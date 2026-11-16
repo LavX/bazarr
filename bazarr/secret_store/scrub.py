@@ -26,7 +26,7 @@ comes back unchanged after a bounded scan.
 
 import logging
 import re
-from threading import RLock, local
+from threading import Lock, RLock, local
 from typing import Any, Iterable, Mapping
 
 from .crypto import decrypt_secret
@@ -40,15 +40,35 @@ logger = logging.getLogger(__name__)
 # both "a secret was configured here".
 MASK = '***'
 
-# A credential shorter than this is not registered as an exact value. Exact
-# masking replaces the value wherever it appears, so a password of "test" would
-# redact every "test" in logs and job text. The trade-off is deliberate and
-# stays: a configured credential of five characters or fewer is not masked by
-# value, and a provider error that echoes one reaches logs and job text as is.
-# Proxy, PostgreSQL and some provider password validators accept values that
-# short, so use a longer one. The patterns below (bearer tokens, Google and
-# OpenRouter keys, ciphertext) match by shape and are not affected.
-_MIN_VALUE_LENGTH = 6
+# A credential of this many characters or more is masked wherever its text
+# appears. Exact masking replaces the value as a substring, so a password of
+# "test" would redact every "test" in logs and job text. A shorter credential
+# is still registered, and masked only where it stands as a whole token in a
+# context that names a value: after "=" or ":" (key=value pairs, JSON and YAML
+# values, query parameters, Authorization headers), as a quoted string, and as
+# the user or password of a URL. "abc" is masked in "password=abc" and in
+# '"pass": "abc"', and left alone in "abcdef" or in a sentence. The patterns
+# below (bearer tokens, Google and OpenRouter keys, ciphertext) match by shape
+# and are not affected.
+MIN_CREDENTIAL_LENGTH = 6
+
+
+def mask_credential_refusal(path: str, submitted: Any, stored: Any = None) -> str | None:
+    """Why a submitted credential is refused because it is the mask text, or None.
+
+    ``path`` is the ``section.field`` the value is stored under and is named in
+    the message. The settings read shows some credentials as the mask, so a
+    client can send the mask back meaning "keep what is stored". Saved as a
+    value, it would replace the stored credential with three asterisks, so it
+    is refused. A mask equal to the stored value is not a change and passes, and
+    so does an empty value, which is a clear. Length is not checked: a short
+    credential is allowed, and the scrub layer masks it as a whole token.
+    """
+    if submitted is None or str(submitted).strip() != MASK:
+        return None
+    if stored is not None and str(stored).strip() == MASK:
+        return None
+    return f'{path} cannot be {MASK}: that text stands for a hidden value. Enter the value itself'
 
 _BEARER_RE = re.compile(r'(?i)\b(Bearer\s+)([A-Za-z0-9\-._~+/=]{8,})')
 _GOOG_API_KEY_RE = re.compile(r'(?i)(x-goog-api-key["\']?\s*[:=]\s*["\']?)([A-Za-z0-9\-_]{8,})')
@@ -86,12 +106,50 @@ _PATTERNS = (
     (_ENC_CIPHERTEXT_RE, MASK),
 )
 
-# The exact credential values currently masked, with the regex that masks
-# them, as one immutable pair. Published by a single assignment in
-# register_secret_values: a reader that caught the new set with the old regex
-# would return the credential unchanged, which is exactly the leak this layer
-# exists to prevent.
-_VALUE_STATE: 'tuple[frozenset[str], re.Pattern[str] | None]' = (frozenset(), None)
+# The exact credential values currently masked, with the regex that masks the
+# long ones, the set of short ones scanned for in context and the long ones
+# again as a tuple for a cheap look before the regex runs, as one immutable
+# tuple. Published by a single assignment in register_secret_values: a reader
+# that caught the new set with the old regex would return the credential
+# unchanged, which is exactly the leak this layer exists to prevent.
+_VALUE_STATE: 'tuple[frozenset[str], re.Pattern[str] | None, frozenset[str], tuple[str, ...]]' = (
+    frozenset(), None, frozenset(), ())
+
+# What the last settings and Provider Hub collection found, what the last
+# database collection found (the instance keys that live only in the database),
+# the keys writers added themselves since boot, and the declared Provider Hub
+# secrets the state store reports. A refresh replaces only its own set and
+# registers the union of all four, so none of them drops another.
+# A key added while a refresh was collecting is never lost: a database refresh
+# drops only the added keys that were there before it started collecting.
+_COLLECTED: frozenset[str] = frozenset()
+_DATABASE_VALUES: frozenset[str] = frozenset()
+# The added keys map to the order they were added in, so a database refresh can
+# tell the ones added before it started collecting (which it may drop if the
+# database no longer holds them) from the ones added during it (which it must
+# keep). The mapping is replaced, never changed in place.
+_ADDED_VALUES: 'dict[str, int]' = {}
+_ADDED_SEQUENCE = 0
+# The declared Provider Hub secrets the state store reports as it writes a state
+# document. No refresh replaces or prunes them: they stay until clear_secret_values.
+_DECLARED_VALUES: frozenset[str] = frozenset()
+
+
+def _registered_union() -> frozenset[str]:
+    """Every credential the sets above hold. Called with the publish lock held."""
+    return _COLLECTED | _DATABASE_VALUES | _ADDED_VALUES.keys() | _DECLARED_VALUES
+
+# Publishing the union of the sets above. A leaf lock: whoever holds it only
+# builds a regex from values already in memory and takes no other lock, so it can
+# be taken while holding any other lock without a cycle. All the sets are read
+# inside it.
+_publish_lock = Lock()
+
+
+def _publish() -> int:
+    with _publish_lock:
+        return register_secret_values(_registered_union())
+
 
 # The credential containers a Provider Hub state document holds. Values under
 # these keys are a plugin's own stored credentials, encrypted at rest by the
@@ -130,13 +188,15 @@ def registered_secret_values() -> frozenset[str]:
 def register_secret_values(values: Iterable[Any]) -> int:
     """Replace the exact credential values masked in text.
 
-    Returns how many values are registered. A value shorter than
-    ``_MIN_VALUE_LENGTH``, one that is already just the mask, and one that is
-    ciphertext are skipped: none of them is a plaintext credential a leak
-    could carry, and masking a short one would redact ordinary text.
+    Returns how many values are registered. A value that is already just the
+    mask and one that is ciphertext are skipped: neither is a plaintext
+    credential a leak could carry. A value shorter than
+    ``MIN_CREDENTIAL_LENGTH`` is registered too, but it is masked only as a whole
+    token in the contexts described above, so ordinary text that contains the
+    same letters stays readable.
 
-    The set and its regex are published together, in one assignment, so no
-    reader can see the new values behind the old regex.
+    The set, its regex and the short values are published together, in one
+    assignment, so no reader can see the new values behind the old regex.
     """
     global _VALUE_STATE
     cleaned = set()
@@ -144,10 +204,7 @@ def register_secret_values(values: Iterable[Any]) -> int:
         if not isinstance(value, str):
             continue
         text = value.strip()
-        if (len(text) >= _MIN_VALUE_LENGTH
-                and text != MASK
-                and not text.startswith('enc:v1:')
-                ):
+        if text and text != MASK and not text.startswith('enc:v1:'):
             cleaned.add(text)
     registered = frozenset(cleaned)
     # Longest first: a credential that contains another is masked whole
@@ -155,21 +212,213 @@ def register_secret_values(values: Iterable[Any]) -> int:
     # A log line can quote a credential through ``%r``, which escapes quotes,
     # backslashes and non-printable characters, so that spelling is masked too.
     # It is derived here, for every registration path, and the value set itself
-    # stays the credentials.
+    # stays the credentials. A spelling is long or short by its own length, so
+    # the escaped form of a short credential is masked as a whole token like the
+    # credential is.
     spellings = set(registered)
     for value in registered:
         quoted = repr(value)[1:-1]
-        if len(quoted) >= _MIN_VALUE_LENGTH:
+        if quoted:
             spellings.add(quoted)
-    ordered = sorted(spellings, key=len, reverse=True)
-    regex = re.compile('|'.join(re.escape(value) for value in ordered)) if ordered else None
-    _VALUE_STATE = (registered, regex)
+    long_values = sorted((value for value in spellings if len(value) >= MIN_CREDENTIAL_LENGTH),
+                         key=len, reverse=True)
+    short_values = frozenset(value for value in spellings if len(value) < MIN_CREDENTIAL_LENGTH)
+    regex = re.compile('|'.join(re.escape(value) for value in long_values)) if long_values else None
+    _VALUE_STATE = (registered, regex, short_values, tuple(long_values))
     return len(registered)
+
+
+# Where a short credential may stand. After "=" or ":" (key=value pairs, JSON
+# and YAML values, query parameters, headers), optionally followed by spaces and
+# an opening quote, plain or escaped as in JSON that was itself put in a string
+# (once, or twice when that was put in a string again, any run of backslashes);
+# or after an authorization scheme name, whatever its case; or as an item of a
+# YAML block list, one or more "-" at the start of a line after any
+# indentation, or of a YAML flow list, right after its "[" or a ",". As a quoted string.
+# As the user of a URL, right after "://". A standalone quote is matched from the
+# start of its run of backslashes, so a long run is scanned once and not again from
+# every position in it. The quote is its own group so that a credential that
+# begins with a quote can be found starting at it.
+_SHORT_CONTEXT_RE = re.compile(
+    r'(?P<after>(?P<pre>(?:[=:]|\b(?i:basic|bearer|digest|token)\s+)\s*|(?m:^)[ \t]*(?:-[ \t]+)+)(?:\\*["\'])?)'
+    r'|(?P<quote>(?<!\\)\\*["\'])'
+    r'|(?P<user>(?<=://))'
+)
+
+# What may follow a short credential for it to be a whole token: whitespace and
+# control characters, quotes and brackets, and the separators of a query string,
+# a URL, a list or a pipe. A "." or a ":" counts only when no word character
+# follows it, so "abc." ends a sentence and "abc.example" and "10:30:45" do not.
+_SHORT_END_CHARS = frozenset('"\'&;,@()[]{}<>%+=!?#|/\\$^')
+_SHORT_MAX_LENGTH = MIN_CREDENTIAL_LENGTH - 1
+
+# After the user of a URL: a colon starts a port or a password, and only a
+# password is followed by an at sign before the path or the next space. The run
+# it scans holds no "/", so it cannot contain another "://" and the scans of one
+# text never overlap: the total work stays linear without a fixed limit.
+_USERINFO_TAIL_RE = re.compile(r'[^@/\s]*@')
+
+
+def _ends_token(text: str, index: int) -> bool:
+    if index >= len(text):
+        return True
+    character = text[index]
+    if character.isspace() or ord(character) < 32 or ord(character) == 127:
+        return True
+    if character in '.:':
+        return index + 1 >= len(text) or not (text[index + 1].isalnum() or text[index + 1] == '_')
+    return character in _SHORT_END_CHARS
+
+
+def _ends_url_user(text: str, index: int) -> bool:
+    if index >= len(text):
+        return False
+    if text[index] == '@':
+        return True
+    return text[index] == ':' and _USERINFO_TAIL_RE.match(text, index + 1) is not None
+
+
+def _short_ends(text: str, start: int, values: frozenset[str]):
+    """The ends of the short credentials that begin at ``start``, longest first.
+
+    At most ``_SHORT_MAX_LENGTH`` slices are looked up in the set, so the cost
+    does not depend on how many credentials are registered."""
+    for length in range(min(_SHORT_MAX_LENGTH, len(text) - start), 0, -1):
+        if text[start:start + length] in values:
+            yield start + length
+
+
+# The delimiters that open, split and close a YAML flow list ("key: [a, b]"). A
+# "[" counts as the start of one only after "=" or ":", so a bracket in prose or
+# in an array index does not make a comma an item separator.
+_FLOW_TOKEN_RE = re.compile(r'(?P<open>[=:]\s*\[)|(?P<bracket>\[)|(?P<close>\])|(?P<comma>,)')
+_BLANKS = ' \t\r\n'
+
+
+# A quoted flow item to its closing quote, on the same line. A backslash escapes
+# the character after it, as in JSON, and a quote doubled inside single quotes
+# is YAML's own escape.
+_QUOTED_ITEM_RES = {
+    '"': re.compile(r'"(?:[^"\\\n]|\\.)*"'),
+    "'": re.compile(r"'(?:[^'\\\n]|''|\\.)*'"),
+}
+
+
+# What may follow the closing quote of a flow item: blanks, then the comma or the
+# bracket that ends it. A quote that is followed by anything else did not close
+# an item, so nothing after it is skipped.
+_AFTER_ITEM_RE = re.compile(r'[ \t\r\n]*[,\]]')
+
+
+def _flow_item_starts(text: str) -> list[int]:
+    """The position where each item of every YAML flow list in the text starts,
+    after the opening bracket or a comma and the blanks beside it. One pass over
+    the brackets and commas, with a stack so that a comma inside a nested
+    bracket does not count for the list around it. A bracket or a comma inside a
+    quoted item is part of that item, not structure, so a quoted item is skipped
+    whole."""
+    starts = []
+    stack: list[bool] = []
+    skip_until = 0
+    for match in _FLOW_TOKEN_RE.finditer(text):
+        if match.start() < skip_until:
+            continue
+        if match.group('close') is not None:
+            if stack:
+                stack.pop()
+            continue
+        if match.group('open') is not None:
+            stack.append(True)
+        elif match.group('bracket') is not None:
+            # A list inside a flow list is a flow list; any other bracket is not.
+            stack.append(bool(stack and stack[-1]))
+        if not (stack and stack[-1]):
+            continue
+        position = match.end()
+        while position < len(text) and text[position] in _BLANKS:
+            position += 1
+        starts.append(position)
+        if position < len(text) and text[position] in _QUOTED_ITEM_RES:
+            quoted = _QUOTED_ITEM_RES[text[position]].match(text, position)
+            if quoted is not None and _AFTER_ITEM_RE.match(text, quoted.end()):
+                skip_until = quoted.end()
+    return starts
+
+
+def _short_spans(text: str, values: frozenset[str]) -> list[tuple[int, int]]:
+    """The spans of the text where a short credential stands as a whole token in
+    one of the contexts above, in order and without overlap.
+
+    One pass over the contexts, each checked with a few set lookups, so the work
+    is linear in the text whatever the number of registered values. A span is the
+    credential alone: the context that named it (the key, the quotes, the scheme)
+    is not in it. Where an opening quote follows the context, a credential is
+    looked for both from the quote and after it, because a credential may itself
+    begin with a quote."""
+    if not values:
+        return []
+    spans = []
+    search_from = 0
+    while True:
+        match = _SHORT_CONTEXT_RE.search(text, search_from)
+        if match is None:
+            break
+        if match.group('after') is not None:
+            starts = [match.end('pre'), match.end()] if match.end('pre') != match.end() else [match.end()]
+            closes = _ends_token
+        elif match.group('user') is not None:
+            starts = [match.end()]
+            closes = _ends_url_user
+        else:
+            quote = match.group('quote')
+            starts = [match.end()]
+            closes = lambda t, i, quote=quote: t.startswith(quote, i)  # noqa: E731
+        found = None
+        for start in starts:
+            for end in _short_ends(text, start, values):
+                if closes(text, end):
+                    found = (start, end)
+                    break
+            if found:
+                break
+        search_from = match.start() + 1
+        if found is not None:
+            spans.append(found)
+    if '[' in text:
+        for start in _flow_item_starts(text):
+            quoted = start < len(text) and text[start] in '"\''
+            for begin in ([start, start + 1] if quoted else [start]):
+                end = next((end for end in _short_ends(text, begin, values) if _ends_token(text, end)), None)
+                if end is not None:
+                    spans.append((begin, end))
+                    break
+    # Searching resumes just after each context, so one credential can be found
+    # from two contexts and the span of one can lie where the context of the next
+    # begins ("Authorization: Basic abc" with both "Basic" and "abc" registered).
+    # Sorted, with a span that overlaps the one before it joined to it.
+    return _merge_spans(spans)
+
+
+def _merge_spans(spans: list[tuple[int, int]]) -> list[tuple[int, int]]:
+    """The spans in order, with any that overlap joined into one that runs to
+    the furthest end, so no part of a match is left readable."""
+    merged: list[tuple[int, int]] = []
+    for start, end in sorted(spans):
+        if merged and start < merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+        else:
+            merged.append((start, end))
+    return merged
 
 
 def clear_secret_values() -> None:
     """Forget every registered value, so tests and a torn-down boot leave no
     stale credential masked."""
+    global _COLLECTED, _DATABASE_VALUES, _ADDED_VALUES, _DECLARED_VALUES
+    _COLLECTED = frozenset()
+    _DATABASE_VALUES = frozenset()
+    _ADDED_VALUES = {}
+    _DECLARED_VALUES = frozenset()
     register_secret_values(())
 
 
@@ -185,10 +434,44 @@ def scrub_text(text: str) -> str:
 
     text = _mask_patterns(text)
 
-    values, regex = _VALUE_STATE
-    if values and regex is not None:
-        text = regex.sub(MASK, text)
-    return text
+    _values, regex, short_values, long_values = _VALUE_STATE
+    # A substring search per long value is far cheaper than running the
+    # alternation at every position of text that holds none of them.
+    long_spans = []
+    if regex is not None and any(value in text for value in long_values):
+        long_spans = [match.span() for match in regex.finditer(text)]
+    # Both sets are found on the text as it stands, so masking a long value
+    # cannot take away the context a short one needs ("Bearer" registered as a
+    # long value must not turn "Authorization: Bearer abc" into "*** abc"). Where
+    # a long and a short match overlap they are joined, then everything is
+    # replaced in one pass.
+    short_spans = _short_spans(text, short_values) if short_values else []
+    if not long_spans and not short_spans:
+        return text
+    pieces = []
+    position = 0
+    for start, end in _merge_spans(long_spans + short_spans):
+        pieces.append(text[position:start])
+        pieces.append(MASK)
+        position = end
+    pieces.append(text[position:])
+    return ''.join(pieces)
+
+
+def scrub_leaf(text: str) -> str:
+    """scrub_text for a string that stands alone as a value in a structure.
+
+    A leaf of a dict or list is scrubbed without the key beside it, so a short
+    credential has no context to be found in: {"api_key": "abc"} holds the bare
+    string "abc". A leaf whose stripped text is exactly a registered credential
+    is that credential, so it is masked whole, short or long. Anything else
+    takes scrub_text.
+    """
+    if not isinstance(text, str) or not text:
+        return text
+    if text.strip() in _VALUE_STATE[0]:
+        return MASK
+    return scrub_text(text)
 
 
 def _mask_patterns(text: str) -> str:
@@ -213,7 +496,7 @@ def scrub_value(value: Any) -> Any:
     structure, not text the backend prints, and stay as they are.
     """
     if isinstance(value, str):
-        return scrub_text(value)
+        return scrub_leaf(value)
     if isinstance(value, dict):
         return {key: scrub_value(item) for key, item in value.items()}
     if isinstance(value, list):
@@ -334,7 +617,9 @@ def refresh_secret_values(settings_obj=None, state=None) -> int:
     Provider Hub state.
 
     Called at boot and after a settings or Hub write, so a credential the
-    user just entered is masked in the same process that stores it. Never
+    user just entered is masked in the same process that stores it. The
+    instance keys the database holds are registered by
+    refresh_database_secret_values, and this keeps what it found. Never
     raises: a read that fails leaves the previous set in place, because
     refusing a boot or a save over the scrub set would be worse than a
     credential that is not yet registered.
@@ -344,6 +629,7 @@ def refresh_secret_values(settings_obj=None, state=None) -> int:
     refresh that re-enters itself on the same thread (a settings write
     triggered from a decryption inside one) answers with the current set.
     """
+    global _COLLECTED
     with _refresh_lock:
         if getattr(_refresh_local, 'depth', 0):
             return len(_VALUE_STATE[0])
@@ -359,7 +645,105 @@ def refresh_secret_values(settings_obj=None, state=None) -> int:
             return len(_VALUE_STATE[0])
         finally:
             _refresh_local.depth = 0
-        return register_secret_values(values)
+        _COLLECTED = frozenset(values)
+        return _publish()
+
+
+def collect_database_secret_values(session) -> set[str]:
+    """Every instance API key the database holds, decrypted: the media server
+    destinations (Emby, Jellyfin, Plex, Silo) and the arr instances (Sonarr,
+    Radarr, Sportarr), the default ones and the rest. Only the default Sonarr
+    and Radarr instances mirror their key into the settings, so every other key
+    is in the database alone. A key that will not decrypt is skipped."""
+    from sqlalchemy import select
+
+    from app.database import TableArrInstances, TableMediaServerInstances
+
+    values: set[str] = set()
+    for model in (TableMediaServerInstances, TableArrInstances):
+        for stored in session.execute(select(model.api_key)).scalars().all():
+            if not isinstance(stored, str) or not stored:
+                continue
+            try:
+                plaintext = decrypt_secret(stored)
+            except Exception:
+                continue
+            if isinstance(plaintext, str) and plaintext:
+                values.add(plaintext)
+    return values
+
+
+def add_database_secret_values(values: Iterable[Any]) -> int:
+    """Register instance keys the caller already holds, next to the ones the
+    database collection found, without reading the database.
+
+    For a writer that has just committed a key and may be holding other locks
+    (the account, config and destination locks): it takes only the leaf publish
+    lock, so it cannot wait on a refresh that is waiting on those. A refresh
+    that was collecting while this ran cannot drop the keys, and one that starts
+    later drops them if the database no longer holds them. Never raises: masking is best effort, and a write
+    that has committed must not fail over it."""
+    global _ADDED_VALUES, _ADDED_SEQUENCE
+    try:
+        added = frozenset(value.strip() for value in values or () if isinstance(value, str) and value.strip())
+        if not added:
+            return len(_VALUE_STATE[0])
+        with _publish_lock:
+            _ADDED_SEQUENCE += 1
+            _ADDED_VALUES = {**_ADDED_VALUES, **dict.fromkeys(added, _ADDED_SEQUENCE)}
+            return register_secret_values(_registered_union())
+    except Exception as error:
+        logger.warning("The instance keys to scrub could not be registered: %s", type(error).__name__)
+        return len(_VALUE_STATE[0])
+
+
+def add_declared_secret_values(values: Iterable[Any]) -> int:
+    """Register the declared Provider Hub secrets of a state document the state
+    store is writing, next to everything else registered.
+
+    Takes only the leaf publish lock, like add_database_secret_values, so it can
+    be called while a refresh is collecting without waiting on it and without
+    being undone by it: no refresh replaces or prunes these. Never raises."""
+    global _DECLARED_VALUES
+    try:
+        declared = frozenset(value.strip() for value in values or () if isinstance(value, str) and value.strip())
+        if not declared:
+            return len(_VALUE_STATE[0])
+        with _publish_lock:
+            _DECLARED_VALUES = _DECLARED_VALUES | declared
+            return register_secret_values(_registered_union())
+    except Exception as error:
+        logger.warning("The declared secrets to scrub could not be registered: %s", type(error).__name__)
+        return len(_VALUE_STATE[0])
+
+
+def refresh_database_secret_values(session=None) -> int:
+    """Register the instance keys held in the database, next to the values the
+    settings and the Provider Hub state gave.
+
+    Called at boot once the database is ready, and after an instance is created
+    or changed, so a key entered there is masked in the same process that stores
+    it. ``session`` is the one the caller is writing through; None uses the
+    shared one. Never raises: a read that fails leaves the previous set in place.
+    """
+    global _DATABASE_VALUES, _ADDED_VALUES
+    with _refresh_lock:
+        with _publish_lock:
+            started = _ADDED_SEQUENCE
+        try:
+            if session is None:
+                from app.database import database as session
+            values = collect_database_secret_values(session)
+        except Exception as error:
+            logger.warning("The instance keys to scrub could not be collected: %s", type(error).__name__)
+            return len(_VALUE_STATE[0])
+        with _publish_lock:
+            _DATABASE_VALUES = frozenset(values)
+            # What the database holds is now in the set above, so the keys added
+            # before this collection started are done with. A key added while it
+            # was reading may not have been visible to it, and stays.
+            _ADDED_VALUES = {value: order for value, order in _ADDED_VALUES.items() if order > started}
+            return register_secret_values(_registered_union())
 
 
 def scrub_state_secrets(state) -> bool:
@@ -385,7 +769,7 @@ def scrub_state_secrets(state) -> bool:
                     continue
                 text_field = in_text or (isinstance(key, str) and key in _STATE_TEXT_FIELDS)
                 if isinstance(value, str):
-                    masked = scrub_text(value) if text_field else _mask_patterns(value)
+                    masked = scrub_leaf(value) if text_field else _mask_patterns(value)
                     if masked != value:
                         node[key] = masked
                         changed = True
@@ -394,7 +778,7 @@ def scrub_state_secrets(state) -> bool:
         else:
             for index, value in enumerate(node):
                 if isinstance(value, str):
-                    masked = scrub_text(value) if in_text else _mask_patterns(value)
+                    masked = scrub_leaf(value) if in_text else _mask_patterns(value)
                     if masked != value:
                         node[index] = masked
                         changed = True
@@ -438,7 +822,7 @@ def scrub_job_secrets(job) -> bool:
     def walk(node, in_text):
         nonlocal changed
         if isinstance(node, str):
-            masked = scrub_text(node) if in_text else _mask_patterns(node)
+            masked = scrub_leaf(node) if in_text else _mask_patterns(node)
             if masked != node:
                 changed = True
             return masked

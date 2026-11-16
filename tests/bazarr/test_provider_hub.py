@@ -10289,3 +10289,51 @@ def test_an_unparseable_state_document_refuses_a_hub_enable_change(tmp_path, mon
 
     assert status == 400, body
     assert state_path.read_bytes() == before
+
+
+def _examplehub_with_secret(tmp_path, monkeypatch, stored=None, **manifest_overrides):
+    """examplehub installed, with `stored` as the encrypted api_key it already holds."""
+    from provider_hub.service import _encrypt_secret_value
+    from provider_hub.state import load_state, save_state
+
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(_empty_state_file(tmp_path)))
+    manifest = _manifest(dependencies={"requirements": []})
+    manifest["config_schema"]["properties"].update(manifest_overrides.pop("properties", {}))
+    manifest["secret_fields"] = ["api_key", *manifest_overrides.pop("secret_fields", [])]
+    state = load_state()
+    state["installations"] = {
+        "examplehub": {
+            "provider_id": "examplehub",
+            "name": "Example Hub Provider",
+            "active_version": "1.0.0",
+            "state": "active",
+            "pending_restart": False,
+            "manifest": manifest,
+            "config": {} if stored is None else {"api_key": _encrypt_secret_value(stored)},
+        }
+    }
+    save_state(state)
+
+
+def test_the_hub_refuses_the_mask_text_as_a_new_secret(tmp_path, monkeypatch, isolated_plugin_registry):
+    from provider_hub.service import runtime_provider_configs, update_provider
+    from provider_hub.state import load_state
+
+    _examplehub_with_secret(tmp_path, monkeypatch, stored="previous-secret")  # pragma: allowlist secret
+    before = load_state()["installations"]["examplehub"]["config"]["api_key"]
+
+    with pytest.raises(ValueError, match=r"^examplehub\.api_key cannot be \*\*\*"):
+        update_provider("examplehub", config={"api_key": "***"})
+
+    assert load_state()["installations"]["examplehub"]["config"]["api_key"] == before
+    assert runtime_provider_configs()["examplehub"]["api_key"] == "previous-secret"  # pragma: allowlist secret
+
+
+def test_the_hub_takes_a_short_secret(tmp_path, monkeypatch, isolated_plugin_registry):
+    from provider_hub.service import runtime_provider_configs, update_provider
+
+    _examplehub_with_secret(tmp_path, monkeypatch, stored="previous-secret")  # pragma: allowlist secret
+
+    update_provider("examplehub", config={"api_key": "abc"})
+
+    assert runtime_provider_configs()["examplehub"]["api_key"] == "abc"

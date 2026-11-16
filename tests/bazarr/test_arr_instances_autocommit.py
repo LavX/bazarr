@@ -1879,3 +1879,34 @@ def test_a_failed_removal_under_ownership_tracking_leaves_the_tracking_as_it_was
     retried = arr_api.client.delete(f"{ROOT}/{target}?remove_library=true", headers=HEADERS)
     assert retried.status_code == 204, retried.json
     _ownership_protected(arr_engine)
+
+
+@pytest.mark.parametrize("kind", ["sonarr", "radarr", "sportarr"])
+def test_the_instance_keys_are_registered_only_after_the_write_is_committed(
+        arr_api, arr_engine, monkeypatch, kind):
+    """A refresh that read the database from another connection before the commit
+    would not see the new key, and a concurrent one could drop it from the registered
+    set for good. The route registers after the commit, so a separate connection
+    sees the row at that moment."""
+    import secret_store.scrub as scrub
+
+    seen = []
+
+    def _refresh(session=None):
+        from secret_store import decrypt_secret
+
+        with arr_engine.connect() as connection:
+            rows = connection.execute(sa.text("SELECT api_key FROM arr_instances")).all()
+        seen.append(sorted(decrypt_secret(row[0]) for row in rows))
+        return 0
+
+    monkeypatch.setattr(scrub, "refresh_database_secret_values", _refresh)
+
+    created = arr_api.client.post(ROOT, json={"kind": kind, "name": "Only", "api_key": "abc"}, headers=HEADERS)
+    assert created.status_code == 201
+    assert seen == [["abc"]]
+
+    changed = arr_api.client.patch(f"{ROOT}/{created.json['id']}", json={"api_key": "abd"}, headers=HEADERS)
+    assert changed.status_code == 200
+    # A separate connection read the new key at the moment of registration.
+    assert seen == [["abc"], ["abd"]]

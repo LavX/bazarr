@@ -556,7 +556,9 @@ class JobsQueue:
         other job text: a filename a provider chose can carry a credential.
         ``kind`` is dispatch, not text, so it is kept as given: a credential
         that happens to equal a handler name must not stop the frontend
-        finding that handler.
+        finding that handler. Every other leaf is masked whole when it equals a
+        registered credential, short or long, and a short credential is masked
+        in a filename where it stands in context.
         """
         action = dict(action)
         kind = action.get('kind')

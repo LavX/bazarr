@@ -1578,6 +1578,34 @@ def test_saving_an_api_key_by_hand_reaches_the_destination(plex_account_api, mon
     assert MediaServerInstanceRepository(schema_session).get_decrypted_api_key(row.id) == 'typed-key'
 
 
+@pytest.mark.parametrize('key', ['abc', 'abcde', ' abcde '])
+def test_a_short_plex_api_key_is_saved(plex_account_api, monkeypatch, schema_session, key):
+    # The scrub layer masks a short credential as a whole token, so it is not refused.
+    from media_servers.repository import MediaServerInstanceRepository
+    client, config = plex_account_api
+    config.plex.ip = 'plex.example'
+    monkeypatch.setattr(config.plex, 'apikey', 'previous-key')  # pragma: allowlist secret
+
+    response = client.post('/api/plex/apikey', headers=HEADERS, json={'apikey': key})
+
+    assert response.status_code == 200
+    assert config.plex.apikey == key.strip()
+    row, = MediaServerInstanceRepository(schema_session).list('plex')
+    assert MediaServerInstanceRepository(schema_session).get_decrypted_api_key(row.id) == key.strip()
+
+
+def test_the_plex_api_key_mask_text_is_refused_and_names_the_field(plex_account_api, monkeypatch):
+    # The mask text is not a key, and saving it would replace the stored key with it.
+    client, config = plex_account_api
+    monkeypatch.setattr(config.plex, 'apikey', 'previous-key')  # pragma: allowlist secret
+
+    response = client.post('/api/plex/apikey', headers=HEADERS, json={'apikey': '***'})
+
+    assert response.status_code == 400
+    assert response.json['error'].startswith('plex.apikey cannot be ***')
+    assert config.plex.apikey == 'previous-key'  # pragma: allowlist secret
+
+
 def test_signing_out_does_not_let_the_next_startup_point_plex_at_localhost(schema_session):
     """Logging out resets ip, port and auth_method to what Plex ships with.
 
@@ -3459,3 +3487,20 @@ def test_a_selection_url_no_parser_reads_plainly_is_refused_not_raised(
     assert response.json['error_code'] == 'server_not_listed'
     assert config.plex.server_url == '' and config.plex.server_connections == []
 
+
+
+def test_the_token_the_plex_account_row_holds_is_registered_with_the_scrubber(schema_session):
+    from media_servers.plex_account import sync_plex_instance
+    from secret_store.scrub import clear_secret_values, register_secret_values, registered_secret_values, scrub_text
+
+    previous = registered_secret_values()
+    clear_secret_values()
+    try:
+        config = plex_settings(auth_method='oauth', token='tok', server_url='https://plex.example:32400')
+        sync_plex_instance(schema_session, config)
+
+        assert scrub_text('X-Plex-Token: tok') == 'X-Plex-Token: ***'
+        assert scrub_text('a tok in prose') == 'a tok in prose'
+    finally:
+        clear_secret_values()
+        register_secret_values(previous)

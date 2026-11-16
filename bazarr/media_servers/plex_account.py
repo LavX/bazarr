@@ -568,6 +568,12 @@ def apply_plex_account(session, settings, *, signed_in=False, signed_out=False, 
     recorded = previous != row.id
     settings.plex.instance_id = row.id
     session.commit()
+    if credential:
+        # The token the row now holds is registered with the scrubber once it is
+        # committed. Only the leaf publish lock is taken, so this is safe under
+        # the account lock the callers hold.
+        from secret_store.scrub import add_database_secret_values
+        add_database_secret_values([credential])
     if recorded and persist is not None and not _persisted(persist):
         # Ownership is never inferred, so after a restart a row whose id never
         # reached disk belongs to nobody and the account would create another.

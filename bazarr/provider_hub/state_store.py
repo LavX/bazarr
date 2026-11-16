@@ -194,7 +194,8 @@ def register_document_secrets(document: str) -> None:
       are masked in every log line (the scrubber derives the ``%r`` form of
       every value it registers).
 
-    A value shorter than six characters is not masked, as everywhere else.
+    A value shorter than six characters is masked only as a whole token in a
+    context, as everywhere else.
     """
     try:
         data = json.loads(document)
@@ -222,10 +223,9 @@ def register_document_secrets(document: str) -> None:
         secret = {value.strip() for value in secret if value.strip() and not value.startswith("enc:")}
         if secret:
             from secret_store import scrub
-            with scrub._refresh_lock:
-                known = scrub.registered_secret_values()
-                if not secret <= known:
-                    scrub.register_secret_values(known | secret)
+            # Added to the shared set without replacing it: a refresh that is
+            # collecting, or the next publish of any other set, keeps these.
+            scrub.add_declared_secret_values(secret)
     except Exception:  # never let the scrub registration stand in the way of storing state
         logger.debug("Could not register the state document's credential values for scrubbing", exc_info=False)
 

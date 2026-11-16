@@ -101,6 +101,30 @@ def get_instance(session, instance_id):
     return (_shown(row), 200) if row else ({'error_code': 'not_found'}, 404)
 
 
+def _refuse_mask_key(repo, operation, instance_id, body):
+    """Refuse the mask text as a new key, so it never replaces the stored one.
+
+    A key equal to the stored one is not new. Only a key the request carries is
+    checked: leaving it out keeps the stored one, and clearing it is not a value.
+    A short key is allowed: it is registered with the scrub layer once saved,
+    which masks it as a whole token.
+    """
+    from secret_store.scrub import mask_credential_refusal
+    submitted = body.get('api_key')
+    if not submitted:
+        return
+    if operation == 'update':
+        row = repo.get(instance_id)
+        if row is None:
+            return
+        kind, stored = row.kind, repo.retained_api_key(instance_id) or None
+    else:
+        kind, stored = body['kind'], None
+    refusal = mask_credential_refusal(f'{kind}.api_key', submitted, stored)
+    if refusal:
+        raise MediaServerError('invalid_credential', refusal)
+
+
 def _write(session, operation, instance_id=None, body=None):
     from app.config import settings
     from .dispatcher import get_native_configuration
@@ -108,6 +132,7 @@ def _write(session, operation, instance_id=None, body=None):
     try:
         if operation != 'delete':
             validate_fields(body, create=operation == 'create')
+            _refuse_mask_key(repo, operation, instance_id, body)
         configuration = get_native_configuration()
         # No staged changes are visible to workers, and failed writes retain
         # the old revision. Other destination operations resume unchanged.
@@ -142,10 +167,24 @@ def _write(session, operation, instance_id=None, body=None):
                 configuration.publish(snapshot)
             else:
                 configuration.delete(instance_id)
+            if operation != 'delete' and body.get('api_key'):
+                # After the durable commit above. This runs inside the destination
+                # lock, and update_instance holds the account and config locks as
+                # well, so it must not wait on anything those locks guard. It
+                # registers the key the request carried with
+                # add_database_secret_values, which takes only the scrubber's leaf
+                # publish lock (held for nothing but building a regex from values
+                # in memory) and reads no database, so it cannot take part in a
+                # lock cycle with the refresh that does.
+                from secret_store.scrub import add_database_secret_values
+                add_database_secret_values([body['api_key']])
         return (None, 204) if operation == 'delete' else (result, 201 if operation == 'create' else 200)
     except MediaServerError as error:
         session.rollback()
-        return {'error_code': error.code}, 400
+        refusal = {'error_code': error.code}
+        if error.message:
+            refusal['message'] = error.message
+        return refusal, 400
     except Exception:
         session.rollback()
         return {'error_code': 'persistence_failed'}, 500

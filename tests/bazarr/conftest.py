@@ -209,3 +209,34 @@ def own_process_candidates(monkeypatch):
         return [name for name in names if name in mine]
 
     monkeypatch.setattr(venvmod, "_candidate_pids", own)
+
+
+@pytest.fixture(autouse=True)
+def _keep_the_scrub_registry():
+    """Undo what a test does to the process-wide credential registry.
+
+    The scrubber's registered values, and the three sets they are the union of
+    (what the settings and Provider Hub collection found, what the database
+    collection found, and the keys writers added), live in module globals. A test
+    that registers a short value or adds an instance key would otherwise leave it
+    masked in every later test. When the scrubber was already imported, its state
+    is put back as it was; when the test was the first to import it, the state is
+    cleared; when the module has gone, nothing is touched.
+    """
+    import sys
+
+    scrub = sys.modules.get("secret_store.scrub")
+    names = ("_VALUE_STATE", "_COLLECTED", "_DATABASE_VALUES", "_ADDED_VALUES", "_ADDED_SEQUENCE",
+             "_DECLARED_VALUES")
+    before = {name: getattr(scrub, name) for name in names} if scrub is not None else None
+    yield
+    after = sys.modules.get("secret_store.scrub")
+    if after is None:
+        return
+    if before is None:
+        # The scrubber was first imported by this test: whatever it registered
+        # belongs to the test.
+        after.clear_secret_values()
+        return
+    for name, value in before.items():
+        setattr(after, name, value)

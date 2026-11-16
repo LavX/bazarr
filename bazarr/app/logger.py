@@ -84,14 +84,28 @@ class FileHandlerFormatter(logging.Formatter):
         return re.sub(self.PLEX_URL_RE, sanitize_plex_url, s)
 
     def format(self, record):
-        s = super(FileHandlerFormatter, self).format(record)
+        # Registered credentials and the known token shapes first, in the text a
+        # message, an exception or a stack can carry one: a value the patterns
+        # below would mask from its label is already gone, and a value that
+        # arrives without one is masked here. The timestamp, the logger name,
+        # the level, the module and the line number are not scrubbed: a short
+        # numeric secret would otherwise be found in the seconds of a time or in
+        # a line number.
+        original = (record.msg, record.args)
+        try:
+            record.msg, record.args = scrub_text(record.getMessage()), ()
+            if record.exc_info and not record.exc_text:
+                record.exc_text = self.formatException(record.exc_info)
+            if record.exc_text:
+                record.exc_text = scrub_text(record.exc_text)
+            if record.stack_info:
+                record.stack_info = scrub_text(record.stack_info)
+            s = super(FileHandlerFormatter, self).format(record)
+        finally:
+            record.msg, record.args = original
         if record.exc_text:
             s = s.replace('\n', '') + '|'
 
-        # Registered credentials and the known token shapes first: a value
-        # the patterns below would mask from its label is already gone, and
-        # a value that arrives without one is masked here.
-        s = scrub_text(s)
         s = self.formatApikey(s)
         s = self.formatIPv4(s)
         s = self.formatPlexUrl(s)

@@ -415,6 +415,28 @@ def get_instance(session, instance_id):
     return to_safe_dict(row), 200
 
 
+def _stored_key(row):
+    """The row's stored API key as plaintext, or None when there is none or it cannot be read."""
+    from secret_store import decrypt_secret
+    try:
+        return decrypt_secret(row.api_key or "") or None
+    except ValueError:
+        return None
+
+
+def _new_key_refusal(kind, submitted, stored):
+    """Why a submitted API key is refused as a new one, or None.
+
+    Only the mask text is refused, so it never replaces the stored key. A key
+    equal to the stored one is not new, leaving the key out keeps the stored
+    one, and clearing it is not a value. A short key is allowed: the route registers
+    it with the scrub layer once the write is committed, which masks it as a whole
+    token.
+    """
+    from secret_store.scrub import mask_credential_refusal
+    return mask_credential_refusal(f"{kind}.api_key", submitted or None, stored)
+
+
 def create_instance(session, args):
     if args.get('kind') == 'sportarr':
         from sportarr.db import needs_sports_transaction, sports_transaction
@@ -428,6 +450,9 @@ def create_instance(session, args):
     arg_error = _connection_arg_error(args)
     if arg_error:
         return {"error": "invalid", "message": arg_error}, 400
+    key_refusal = _new_key_refusal(args.get("kind"), args.get("api_key"), None)
+    if key_refusal:
+        return {"error": "invalid", "message": key_refusal}, 400
     try:
         ss_blob = validate_subtitle_settings(args.get("subtitle_settings"))
     except ValueError as exc:
@@ -525,6 +550,9 @@ def update_instance(session, instance_id, args):
             kwargs["clear_api_key"] = True
         elif args.get("api_key") is not None:
             kwargs["api_key"] = args["api_key"]
+            key_refusal = _new_key_refusal(existing.kind, args["api_key"], _stored_key(existing))
+            if key_refusal:
+                return {"error": "invalid", "message": key_refusal}, 400
 
         if args.get("subtitle_settings") is not None:
             try:

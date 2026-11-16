@@ -24,7 +24,7 @@ from urllib.parse import urlparse
 from subliminal_patch.extensions import provider_registry
 
 from secret_store.registry import SECRET_DESCRIPTOR_KEY as SECRET_DESCRIPTORS_KEY
-from secret_store.scrub import scrub_job_secrets, scrub_text
+from secret_store.scrub import mask_credential_refusal, scrub_job_secrets, scrub_text
 
 from .manifest import ManifestValidationError, manifest_provider_id, validate_manifest
 from .kinds import SUBTITLE_PROVIDER, catalog_kind_of, get_kind, kind_for_api, kind_of, known_kinds
@@ -1836,6 +1836,18 @@ def update_provider(provider_id: str, enabled: bool | None = None, config: dict[
                         f"The credential {key} must be text; the configuration "
                         "was not saved."
                     )
+                # The mask text is refused, so it never replaces a stored
+                # credential, the same rule the settings save applies. A
+                # value equal to the stored one is not new. A short value is
+                # allowed, and the scrub layer masks it as a whole token.
+                try:
+                    stored_value = _decrypt_secret_value(next_config.get(key))
+                except Exception:
+                    stored_value = None
+                refusal = mask_credential_refusal(
+                    f"{provider_id}.{key}", value, stored_value or None)
+                if refusal:
+                    raise ValueError(f"{refusal}; the configuration was not saved.")
                 try:
                     next_config[key] = _encrypt_secret_value(value)
                 except Exception as error:

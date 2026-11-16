@@ -17,7 +17,7 @@ from secret_store.crypto import SECRET_MARKER_PREFIX, encrypt_secret
 from secret_store.scrub import (MASK, clear_secret_values, collect_hub_secret_values,
                                 collect_settings_secret_values, refresh_secret_values,
                                 register_secret_values, registered_secret_values, scrub_persisted_secrets,
-                                scrub_state_secrets, scrub_text, scrub_value)
+                                scrub_job_secrets, scrub_state_secrets, scrub_text, scrub_value)
 
 FAKE_KEY = "sk-fake-provider-key-0123456789"  # pragma: allowlist secret
 ANOTHER_FAKE_KEY = "another-fake-value-9876"  # pragma: allowlist secret
@@ -100,9 +100,66 @@ def test_registering_replaces_the_previous_set(scrub_registry):
     assert scrub_text(ANOTHER_FAKE_KEY) == MASK
 
 
-def test_a_value_shorter_than_the_floor_is_not_registered(scrub_registry):
-    assert scrub_registry(["abcde"]) == 0
+def test_a_value_shorter_than_the_floor_is_registered_but_not_masked_in_plain_text(scrub_registry):
+    assert scrub_registry(["abcde"]) == 1
     assert scrub_text("plain words like abcde stay readable") == "plain words like abcde stay readable"
+    assert scrub_text("abcde") == "abcde"
+
+
+@pytest.mark.parametrize("text, masked", [
+    ("password=abc", "password=***"),
+    ("password = abc;", "password = ***;"),
+    ("login failed for pass: abc", "login failed for pass: ***"),
+    ('{"pass": "abc", "user": "name"}', '{"pass": "***", "user": "name"}'),
+    ("{'pass': 'abc'}", "{'pass': '***'}"),
+    ("pass: 'abc'", "pass: '***'"),
+    ("GET /search?apikey=abc&page=2", "GET /search?apikey=***&page=2"),
+    ("https://user:abc@host.example/path", "https://user:***@host.example/path"),
+    ("https://abc:secret-pw@host.example/path", "https://***:secret-pw@host.example/path"),
+    ("Authorization: Basic abc", "Authorization: Basic ***"),
+    ("Authorization: abc", "Authorization: ***"),
+    ('run --password "abc" now', 'run --password "***" now'),
+    ("key=abc", "key=***"),
+])
+def test_a_short_value_is_masked_as_a_whole_token_in_context(scrub_registry, text, masked):
+    scrub_registry(["abc"])
+    assert scrub_text(text) == masked
+
+
+@pytest.mark.parametrize("text", [
+    "an abcdef word and abc in prose",
+    "cabbage abcdef",
+    "password=abcdef",
+    "password=xabc",
+    "token=abc.example",
+    "https://host.example/abc/path",
+    "the abc.txt file",
+    '{"abcd": "abcd"}',
+])
+def test_an_unrelated_word_with_the_same_letters_is_not_masked(scrub_registry, text):
+    scrub_registry(["abc"])
+    assert scrub_text(text) == text
+
+
+def test_short_and_long_values_mask_together(scrub_registry):
+    scrub_registry(["abc", FAKE_KEY, "ab"])
+    text = f"user=ab pass=abc key={FAKE_KEY} and {FAKE_KEY} alone, abc alone"
+    assert scrub_text(text) == "user=*** pass=*** key=*** and *** alone, abc alone"
+
+
+def test_a_long_value_is_masked_anywhere_as_before(scrub_registry):
+    scrub_registry([FAKE_KEY, "abc"])
+    assert scrub_text(f"x{FAKE_KEY}y {FAKE_KEY}") == "x***y ***"
+
+
+def test_a_short_captcha_key_and_a_short_username_are_collected_and_masked(scrub_registry):
+    from secret_store.scrub import collect_settings_secret_values
+
+    settings = {"anticaptcha": {"anti_captcha_key": "abcde"}, "hdbits": {"username": "ab"}}
+    assert scrub_registry(collect_settings_secret_values(settings)) == 2
+    assert scrub_text('anti_captcha_key=abcde "hdbits": "ab" user=ab') == \
+        'anti_captcha_key=*** "hdbits": "***" user=***'
+    assert scrub_text("a cabbage of abcdefg") == "a cabbage of abcdefg"
 
 
 def test_the_mask_and_ciphertext_are_not_registered(scrub_registry):
@@ -326,7 +383,7 @@ def test_the_registry_publishes_values_and_their_regex_together(scrub_registry):
     import secret_store.scrub as scrub
 
     scrub_registry([FAKE_KEY, ANOTHER_FAKE_KEY])
-    values, regex = scrub._VALUE_STATE
+    values, regex, _short, _long = scrub._VALUE_STATE
     assert values == {FAKE_KEY, ANOTHER_FAKE_KEY}
     assert regex is not None
     assert all(regex.search(value) for value in values)
@@ -523,3 +580,547 @@ def test_ordinary_lines_are_scrubbed_without_a_regression(scrub_registry):
     # Nothing to mask: the same object comes back, with no copy to leave
     # behind in a buffer or a payload.
     assert scrub_text(line) is line
+
+
+@pytest.mark.parametrize("text, masked", [
+    ("password=abc.", "password=***."),
+    ("password=abc! next", "password=***! next"),
+    ("password=abc?", "password=***?"),
+    ("password=abc: failed", "password=***: failed"),
+    ("/search?apikey=abc#top", "/search?apikey=***#top"),
+    ("a|password=abc|b", "a|password=***|b"),
+    ("password=abc/path", "password=***/path"),
+    ("password=abc\\next", "password=***\\next"),
+    ("first line password=abc\nsecond line", "first line password=***\nsecond line"),
+    ("password=abc", "password=***"),
+    ('{\\"pass\\": \\"abc\\"}', '{\\"pass\\": \\"***\\"}'),
+    ('log: "{\\"user\\": \\"abc\\"}"', 'log: "{\\"user\\": \\"***\\"}"'),
+])
+def test_trailing_punctuation_still_ends_a_short_token(scrub_registry, text, masked):
+    scrub_registry(["abc"])
+    assert scrub_text(text) == masked
+
+
+@pytest.mark.parametrize("text, masked", [
+    ("authorization: BASIC abc", "authorization: BASIC ***"),
+    ("Authorization: bearer abc", "Authorization: bearer ***"),
+    ("Authorization: DIGEST abc", "Authorization: DIGEST ***"),
+])
+def test_an_authorization_scheme_name_is_matched_in_any_case(scrub_registry, text, masked):
+    scrub_registry(["abc"])
+    assert scrub_text(text) == masked
+
+
+def test_the_credential_itself_stays_case_sensitive(scrub_registry):
+    scrub_registry(["abc"])
+    assert scrub_text("Authorization: Basic ABC") == "Authorization: Basic ABC"
+    assert scrub_text("password=ABC") == "password=ABC"
+
+
+@pytest.mark.parametrize("short, long, text, masked", [
+    ("abc", "abc@example", "mail=abc@example done", "mail=*** done"),
+    ("bob", "bob@example.com", "user: bob@example.com", "user: ***"),
+    ("bob", "bob@example.com", "https://bob@example.com/x and bob@example.com", "https://***/x and ***"),
+])
+def test_a_short_value_never_pre_empts_a_longer_credential(scrub_registry, short, long, text, masked):
+    scrub_registry([short, long])
+    assert scrub_text(text) == masked
+
+
+def test_a_short_value_beside_a_longer_one_is_still_masked_on_its_own(scrub_registry):
+    scrub_registry(["bob", "bob@example.com"])
+    assert scrub_text("user=bob mail=bob@example.com") == "user=*** mail=***"
+
+
+def test_a_structured_leaf_equal_to_a_short_credential_is_masked(scrub_registry):
+    scrub_registry(["abc", FAKE_KEY])
+    payload = {"api_key": "abc", "rows": ["abc", " abc ", "abcd", 7], "nested": ({"token": "abc"},),
+               "text": "prose with abc in it"}
+    assert scrub_value(payload) == {
+        "api_key": "***", "rows": ["***", "***", "abcd", 7], "nested": ({"token": "***"},),
+        "text": "prose with abc in it",
+    }
+
+
+def test_a_job_row_leaf_equal_to_a_short_credential_is_masked(scrub_registry):
+    scrub_registry(["abc"])
+    job = {"id": "abc", "action": "install", "message": "failed",
+           "details": {"config": {"api_key": "abc", "region": "eu"}, "args": ["abc", "other"]}}
+    assert scrub_job_secrets(job) is True
+    assert job == {"id": "abc", "action": "install", "message": "failed",
+                   "details": {"config": {"api_key": "***", "region": "eu"}, "args": ["***", "other"]}}
+
+
+def test_a_state_document_leaf_in_a_text_field_equal_to_a_short_credential_is_masked(scrub_registry):
+    scrub_registry(["abc"])
+    state = {"installations": {"p": {"last_error": "abc", "details": {"api_key": "abc"}, "name": "abc"}}}
+    assert scrub_state_secrets(state) is True
+    assert state == {"installations": {"p": {"last_error": "***", "details": {"api_key": "***"},
+                                             "name": "abc"}}}
+
+
+def _best_of(runs, function):
+    import time
+
+    best = None
+    for _ in range(runs):
+        started = time.perf_counter()
+        function()
+        elapsed = time.perf_counter() - started
+        best = elapsed if best is None else min(best, elapsed)
+    return best
+
+
+LONG_VALUES = ["long-credential-00001-value", "long-credential-00002-value", "long-credential-00003-value"]
+WORKLOAD = "GET /x?page=1&size=20&token=zz9 user=ab note: ok \"quoted\" 10:30:45 " * 4000
+
+
+def test_substitution_cost_does_not_grow_with_the_number_of_registered_short_values(scrub_registry):
+    # The same text, the same matches, a registry of 2 short values and then 370: the cost of a
+    # scan is set by the text, so the ratio stays near one. A scan that tried every registered
+    # value at every context would be two orders of magnitude slower on the large registry.
+    small = ["ab", "1"]
+    large = small + [f"{index:03x}"[-3:] + chr(97 + index % 26) for index in range(368)]
+    assert len(set(large)) == 370
+
+    scrub_registry(small + LONG_VALUES)
+    expected = scrub_text(WORKLOAD)
+    small_cost = _best_of(5, lambda: scrub_text(WORKLOAD))
+
+    scrub_registry(large + LONG_VALUES)
+    assert scrub_text(WORKLOAD) == expected
+    large_cost = _best_of(5, lambda: scrub_text(WORKLOAD))
+
+    assert large_cost < small_cost * 3
+
+
+def test_the_scan_is_linear_in_the_text(scrub_registry):
+    scrub_registry(["a", "ab"] + LONG_VALUES)
+    small = "key=zz " * 5000
+    large = small * 8
+
+    small_cost = _best_of(5, lambda: scrub_text(small))
+    large_cost = _best_of(5, lambda: scrub_text(large))
+
+    # Eight times the text takes about eight times as long, far from its square (64).
+    assert large_cost < small_cost * 20
+
+
+@pytest.mark.parametrize("text, masked", [
+    ("password=abc<tag>", "password=***<tag>"),
+    ("password=abc(x)", "password=***(x)"),
+    ("[password=abc]", "[password=***]"),
+    ("{password=abc}", "{password=***}"),
+    ("password=abc%20more", "password=***%20more"),
+    ("password=abc+more", "password=***+more"),
+    ("password=abc=more", "password=***=more"),
+    ("password=abc\x01more", "password=***\x01more"),
+    ("password=abc\tmore", "password=***\tmore"),
+])
+def test_more_characters_end_a_short_token(scrub_registry, text, masked):
+    scrub_registry(["abc"])
+    assert scrub_text(text) == masked
+
+
+@pytest.mark.parametrize("secret, text, masked", [
+    ('"abc', 'password="abc', "password=***"),
+    ('"abc', 'password = "abc and more', "password = *** and more"),
+    ("'ab", "pass='ab;", "pass=***;"),
+    ('"abc', '{"pass": "abc}', '{"pass": ***}'),
+    ("abc", 'password="abc"', 'password="***"'),
+])
+def test_a_credential_that_begins_with_a_quote_is_found_from_the_quote(scrub_registry, secret, text, masked):
+    scrub_registry([secret])
+    assert scrub_text(text) == masked
+
+
+@pytest.mark.parametrize("text, masked", [
+    ("http://plex:32400", "http://plex:32400"),
+    ("http://plex:32400/web", "http://plex:32400/web"),
+    ("http://plex:32400 and more", "http://plex:32400 and more"),
+    ("http://plex@host/web", "http://***@host/web"),
+    ("http://plex:pw@host/web", "http://***:pw@host/web"),
+    ("http://plex:p:w@host:8080/", "http://***:p:w@host:8080/"),
+])
+def test_a_url_user_needs_an_at_sign_after_a_colon(scrub_registry, text, masked):
+    scrub_registry(["plex"])
+    assert scrub_text(text) == masked
+
+
+@pytest.mark.parametrize("text", ["at 10:30:45 today", "2026-11-15 10:30:45,123 - msg", "ratio 1:30:5"])
+def test_a_short_numeric_secret_leaves_a_time_of_day_intact(scrub_registry, text):
+    # A colon followed by a digit does not end a token, so the minutes of a time are not a
+    # standalone value. (Seconds at the very end of a time are, as any value after a colon.)
+    scrub_registry(["30", "10"])
+    assert scrub_text(text) == text
+
+
+def test_the_log_formatter_scrubs_the_message_and_not_the_timestamp(scrub_registry):
+    import logging
+    import time
+
+    from app.logger import FileHandlerFormatter
+
+    scrub_registry(["30", "45"])
+    formatter = FileHandlerFormatter('%(asctime)s|%(levelname)-8s|%(name)-32s|%(message)s|', '%Y-%m-%d %H:%M:%S')
+    record = logging.LogRecord("x", logging.INFO, __file__, 1, "retry count=30 for user=45", None, None)
+    record.created = time.mktime((2026, 11, 15, 10, 30, 45, 0, 0, -1))
+    record.msecs = 0
+    line = formatter.format(record)
+    stamp = line.split("|", 1)[0]
+    assert stamp == "2026-11-15 10:30:45"
+    assert stamp == formatter.formatTime(record, formatter.datefmt)
+    assert "count=*** for user=***" in line
+
+
+@pytest.mark.parametrize("text, masked", [
+    ("api_keys:\n  - abc\n  - other", "api_keys:\n  - ***\n  - other"),
+    ("- abc", "- ***"),
+    ("list:\n\t-   abc  \nnext: x", "list:\n\t-   ***  \nnext: x"),
+    ('keys:\n  - "abc"', 'keys:\n  - "***"'),
+    ("keys:\n  - abcd\n  - xabc", "keys:\n  - abcd\n  - xabc"),
+    ("a sentence - abc in prose", "a sentence - abc in prose"),
+    ("range 1 - abc", "range 1 - abc"),
+])
+def test_an_unquoted_yaml_list_item_is_a_value_context(scrub_registry, text, masked):
+    scrub_registry(["abc"])
+    assert scrub_text(text) == masked
+
+
+@pytest.mark.parametrize("password", ["p" * 300, "p" * 5000, "word:" * 400 + "x"])
+def test_a_short_username_is_masked_whatever_the_length_of_the_password(scrub_registry, password):
+    scrub_registry(["bob"])
+    assert scrub_text(f"http://bob:{password}@host.example/path") == f"http://***:{password}@host.example/path"
+    assert scrub_text(f"http://bob:{password} host") == f"http://bob:{password} host"
+
+
+def test_the_url_user_scan_stays_linear_with_many_colons(scrub_registry):
+    scrub_registry(["bob"])
+    small = "http://bob:" + "p:" * 2000
+    large = small * 8
+
+    small_cost = _best_of(5, lambda: scrub_text(small))
+    large_cost = _best_of(5, lambda: scrub_text(large))
+
+    assert large_cost < max(small_cost, 0.002) * 40
+
+
+def test_the_long_value_precheck_keeps_the_alternation_off_text_that_holds_none(scrub_registry):
+    # About 100 long values. A text that holds none of them is cleared by one substring search per
+    # value, and the alternation is never run over it; a text that holds one runs it once. Counted,
+    # not timed, so the check does not depend on the machine.
+    import secret_store.scrub as scrub
+
+    many = [f"{chr(97 + index % 26)}{index:05d}-credential-value-{index}" for index in range(100)]
+    text = ("2026-11-15 10:30:45 worker retrying request to https://host.example/api/v1/items?page=1 "
+            "after a timeout of thirty seconds and no further detail\n") * 2500
+
+    scrub_registry(many)
+    values, regex, short_values, long_values = scrub._VALUE_STATE
+
+    class Counting:
+        calls = 0
+
+        def finditer(self, subject):
+            Counting.calls += 1
+            return regex.finditer(subject)
+
+    scrub._VALUE_STATE = (values, Counting(), short_values, long_values)
+
+    assert scrub_text(text) == text
+    assert Counting.calls == 0
+
+    assert scrub_text("x " + many[57] + " y") == "x *** y"
+    assert Counting.calls == 1
+
+
+def test_the_console_format_scrubs_only_the_message(scrub_registry):
+    import logging
+
+    from app.logger import FileHandlerFormatter
+
+    scrub_registry(["45", "7"])
+    formatter = FileHandlerFormatter(
+        '%(asctime)-15s - %(name)-32s (%(thread)x) :  %(levelname)s (%(module)s:%(lineno)d) - %(message)s')
+    record = logging.LogRecord("name7", logging.INFO, "/x/module7.py", 45, "retry count=45 for user=7", None, None)
+    line = formatter.format(record)
+
+    assert "(module7:45)" in line
+    assert "name7" in line
+    assert line.endswith("retry count=*** for user=***")
+
+
+def test_an_exception_and_a_stack_in_a_log_record_are_scrubbed(scrub_registry):
+    import logging
+
+    from app.logger import FileHandlerFormatter
+
+    scrub_registry(["abc"])
+    formatter = FileHandlerFormatter('%(levelname)s|%(message)s|')
+    try:
+        raise ValueError("password=abc")
+    except ValueError:
+        import sys
+        record = logging.LogRecord("n", logging.ERROR, "/x/m.py", 1, "failed %s", ("user=abc",), sys.exc_info())
+    record.stack_info = "stack password=abc"
+    line = formatter.format(record)
+
+    assert "abc" not in line
+    assert "failed user=***" in line
+    assert "password=***" in line
+
+
+@pytest.mark.parametrize("text, masked", [
+    ("api_keys: [abc, other]", "api_keys: [***, other]"),
+    ("api_keys: [other, abc]", "api_keys: [other, ***]"),
+    ("api_keys: [ other ,abc ,  x ]", "api_keys: [ other ,*** ,  x ]"),
+    ('api_keys: ["abc", "other"]', 'api_keys: ["***", "other"]'),
+    ("api_keys=[x,abc]", "api_keys=[x,***]"),
+    ("keys: [[abc, x], [y, abc]]", "keys: [[***, x], [y, ***]]"),
+    ("keys:\n  - - abc\n    - x\n  - - - abc", "keys:\n  - - ***\n    - x\n  - - - ***"),
+    ("keys: [abcd, xabc, abc.x]", "keys: [abcd, xabc, abc.x]"),
+    ("indexes a[abc] and b[x, abc] and (1, abc) and abc, abc", "indexes a[abc] and b[x, abc] and (1, abc) and abc, abc"),
+    ("keys: [x]\nnext, abc", "keys: [x]\nnext, abc"),
+])
+def test_a_yaml_flow_list_and_a_nested_block_list_are_value_contexts(scrub_registry, text, masked):
+    scrub_registry(["abc"])
+    assert scrub_text(text) == masked
+
+
+@pytest.mark.parametrize("text, masked", [
+    # "Bearer" is itself registered here, so it is masked as the long value it is, and the
+    # short value after it is still found: the scheme it needs was in the text it was found in.
+    ("Authorization: Bearer abc", "Authorization: *** ***"),
+    ("Authorization: bearer abc and Bearer abc", "Authorization: bearer *** and *** ***"),
+    ("Basic abc", "Basic ***"),
+])
+def test_a_long_value_cannot_erase_the_context_a_short_value_needs(scrub_registry, text, masked):
+    scrub_registry(["Bearer", "Basic", "abc"])
+    assert scrub_text(text) == masked
+
+
+def test_a_long_match_wins_where_it_overlaps_a_short_one(scrub_registry):
+    scrub_registry(["abc", "abc@example.com", "pass=abcdef"])
+    assert scrub_text("mail=abc@example.com and pass=abcdef and user=abc") == "mail=*** and *** and user=***"
+
+
+@pytest.mark.parametrize("text, masked", [
+    ("password=abc$HOME", "password=***$HOME"),
+    ("password=abc^x", "password=***^x"),
+])
+def test_dollar_and_caret_end_a_short_token(scrub_registry, text, masked):
+    scrub_registry(["abc"])
+    assert scrub_text(text) == masked
+
+
+def test_a_key_added_while_a_database_refresh_collects_survives_it(scrub_registry, monkeypatch):
+    import secret_store.scrub as scrub
+
+    scrub_registry([])
+    scrub.add_database_secret_values(["old"])
+
+    def collect(session):
+        # A writer commits and registers its key while the collection is reading.
+        scrub.add_database_secret_values(["abc"])
+        return {"stored"}
+
+    monkeypatch.setattr(scrub, "collect_database_secret_values", collect)
+    scrub.refresh_database_secret_values(object())
+
+    # "old" was added before the refresh started collecting and the database does not hold it.
+    assert scrub_text("a=abc b=stored c=old") == "a=*** b=*** c=old"
+
+    scrub.refresh_secret_values({"omdb": {"apikey": FAKE_KEY}}, state={"installations": {}})
+    assert scrub_text(f"a=abc {FAKE_KEY} b=stored") == "a=*** *** b=***"
+
+    scrub.clear_secret_values()
+    assert scrub_text("a=abc") == "a=abc"
+
+
+def test_adding_a_key_never_raises(scrub_registry, monkeypatch):
+    import secret_store.scrub as scrub
+
+    def broken(values):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(scrub, "register_secret_values", broken)
+    scrub.add_database_secret_values(["abc"])
+
+
+def test_adding_a_key_takes_no_lock_but_its_own(scrub_registry):
+    # Safe under the account, config and destination locks: a refresh that holds the
+    # collection lock (and may be waiting on those) does not block an addition.
+    import secret_store.scrub as scrub
+
+    with scrub._refresh_lock:
+        done = []
+        import threading
+
+        thread = threading.Thread(target=lambda: done.append(scrub.add_database_secret_values(["abc"])))
+        thread.start()
+        thread.join(5)
+        assert done, "the addition waited on the refresh lock"
+    assert scrub_text("a=abc") == "a=***"
+
+
+@pytest.mark.parametrize("text, masked", [
+    ('keys: ["]", abc]', 'keys: ["]", ***]'),
+    ('keys: ["[", abc, "]"]', 'keys: ["[", ***, "]"]'),
+    ('keys: ["a,b", abc]', 'keys: ["a,b", ***]'),
+    ("keys: ['],', abc]", "keys: ['],', ***]"),
+    ('keys: ["\\"]", abc]', 'keys: ["\\"]", ***]'),
+    ('keys: ["a", ["]", abc], x]', 'keys: ["a", ["]", ***], x]'),
+    ('keys: ["]", abcd, x]', 'keys: ["]", abcd, x]'),
+    ('keys: ["]"] then abc, abc', 'keys: ["]"] then abc, abc'),
+])
+def test_brackets_and_commas_inside_a_quoted_flow_item_are_not_structure(scrub_registry, text, masked):
+    scrub_registry(["abc"])
+    assert scrub_text(text) == masked
+
+
+def test_an_unterminated_quote_in_a_flow_list_does_not_loop_or_swallow_the_line(scrub_registry):
+    scrub_registry(["abc"])
+    assert scrub_text('keys: ["unterminated, abc]') == 'keys: ["unterminated, ***]'
+    text = 'keys: [" ' + ', "' * 3000
+    assert scrub_text(text) == text
+
+
+def test_a_short_value_that_is_also_the_scheme_of_the_next_context_is_masked_in_both_places(scrub_registry):
+    scrub_registry(["Basic", "abc"])
+    assert scrub_text("Authorization: Basic abc") == "Authorization: *** ***"
+    assert scrub_text("a: Basic abc, b=Basic") == "a: *** ***, b=***"
+
+
+@pytest.mark.parametrize("text, masked", [
+    ("keys: ['it''s ]', abc]", "keys: ['it''s ]', ***]"),
+    ("keys: ['a''', abc]", "keys: ['a''', ***]"),
+    ("keys: ['x''y,z''', abc]", "keys: ['x''y,z''', ***]"),
+    # A quote not followed by a comma or a bracket did not close an item: nothing after it is hidden.
+    ('keys: ["a, abc, b"c, abc]', 'keys: ["a, ***, b"c, ***]'),
+    ('keys: ["a" x, abc]', 'keys: ["a" x, ***]'),
+    # Blanks between the closing quote and the comma are fine.
+    ('keys: ["]"  , abc]', 'keys: ["]"  , ***]'),
+])
+def test_doubled_single_quotes_escape_and_an_unbalanced_quote_hides_nothing(scrub_registry, text, masked):
+    scrub_registry(["abc"])
+    assert scrub_text(text) == masked
+
+
+def test_a_database_refresh_that_finds_nothing_drops_the_earlier_additions(scrub_registry, monkeypatch):
+    import secret_store.scrub as scrub
+
+    scrub_registry([])
+    scrub.add_database_secret_values(["abc"])
+    assert scrub_text("a=abc") == "a=***"
+
+    monkeypatch.setattr(scrub, "collect_database_secret_values", lambda session: set())
+    scrub.refresh_database_secret_values(object())
+    assert scrub_text("a=abc") == "a=abc"
+
+    # Added after that refresh, so a refresh that finds it in the database keeps it.
+    scrub.add_database_secret_values(["xyz"])
+    assert scrub_text("a=xyz") == "a=***"
+    monkeypatch.setattr(scrub, "collect_database_secret_values", lambda session: {"xyz"})
+    scrub.refresh_database_secret_values(object())
+    assert scrub_text("a=xyz") == "a=***"
+
+    # And one that no longer finds it drops it, as it dropped "abc".
+    monkeypatch.setattr(scrub, "collect_database_secret_values", lambda session: set())
+    scrub.refresh_database_secret_values(object())
+    assert scrub_text("a=xyz") == "a=xyz"
+
+
+def test_overlapping_spans_are_joined_to_the_furthest_end():
+    from secret_store.scrub import _merge_spans
+
+    assert _merge_spans([(5, 8), (3, 6), (10, 12), (11, 15), (20, 21)]) == [(3, 8), (10, 15), (20, 21)]
+    assert _merge_spans([(0, 10), (2, 4)]) == [(0, 10)]
+    assert _merge_spans([(0, 2), (2, 4)]) == [(0, 2), (2, 4)]
+
+
+def test_a_short_match_that_overlaps_a_long_one_leaves_no_part_of_either_readable(scrub_registry):
+    scrub_registry(["abc", "bc@example"])
+    assert scrub_text("x=abc@example") == "x=***"
+    assert scrub_text("x=abc and y=bc@example") == "x=*** and y=***"
+
+
+def test_a_job_action_masks_a_leaf_equal_to_a_short_or_long_credential(scrub_registry):
+    from secret_store.scrub import scrub_value
+
+    scrub_registry(["abc", FAKE_KEY])
+    action = {"kind": "discover.save", "label": "Save", "ticket": "abc", "file": f"x {FAKE_KEY}", "note": "a=abc"}
+
+    assert scrub_value(action) == {
+        "kind": "discover.save", "label": "Save", "ticket": "***", "file": "x ***", "note": "a=***"}
+    assert scrub_value({"label": FAKE_KEY, "x": "abcd"}) == {"label": "***", "x": "abcd"}
+
+
+def test_the_repr_form_of_a_short_credential_is_masked_as_a_whole_token(scrub_registry):
+    value = "a'b"
+    scrub_registry([value])
+    assert scrub_text(f"password={value}") == "password=***"
+    assert scrub_text(f"password={value!r}") == 'password="***"'
+    assert scrub_text(f"args={['x', value]!r}") == 'args=[\'x\', "***"]'
+
+
+def test_every_registration_path_carries_the_repr_forms(scrub_registry):
+    import secret_store.scrub as scrub
+
+    long_value = "back\\slash'quote-0123"
+    short_value = "x\\y"
+    scrub_registry([])
+
+    scrub.add_database_secret_values([long_value, short_value])
+    assert scrub_text(f"k {long_value!r}") == f'k "{MASK}"'
+    assert scrub_text(f"pass={short_value!r}") == "pass='***'"
+
+    scrub.clear_secret_values()
+    scrub.add_declared_secret_values([long_value, short_value])
+    assert scrub_text(f"k {long_value!r}") == f'k "{MASK}"'
+    assert scrub_text(f"pass={short_value!r}") == "pass='***'"
+
+    scrub.clear_secret_values()
+    scrub.refresh_secret_values({"sonarr": {"apikey": long_value}, "hdbits": {"passkey": short_value}},
+                                state={"installations": {}})
+    assert scrub_text(f"k {long_value!r}") == f'k "{MASK}"'
+    assert scrub_text(f"pass={short_value!r}") == "pass='***'"
+
+
+def test_a_declared_hub_secret_survives_every_refresh_and_addition(scrub_registry, monkeypatch):
+    import secret_store.scrub as scrub
+
+    scrub_registry([])
+    scrub.add_declared_secret_values(["declared-secret-1", "dcl"])
+    assert scrub_text("a=declared-secret-1 b=dcl") == "a=*** b=***"
+
+    monkeypatch.setattr(scrub, "collect_database_secret_values", lambda session: {"stored"})
+    scrub.refresh_database_secret_values(object())
+    scrub.add_database_secret_values(["added"])
+    scrub.refresh_secret_values({"omdb": {"apikey": FAKE_KEY}}, state={"installations": {}})
+
+    assert scrub_text(f"a=declared-secret-1 b=dcl c=stored d=added e={FAKE_KEY}") == "a=*** b=*** c=*** d=*** e=***"
+
+
+@pytest.mark.parametrize("text, masked", [
+    ('{\\\\\\"pass\\\\\\": \\\\\\"abc\\\\\\"}', '{\\\\\\"pass\\\\\\": \\\\\\"***\\\\\\"}'),
+    ('\\\\\\"abc\\\\\\"', '\\\\\\"***\\\\\\"'),
+    ('x=\\\\\\"abc', 'x=\\\\\\"***'),
+    ('\\"abc\\"', '\\"***\\"'),
+    ('\\\\\\"abcd\\\\\\"', '\\\\\\"abcd\\\\\\"'),
+])
+def test_a_doubly_escaped_quote_is_a_quote_too(scrub_registry, text, masked):
+    scrub_registry(["abc"])
+    assert scrub_text(text) == masked
+
+
+@pytest.mark.parametrize("tail", ["", '"', '"abc', "=", "x"])
+def test_the_quote_scan_stays_linear_over_a_long_run_of_backslashes(scrub_registry, tail):
+    scrub_registry(["abc"])
+    small = "\\" * 2000 + tail
+    large = small * 8 if not tail else "\\" * 16000 + tail
+
+    small_cost = _best_of(5, lambda: scrub_text(small))
+    large_cost = _best_of(5, lambda: scrub_text(large))
+
+    # Eight times the run takes about eight times as long, far from its square (64).
+    assert large_cost < max(small_cost, 0.002) * 40

@@ -33,6 +33,7 @@ def _validate_state_token(state: str, stored_state: str) -> bool:
         return False
     return _secrets.compare_digest(state, stored_state)
 from plex.operations import plex_account_verify_ssl  # noqa: E402
+from secret_store.scrub import mask_credential_refusal  # noqa: E402
 from app.config import settings, write_config  # noqa: E402
 from utilities.security_guards import normalized_origin  # noqa: E402
 from app.logger import logger  # noqa: E402
@@ -906,14 +907,17 @@ class PlexApiKey(Resource):
             if not apikey:
                 return {'error': 'API key is required'}, 400
 
-            # Plaintext into in-memory settings; secret_store encrypts on
-            # write_config(). The legacy apikey_encrypted=True flag is no
-            # longer needed - leave it cleared so the legacy migration
-            # path doesn't get re-triggered on reboot.
-            #
+            refusal = mask_credential_refusal('plex.apikey', apikey)
+            if refusal:
+                return {'error': refusal}, 400
+
             # An account transition, under the account lock like every other.
             from media_servers.plex_account import ACCOUNT_LOCK
             with ACCOUNT_LOCK:
+                # Plaintext into in-memory settings; secret_store encrypts on
+                # write_config(). The legacy apikey_encrypted=True flag is no
+                # longer needed - leave it cleared so the legacy migration
+                # path doesn't get re-triggered on reboot.
                 settings.plex.apikey = apikey
                 settings.plex.apikey_encrypted = False
                 settings.plex.auth_method = 'apikey'

@@ -1047,3 +1047,39 @@ def test_a_previously_stamped_adoption_still_gets_its_columns_repaired(tmp_path,
         'the stamped-but-unrepaired install kept its missing column')
 
     engine.dispose()
+
+
+def test_startup_registers_the_database_held_instance_keys_with_the_scrubber(tmp_path, monkeypatch):
+    """Only the default Sonarr and Radarr keys are mirrored into the settings, so the
+    scrubber learns every other instance key from the database, once at startup. This
+    drives migrate_db, the call main.py makes, and fails if that registration is gone."""
+    from flask import Flask
+    from sqlalchemy.orm import scoped_session, sessionmaker
+
+    import app.database as db_module
+    import secret_store.scrub as scrub
+
+    db_path = tmp_path / 'bazarr.db'
+    engine = sa.create_engine(f'sqlite:///{db_path}')
+    db_module.Base.metadata.create_all(engine)
+    with engine.begin() as connection:
+        connection.execute(sa.text('CREATE TABLE IF NOT EXISTS alembic_version '
+                                   '(version_num VARCHAR(32) NOT NULL)'))
+        connection.execute(sa.text('DELETE FROM alembic_version'))
+        connection.execute(sa.text('INSERT INTO alembic_version (version_num) VALUES (:head)'),
+                           {'head': _chain_head()})
+
+    session = scoped_session(sessionmaker(bind=engine))
+    monkeypatch.setattr(db_module, 'engine', engine)
+    monkeypatch.setattr(db_module, 'url', f'sqlite:///{db_path}')
+    monkeypatch.setattr(db_module, 'database', session)
+    registered = []
+    monkeypatch.setattr(scrub, 'refresh_database_secret_values', lambda given=None: registered.append(given))
+
+    application = Flask(__name__)
+    application.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+    db_module.migrate_db(application)
+
+    assert registered == [session]
+
+    engine.dispose()

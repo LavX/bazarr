@@ -9,8 +9,10 @@ from urllib3.exceptions import ReadTimeoutError
 
 
 class MediaServerError(Exception):
-    def __init__(self, code: str):
+    def __init__(self, code: str, message: str | None = None):
         self.code = code
+        # Set when the refusal has text of its own to show beside the code.
+        self.message = message
         super().__init__(code)
 
 
