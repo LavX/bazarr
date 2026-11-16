@@ -688,7 +688,10 @@ class TranslatorSettingsService:
             if name not in validated.secrets:
                 self._store.clear_secret(owner, name, destinations=destinations)
         for name, value in validated.secrets.items():
-            self._store.set_secret(owner, name, _json_secret(value), destinations=destinations)
+            try:
+                self._store.set_secret(owner, name, _json_secret(value), destinations=destinations)
+            except TranslatorStoreError as error:
+                raise InvalidValuesError(str(error), field_errors={name: str(error)}) from error
 
 
 __all__ = [

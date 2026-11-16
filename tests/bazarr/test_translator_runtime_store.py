@@ -626,6 +626,33 @@ def test_with_the_switch_off_the_translator_secrets_are_not_collected(store, scr
     assert scrub.registered_secret_values() == others
 
 
+def test_a_short_engine_key_and_key_list_entries_are_masked_as_whole_tokens(store, scrub_with_the_runtime_on):
+    scrub, others = scrub_with_the_runtime_on
+    owner = (INSTANCE, _ai_engine(store, with_connection=False).id)
+    store.set_secret(owner, "token", "k3y", destinations=frozenset())
+    store.set_secret(owner, "keys", json.dumps(["ab1", "cd2"]), destinations=frozenset())
+
+    # In context a short key is masked, inside a longer word it is left alone.
+    assert scrub.scrub_text("token=k3y and password: ab1") == f"token={scrub.MASK} and password: {scrub.MASK}"
+    assert scrub.scrub_text("first=ab1&second=cd2") == f"first={scrub.MASK}&second={scrub.MASK}"
+    assert scrub.scrub_text("the k3yboard and cd2x") == "the k3yboard and cd2x"
+    # Standing alone as a value, it is masked whole.
+    assert scrub.scrub_leaf("k3y") == scrub.MASK
+    assert scrub.scrub_leaf("cd2") == scrub.MASK
+    assert scrub.scrub_leaf("k3yboard") == "k3yboard"
+
+
+def test_the_mask_text_is_refused_as_a_new_secret_and_keeps_the_stored_one(store):
+    owner = (INSTANCE, _ai_engine(store, with_connection=False).id)
+    with pytest.raises(TranslatorStoreError, match="cannot be"):
+        store.set_secret(owner, "token", "***", destinations=frozenset())
+    assert store.secrets_for_request(owner, frozenset()) == {}
+    store.set_secret(owner, "token", KEY, destinations=frozenset())
+    with pytest.raises(TranslatorStoreError, match="translator.token cannot be"):
+        store.set_secret(owner, "token", " *** ", destinations=frozenset())
+    assert store.secrets_for_request(owner, frozenset()) == {"token": KEY}
+
+
 def test_an_empty_value_keeps_the_stored_secret_and_clear_removes_it(store):
     instance = _ai_engine(store, with_connection=False)
     owner = (INSTANCE, instance.id)
@@ -657,12 +684,12 @@ def test_a_changed_base_url_never_reuses_the_stored_key(store):
     store.set_secret(owner, "api_key", KEY, destinations=first)
     assert store.secrets_for_request(owner, first) == {"api_key": KEY}
 
-    result = store.update_connection(connection.id, schema=OPENAI, settings={"base_url": "http://10.0.0.5:1234/v1"})
-    assert result.new_destinations == {"http://10.0.0.5:1234/v1"}
+    result = store.update_connection(connection.id, schema=OPENAI, settings={"base_url": "http://translator.example:1234/v1"})
+    assert result.new_destinations == {"http://translator.example:1234/v1"}
     assert result.awaiting_secrets is True
     assert store.get_connection(connection.id).awaiting_secrets == 1
     assert not store.connection_usable(store.get_connection(connection.id))
-    changed = effective_destinations(OPENAI, {"base_url": "http://10.0.0.5:1234/v1"})
+    changed = effective_destinations(OPENAI, {"base_url": "http://translator.example:1234/v1"})
     assert store.secrets_for_request(owner, changed) == {}
     assert store.secret_summary(owner, changed)["api_key"]["stale"] is True
 

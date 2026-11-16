@@ -473,12 +473,19 @@ class TranslatorStore:
 
     # ---------------------------------------------------------------- secrets
     def set_secret(self, owner: Owner, field_name: str, value: str, *, destinations: frozenset[str]) -> None:
-        """Store a secret, encrypted, bound to ``destinations``. An empty value keeps what is stored."""
+        """Store a secret, encrypted, bound to ``destinations``. An empty value keeps what is stored.
+
+        The mask text is refused as a new value, the way the settings save refuses it: it stands for a hidden
+        value, and saved as one it would replace the stored secret with three asterisks.
+        """
         from secret_store import encrypt_secret, persist_master_key
 
         self._require_owner(owner)
         if not value:
             return
+        refusal = self._mask_refusal(owner, field_name, value)
+        if refusal:
+            raise TranslatorStoreError(refusal)
         persist_master_key()
         encrypted = encrypt_secret(value)
         with write_transaction(self._session):
@@ -495,6 +502,19 @@ class TranslatorStore:
             self._session.flush()
             self._refresh_awaiting(owner, destinations)
         self._scrub_after_commit()
+
+    def _mask_refusal(self, owner: Owner, field_name: str, value: str) -> str | None:
+        from secret_store import decrypt_secret
+        from secret_store.scrub import mask_credential_refusal
+
+        stored = None
+        row = self._secret_row(owner, field_name)
+        if row is not None:
+            try:
+                stored = decrypt_secret(row.encrypted_value)
+            except Exception:
+                stored = None
+        return mask_credential_refusal(f"translator.{field_name}", value, stored or None)
 
     def clear_secret(self, owner: Owner, field_name: str, *, destinations: frozenset[str]) -> None:
         with write_transaction(self._session):
