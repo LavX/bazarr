@@ -35,6 +35,8 @@ from .field_schema import is_finite_number, is_secret_field
 from .destinations import DestinationSchema, added_destinations, covers, effective_destinations
 from .transaction import inside_write_transaction, write_transaction
 
+MASK = "***"  # what the settings read shows in place of a hidden secret
+
 logger = logging.getLogger(__name__)
 
 OFFICIAL_ENGINE_PLUGIN_ID = "ai_translator"
@@ -742,6 +744,12 @@ class TranslatorStore:
         destinations = effective_destinations(schema, settings)
         for key, value in moved.items():
             if value in (None, "", []):
+                continue
+            if isinstance(value, str) and value.strip() == MASK:
+                # Older versions could store the mask text as a value. It is no credential, so it is dropped
+                # and the secret reads as unset. An update never fails over it.
+                logger.warning("The stored value of the %s secret of a translator engine was the mask text, "
+                               "so it was dropped and must be entered again", key)
                 continue
             self.set_secret(owner, key, value if isinstance(value, str) else json.dumps(value),
                             destinations=destinations)

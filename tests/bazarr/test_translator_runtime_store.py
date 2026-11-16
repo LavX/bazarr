@@ -725,6 +725,19 @@ def _resolver(schema_by_kind):
     return lambda kind, _row: schema_by_kind[kind]
 
 
+def test_a_plugin_update_drops_a_stored_mask_text_instead_of_failing(store, caplog):
+    after = DestinationSchema(fields=({"key": "token", "type": "secret"}, {"key": "other", "type": "secret"},
+                                      {"key": "label", "type": "text"}))
+    instance = store.create_instance("lingarr", settings={"token": "***", "other": KEY, "label": "x"})
+    with caplog.at_level("WARNING"):
+        store.apply_plugin_update("lingarr", _resolver({INSTANCE: after, CONNECTION: after}))
+    # The mask text left the settings and was not stored as a secret; the real secret moved as usual.
+    assert store.settings_of(store.get_instance(instance.id)) == {"label": "x"}
+    assert store.secrets_for_request((INSTANCE, instance.id), frozenset()) == {"other": KEY}
+    assert list(store.secret_summary((INSTANCE, instance.id), frozenset())) == ["other"]
+    assert "token" in caplog.text and "***" not in caplog.text.replace("the mask text", "")
+
+
 def test_a_renamed_destination_field_with_a_new_value_is_caught(store):
     old = DestinationSchema(fields=({"key": "base_url", "type": "text", "destination": True},))
     new = DestinationSchema(fields=({"key": "server_url", "type": "text", "destination": True},))
