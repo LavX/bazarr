@@ -439,9 +439,9 @@ class Dispatcher:
         self._finish_history(history, state, "partial" if output.partial_error else "completed")
 
     def _publication_failed(self, jobs, history, state, error: BaseException) -> str:
-        """The subtitle could not be written. The batches stay for a retry, unless the write was refused because
-        a subtitle arrived meanwhile or the person stopped the job: then nothing is left to retry. Says what was
-        recorded: ``"retry"``, ``"failed"`` or ``"cancelled"``."""
+        """The subtitle could not be written. The job awaits a retry with its batches, whether the write failed or
+        was refused because the source or the destination changed while the translation ran. Only a Stop ends
+        it. Says what was recorded: ``"cancelled"``, or the error class of the retry."""
         from app.jobs_queue import JobCancelled
         from subtitles.tools.subsync_engines import SubtitleDestinationChanged, SubtitleSourceChanged
 
@@ -449,17 +449,12 @@ class Dispatcher:
             jobs.cancel(state.job_id)
             self._finish_history(history, state, "cancelled")
             return "cancelled"
-        if isinstance(error, (SubtitleDestinationChanged, SubtitleSourceChanged)):
-            jobs.fail(state.job_id, fail.DESTINATION_CHANGED, fail.MESSAGES[fail.DESTINATION_CHANGED])
-            self._finish_history(history, state, "failed", fail.DESTINATION_CHANGED,
-                                 fail.MESSAGES[fail.DESTINATION_CHANGED])
-            return "failed"
-        else:
-            message = fail.MESSAGES[fail.PUBLISH_FAILED]
-            jobs.await_retry(state.job_id, fail.PUBLISH_FAILED, message, retry_at=self.clock() +
-                             timedelta(seconds=DEFAULT_RETRY_SECONDS))
-            self._finish_history(history, state, "awaiting_retry", fail.PUBLISH_FAILED, type(error).__name__)
-            return "retry"
+        error_class = (fail.INPUT_CHANGED if isinstance(error, (SubtitleDestinationChanged, SubtitleSourceChanged))
+                       else fail.PUBLISH_FAILED)
+        jobs.await_retry(state.job_id, error_class, fail.MESSAGES[error_class],
+                         retry_at=self.clock() + timedelta(seconds=DEFAULT_RETRY_SECONDS))
+        self._finish_history(history, state, "awaiting_retry", error_class, type(error).__name__)
+        return error_class
 
     def _finish_history(self, history, state, status, error_class=None, detail=None):
         try:

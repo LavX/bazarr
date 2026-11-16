@@ -908,14 +908,19 @@ def test_a_publication_that_fails_keeps_the_batches_and_records_the_failure(env)
     assert (row["status"], row["error_class"]) == ("awaiting_retry", "publish_failed")
 
 
-def test_a_write_refused_because_a_subtitle_arrived_is_not_retried(env):
-    from subtitles.tools.subsync_engines import SubtitleDestinationChanged
+def test_a_write_refused_because_the_source_or_destination_changed_is_retried_later(env):
+    from subtitles.tools.subsync_engines import SubtitleDestinationChanged, SubtitleSourceChanged
 
     env.ai_engine()
     outcome = env.dispatcher().run(make_spec())
-    outcome.publication_failed(SubtitleDestinationChanged("moved"))
+    assert outcome.publication_failed(SubtitleDestinationChanged("moved")) == "input_changed"
     job = env.last_job()
-    assert (job.state, job.error_class) == ("failed", "destination_changed") and env.checkpoints() == []
+    assert (job.state, job.error_class) == ("awaiting_retry", "input_changed")
+    assert len(env.checkpoints()) == 1
+    assert env.history(job)["status"] == "awaiting_retry"
+    TranslationJobs(env.session, clock=env.clock).requeue(job.id)
+    outcome = env.dispatcher().run(make_spec())
+    assert outcome.publication_failed(SubtitleSourceChanged("edited")) == "input_changed"
 
 
 def test_a_stop_during_the_write_cancels_the_job(env):
@@ -1222,3 +1227,31 @@ def test_when_every_connection_is_waiting_the_soonest_window_decides(env):
     assert caught.value.error_class == "quota_exhausted"
     assert caught.value.retry_at == datetime(2026, 11, 15, 12, 1, 0)
     assert env.requests() == []
+
+
+def test_a_hold_named_twice_is_refused_and_settles_nothing(env):
+    from subtitles.tools.translate.runtime.usage import UsageError
+
+    job_id = _running_job(env)
+    limits = CostLimits(job_cap=usd(1), translation_limit=1)
+    ledger = UsageLedger(env.session, clock=env.clock)
+    ledger.reserve_job_budget(str(job_id), limits)
+    ledger.reserve_call(str(job_id), "a", worst_case_micros=usd(0.4), limits=limits)
+    with pytest.raises(UsageError):
+        ledger.settle_calls(str(job_id), [("a", 5, 0, usd(0.3), "m"), ("a", 0, 0, 0, "m")], limits=limits)
+    assert ledger.job_cost(str(job_id)) == usd(0.4), "the hold is still at its worst case"
+
+
+def test_a_usage_report_that_lists_a_hold_twice_settles_it_once_at_the_reading(env):
+    from subtitles.tools.translate.runtime import host_calls as hc
+
+    job_id = _running_job(env)
+    limits = CostLimits(job_cap=usd(1), translation_limit=1)
+    ledger = UsageLedger(env.session, clock=env.clock)
+    ledger.reserve_job_budget(str(job_id), limits)
+    context, reserve_call = _host_call(env, job_id, {"amount": 0.4, "model": "m"}, limits=limits)
+    hold = hc.reserve(reserve_call)["hold"]
+    settle = type("Call", (), {"context": context, "params": {"tokens": 5, "cost": 0.3, "model": "m",
+                                                             "reservations": [hold, hold]}})()
+    hc.usage(settle)
+    assert ledger.job_cost(str(job_id)) == usd(0.3), "the paid usage was not overwritten with zero"

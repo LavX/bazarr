@@ -279,6 +279,10 @@ class UsageLedger:
         items = list(settlements)
         if not items:
             raise UsageError("Nothing to settle")
+        ids = [item[0] for item in items]
+        if len(set(ids)) != len(ids):
+            # The same hold twice would settle it at the reading and then again at nothing.
+            raise UsageError("A reservation is named twice")
         for _call_id, input_tokens, output_tokens, actual_micros, _model in items:
             _micros(actual_micros, "actual_micros")
             if input_tokens < 0 or output_tokens < 0:

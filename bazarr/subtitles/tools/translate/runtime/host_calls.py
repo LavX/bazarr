@@ -167,6 +167,8 @@ def usage(call) -> dict:
         raise _refuse("invalid_request", str(error)) from None
     ledger = UsageLedger(context.session, clock=context.clock)
     limits = context.limits()
+    # A hold listed twice is one hold: settling it again at nothing would wipe out the reading.
+    holds = list(dict.fromkeys(holds))
     if not holds:
         # Spend reported with no hold: a free connection's tokens, or a back end that only reports its cost.
         # It is a call of worst case 0 (always admitted) settled at what was reported, so it counts.

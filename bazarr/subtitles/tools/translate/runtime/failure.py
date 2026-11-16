@@ -44,7 +44,7 @@ BUDGET_EXHAUSTED = "budget_exhausted"      # the job's budget ran out while it r
 NO_USABLE_CONNECTION = "no_usable_connection"
 GATE_CLOSED = "gate_closed"
 PUBLISH_FAILED = "publish_failed"          # the translation came back but the subtitle could not be written
-DESTINATION_CHANGED = "destination_changed"
+INPUT_CHANGED = "input_changed"            # the source or the destination subtitle changed while the translation ran
 
 FAILOVER_CLASSES = frozenset({RATE_LIMITED, QUOTA_EXHAUSTED, AUTH_REQUIRED, DEPENDENCY_UNAVAILABLE})
 
@@ -53,7 +53,7 @@ FAILOVER_CLASSES = frozenset({RATE_LIMITED, QUOTA_EXHAUSTED, AUTH_REQUIRED, DEPE
 # at all.
 _RETRY_LATER = frozenset({
     RATE_LIMITED, QUOTA_EXHAUSTED, AUTH_REQUIRED, DEPENDENCY_UNAVAILABLE, WORKER_FAILED, WORKER_UNAVAILABLE,
-    MONTH_CAP, BUDGET_EXHAUSTED, NO_USABLE_CONNECTION, INTERNAL, PUBLISH_FAILED,
+    MONTH_CAP, BUDGET_EXHAUSTED, NO_USABLE_CONNECTION, INTERNAL, PUBLISH_FAILED, INPUT_CHANGED,
 })
 
 # What a person is told. A class that carries the plugin's own message keeps it; these cover the host's own.
@@ -70,7 +70,8 @@ MESSAGES = {
     NO_USABLE_CONNECTION: "No back end of this engine can take the job right now.",
     GATE_CLOSED: "Translation is not available, so the normal subtitle search runs instead.",
     PUBLISH_FAILED: "The translation finished but the subtitle could not be written. The job will be tried again later.",
-    DESTINATION_CHANGED: "A subtitle for this language arrived while the translation ran, so nothing was written.",
+    INPUT_CHANGED: ("The source or the destination subtitle changed while the translation ran, so nothing was written. "
+                    "The job will be tried again later."),
 }
 
 

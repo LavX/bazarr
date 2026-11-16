@@ -25,9 +25,12 @@ from radarr.history import history_log_movie
 from sonarr.history import history_log
 from sportarr.connection import check_cancelled
 from sportarr.profile_hooks import finish_translation
-from subtitles.tools.subsync_engines import staged_subtitle_write
+from subtitles.tools.subsync_engines import (SubtitleDestinationChanged, SubtitleSourceChanged,
+                                             capture_subtitle_versions, staged_subtitle_write,
+                                             validate_subtitle_versions)
 
 from ..core.translator_utils import add_translator_info, create_process_result, get_title, translation_write_kwargs
+from .failure import MESSAGES
 from .dispatch import DispatchFailed, Dispatcher, JobSpec, LegacyDeclined, LegacyResult
 from .jobs import line_digest, target_key
 
@@ -116,6 +119,7 @@ class RuntimeTranslatorService:
         self.skipped = False
         self._dispatcher = dispatcher
         self._job_id = None
+        self._versions = ()
 
     def _check(self):
         if self._job_id:
@@ -170,6 +174,10 @@ class RuntimeTranslatorService:
             history_media={"media_type": self.media_type, "media_id": media_id, "media_title": title or None,
                            "arr_instance_id": self.arr_instance_id},
             check_cancel=self._check, progress=self._progress, legacy=self._legacy)
+        # The versions of the source and of the destination as they are when the job starts, before the engine is
+        # asked: whatever the remote call took, an edit made meanwhile must not be published over.
+        self._versions = capture_subtitle_versions(self.video_path, (self.source_srt_file, self.dest_srt_file),
+                                                   self.cancel)
         try:
             outcome = (self._dispatcher or Dispatcher()).run(spec)
         except DispatchFailed as failed:
@@ -186,10 +194,8 @@ class RuntimeTranslatorService:
             # The job is not over until the subtitle is written: its batches stay for a retry and the failure is
             # on record. The error raised matches what was recorded, so the queue and the history agree.
             recorded = outcome.publication_failed(error) if outcome.publication_failed is not None else None
-            if recorded == "retry":
-                raise TranslationRuntimeError(
-                    "The translation finished but the subtitle could not be written. It will be tried again later.",
-                    "publish_failed", retry_later=True) from error
+            if recorded and recorded != "cancelled":
+                raise TranslationRuntimeError(MESSAGES[recorded], recorded, retry_later=True) from error
             raise
         try:
             return self._record(outcome, translated)
@@ -199,14 +205,21 @@ class RuntimeTranslatorService:
                 outcome.complete()
 
     def _write_file(self, subs, source_lines, outcome, job_id):
-        """Write the translated subtitle. Returns the word the credit line and the history message use."""
+        """Write the translated subtitle. Returns the word the credit line and the history message use.
+
+        The versions taken at the start are checked again here, before anything is staged, and handed to the
+        staged write, which checks them once more under its locks at the moment of publication.
+        """
+        self._check_inputs()
+        write_kwargs = dict(translation_write_kwargs(self, job_id))
+        write_kwargs["expected_versions"] = tuple(write_kwargs.get("expected_versions") or ()) + self._versions
         with staged_subtitle_write(self.video_path, self.dest_srt_file,
                                    on_publish=publication_callback(self.media_type, self.video_path, "translate",
                                                                    self.arr_instance_id),
                                    source_paths=(self.source_srt_file,),
                                    before_publish=lambda: jobs_queue.update_job_progress(job_id=job_id),
                                    allow_empty=not bool(self.sports_operation),
-                                   **translation_write_kwargs(self, job_id)) as temporary:
+                                   **write_kwargs) as temporary:
             for line, source, text in zip(subs, source_lines, outcome.lines):
                 if text.strip() and text != source:
                     line.text = text
@@ -214,6 +227,19 @@ class RuntimeTranslatorService:
             translated = "partially translated" if self.partial_error else "translated"
             add_translator_info(temporary, f"# Subtitles {translated} with {outcome.engine_name} #")
         return translated
+
+    def _check_inputs(self):
+        """Raise the same error the staged write would when the source or the destination is no longer as it
+        was when the job started."""
+        source, destination = self._versions
+        try:
+            validate_subtitle_versions((source,))
+        except SubtitleSourceChanged:
+            raise SubtitleSourceChanged("The source subtitle changed while the translation ran") from None
+        try:
+            validate_subtitle_versions((destination,))
+        except SubtitleSourceChanged:
+            raise SubtitleDestinationChanged("The destination subtitle changed while the translation ran") from None
 
     def _record(self, outcome, translated):
         """The history, post-processing hooks and result of a subtitle that is on disk."""

@@ -586,17 +586,63 @@ def test_a_subtitle_that_cannot_be_written_leaves_the_job_awaiting_a_retry_and_s
     assert (row["status"], row["error_class"]) == ("awaiting_retry", "publish_failed")
 
 
-def test_a_write_refused_because_a_subtitle_arrived_is_raised_as_it_was_and_not_retried(env, media, monkeypatch):
-    from subtitles.tools.subsync_engines import SubtitleDestinationChanged
+class _EditsDuring:
+    """A dispatcher that lets something happen while the engine is being asked, then answers as it should."""
+
+    def __init__(self, inner, during):
+        self.inner, self.during = inner, during
+
+    def run(self, spec):
+        self.during()
+        return self.inner.run(spec)
+
+
+def test_a_source_edited_while_the_engine_was_asked_is_not_published_over(env, media):
+    from subtitles.tools.translate.runtime.service import TranslationRuntimeError
+
+    env.ai_engine()
+    service = build_service(env, media)
+    service._dispatcher = _EditsDuring(
+        env.dispatcher(), lambda: media.source.write_text(SRT.replace("One", "Uno"), encoding="utf-8"))
+    with pytest.raises(TranslationRuntimeError) as caught:
+        service.translate(job_id=None)
+    assert (caught.value.reason, caught.value.retry_later) == ("input_changed", True)
+    assert not media.dest.exists(), "nothing was published"
+    job = env.last_job()
+    assert (job.state, job.error_class) == ("awaiting_retry", "input_changed")
+    assert len(env.checkpoints()) == 1
+    row = env.history(job)
+    assert (row["status"], row["error_class"]) == ("awaiting_retry", "input_changed")
+
+
+def test_a_subtitle_that_arrived_while_the_engine_was_asked_is_not_replaced(env, media):
+    from subtitles.tools.translate.runtime.service import TranslationRuntimeError
+
+    env.ai_engine()
+    service = build_service(env, media)
+    service._dispatcher = _EditsDuring(env.dispatcher(), lambda: media.dest.write_text(SRT, encoding="utf-8"))
+    with pytest.raises(TranslationRuntimeError) as caught:
+        service.translate(job_id=None)
+    assert (caught.value.reason, caught.value.retry_later) == ("input_changed", True)
+    assert media.dest.read_text(encoding="utf-8") == SRT, "the subtitle that arrived is untouched"
+    assert env.last_job().state == "awaiting_retry"
+
+
+def test_the_versions_taken_at_the_start_are_handed_to_the_staged_write_for_the_check_at_publication(
+        env, media, monkeypatch):
     from subtitles.tools.translate.runtime import service
 
     env.ai_engine()
-    monkeypatch.setattr(service, "staged_subtitle_write",
-                        lambda *a, **k: (_ for _ in ()).throw(SubtitleDestinationChanged("moved")))
-    with pytest.raises(SubtitleDestinationChanged):
-        build_service(env, media).translate(job_id=None)
-    job = env.last_job()
-    assert (job.state, job.error_class) == ("failed", "destination_changed") and env.checkpoints() == []
+    seen = []
+    real = service.staged_subtitle_write
+
+    def spy(*args, **kwargs):
+        seen.append(kwargs["expected_versions"])
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(service, "staged_subtitle_write", spy)
+    build_service(env, media).translate(job_id=None)
+    assert [snapshot.path for snapshot in seen[0]] == [str(media.source), str(media.dest)]
 
 
 def test_a_failure_after_the_file_is_on_disk_is_not_a_failed_publication(env, media, monkeypatch):
