@@ -23,6 +23,9 @@ from test_provider_hub import _manifest_with_region
 hub_engine = engines.hub_engine
 hub_store = engines.hub_store
 
+# The cleanup's in-use check reads the real /proc: keep it to this process's own tree.
+pytestmark = pytest.mark.usefixtures("own_process_candidates")
+
 SECRET = "plaintext-credential-9f3a"  # pragma: allowlist secret
 
 
