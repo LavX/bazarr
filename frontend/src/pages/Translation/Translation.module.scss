@@ -132,16 +132,38 @@
   color: var(--bz-text-tertiary);
 }
 
+/* An engine's name with its on and off switch beside it; the switch moves under a name that fills the line. */
+.setupHead {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 14px;
+  margin-bottom: 4px;
+}
+
+.powerLabel {
+  padding-inline-start: 8px;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--bz-text-secondary);
+}
+
 .setupTitle {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
   gap: 8px 10px;
-  margin: 0 0 4px;
+  min-width: 0;
+  margin: 0;
   font-size: 20px;
   font-weight: 600;
   line-height: 1.25;
   color: var(--bz-text-primary);
+}
+
+/* What the switch answered, kept to the width of the text above it. */
+.setupNote {
+  max-width: 62ch;
 }
 
 /* Whatever comes first under an engine's name keeps the same distance from it. */
@@ -499,12 +521,26 @@
   margin-top: 20px;
 }
 
-.conflict {
+.conflict,
+.attention {
   padding: 12px 14px;
   border: 1px solid
     color-mix(in srgb, var(--bz-stat-processing) 30%, transparent);
   border-radius: var(--bz-radius-md);
   background: color-mix(in srgb, var(--bz-stat-processing) 9%, transparent);
+}
+
+/* Why an engine is off and what to do, in place of the line under its name. */
+.attention {
+  max-width: 62ch;
+  margin-top: 8px;
+}
+
+.attentionText {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--bz-text-secondary);
 }
 
 .conflictTitle {

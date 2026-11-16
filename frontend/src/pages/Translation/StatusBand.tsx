@@ -3,9 +3,11 @@ import { StatusBadge } from "@/pages/Settings/Providers/hub/components/StatusBad
 import type { TranslationState, TranslationSummary } from "@/types/translation";
 import {
   backendName,
+  canRun,
   engineName,
   engineStatus,
   hasBackends,
+  heldBack,
   money,
   working,
 } from "./model";
@@ -32,6 +34,10 @@ const StatusBand: FunctionComponent<{
   const engine =
     state.instances.find((item) => item.id === state.engine) ?? null;
   const status = engine ? engineStatus(engine) : null;
+  // With no engine picked, an engine that was turned off and waits for a look is the likely reason.
+  const waiting = engine
+    ? null
+    : (state.instances.find((item) => heldBack(item) && canRun(item)) ?? null);
   const first = engine?.connections.find(working);
   const more = engine ? engine.connections.filter(working).length - 1 : 0;
   const month = summary?.month;
@@ -67,7 +73,11 @@ const StatusBand: FunctionComponent<{
           ) : (
             <>
               <span className={styles.factStrong}>Translation is off</span>
-              <span>Pick an engine to turn it on.</span>
+              <span>
+                {waiting
+                  ? `${engineName(waiting)} was turned off and needs a look. Open its set-up to turn it on again.`
+                  : "Pick an engine to turn it on."}
+              </span>
             </>
           )}
         </div>

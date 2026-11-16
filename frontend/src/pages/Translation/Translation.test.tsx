@@ -5,7 +5,7 @@ import { beforeEach, describe, expect, it } from "vitest";
 import queryClient from "@/apis/queries";
 import { act, customRender, screen, waitFor, within } from "@/tests";
 import server from "@/tests/mocks/node";
-import type { TranslationState } from "@/types/translation";
+import type { TranslationEngine, TranslationState } from "@/types/translation";
 import {
   connection,
   engine,
@@ -222,14 +222,55 @@ describe("Translation page", () => {
     ).toHaveValue("");
   });
 
+  // An engine that a plugin update turned off: off, and flagged for a look.
+  const heldBack = () =>
+    engine({ enabled: false, awaiting_secrets: true, configured: false });
+  // An engine whose plugin declares nothing to set.
+  const bare = (patch: Partial<TranslationEngine> = {}) =>
+    engine({
+      values: {},
+      secrets: {},
+      connections: [],
+      schema: {
+        settings_version: 1,
+        endpoints: [],
+        fields: [],
+        backend_types: {},
+      },
+      ...patch,
+    });
+  const powerSwitch = (name = "AI Subtitle Translator") =>
+    screen.getByRole("switch", { name: `Turn ${name} on or off` });
+
+  it("says under its name why an engine an update turned off is off, and what to do", async () => {
+    state = { ...state, engine: null, instances: [second, heldBack()] };
+    const group = await showPage();
+    expect(powerSwitch()).not.toBeChecked();
+    expect(
+      screen.getByText("Turned off until its settings are checked"),
+    ).toBeVisible();
+    expect(
+      screen.getByText(/usually because a plugin update changed/),
+    ).toHaveTextContent(
+      "Check the engine settings below and save them, then turn it on with the switch beside its name.",
+    );
+    // The flag it carries is the one a changed address sets, and nothing here blames an address.
+    expect(screen.queryByText(/address changed/)).toBeNull();
+    expect(screen.queryByText("Enter the keys again")).toBeNull();
+    // Its card in the list says the same, in short.
+    expect(within(group).getByText("Needs a review")).toBeVisible();
+    // No engine is picked any more, and the line at the top of the page names the one to look at.
+    expect(
+      within(
+        screen.getByRole("group", { name: "Translation status" }),
+      ).getByText(
+        "AI Subtitle Translator was turned off and needs a look. Open its set-up to turn it on again.",
+      ),
+    ).toBeVisible();
+  });
+
   it("turns an engine that an update switched off back on, and the form saves on top of that", async () => {
-    state = {
-      ...state,
-      instances: [
-        second,
-        engine({ enabled: false, awaiting_secrets: true, configured: false }),
-      ],
-    };
+    state = { ...state, instances: [second, heldBack()] };
     server.use(
       http.patch("/api/translation/engines/:id", async ({ request }) => {
         const body = (await request.json()) as { enabled?: boolean };
@@ -245,15 +286,15 @@ describe("Translation page", () => {
     );
     const user = userEvent.setup();
     await showPage();
-    const toggle = screen.getByRole("switch", { name: "Use this engine" });
-    expect(toggle).not.toBeChecked();
-    await user.click(toggle);
+    expect(powerSwitch()).not.toBeChecked();
+    await user.click(powerSwitch());
     await waitFor(() => expect(calls).toHaveLength(1));
     expect(calls[0].body).toEqual({ enabled: true, expected_revision: 3 });
+    await waitFor(() => expect(powerSwitch()).toBeChecked());
     await waitFor(() =>
       expect(
-        screen.getByRole("switch", { name: "Use this engine" }),
-      ).toBeChecked(),
+        screen.queryByText("Turned off until its settings are checked"),
+      ).toBeNull(),
     );
     // The switch moved the revision on; the form it left alone is still current for the next save.
     await user.click(
@@ -263,57 +304,201 @@ describe("Translation page", () => {
     expect(calls[1].body).toMatchObject({ expected_revision: 4 });
   });
 
-  it("can turn on a disabled engine whose plugin declares no settings", async () => {
-    const bare = engine({
-      enabled: false,
-      awaiting_secrets: true,
-      values: {},
-      secrets: {},
-      connections: [],
-      schema: {
-        settings_version: 1,
-        endpoints: [],
-        fields: [],
-        backend_types: {},
-      },
-    });
-    state = { ...state, instances: [second, bare] };
+  it("keeps the switch beside the name of an engine with nothing to set up, on or off", async () => {
+    // The only engine on the page, so every line found is its own.
+    state = { ...state, fallback_engine: null, instances: [bare()] };
+    server.use(
+      http.patch("/api/translation/engines/:id", async ({ request }) => {
+        const body = (await request.json()) as { enabled: boolean };
+        record("patch", "engine", body);
+        const saved = bare({ enabled: body.enabled, revision: 4 });
+        state = { ...state, engine: null, instances: [saved] };
+        return HttpResponse.json({ engine: saved, notices: [] });
+      }),
+    );
+    const user = userEvent.setup();
+    await showPage();
+    // On: the switch is there, with nothing else to do.
+    expect(powerSwitch()).toBeChecked();
+    expect(screen.getByText("Nothing to set up")).toBeVisible();
+    expect(screen.getByText("This engine works as it is.")).toBeVisible();
+    expect(
+      screen.queryByRole("heading", { name: "Engine settings" }),
+    ).toBeNull();
+    await user.click(powerSwitch());
+    await waitFor(() => expect(calls).toHaveLength(1));
+    expect(calls[0].body).toEqual({ enabled: false, expected_revision: 3 });
+    // Off: the same switch, and the line under the name says how to bring it back.
+    await waitFor(() => expect(powerSwitch()).not.toBeChecked());
+    expect(
+      await screen.findAllByText(
+        "This engine is off. Turn it on to translate with it.",
+      ),
+    ).not.toHaveLength(0);
+    expect(
+      screen.getByText(
+        "This engine has no settings. Once it is on, it works as it is.",
+      ),
+    ).toBeVisible();
+    expect(
+      screen.queryByRole("button", { name: "Save engine settings" }),
+    ).toBeNull();
+  });
+
+  it("can turn on an engine with no settings that an update turned off", async () => {
+    const held = bare({ enabled: false, awaiting_secrets: true });
+    state = { ...state, instances: [second, held] };
     server.use(
       http.patch("/api/translation/engines/:id", async ({ request }) => {
         record("patch", "engine", await request.json());
         return HttpResponse.json({
-          engine: { ...bare, enabled: true, revision: 4 },
+          engine: { ...held, enabled: true, revision: 4 },
           notices: [],
         });
       }),
     );
     const user = userEvent.setup();
     await showPage();
+    expect(screen.getByText("This engine was turned off")).toBeVisible();
     expect(
-      screen.queryByRole("button", { name: "Save engine settings" }),
-    ).toBeNull();
-    await user.click(screen.getByRole("switch", { name: "Use this engine" }));
+      screen.getByText(
+        "A plugin update usually does this. Turn it on with the switch beside its name.",
+      ),
+    ).toBeVisible();
+    await user.click(powerSwitch());
     await waitFor(() => expect(calls).toHaveLength(1));
     expect(calls[0].body).toEqual({ enabled: true, expected_revision: 3 });
   });
 
-  it("says why an engine cannot be turned on yet", async () => {
-    state = {
-      ...state,
-      instances: [second, engine({ enabled: false, awaiting_secrets: true })],
-    };
+  it("marks the settings that keep an engine from being turned on, and puts the switch back", async () => {
+    state = { ...state, instances: [second, heldBack()] };
     server.use(
+      // What the server answers while the saved settings do not fit the plugin: the fields, and a
+      // sentence that names none of them.
       http.patch("/api/translation/engines/:id", () =>
         HttpResponse.json(
-          { error: "invalid", message: "Region is required." },
+          {
+            error: "invalid",
+            message: "The values are not valid.",
+            field_errors: { credit_line: "is required" },
+          },
           { status: 400 },
         ),
       ),
     );
     const user = userEvent.setup();
     await showPage();
-    await user.click(screen.getByRole("switch", { name: "Use this engine" }));
-    expect(await screen.findByText("Region is required.")).toBeVisible();
+    await user.click(powerSwitch());
+    expect(
+      await screen.findByText(
+        "It cannot be turned on yet: a setting below needs fixing. Save the settings, then turn it on.",
+      ),
+    ).toBeVisible();
+    expect(screen.getByText("is required")).toBeVisible();
+    expect(screen.queryByText("The values are not valid.")).toBeNull();
+    await waitFor(() => expect(powerSwitch()).not.toBeChecked());
+  });
+
+  it("says in the server's words why a switch was refused, or in its own when there are none", async () => {
+    state = { ...state, instances: [second, heldBack()] };
+    let answer: () => Response = () =>
+      HttpResponse.json(
+        {
+          error: "plugin_unavailable",
+          message: "The plugin could not check these settings.",
+        },
+        { status: 409 },
+      );
+    server.use(http.patch("/api/translation/engines/:id", () => answer()));
+    const user = userEvent.setup();
+    await showPage();
+    await user.click(powerSwitch());
+    expect(
+      await screen.findByText("The plugin could not check these settings."),
+    ).toBeVisible();
+    await waitFor(() => expect(powerSwitch()).not.toBeChecked());
+    answer = () => new HttpResponse(null, { status: 500 });
+    await user.click(powerSwitch());
+    expect(
+      await screen.findByText("The engine could not be turned on. Try again."),
+    ).toBeVisible();
+    expect(
+      screen.queryByText("The plugin could not check these settings."),
+    ).toBeNull();
+  });
+
+  it("says that no engine is picked after the one that translates is turned off", async () => {
+    server.use(
+      http.patch("/api/translation/engines/:id", async ({ request }) => {
+        record("patch", "engine", await request.json());
+        const saved = engine({
+          enabled: false,
+          configured: false,
+          revision: 4,
+        });
+        state = { ...state, engine: null, instances: [second, saved] };
+        return HttpResponse.json({
+          engine: saved,
+          notices: [
+            {
+              code: "engine_reset",
+              message:
+                "The selected translation engine was turned off, so no engine is selected.",
+              instance_id: 1,
+            },
+          ],
+        });
+      }),
+    );
+    const user = userEvent.setup();
+    const group = await showPage();
+    await user.click(powerSwitch());
+    expect(
+      await screen.findByText(
+        "The selected translation engine was turned off, so no engine is selected.",
+      ),
+    ).toBeVisible();
+    expect(calls[0].body).toEqual({ enabled: false, expected_revision: 3 });
+    // Turned off by hand: it is plainly off, with nothing to review.
+    await waitFor(() => expect(within(group).getByText("Off")).toBeVisible());
+    expect(
+      screen.queryByText("Turned off until its settings are checked"),
+    ).toBeNull();
+  });
+
+  it("holds the settings form while the switch is written, and the switch while the form saves", async () => {
+    let release: () => void = () => undefined;
+    server.use(
+      http.patch("/api/translation/engines/:id", async ({ request }) => {
+        record("patch", "engine", await request.json());
+        await new Promise<void>((resolve) => {
+          release = resolve;
+        });
+        return HttpResponse.json({
+          engine: engine({ revision: 4 }),
+          notices: [],
+        });
+      }),
+    );
+    const user = userEvent.setup();
+    await showPage();
+    const save = () =>
+      screen.getByRole("button", { name: "Save engine settings" });
+    await user.click(powerSwitch());
+    await waitFor(() => expect(calls).toHaveLength(1));
+    // The switch shows where it was put while the write is on its way, and a second press adds no request.
+    expect(powerSwitch()).not.toBeChecked();
+    expect(powerSwitch()).toHaveAttribute("aria-busy", "true");
+    expect(save()).toBeDisabled();
+    await user.click(powerSwitch());
+    expect(calls).toHaveLength(1);
+    release();
+    await waitFor(() => expect(save()).toBeEnabled());
+    await user.click(save());
+    await waitFor(() => expect(calls).toHaveLength(2));
+    expect(powerSwitch()).toBeDisabled();
+    release();
+    await waitFor(() => expect(powerSwitch()).toBeEnabled());
   });
 
   it("shows a field error beside its field", async () => {

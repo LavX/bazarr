@@ -76,6 +76,15 @@ export interface Status {
   next: string;
 }
 
+/**
+ * Off, and flagged for the person to look at. A plugin update leaves an engine like this when what it
+ * has saved no longer fits the new release. The server sends no reason of its own, and an engine that
+ * was waiting for its key when it was turned off reads the same, so the page says "usually", never
+ * "an update did this".
+ */
+export const heldBack = (engine: TranslationEngine) =>
+  !engine.enabled && engine.awaiting_secrets;
+
 /** Whether an engine can take a job, and when it cannot, the reason and the next step. */
 export function engineStatus(engine: TranslationEngine): Status {
   if (!canRun(engine)) {
@@ -83,6 +92,27 @@ export function engineStatus(engine: TranslationEngine): Status {
       tone: "danger",
       label: "Plugin not running",
       next: "Its plugin is not installed or not running. Repair or reinstall it in the Subtitle Hub.",
+    };
+  }
+  // An engine that is off takes no job whatever else is true of it, so this comes before what it lacks.
+  if (heldBack(engine)) {
+    return (engine.schema?.fields ?? []).length > 0
+      ? {
+          tone: "warning",
+          label: "Needs a review",
+          next: "Turned off because its saved settings no longer fit, usually after a plugin update. Check the settings and save them, then turn it on.",
+        }
+      : {
+          tone: "warning",
+          label: "Turned off",
+          next: "Turned off, usually by a plugin update. Turn it on to translate with it.",
+        };
+  }
+  if (!engine.enabled) {
+    return {
+      tone: "neutral",
+      label: "Off",
+      next: "This engine is off. Turn it on to translate with it.",
     };
   }
   if (engine.awaiting_secrets) {

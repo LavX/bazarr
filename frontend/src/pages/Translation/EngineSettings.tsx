@@ -1,11 +1,7 @@
 /* eslint-disable camelcase -- transport names. */
-import { FunctionComponent, useState } from "react";
-import { Alert, Button, Group, Stack, Switch } from "@mantine/core";
-import {
-  readRefusal,
-  useFreshState,
-  useSaveEngine,
-} from "@/apis/hooks/translation";
+import { FunctionComponent, useEffect, useState } from "react";
+import { Alert, Button, Group, Stack } from "@mantine/core";
+import { useFreshState, useSaveEngine } from "@/apis/hooks/translation";
 import {
   initialValues,
   PluginSettingsForm,
@@ -14,7 +10,7 @@ import {
 import type { TranslationEngine } from "@/types/translation";
 import ConflictNotice from "./ConflictNotice";
 import ConsentModal from "./ConsentModal";
-import { useDraftRevision } from "./useDraftRevision";
+import type { useDraftRevision } from "./useDraftRevision";
 import { useGuardedSave } from "./useGuardedSave";
 import styles from "./Translation.module.scss";
 
@@ -22,19 +18,31 @@ import styles from "./Translation.module.scss";
  * The engine's own settings, drawn from its manifest. Back ends have their
  * own form. The draft keeps the revision it was loaded from, so a save made
  * after another tab's save is refused. The form keeps what was typed when that
- * happens, and saving over the other change is then an explicit choice. An
- * engine whose plugin declares no settings has the switch only.
+ * happens, and saving over the other change is then an explicit choice.
+ *
+ * The engine's on and off switch sits beside its name, outside this form, and
+ * writes the same row. The two share the draft's revision and take turns: the
+ * form does not save while the switch is being written, and says when it is
+ * busy so the switch can wait for it.
  */
-const EngineSettings: FunctionComponent<{ engine: TranslationEngine }> = ({
-  engine,
-}) => {
+const EngineSettings: FunctionComponent<{
+  engine: TranslationEngine;
+  /** The revision this form's draft was loaded from, shared with the engine's switch. */
+  revision: ReturnType<typeof useDraftRevision>;
+  /** The engine's switch is being written: nothing here is saved meanwhile. */
+  switching?: boolean;
+  /** The fields a refused turn-on named, marked like the form's own field errors. */
+  switchErrors?: Record<string, string>;
+  onBusy?: (busy: boolean) => void;
+  /** The settings were saved, so a refusal that named them is answered. */
+  onSaved?: () => void;
+}> = ({ engine, revision, switching, switchErrors, onBusy, onSaved }) => {
   const fields = engine.schema?.fields ?? [];
   const [values, setValues] = useState<PluginValues>(() =>
     initialValues(fields, engine.values),
   );
   const [cleared, setCleared] = useState<string[]>([]);
   const mutation = useSaveEngine();
-  const revision = useDraftRevision(engine.revision);
   const form = useGuardedSave(async (accepted) => {
     const saved = await mutation.mutateAsync({
       id: engine.id,
@@ -49,6 +57,7 @@ const EngineSettings: FunctionComponent<{ engine: TranslationEngine }> = ({
     setValues(initialValues(fields, saved.engine.values));
     setCleared([]);
     revision.reload(saved.engine.revision);
+    onSaved?.();
     return saved;
   }, revision.conflicted);
 
@@ -92,94 +101,68 @@ const EngineSettings: FunctionComponent<{ engine: TranslationEngine }> = ({
     await form.save();
   };
 
-  // A plugin update can turn an engine off until its settings are reviewed, and saving them does not turn it
-  // back on, so the switch is here. It carries the revision the engine has now; a form that was current
-  // before the switch stays current after it.
-  const [switchProblem, setSwitchProblem] = useState("");
-  const switchEngine = (enabled: boolean) => {
-    const draftIsCurrent = revision.forSave() === engine.revision;
-    setSwitchProblem("");
-    mutation.mutate(
-      { id: engine.id, body: { enabled, expected_revision: engine.revision } },
-      {
-        onSuccess: (saved) => {
-          if (draftIsCurrent) {
-            revision.reload(saved.engine.revision);
-          }
-        },
-        onError: (error) =>
-          setSwitchProblem(
-            readRefusal(error)?.message || "The request failed. Try again.",
-          ),
-      },
-    );
-  };
+  const busy = form.busy || loadingFor !== null;
+  useEffect(() => {
+    onBusy?.(busy);
+    return () => onBusy?.(false);
+  }, [busy, onBusy]);
 
   return (
     <Stack className={styles.editorForm}>
-      <Switch
-        label="Use this engine"
-        checked={engine.enabled}
-        disabled={mutation.isPending || form.busy}
-        onChange={(event) => switchEngine(event.currentTarget.checked)}
+      <PluginSettingsForm
+        fields={fields}
+        values={values}
+        secrets={engine.secrets}
+        errors={{ ...switchErrors, ...form.fieldErrors }}
+        // Locked while a conflict answer loads what is saved now: the save that follows sends what the
+        // form held when the answer was given, so nothing may be typed in between.
+        disabled={busy}
+        pendingClear={cleared}
+        onChange={setValues}
+        onClearSecret={(key) =>
+          setCleared((current) => [...new Set([...current, key])])
+        }
       />
-      {switchProblem && (
-        <Alert color="red" role="alert">
-          {switchProblem}
+      {/* An engine that is off and flagged says why beside its name, and the reason there is not a changed address. */}
+      {engine.awaiting_secrets && engine.enabled && (
+        <Alert color="yellow" title="Enter the keys again">
+          An address changed, so the saved keys no longer apply.
         </Alert>
       )}
-      {fields.length > 0 && (
-        <>
-          <PluginSettingsForm
-            fields={fields}
-            values={values}
-            secrets={engine.secrets}
-            errors={form.fieldErrors}
-            // Locked while a conflict answer loads what is saved now: the save that follows sends what the
-            // form held when the answer was given, so nothing may be typed in between.
-            disabled={form.busy || loadingFor !== null}
-            pendingClear={cleared}
-            onChange={setValues}
-            onClearSecret={(key) =>
-              setCleared((current) => [...new Set([...current, key])])
-            }
-          />
-          {engine.awaiting_secrets && (
-            <Alert color="yellow" title="Enter the keys again">
-              An address changed, so the saved keys no longer apply.
-            </Alert>
-          )}
-          {form.stale ? (
-            <ConflictNotice
-              subject="These settings"
-              saving={form.busy || loadingFor === "mine"}
-              reloading={loadingFor === "discard"}
-              problem={reloadProblem}
-              onSaveMine={() => void saveMine()}
-              onDiscard={() => void discard()}
-            />
-          ) : (
-            form.message && (
-              <Alert color="red" role="alert">
-                {form.message}
-              </Alert>
-            )
-          )}
-          {!form.stale && (
-            <Group>
-              <Button loading={form.busy} onClick={() => void form.save()}>
-                Save engine settings
-              </Button>
-            </Group>
-          )}
-          <ConsentModal
-            destinations={form.asking}
-            busy={form.busy}
-            onAccept={() => void form.accept()}
-            onCancel={form.decline}
-          />
-        </>
+      {form.stale ? (
+        <ConflictNotice
+          subject="These settings"
+          saving={form.busy || loadingFor === "mine"}
+          reloading={loadingFor === "discard"}
+          problem={reloadProblem}
+          disabled={switching}
+          onSaveMine={() => void saveMine()}
+          onDiscard={() => void discard()}
+        />
+      ) : (
+        form.message && (
+          <Alert color="red" role="alert">
+            {form.message}
+          </Alert>
+        )
       )}
+      {!form.stale && (
+        <Group>
+          <Button
+            loading={form.busy}
+            disabled={switching}
+            onClick={() => void form.save()}
+          >
+            Save engine settings
+          </Button>
+        </Group>
+      )}
+      <ConsentModal
+        destinations={form.asking}
+        busy={form.busy}
+        onAccept={() => void form.accept()}
+        onCancel={form.decline}
+      />
     </Stack>
   );
 };
