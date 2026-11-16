@@ -72,8 +72,11 @@ print(json.dumps({'model': settings.translator.gemini_model}))
     env = {**os.environ, "PYTHONDONTWRITEBYTECODE": "1", "XDG_CACHE_HOME": str(tmp_path / "cache")}
     first_contents = None
     for _startup in range(2):
+        # Each run starts a fresh interpreter that imports the app config and its dependencies.
+        # On a loaded machine that has taken more than 30 seconds, so the bound only guards against
+        # a hang, and stays low enough that a hang in every case still ends inside the CI job limit.
         process = subprocess.run([sys.executable, "-c", script, str(repo), str(config_dir)],
-                                 cwd=repo, env=env, capture_output=True, text=True, timeout=30)
+                                 cwd=repo, env=env, capture_output=True, text=True, timeout=90)
         assert process.returncode == 0, process.stderr
         assert json.loads(process.stdout) == {"model": expected}
         persisted = yaml.safe_load(config_file.read_text(encoding="utf-8"))
