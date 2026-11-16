@@ -298,7 +298,7 @@ def test_a_held_back_engine_with_a_removed_plain_field_can_be_repaired_and_turne
     instance = store.create_instance(PLUGIN, settings={"label": "mine", "legacy": "old"})
     lifecycle.stage(_manifest("1.0.0", old_fields), _manifest("2.0.0", new_fields))
     # The release drops a populated field and requires one the engine does not have: it is held back as it was.
-    assert "Settings > Translation" in _activate()["last_error"]
+    assert "Translation in the main menu" in _activate()["last_error"]
     store._session.expire_all()
     held = store.get_instance(instance.id)
     assert held.enabled == 0 and store.settings_of(held) == {"label": "mine", "legacy": "old"}
