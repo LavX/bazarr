@@ -60,7 +60,7 @@ TREE = textwrap.dedent(
     pids["own_session"] = own
     with open(out + ".tmp", "w") as handle:
         json.dump(pids, handle)
-    os.rename(out + ".tmp", out)
+    os.replace(out + ".tmp", out)
     if mode != "dead-leader":
         time.sleep(300)
     os._exit(0)
@@ -78,6 +78,27 @@ def state(pid):
 
 def alive(pid):
     return state(pid) not in (None, "Z", "X")
+
+
+def read_json_when_ready(path, what, timeout=30.0):
+    """Poll until a file a child writes holds complete JSON; fail with ``what`` at the deadline.
+
+    Children write to a temp name and ``os.replace`` it into place, and this still tolerates
+    an empty or half-written file instead of trusting that the name exists.
+    """
+    deadline = time.monotonic() + timeout
+    last = "the file never appeared"
+    while True:
+        try:
+            with open(path) as handle:
+                return json.loads(handle.read())
+        except FileNotFoundError:
+            pass
+        except ValueError as exc:
+            last = "unparsable: %s" % exc
+        if time.monotonic() >= deadline:
+            pytest.fail("%s within %.0fs (%s)" % (what, timeout, last))
+        time.sleep(0.05)
 
 
 def wait_until(check, timeout=15.0):
@@ -139,8 +160,7 @@ def make_tree(tmp_path, started, marker, mode="live", name="tree"):
     subprocess.run(
         [sys.executable, "-c", TREE, str(out), mode, SLEEP, ENV, marker or ""], env=env, check=True, timeout=30
     )
-    assert wait_until(out.exists), "the tree script did not report"
-    seen = json.loads(out.read_text())
+    seen = read_json_when_ready(out, "the tree script did not report")
     pids.extend(seen.values())
     return seen
 
@@ -446,7 +466,8 @@ def test_a_hidden_environment_is_never_read_and_never_swept(tmp_path, instance, 
         "import ctypes, os, sys, time\n"
         "ctypes.CDLL(None).prctl(4, 0, 0, 0, 0)\n"
         "os.setsid()\n"
-        "open(sys.argv[1], 'w').write(str(os.getpid()))\n"
+        "open(sys.argv[1] + '.tmp', 'w').write(str(os.getpid()))\n"
+        "os.replace(sys.argv[1] + '.tmp', sys.argv[1])\n"
         "time.sleep(300)\n"
     )
     env = {"PATH": os.environ.get("PATH", ""), spawn.OWNER_VARIABLE: dead_owner(instance)}
@@ -661,8 +682,9 @@ def test_a_killed_host_leaves_a_launcher_tree_that_the_next_boot_removes(tmp_pat
         spec = RuntimeSpec(sys.executable, ("-I", "-c", worker), rw, clean_env(home=rw, tmpdir=rw), policy, Limits(), 1.0)
         process = spawn_worker(spec, probe=SandboxProbe(abi=0, verified=False, reason="test"))
         worker_pid, detached = (int(item) for item in process.stdout.readline().split())
-        with open(out, "w") as handle:
+        with open(out + ".tmp", "w") as handle:
             json.dump({"host": os.getpid(), "launcher": process.pid, "worker": worker_pid, "detached": detached}, handle)
+        os.replace(out + ".tmp", out)
         time.sleep(300)
         """
     )
@@ -674,8 +696,7 @@ def test_a_killed_host_leaves_a_launcher_tree_that_the_next_boot_removes(tmp_pat
     )
     pids = {}
     try:
-        assert wait_until(pids_file.exists, 30), "the host did not start a launcher"
-        pids = json.loads(pids_file.read_text())
+        pids = read_json_when_ready(pids_file, "the host did not start a launcher")
         assert alive(pids["launcher"]) and alive(pids["worker"]) and alive(pids["detached"])
         if how == "launcher-killed":
             # A hard kill of the host and of its launcher: no cleanup runs anywhere, and the worker's
@@ -730,15 +751,15 @@ def _nondumpable_leader_tree(tmp_path, started, marker, name="hidden"):
         kid = os.fork()
         if kid == 0:
             os.execve(sleeper, [sleeper, "300"], {"BAZARR_SANDBOX_OWNER": marker})
-        with open(out, "w") as handle:
+        with open(out + ".tmp", "w") as handle:
             json.dump({"leader": os.getpid(), "worker": kid}, handle)
+        os.replace(out + ".tmp", out)
         time.sleep(300)
         """
     )
     env = {"PATH": os.environ.get("PATH", "")}
     subprocess.run([sys.executable, "-c", script, str(out), SLEEP, marker], env=env, check=True, timeout=30)
-    assert wait_until(out.exists)
-    seen = json.loads(out.read_text())
+    seen = read_json_when_ready(out, "the hidden leader did not report")
     started[0].extend(seen.values())
     return seen
 
