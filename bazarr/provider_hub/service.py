@@ -2689,6 +2689,23 @@ def list_installations(redact: bool = True, *, kind: str | None = None) -> list[
     return installations
 
 
+def dismiss_review_notice(provider_id: str) -> bool:
+    """Record on the installation that the person has read its review notice.
+
+    An installation made for the person, rather than by them, carries ``review_pending`` until they have seen
+    what it may do. Dismissing it clears the flag on the record itself, so it stays dismissed from any browser.
+    False when there is no such installation.
+    """
+    def clear(state: dict[str, Any]) -> bool:
+        provider = (state.get("installations") or {}).get(provider_id)
+        if not isinstance(provider, dict):
+            return False
+        provider["review_pending"] = False
+        return True
+
+    return bool(mutate_state(clear))
+
+
 def list_providers(redact: bool = True) -> list[dict[str, Any]]:
     """The Subtitle Hub's listing: subtitle providers only."""
     return list_installations(redact, kind=SUBTITLE_PROVIDER)

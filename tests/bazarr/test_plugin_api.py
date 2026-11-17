@@ -401,3 +401,83 @@ def test_the_subtitle_hub_install_route_still_checks_the_closure_of_an_answer_th
     assert len(checked) == 2
     assert accepted.status_code == 202 and refused.status_code == 400
     assert [func for func, _kwargs in queued] == ["install_provider"]
+
+
+class _FakePool:
+    def __init__(self, workers):
+        self._workers = workers
+
+    def status(self):
+        return {"workers": self._workers}
+
+
+def _bound_port(workers_status):
+    from subtitles.tools.translate.runtime import workers
+
+    return workers.PoolWorkers(_FakePool(workers_status), lambda plugin_id: None)
+
+
+def test_an_installation_says_how_its_worker_is_doing_once_one_is_bound(client):
+    from subtitles.tools.translate.runtime import workers
+
+    workers.bind(_bound_port({"exampleservice": {
+        "state": "backoff", "in_flight": 0, "retry_after": 12.5, "last_error": "the worker did not start",
+        "starts": 3, "crashes": 2, "memory_bytes": 0, "recent_stderr": ["never in the listing"]}}))
+    try:
+        listed = {item["provider_id"]: item for item in _get(client, "/api/plugins/installations").json["data"]}
+        single = _get(client, "/api/plugins/installations/exampleservice").json
+    finally:
+        workers.unbind()
+
+    runtime = listed["exampleservice"]["runtime"]
+    assert runtime == single["runtime"]
+    assert runtime["phase"] == "backing_off" and runtime["retry_after"] == 12.5
+    assert runtime["last_error"] == "the worker did not start"
+    # The log is read on its own, and a plugin with no worker has no runtime at all.
+    assert "recent_stderr" not in runtime
+    assert "runtime" not in listed["providerhub"]
+
+
+def test_no_runtime_is_reported_while_no_worker_is_bound(client):
+    listed = _get(client, "/api/plugins/installations").json["data"]
+    assert all("runtime" not in item for item in listed)
+
+
+def test_the_log_lists_the_workers_recent_lines_with_secrets_masked(client):
+    from subtitles.tools.translate.runtime import workers
+
+    secret = "sk-" + "a1b2c3d4" * 4  # pragma: allowlist secret
+    workers.bind(_bound_port({"exampleservice": {
+        "state": "ready", "recent_stderr": ["started", f"Authorization: Bearer {secret}", "done"]}}))
+    try:
+        response = _get(client, "/api/plugins/installations/exampleservice/log")
+    finally:
+        workers.unbind()
+
+    assert response.status_code == 200
+    lines = response.json["lines"]
+    assert lines[0] == "started" and lines[2] == "done"
+    assert secret not in " ".join(lines)
+    assert response.json["last_error"] is None
+
+
+def test_the_log_of_a_plugin_with_no_worker_is_empty_and_an_unknown_plugin_is_not_found(client):
+    empty = _get(client, "/api/plugins/installations/exampleservice/log")
+    assert empty.status_code == 200 and empty.json["lines"] == []
+    assert _get(client, "/api/plugins/installations/nothing/log").status_code == 404
+
+
+def test_dismissing_a_review_notice_is_kept_on_the_installation(client, tmp_path):
+    write_state(tmp_path / "state.json", installations={
+        "exampleservice": {"provider_id": "exampleservice", "kind": SERVICE_KIND, "name": "Service",
+                           "active_version": "1.0.0", "state": "active", "pending_restart": False,
+                           "review_pending": True, "manifest": {"id": "exampleservice"}}})
+    path = "/api/plugins/installations/exampleservice"
+    assert _get(client, path).json["review_pending"] is True
+
+    response = client.post(f"{path}/review/dismiss", headers={"X-API-KEY": API_KEY})
+
+    assert response.status_code == 200 and response.json == {"review_pending": False}
+    assert _get(client, path).json["review_pending"] is False
+    missing = client.post("/api/plugins/installations/nothing/review/dismiss", headers={"X-API-KEY": API_KEY})
+    assert missing.status_code == 404
