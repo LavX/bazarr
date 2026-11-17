@@ -151,6 +151,14 @@ class Server:
         if self.server:
             print("Closing webserver...")
             self.server.close()
+        # Translator workers run in processes of their own. Nothing to end, and nothing to import, when the
+        # translation runtime was never bound to them.
+        translator_binding = sys.modules.get("subtitles.tools.translate.runtime.worker_binding")
+        if translator_binding:
+            try:
+                translator_binding.shutdown()
+            except Exception:
+                pass
         stop_sportarr_clients()
         print("Closing database...")
         close_database()

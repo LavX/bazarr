@@ -2,7 +2,13 @@
 """The two calls the Translation page makes to a plugin's worker: a connection test and a model list.
 
 Both are the plugin's own ``test`` and ``options`` methods, sent through the worker port the dispatcher uses.
-While no worker is bound the page does not offer the test; one that is refused before it is sent is settled at nothing.
+While no worker is bound the page does not offer the test; one that is refused before it is sent, whatever the reason, is
+settled at nothing.
+
+Where a probe runs. Every ``test`` and ``options`` request goes to a worker started for that one call (see
+``workers.PoolWorkers.call``), never to the long-lived worker that serves translations. The page asks about drafts that are
+not saved, so the address can name a port the long-lived worker was not started with, and a probe that outlives its deadline
+against a plugin that ignores the cancel ends the worker it runs in.
 
 Secrets. A test sends what a translation would: the engine's stored secrets and the connection's, each only to
 the addresses it was entered under. The caller (``TranslatorSettingsService.test_connection``) cuts them and takes
@@ -24,8 +30,10 @@ logger = logging.getLogger(__name__)
 _TOKEN_KEYS = ("input_tokens", "output_tokens")
 
 
-BUSY_TEST = ("The translation engine is busy translating. Try the test again in a moment.")
+BUSY_TEST = "Other tests are running right now. Try the test again in a moment."
 UNSTARTED_TEST = "The translation engine could not take the test. Try again in a moment."
+# The pool refuses to start more workers of a plugin that had several ended by force within the hour.
+PAUSED_TEST = "Tests of this engine are paused because earlier ones had to be stopped. Try again in about {minutes} minutes."
 
 
 def worker_probe(request: ProbeRequest) -> Mapping[str, Any]:
@@ -36,8 +44,8 @@ def worker_probe(request: ProbeRequest) -> Mapping[str, Any]:
 
     Returns the answer ``TranslatorSettingsService`` reads: ``ok``, a ``message``, the tokens the request used
     when the plugin reports them, and ``sent: false`` for every refusal that happened before anything left
-    Bazarr+ (no worker, a worker busy with a translation, one that would not start), so a priced test is
-    settled at nothing.
+    Bazarr+ (no worker, too many one-call workers at once, a request that could not be encoded, one that would not
+    start), so a priced test is settled at nothing.
     """
     port = workers.bound_port()
     if not workers.is_bound(port):
@@ -54,6 +62,9 @@ def worker_probe(request: ProbeRequest) -> Mapping[str, Any]:
         outcome = port.call(request.plugin_id, workers.TEST_OP, {"config": config}, dict(request.secrets),
                             timeout=request.timeout_seconds)
     except workers.NotSent as refused:
+        if refused.code == "unverified_limit" and refused.retry_after:
+            minutes = max(1, round(refused.retry_after / 60))
+            return {"ok": False, "sent": False, "message": PAUSED_TEST.format(minutes=minutes)}
         return {"ok": False, "sent": False, "message": BUSY_TEST if refused.busy else UNSTARTED_TEST}
     value = wire.unwrap(outcome.result, outcome.data)
     if not isinstance(value, Mapping):

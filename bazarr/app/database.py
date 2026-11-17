@@ -1249,9 +1249,9 @@ class TableTranslationBudget(Base):
     updated_at = mapped_column(DateTime, nullable=False, default=datetime.now)
 
 
-# Tables that only a migration creates. The translation runtime is dark behind a switch, so a boot with the
-# switch off must not add its tables; init_db() leaves them out of create_all. Take a name out of this set
-# when the revision that creates the table has merged and the table should exist on a fresh install.
+# Tables that only a migration creates: init_db() leaves them out of create_all, and the migration that
+# builds them runs on every install, whether or not the translation runtime is switched on, so a boot reaches the same
+# tables however it started. The runtime reads and writes them only with its switch on.
 MIGRATION_ONLY_TABLES = frozenset({
     TableTranslatorEngineInstance.__tablename__,
     TableTranslatorConnection.__tablename__,

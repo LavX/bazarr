@@ -130,7 +130,10 @@ TEST_MESSAGE_LIMIT = 300
 # A probe is told to give up after this long, and is not waited for much longer: a hung worker must not hold a
 # request thread, and its worst-case charge stays counted.
 TEST_TIMEOUT_SECONDS = 20.0
-TEST_TIMEOUT_GRACE_SECONDS = 5.0
+# A test's worker has to be waited for and started before the request is sent (a permit when two others run, then the
+# worker's start), and stopped after it, so the wait for the probe is longer than the request's own time by more than a
+# second or two.
+TEST_TIMEOUT_GRACE_SECONDS = 20.0
 # What a probe may fail with and still be a failed test. A bug in our own code or in a binding (a wrong type, a
 # missing attribute or key) is not turned into "the back end did not answer": it is raised.
 PROGRAMMING_ERRORS = (TypeError, AttributeError, NameError, LookupError, AssertionError, ImportError,
@@ -910,7 +913,7 @@ class TranslatorSettingsService:
 
         ``outcome`` says what ``ok: false`` alone does not: ``failed`` when a request went out (or may have) and
         the back end did not answer as it should, ``not_ready`` when nothing was sent because the test could
-        not be started just now (the engine busy with a translation or not started, a test of this back end
+        not be started just now (too many other tests running or the worker not started, a test of this back end
         still running, the test stopping before its request was handed over), and ``refused`` when nothing
         was sent because what is saved, or a cost cap, does not allow it. A test that worked is ``answered``.
         """
@@ -1118,7 +1121,7 @@ class TranslatorSettingsService:
             return self._test_result(False, UNFINISHED_TEST)
         if answer.get("ok") is True:
             return self._test_result(True, "", started)
-        # A probe that says the request never left Bazarr+ (a worker busy with a translation, one that would not
+        # A probe that says the request never left Bazarr+ (too many other tests running, one that would not
         # start) is not a verdict on the back end: the same test may go through in a moment.
         return self._test_result(False, self._said(answer.get("message"), held) or self._unanswered(where),
                                  outcome=NOT_READY if answer.get("sent") is False else FAILED)

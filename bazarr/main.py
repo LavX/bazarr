@@ -61,9 +61,23 @@ if args.create_db_revision:
     stop_bazarr(EXIT_NORMAL)
 else:
     migrate_db(app)
+    try:
+        # The first start after an upgrade has no translation runtime tables until now.
+        if getattr(settings.translator, "runtime_v2", False) is True:
+            from subtitles.tools.translate.runtime import run_startup_tasks
+            run_startup_tasks()
+    except Exception:  # pragma: no cover - must not prevent startup
+        logging.exception("Unable to start the translation runtime after the migrations")
     upgrade_languages_profile_values()
     fix_languages_profiles_with_duplicate_ids()
     activate_staged_installations()
+    try:
+        # A removal staged in the last run is finished by now: clear what the removed translators left.
+        if getattr(settings.translator, "runtime_v2", False) is True:
+            from subtitles.tools.translate.runtime import worker_binding
+            worker_binding.sweep_removed_plugins()
+    except Exception:  # pragma: no cover - must not prevent startup
+        logging.exception("Unable to clear the folders of removed translators")
 
 # Mark the workers this run starts, then end the leftovers of a previous run.
 # The mark goes first so nothing this run starts can be mistaken for a

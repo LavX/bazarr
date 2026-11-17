@@ -12,6 +12,7 @@ Modules in this package may be imported with the switch off; they must not run.
 from __future__ import annotations
 
 import logging
+import threading
 import time
 
 logger = logging.getLogger(__name__)
@@ -72,3 +73,36 @@ def runtime_v2_enabled() -> bool:
     if not runtime_v2_flag():
         return False
     return _runtime_tables_exist()
+
+
+_startup_done = False
+_startup_lock = threading.Lock()
+
+
+def run_startup_tasks() -> bool:
+    """What the runtime does once per process when the tables are there: register the stored secrets for the log scrubber
+    and mark the jobs the last run was in the middle of to be retried. True once they have run.
+
+    Called from init.py and again right after the migrations. On the first start after an upgrade the tables do not
+    exist at init, so the first call does nothing (and logs nothing); the second one asks the database afresh, with no
+    wait for the remembered "tables missing" answer to expire, and does the work as soon as the migration made them. With
+    the switch off it does nothing at all.
+    """
+    global _startup_done, _absent_until
+    if _startup_done or not runtime_v2_flag():
+        return _startup_done
+    with _startup_lock:
+        if _startup_done:
+            return True
+        _absent_until = 0.0
+        if not runtime_v2_enabled():
+            return False
+        from app.config import settings
+        from secret_store.scrub import refresh_secret_values
+
+        from .dispatch import recover_after_restart
+
+        refresh_secret_values(settings)
+        recover_after_restart()
+        _startup_done = True
+        return True

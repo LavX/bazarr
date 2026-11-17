@@ -344,7 +344,13 @@ class UnknownWorker(PoolError):
 
 
 class WorkerKilled(PoolError):
-    """The pool ended the worker for breaking a limit while it held this request."""
+    """The pool ended the worker for breaking a limit while it held this request.
+
+    ``before_send`` is True when that happened before the request was given to the worker, for a worker that was over
+    its memory limit as it started: nothing was sent, so a caller may treat it like any other refusal.
+    """
+
+    before_send = False
 
 
 class WorkerState(str, enum.Enum):
@@ -492,6 +498,13 @@ class WorkerDefinition:
     # Builds the runtime object; None means a ``WorkerSession``. Called as
     # ``runtime(definition, session_limits, host_calls, on_event, on_stderr)``.
     runtime: Callable[..., WorkerRuntime] | None = None
+    # The name workers ended without whole-tree proof are counted and capped under (default: ``key``). Workers that
+    # have a key each, as one-off runs may, and belong to one plugin, share a name here so the cap is the plugin's.
+    cap_key: str | None = None
+
+    @property
+    def count_key(self) -> str:
+        return self.cap_key or self.key
 
     def memory_limit(self) -> int:
         return self.memory_limit_bytes if self.memory_limit_bytes else memory_limit_for(self.kind)
@@ -2179,7 +2192,9 @@ class WorkerPool:
                     # Over its limit, or too big to measure, before it has been given
                     # anything: end it and send nothing.
                     self._kill_current(entry, slot, problem, requested=True)
-                    raise WorkerKilled(problem[1], code=problem[0])
+                    refused = WorkerKilled(problem[1], code=problem[0])
+                    refused.before_send = True
+                    raise refused
                 handle = slot.session.submit(
                     op, params, timeout=timeout, max_result_bytes=max_result_bytes,
                     secrets=secrets, on_progress=on_progress)
@@ -2253,7 +2268,7 @@ class WorkerPool:
         self._check_request(timeout, secrets)
         with self._cond:
             self._check_open()
-            self._check_key_free(definition.key)
+            self._check_key_free(definition.key, cap_key=definition.count_key)
         if not self._oneshot.acquire(timeout=self.limits.acquire_timeout):
             raise PoolUnavailable("too many one-off runs in progress", code=PoolCodes.POOL_FULL, retry_after=1.0)
         slot = _Slot(definition, self._clock(), self.limits, ephemeral=True)
@@ -2265,7 +2280,7 @@ class WorkerPool:
                 self._check_open()
                 # The check at the top was made before the permit was waited for; a
                 # resident of this key may have become stuck since.
-                self._check_key_free(definition.key, slot)
+                self._check_key_free(definition.key, slot, definition.count_key)
                 self._ephemeral.add(slot)
                 self._ephemeral_starting.add(slot)
             self._ensure_sampler()
@@ -2290,7 +2305,9 @@ class WorkerPool:
             problem = self._memory_problem(slot, definition.memory_limit())
             if problem is not None:
                 slot.kill_reason = problem
-                raise WorkerKilled(problem[1], code=problem[0])
+                refused = WorkerKilled(problem[1], code=problem[0])
+                refused.before_send = True
+                raise refused
             try:
                 with self._cond:
                     slot.pending += 1
@@ -2337,8 +2354,10 @@ class WorkerPool:
             if gone:
                 self._oneshot.release()
 
-    def _check_key_free(self, key, slot=None):
+    def _check_key_free(self, key, slot=None, cap_key=None):
         """Refuse a start of ``key`` while a worker of it is being torn down, or the cap is spent. Lock held.
+
+        The cap is counted under ``cap_key`` (default ``key``): the definition's ``count_key``.
 
         With ``slot``, the check and the reservation of one unit of the allowance for
         it are one step: concurrent admissions cannot all pass a check that only one fits.
@@ -2346,14 +2365,15 @@ class WorkerPool:
         if self._tearing.get(key):
             raise PoolUnavailable("the previous worker of %s is still being stopped" % key,
                                   code=PoolCodes.UNAVAILABLE, retry_after=1.0)
-        wait = self._unverified_wait(key)
+        counted = cap_key or key
+        wait = self._unverified_wait(counted)
         if wait:
             raise PoolUnavailable(
                 "%s has had %d workers ended without whole-tree cleanup within the last hour; "
                 "detached processes cannot be tracked on this platform, so starts are paused"
-                % (key, self.limits.unverified_limit), code=PoolCodes.UNVERIFIED_LIMIT, retry_after=wait)
+                % (counted, self.limits.unverified_limit), code=PoolCodes.UNVERIFIED_LIMIT, retry_after=wait)
         if slot is not None:
-            self._unverified_reserved[key] = self._unverified_reserved.get(key, 0) + 1
+            self._unverified_reserved[counted] = self._unverified_reserved.get(counted, 0) + 1
             slot.unverified_reserved = True
 
     def _wait_watched(self, slot, handle):
@@ -2779,7 +2799,7 @@ class WorkerPool:
                         self._wait(deadline, "the previous worker is still being stopped",
                                    code=PoolCodes.UNAVAILABLE)
                         continue
-                    self._check_key_free(key)
+                    self._check_key_free(key, cap_key=entry.definition.count_key)
                     if not self._claim_capacity(entry):
                         self._wait(deadline, "no free worker slot", code=PoolCodes.POOL_FULL)
                         continue
@@ -2790,7 +2810,7 @@ class WorkerPool:
                     slot.entry = entry
                     slot.generation = entry.generation
                     # Admitted: the unit is taken here, in the hold that checked the cap.
-                    self._reserve_unverified(key, slot)
+                    self._reserve_unverified(definition.count_key, slot)
                     entry.starting = slot
                 break
         finally:
@@ -3456,7 +3476,7 @@ class WorkerPool:
         if not slot.unverified_reserved:
             return
         slot.unverified_reserved = False
-        key = slot.definition.key
+        key = slot.definition.count_key
         left = self._unverified_reserved.get(key, 0) - 1
         if left > 0:
             self._unverified_reserved[key] = left
@@ -3479,8 +3499,16 @@ class WorkerPool:
         if process is None or isinstance(process, LauncherProcess):
             self._settle_unverified(slot)
             return
-        key = slot.definition.key
+        if slot.ephemeral and slot.kill_reason is None and getattr(session, "exit_code", None) == 0:
+            # A one-off run whose worker left by itself, with exit code 0, after being asked to and without the pool
+            # having ended it: it is the routine end of a short request, not a plugin that leaks. Counting it would turn the cap into a
+            # quota on how often a person may test a connection or fetch a model list.
+            self._settle_unverified(slot)
+            return
+        key = slot.definition.count_key
         now = self._clock()
+        for other in [name for name, held in self._unverified.items() if not held and name != key]:
+            del self._unverified[other]
         stamps = self._unverified.setdefault(key, deque())
         stamps.append(now)
         # The record replaces the unit that was held for it: same place, counted once.
