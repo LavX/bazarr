@@ -26,6 +26,13 @@ class FeedResponse:
     def json(self):
         return json.loads(self.content.decode("utf-8"))
 
+    def iter_content(self, chunk_size=1):
+        if self.content:
+            yield self.content
+
+    def close(self):
+        pass
+
     def raise_for_status(self):
         if self.status_code >= 400:
             import requests

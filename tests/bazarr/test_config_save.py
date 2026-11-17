@@ -2235,6 +2235,10 @@ def test_hub_local_availability_refreshes_recording_schedule_after_save(monkeypa
     from app import config
 
     calls = []
+    # The save writes the live settings object, so both switches are put back when the test ends. Left on, a
+    # later test that imports the scheduler finds local indexing enabled and queries tables it never made.
+    for switch in ('enabled', 'serve_local_subs'):
+        monkeypatch.setattr(config.settings.compat_endpoint, switch, False)
     monkeypatch.setattr(config, 'write_config', lambda: True)
     monkeypatch.setattr(config, 'validate_log_regex', lambda: None)
     monkeypatch.setattr(config.settings.validators, 'validate', lambda: None)

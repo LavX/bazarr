@@ -30,6 +30,7 @@ import { useGatedAction } from "@/components/modals/PasswordConfirmModal";
 import { EmptyState } from "@/pages/Settings/Providers/hub/components/EmptyState";
 import { TrustBadge } from "@/pages/Settings/Providers/hub/components/TrustBadge";
 import {
+  describeCatalogOrigin,
   formatRelativeTime,
   parseGitHubRef,
   parseGitHubUrl,
@@ -76,6 +77,7 @@ const SourceRow: FunctionComponent<SourceRowProps> = ({
     Boolean(source.official) &&
     wouldSet !== null &&
     !TRUSTED_OFFICIAL_REFS.includes(wouldSet);
+  const originNote = describeCatalogOrigin(source);
   const dirty = (source.dev_ref ?? null) !== wouldSet;
   const canApply =
     dirty && (!devMode || trimmedBranch.length > 0) && !patch.isPending;
@@ -140,6 +142,11 @@ const SourceRow: FunctionComponent<SourceRowProps> = ({
               Dev: {source.dev_ref}
             </Badge>
           )}
+          {originNote && (
+            <Badge size="xs" variant="light" color="blue">
+              Mirror
+            </Badge>
+          )}
         </Group>
         <Group gap={12}>
           {usage > 0 && (
@@ -154,6 +161,11 @@ const SourceRow: FunctionComponent<SourceRowProps> = ({
           )}
         </Group>
       </Group>
+      {originNote && (
+        <Text size="xs" c="dimmed" role="status">
+          {originNote}
+        </Text>
+      )}
       {source.catalog_status === "bundled" && (
         <Text size="xs" c="dimmed" role="status">
           Showing the catalog bundled with this release. It has not been

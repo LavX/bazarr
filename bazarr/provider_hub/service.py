@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import contextlib
+import contextvars
 import copy
 import io
 import json
@@ -512,21 +513,164 @@ def _fetch_raw_file(owner: str, repo: str, commit: str, path: str) -> bytes | No
     return response.content
 
 
-def _fetch_signed_feed(owner: str, repo: str, commit: str, channel: str):
-    """The signed files of ``channel`` at ``commit``, or None when the commit has no signed catalog."""
-    body = _fetch_raw_file(owner, repo, commit, catalog_feed.SIGNED_CATALOG_PATH.format(channel=channel))
+def _fallback_setting_on() -> bool:
+    """Whether the user lets the official catalog be read from its mirror when GitHub refuses."""
+    from app.config import settings
+    return bool(getattr(settings.general, "provider_hub_allow_fallback", True))
+
+
+def _iso_from_epoch(moment: float | None) -> str | None:
+    if moment is None:
+        return None
+    try:
+        return datetime.fromtimestamp(moment, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    except (ValueError, TypeError, OverflowError, OSError):
+        return None
+
+
+class _Served:
+    """Which origin served one fetch, why it was not the first, and the mirror pointer it relied on.
+
+    ``failure`` is the first trigger failure the fetch met: ``surface``, ``origin``, ``kind``, ``status``,
+    ``at`` and, when GitHub gave a reset time, ``retry_at``.
+    """
+
+    def __init__(self) -> None:
+        self.origin: str | None = None
+        self.failure: dict[str, Any] | None = None
+        self.pointer: dict[str, str] | None = None
+        self.unchanged = False
+
+    def observe(self, origin: str, surface: str, failure: "transport.Failure") -> None:
+        if self.failure is not None:
+            return
+        self.failure = {
+            "surface": surface, "origin": origin, "kind": failure.kind.value, "status": failure.status,
+            "at": utcnow_iso(), "retry_at": _iso_from_epoch(failure.retry_at),
+        }
+
+    def note_origin(self, origin: str) -> None:
+        # One mirror file in a fetch makes the fetch a mirror one.
+        if self.origin != transport.PAGES_ORIGIN:
+            self.origin = origin
+
+
+def _note_served(source: dict[str, Any], served: "_Served | None") -> None:
+    """Record on the official source where its catalog came from and what made it move."""
+    if served is not None and served.unchanged:
+        if served.pointer is not None:
+            source["mirror_pointer"] = served.pointer
+        return
+    if served is None or served.origin is None and served.failure is None:
+        source.pop("last_origin", None)
+        source.pop("last_failure", None)
+        return
+    source["last_origin"] = served.origin
+    source["last_failure"] = served.failure
+    if served.pointer is not None:
+        source["mirror_pointer"] = served.pointer
+
+
+def _mirror_allowed_for(source: dict[str, Any], owner: str, repo: str, ref: str) -> bool:
+    """Whether the official source may read the catalog from its mirror.
+
+    Only the official source on the default branch qualifies, with the user's setting on. A source on a
+    ``dev_ref`` reads the repository itself, so testing is never served from a copy. The signed feed has to
+    be readable too: the unsigned legacy catalog is never taken from the mirror.
+    """
+    return (
+        not source.get("dev_ref") and ref == "main"
+        and f"{owner}/{repo}".lower() == transport.OFFICIAL_REPO.lower()
+        and catalog_feed.signed_feed_enabled() and _fallback_setting_on()
+    )
+
+
+def _primary_has_no_file(error: BaseException, route: "transport.JobRoute") -> bool:
+    """Whether ``error`` is the primary origin saying the commit has no such file.
+
+    A 404 from the mirror, or from a primary that was skipped, says nothing about the repository:
+    the route is on the mirror by then, and the file is not known to be missing.
+    """
+    return route.sticky is None and transport.classify_failure(error).kind is transport.FailureKind.NOT_FOUND
+
+
+def _fetch_catalog_file(
+    owner: str, repo: str, commit: str, channel: str, path: str, route: "transport.JobRoute | None",
+    served: "_Served | None",
+) -> bytes | None:
+    """One file of the signed feed at ``commit``, or None when the primary origin says it does not exist."""
+    if route is None:
+        return _fetch_raw_file(owner, repo, commit, path)
+    key = transport.FetchKey(f"{owner}/{repo}", channel, commit, path)
+    try:
+        result = transport.fetch_with_fallback(
+            transport.default_origins(), key, surface=transport.SURFACE_CATALOG, official=True,
+            allow_fallback=True, route=route, observer=served.observe if served is not None else None)
+    except Exception as error:
+        if _primary_has_no_file(error, route):
+            return None
+        if served is not None and isinstance(error, transport.NoOriginAvailable) and error.failure is not None:
+            served.observe(transport.RAW_ORIGIN, transport.SURFACE_CATALOG, error.failure)
+        raise
+    if served is not None:
+        served.note_origin(result.origin)
+    return result.content
+
+
+def _fetch_signed_feed(
+    owner: str, repo: str, commit: str, channel: str, route: "transport.JobRoute | None" = None,
+    served: "_Served | None" = None,
+):
+    """The signed files of ``channel`` at ``commit``, or None when the commit has no signed catalog.
+
+    With a ``route`` the files are read through the origins, raw first and the mirror when raw fails. The
+    absence of a signed catalog is only ever the primary's 404.
+    """
+    body = _fetch_catalog_file(
+        owner, repo, commit, channel, catalog_feed.SIGNED_CATALOG_PATH.format(channel=channel), route, served)
     if body is None:
         return None
     return catalog_feed.FetchedFeed(
         catalog=body,
-        envelope=_fetch_raw_file(owner, repo, commit, catalog_feed.SIGNED_ENVELOPE_PATH.format(channel=channel)),
-        key_file=_fetch_raw_file(owner, repo, commit, catalog_feed.KEY_FILE_PATH),
+        envelope=_fetch_catalog_file(
+            owner, repo, commit, channel, catalog_feed.SIGNED_ENVELOPE_PATH.format(channel=channel), route, served),
+        key_file=_fetch_catalog_file(owner, repo, commit, channel, catalog_feed.KEY_FILE_PATH, route, served),
     )
+
+
+def _head_from_mirror(
+    source: dict[str, Any], channel: str, advertisement_error: BaseException, served: "_Served | None",
+) -> "transport.MirrorPointer":
+    """The channel head the mirror names, for a refresh whose ref advertisement failed.
+
+    Only called after a failure that is a trigger. The pointer is taken only when it is the stored commit or
+    strictly ahead of it, so a stale mirror cannot roll the catalog back. When the mirror cannot help, the
+    failure of GitHub is the one raised, so it is the one shown.
+    """
+    if served is not None:
+        served.observe("github", transport.SURFACE_POINTER, transport.classify_failure(advertisement_error))
+    try:
+        pointer = transport.fetch_pointer(channel, observer=served.observe if served is not None else None)
+        stored = source.get("resolved_commit")
+        accepted = source.get("mirror_pointer")
+        accepted_at = accepted.get("published_at") if isinstance(accepted, dict) else None
+        transport.check_pointer_advance(
+            pointer, stored if isinstance(stored, str) and stored else None,
+            accepted_at if isinstance(accepted_at, str) else None)
+    except transport.TransportError as refusal:
+        if refusal.kind is transport.FailureKind.INTEGRITY:
+            raise CatalogSourceError(
+                f"GitHub did not answer, and the mirror was not used: {refusal}. "
+                "Your cached catalog is unchanged.") from refusal
+        raise advertisement_error from refusal
+    except Exception as mirror_error:
+        raise advertisement_error from mirror_error
+    return pointer
 
 
 def _fetch_official_catalog(
     source: dict[str, Any], state: dict[str, Any], ancestry, unchanged_commit: str | None = None,
-    advertisement_sink=None,
+    advertisement_sink=None, served: "_Served | None" = None,
 ):
     """The official catalog, read through the signature check.
 
@@ -535,6 +679,11 @@ def _fetch_official_catalog(
     feed (None for the legacy catalog). The head is the commit trust is judged on; the manifests of a
     verified catalog are pinned to the signed body's ``source_commit`` instead. The legacy catalog never
     carries a plugins list. Raises ``catalog_feed.FeedRefused`` when a signed catalog fails its check.
+
+    When GitHub refuses the ref lookup or the files, and the setting allows it, the mirror stands in:
+    it names the head, and the signed files are read from it when raw fails. What it serves is judged
+    exactly as raw's bytes are, against the counters this host stored for the channel. ``served`` is told
+    where the catalog came from.
     """
     channel = catalog_feed.feed_channel(source.get("dev_ref"))
     host_latched = any(catalog_feed.stored_record(state, name).latched
@@ -554,19 +703,39 @@ def _fetch_official_catalog(
         return payload, head, None
     owner, repo, ref, _path = _parse_github_file_url(source["url"])
     ref = source.get("dev_ref") or ref
-    head = _resolve_github_ref(owner, repo, ref, advertisement_sink=advertisement_sink)
+    mirror = _mirror_allowed_for(source, owner, repo, ref)
+    route = transport.JobRoute() if mirror else None
+    pointer = None
+    try:
+        head = _resolve_github_ref(owner, repo, ref, advertisement_sink=advertisement_sink)
+    except Exception as error:
+        if not mirror or not transport.classify_failure(error).trigger:
+            raise
+        pointer = _head_from_mirror(source, channel, error, served)
+        head = pointer.commit
     if unchanged_commit is not None and head == unchanged_commit.lower() and not _is_commit_sha(ref):
+        if served is not None and mirror:
+            # Nothing was read, so where the held catalog came from is unchanged.
+            served.unchanged = True
+            served.pointer = _pointer_record(pointer, source)
         return None, head, None
     feed = catalog_feed.verify_fetched(
-        _fetch_signed_feed(owner, repo, head, channel),
+        _fetch_signed_feed(owner, repo, head, channel, route, served),
         channel=channel,
         stored=catalog_feed.stored_record(state, channel), now=catalog_feed.current_time(),
         host_build_time=catalog_feed.build_time(), host_latched=host_latched,
     )
     if feed is None:
+        if pointer is not None:
+            # The commit was named by the mirror, so nothing anchors an unsigned catalog at it.
+            raise CatalogSourceError(
+                "GitHub did not answer, and the mirror's catalog has no signed file, so it was not used. "
+                "Your cached catalog is unchanged.")
         # No signed file at this commit and the channel has never latched: the legacy catalog.
         payload, _same = _fetch_github_catalog(source["url"], override_ref=head)
         payload.pop("plugins", None)
+        if served is not None and mirror:
+            served.note_origin(transport.RAW_ORIGIN)
         return payload, head, None
     if feed.source_commit != head:
         verdict, _reason = ancestry.check(feed.source_commit)
@@ -575,7 +744,24 @@ def _fetch_official_catalog(
                 catalog_feed.Status.MALFORMED,
                 "The signed catalog names a commit that is not on the official catalog's main or beta.",
                 key_file_version=feed.result.key_file_version)
+    if served is not None:
+        served.pointer = _pointer_record(pointer, source)
     return feed.catalog, head, feed
+
+
+def _pointer_record(pointer: "transport.MirrorPointer | None", source: dict[str, Any]) -> dict[str, str] | None:
+    """What to remember of the mirror pointer a refresh relied on: the commit and when it was published.
+
+    The stamp is a high-water mark: a pointer for the stored commit with an older stamp never lowers it,
+    so a later pointer cannot slip in under it. A refresh that did not use the pointer keeps the last one.
+    """
+    held = source.get("mirror_pointer")
+    held = held if isinstance(held, dict) else None
+    if pointer is None:
+        return held
+    held_at = held.get("published_at") if held else None
+    stamp = max(pointer.published_at, held_at) if isinstance(held_at, str) else pointer.published_at
+    return {"commit": pointer.commit, "published_at": stamp}
 
 
 # The official source is trusted only on these branches of the official catalog
@@ -1316,6 +1502,35 @@ def _note_catalog_signature(
         catalog_feed.clear_refusal(state, feed.channel)
 
 
+def _store_transport(state: dict[str, Any]) -> None:
+    """Put what the transport has learnt about each origin into ``state``, inside the write that holds it.
+
+    The process record is authoritative once it has been restored, so it is stored as it is: a restriction
+    lifted by a success stays lifted after a restart. Nothing is written while the transport has learnt
+    nothing and the state holds nothing.
+    """
+    record = transport.export_state()
+    if any(record.values()) or "transport" in state:
+        state["transport"] = record
+
+
+def _persist_transport() -> None:
+    """The same, for a caller that is not inside a state write (an install): one write, only when the
+    stored section differs. A failure is logged and goes no further."""
+    try:
+        if not _fallback_setting_on():
+            return
+        record = transport.export_state()
+        held = load_state().get("transport")
+        if (not any(record.values()) and held is None) or record == held:
+            return
+        mutate_state(lambda state: _store_transport(state))
+    except Exception:
+        # What the transport learnt is kept in memory too, so a failed write costs a restart's memory only.
+        logging.getLogger(__name__).warning(
+            "The Provider Hub could not store what it learnt about its catalog origins", exc_info=True)
+
+
 def refresh_catalog(source_ids: set[str] | None = None, checkpoint=None) -> dict[str, Any]:
     """Refresh catalog sources. When ``source_ids`` is given, only those source ids
     are fetched (e.g. the startup migration refreshes only the official source so an
@@ -1337,6 +1552,8 @@ def refresh_catalog(source_ids: set[str] | None = None, checkpoint=None) -> dict
             rejected_plugins: list[dict[str, Any]] = []
             accepted_feeds: dict[str, catalog_feed.ChannelRecord] = {}
             ancestry = _OfficialAncestry(state)
+            if _fallback_setting_on():
+                transport.restore_state(state.get("transport"))
             for source_key, source in (state.get("catalog_sources") or {}).items():
                 if not isinstance(source, dict):
                     continue
@@ -1393,11 +1610,12 @@ def refresh_catalog(source_ids: set[str] | None = None, checkpoint=None) -> dict
                             skip_commit = previous_commit
                 from_floor = False
                 feed = None
+                served = _Served() if is_official else None
                 try:
                     if is_official:
                         catalog, commit, feed = _fetch_official_catalog(
                             source, state, ancestry, unchanged_commit=skip_commit,
-                            advertisement_sink=ancestry.note_advertisement,
+                            advertisement_sink=ancestry.note_advertisement, served=served,
                         )
                     else:
                         catalog, commit = _fetch_github_catalog(
@@ -1409,7 +1627,11 @@ def refresh_catalog(source_ids: set[str] | None = None, checkpoint=None) -> dict
                     source["last_checked_at"] = now
                     source["last_error"] = None
                     floor.clear_seed(source)
+                    if is_official:
+                        _note_served(source, served)
                 except Exception as error:
+                    if served is not None and served.failure is not None:
+                        source["last_failure"] = served.failure
                     if isinstance(error, catalog_feed.FeedRefused):
                         refused_channel = catalog_feed.feed_channel(source.get("dev_ref"))
                         if refused_channel is not None:
@@ -1592,6 +1814,8 @@ def refresh_catalog(source_ids: set[str] | None = None, checkpoint=None) -> dict
                         del entries[key]
             if source_ids is None or OFFICIAL_CATALOG_SOURCE_ID in source_ids:
                 _recheck_installed_trust(state, ancestry)
+            if _fallback_setting_on():
+                _store_transport(state)
             ok_sources = sources_count - len(failed_sources)
             return {
                 "refreshed_at": now,
@@ -2699,16 +2923,54 @@ def _deadline_request_timeout(deadline: float | None, default: float = 30.0) -> 
     return max(1.0, min(default, remaining))
 
 
-def _fetch_github_bundle_file(manifest, relative_path: str, deadline: float | None = None) -> bytes:
+# The channel an install may read its bundle from the mirror for, set while the install of an official
+# source's entry runs. None for every other install, which reads GitHub only.
+_BUNDLE_MIRROR_CHANNEL: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "provider_hub_bundle_mirror_channel", default=None)
+
+
+# The largest single bundle file read through the origins. The old fetch had no limit, and no file of the
+# catalog comes near this.
+_BUNDLE_FILE_MAX_BYTES = 64 * 1024 * 1024
+
+
+def _bundle_mirror_channel(state: dict[str, Any], source_id: str | None) -> str | None:
+    """The mirror channel the bundle of an entry of ``source_id`` may be read from, or None.
+
+    Only the official source with no ``dev_ref`` qualifies, with the user's setting on. A community source
+    or a source on a development ref reads GitHub only.
+    """
+    if source_id != OFFICIAL_CATALOG_SOURCE_ID or not _fallback_setting_on():
+        return None
+    source = (state.get("catalog_sources") or {}).get(OFFICIAL_CATALOG_SOURCE_ID)
+    if not isinstance(source, dict) or source.get("dev_ref") or source.get("official") is False:
+        return None
+    return catalog_feed.CHANNEL_MAIN
+
+
+def _fetch_github_bundle_file(
+    manifest, relative_path: str, deadline: float | None = None, route: "transport.JobRoute | None" = None,
+) -> bytes:
     bundled = floor.bundle_file(manifest, relative_path)
     if bundled is not None:
         return bundled
-    response = requests.get(
-        _github_raw_url(manifest, relative_path),
-        timeout=_deadline_request_timeout(deadline),
-    )
-    response.raise_for_status()
-    content = response.content
+    channel = _BUNDLE_MIRROR_CHANNEL.get()
+    raw_path = "/".join(part for part in (manifest.source_path, relative_path) if part)
+    key = transport.FetchKey(str(manifest.source_repo), channel or "", manifest.source_commit, raw_path)
+    # A file whose path the origins cannot address is read from GitHub the old way, mirror or not.
+    if (channel is not None and str(manifest.source_repo).lower() == transport.OFFICIAL_REPO.lower()
+            and transport.key_is_addressable(key)):
+        content = transport.fetch_with_fallback(
+            transport.default_origins(), key, surface=transport.SURFACE_BUNDLE, official=True,
+            allow_fallback=True, route=route if route is not None else transport.JobRoute(),
+            timeout=_deadline_request_timeout(deadline), max_bytes=_BUNDLE_FILE_MAX_BYTES).content
+    else:
+        response = requests.get(
+            _github_raw_url(manifest, relative_path),
+            timeout=_deadline_request_timeout(deadline),
+        )
+        response.raise_for_status()
+        content = response.content
     if not isinstance(content, bytes):
         raise ProviderHubInstallError(f"GitHub returned invalid content for {relative_path}")
     return content
@@ -2731,10 +2993,15 @@ def _fetch_bundle(manifest, deadline: float | None = None) -> Path:
     target.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix=".stage-", dir=str(target.parent)) as tmp_dir:
         tmp_path = Path(tmp_dir)
+        # One install is one job: it moves to the mirror at most once, whichever file meets the failure.
+        route = transport.JobRoute() if _BUNDLE_MIRROR_CHANNEL.get() is not None else None
         for relative_path in manifest.files:
             destination = tmp_path / relative_path
             destination.parent.mkdir(parents=True, exist_ok=True)
-            destination.write_bytes(_fetch_github_bundle_file(manifest, relative_path, deadline=deadline))
+            fetched = (
+                _fetch_github_bundle_file(manifest, relative_path, deadline=deadline) if route is None
+                else _fetch_github_bundle_file(manifest, relative_path, deadline=deadline, route=route))
+            destination.write_bytes(fetched)
 
         _write_manifest_file(manifest, tmp_path)
         verify_bundle_tree(manifest, tmp_path)
@@ -3448,17 +3715,26 @@ def stage_install(
     origin = "catalog"
     manifest_source = validated.raw.get("source") if isinstance(validated.raw, dict) else None
     catalog_url = manifest_source.get("catalog_url") if isinstance(manifest_source, dict) else None
-    return _stage_validated(
-        validated,
-        source_trusted,
-        origin,
-        source_id,
-        _fetch_bundle,
-        catalog_url=catalog_url,
-        install_timeout=install_timeout,
-        checkpoint=checkpoint,
-        catalog_list=catalog_list,
-    )
+    mirror_channel = _bundle_mirror_channel(state, source_id)
+    token = _BUNDLE_MIRROR_CHANNEL.set(mirror_channel)
+    try:
+        if mirror_channel is not None:
+            transport.restore_state(state.get("transport"))
+        return _stage_validated(
+            validated,
+            source_trusted,
+            origin,
+            source_id,
+            _fetch_bundle,
+            catalog_url=catalog_url,
+            install_timeout=install_timeout,
+            checkpoint=checkpoint,
+            catalog_list=catalog_list,
+        )
+    finally:
+        _BUNDLE_MIRROR_CHANNEL.reset(token)
+        if mirror_channel is not None:
+            _persist_transport()
 
 
 def _find_catalog_entry(
