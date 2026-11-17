@@ -46,6 +46,15 @@ interface TestOutcome {
 const SWITCH_WAITS =
   "Save or close the form to switch this back end on or off.";
 
+/**
+ * Why a held-back back end has no test to run. A test uses what is saved, and what is saved is what
+ * no longer fits: the server would answer about a changed address, which is not what happened.
+ */
+const TEST_WAITS =
+  "A test uses what is saved. Check and save this back end's settings first.";
+const TEST_GONE =
+  "Nothing to test: the engine's plugin no longer has this kind of back end.";
+
 const seconds = (ms: number) =>
   ms < 1000 ? `${Math.round(ms)} ms` : `${(ms / 1000).toFixed(1)} s`;
 
@@ -289,6 +298,8 @@ const BackendList: FunctionComponent<{
           const name = backendName(engine, item);
           const editing = editingId === item.id;
           const hold = backendHold(engine, item);
+          const testWaits =
+            hold === "review" ? TEST_WAITS : hold === "gone" ? TEST_GONE : "";
           return (
             <div className={styles.backend} data-off={!item.enabled}>
               <div className={styles.backendIdentity}>
@@ -334,12 +345,24 @@ const BackendList: FunctionComponent<{
                     size="compact-sm"
                     variant="default"
                     loading={testing === item.id}
-                    disabled={testing !== null && testing !== item.id}
+                    disabled={
+                      (testing !== null && testing !== item.id) ||
+                      testWaits !== ""
+                    }
                     aria-label={`Test ${name}`}
+                    aria-describedby={
+                      testWaits ? `${hintId}test${item.id}` : undefined
+                    }
+                    title={testWaits || undefined}
                     onClick={() => runTest(item)}
                   >
                     Test
                   </Button>
+                )}
+                {canTest && testWaits && (
+                  <VisuallyHidden id={`${hintId}test${item.id}`}>
+                    {testWaits}
+                  </VisuallyHidden>
                 )}
                 <Button
                   size="compact-sm"

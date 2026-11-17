@@ -189,7 +189,8 @@ export function engineStatus(engine: TranslationEngine): Status {
     return {
       tone: "warning",
       label: "Not set up",
-      next: "Fill in its settings and save them.",
+      // Its settings may already show values, as an address that is only a default does: saving is the step.
+      next: "Check its settings and save them.",
     };
   }
   return { tone: "success", label: "Ready", next: "" };

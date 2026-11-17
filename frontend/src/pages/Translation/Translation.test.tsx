@@ -15,6 +15,7 @@ import {
   engine,
   inputsHolding,
   job,
+  lingarr,
   second,
   SECRET,
 } from "./fixtures";
@@ -952,6 +953,55 @@ describe("Translation page", () => {
     );
     const editor = await openEditor("OpenAI compatible, model-2");
     expect(within(editor).getByText("is required")).toBeVisible();
+  });
+
+  it("offers no test of a back end an update turned off, and says why", async () => {
+    state = { ...state, capabilities: ["test"] };
+    withBackEnds(connection(1), heldBackEnd(2));
+    server.use(
+      http.post("/api/translation/connections/:id/test", () => {
+        record("post", "test", null);
+        return HttpResponse.json({ ok: true, message: "", latency_ms: 1 });
+      }),
+    );
+    const user = userEvent.setup();
+    await showPage();
+    // A test uses what is saved, and the server would answer it with a changed address.
+    const held = screen.getByRole("button", {
+      name: "Test OpenAI compatible, model-2",
+    });
+    expect(held).toBeDisabled();
+    expect(held).toHaveAccessibleDescription(
+      "A test uses what is saved. Check and save this back end's settings first.",
+    );
+    const other = screen.getByRole("button", {
+      name: "Test OpenAI compatible, model-1",
+    });
+    expect(other).toBeEnabled();
+    await user.click(other);
+    expect(
+      await screen.findByText("It works. Answered in 1 ms."),
+    ).toBeVisible();
+    expect(calls).toHaveLength(1);
+  });
+
+  it("says to check and save an engine that is not set up while its address already shows a value", async () => {
+    state = {
+      ...state,
+      engine: 5,
+      fallback_engine: null,
+      instances: [lingarr({ configured: false })],
+    };
+    const group = await showPage();
+    expect(within(group).getByText("Not set up")).toBeVisible();
+    expect(screen.getByLabelText(/Lingarr URL/)).toHaveValue(
+      "http://lingarr:9876",
+    );
+    expect(
+      screen.getAllByText("Check its settings and save them.", {
+        exact: false,
+      }).length,
+    ).toBeGreaterThan(0);
   });
 
   it("says a held-back back end of a type the plugin dropped can only be removed", async () => {
