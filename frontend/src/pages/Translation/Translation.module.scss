@@ -486,6 +486,12 @@
   background: color-mix(in srgb, var(--bz-stat-failed) 10%, transparent);
 }
 
+/* A test that never ran: quiet, because nothing is wrong with the back end. */
+.result[data-tone="waiting"] {
+  color: var(--bz-text-secondary);
+  background: var(--bz-hover-bg-emphasis);
+}
+
 .resultText {
   color: var(--bz-text-primary);
 }

@@ -3,6 +3,7 @@ import { FunctionComponent, useId, useRef, useState } from "react";
 import { Alert, Button, Menu, Switch, VisuallyHidden } from "@mantine/core";
 import {
   faCircleCheck,
+  faClock,
   faPlus,
   faTriangleExclamation,
 } from "@fortawesome/free-solid-svg-icons";
@@ -36,11 +37,21 @@ import {
 import styles from "./Translation.module.scss";
 
 interface TestOutcome {
-  ok: boolean;
+  /**
+   * How the answer is shown. `waiting` is a test that never ran because the engine could not take it
+   * just now: nothing is wrong with the back end, so it is not shown as a failure.
+   */
+  tone: "success" | "danger" | "waiting";
   message: string;
   /** The revision of the back end the test ran against. A changed back end has not been tested. */
   revision: number;
 }
+
+const RESULT_ICON = {
+  success: faCircleCheck,
+  danger: faTriangleExclamation,
+  waiting: faClock,
+};
 
 /** Why a row's switch cannot be used while that row's form is open. */
 const SWITCH_WAITS =
@@ -54,6 +65,11 @@ const TEST_WAITS =
   "A test uses what is saved. Check and save this back end's settings first.";
 const TEST_GONE =
   "Nothing to test: the engine's plugin no longer has this kind of back end.";
+
+/** What stands before the reason of a test that never ran, so it is not read as the back end's answer. */
+const NOT_TESTED = "Not tested yet.";
+const TRY_AGAIN_SOON =
+  "The engine could not take the test just now. Try again in a moment.";
 
 const seconds = (ms: number) =>
   ms < 1000 ? `${Math.round(ms)} ms` : `${(ms / 1000).toFixed(1)} s`;
@@ -209,28 +225,37 @@ const BackendList: FunctionComponent<{
     // The answer belongs to the back end as it was when the test ran, and is said aloud as well as shown.
     // Emptied first: a result that reads the same as the last one is then a change, and is said again.
     setAnnouncement("");
-    const report = (ok: boolean, message: string) => {
+    const report = (tone: TestOutcome["tone"], message: string) => {
       setTests((current) => ({
         ...current,
-        [item.id]: { ok, message, revision: item.revision },
+        [item.id]: { tone, message, revision: item.revision },
       }));
       setAnnouncement(backendName(engine, item) + ": " + message);
     };
     setTesting(item.id);
     test.mutate(item.id, {
-      onSuccess: (result) =>
-        report(
-          result.ok,
-          result.ok
-            ? "It works." +
-                (typeof result.latency_ms === "number"
-                  ? " Answered in " + seconds(result.latency_ms) + "."
-                  : "")
-            : result.message,
-        ),
+      onSuccess: (result) => {
+        if (result.ok) {
+          report(
+            "success",
+            "It works." +
+              (typeof result.latency_ms === "number"
+                ? " Answered in " + seconds(result.latency_ms) + "."
+                : ""),
+          );
+        } else if (result.outcome === "not_ready") {
+          // Nothing was sent: the engine was busy or had not started. The server's sentence says which.
+          report(
+            "waiting",
+            NOT_TESTED + " " + (result.message || TRY_AGAIN_SOON),
+          );
+        } else {
+          report("danger", result.message);
+        }
+      },
       onError: (error) =>
         report(
-          false,
+          "danger",
           readRefusal(error)?.message ||
             "The test could not run. Check that Bazarr+ is reachable and try again.",
         ),
@@ -417,10 +442,11 @@ const BackendList: FunctionComponent<{
               {outcome && (
                 <div
                   className={styles.result}
-                  data-tone={outcome.ok ? "success" : "danger"}
+                  data-tone={outcome.tone}
+                  data-testid="test-result"
                 >
                   <FontAwesomeIcon
-                    icon={outcome.ok ? faCircleCheck : faTriangleExclamation}
+                    icon={RESULT_ICON[outcome.tone]}
                     style={{ marginTop: 3 }}
                   />
                   <span className={styles.resultText}>{outcome.message}</span>

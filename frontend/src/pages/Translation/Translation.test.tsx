@@ -1454,12 +1454,106 @@ describe("Translation page", () => {
     await user.click(
       screen.getByRole("button", { name: "Test OpenAI compatible, model-1" }),
     );
+    const tested = row("OpenAI compatible, model-1");
     expect(
-      await screen.findByText(
+      await within(tested).findByText(
         "A test of this back end is already running. Wait for it to finish.",
       ),
     ).toBeVisible();
+    // This answer names no outcome, as a server that does not send one: it reads as a failed test.
+    expect(within(tested).getByTestId("test-result")).toHaveAttribute(
+      "data-tone",
+      "danger",
+    );
     expect(screen.queryByText(/It works/)).not.toBeInTheDocument();
+  });
+
+  it("shows a test the engine could not take as not tested yet, and keeps the failure style for a back end that failed", async () => {
+    state = { ...state, capabilities: ["test"] };
+    // What the server answers, in turn: the engine is busy, the engine has not started, an answer with
+    // no sentence, the back end did not answer, and a saved key that may not be sent.
+    const answers = [
+      {
+        ok: false,
+        message:
+          "The translation engine is busy translating. Try the test again in a moment.",
+        latency_ms: null,
+        outcome: "not_ready",
+      },
+      {
+        ok: false,
+        message:
+          "The translation engine could not take the test. Try again in a moment.",
+        latency_ms: null,
+        outcome: "not_ready",
+      },
+      { ok: false, message: "", latency_ms: null, outcome: "not_ready" },
+      {
+        ok: false,
+        message: "No answer from http://lms:1234. Check that it is running.",
+        latency_ms: null,
+        outcome: "failed",
+      },
+      {
+        ok: false,
+        message:
+          "The address changed after the key was saved, so the saved key is not sent to the new one. Enter the key again and save.",
+        latency_ms: null,
+        outcome: "refused",
+      },
+    ];
+    let asked = 0;
+    server.use(
+      http.post("/api/translation/connections/:id/test", () =>
+        HttpResponse.json(answers[asked++]),
+      ),
+    );
+    const user = userEvent.setup();
+    await showPage();
+    const name = "OpenAI compatible, model-1";
+    const test = () =>
+      user.click(screen.getByRole("button", { name: `Test ${name}` }));
+    // The answer under the row once it reads `text`: the element that carries its tone.
+    const shown = async (text: string) => {
+      await within(row(name)).findByText(text);
+      return within(row(name)).getByTestId("test-result");
+    };
+
+    await test();
+    const busy =
+      "Not tested yet. The translation engine is busy translating. Try the test again in a moment.";
+    expect(await shown(busy)).toHaveAttribute("data-tone", "waiting");
+    // It is said aloud the same way, with the back end's name.
+    expect(screen.getByText(`${name}: ${busy}`)).toBeInTheDocument();
+
+    await test();
+    expect(
+      await shown(
+        "Not tested yet. The translation engine could not take the test. Try again in a moment.",
+      ),
+    ).toHaveAttribute("data-tone", "waiting");
+
+    await test();
+    expect(
+      await shown(
+        "Not tested yet. The engine could not take the test just now. Try again in a moment.",
+      ),
+    ).toHaveAttribute("data-tone", "waiting");
+
+    await test();
+    expect(
+      await shown("No answer from http://lms:1234. Check that it is running."),
+    ).toHaveAttribute("data-tone", "danger");
+    expect(screen.queryByText(/Not tested yet/)).toBeNull();
+
+    // Nothing was sent here either, but something has to be changed first: that is not "try again".
+    await test();
+    expect(
+      await shown(
+        "The address changed after the key was saved, so the saved key is not sent to the new one. Enter the key again and save.",
+      ),
+    ).toHaveAttribute("data-tone", "danger");
+    expect(asked).toBe(5);
   });
 
   it("shows no Test, spend, queue or caps, and asks for none of them, on a server that lists no capabilities", async () => {

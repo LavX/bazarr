@@ -175,6 +175,13 @@ def _claim_test(connection_id: int) -> "_Claim | None":
 
 OPEN_TEST = "The translation engine is not running, so this back end cannot be tested yet."
 
+# What a connection test came to, beside ``ok``: whether a request went out at all, and when none did, whether
+# waiting is enough. A page shows a back end that failed differently from a test that never ran.
+ANSWERED = "answered"    # the back end answered: ``ok`` is true
+FAILED = "failed"        # a request went out, or may have, and the back end did not answer as it should
+NOT_READY = "not_ready"  # nothing was sent: the engine could not take the test just now, and may in a moment
+REFUSED = "refused"      # nothing was sent: what is saved, or a cost cap, does not allow the test
+
 
 @dataclass(frozen=True)
 class ProbeRequest:
@@ -900,6 +907,12 @@ class TranslatorSettingsService:
         waits for its secrets is not tested with stale ones. A refusal of this kind and a back end that
         does not answer are both ``ok: false`` with a sentence that says what to do; the answer never carries a
         key. A priced test is reserved against the cost caps and settled in the usage ledger like any call.
+
+        ``outcome`` says what ``ok: false`` alone does not: ``failed`` when a request went out (or may have) and
+        the back end did not answer as it should, ``not_ready`` when nothing was sent because the engine could
+        not take the test just now (busy with a translation, not started, a test of this back end still
+        running), and ``refused`` when nothing was sent because what is saved, or a cost cap, does not allow
+        it. A test that worked is ``answered``.
         """
         if payload not in (None, {}):
             raise InvalidValuesError("A test uses the settings as they are saved. Save your changes first.")
@@ -919,16 +932,16 @@ class TranslatorSettingsService:
         values = _shown_settings(schema.fields, saved)
         if any(item.startswith("invalid:") for item in destinations):
             return self._test_result(False, "The saved address is not a valid web address. Open this back end, "
-                                            "correct the address and save it.")
+                                            "correct the address and save it.", outcome=REFUSED)
         summary = self._store.secret_summary(owner, destinations)
         if connection.awaiting_secrets or any(entry.get("stale") for entry in summary.values()):
             return self._test_result(False, "The address changed after the key was saved, so the saved key is not "
-                                            "sent to the new one. Enter the key again and save.")
+                                            "sent to the new one. Enter the key again and save.", outcome=REFUSED)
         secrets = self._store.secrets_for_request(owner, destinations)
         engine_values = dict(self._store.settings_of(instance))
         engine_refusal, engine_secrets = self._engine_secrets(instance, engine_values)
         if engine_refusal:
-            return self._test_result(False, engine_refusal)
+            return self._test_result(False, engine_refusal, outcome=REFUSED)
         secrets = {**engine_secrets, **secrets}  # the connection's win a name they share
         # Every saved secret of the connection and of its engine, for masking only.
         held = {**{f"engine.{name}": value for name, value in
@@ -937,7 +950,8 @@ class TranslatorSettingsService:
         where = self._typed_origin(schema, values)
         claim = _claim_test(connection.id)
         if claim is None:
-            return self._test_result(False, "A test of this back end is already running. Wait for it to finish.")
+            return self._test_result(False, "A test of this back end is already running. Wait for it to finish.",
+                                     outcome=NOT_READY)
         bug: BaseException | None = None
         result: dict[str, Any] | None = None
         try:
@@ -998,14 +1012,15 @@ class TranslatorSettingsService:
         fields = (definition.get(connection.backend_type) or {}).get("fields") or []
         listing = next((item["key"] for item in fields if item.get("type") == "options"), None)
         if listing is None:
-            return self._test_result(False, "This back end has no check that can run without translating.")
+            return self._test_result(False, "This back end has no check that can run without translating.",
+                                     outcome=REFUSED)
         draft = {**values, **({MODEL_KEY: connection.model} if connection.model else {})}
         started = time.monotonic()
         try:
             answer = self.options(instance.id, connection.backend_type, listing, draft, plugin=plugin)
         except InvalidValuesError:
             return self._test_result(False, "The saved settings no longer fit this version of the plugin. Open "
-                                            "this back end and save it again.")
+                                            "this back end and save it again.", outcome=REFUSED)
         if answer.get("available") is True:
             return self._test_result(True, "", started)
         return self._test_result(False, self._unanswered(where))
@@ -1049,7 +1064,7 @@ class TranslatorSettingsService:
             def refused(reason):
                 remainder = (ledger.month_remainder(caps)
                              if caps.month_cap is not None and caps.job_cap is not None else None)
-                return self._test_result(False, _cap_message(reason, caps, remainder))
+                return self._test_result(False, _cap_message(reason, caps, remainder), outcome=REFUSED)
 
             try:
                 budget = ledger.reserve_job_budget(job_id, limits)
@@ -1099,7 +1114,10 @@ class TranslatorSettingsService:
             return self._test_result(False, UNFINISHED_TEST)
         if answer.get("ok") is True:
             return self._test_result(True, "", started)
-        return self._test_result(False, self._said(answer.get("message"), held) or self._unanswered(where))
+        # A probe that says the request never left Bazarr+ (a worker busy with a translation, one that would not
+        # start) is not a verdict on the back end: the same test may go through in a moment.
+        return self._test_result(False, self._said(answer.get("message"), held) or self._unanswered(where),
+                                 outcome=NOT_READY if answer.get("sent") is False else FAILED)
 
     def _run_probe(self, request: ProbeRequest, claim: _Claim) -> Mapping[str, Any]:
         """Call the probe, and stop waiting for it a little after the time it was given.
@@ -1214,9 +1232,13 @@ class TranslatorSettingsService:
         return " ".join(text.split())[:TEST_MESSAGE_LIMIT]
 
     @staticmethod
-    def _test_result(ok: bool, message: str, started: float | None = None) -> dict[str, Any]:
+    def _test_result(ok: bool, message: str, started: float | None = None, *,
+                     outcome: str | None = None) -> dict[str, Any]:
+        """The answer of a test. ``outcome`` is ``answered`` for one that worked and ``failed`` for one that did
+        not, unless the caller knows that nothing was sent and says which kind of refusal it was."""
         latency = int((time.monotonic() - started) * 1000) if ok and started is not None else None
-        return {"ok": ok, "message": message, "latency_ms": latency}
+        return {"ok": ok, "message": message, "latency_ms": latency,
+                "outcome": outcome or (ANSWERED if ok else FAILED)}
 
     # ------------------------------------------------------------ helpers
     @staticmethod

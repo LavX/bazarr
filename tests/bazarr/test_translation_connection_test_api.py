@@ -216,6 +216,7 @@ def test_a_back_end_that_answers_is_ok_with_its_latency_and_the_key_it_was_given
     assert response.status_code == 200
     assert response.json["ok"] is True and response.json["message"] == ""
     assert isinstance(response.json["latency_ms"], int) and response.json["latency_ms"] >= 0
+    assert response.json["outcome"] == "answered"
     (asked,) = world.requests
     assert isinstance(asked, ProbeRequest)
     assert (asked.backend_type, asked.model, asked.connection_id) == ("openai_compatible", "qwen", connection_id)
@@ -243,7 +244,7 @@ def test_a_back_end_that_does_not_answer_says_what_failed_and_what_to_do(world, 
     response = world.call("post", f"connections/{connection_id}/test", {})
     assert response.status_code == 200
     assert response.json == {"ok": False, "message": f"No answer from {LAN_ORIGIN}. Check that the server is running.",
-                             "latency_ms": None}
+                             "latency_ms": None, "outcome": "failed"}
     _nothing_leaked(world, caplog)
 
 
@@ -294,9 +295,56 @@ def test_a_probe_that_raises_never_puts_its_text_in_the_answer_or_the_log(world,
     response = world.call("post", f"connections/{connection_id}/test", {})
     assert response.status_code == 200 and response.json["ok"] is False
     assert "Bazarr+ log" in response.json["message"]
+    # Whether the request went out is not known, so it is not called unsent.
+    assert response.json["outcome"] == "failed"
     assert any("RuntimeError" in record.getMessage() for record in caplog.records)  # it was logged, with no key
     _nothing_leaked(world, caplog)
     assert "192.0.2.20" not in response.get_data(as_text=True)
+
+
+# ------------------------------------------------------- what a test came to
+
+@pytest.mark.parametrize("sentence", ["BUSY_TEST", "UNSTARTED_TEST"])
+def test_a_test_the_engine_could_not_take_says_it_was_not_sent_and_keeps_ok_and_the_message(world, sentence):
+    """The page shows this one calmly: nothing is wrong with the back end, and a moment later it may go through."""
+    from subtitles.tools.translate.runtime import probe
+
+    message = getattr(probe, sentence)
+    # What ``probe.worker_probe`` answers for a worker that is busy translating, or that would not start.
+    world.probe({"ok": False, "sent": False, "message": message})
+    connection_id = world.lan_connection()
+    response = world.call("post", f"connections/{connection_id}/test", {})
+    assert response.status_code == 200
+    assert response.json == {"ok": False, "message": message, "latency_ms": None, "outcome": "not_ready"}
+
+
+def test_a_back_end_that_was_asked_and_failed_is_not_mistaken_for_a_test_that_never_ran(world):
+    connection_id = world.lan_connection()
+    # The plugin asked the back end and it refused the key: a request went out.
+    world.probe({"ok": False, "message": "The back end refused the key."})
+    asked = world.call("post", f"connections/{connection_id}/test", {}).json
+    # A probe that leaves ``sent`` out, or says it was sent, did send: only an explicit false is unsent.
+    world.probe({"ok": False, "sent": True, "message": "The back end refused the key."})
+    said_sent = world.call("post", f"connections/{connection_id}/test", {}).json
+    world.probe({"ok": False, "sent": False, "message": "The translation engine is busy translating."})
+    unsent = world.call("post", f"connections/{connection_id}/test", {}).json
+    assert [item["outcome"] for item in (asked, said_sent, unsent)] == ["failed", "failed", "not_ready"]
+    assert [item["ok"] for item in (asked, said_sent, unsent)] == [False, False, False]
+    # A test that worked is never unsent, whatever else the probe says.
+    world.probe({"ok": True, "sent": False})
+    assert world.call("post", f"connections/{connection_id}/test", {}).json["outcome"] == "answered"
+
+
+def test_the_outcome_is_one_of_four_values_whatever_the_test_came_to(world):
+    from subtitles.tools.translate.runtime import settings_service
+
+    assert {settings_service.ANSWERED, settings_service.FAILED, settings_service.NOT_READY,
+            settings_service.REFUSED} == {"answered", "failed", "not_ready", "refused"}
+    result = TranslatorSettingsService._test_result
+    assert result(True, "")["outcome"] == "answered" and result(False, "no")["outcome"] == "failed"
+    assert result(False, "wait", outcome=settings_service.NOT_READY)["outcome"] == "not_ready"
+    # The fields a client already reads are as they were.
+    assert set(result(False, "no")) == {"ok", "message", "latency_ms", "outcome"}
 
 
 # --------------------------------------------------- destination and key rules
@@ -312,6 +360,7 @@ def test_a_key_is_not_sent_to_an_address_it_was_not_entered_under(world, caplog)
     response = world.call("post", f"connections/{connection_id}/test", {})
     assert response.status_code == 200 and response.json["ok"] is False
     assert "Enter the key again" in response.json["message"]
+    assert response.json["outcome"] == "refused"
     assert world.requests == []
     _nothing_leaked(world, caplog)
 
@@ -325,6 +374,7 @@ def test_a_saved_address_that_is_not_a_clean_one_is_refused_before_anything_is_s
     response = world.call("post", f"connections/{connection_id}/test", {})
     assert response.status_code == 200 and response.json["ok"] is False
     assert "not a valid web address" in response.json["message"]
+    assert response.json["outcome"] == "refused"
     assert "hunter2" not in world.last_text and "hunter2" not in caplog.text
     assert world.requests == []
 
@@ -431,6 +481,7 @@ def test_a_priced_test_is_refused_when_the_month_cap_is_used_up_and_nothing_is_s
     response = world.call("post", f"connections/{connection_id}/test", {})
     assert response.status_code == 200 and response.json["ok"] is False
     assert "month" in response.json["message"] and "no test was sent" in response.json["message"]
+    assert response.json["outcome"] == "refused"
     assert world.requests == []
     assert _calls(world)[0] == []
 
@@ -467,6 +518,7 @@ def test_with_no_probe_the_model_list_the_engine_can_fetch_answers_the_test(worl
     connection_id = _priced(world)
     response = world.call("post", f"connections/{connection_id}/test", {})
     assert response.json["ok"] is True and isinstance(response.json["latency_ms"], int)
+    assert response.json["outcome"] == "answered"
     assert asked == [(world.instance.id, "openai_compatible", "model", {"base_url": LAN, "model": "qwen"})]
     # Listing models costs nothing, so a priced back end is not charged for it.
     assert _calls(world) == ([], [])
@@ -479,6 +531,7 @@ def test_a_model_list_that_cannot_be_fetched_is_a_failed_test_that_names_the_add
     response = world.call("post", f"connections/{connection_id}/test", {})
     assert response.status_code == 200 and response.json["ok"] is False and response.json["latency_ms"] is None
     assert response.json["message"].startswith(f"No answer at {LAN_ORIGIN}.")
+    assert response.json["outcome"] == "failed"
     _nothing_leaked(world, caplog)
 
 
@@ -495,6 +548,7 @@ def test_saved_settings_that_no_longer_fit_the_plugin_are_a_failed_test_not_a_se
     response = world.call("post", f"connections/{connection_id}/test", {})
     assert response.status_code == 200 and response.json["ok"] is False
     assert "save it again" in response.json["message"]
+    assert response.json["outcome"] == "refused"
 
 
 def test_the_refusal_names_the_month_cap_when_only_that_one_is_set(world):
@@ -663,6 +717,7 @@ def test_only_one_test_runs_per_connection_and_the_claim_is_always_given_back(wo
     try:
         busy = world.call("post", f"connections/{connection_id}/test", {})
         assert busy.status_code == 200 and busy.json["ok"] is False and "already running" in busy.json["message"]
+        assert busy.json["outcome"] == "not_ready"
         assert world.requests == []
         # Another connection is not held up by it.
         assert world.call("post", f"connections/{other_id}/test", {}).json["ok"] is True
@@ -901,6 +956,7 @@ def test_a_priced_test_whose_probe_thread_could_not_start_was_never_sent_and_is_
     response = world.call("post", f"connections/{connection_id}/test", {})
     assert response.status_code == 200 and response.json["ok"] is False
     assert "could not be started" in response.json["message"]
+    assert response.json["outcome"] == "not_ready"
     (call,), (budget,) = _calls(world)
     assert (call.actual_micros, call.state, budget.state) == (0, "settled", "released")
     assert world.requests == [] and settings_service._RUNNING_TESTS == set()

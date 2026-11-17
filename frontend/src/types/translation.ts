@@ -131,10 +131,25 @@ export interface TranslationLimitsBody {
   job_cap: number | null;
 }
 
+/**
+ * What a connection test came to, beside `ok`: `failed` when a request went
+ * out (or may have) and the back end did not answer as it should, `not_ready`
+ * when nothing was sent because the engine could not take the test just now,
+ * `refused` when nothing was sent because what is saved, or a cost cap, does
+ * not allow it. A test that worked is `answered`.
+ */
+export type TranslationTestOutcome =
+  | "answered"
+  | "failed"
+  | "not_ready"
+  | "refused";
+
 export interface TranslationTestResult {
   ok: boolean;
   message: string;
   latency_ms?: number | null;
+  /** Absent on a server that does not say it: a test that is not ok then reads as failed. */
+  outcome?: TranslationTestOutcome;
 }
 
 export type TranslationJobStatus =
