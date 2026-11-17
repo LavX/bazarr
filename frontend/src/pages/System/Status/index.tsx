@@ -133,6 +133,24 @@ function sandboxValue(sandbox: System.SandboxStatus): string {
   return sandbox.label;
 }
 
+function providerSandboxValue(
+  providers: System.ProviderSandboxStatus,
+): ReactNode {
+  // A provider that runs without the sandbox is said so plainly, in the colour
+  // of a warning. Nothing here is worded as protection the host does not give.
+  if (providers.state === "unsandboxed") {
+    return (
+      <Text component="span" size="sm" c="red" fw="bold">
+        {providers.notice ?? "Subtitle provider plugins run without a sandbox."}
+      </Text>
+    );
+  }
+  if (providers.state === "off") {
+    return "Off: subtitle provider plugins run without a sandbox (switched off in the Subtitle Hub settings)";
+  }
+  return "On: subtitle provider plugins cannot read the configuration or the database, and media is read-only to them";
+}
+
 function mediaServerValue(server: System.MediaServerStatus): string {
   if (server.state === "checking") {
     // No probe has answered yet. The page polls until one does.
@@ -350,6 +368,12 @@ const SystemStatusView: FunctionComponent = () => {
           {status?.sandbox ? (
             <Row title="Plugin Worker Sandbox">
               {sandboxValue(status.sandbox)}
+            </Row>
+          ) : null}
+          {status?.sandbox?.providers &&
+          status.sandbox.providers.state !== "pending" ? (
+            <Row title="Subtitle Provider Sandbox">
+              {providerSandboxValue(status.sandbox.providers)}
             </Row>
           ) : null}
           {status?.dev_plugin_source ? (

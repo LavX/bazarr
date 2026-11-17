@@ -182,6 +182,26 @@ declare namespace System {
      * fields then carry placeholders and the label says it is checking.
      */
     pending?: boolean;
+    /**
+     * What confines subtitle provider workers. Absent on responses from before
+     * the field existed.
+     */
+    providers?: ProviderSandboxStatus;
+  }
+
+  interface ProviderSandboxStatus {
+    /** The "Sandbox subtitle provider plugins" setting. */
+    enabled: boolean;
+    /**
+     * enforced: the filesystem ruleset applies. unsandboxed: switched on, but
+     * the host or a start could not apply it (see notice). off: switched off.
+     * pending: the host check is still running.
+     */
+    state: "enforced" | "unsandboxed" | "off" | "pending";
+    /** Why providers run without the sandbox; null when nothing is wrong. */
+    notice: string | null;
+    /** The providers recorded as started without the sandbox. */
+    unsandboxed: string[];
   }
 
   interface TranslationAvailability {

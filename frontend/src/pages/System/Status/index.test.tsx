@@ -408,6 +408,82 @@ describe("System Status", () => {
     expect(screen.queryByText(/^Sandboxed/)).toBeNull();
   });
 
+  it("names a subtitle provider sandbox that could not be applied, never as protection", async () => {
+    const base: System.SandboxStatus = {
+      abi: 0,
+      enforced: false,
+      workers_sandboxed: false,
+      filesystem: "declared",
+      network: "declared",
+      signal_scope: "declared",
+      capabilities: "declared",
+      label: "Not sandboxed on this host",
+      reason: "kernel has no Landlock (ENOSYS)",
+      limitations: [],
+    };
+    statusWith({
+      sandbox: {
+        ...base,
+        providers: {
+          enabled: true,
+          state: "unsandboxed",
+          notice:
+            "Subtitle provider plugins run without the sandbox on this host: kernel has no Landlock (ENOSYS).",
+          unsandboxed: ["embeddedsubtitles"],
+        },
+      },
+    });
+    customRender(<SystemStatusView />);
+
+    expect(
+      await screen.findByText("Subtitle Provider Sandbox", undefined, {
+        timeout: 8000,
+      }),
+    ).toBeInTheDocument();
+    expect(
+      await screen.findByText(
+        /Subtitle provider plugins run without the sandbox on this host/,
+      ),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/^On:/)).toBeNull();
+  });
+
+  it("says the subtitle provider sandbox is on, off, or leaves the row out while the check runs", async () => {
+    const base: System.SandboxStatus = {
+      abi: 10,
+      enforced: true,
+      workers_sandboxed: false,
+      filesystem: "enforced",
+      network: "enforced",
+      signal_scope: "enforced",
+      capabilities: "dropped",
+      label: "Sandbox available: Landlock ABI 10.",
+      reason: "",
+      limitations: [],
+    };
+    statusWith({
+      sandbox: {
+        ...base,
+        providers: {
+          enabled: false,
+          state: "off",
+          notice: null,
+          unsandboxed: [],
+        },
+      },
+    });
+    customRender(<SystemStatusView />);
+    expect(
+      await screen.findByText(
+        /^Off: subtitle provider plugins run without/,
+        undefined,
+        {
+          timeout: 8000,
+        },
+      ),
+    ).toBeInTheDocument();
+  });
+
   it("warns while a development plugin source is set and says nothing otherwise", async () => {
     statusWith({ devPluginSource: "branch-catalog" });
     customRender(<SystemStatusView />);
