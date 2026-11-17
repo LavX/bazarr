@@ -1387,6 +1387,31 @@ describe("Translation page", () => {
     ).toBeVisible();
   });
 
+  it("shows the sentence for a test the server refused before sending anything", async () => {
+    state = { ...state, capabilities: ["test"] };
+    server.use(
+      http.post("/api/translation/connections/:id/test", () =>
+        HttpResponse.json({
+          ok: false,
+          message:
+            "A test of this back end is already running. Wait for it to finish.",
+          latency_ms: null,
+        }),
+      ),
+    );
+    const user = userEvent.setup();
+    await showPage();
+    await user.click(
+      screen.getByRole("button", { name: "Test OpenAI compatible, model-1" }),
+    );
+    expect(
+      await screen.findByText(
+        "A test of this back end is already running. Wait for it to finish.",
+      ),
+    ).toBeVisible();
+    expect(screen.queryByText(/It works/)).not.toBeInTheDocument();
+  });
+
   it("shows no Test, spend, queue or caps, and asks for none of them, on a server that lists no capabilities", async () => {
     const user = userEvent.setup();
     await showPage();
