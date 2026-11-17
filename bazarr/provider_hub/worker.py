@@ -1,6 +1,7 @@
 # coding=utf-8
 from __future__ import annotations
 
+import errno
 import json
 import logging
 import os
@@ -291,6 +292,14 @@ _RUNNER_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "worker_r
 
 _SAFE_KEY = re.compile(r"[^A-Za-z0-9_.-]")
 
+# The launcher's own words for a ruleset or limit that could not be applied before the worker ran
+# (``launcher._child``). Its other ``sandbox`` reports (a failed fork, survivors of the cleanup) come
+# from a launcher that is past that point and never start an unsandboxed retry.
+_APPLY_FAILURE_PREFIX = "could not apply sandbox: "
+_ERRNO_IN_MESSAGE = re.compile(r"\[Errno (\d+)\]")
+# What a kernel without Landlock, or with a lower ABI than the probe saw, answers with.
+_KERNEL_CANNOT_APPLY = frozenset({errno.ENOSYS, errno.EOPNOTSUPP})
+
 
 @dataclass(frozen=True)
 class ProviderLayout:
@@ -340,27 +349,59 @@ def provider_layout(command, cwd, env, provider_id) -> ProviderLayout | None:
         return None
 
 
+def _is_provider_runner(command, env) -> bool:
+    """Whether ``command`` starts the real provider runner for a bundle, whatever interpreter it uses."""
+    try:
+        return bool(
+            command
+            and len(command) >= 2
+            and os.path.abspath(str(command[-1])) == _RUNNER_PATH
+            and (env or {}).get("BAZARR_PROVIDER_HUB_BUNDLE")
+        )
+    except Exception:
+        return False
+
+
 def provider_spec(layout: ProviderLayout, command, cwd, env):
     """The launch specification of one provider worker: the softer provider profile.
 
-    Filesystem: read-only for everything the host can see outside the configuration folder (the
-    media library included), read-write for the plugin's own data and temp folders, read-only for
-    its bundle and environment. The configuration folder, with its ``config.yaml`` and the
-    database, is not granted. No TCP rules, no file-size or process-count limit and no metadata
-    filter, so ``ffmpeg`` can write large temporary files and run its threads.
+    Filesystem: an allowlist. Read-only for the system paths, the interpreter and its libraries, the
+    plugin's bundle and environment, the programs on ``PATH`` and the media root folders; read-write
+    for the plugin's own data and temp folders. Everything else is denied: the configuration folder
+    (``config.yaml`` and the database), the backup folder, home folders and other services' data.
+    No TCP rules, no file-size or process-count limit and no metadata filter, so ``ffmpeg`` can
+    write large temporary files and run its threads.
     """
+    from .provider_roots import backup_folders, media_root_folders, program_folders
     from .runtime.environment import worker_environment
-    from .sandbox.policy import PROVIDER_LIMITS, RuntimeSpec, SandboxPolicy, provider_outside_paths
+    from .sandbox.policy import (
+        PROVIDER_EXTRA_READ_PATHS,
+        PROVIDER_LIMITS,
+        RuntimeSpec,
+        SandboxPolicy,
+        provider_tree_grants,
+    )
 
     base = layout.hub_dir / "run" / layout.key
     data, temp = base / "data", base / "tmp"
-    for folder in (data, temp):
+    for folder in (base, data, temp):
         folder.mkdir(parents=True, exist_ok=True, mode=0o700)
+        # The worker can change the mode of its own folders; the next start puts it back.
+        os.chmod(folder, 0o700)
+    backups = backup_folders()
+    shields = [layout.config_dir, *backups]
+    managed_binaries = layout.config_dir / "managed" / "bin"
     policy = SandboxPolicy.for_interpreter(
         layout.interpreter,
-        read_only=[*provider_outside_paths(layout.config_dir), layout.bundle, layout.runner],
+        read_only=[
+            layout.bundle,
+            layout.runner,
+            managed_binaries,
+            *PROVIDER_EXTRA_READ_PATHS,
+            *provider_tree_grants([*program_folders(), *media_root_folders()], shields),
+        ],
         read_write=[data, temp],
-        protected_paths=[layout.config_dir / "config", layout.config_dir / "db"],
+        protected_paths=[layout.config_dir / "config", layout.config_dir / "db", *backups],
     )
     environment = worker_environment(
         "subtitle_provider",
@@ -485,17 +526,20 @@ class ProviderWorkerClient:
     def _spawn(self, env: dict[str, str]):
         """Start the worker process: through the provider sandbox when it applies, else directly.
 
-        A provider worker is sandboxed unless the user switched that off, this client already
-        failed open, or the host cannot do it (then the worker starts without it and the status
-        page says so). Everything that is not a hub provider worker starts as before.
+        A provider worker is sandboxed unless the user switched that off or the host cannot do it
+        (no Landlock, or a canary that escaped): then it starts without it and the status page
+        says so. Where the host can, a start that cannot prepare its ruleset fails: a worker that
+        can damage the files the ruleset is built from must not be able to turn the sandbox off
+        for its next start. Everything that is not a hub provider worker starts as before.
         """
+        self._sandbox_layout = None
         profile = self._sandbox_profile()
         if profile is not None:
             try:
                 return profile()
             except Exception as error:
-                # Whatever stops the ruleset being prepared, the provider still starts.
-                self._fail_open(f"the sandbox could not be prepared: {error}")
+                self._blocked(f"the ruleset could not be prepared: {error}")
+                raise WorkerError(f"the sandbox could not be prepared, so the provider was not started: {error}") from error
         return subprocess.Popen(
             self.command,
             cwd=self.cwd,
@@ -511,8 +555,17 @@ class ProviderWorkerClient:
         """A callable that starts the sandboxed worker, or None when this start is unsandboxed."""
         if getattr(self, "_sandbox_failed_open", False):
             return None
-        layout = provider_layout(self.command, self.cwd, self.env, getattr(self, "provider_id", None))
+        provider_id = getattr(self, "provider_id", None)
+        layout = provider_layout(self.command, self.cwd, self.env, provider_id)
         if layout is None:
+            if _is_provider_runner(self.command, self.env):
+                from .sandbox import note_provider_unsandboxed, provider_profile_enabled
+
+                if provider_profile_enabled():
+                    note_provider_unsandboxed(
+                        provider_id or "temporary",
+                        "the worker does not run from one of the hub's own environments",
+                    )
             return None
         from .sandbox import provider_profile_enabled
 
@@ -523,7 +576,6 @@ class ProviderWorkerClient:
         probe = probe_sandbox()
         if not probe.enforces(PROVIDER_MIN_ABI):
             note_provider_unsandboxed(layout.key, probe.reason or "this host has no Landlock")
-            self._sandbox_layout = None
             return None
 
         def start():
@@ -542,21 +594,35 @@ class ProviderWorkerClient:
 
         return start
 
+    def _notice_key(self) -> str:
+        layout = provider_layout(self.command, self.cwd, self.env, getattr(self, "provider_id", None))
+        return layout.key if layout else (getattr(self, "provider_id", None) or "temporary")
+
     def _fail_open(self, cause: str) -> None:
-        """Remember that this client's workers start without the sandbox from now on, and say why."""
+        """The kernel cannot apply a ruleset at all: this client's workers start without it from now on, and say why."""
         from .sandbox import note_provider_unsandboxed
 
         self._sandbox_failed_open = True
         self._sandbox_layout = None
-        layout = provider_layout(self.command, self.cwd, self.env, getattr(self, "provider_id", None))
-        note_provider_unsandboxed(layout.key if layout else (getattr(self, "provider_id", None) or "temporary"), cause)
+        note_provider_unsandboxed(self._notice_key(), cause)
+
+    def _blocked(self, cause: str) -> None:
+        """Record that a start was refused because its ruleset could not be applied."""
+        from .sandbox import note_provider_blocked
+
+        self._sandbox_layout = None
+        note_provider_blocked(self._notice_key(), cause)
 
     def _opened_after_apply_failure(self) -> bool:
-        """After a worker that said nothing: True when the launcher reports the ruleset was not applied.
+        """After a worker that said nothing: handle a launcher report that the ruleset was not applied.
 
-        The client then starts its workers without the sandbox from now on, so the caller starts one
-        and sends the request again. A worker that is merely gone, for any other reason, is not
-        this: the request fails as it always did.
+        Only a report that the ruleset failed to apply before the worker ran counts; a report about
+        the launcher's cleanup, or its fork, after the worker ran is not one (``_sandbox_apply_failure``).
+        When the kernel itself cannot apply a ruleset (no Landlock, or a lower ABI than the probe
+        saw) the client starts its workers without it from now on and True is returned, so the caller
+        starts one and sends the request again. Any other failure (a grant that could not be opened,
+        a capability that could not be dropped) refuses this start with an error: it is what a worker
+        that damaged its own folders would cause, and it must not switch the sandbox off.
         """
         process = self.process
         if process is None or not getattr(self, "_sandbox_layout", None):
@@ -571,8 +637,12 @@ class ProviderWorkerClient:
         if not cause:
             return False
         self._kill_tree(process, 5.0)
-        self._fail_open(f"the sandbox could not be applied: {cause}")
-        return True
+        match = _ERRNO_IN_MESSAGE.search(cause)
+        if match and int(match.group(1)) in _KERNEL_CANNOT_APPLY:
+            self._fail_open(f"the kernel could not apply the ruleset: {cause}")
+            return True
+        self._blocked(f"the ruleset could not be applied: {cause}")
+        raise WorkerError(f"the sandbox could not be applied, so the provider was not started: {cause}")
 
     def _sandboxed_answer(self, line: str) -> None:
         """A sandboxed worker answered, so its ruleset is in force: any earlier notice for it is out of date."""
@@ -592,7 +662,7 @@ class ProviderWorkerClient:
             failure = report()
         except Exception:
             return None
-        if failure is not None and failure.kind == "sandbox":
+        if failure is not None and failure.kind == "sandbox" and failure.message.startswith(_APPLY_FAILURE_PREFIX):
             return failure.message
         return None
 

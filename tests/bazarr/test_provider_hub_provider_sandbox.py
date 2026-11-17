@@ -65,6 +65,10 @@ class Fixture:
         if op == "stub":
             completed = subprocess.run([config["stub"], config["size"]], capture_output=True, text=True)
             return [{"result": completed.stdout.strip() or completed.stderr.strip(), "code": completed.returncode}]
+        if op == "chmod":
+            return [{"result": _try(lambda: (os.chmod(config["path"], 0), "changed")[1])}]
+        if op == "exit":
+            os._exit(3)
         if op == "env":
             return [{"result": {key: os.environ.get(key) for key in config["keys"]}}]
         raise ValueError(op)
@@ -127,14 +131,17 @@ def host(tmp_path, monkeypatch):
     monkeypatch.setattr(worker_module, "provider_layout", lambda *args, **kwargs: layout)
     monkeypatch.setattr("provider_hub.sandbox.provider_profile_enabled", lambda: True)
 
-    # The walk lists the entries beside every ancestor of the configuration folder. A shared
-    # temp directory holds thousands of unrelated ones, which would only bloat the launch spec.
-    real_outside = policy_module.provider_outside_paths
-
-    def bounded(shield, **kwargs):
-        return tuple(path for path in real_outside(shield, **kwargs) if os.path.dirname(path) not in ("/tmp", "/var/tmp"))
-
-    monkeypatch.setattr(policy_module, "provider_outside_paths", bounded)
+    # What the profile may read besides the system, the interpreter and the bundle: the programs on
+    # PATH and the media roots. A folder beside the others that is neither holds a secret.
+    secret = tmp_path / "home" / "me"
+    secret.mkdir(parents=True)
+    (secret / "id_rsa").write_text("private key", encoding="utf-8")
+    backups = tmp_path / "backups"
+    backups.mkdir()
+    (backups / "backup.txt").write_text("copy of config.yaml and the database", encoding="utf-8")
+    monkeypatch.setenv("PATH", str(stub.parent) + os.pathsep + os.environ.get("PATH", ""))
+    monkeypatch.setattr("provider_hub.provider_roots.media_root_folders", lambda: [str(media)])
+    monkeypatch.setattr("provider_hub.provider_roots.backup_folders", lambda: [backups])
     return {
         "config": config,
         "media": media,
@@ -142,6 +149,8 @@ def host(tmp_path, monkeypatch):
         "stub": stub,
         "layout": layout,
         "root": tmp_path,
+        "secret": secret,
+        "backups": backups,
     }
 
 
@@ -175,9 +184,13 @@ def client(host):
 
 
 def _enforcing_kernel():
+    """The provider profile needs Landlock from ABI 1, not the full sandbox, so this runs on older kernels too."""
     probe = probe_sandbox()
-    if not probe.enforced:
-        pytest.skip("this host cannot enforce the worker sandbox: %s" % probe.reason)
+    if not probe.enforces(PROVIDER_MIN_ABI):
+        reason = "this host cannot enforce the provider sandbox: %s" % probe.reason
+        if os.environ.get("BAZARR_REQUIRE_SANDBOX_TESTS") == "1":
+            pytest.fail("BAZARR_REQUIRE_SANDBOX_TESTS=1 but %s" % reason, pytrace=False)
+        pytest.skip(reason)
     return probe
 
 
@@ -249,12 +262,31 @@ def test_without_landlock_the_provider_still_starts_and_the_status_carries_a_not
     assert status["unsandboxed"] == ["fixture"]
 
 
-def test_when_the_ruleset_cannot_be_applied_the_provider_starts_anyway_and_the_notice_names_the_cause(
+def test_when_the_kernel_cannot_apply_a_ruleset_the_provider_starts_anyway_and_the_notice_names_the_cause(
     host, client, monkeypatch
 ):
-    # The probe says the host enforces, but the launcher cannot apply this worker's ruleset: a grant
-    # is not the object the policy recorded. The worker never ran, so the request is repeated without it.
-    probe = SandboxProbe(abi=10, verified=True, reason="kernel reports ABI 10, canary confined")
+    # The probe says the host enforces, but the kernel the worker lands on has a lower ABI than the
+    # probe saw: no ruleset can be applied at all. The worker never ran, so the request is repeated without it.
+    probe = SandboxProbe(abi=99, verified=True, reads_verified=True, reason="forced for the test")
+    monkeypatch.setattr("provider_hub.sandbox.probe_sandbox", lambda *a, **k: probe)
+    worker = client()
+
+    answer = _ask(worker, op="read", path=str(host["config"] / "config" / "config.yaml"))
+    assert answer["result"].startswith("general:")
+    assert worker._sandbox_failed_open is True
+    assert getattr(worker.process, "enforcement", "declared") == "declared"
+    status = provider_profile_status(probe)
+    assert status["state"] == "unsandboxed"
+    assert status["unsandboxed"] == ["fixture"]
+    assert "could not apply the ruleset" in status["notice"]
+    # The client does not try the sandbox again for its next worker.
+    assert _ask(worker, op="read", path=str(host["media"] / "film.mkv"))["result"] == "film"
+
+
+def test_a_ruleset_that_fails_to_apply_for_any_other_reason_refuses_the_start_instead_of_opening(host, client, monkeypatch):
+    # A grant that is not the object the policy recorded. A worker that damaged its own tree could cause
+    # this, so the sandbox must not be dropped for it.
+    probe = SandboxProbe(abi=10, verified=True, reads_verified=True)
     monkeypatch.setattr("provider_hub.sandbox.probe_sandbox", lambda *a, **k: probe)
     real_spec = worker_module.provider_spec
 
@@ -269,20 +301,22 @@ def test_when_the_ruleset_cannot_be_applied_the_provider_starts_anyway_and_the_n
     monkeypatch.setattr(worker_module, "provider_spec", broken)
     worker = client()
 
-    answer = _ask(worker, op="read", path=str(host["config"] / "config" / "config.yaml"))
-    assert answer["result"].startswith("general:")
-    assert worker._sandbox_failed_open is True
-    assert getattr(worker.process, "enforcement", "declared") == "declared"
+    with pytest.raises(worker_module.WorkerError, match="was not started"):
+        _ask(worker, op="read", path=str(host["config"] / "config" / "config.yaml"))
+    assert worker._sandbox_failed_open is False
     status = provider_profile_status(probe)
-    assert status["state"] == "unsandboxed"
-    assert status["unsandboxed"] == ["fixture"]
-    assert "could not be applied" in status["notice"]
-    # The client does not try the sandbox again for its next worker.
-    assert _ask(worker, op="read", path=str(host["media"] / "film.mkv"))["result"] == "film"
+    assert status["state"] == "blocked"
+    assert status["blocked"] == ["fixture"] and status["unsandboxed"] == []
+    assert "could not be applied" in status["notice"] and "was not started" in status["notice"]
+    # Again, once the grant is right: nothing was latched open.
+    monkeypatch.setattr(worker_module, "provider_spec", real_spec)
+    _enforcing_kernel()
+    assert _ask(worker, op="read", path=str(host["config"] / "config" / "config.yaml"))["result"] == "denied"
+    assert provider_profile_status(probe)["state"] == "enforced"
 
 
-def test_a_failed_preparation_also_fails_open(host, client, monkeypatch):
-    probe = SandboxProbe(abi=10, verified=True)
+def test_a_failed_preparation_refuses_the_start_where_the_host_can_enforce_and_never_runs_unsandboxed(host, client, monkeypatch):
+    probe = SandboxProbe(abi=10, verified=True, reads_verified=True)
     monkeypatch.setattr("provider_hub.sandbox.probe_sandbox", lambda *a, **k: probe)
 
     def refuse(*args, **kwargs):
@@ -291,8 +325,80 @@ def test_a_failed_preparation_also_fails_open(host, client, monkeypatch):
     monkeypatch.setattr(worker_module, "provider_spec", refuse)
     worker = client()
 
-    assert _ask(worker, op="read", path=str(host["media"] / "film.mkv"))["result"] == "film"
+    with pytest.raises(worker_module.WorkerError, match="shielded folder"):
+        _ask(worker, op="read", path=str(host["media"] / "film.mkv"))
+    assert worker.process is None
     assert "shielded folder" in provider_profile_status(probe)["notice"]
+
+
+def test_a_worker_that_damages_its_own_folder_cannot_switch_the_sandbox_off_for_its_next_start(host, client):
+    _enforcing_kernel()
+    worker = client()
+    run = host["config"] / "provider_hub" / "run" / "fixture"
+
+    assert _ask(worker, op="read", path=str(host["config"] / "config" / "config.yaml"))["result"] == "denied"
+    assert _ask(worker, op="chmod", path=str(run / "data"))["result"] == "changed"
+    assert _ask(worker, op="chmod", path=str(run))["result"] == "changed"
+    with pytest.raises(worker_module.WorkerError):
+        _ask(worker, op="exit")
+
+    # The next start puts the folders right and is sandboxed again.
+    assert _ask(worker, op="read", path=str(host["config"] / "config" / "config.yaml"))["result"] == "denied"
+    assert worker._sandbox_failed_open is False
+    assert (run.stat().st_mode & 0o777) == 0o700
+
+
+def _launcher_failure_client(kind, message):
+    worker = ProviderWorkerClient.__new__(ProviderWorkerClient)
+
+    class Process:
+        returncode = 78
+
+        @staticmethod
+        def launcher_failure():
+            return spawn_module.LauncherFailure(kind, message)
+
+        @staticmethod
+        def poll():
+            return 78
+
+    worker.process = Process()
+    worker._sandbox_layout = object()
+    worker.command, worker.cwd, worker.env, worker.provider_id = ["x"], None, {}, "fixture"
+    worker._sandbox_failed_open = False
+    worker._killed = []
+    worker._kill_tree = lambda process, grace: worker._killed.append(process) or True
+    worker._has_exited = lambda process: True
+    return worker
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "a descendant of the worker survived the launcher's cleanup",
+        "a descendant of the worker may have survived the launcher's cleanup",
+        "launcher could not fork the worker: [Errno 11] Resource temporarily unavailable",
+    ],
+)
+def test_a_launcher_report_about_the_cleanup_or_the_fork_is_never_an_apply_failure(message):
+    worker = _launcher_failure_client("sandbox", message)
+
+    assert worker._sandbox_apply_failure() is None
+    assert worker._opened_after_apply_failure() is False
+    assert worker._sandbox_failed_open is False
+    assert worker._killed == []
+
+
+def test_only_a_report_that_the_ruleset_was_not_applied_is_one():
+    ours = "could not apply sandbox: [Errno 13] Permission denied"
+    worker = _launcher_failure_client("sandbox", ours)
+    assert worker._sandbox_apply_failure() == ours
+    # A report of another kind (a bad spec, a failed exec) is not one either.
+    assert _launcher_failure_client("exec", "exec failed: x")._sandbox_apply_failure() is None
+    assert _launcher_failure_client("spec", "bad working directory: x")._sandbox_apply_failure() is None
+    with pytest.raises(worker_module.WorkerError, match="was not started"):
+        worker._opened_after_apply_failure()
+    assert worker._sandbox_failed_open is False
 
 
 # ------------------------------------------------------------------------------------- the switch
@@ -308,7 +414,8 @@ def test_with_the_toggle_off_the_worker_starts_without_the_ruleset(host, client,
 
     assert _ask(worker, op="read", path=str(host["config"] / "config" / "config.yaml"))["result"].startswith("general:")
     status = provider_profile_status(SandboxProbe(abi=10, verified=True), enabled=False)
-    assert status == {"enabled": False, "state": "off", "notice": None, "unsandboxed": []}
+    assert (status["enabled"], status["state"], status["notice"]) == (False, "off", None)
+    assert status["unsandboxed"] == [] and status["blocked"] == []
 
 
 def test_the_toggle_is_a_setting_that_is_on_by_default():
@@ -337,19 +444,47 @@ def test_a_provider_that_started_without_the_sandbox_is_named_while_the_host_enf
 
 
 # ------------------------------------------------------------------------------ the profile itself
-def test_the_profile_shields_the_configuration_folder_and_grants_the_rest_read_only(host):
+def test_the_profile_is_an_allowlist_of_the_system_the_plugin_the_programs_and_the_media(host):
     spec = worker_module.provider_spec(host["layout"], worker_command(sys.executable, RUNNER), host["bundle"], {})
     config = str(host["config"])
     granted = [*spec.policy.read_only, *spec.policy.read_write]
 
-    assert not any(path == config or path.startswith(config + "/") and "/run/" not in path for path in granted)
+    def covered(path):
+        return any(path == grant or path.startswith(grant.rstrip("/") + "/") for grant in granted)
+
+    run = config + "/provider_hub/run/fixture"
+    assert not any(path == config or (path.startswith(config + "/") and not path.startswith(run + "/")) for path in granted)
     assert str(host["media"]) in spec.policy.read_only
     assert str(host["bundle"]) in spec.policy.read_only
-    assert sorted(spec.policy.read_write) == [
-        str(host["config"] / "provider_hub" / "run" / "fixture" / "data"),
-        str(host["config"] / "provider_hub" / "run" / "fixture" / "tmp"),
-    ]
+    assert str(host["stub"].parent) in spec.policy.read_only
+    # Beside them, nothing: a home folder, a backup folder, the folder that holds the test's own files.
+    assert not covered(str(host["secret"] / "id_rsa"))
+    assert not covered(str(host["backups"] / "backup.txt"))
+    assert not covered(str(host["root"]))
+    for top in ("/root", "/var", "/srv", "/opt", "/mnt", "/home", "/tmp", "/boot", "/run", "/etc/shadow"):
+        assert top not in granted
+    assert sorted(spec.policy.read_write) == [run + "/data", run + "/tmp"]
     assert spec.policy.connect_ports is None
+
+
+def test_a_provider_worker_cannot_read_a_home_folder_or_the_backups(host, client):
+    _enforcing_kernel()
+    worker = client()
+
+    assert _ask(worker, op="read", path=str(host["secret"] / "id_rsa"))["result"] == "denied"
+    assert _ask(worker, op="read", path=str(host["backups"] / "backup.txt"))["result"] == "denied"
+    assert _ask(worker, op="read", path=str(host["media"] / "film.mkv"))["result"] == "film"
+
+
+def test_the_backup_folder_is_a_protected_path_of_the_policy(host, monkeypatch):
+    # A backup folder inside a granted tree would be refused outright: no start is ever built with it readable.
+    monkeypatch.setattr("provider_hub.provider_roots.backup_folders", lambda: [host["media"] / "backups"])
+    (host["media"] / "backups").mkdir()
+    spec = worker_module.provider_spec(host["layout"], worker_command(sys.executable, RUNNER), host["bundle"], {})
+
+    assert str(host["media"]) not in spec.policy.read_only
+    assert str(host["media"] / "film.mkv") in spec.policy.read_only
+    assert str(host["media"] / "backups") not in spec.policy.read_only
 
 
 def test_the_profile_leaves_out_the_file_size_and_process_limits_and_the_metadata_filter(host):
@@ -386,25 +521,28 @@ def test_the_profile_environment_has_the_plugins_home_and_temp_folders_and_no_pr
     assert "BAZARR_PROVIDER_HUB_MANIFEST" in spec.env
 
 
-def test_the_outside_paths_hold_everything_beside_the_configuration_folder_and_not_the_folder(tmp_path):
-    shield = tmp_path / "data" / "config"
-    shield.mkdir(parents=True)
-    (tmp_path / "data" / "cache").mkdir()
-    (tmp_path / "library").mkdir()
-    (tmp_path / "link").symlink_to(shield)
+def test_tree_grants_leave_out_a_shielded_folder_inside_a_root(tmp_path):
+    root = tmp_path / "data"
+    (root / "config" / "db").mkdir(parents=True)
+    (root / "media" / "films").mkdir(parents=True)
+    (root / "cache").mkdir()
+    (root / "top.mkv").write_text("x", encoding="utf-8")
+    elsewhere = tmp_path / "library"
+    elsewhere.mkdir()
+    (tmp_path / "link").symlink_to(root / "config")
 
-    found = policy_module.provider_outside_paths(shield)
+    found = policy_module.provider_tree_grants([root, elsewhere, tmp_path / "link", tmp_path / "missing"], [root / "config"])
 
-    assert str(tmp_path / "library") in found
-    assert str(tmp_path / "data" / "cache") in found
-    assert str(shield) not in found
-    # An ancestor would cover the shielded folder, and a link into it would too.
-    assert str(tmp_path) not in found and str(tmp_path / "data") not in found
-    assert str(tmp_path / "link") not in found
-    for name in ("proc", "dev", "etc", "run"):
-        assert "/" + name not in found
+    assert str(elsewhere) in found
+    assert str(root / "media") in found and str(root / "cache") in found and str(root / "top.mkv") in found
+    # The root that held the shield is replaced by what lies beside it; the shield, a link into it and a
+    # folder that does not exist are not granted.
+    assert str(root) not in found and str(root / "config") not in found
+    assert str(tmp_path / "link") not in found and str(tmp_path / "missing") not in found
+    # A root that is itself inside a shield is dropped.
+    assert policy_module.provider_tree_grants([root / "config" / "db"], [root / "config"]) == ()
     with pytest.raises(policy_module.PolicyError):
-        policy_module.provider_outside_paths("/")
+        policy_module.provider_tree_grants(["/"], [root])
 
 
 def test_only_the_real_runner_started_from_a_hub_interpreter_is_a_provider_worker(tmp_path, monkeypatch):
@@ -573,3 +711,37 @@ def test_on_an_older_abi_a_provider_cannot_read_the_configuration_and_ffmpeg_sti
     assert answer["code"] == 0 and answer["result"] == "wrote %d" % (size + 1)
     assert getattr(worker.process, "enforcement", None) == "enforced"
     assert worker._sandbox_failed_open is False
+
+
+def test_the_probe_checks_the_filesystem_where_the_metadata_filter_does_not_exist(monkeypatch):
+    # An architecture without the filter loses the full sandbox, not the part the provider profile uses.
+    _enforcing_kernel()
+    monkeypatch.setattr(spawn_module.seccomp, "supported", lambda: False)
+
+    probe = spawn_module._run_probe(sys.executable)
+
+    assert probe.reads_verified is True
+    assert probe.enforced is False and probe.verified is False
+    assert probe.enforces(PROVIDER_MIN_ABI) is True
+    assert "metadata filter" in probe.reason
+    assert provider_profile_status(probe)["state"] in ("enforced", "partial")
+
+
+def test_the_status_lists_what_the_provider_profile_leaves_open_on_every_kernel():
+    status = provider_profile_status(SandboxProbe(abi=10, verified=True, reads_verified=True))
+
+    assert status["state"] == "enforced"
+    text = " ".join(status["limitations"])
+    assert "seccomp" in text and "mode, owner, times or extended attributes" in text
+    assert "file-size" in text
+
+
+def test_a_refused_start_is_its_own_state_and_clears_when_a_sandboxed_worker_answers():
+    probe = SandboxProbe(abi=10, verified=True, reads_verified=True)
+    spawn_module.note_provider_blocked("embeddedsubtitles", "the ruleset could not be applied: grant changed")
+
+    status = provider_profile_status(probe)
+    assert status["state"] == "blocked" and status["blocked"] == ["embeddedsubtitles"]
+    assert "was not started" in status["notice"]
+    spawn_module.clear_provider_notice("embeddedsubtitles")
+    assert provider_profile_status(probe)["state"] == "enforced"

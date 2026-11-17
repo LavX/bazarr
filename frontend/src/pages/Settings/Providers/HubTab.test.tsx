@@ -157,6 +157,72 @@ it("saves the subtitle provider sandbox switch and shows the notice when provide
   );
 });
 
+// The host's sandbox check runs once, in the background, after boot. A Subtitle Hub opened before it has
+// answered shows the notice as soon as it has, without a reload.
+it("shows the provider sandbox notice once the pending host check has answered", async () => {
+  let answered = false;
+  server.use(
+    http.get("/api/system/settings", () =>
+      HttpResponse.json({
+        general: {
+          theme: "auto",
+          enabled_providers: [],
+          provider_hub_sandbox: true,
+        },
+      }),
+    ),
+    http.get("/api/system/status", () =>
+      HttpResponse.json({
+        data: {
+          sandbox: answered
+            ? {
+                pending: false,
+                providers: {
+                  enabled: true,
+                  state: "unsandboxed",
+                  notice:
+                    "Subtitle provider plugins run without the sandbox on this host: no Landlock.",
+                  unsandboxed: [],
+                },
+              }
+            : {
+                pending: true,
+                providers: {
+                  enabled: true,
+                  state: "pending",
+                  notice: null,
+                  unsandboxed: [],
+                },
+              },
+        },
+      }),
+    ),
+  );
+  const router = createMemoryRouter(
+    [{ path: "/subtitle-hub", element: <SettingsProvidersView /> }],
+    { initialEntries: ["/subtitle-hub"] },
+  );
+  rawRender(
+    <AllProviders>
+      <RouterProvider router={router} />
+    </AllProviders>,
+  );
+  await screen.findByRole("switch", {
+    name: "Sandbox subtitle provider plugins",
+  });
+  expect(screen.queryByText(/run without the sandbox on this host/)).toBeNull();
+  answered = true;
+  expect(
+    await screen.findByText(
+      /run without the sandbox on this host: no Landlock/,
+      undefined,
+      {
+        timeout: 10000,
+      },
+    ),
+  ).toBeInTheDocument();
+}, 20000);
+
 // The write-only states of a plugin secret on the provider card. The value
 // never comes back from the API, so the card has to say what is stored
 // through the descriptor, and every action has to be explicit: an

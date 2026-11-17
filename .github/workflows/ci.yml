@@ -510,7 +510,10 @@ jobs:
       - name: pytest worker sandbox (a skipped enforcement test is a failure)
         env:
           BAZARR_REQUIRE_SANDBOX_TESTS: "1"
-        run: pytest tests/bazarr/test_plugin_sandbox_launcher.py -v --tb=short
+        run: |
+          pytest tests/bazarr/test_plugin_sandbox_launcher.py \
+            tests/bazarr/test_provider_hub_provider_sandbox.py \
+            -v --tb=short
 
   backend-suites:
     name: Backend suites (Python ${{ matrix.python-version }})

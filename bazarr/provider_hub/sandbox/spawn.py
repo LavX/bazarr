@@ -66,8 +66,10 @@ __all__ = [
     "SandboxProbe",
     "WorkerProcess",
     "clear_provider_notice",
+    "note_provider_blocked",
     "note_provider_unsandboxed",
     "probe_sandbox",
+    "PROVIDER_PROFILE_LIMITATIONS",
     "provider_profile_enabled",
     "provider_profile_gaps",
     "provider_profile_status",
@@ -232,7 +234,10 @@ def sandbox_limitations(probe: SandboxProbe) -> list[str]:
             "their files, network or signals. A plugin may not keep deleted files mapped inside "
             "its folders." + _shm_note()
         ]
-    notes = ["Workers cannot change file modes, owners, times or extended attributes anywhere."]
+    notes = [
+        "Workers cannot change file modes, owners, times or extended attributes anywhere. "
+        "Subtitle provider plugins are the exception: they run without that filter."
+    ]
     if probe.abi < 4 or not probe.network_enforced:
         notes.append("Network connections are not restricted.")
     if probe.abi < 9:
@@ -267,7 +272,8 @@ def sandbox_limitations(probe: SandboxProbe) -> list[str]:
 # never come through here; they fail closed.
 
 _provider_notice_lock = threading.Lock()
-_provider_notices: dict[str, str] = {}
+# provider -> (what happened, cause). "unsandboxed": it runs without the ruleset. "blocked": its start was refused.
+_provider_notices: dict[str, tuple[str, str]] = {}
 
 
 def provider_profile_enabled() -> bool:
@@ -280,16 +286,28 @@ def provider_profile_enabled() -> bool:
         return True
 
 
-def note_provider_unsandboxed(provider: str, cause: str) -> None:
-    """Record that a provider worker started without the ruleset, and why. One entry per provider."""
+def _note(provider: str, kind: str, cause: str) -> None:
     cause = " ".join(str(cause or "unknown reason").split())[:300]
     with _provider_notice_lock:
-        first = _provider_notices.get(provider) != cause
-        _provider_notices[provider] = cause
+        first = _provider_notices.get(provider) != (kind, cause)
+        _provider_notices[provider] = (kind, cause)
     if first:
         logging.getLogger(__name__).warning(
-            "Subtitle provider %s runs without the worker sandbox: %s", provider, cause
+            "Subtitle provider %s %s: %s",
+            provider,
+            "runs without the worker sandbox" if kind == "unsandboxed" else "was not started, the worker sandbox could not be applied",
+            cause,
         )
+
+
+def note_provider_unsandboxed(provider: str, cause: str) -> None:
+    """Record that a provider worker started without the ruleset, and why. One entry per provider."""
+    _note(provider, "unsandboxed", cause)
+
+
+def note_provider_blocked(provider: str, cause: str) -> None:
+    """Record that a provider worker was not started because its ruleset could not be applied."""
+    _note(provider, "blocked", cause)
 
 
 def clear_provider_notice(provider: str) -> None:
@@ -308,7 +326,7 @@ def provider_profile_gaps(abi: int) -> list[str]:
     if abi < 3:
         gaps.append(
             "truncating a file is not controlled, so a plugin can still empty a file the Bazarr+ user "
-            "can write, the media library included"
+            "can write, config.yaml, the database and the media library included"
         )
     if abi < 2:
         gaps.append(
@@ -318,21 +336,40 @@ def provider_profile_gaps(abi: int) -> list[str]:
     return gaps
 
 
+# True on every kernel: provider plugins run without the metadata filter (seccomp) that the other
+# plugin kinds get, because ffmpeg needs the calls it blocks to be cheap and the limits it sets to be absent.
+PROVIDER_PROFILE_LIMITATIONS: tuple[str, ...] = (
+    "the metadata filter (seccomp) is not applied to provider plugins, so a plugin can change the mode, "
+    "owner, times or extended attributes of any file the Bazarr+ user owns, media included",
+    "the file-size and process-count limits are not applied",
+    "network connections are not restricted",
+)
+
+
 def provider_profile_status(probe: "SandboxProbe | None", *, enabled: bool | None = None) -> dict[str, Any]:
     """What confines subtitle provider workers, for the status page and the Subtitle Hub.
 
     ``state`` is ``enforced`` (the filesystem ruleset applies in full), ``partial`` (it applies, on
     a Landlock ABI older than 3: ``notice`` names what it leaves open), ``unsandboxed`` (switched
-    on but the host, or a start, could not apply it: ``notice`` says why), ``off`` (switched off by
-    the user) or ``pending`` (the host check is still running). ``probe`` is None while that check runs.
+    on but the host, or a start, could not apply it: ``notice`` says why), ``blocked`` (the host
+    can, but a start could not apply its ruleset and was refused), ``off`` (switched off by the
+    user) or ``pending`` (the host check is still running). ``probe`` is None while that check
+    runs. ``limitations`` is what the provider profile leaves open on every kernel.
     """
     if enabled is None:
         enabled = provider_profile_enabled()
     with _provider_notice_lock:
         recorded = dict(_provider_notices)
-    result: dict[str, Any] = {"enabled": bool(enabled), "state": "off", "notice": None, "unsandboxed": sorted(recorded)}
+    result: dict[str, Any] = {
+        "enabled": bool(enabled),
+        "state": "off",
+        "notice": None,
+        "unsandboxed": sorted(name for name, (kind, _cause) in recorded.items() if kind == "unsandboxed"),
+        "blocked": sorted(name for name, (kind, _cause) in recorded.items() if kind == "blocked"),
+        "limitations": list(PROVIDER_PROFILE_LIMITATIONS),
+    }
     if not enabled:
-        result["unsandboxed"] = []
+        result["unsandboxed"] = result["blocked"] = []
         return result
     if probe is None:
         result["state"] = "pending"
@@ -345,12 +382,20 @@ def provider_profile_status(probe: "SandboxProbe | None", *, enabled: bool | Non
             "from reading the configuration or the database: %s." % reason.rstrip("."),
         )
         return result
-    if recorded:
-        names = ", ".join(sorted(recorded))
+    if result["blocked"]:
+        causes = "; ".join(sorted({c.rstrip(".") for _n, (k, c) in recorded.items() if k == "blocked"}))
+        result.update(
+            state="blocked",
+            notice="The sandbox could not be applied to %s, so it was not started: %s."
+            % (", ".join(result["blocked"]), causes),
+        )
+        return result
+    if result["unsandboxed"]:
+        causes = "; ".join(sorted({c.rstrip(".") for _n, (k, c) in recorded.items() if k == "unsandboxed"}))
         result.update(
             state="unsandboxed",
             notice="The sandbox could not be applied to %s, which runs without it: %s."
-            % (names, "; ".join(sorted(set(v.rstrip(".") for v in recorded.values())))),
+            % (", ".join(result["unsandboxed"]), causes),
         )
         return result
     gaps = provider_profile_gaps(probe.abi)
@@ -573,8 +618,9 @@ def _run_probe(python: str) -> SandboxProbe:
     abi, reason = landlock.probe_abi()
     if abi < 1:
         return SandboxProbe(abi=0, verified=False, reason=reason)
-    if not seccomp.supported():
-        return SandboxProbe(abi=abi, verified=False, reason="no metadata filter for this architecture")
+    # The metadata filter exists for some architectures only. Where it does not, every kind that needs it
+    # is not "enforced", but the filesystem canary still runs: the provider profile does not use the filter.
+    filter_available = seccomp.supported()
     if getattr(sys, "frozen", False) and python == sys.executable:
         return SandboxProbe(abi=abi, verified=False, reason="frozen build has no stand-alone interpreter for the launcher")
     base = tempfile.mkdtemp(prefix="bazarr-landlock-")
@@ -602,6 +648,7 @@ def _run_probe(python: str) -> SandboxProbe:
             env=clean_env(home=allowed, tmpdir=allowed),
             policy=policy,
             term_grace=1.0,
+            seccomp=filter_available,
         )
         process = _start(spec, enforce=True, min_abi=1, enforcement="enforced", stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         try:
@@ -619,6 +666,12 @@ def _run_probe(python: str) -> SandboxProbe:
         reads_verified = result.get("write_inside") == "allowed" and all(
             result.get(k) == "denied" for k in _CANARY_READS_DENIED
         )
+        if not filter_available:
+            if not reads_verified:
+                return SandboxProbe(abi=abi, verified=False, reason="canary escaped the sandbox: %s" % result)
+            return SandboxProbe(
+                abi=abi, verified=False, reads_verified=True, reason="no metadata filter for this architecture"
+            )
         if abi < MIN_ENFORCED_ABI:
             # Below ABI 3 the full canary cannot pass (truncate is not covered), so the host is not
             # "enforced" for any worker that needs that. The reads and writes it did hold back are
@@ -1605,7 +1658,9 @@ def spawn_worker(
 
     "Enforced" means all of: the ruleset (filesystem, plus network and signal
     scope where the ABI has them), every Linux capability dropped, the seccomp
-    filter that denies chmod, chown, utime and xattr calls, and the limits.
+    filter that denies chmod, chown, utime and xattr calls, and the limits. The
+    spec's ``seccomp`` flag and limits are how the subtitle provider profile
+    leaves the filter and two limits out.
 
     ``popen_kwargs`` (``text``, ``bufsize`` and so on) go to ``subprocess.Popen``;
     ``preexec_fn`` is refused. On a platform other than Linux the worker starts

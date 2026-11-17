@@ -142,45 +142,52 @@ class Limits:
 # size 0, nice, oom_score_adj and umask stay as for every worker.
 PROVIDER_LIMITS = Limits(fsize=None, nproc=None)
 
-# Top-level entries a provider worker is not given as read-only trees. Landlock rules only add
-# rights, so "read-only everywhere but the config folder" is built by listing what lies beside
-# the config folder's ancestors, and these four are left out of that list: /proc and /dev are
-# granted as the single entries a worker needs (``/proc/self`` and the device nodes), /etc
-# is granted file by file (TLS trust, name resolution, time zone: it also holds private keys
-# and password hashes a root worker could read) and /run holds service sockets and secrets.
-PROVIDER_SKIPPED_TOP_LEVEL: frozenset[str] = frozenset({"proc", "dev", "etc", "run"})
+# Small files and folders a provider worker reads beyond the system, interpreter and plugin paths:
+# the processor count that ffmpeg sizes its thread pool from.
+PROVIDER_EXTRA_READ_PATHS: tuple[str, ...] = (
+    "/sys/devices/system/cpu",
+    "/proc/cpuinfo",
+    "/proc/meminfo",
+)
 
 
-def provider_outside_paths(shield: str | os.PathLike, *, skip_top: Iterable[str] = PROVIDER_SKIPPED_TOP_LEVEL) -> tuple[str, ...]:
-    """Everything the host can see outside ``shield``, as the read-only grants of a provider worker.
+def provider_tree_grants(roots: Iterable[str | os.PathLike], shields: Iterable[str | os.PathLike]) -> tuple[str, ...]:
+    """Read-only grants for ``roots``, with every shielded tree left out of them.
 
-    Walks from ``/`` down to ``shield`` and lists, at every level, the entries beside the one on
-    the way down: the media library, the interpreter's prefix, the application's own code and
-    the rest. The ancestors themselves are never granted (a grant on one would cover the
-    shielded folder), and neither is any entry that is or leads into ``shield`` or into one of
-    its ancestors. A level that cannot be listed adds nothing: the worker gets less, never more.
+    Landlock rules only add rights and cannot carve a hole out of a granted folder, so a root that
+    holds a shielded folder (a media root that also holds the configuration or the backups) is
+    replaced by what lies beside the path down to the shield, level by level. A root that is
+    inside a shield, or is one, is dropped, and a root that does not exist is skipped. The shields
+    themselves are never listed, nor is anything that leads into one through a link.
     """
-    skipped = frozenset(skip_top)
-    target = os.path.realpath(_abs(shield))
-    parts = Path(target).parts[1:]
-    if not parts:
-        raise PolicyError("the shielded folder cannot be the filesystem root")
+    targets = [os.path.realpath(_abs(shield)) for shield in shields]
     found: list[str] = []
-    current = "/"
-    for depth, part in enumerate(parts):
+
+    def inside(path: str, folder: str) -> bool:
+        return path == folder or path.startswith(folder.rstrip("/") + "/")
+
+    def walk(path: str, depth: int = 0) -> None:
+        real = os.path.realpath(path)
+        if any(inside(real, target) for target in targets):
+            return
+        if not any(inside(target, real) for target in targets):
+            if os.path.exists(real) and path not in found:
+                found.append(path)
+            return
+        if depth > 64 or not os.path.isdir(real):
+            return
         try:
-            names = sorted(os.listdir(current))
+            names = sorted(os.listdir(real))
         except OSError:
-            names = []
+            return
         for name in names:
-            if name == part or (depth == 0 and name in skipped):
-                continue
-            entry = os.path.join(current, name)
-            real = os.path.realpath(entry)
-            if real == target or target.startswith(real.rstrip("/") + "/") or real.startswith(target + "/"):
-                continue
-            found.append(entry)
-        current = os.path.join(current, part)
+            walk(os.path.join(real, name), depth + 1)
+
+    for root in roots:
+        lexical = _abs(root)
+        if lexical == "/":
+            raise PolicyError("the filesystem root cannot be granted")
+        walk(lexical)
     return tuple(found)
 
 

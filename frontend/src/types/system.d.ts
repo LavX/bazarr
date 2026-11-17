@@ -195,10 +195,17 @@ declare namespace System {
     /**
      * enforced: the filesystem ruleset applies in full. partial: it applies on
      * an older Landlock ABI and the notice names what it leaves open.
-     * unsandboxed: switched on, but the host or a start could not apply it (see
-     * notice). off: switched off. pending: the host check is still running.
+     * unsandboxed: switched on, but the host cannot apply it (see notice).
+     * blocked: the host can, but a start could not apply its ruleset and was
+     * refused. off: switched off. pending: the host check is still running.
      */
-    state: "enforced" | "partial" | "unsandboxed" | "off" | "pending";
+    state:
+      | "enforced"
+      | "partial"
+      | "unsandboxed"
+      | "blocked"
+      | "off"
+      | "pending";
     /**
      * Why providers run without the sandbox, or what a partial one leaves
      * open; null when nothing is wrong.
@@ -206,6 +213,10 @@ declare namespace System {
     notice: string | null;
     /** The providers recorded as started without the sandbox. */
     unsandboxed: string[];
+    /** The providers whose start was refused because the ruleset failed. */
+    blocked?: string[];
+    /** What the provider profile leaves open on every kernel. */
+    limitations?: string[];
   }
 
   interface TranslationAvailability {

@@ -1,4 +1,4 @@
-import { FunctionComponent } from "react";
+import { FunctionComponent, useEffect } from "react";
 import { Alert, Stack } from "@mantine/core";
 import { useSystemStatus } from "@/apis/hooks";
 import { Check, Message } from "@/pages/Settings/components";
@@ -12,10 +12,18 @@ import { Check, Message } from "@/pages/Settings/components";
  * why, so nothing here ever reads as protection that is not there.
  */
 const ProviderSandboxSetting: FunctionComponent = () => {
-  const { data } = useSystemStatus();
+  const { data, refetch } = useSystemStatus();
   const providers = data?.sandbox?.providers;
   const notice = providers?.notice ?? null;
   const partial = providers?.state === "partial";
+  const pending = data?.sandbox?.pending === true;
+  // The host check runs once, in the background, after boot. Opened before it
+  // answers, this page asks again until it has, as System > Status does.
+  useEffect(() => {
+    if (!pending) return;
+    const timer = setInterval(() => void refetch(), 3000);
+    return () => clearInterval(timer);
+  }, [pending, refetch]);
   return (
     <Stack gap="xs">
       <Check
@@ -25,10 +33,11 @@ const ProviderSandboxSetting: FunctionComponent = () => {
       <Message>
         Subtitle provider plugins cannot read the configuration file or the
         database, and the media library is read-only to them. They keep their
-        own data and temporary folders. Where this host's kernel covers only
-        part of it, or none, providers still run and a notice appears here and
-        on System &gt; Status. Takes effect when a provider worker next starts.
-        On by default.
+        own data and temporary folders. They are not stopped from changing the
+        mode, owner or times of files the Bazarr+ user owns, and they have no
+        network restriction. Where this host's kernel covers only part of it, or
+        none, providers still run and a notice appears here and on System &gt;
+        Status. Takes effect when a provider worker next starts. On by default.
       </Message>
       {notice ? (
         <Alert

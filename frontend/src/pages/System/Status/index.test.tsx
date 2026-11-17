@@ -484,6 +484,39 @@ describe("System Status", () => {
     expect(screen.queryByText(/^On:/)).toBeNull();
   });
 
+  it("says a subtitle provider whose sandbox could not be applied was not started", async () => {
+    statusWith({
+      sandbox: {
+        abi: 10,
+        enforced: true,
+        workers_sandboxed: false,
+        filesystem: "enforced",
+        network: "enforced",
+        signal_scope: "enforced",
+        capabilities: "dropped",
+        label: "Sandbox available: Landlock ABI 10.",
+        reason: "",
+        limitations: [],
+        providers: {
+          enabled: true,
+          state: "blocked",
+          notice:
+            "The sandbox could not be applied to embeddedsubtitles, so it was not started: the ruleset could not be applied.",
+          unsandboxed: [],
+          blocked: ["embeddedsubtitles"],
+          limitations: ["the metadata filter (seccomp) is not applied"],
+        },
+      },
+    });
+    customRender(<SystemStatusView />);
+
+    expect(
+      await screen.findByText(/so it was not started/, undefined, {
+        timeout: 8000,
+      }),
+    ).toBeInTheDocument();
+  });
+
   it("says the subtitle provider sandbox is on, off, or leaves the row out while the check runs", async () => {
     const base: System.SandboxStatus = {
       abi: 10,
