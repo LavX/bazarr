@@ -1016,6 +1016,32 @@ def test_a_start_clears_the_folders_of_plugins_that_are_not_installed(hub):
     assert hub.definitions().sweep_orphans() == []
 
 
+def test_a_start_leaves_the_folders_of_a_removed_plugin_whose_data_was_kept(hub, monkeypatch):
+    for plugin in ("kept_one", "ghost"):
+        (hub.root / "run" / plugin / "data").mkdir(parents=True)
+        (hub.root / "run" / plugin / "data" / "state.db").write_text("data")
+    definitions = hub.definitions()
+    monkeypatch.setattr(worker_binding, "_definitions", definitions)
+    monkeypatch.setattr(worker_binding, "_port", SimpleNamespace(retire=lambda plugin_id: None))
+
+    worker_binding.plugin_kept("kept_one")
+
+    assert (hub.root / "run" / "kept_one" / worker_binding.KEPT_MARKER).exists()
+    assert definitions.sweep_orphans() == ["ghost"]
+    assert (hub.root / "run" / "kept_one" / "data" / "state.db").read_text() == "data"
+    # Removing it again with the data deleted takes the marker and the folder with it.
+    definitions.plugin_removed("kept_one")
+    assert not (hub.root / "run" / "kept_one").exists()
+
+
+def test_keeping_the_data_of_a_plugin_that_never_ran_marks_nothing(hub, monkeypatch):
+    definitions = hub.definitions()
+    monkeypatch.setattr(worker_binding, "_definitions", definitions)
+    monkeypatch.setattr(worker_binding, "_port", SimpleNamespace(retire=lambda plugin_id: None))
+    worker_binding.plugin_kept("never_ran")
+    assert not (hub.root / "run" / "never_ran").exists()
+
+
 # ------------------------------------------------------------------ the sweep only removes what is not installed at all
 def _write_inventory(path, rows):
     import json

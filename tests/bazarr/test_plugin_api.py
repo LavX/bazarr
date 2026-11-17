@@ -481,3 +481,27 @@ def test_dismissing_a_review_notice_is_kept_on_the_installation(client, tmp_path
     assert _get(client, path).json["review_pending"] is False
     missing = client.post("/api/plugins/installations/nothing/review/dismiss", headers={"X-API-KEY": API_KEY})
     assert missing.status_code == 404
+
+
+@pytest.mark.parametrize("query, kept", [("", True), ("?keep_data=true", True), ("?keep_data=false", False),
+                                          ("?keep_data=FALSE", False)])
+def test_removing_a_plugin_keeps_its_data_unless_it_is_asked_to_delete_it(client, monkeypatch, query, kept):
+    from provider_hub import jobs
+
+    queued = []
+    monkeypatch.setattr(jobs, "queue_uninstall", lambda plugin_id, name=None, keep_data=False: queued.append(
+        (plugin_id, keep_data)) or "job-1")
+
+    response = client.delete(f"/api/plugins/installations/exampleservice{query}", headers={"X-API-KEY": API_KEY})
+
+    assert response.status_code == 202 and response.json == {"job_id": "job-1"}
+    assert queued == [("exampleservice", kept)]
+
+
+def test_removing_a_plugin_refuses_an_answer_that_is_neither_keep_nor_delete(client, monkeypatch):
+    from provider_hub import jobs
+
+    monkeypatch.setattr(jobs, "queue_uninstall", lambda *a, **k: pytest.fail("nothing is queued"))
+    response = client.delete("/api/plugins/installations/exampleservice?keep_data=maybe",
+                            headers={"X-API-KEY": API_KEY})
+    assert response.status_code == 400

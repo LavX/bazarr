@@ -213,9 +213,9 @@ export function usePluginRemove() {
   const refresh = useRefreshAfterChange();
   return useMutation({
     mutationKey: [...pluginsKey, QueryKeys.Actions, "remove"],
-    mutationFn: async (id: string) => {
+    mutationFn: async ({ id, keepData }: { id: string; keepData: boolean }) => {
       const { job_id: jobId } = await withInlineErrors(() =>
-        api.plugins.remove(id),
+        api.plugins.remove(id, keepData),
       );
       await waitForJob(client, jobId);
     },

@@ -309,15 +309,20 @@ const PluginHubView: FunctionComponent = () => {
     setRemoveProblem("");
     setRemoving(row);
   };
-  const confirmRemove = async () => {
+  const confirmRemove = async (keepData: boolean) => {
     if (!removing || working !== null) {
       return;
     }
     setWorking(removing.id);
     setRemoveProblem("");
     try {
-      await remove.mutateAsync(removing.id);
-      showNotification(notification.info("Removed", removing.name));
+      await remove.mutateAsync({ id: removing.id, keepData });
+      showNotification(
+        notification.info(
+          keepData ? "Removed, its data is kept" : "Removed with its data",
+          removing.name,
+        ),
+      );
       setRemoving(null);
     } catch (error) {
       const copy = explainFailure(reasonOf(error));
@@ -526,7 +531,7 @@ const PluginHubView: FunctionComponent = () => {
         row={removing}
         busy={working !== null && working === removing?.id}
         problem={removeProblem}
-        onConfirm={() => void confirmRemove()}
+        onConfirm={(keepData) => void confirmRemove(keepData)}
         onClose={() => setRemoving(null)}
         onClosed={restoreFocus}
       />

@@ -251,9 +251,13 @@ class PluginsApi extends BaseApi {
     return response.data;
   }
 
-  async remove(id: string) {
+  /** `keepData` keeps the plugin's saved settings and data folder, and false deletes them. */
+  async remove(id: string, keepData: boolean) {
     const response = await this.delete<ProviderHubJobRef>(
       `/installations/${id}`,
+      undefined,
+      // eslint-disable-next-line camelcase -- transport name
+      { keep_data: keepData },
     );
     return response.data;
   }

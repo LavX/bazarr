@@ -153,8 +153,9 @@ def service_kind():
             self.calls.append(("removed", plugin_id))
             return True
 
-        def after_removed(self, plugin_id):
+        def after_removed(self, plugin_id, keep_data=False):
             self.calls.append(("after_removed", plugin_id))
+            self.kept = keep_data
 
         def set_enabled(self, installation, enabled):
             super().set_enabled(installation, enabled)

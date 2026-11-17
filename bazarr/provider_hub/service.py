@@ -4485,12 +4485,14 @@ def dependent_refusal(provider_id: str, action: str, *, enabled_only: bool = Fal
     return closure.dependents_text(provider_id, names, action) if names else None
 
 
-def remove_installation(provider_id: str, *, ignoring_dependents: frozenset[str] = frozenset()) -> bool:
+def remove_installation(provider_id: str, *, ignoring_dependents: frozenset[str] = frozenset(),
+                        keep_data: bool = False) -> bool:
     """Stage the removal of an installation, or remove it at once when it was never active.
 
     A plugin another one depends on is refused. ``ignoring_dependents`` names plugins that do not count as
     dependents, which is how a failed install discards the plugins it staged for itself while any other
-    plugin that has come to depend on them still protects them.
+    plugin that has come to depend on them still protects them. ``keep_data`` is the person's choice to keep the
+    plugin's saved settings and data folder, which the kind honours; the default deletes them.
     """
     state = load_state()
     installations = state.setdefault("installations", {})
@@ -4560,7 +4562,7 @@ def remove_installation(provider_id: str, *, ignoring_dependents: frozenset[str]
         from . import runtime_status
         runtime_status.clear(provider_id)
         try:
-            kind_hooks.after_removed(provider_id)
+            kind_hooks.after_removed(provider_id, keep_data=keep_data)
         except Exception:
             logging.getLogger(__name__).exception("Cleanup after the removal of %s failed", provider_id)
         if result == "removed_pending":

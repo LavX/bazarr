@@ -78,8 +78,12 @@ beforeEach(() => {
       record("post", `repair ${String(params.id)}`);
       return HttpResponse.json({ job_id: null }, { status: 202 });
     }),
-    http.delete("/api/plugins/installations/:id", ({ params }) => {
-      record("delete", String(params.id));
+    http.delete("/api/plugins/installations/:id", ({ params, request }) => {
+      record(
+        "delete",
+        String(params.id),
+        Object.fromEntries(new URL(request.url).searchParams),
+      );
       return HttpResponse.json({ job_id: null }, { status: 202 });
     }),
     http.post("/api/plugins/installations/:id/review/dismiss", ({ params }) => {
@@ -212,19 +216,52 @@ describe("removing a plugin", () => {
     expect(calls).toEqual([]);
   });
 
-  it("removes a plugin nothing needs once it is confirmed, and not before", async () => {
-    installed = [installedBackend];
-    showPage();
-    const user = await menuOf("Opencode back end");
+  const openRemove = async (name: string) => {
+    const user = await menuOf(name);
     await user.click(await screen.findByRole("menuitem", { name: "Remove" }));
     const dialog = await screen.findByRole("dialog", {
-      name: "Remove Opencode back end?",
+      name: `Remove ${name}?`,
     });
+    return { user, dialog };
+  };
+
+  it("keeps the plugin's data by default, and sends nothing before it is confirmed", async () => {
+    installed = [installedBackend];
+    showPage();
+    const { user, dialog } = await openRemove("Opencode back end");
+    expect(
+      within(dialog).getByRole("radio", { name: /Keep its settings and data/ }),
+    ).toBeChecked();
     expect(calls).toEqual([]);
     await user.click(within(dialog).getByRole("button", { name: "Remove" }));
     await waitFor(() =>
       expect(calls).toEqual([
-        { method: "delete", path: "opencode_backend", body: null },
+        {
+          method: "delete",
+          path: "opencode_backend",
+          body: { keep_data: "true" },
+        },
+      ]),
+    );
+  });
+
+  it("deletes the plugin's data when that is chosen", async () => {
+    installed = [installedBackend];
+    showPage();
+    const { user, dialog } = await openRemove("Opencode back end");
+    await user.click(
+      within(dialog).getByRole("radio", {
+        name: /Delete its settings and data/,
+      }),
+    );
+    await user.click(within(dialog).getByRole("button", { name: "Remove" }));
+    await waitFor(() =>
+      expect(calls).toEqual([
+        {
+          method: "delete",
+          path: "opencode_backend",
+          body: { keep_data: "false" },
+        },
       ]),
     );
   });

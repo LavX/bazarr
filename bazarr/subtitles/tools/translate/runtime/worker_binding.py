@@ -42,6 +42,8 @@ from . import workers
 logger = logging.getLogger(__name__)
 
 KIND = "translator"
+# A file in a plugin's folder that says its data was kept on purpose when the plugin was removed.
+KEPT_MARKER = ".kept"
 DEFAULT_PORTS = frozenset({80, 443})
 _DEFAULT_PORT_OF = {"http": 80, "https": 443}
 _PLUGIN_ID = re.compile(r"\A[a-z0-9][a-z0-9_.-]{0,63}\Z")
@@ -242,6 +244,15 @@ class TranslatorWorkers:
         if _PLUGIN_ID.match(plugin_id):
             shutil.rmtree(Path(self._hub_dir()) / "run" / plugin_id, ignore_errors=True)
 
+    def keep_folders(self, plugin_id: str) -> None:
+        """Mark the plugin's writable folders as kept, so a sweep of leftovers leaves them alone."""
+        folder = Path(self._hub_dir()) / "run" / plugin_id
+        if _PLUGIN_ID.match(plugin_id) and folder.is_dir() and not folder.is_symlink():
+            try:
+                (folder / KEPT_MARKER).touch()
+            except OSError:
+                logger.warning("Could not mark the folders of translator %s as kept", plugin_id, exc_info=True)
+
     def sweep_orphans(self) -> list[str]:
         """Remove the writable folders of plugins that are not installed at all, left by a removal that was saved
         after the process that made it had stopped clearing. Every row of the Plugin Hub's inventory counts as
@@ -260,7 +271,7 @@ class TranslatorWorkers:
         for child in children:
             if child.is_symlink() or not child.is_dir() or not _PLUGIN_ID.match(child.name):
                 continue
-            if child.name in known:
+            if child.name in known or (child / KEPT_MARKER).exists():
                 continue
             shutil.rmtree(child, ignore_errors=True)
             removed.append(child.name)
@@ -431,6 +442,20 @@ def plugin_removed(plugin_id: str) -> None:
     with _lock:
         _pending_removal.add(plugin_id)
     _sweep_removed()
+
+
+def plugin_kept(plugin_id: str) -> None:
+    """The plugin was removed and its data is kept: its worker is retired once its jobs are done, and its writable
+    folders are marked so that no sweep clears them. Nothing happens while no binding is in place."""
+    with _lock:
+        port, definitions = _port, _definitions
+        # A removal asked for earlier is overtaken by this answer.
+        _pending_removal.discard(plugin_id)
+    if port is None:
+        return
+    port.retire(plugin_id)
+    if definitions is not None:
+        definitions.keep_folders(plugin_id)
 
 
 def _sweep_removed(from_timer: bool = False) -> None:

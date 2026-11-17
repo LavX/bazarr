@@ -517,6 +517,38 @@ def test_releasing_a_plugin_resets_pointers_and_deletes_nothing_until_asked(stor
     assert store.list_instances("google_translate") == []
 
 
+@pytest.mark.parametrize("keep", [True, False])
+def test_removing_a_translator_keeps_or_deletes_what_it_stored_as_asked(store, pointers, monkeypatch, keep):
+    """The kind hook that runs once a removal is saved: the answer decides whether the engine instance, its
+    connections and its secrets survive, and a reinstall finds them when they did."""
+    from provider_hub.kinds.translator import TranslatorKind
+    from subtitles.tools.translate.runtime import worker_binding
+
+    marked, cleared = [], []
+    monkeypatch.setattr("provider_hub.kinds.translator._store", lambda: store)
+    monkeypatch.setattr(worker_binding, "plugin_kept", marked.append)
+    monkeypatch.setattr(worker_binding, "plugin_removed", cleared.append)
+    instance = _ai_engine(store)
+    store.set_secret((CONNECTION, store.list_connections(instance.id)[0].id), "api_key", KEY,
+                     destinations=frozenset({"https://openrouter.ai"}))
+    kind = TranslatorKind()
+    assert kind.on_removed(OFFICIAL_ENGINE_PLUGIN_ID) is True
+
+    kind.after_removed(OFFICIAL_ENGINE_PLUGIN_ID, keep_data=keep)
+
+    if keep:
+        assert (marked, cleared) == ([OFFICIAL_ENGINE_PLUGIN_ID], [])
+        assert [row.id for row in store.list_instances(OFFICIAL_ENGINE_PLUGIN_ID)] == [instance.id]
+        assert len(store.list_connections(instance.id)) == 1
+        # Installing the plugin again picks the same instance up instead of making a blank one.
+        assert kind.on_installed(OFFICIAL_ENGINE_PLUGIN_ID) is True
+        assert [row.id for row in store.list_instances(OFFICIAL_ENGINE_PLUGIN_ID)] == [instance.id]
+    else:
+        assert (marked, cleared) == ([], [OFFICIAL_ENGINE_PLUGIN_ID])
+        assert store.list_instances(OFFICIAL_ENGINE_PLUGIN_ID) == []
+        assert store.list_connections(instance.id) == []
+
+
 def test_disabling_a_plugin_releases_the_pointers_but_keeps_its_instances(store, pointers):
     google = store.create_instance("google_translate")
     store.set_engine(google.id)

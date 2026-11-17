@@ -70,7 +70,17 @@ class TranslatorKind(Kind):
         _retire_worker(plugin_id)
         return True
 
-    def after_removed(self, plugin_id: str) -> None:
+    def after_removed(self, plugin_id: str, keep_data: bool = False) -> None:
+        if keep_data:
+            # The engine instances, their connections and secrets stay, and so do the plugin's folders, marked so
+            # that no sweep takes them for leftovers. Installing the plugin again picks them up.
+            try:
+                from subtitles.tools.translate.runtime import worker_binding
+
+                worker_binding.plugin_kept(plugin_id)
+            except Exception:
+                logger.warning("Could not mark the folders of translator %s as kept", plugin_id, exc_info=True)
+            return
         try:
             _store().delete_plugin_data(plugin_id)
         except Exception:

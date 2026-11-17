@@ -257,3 +257,16 @@ def test_a_catalog_entry_counts_a_kind_only_from_a_schema_2_manifest():
     assert catalog_kind_of({"kind": "other_kind", "manifest": {}}) == SUBTITLE_PROVIDER
     assert catalog_kind_of({"manifest": {"schema_version": 1, "kind": "other_kind"}}) == SUBTITLE_PROVIDER
     assert catalog_kind_of({"manifest": {"schema_version": 2, "kind": "other_kind"}}) == "other_kind"
+
+
+@pytest.mark.parametrize("keep", [True, False])
+def test_a_removal_hands_the_choice_about_its_data_to_the_kind(tmp_path, monkeypatch, service_kind, keep):
+    from provider_hub import service
+
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(write_state(tmp_path / "state.json", installations={
+        "exampleservice": _active_row("exampleservice", kind=SERVICE_KIND),
+    })))
+
+    service.remove_installation("exampleservice", keep_data=keep)
+    assert ("after_removed", "exampleservice") in service_kind.calls
+    assert service_kind.kept is keep

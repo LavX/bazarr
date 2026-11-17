@@ -59,8 +59,11 @@ class Kind:
         """This plugin was removed or its removal was staged. Same return rule."""
         return True
 
-    def after_removed(self, plugin_id: str) -> None:
+    def after_removed(self, plugin_id: str, keep_data: bool = False) -> None:
         """This plugin's removal has been saved. The place for cleanup that cannot be undone.
+
+        ``keep_data`` is the person's answer to what happens to what the plugin stored: True keeps its saved
+        settings and its data folder, so installing it again finds them, and False deletes them.
 
         ``on_removed`` runs before the removal is saved and may be rolled back by a failure; anything
         that deletes data belongs here instead. It cannot veto the removal, so it reports problems by

@@ -113,9 +113,11 @@ def queue_install_local(package_path, filename=None):
     return job_id
 
 
-def queue_uninstall(provider_id, name=None):
-    return _enqueue(f"Uninstalling provider {name or provider_id}", "uninstall_provider",
-                    {"provider_id": provider_id, "name": name})
+def queue_uninstall(provider_id, name=None, keep_data=False):
+    kwargs = {"provider_id": provider_id, "name": name}
+    if keep_data:
+        kwargs["keep_data"] = True
+    return _enqueue(f"Uninstalling provider {name or provider_id}", "uninstall_provider", kwargs)
 
 
 def queue_update(provider_id, name=None, consent=None):
@@ -164,12 +166,12 @@ def install_local_provider(package_path, filename=None, job_id=None):
     return installation
 
 
-def uninstall_provider(provider_id, name=None, job_id=None):
+def uninstall_provider(provider_id, name=None, keep_data=False, job_id=None):
     label = name or provider_id
     # The removal is a single state write, so the only place to stop is before it.
     jobs_queue.update_job_progress(job_id=job_id, progress_message=f"Removing {label}")
     try:
-        removed = service.remove_installation(provider_id)
+        removed = service.remove_installation(provider_id, keep_data=keep_data)
     except Exception as error:
         raise JobFailed(f"Could not uninstall {label}: {reason_of(error)}") from error
     if not removed:

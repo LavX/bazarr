@@ -1,5 +1,5 @@
-import { FunctionComponent, useRef } from "react";
-import { Alert, Button, Group, Modal, Stack, Text } from "@mantine/core";
+import { FunctionComponent, useEffect, useRef, useState } from "react";
+import { Alert, Button, Group, Modal, Radio, Stack, Text } from "@mantine/core";
 import { useQuery } from "@tanstack/react-query";
 import { QueryKeys } from "@/apis/queries/keys";
 import api from "@/apis/raw";
@@ -60,7 +60,8 @@ interface RemoveDialogProps {
   row: PluginRow | null;
   busy: boolean;
   problem: string;
-  onConfirm: () => void;
+  /** What the person chose to do with the plugin's saved settings and data folder. */
+  onConfirm: (keepData: boolean) => void;
   onClose: () => void;
   onClosed?: () => void;
 }
@@ -83,6 +84,14 @@ export const RemoveDialog: FunctionComponent<RemoveDialogProps> = ({
   }
   const current = row ?? shown.current;
   const effects = useEngineEffects(row?.id ?? null);
+  // Keeping is the default, and every removal starts from it.
+  const [choice, setChoice] = useState<"keep" | "delete">("keep");
+  const openedFor = row?.id ?? null;
+  useEffect(() => {
+    if (openedFor !== null) {
+      setChoice("keep");
+    }
+  }, [openedFor]);
   const blockers = current?.dependents ?? [];
   const blocked = blockers.length > 0;
   return (
@@ -110,10 +119,27 @@ export const RemoveDialog: FunctionComponent<RemoveDialogProps> = ({
               first.
             </Alert>
           ) : (
-            <Text size="sm">
-              Bazarr+ removes the plugin and the settings saved for it. You can
-              install it again from the Marketplace.
-            </Text>
+            <Radio.Group
+              value={choice}
+              onChange={(value) =>
+                setChoice(value === "delete" ? "delete" : "keep")
+              }
+              label="What happens to its data"
+              description="The settings you saved for it and its data folder."
+            >
+              <Stack gap="xs" mt="xs">
+                <Radio
+                  value="keep"
+                  label="Keep its settings and data"
+                  description="Installing it again picks up where you left off."
+                />
+                <Radio
+                  value="delete"
+                  label="Delete its settings and data"
+                  description="Installing it again starts clean. This cannot be undone."
+                />
+              </Stack>
+            </Radio.Group>
           )}
           {!blocked && effects.length > 0 && (
             <Alert color="yellow" variant="light" role="note">
@@ -138,7 +164,7 @@ export const RemoveDialog: FunctionComponent<RemoveDialogProps> = ({
             </Button>
             <Button
               color="red"
-              onClick={onConfirm}
+              onClick={() => onConfirm(choice === "keep")}
               loading={busy}
               disabled={blocked}
             >
