@@ -12,6 +12,12 @@ import { QueryKeys } from "@/apis/queries/keys";
 import TranslationForm from "@/components/forms/TranslationForm";
 import { customRender, screen, waitFor } from "@/tests";
 import server from "@/tests/mocks/node";
+import {
+  choose,
+  optionsOf,
+  stateLoaded,
+  translatorStatus,
+} from "./pickFixtures";
 
 const LANGUAGES = [
   { code2: "en", code3: "eng", name: "English", enabled: true },
@@ -209,5 +215,169 @@ describe("TranslationForm and the translation gate", () => {
       from_language: "en",
       codec: "subrip",
     });
+  });
+});
+
+describe("TranslationForm and the manual pick", () => {
+  const selection = [
+    {
+      id: 5,
+      type: "movie",
+      language: "en",
+      path: "/movies/m.en.srt",
+      hi: "False",
+      forced: "False",
+      arr_instance_id: 2,
+    },
+  ] as FormType.ModifySubtitle[];
+
+  function settings() {
+    server.use(
+      http.get("/api/system/settings", () =>
+        HttpResponse.json({
+          general: { theme: "auto" },
+          translator: { translator_type: "google_translate" },
+        }),
+      ),
+      http.get("/api/system/languages", () => HttpResponse.json(LANGUAGES)),
+    );
+  }
+
+  async function languagesLoaded() {
+    await waitFor(() =>
+      expect(
+        queryClient.getQueryState([
+          QueryKeys.System,
+          QueryKeys.Languages,
+          false,
+        ])?.status,
+      ).toBe("success"),
+    );
+  }
+
+  it("offers the back ends that can take a job, and no others", async () => {
+    const user = userEvent.setup();
+    settings();
+    translatorStatus(true, { available: true, reason: "" });
+    customRender(<TranslationForm selections={selection} />);
+
+    await screen.findByRole("combobox", { name: "Translate with" });
+    // The state arrives after the form; the option shows up with it.
+    await stateLoaded();
+    expect(await optionsOf(user, "Translate with")).toEqual([
+      "Automatic",
+      "OpenAI compatible, usable-model",
+    ]);
+  });
+
+  it("names the selected engine rather than the old setting while the new translator is on", async () => {
+    settings();
+    translatorStatus(true, { available: true, reason: "" });
+    customRender(<TranslationForm selections={selection} />);
+
+    expect(
+      await screen.findByText(
+        "The engine selected on the Translation page will be used.",
+      ),
+    ).toBeInTheDocument();
+    // The old setting says Google Translate, and that means nothing now.
+    expect(screen.queryByText(/Google Translate/)).not.toBeInTheDocument();
+  });
+
+  it("sends the picked back end with the request", async () => {
+    const user = userEvent.setup();
+    settings();
+    translatorStatus(true, { available: true, reason: "" });
+    let sent: Record<string, FormDataEntryValue> | undefined;
+    server.use(
+      http.patch("/api/subtitles", async ({ request }) => {
+        sent = Object.fromEntries((await request.formData()).entries());
+        return HttpResponse.json({ job_id: 3 }, { status: 202 });
+      }),
+    );
+    customRender(<TranslationForm selections={selection} />);
+    await languagesLoaded();
+    await screen.findByRole("combobox", { name: "Translate with" });
+    await stateLoaded();
+
+    await choose(user, "Translate with", "OpenAI compatible, usable-model");
+    expect(
+      screen.getByText(
+        "OpenAI compatible, usable-model will be used for this translation alone.",
+      ),
+    ).toBeInTheDocument();
+    const language = screen
+      .getAllByRole("combobox")
+      .find((item) => !item.getAttribute("aria-label")?.includes("with"))!;
+    await user.type(language, "Hung");
+    await user.click(
+      await screen.findByRole("option", { name: "Hungarian", hidden: true }),
+    );
+    await user.click(screen.getByRole("button", { name: "Start" }));
+
+    await waitFor(() => expect(sent).toBeDefined());
+    expect(sent).toMatchObject({ language: "hu", connection_id: "1" });
+  });
+
+  it("sends no back end for Automatic, and the request is what it always was", async () => {
+    const user = userEvent.setup();
+    settings();
+    translatorStatus(true, { available: true, reason: "" });
+    let sent: Record<string, FormDataEntryValue> | undefined;
+    server.use(
+      http.patch("/api/subtitles", async ({ request }) => {
+        sent = Object.fromEntries((await request.formData()).entries());
+        return HttpResponse.json({ job_id: 3 }, { status: 202 });
+      }),
+    );
+    customRender(<TranslationForm selections={selection} />);
+    await languagesLoaded();
+    await screen.findByRole("combobox", { name: "Translate with" });
+
+    const language = screen
+      .getAllByRole("combobox")
+      .find((item) => !item.getAttribute("aria-label")?.includes("with"))!;
+    await user.type(language, "Hung");
+    await user.click(
+      await screen.findByRole("option", { name: "Hungarian", hidden: true }),
+    );
+    await user.click(screen.getByRole("button", { name: "Start" }));
+
+    await waitFor(() => expect(sent).toBeDefined());
+    expect(sent).not.toHaveProperty("connection_id");
+  });
+
+  it("lets a picked back end start when the selected engine's gate is closed", async () => {
+    const user = userEvent.setup();
+    settings();
+    translatorStatus(true, {
+      available: false,
+      reason: "No translator is configured",
+    });
+    customRender(<TranslationForm selections={selection} />);
+    await screen.findByText("No translator is configured");
+    expect(screen.getByRole("button", { name: "Start" })).toBeDisabled();
+    await stateLoaded();
+
+    await choose(user, "Translate with", "OpenAI compatible, usable-model");
+
+    expect(screen.getByRole("button", { name: "Start" })).toBeEnabled();
+    expect(
+      screen.queryByText("No translator is configured"),
+    ).not.toBeInTheDocument();
+  });
+
+  it("shows no picker and never asks for the page's state while the new translator is off", async () => {
+    settings();
+    const asked = translatorStatus(false, { available: true, reason: "" });
+    customRender(<TranslationForm selections={selection} />);
+
+    expect(
+      await screen.findByText("Google Translate will be used."),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("combobox", { name: "Translate with" }),
+    ).not.toBeInTheDocument();
+    expect(asked).toEqual([]);
   });
 });

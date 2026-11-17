@@ -16,6 +16,10 @@ import {
 import { useLanguages } from "@/apis/hooks/languages";
 import { useTranslatorModels } from "@/apis/hooks/translator";
 import {
+  AUTOMATIC_LABEL,
+  useManualPick,
+} from "@/components/forms/TranslationPick";
+import {
   cancelEditorTranslation,
   isTerminalJob,
   queueEditorTranslation,
@@ -213,7 +217,9 @@ export default function TranslatePanel({
 
   const [applied, setApplied] = useState(false);
 
-  const { data: modelsData } = useTranslatorModels(open);
+  // With the new translator on, one back end can be picked for this translation.
+  const pick = useManualPick();
+  const { data: modelsData } = useTranslatorModels(open && !pick.runtime);
   const { data: serverLanguages } = useLanguages();
   // The panel's own gate answer, not the configured engine's: it posts to the
   // editor endpoint, which asks about the AI Subtitle Translator service.
@@ -365,6 +371,7 @@ export default function TranslatePanel({
         targetLanguage: targetLangName,
         title: mediaTitle || "",
         mediaType: "",
+        ...(pick.connectionId !== null && { connectionId: pick.connectionId }),
       });
 
       if (queued.jobId) {
@@ -402,6 +409,7 @@ export default function TranslatePanel({
     languageOptions,
     onTranslatingChange,
     refetchTranslationStatus,
+    pick.connectionId,
   ]);
 
   const handleCancel = useCallback(() => {
@@ -437,6 +445,9 @@ export default function TranslatePanel({
     jobData?.progress_message ||
     (jobData?.status === "pending" ? "Queued..." : "");
   const modelUsed = modelsData?.default_model || "";
+  // A pick is answered for its own back end by the server, so the gate for the selected engine does not
+  // hold it back.
+  const gateClosed = !translation.available && pick.connectionId === null;
   const isWorking = phase === "submitting" || phase === "translating";
 
   return (
@@ -603,6 +614,44 @@ export default function TranslatePanel({
         </select>
       </div>
 
+      {/* The back end: a pick of one, or the selected engine */}
+      {pick.runtime && (
+        <div style={styles.row}>
+          <span style={styles.label}>With</span>
+          <select
+            aria-label="Translate with"
+            style={styles.select}
+            value={pick.connectionId === null ? "" : String(pick.connectionId)}
+            onChange={(e) =>
+              pick.setConnectionId(
+                e.target.value === "" ? null : Number(e.target.value),
+              )
+            }
+            disabled={isWorking}
+          >
+            <option value="">{AUTOMATIC_LABEL}</option>
+            {[...new Set(pick.choices.map((item) => item.engine))].map(
+              (engine) => (
+                <optgroup key={engine} label={engine}>
+                  {pick.choices
+                    .filter((item) => item.engine === engine)
+                    .map((item) => (
+                      <option key={item.id} value={item.id}>
+                        {item.label}
+                      </option>
+                    ))}
+                </optgroup>
+              ),
+            )}
+          </select>
+        </div>
+      )}
+      {pick.runtime && pick.connectionId !== null && (
+        <div style={styles.statusText}>
+          This back end does the whole translation alone.
+        </div>
+      )}
+
       {/* Model info */}
       {modelUsed && <div style={styles.statusText}>Model: {modelUsed}</div>}
 
@@ -613,9 +662,7 @@ export default function TranslatePanel({
       </div>
 
       {/* The gate's reason while no translator can run */}
-      {!translation.available && (
-        <div style={styles.errorText}>{translation.reason}</div>
-      )}
+      {gateClosed && <div style={styles.errorText}>{translation.reason}</div>}
 
       {/* Progress section */}
       {phase === "translating" && (
@@ -647,14 +694,14 @@ export default function TranslatePanel({
             type="button"
             style={{
               ...styles.btnPrimary,
-              ...(!translation.available ||
+              ...(gateClosed ||
               (useRefCues ? referenceCues!.length === 0 : cues.length === 0) ||
               !targetLanguage
                 ? { opacity: 0.5, cursor: "not-allowed" }
                 : {}),
             }}
             disabled={
-              !translation.available ||
+              gateClosed ||
               (useRefCues ? referenceCues!.length === 0 : cues.length === 0) ||
               !targetLanguage
             }

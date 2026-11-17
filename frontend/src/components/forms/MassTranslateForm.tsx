@@ -18,6 +18,9 @@ import {
   useTranslationRefusal,
 } from "@/apis/hooks";
 import { BatchItem } from "@/apis/raw/subtitles";
+import TranslationPick, {
+  useManualPick,
+} from "@/components/forms/TranslationPick";
 import { Selector } from "@/components/inputs";
 import { useModals, withModal } from "@/modules/modals";
 import { useSelectorOptions } from "@/utilities";
@@ -196,6 +199,8 @@ const MassTranslateForm: FunctionComponent<Props> = ({ items, onComplete }) => {
   // The availability above is a cached status, so the gate can have closed
   // since it was read: a 409 is where the server's reason gets a say.
   const showTranslationRefusal = useTranslationRefusal();
+  // With the new translator on, a back end can be picked for every item of this run.
+  const pick = useManualPick();
 
   const { data: languages } = useEnabledLanguages();
 
@@ -226,7 +231,9 @@ const MassTranslateForm: FunctionComponent<Props> = ({ items, onComplete }) => {
   });
 
   const translatorType = settings?.data?.translator?.translator_type;
-  const isGoogleTranslator = translatorType === "google_translate";
+  // The old setting means nothing once the new translator is on.
+  const isGoogleTranslator =
+    !pick.runtime && translatorType === "google_translate";
 
   const availableLanguages = useMemo(() => {
     if (isGoogleTranslator) {
@@ -334,6 +341,9 @@ const MassTranslateForm: FunctionComponent<Props> = ({ items, onComplete }) => {
         options: {
           fromLang: values.sourceLanguage!.code2,
           toLang: values.targetLanguage!.code2,
+          ...(pick.connectionId !== null && {
+            connectionId: pick.connectionId,
+          }),
         },
       });
 
@@ -362,16 +372,33 @@ const MassTranslateForm: FunctionComponent<Props> = ({ items, onComplete }) => {
   return (
     <form onSubmit={form.onSubmit(handleSubmit)}>
       <Stack>
-        {translation.available ? (
+        {pick.connectionId !== null ? (
           <Alert>
             <Text size="sm">
-              {translatorService}
-              {translatorModel} will be used to translate{" "}
-              <strong>{items.length}</strong> item(s).
+              {pick.label} will be used to translate{" "}
+              <strong>{items.length}</strong> item(s), with no other back end to
+              fall back on.
             </Text>
-            <Text size="xs" c="var(--bz-text-tertiary)" mt="xs">
-              You can choose translation service in the subtitles settings.
-            </Text>
+          </Alert>
+        ) : translation.available ? (
+          <Alert>
+            {pick.runtime ? (
+              <Text size="sm">
+                The engine selected on the Translation page will be used to
+                translate <strong>{items.length}</strong> item(s).
+              </Text>
+            ) : (
+              <>
+                <Text size="sm">
+                  {translatorService}
+                  {translatorModel} will be used to translate{" "}
+                  <strong>{items.length}</strong> item(s).
+                </Text>
+                <Text size="xs" c="var(--bz-text-tertiary)" mt="xs">
+                  You can choose translation service in the subtitles settings.
+                </Text>
+              </>
+            )}
           </Alert>
         ) : (
           <Alert color="red">{translation.reason}</Alert>
@@ -409,6 +436,8 @@ const MassTranslateForm: FunctionComponent<Props> = ({ items, onComplete }) => {
           </Alert>
         )}
 
+        <TranslationPick pick={pick} disabled={isPending} />
+
         <Selector
           label="Source Language"
           placeholder="Select source language (e.g., English)"
@@ -439,7 +468,10 @@ const MassTranslateForm: FunctionComponent<Props> = ({ items, onComplete }) => {
           <Button
             type="submit"
             loading={isPending}
-            disabled={items.length === 0 || !translation.available}
+            disabled={
+              items.length === 0 ||
+              (!translation.available && pick.connectionId === null)
+            }
           >
             Translate {items.length} Item(s)
           </Button>

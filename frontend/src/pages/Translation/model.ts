@@ -65,6 +65,34 @@ export const backendName = (
 export const working = (item: TranslationConnection) =>
   item.enabled && item.usable && !item.awaiting_secrets;
 
+export interface PickChoice {
+  /** The connection's id, which is what a pick sends. */
+  id: number;
+  /** The back end as a label says it: its type, and its model when it has one. */
+  label: string;
+  /** The engine that serves it. */
+  engine: string;
+}
+
+/**
+ * The back ends a person can pick for one translation: on, with their keys, served by an engine that is
+ * on and whose plugin runs. The server asks the same of a pick and refuses any other, so a back end that
+ * is held back or off is not offered rather than offered and refused. An engine with no back ends (a free
+ * engine with nothing to choose) has nothing to pick.
+ */
+export function pickableConnections(state: TranslationState): PickChoice[] {
+  return orderedEngines(state.instances)
+    .filter((engine) => engine.enabled && !engine.awaiting_secrets)
+    .filter(canRun)
+    .flatMap((engine) =>
+      engine.connections.filter(working).map((item) => ({
+        id: item.id,
+        label: backendName(engine, item),
+        engine: engineName(engine),
+      })),
+    );
+}
+
 /** Whether there is something to run: an engine's plugin, or Bazarr+ itself for an engine it runs. */
 export const canRun = (engine: TranslationEngine) =>
   engine.legacy === true || engine.plugin?.active === true;

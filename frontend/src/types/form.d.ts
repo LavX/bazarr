@@ -59,6 +59,8 @@ declare namespace FormType {
     output_mode?: "overwrite" | "keep_all";
     /** Source language code2; required when path is empty (embedded track). */
     from_language?: string;
+    /** Translate only: the one back end of the new translator to run the job on. */
+    connection_id?: number;
     /** HI flag of the embedded source track (defaults to hi when omitted). */
     from_hi?: PythonBoolean;
     /** Forced flag of the embedded source track (defaults to forced when omitted). */

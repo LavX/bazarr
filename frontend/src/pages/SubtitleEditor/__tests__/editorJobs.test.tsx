@@ -5,11 +5,16 @@ import { http, HttpResponse } from "msw";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import queryClient from "@/apis/queries";
 import { QueryKeys } from "@/apis/queries/keys";
+import {
+  PICK_STATE,
+  stateLoaded,
+  translatorStatus,
+} from "@/components/forms/__tests__/pickFixtures";
 import EditorPage from "@/pages/SubtitleEditor/EditorPage";
 import TranslatePanel from "@/pages/SubtitleEditor/TranslatePanel";
 import WaveformTimeline from "@/pages/SubtitleEditor/WaveformTimeline";
 import { AllProviders } from "@/providers";
-import { act, customRender, rawRender, screen, waitFor } from "@/tests";
+import { act, customRender, rawRender, screen, waitFor, within } from "@/tests";
 import server from "@/tests/mocks/node";
 
 const wavesurfer = vi.hoisted(() => ({
@@ -1328,5 +1333,117 @@ describe("EditorPage single-line translate", () => {
     await waitFor(() => expect(aiBtn).toBeEnabled());
     expect(aiBtn).toHaveTextContent("AI");
     expect(queueRequests).toBe(1);
+  });
+});
+
+describe("TranslatePanel and the manual pick", () => {
+  const OPEN = { available: true, reason: "" };
+
+  function queued() {
+    const submitted: Array<Record<string, unknown>> = [];
+    server.use(
+      http.post("/api/translator/editor", async ({ request }) => {
+        submitted.push((await request.json()) as Record<string, unknown>);
+        return HttpResponse.json({ jobId: 7 }, { status: 202 });
+      }),
+    );
+    return submitted;
+  }
+
+  it("offers the back ends that can take a job, and no others", async () => {
+    translatorStatus(true, OPEN);
+    renderPanel();
+
+    const pick = await screen.findByRole("combobox", {
+      name: "Translate with",
+    });
+    await stateLoaded();
+    await waitFor(() =>
+      expect(
+        within(pick)
+          .getAllByRole("option")
+          .map((item) => item.textContent),
+      ).toEqual(["Automatic", "OpenAI compatible, usable-model"]),
+    );
+  });
+
+  it("queues the picked back end with the lines", async () => {
+    translatorStatus(true, OPEN);
+    const submitted = queued();
+    renderPanel();
+    const user = userEvent.setup();
+
+    const pick = await screen.findByRole("combobox", {
+      name: "Translate with",
+    });
+    await stateLoaded();
+    await waitFor(() =>
+      expect(within(pick).getAllByRole("option")).toHaveLength(2),
+    );
+    await user.selectOptions(pick, "OpenAI compatible, usable-model");
+    expect(
+      screen.getByText("This back end does the whole translation alone."),
+    ).toBeVisible();
+    await user.click(await screen.findByRole("button", { name: "Translate" }));
+
+    await screen.findByRole("button", { name: "Cancel" });
+    expect(submitted).toHaveLength(1);
+    expect(submitted[0]).toMatchObject({
+      targetLanguage: "Hungarian",
+      connectionId: PICK_STATE.instances[0].connections[0].id,
+    });
+  });
+
+  it("queues no back end for Automatic", async () => {
+    translatorStatus(true, OPEN);
+    const submitted = queued();
+    renderPanel();
+    const user = userEvent.setup();
+
+    await screen.findByRole("combobox", { name: "Translate with" });
+    await user.click(await screen.findByRole("button", { name: "Translate" }));
+
+    await screen.findByRole("button", { name: "Cancel" });
+    expect(submitted[0]).not.toHaveProperty("connectionId");
+  });
+
+  it("lets a picked back end translate when the editor's gate is closed", async () => {
+    translatorStatus(true, {
+      available: false,
+      reason: "No translator is configured",
+    });
+    renderPanel();
+    const user = userEvent.setup();
+
+    expect(
+      await screen.findByText("No translator is configured"),
+    ).toBeVisible();
+    expect(
+      await screen.findByRole("button", { name: "Translate" }),
+    ).toBeDisabled();
+    const pick = await screen.findByRole("combobox", {
+      name: "Translate with",
+    });
+    await stateLoaded();
+    await waitFor(() =>
+      expect(within(pick).getAllByRole("option")).toHaveLength(2),
+    );
+    await user.selectOptions(pick, "OpenAI compatible, usable-model");
+
+    expect(screen.getByRole("button", { name: "Translate" })).toBeEnabled();
+    expect(
+      screen.queryByText("No translator is configured"),
+    ).not.toBeInTheDocument();
+  });
+
+  it("shows no picker and never asks for the page's state while the new translator is off", async () => {
+    const asked = translatorStatus(false, OPEN);
+    renderPanel();
+
+    await screen.findByRole("button", { name: "Translate" });
+    expect(
+      screen.queryByRole("combobox", { name: "Translate with" }),
+    ).not.toBeInTheDocument();
+    expect(asked).toEqual([]);
   });
 });

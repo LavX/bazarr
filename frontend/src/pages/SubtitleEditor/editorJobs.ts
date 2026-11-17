@@ -123,6 +123,8 @@ export interface EditorTranslationRequest {
   targetLanguage: string;
   title: string;
   mediaType: string;
+  /** The one back end of the new translator to run on, with no failover. Left out for the selected engine. */
+  connectionId?: number;
 }
 
 export interface EditorTranslationState {

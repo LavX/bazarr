@@ -84,6 +84,8 @@ export interface BatchOptions {
   outputMode?: "overwrite" | "keep_all";
   fromLang?: string;
   toLang?: string;
+  /** Translate only: the one back end of the new translator every item runs on. */
+  connectionId?: number;
 }
 
 /* eslint-disable camelcase -- backend API contract */
@@ -95,6 +97,7 @@ interface BatchPayload {
   output_mode?: "overwrite" | "keep_all";
   from_lang?: string;
   to_lang?: string;
+  connection_id?: number;
 }
 
 function toBatchPayload(options: BatchOptions): BatchPayload {
@@ -106,6 +109,7 @@ function toBatchPayload(options: BatchOptions): BatchPayload {
     output_mode: options.outputMode,
     from_lang: options.fromLang,
     to_lang: options.toLang,
+    connection_id: options.connectionId,
   };
 }
 /* eslint-enable camelcase */
