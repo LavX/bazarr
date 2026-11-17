@@ -95,8 +95,10 @@ class TranslatorWorkers:
     def __init__(self, *, installation_for: Callable[[str], Any] | None = None,
                  store_factory: Callable[[], Any] | None = None, hub_dir: Callable[[], Path] | None = None,
                  config_dir: Callable[[], str] | None = None, reserved_ports: Callable[[], Iterable[int]] | None = None,
-                 sdk_root: Path | None = None, require_sandbox: bool = False, probe: Any = None):
+                 sdk_root: Path | None = None, require_sandbox: bool = False, probe: Any = None,
+                 known_ids: Callable[[], set[str]] | None = None):
         self._installation_for = installation_for or _running_installation
+        self._known_ids = known_ids or _installed_ids
         self._store_factory = store_factory or _default_store
         self._hub_dir = hub_dir or _hub_dir
         self._config_dir = config_dir or _config_dir
@@ -231,8 +233,9 @@ class TranslatorWorkers:
         shutil.rmtree(self._folders(plugin_id, call_id)[0].parent, ignore_errors=True)
 
     def installed(self, plugin_id: str) -> bool:
-        """Whether the Plugin Hub still has the plugin's release running."""
-        return self._installation_for(plugin_id) is not None
+        """Whether the Plugin Hub has the plugin at all: running, held back, switched off, staged or being removed.
+        Raises when the state cannot be read, so that nothing is taken for gone."""
+        return plugin_id in self._known_ids()
 
     def plugin_removed(self, plugin_id: str) -> None:
         """Remove the plugin's writable folders. The caller has made sure nothing of the plugin is running."""
@@ -240,18 +243,24 @@ class TranslatorWorkers:
             shutil.rmtree(Path(self._hub_dir()) / "run" / plugin_id, ignore_errors=True)
 
     def sweep_orphans(self) -> list[str]:
-        """Remove the writable folders of plugins that are not installed, left by a removal the process that made it did
-        not finish clearing. Returns the plugin ids whose folders went. Run at boot, when no worker is running."""
+        """Remove the writable folders of plugins that are not installed at all, left by a removal that was saved
+        after the process that made it had stopped clearing. Every row of the Plugin Hub's inventory counts as
+        installed, whatever its state: a plugin that is held back, switched off or only staged keeps its data. When the
+        inventory cannot be read nothing is removed. Returns the plugin ids whose folders went."""
         run = Path(self._hub_dir()) / "run"
         removed: list[str] = []
         try:
+            known = set(self._known_ids())
             children = sorted(run.iterdir())
         except OSError:
+            return removed
+        except Exception:
+            logger.warning("The installed translators could not be read, so no folder was removed", exc_info=True)
             return removed
         for child in children:
             if child.is_symlink() or not child.is_dir() or not _PLUGIN_ID.match(child.name):
                 continue
-            if self.installed(child.name):
+            if child.name in known:
                 continue
             shutil.rmtree(child, ignore_errors=True)
             removed.append(child.name)
@@ -291,6 +300,17 @@ class TranslatorWorkers:
 
 
 # ------------------------------------------------------------------------------------------------ real sources
+def _installed_ids() -> set[str]:
+    """Every plugin the Plugin Hub's inventory has a row for, read strictly: a document that cannot be read raises."""
+    from provider_hub.state import load_state_strict
+
+    installations = load_state_strict().get("installations")
+    if not isinstance(installations, dict):
+        raise ValueError("the Plugin Hub inventory has no installations")
+    return {str(plugin_id) for plugin_id in installations}
+
+
+
 def _running_installation(plugin_id: str):
     from provider_hub.kinds import TRANSLATOR
     from provider_hub.state import running_installations
@@ -382,8 +402,7 @@ def bind_when_enabled() -> bool:
         return False
     bind(pool)
     try:
-        for plugin_id in _definitions.sweep_orphans():
-            logger.info("Cleared the folders of translator %s, which is no longer installed", plugin_id)
+        sweep_removed_plugins()
     except Exception:
         logger.warning("Could not clear the folders of removed translators", exc_info=True)
     logger.debug("The translation runtime is bound to its translator workers")
@@ -425,7 +444,11 @@ def _sweep_removed(from_timer: bool = False) -> None:
     cleared = set()
     for plugin_id in pending:
         try:
-            if port.idle(plugin_id) and not definitions.installed(plugin_id):
+            if definitions.installed(plugin_id):
+                # A removal of a plugin that is running is staged until the next start, and the sweep after that
+                # start clears it: nothing here changes before then, so there is nothing to look at again.
+                cleared.add(plugin_id)
+            elif port.idle(plugin_id):
                 definitions.plugin_removed(plugin_id)
                 cleared.add(plugin_id)
         except Exception:
@@ -436,6 +459,20 @@ def _sweep_removed(from_timer: bool = False) -> None:
             _removal_timer = threading.Timer(REMOVAL_RECHECK_SECONDS, _sweep_removed, args=(True,))
             _removal_timer.daemon = True
             _removal_timer.start()
+
+
+def sweep_removed_plugins() -> list[str]:
+    """Clear the folders of translators that are not installed any more. Run after the staged installations have been
+    activated at start, which is when a removal made in the last run is finished. Nothing happens while no binding is in
+    place."""
+    with _lock:
+        definitions = _definitions
+    if definitions is None:
+        return []
+    removed = definitions.sweep_orphans()
+    for plugin_id in removed:
+        logger.info("Cleared the folders of translator %s, which is no longer installed", plugin_id)
+    return removed
 
 
 def shutdown() -> None:

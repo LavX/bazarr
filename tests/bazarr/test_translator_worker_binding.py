@@ -84,6 +84,7 @@ class Hub:
         self.installation = SimpleNamespace(provider_id=PLUGIN, active_path=str(self.bundle),
                                             python_path=str(env_bin / "python"), manifest=self.manifest)
         self.installed = {PLUGIN: self.installation}
+        self.extra_known = set()  # inventory rows that are not running: held back, switched off, staged
         self.rows = []  # (instance id, plugin id, enabled, settings, [(connection plugin, type, enabled, settings)])
 
     def store(self):
@@ -107,6 +108,7 @@ class Hub:
     def definitions(self, **kwargs):
         return worker_binding.TranslatorWorkers(
             installation_for=lambda plugin_id: self.installed.get(plugin_id), store_factory=self.store,
+            known_ids=lambda: set(self.installed) | self.extra_known,
             hub_dir=lambda: self.root, config_dir=lambda: str(self.config), reserved_ports=lambda: {6767}, **kwargs)
 
 
@@ -968,6 +970,9 @@ def test_removal_waits_for_a_short_call_that_has_a_worker_and_keeps_the_folders_
 
             raise UnknownWorker("never started")
 
+        def teardown_confirmed(self, key):
+            return True
+
         def run_once(self, definition, op, params, **kwargs):
             started.set()
             gate.wait(20)
@@ -989,14 +994,16 @@ def test_removal_waits_for_a_short_call_that_has_a_worker_and_keeps_the_folders_
     assert _wait(lambda: not base.exists())
 
 
-def test_a_removal_that_is_only_staged_keeps_the_folders_until_the_plugin_is_gone(bound):
+def test_a_removal_that_is_only_staged_arms_no_timer_and_the_sweep_after_the_next_start_finishes_it(bound):
     hub, base = bound.hub, bound.hub.root / "run" / PLUGIN
     bound.definitions._spec(PLUGIN, {443})
     worker_binding.plugin_removed(PLUGIN)  # still installed: the removal waits for a restart
-    time.sleep(0.5)
-    assert base.exists() and PLUGIN in worker_binding._pending_removal
-    hub.installed.pop(PLUGIN)
-    assert _wait(lambda: not base.exists())
+    assert base.exists() and not worker_binding._pending_removal and worker_binding._removal_timer is None
+    assert worker_binding.sweep_removed_plugins() == []  # the same process: nothing changed
+    assert base.exists()
+    hub.installed.pop(PLUGIN)  # the next start: the staged removal was applied
+    assert worker_binding.sweep_removed_plugins() == [PLUGIN]
+    assert not base.exists()
 
 
 def test_a_start_clears_the_folders_of_plugins_that_are_not_installed(hub):
@@ -1007,3 +1014,90 @@ def test_a_start_clears_the_folders_of_plugins_that_are_not_installed(hub):
     assert hub.definitions().sweep_orphans() == ["ghost"]
     assert (hub.root / "run" / PLUGIN / "data").is_dir() and (hub.root / "run" / "not a plugin id").is_dir()
     assert hub.definitions().sweep_orphans() == []
+
+
+# ------------------------------------------------------------------ the sweep only removes what is not installed at all
+def _write_inventory(path, rows):
+    import json
+
+    path.write_text(json.dumps({"catalog_sources": {}, "catalog_entries": {}, "jobs": [], "installations": rows}),
+                    encoding="utf-8")
+
+
+def _row(**overrides):
+    row = {"provider_id": PLUGIN, "name": "Sample", "kind": "translator", "state": "active", "active_version": "1.0",
+           "pending_restart": False, "manifest": _manifest(), "enabled": True}
+    row.update(overrides)
+    return row
+
+
+def test_the_sweep_keeps_the_folders_of_every_translator_the_inventory_has_a_row_for(hub, monkeypatch, tmp_path):
+    """A translator that is held back at boot, switched off or only staged is installed: its data stays. Only a
+    folder with no row at all goes."""
+    state = tmp_path / "state.json"
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(state))
+    names = {"running": "runner", "blocked": "blocker", "disabled": "sleeper", "staged": "newcomer", "ghost": "ghost"}
+    for plugin in names.values():
+        (hub.root / "run" / plugin / "data").mkdir(parents=True)
+        (hub.root / "run" / plugin / "data" / "keep.db").write_text("data")
+    _write_inventory(state, {
+        "runner": _row(provider_id="runner"),
+        "blocker": _row(provider_id="blocker", blocked=True),
+        "sleeper": _row(provider_id="sleeper", enabled=False),
+        "newcomer": _row(provider_id="newcomer", state="staged", active_version=None, staged_version="2.0",
+                         pending_restart=True)})
+    definitions = worker_binding.TranslatorWorkers(hub_dir=lambda: hub.root, store_factory=hub.store,
+                                                   config_dir=lambda: str(hub.config))  # the real inventory reader
+    assert definitions.sweep_orphans() == ["ghost"]
+    for plugin in ("runner", "blocker", "sleeper", "newcomer"):
+        assert (hub.root / "run" / plugin / "data" / "keep.db").read_text() == "data", plugin
+    assert not (hub.root / "run" / "ghost").exists()
+    # A removal that is staged is not a removal yet.
+    assert definitions.installed("blocker") and definitions.installed("newcomer") and not definitions.installed("ghost")
+
+
+@pytest.mark.parametrize("content", ["not json at all", '["a", "list"]', '{"installations": []}'])
+def test_the_sweep_removes_nothing_when_the_inventory_cannot_be_read(hub, monkeypatch, tmp_path, content):
+    state = tmp_path / "state.json"
+    state.write_text(content, encoding="utf-8")
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(state))
+    (hub.root / "run" / "keeper" / "data").mkdir(parents=True)
+    definitions = worker_binding.TranslatorWorkers(hub_dir=lambda: hub.root, store_factory=hub.store,
+                                                   config_dir=lambda: str(hub.config))
+    assert definitions.sweep_orphans() == []
+    assert (hub.root / "run" / "keeper" / "data").is_dir()
+
+
+# ------------------------------------------------------------- idle means nothing of the plugin is left running
+@pytest.mark.parametrize("retiring,confirmed,idle", [(0, True, True), (1, True, False), (0, False, False)])
+def test_a_plugin_with_a_draining_worker_or_an_unconfirmed_teardown_is_not_idle(retiring, confirmed, idle):
+    from provider_hub.runtime.pool import WorkerState
+
+    class Pool:
+        def state(self, key):
+            return WorkerState.STOPPED  # a failed restart can leave the entry stopped with a worker still draining
+
+        def teardown_confirmed(self, key):
+            return confirmed
+
+        def status(self):
+            return {"workers": {PLUGIN: {"retiring": retiring}}}
+
+    assert workers.PoolWorkers(Pool(), _definition_of).idle(PLUGIN) is idle
+
+
+# ------------------------------------------------------- a paused plugin says so instead of "in a moment"
+def test_a_refusal_for_the_per_plugin_cap_carries_its_wait_and_the_page_says_how_long():
+    from provider_hub.runtime.pool import PoolCodes, PoolUnavailable
+    from subtitles.tools.translate.runtime import probe
+    from subtitles.tools.translate.runtime.settings_service import ProbeRequest  # noqa: F401
+
+    class Pool:
+        def run_once(self, definition, op, params, **kwargs):
+            raise PoolUnavailable("paused", code=PoolCodes.UNVERIFIED_LIMIT, retry_after=3000.0)
+
+    port = workers.PoolWorkers(Pool(), _definition_of)
+    with pytest.raises(workers.NotSent) as refused:
+        port.call(PLUGIN, "test", {}, {}, timeout=5)
+    assert refused.value.code == "unverified_limit" and refused.value.retry_after == 3000.0
+    assert "50 minutes" in probe.PAUSED_TEST.format(minutes=round(refused.value.retry_after / 60))

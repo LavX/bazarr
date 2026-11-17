@@ -405,3 +405,14 @@ def test_a_priced_test_whose_worker_started_over_its_memory_limit_is_settled_at_
     assert result["ok"] is False and result["outcome"] == "not_ready"
     rows = service._store.session.query(TableTranslationUsage).all()
     assert [(row.state, row.actual_micros) for row in rows] == [("settled", 0)]
+
+
+def test_a_test_refused_for_the_per_plugin_cap_says_how_long_to_wait_and_is_not_a_verdict(app_service):
+    class Paused(FakePort):
+        def call(self, plugin_id, op, params, secrets, *, timeout):
+            raise workers.NotSent("paused", retry_after=3000.0, code="unverified_limit")
+
+    workers.bind(Paused({}))
+    result = app_service.service.test_connection(app_service.connection_id)
+    assert result["ok"] is False and result["outcome"] == "not_ready"
+    assert "about 50 minutes" in result["message"] and "in a moment" not in result["message"]

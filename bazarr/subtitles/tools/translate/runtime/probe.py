@@ -32,6 +32,8 @@ _TOKEN_KEYS = ("input_tokens", "output_tokens")
 
 BUSY_TEST = "Other tests are running right now. Try the test again in a moment."
 UNSTARTED_TEST = "The translation engine could not take the test. Try again in a moment."
+# The pool refuses to start more workers of a plugin that had several ended by force within the hour.
+PAUSED_TEST = "Tests of this engine are paused because earlier ones had to be stopped. Try again in about {minutes} minutes."
 
 
 def worker_probe(request: ProbeRequest) -> Mapping[str, Any]:
@@ -60,6 +62,9 @@ def worker_probe(request: ProbeRequest) -> Mapping[str, Any]:
         outcome = port.call(request.plugin_id, workers.TEST_OP, {"config": config}, dict(request.secrets),
                             timeout=request.timeout_seconds)
     except workers.NotSent as refused:
+        if refused.code == "unverified_limit" and refused.retry_after:
+            minutes = max(1, round(refused.retry_after / 60))
+            return {"ok": False, "sent": False, "message": PAUSED_TEST.format(minutes=minutes)}
         return {"ok": False, "sent": False, "message": BUSY_TEST if refused.busy else UNSTARTED_TEST}
     value = wire.unwrap(outcome.result, outcome.data)
     if not isinstance(value, Mapping):

@@ -55,9 +55,12 @@ class NotSent(Exception):
     request the wire could not carry, or a worker that would not start. ``busy`` tells a refusal that only asks the
     caller to wait from one that is not going to change by waiting."""
 
-    def __init__(self, message: str, *, busy: bool = False):
+    def __init__(self, message: str, *, busy: bool = False, retry_after: float | None = None, code: str | None = None):
         super().__init__(message)
         self.busy = busy
+        # How long until asking again can work, and why not now, when the pool knows.
+        self.retry_after = retry_after
+        self.code = code
 
 
 class RunningCall(Protocol):
@@ -257,8 +260,8 @@ class PoolWorkers:
             except (PoolError, SessionBusy) as error:
                 # The pool turned the request away or the worker would not start: nothing was written.
                 busy = isinstance(error, SessionBusy) or getattr(error, "code", None) == PoolCodes.POOL_FULL
-                raise NotSent(f"the worker could not take the request ({type(error).__name__})",
-                              busy=busy) from None
+                raise NotSent(f"the worker could not take the request ({type(error).__name__})", busy=busy,
+                              retry_after=getattr(error, "retry_after", None), code=getattr(error, "code", None)) from None
         finally:
             with self._lock:
                 left = self._calls.get(plugin_id, 0) - 1
@@ -278,14 +281,18 @@ class PoolWorkers:
         there, or is stopped, or is waiting out a failure with no process."""
         from provider_hub.runtime.pool import UnknownWorker, WorkerState
 
+        key = self._key_for(plugin_id)
         with self._lock:
             if self._calls.get(plugin_id):
                 return False
         try:
-            state = self._pool.state(self._key_for(plugin_id))
+            state = self._pool.state(key)
         except UnknownWorker:
-            return True
-        return state in (WorkerState.STOPPED, WorkerState.BACKOFF, WorkerState.BROKEN)
+            return self._pool.teardown_confirmed(key)
+        if state not in (WorkerState.STOPPED, WorkerState.BACKOFF, WorkerState.BROKEN):
+            return False
+        # An entry in one of those states can still have a worker that is draining or whose end is not confirmed yet.
+        return self._pool.teardown_confirmed(key) and not self._pool.status()["workers"][key]["retiring"]
 
     def retire(self, plugin_id):
         """Take the plugin's worker out of service once the jobs it holds are done. The next request starts a new
