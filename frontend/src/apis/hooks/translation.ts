@@ -30,10 +30,15 @@ export function useTranslationRuntime(): boolean {
   return data?.translation_runtime_v2 === true;
 }
 
-export function useTranslationState() {
+/**
+ * The page's state. `enabled` is for a caller outside the page that reads it
+ * only while the runtime is on: the route does not exist with it off.
+ */
+export function useTranslationState(enabled = true) {
   return useQuery({
     queryKey: stateKey,
     queryFn: () => api.translation.state(),
+    enabled,
     retry: false,
     refetchOnWindowFocus: false,
   });

@@ -3,6 +3,7 @@
 import userEvent from "@testing-library/user-event";
 import { http, HttpResponse } from "msw";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { NOTHING_WRITTEN } from "@/pages/Setup/steps/types";
 import { createDraft } from "@/pages/Setup/useOnboardingSelection";
 import { cleanup, customRender, screen, waitFor } from "@/tests";
 import server from "@/tests/mocks/node";
@@ -132,7 +133,8 @@ describe("PlexServerForm", () => {
     await waitFor(() =>
       expect(markSaved).toHaveBeenCalledWith(draft.draftId, "plex-1"),
     );
-    expect(onNext).toHaveBeenCalled();
+    // A connection was made, so it is an answer.
+    expect(onNext).toHaveBeenCalledWith();
   });
 
   it("marks the row the account owns, not the first Plex row there is", async () => {
@@ -200,7 +202,7 @@ describe("PlexServerForm", () => {
 
     await user.click(screen.getByRole("button", { name: /^continue$/i }));
 
-    await waitFor(() => expect(onNext).toHaveBeenCalled());
+    await waitFor(() => expect(onNext).toHaveBeenCalledWith(NOTHING_WRITTEN));
     expect(markSaved).not.toHaveBeenCalled();
   });
 });

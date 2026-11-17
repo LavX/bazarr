@@ -106,7 +106,8 @@ def test_a_manual_pick_replaces_a_queued_job_and_ends_it_superseded(env, queue_s
 
 def test_a_request_that_follows_a_manual_pick_joins_the_pinned_job(env, queue_status):
     pick = enqueue.decide(SOURCE, "fr", pinned_connection_id=3, session=env.session, clock=env.clock)
-    later = enqueue.decide(SOURCE, "fr", session=env.session, clock=env.clock)  # the request that queues it
+    # The request that recorded the pick and queues the job owns it.
+    later = enqueue.decide(SOURCE, "fr", owns_pin=True, session=env.session, clock=env.clock)
     assert later.translator_job_id == pick.translator_job_id
     assert jobs_of(env).get(pick.translator_job_id).pinned_connection_id == 3
 
@@ -557,7 +558,9 @@ def test_the_editor_translates_through_the_selected_engine_when_the_runtime_is_o
 
     env.ai_engine()
     monkeypatch.setattr(service, "Dispatcher", lambda: env.dispatcher())
-    monkeypatch.setattr(editor, "_runtime_editor_service", lambda media_type: editor._RuntimeEditorService(media_type))
+    monkeypatch.setattr(editor, "_runtime_editor_service",
+                        lambda media_type, pinned_connection_id=None: editor._RuntimeEditorService(
+                            media_type, pinned_connection_id))
     lines = [{"position": 4, "line": "Hello"}, {"position": 9, "line": "World"}]
     job_id = editor.enqueue_editor_translation(lines, "en", "fr", title="Example")
     _run_editor_job(editor_queue, job_id)
@@ -573,7 +576,9 @@ def test_the_editor_says_why_when_the_gate_is_closed(env, editor_queue, monkeypa
     from subtitles.tools.translate.runtime import service
 
     monkeypatch.setattr(service, "Dispatcher", lambda: env.dispatcher())
-    monkeypatch.setattr(editor, "_runtime_editor_service", lambda media_type: editor._RuntimeEditorService(media_type))
+    monkeypatch.setattr(editor, "_runtime_editor_service",
+                        lambda media_type, pinned_connection_id=None: editor._RuntimeEditorService(
+                            media_type, pinned_connection_id))
     job_id = editor.enqueue_editor_translation([{"position": 0, "line": "Hello"}], "en", "fr")
     _run_editor_job(editor_queue, job_id)
     state = editor.editor_translation_state(job_id)

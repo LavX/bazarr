@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import type { MediaServerDraftSummary } from "@/pages/Setup/useOnboardingSelection";
 import { buildSteps, mediaServerStepKey, ONBOARDING_STEPS } from "./index";
+import TranslationStep from "./TranslationStep";
+import TranslatorStep from "./TranslatorStep";
 
 const NO_SERVERS: MediaServerDraftSummary[] = [];
 
@@ -190,6 +192,48 @@ describe("onboarding step registry", () => {
   it("every step declares the phase the rail counts", () => {
     for (const step of ONBOARDING_STEPS) {
       expect(["start", "connect", "subtitles", "finish"]).toContain(step.phase);
+    }
+  });
+});
+
+describe("the translation step and the new translator", () => {
+  const translation = (runtime?: boolean) =>
+    buildSteps({
+      intent: "library",
+      mediaServers: NO_SERVERS,
+      translationRuntime: runtime,
+    }).find((step) => step.key === "translator")!;
+
+  it("is the step it always was while the new translator is off", () => {
+    expect(translation().Component).toBe(TranslatorStep);
+    expect(translation(false).Component).toBe(TranslatorStep);
+    // The registry itself is not touched either way.
+    expect(
+      ONBOARDING_STEPS.find((step) => step.key === "translator")?.Component,
+    ).toBe(TranslatorStep);
+  });
+
+  it("offers the new engines while it is on, under the same key and place", () => {
+    const off = translation(false);
+    const on = translation(true);
+    expect(on.Component).toBe(TranslationStep);
+    // Only what the step shows changes: its key, label, phase and skip do not,
+    // so a cursor saved on it still lands on it.
+    expect({ ...on, Component: null }).toEqual({ ...off, Component: null });
+  });
+
+  it("leaves every other step and the order alone", () => {
+    const off = buildSteps({ intent: "library", mediaServers: NO_SERVERS });
+    const on = buildSteps({
+      intent: "library",
+      mediaServers: NO_SERVERS,
+      translationRuntime: true,
+    });
+    expect(on.map((step) => step.key)).toEqual(off.map((step) => step.key));
+    for (const [index, step] of on.entries()) {
+      if (step.key !== "translator") {
+        expect(step).toBe(off[index]);
+      }
     }
   });
 });

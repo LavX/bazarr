@@ -52,7 +52,10 @@ def runtime_active():
         return False
 
 
-def translation_available(translator_type=None):
+PICK_NEEDS_RUNTIME = 'Picking a back end needs the new translator, which is switched off'
+
+
+def translation_available(translator_type=None, pin=None):
     """The configured translator's answer to "can you translate", with a reason.
 
     Every rule mirrors what the engine needs to run, not what the factory can
@@ -65,7 +68,17 @@ def translation_available(translator_type=None):
     one. The subtitle editor translates through the AI Subtitle Translator
     service whatever the settings page has selected, so it asks about that
     engine and gets the answer that engine's own branch would give.
+
+    ``pin`` is a manual pick (see ``pick.pin_value``): one back end, or one engine that has none. It is answered
+    for that pick, whatever engine is selected, and refused while the runtime is off: a pick is never dropped
+    silently.
     """
+    if pin is not None:
+        if not runtime_active():
+            return TranslationAvailability(False, PICK_NEEDS_RUNTIME)
+        from .runtime.gate import pinned_gate
+        picked = pinned_gate(pin)
+        return TranslationAvailability(picked.available, picked.reason)
     if runtime_active():
         # The runtime answers for the selected engine. A named type is one of the old engines, which the
         # runtime does not have, so it is not asked about.

@@ -322,7 +322,11 @@ const FinishStep: FC<WizardStepProps> = ({ onBack }) => {
   if (!translatorReady) {
     extras.push({
       label: "Translate subtitles with AI",
-      where: "Settings, Translator",
+      // The page moved out of Settings once the new translator is on.
+      where:
+        status?.translation_runtime_v2 === true
+          ? "Translation"
+          : "Settings, Translator",
     });
   }
 

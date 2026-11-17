@@ -21,6 +21,7 @@ import {
 } from "@fortawesome/free-solid-svg-icons";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import { useEditorTranslationAvailability } from "@/apis/hooks";
+import { useManualPick } from "@/components/forms/TranslationPick";
 
 type ToolbarAction =
   | "save"
@@ -85,6 +86,10 @@ export default function EditorToolbar({
   // translate posts to the editor endpoint, which asks about the AI Subtitle
   // Translator service whatever the settings page selected.
   const translation = useEditorTranslationAvailability();
+  // The panel also starts a translation on a back end or engine picked by hand, which the gate for the
+  // selected engine says nothing about: it opens while anything can be picked.
+  const manual = useManualPick();
+  const canTranslate = translation.available || manual.choices.length > 0;
 
   return (
     <Group
@@ -312,11 +317,7 @@ export default function EditorToolbar({
             </ActionIcon>
           </Tooltip>
           <Tooltip
-            label={
-              translation.available
-                ? "AI Translate (Alt+T)"
-                : translation.reason
-            }
+            label={canTranslate ? "AI Translate (Alt+T)" : translation.reason}
             position="bottom"
             withArrow
           >
@@ -328,13 +329,13 @@ export default function EditorToolbar({
               // tooltip needs, so the reason would never show. The closed gate
               // travels as data-disabled with a guarded click instead: the
               // tooltip opens and the click does nothing.
-              data-disabled={!translation.available || undefined}
+              data-disabled={!canTranslate || undefined}
               style={{
-                opacity: translation.available ? undefined : 0.5,
-                cursor: translation.available ? undefined : "not-allowed",
+                opacity: canTranslate ? undefined : 0.5,
+                cursor: canTranslate ? undefined : "not-allowed",
               }}
               onClick={() => {
-                if (!translation.available) return;
+                if (!canTranslate) return;
                 onAction("translate");
               }}
               aria-label="AI Translate"

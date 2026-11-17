@@ -35,6 +35,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Any, Callable, Sequence
 
+from ..pick import split_pin
 from . import failure as fail
 from . import gate as gate_module
 from . import legacy_engines
@@ -44,7 +45,7 @@ from .failure import AttemptFailure
 from .history import HistoryStore
 from .host_calls import AttemptContext, stored_checkpoints
 from .jobs import (AWAITING_RETRY, DEADLINE_EXCEEDED, INACTIVITY_TIMEOUT, QUEUED, DeadlineAction, DeadlineWatch,
-                   TranslationJobs, line_digest)
+                   TranslationJobs, line_digest, retry_hold)
 from .output_checks import add_rtl_marks, check_line
 from .request import LanguageSpec, UnsupportedLanguage, normalize_request_languages
 from .store import CONNECTION, INSTANCE, Notice, TranslatorStore
@@ -80,7 +81,12 @@ class JobSpec:
     media: dict = field(default_factory=dict)
     # What the history row says about the media: media_type, media_id, media_title, arr_instance_id.
     history_media: dict = field(default_factory=dict)
+    # A manual pick as ``pick.pin_value`` makes it: a connection's id, or an engine's id as its negative.
     pinned_connection_id: int | None = None
+    # True for a job the queue runs for a request that already made its record (the library path): a pick that
+    # request made is on the record, not in the spec. A request that carries no pick and finds a record that has one
+    # (the editor, which makes its record here) clears the pick, because a pick belongs to the request that made it.
+    pin_from_job: bool = False
     # Raises JobCancelled when the person stopped the job.
     check_cancel: Callable[[], None] = lambda: None
     # progress(done, total, message): shown on the job in the queue.
@@ -334,6 +340,24 @@ class Dispatcher:
     def _ensure_job(self, jobs: TranslationJobs, spec: JobSpec):
         """The job's record, ready to start. None when another job already runs it or it has ended."""
         row = jobs.active_for(spec.source_key, spec.target_key)
+        picked = spec.pinned_connection_id
+        if row is not None and picked is not None and row.pinned_connection_id != picked \
+                and row.state in (QUEUED, AWAITING_RETRY):
+            # A new pick replaces the one the job has: the old job ends superseded and its checkpoints go.
+            result = jobs.request(spec.source_key, spec.target_key, manual=True, pinned_connection_id=picked)
+            if result.job_id is None:
+                return None
+            if result.replaced_job_id is not None:
+                try:
+                    HistoryStore(self.session, clock=self.clock).finish_job(str(result.replaced_job_id), "superseded")
+                except Exception:
+                    logger.debug("The superseded translation had no history row to finish")
+            row = jobs.get(result.job_id)
+        elif row is not None and picked is None and row.pinned_connection_id is not None \
+                and not spec.pin_from_job and row.state in (QUEUED, AWAITING_RETRY):
+            # This request carries no pick, and a pick belongs to the request that made it.
+            jobs.clear_pin(row.id)
+            row = jobs.get(row.id)
         if row is None:
             result = jobs.request(spec.source_key, spec.target_key, manual=spec.pinned_connection_id is not None,
                                   pinned_connection_id=spec.pinned_connection_id)
@@ -341,13 +365,18 @@ class Dispatcher:
                 return None
             row = jobs.get(result.job_id)
         if row is not None and row.state == AWAITING_RETRY:
+            hold = retry_hold(row, spec.pinned_connection_id, self.clock())
+            if hold:
+                # The editor asks again with the pick it already had, and the engine asked to be left alone.
+                raise DispatchFailed(row.error_class or fail.INTERNAL, hold, retry_later=True, retry_at=row.retry_at)
             if not jobs.requeue(row.id):
                 return None
             row = jobs.get(row.id)
         if row is None or row.state != QUEUED:
             return None
-        if spec.pinned_connection_id is None and row.pinned_connection_id is not None:
-            # A manual pick recorded its connection on the job when it was made.
+        if spec.pinned_connection_id is None and spec.pin_from_job and row.pinned_connection_id is not None:
+            # A manual pick recorded its pick on the job when the request was made, and the queue job that request
+            # added runs it.
             spec.pinned_connection_id = row.pinned_connection_id
         return row
 
@@ -355,6 +384,17 @@ class Dispatcher:
         """The engines to try, in order. Raises ``GateClosed`` when the job cannot run at all."""
         store = self.store
         notices: list[Notice] = []
+        if spec.pinned_connection_id is not None and split_pin(spec.pinned_connection_id)[0] == "engine":
+            # An engine picked by hand, one with no back ends: that engine alone, no failover and no fallback.
+            instance = store.get_instance(split_pin(spec.pinned_connection_id)[1], fresh=True)
+            if instance is None:
+                raise GateClosed(gate_module.PICK_ENGINE_MISSING, gate_module.ENGINE_MISSING)
+            if store.list_connections(instance.id):
+                raise GateClosed(gate_module.PICK_ENGINE_HAS_BACKENDS, gate_module.NOT_CONFIGURED)
+            state = gate_module.engine_state(store, instance, self.holds, self.workers)
+            if not state.available:
+                raise GateClosed(state.reason, state.cause)
+            return [_Choice(instance)], notices
         if spec.pinned_connection_id is not None:
             connection = store.get_connection(spec.pinned_connection_id, fresh=True)
             instance = store.get_instance(connection.instance_id, fresh=True) if connection is not None else None
@@ -567,6 +607,13 @@ class Dispatcher:
         """The connections to try, in order. A connectionless engine is one attempt with ``None``."""
         store = self.store
         if choice.pinned is not None:
+            # A pick still respects the retry time the back end reported: it is answered with that reason, and the
+            # job waits for it like any other that hit the window.
+            waiting = self.windows.waiting(choice.pinned.id)
+            if waiting is not None:
+                remaining, error_class = waiting
+                raise AttemptFailure(error_class, "The back end you picked asked to be left alone for now.",
+                                     retry_after=remaining)
             return [choice.pinned]
         connections = store.list_connections(instance.id)
         if not connections:

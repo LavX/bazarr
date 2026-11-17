@@ -13,7 +13,7 @@ import { useOnboardingSelection } from "@/pages/Setup/useOnboardingSelection";
 import { useReportStepBusy } from "@/pages/Setup/useStepBusy";
 import ConnectedServerRow from "./mediaServer/ConnectedServerRow";
 import StepActions from "./mediaServer/StepActions";
-import type { WizardStepProps } from "./types";
+import { NOTHING_WRITTEN, type WizardStepProps } from "./types";
 import styles from "./MediaServerStep.module.scss";
 
 // The same four kinds, in the same order, as the Connections tabs.
@@ -167,6 +167,14 @@ const MediaServerStep: FC<WizardStepProps> = ({ onNext, onBack }) => {
     (draft) => draft.instanceId === undefined,
   ).length;
 
+  // Continue with nothing connected writes nothing, whether or not a server was
+  // ticked: the ticked one is set up on its own step, which answers for itself.
+  // The rail draws this one as a walk past, like every other step left empty.
+  // A server whose row was just written counts, though the list has not caught up yet.
+  const untouched =
+    ORDER.every((kind) => connected[kind].length === 0) &&
+    drafts.every((draft) => draft.instanceId === undefined);
+
   // Whether the kind's master switch is on. The dispatcher reads it before it
   // reads any row, so an enabled instance under a switched-off kind refreshes
   // nothing; calling that connected is the same lie the Finish recap used to
@@ -209,7 +217,7 @@ const MediaServerStep: FC<WizardStepProps> = ({ onNext, onBack }) => {
       layout="wide"
       actions={
         <StepActions
-          onNext={onNext}
+          onNext={() => (untouched ? onNext(NOTHING_WRITTEN) : onNext())}
           onBack={onBack}
           continueLabel={
             pendingTotal > 0

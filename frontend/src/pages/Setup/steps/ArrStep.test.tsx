@@ -17,6 +17,7 @@ import {
 import { StepBusyProvider, useStepBusy } from "@/pages/Setup/useStepBusy";
 import { customRender, screen, waitFor } from "@/tests";
 import ArrStep from "./ArrStep";
+import { NOTHING_WRITTEN } from "./types";
 
 // Keep the real barrel (AllProviders' ThemeLoader reads useSystemSettings from
 // it) and override only the hooks the step drives.
@@ -425,7 +426,7 @@ describe("ArrStep", () => {
 
     expect(createMutate).not.toHaveBeenCalled();
     expect(settingsMutate).not.toHaveBeenCalled();
-    expect(onNext).toHaveBeenCalled();
+    expect(onNext).toHaveBeenCalledWith(NOTHING_WRITTEN);
   });
 
   it("refuses to create until an address and an API key are given", async () => {

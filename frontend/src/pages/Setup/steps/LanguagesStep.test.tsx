@@ -9,6 +9,7 @@ import {
 import { customRender, screen, waitFor } from "@/tests";
 import server from "@/tests/mocks/node";
 import LanguagesStep from "./LanguagesStep";
+import { NOTHING_WRITTEN } from "./types";
 
 // Keep the real barrel (AllProviders' ThemeLoader reads useSystemSettings from
 // it) and override only the hooks this step drives.
@@ -205,7 +206,8 @@ describe("LanguagesStep", () => {
     await user.click(screen.getByRole("button", { name: /continue/i }));
 
     expect(mutate).not.toHaveBeenCalled();
-    expect(onNext).toHaveBeenCalled();
+    // Nothing was written and nothing is known: a walk past.
+    expect(onNext).toHaveBeenCalledWith(NOTHING_WRITTEN);
   });
 
   it("disables Continue until a language is selected", async () => {
@@ -390,7 +392,8 @@ describe("LanguagesStep", () => {
     await user.click(screen.getByRole("button", { name: /continue/i }));
 
     expect(mutate).not.toHaveBeenCalled();
-    expect(onNext).toHaveBeenCalled();
+    // Profiles exist already, which is an answer.
+    expect(onNext).toHaveBeenCalledWith();
   });
 
   it("renders a Back button when onBack is provided", () => {

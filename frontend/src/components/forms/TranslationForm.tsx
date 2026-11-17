@@ -9,6 +9,9 @@ import {
   useTranslationAvailability,
   useTranslationRefusal,
 } from "@/apis/hooks";
+import TranslationPick, {
+  useManualPick,
+} from "@/components/forms/TranslationPick";
 import { Selector } from "@/components/inputs";
 import { useModals, withModal } from "@/modules/modals";
 import { notification } from "@/modules/notification";
@@ -146,6 +149,8 @@ const TranslationForm: FunctionComponent<Props> = ({
   // The availability above is a cached status, so the gate can have closed
   // since it was read: a 409 is where the server's reason gets a say.
   const showTranslationRefusal = useTranslationRefusal();
+  // With the new translator on, a back end can be picked for this one translation.
+  const pick = useManualPick();
 
   const { data: languages } = useEnabledLanguages();
 
@@ -159,7 +164,9 @@ const TranslationForm: FunctionComponent<Props> = ({
   });
 
   const translatorType = settings?.data?.translator?.translator_type;
-  const isGoogleTranslator = translatorType === "google_translate";
+  // The old setting means nothing once the new translator is on.
+  const isGoogleTranslator =
+    !pick.runtime && translatorType === "google_translate";
 
   const available = useMemo(() => {
     // Only filter by translations if using Google Translate
@@ -222,6 +229,7 @@ const TranslationForm: FunctionComponent<Props> = ({
                     language: language.code2,
                     // eslint-disable-next-line camelcase
                     arr_instance_id: s.arr_instance_id,
+                    ...pick.fields,
                   },
                 }),
               ),
@@ -252,19 +260,30 @@ const TranslationForm: FunctionComponent<Props> = ({
     >
       <Stack pos="relative">
         <LoadingOverlay visible={isPending} />
-        {translation.available ? (
+        {pick.picked ? (
+          <Alert>{pick.label} will be used for this translation alone.</Alert>
+        ) : translation.available ? (
           <Alert>
-            <div>
-              {translatorService}
-              {translatorModel} will be used.
-            </div>
-            <div>
-              You can choose translation service in the subtitles settings.
-            </div>
+            {pick.runtime ? (
+              <div>
+                The engine selected on the Translation page will be used.
+              </div>
+            ) : (
+              <>
+                <div>
+                  {translatorService}
+                  {translatorModel} will be used.
+                </div>
+                <div>
+                  You can choose translation service in the subtitles settings.
+                </div>
+              </>
+            )}
           </Alert>
         ) : (
           <Alert color="red">{translation.reason}</Alert>
         )}
+        <TranslationPick pick={pick} disabled={isPending} />
         {isGoogleTranslator && (
           <Alert variant="outline">
             Enabled languages not listed here are unsupported by{" "}
@@ -276,7 +295,7 @@ const TranslationForm: FunctionComponent<Props> = ({
         <Button
           type="submit"
           loading={isPending}
-          disabled={!translation.available}
+          disabled={!translation.available && pick.picked === null}
         >
           Start
         </Button>

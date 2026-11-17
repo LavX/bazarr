@@ -1223,11 +1223,12 @@ def _process_subtitle_item(item, action, options, job_id, children=None, *,
         # queued, and an operator can switch translation off between two
         # items. The item fails with the gate's reason instead of queueing
         # one doomed translation job after another.
-        from subtitles.tools.translate.availability import translation_available
-        availability = translation_available()
+        from subtitles.tools.translate.pick import pin_value
+        pick = pin_value(options.get('connection_id'), options.get('engine_id'))
+        availability = _translation_available(options)
         if not availability.available:
             raise ValueError(availability.reason)
-        from subtitles.tools.translate.main import translate_subtitles_file
+        from subtitles.tools.translate.main import pin_translation, translate_subtitles_file
         if item.get('sports_event_id'):
             media_type = 'sports'
         else:
@@ -1260,6 +1261,10 @@ def _process_subtitle_item(item, action, options, job_id, children=None, *,
         # Don't pass the batch job_id to translate. translate_subtitles_file
         # has its own job/progress lifecycle that would hijack the batch job.
         # Calling without job_id makes it queue as its own separate job.
+        if pick is not None:
+            # The pick is recorded on the job this item's request then joins.
+            pin_translation(item['video_path'], source_srt_file, options.get('to_lang', 'en'), item['forced'],
+                            item['hi'], None, pick)
         child_id = translate_subtitles_file(
             video_path=item['video_path'],
             source_srt_file=source_srt_file,
@@ -1644,7 +1649,17 @@ class _TranslationGateClosed(Exception):
     str() is the gate's reason."""
 
 
-def _translation_gate_refusal(job_id=None):
+def _translation_available(options):
+    """The gate's answer for this batch: the picked back end or engine's own gate when the batch carries a pick,
+    and the selected engine's otherwise. Raises ``ValueError`` for a pick that is not a valid id."""
+    from subtitles.tools.translate.availability import translation_available
+    from subtitles.tools.translate.pick import pin_value
+
+    pin = pin_value((options or {}).get('connection_id'), (options or {}).get('engine_id'))
+    return translation_available(pin=pin) if pin is not None else translation_available()
+
+
+def _translation_gate_refusal(job_id=None, options=None):
     """Refuse a mass translate while the gate is closed.
 
     A batch that is already running, one with a job id, fails with the reason:
@@ -1653,14 +1668,17 @@ def _translation_gate_refusal(job_id=None):
     _TranslationGateClosed, which mass_batch_operation answers with the payload
     its callers expect. An open gate returns quietly.
     """
-    from subtitles.tools.translate.availability import translation_available
-
-    availability = translation_available()
-    if availability.available:
-        return
+    try:
+        availability = _translation_available(options)
+    except ValueError as exc:
+        reason = str(exc)
+    else:
+        if availability.available:
+            return
+        reason = availability.reason
     if job_id:
-        raise JobFailed(availability.reason)
-    raise _TranslationGateClosed(availability.reason)
+        raise JobFailed(reason)
+    raise _TranslationGateClosed(reason)
 
 
 def mass_batch_operation(items=None, action='sync', options=None, job_id=None):
@@ -1692,7 +1710,7 @@ def mass_batch_operation(items=None, action='sync', options=None, job_id=None):
     # open-gate self-schedule would crash with a TypeError.
     if action == 'translate':
         try:
-            _translation_gate_refusal(job_id)
+            _translation_gate_refusal(job_id, options)
         except _TranslationGateClosed as refusal:
             return {'queued': 0, 'skipped': 0, 'errors': [str(refusal)]}
 
@@ -1759,7 +1777,9 @@ def mass_batch_operation(items=None, action='sync', options=None, job_id=None):
     extraction_pool = None
     try:
         if action == 'translate':
-            from subtitles.tools.translate.availability import translation_available
+            def translation_available():
+                # The batch's own gate: a pick is answered for that back end or engine, whatever is selected.
+                return _translation_available(options)
 
             workers = settings.general.mass_embedded_extract_workers
             extraction_pool = ThreadPoolExecutor(max_workers=workers, thread_name_prefix='mass-extract')

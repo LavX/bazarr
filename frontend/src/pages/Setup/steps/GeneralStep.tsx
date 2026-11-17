@@ -13,7 +13,7 @@ import { folderOptions } from "@/pages/Settings/Subtitles/options";
 import StepLayout from "@/pages/Setup/StepLayout";
 import { useReportStepBusy } from "@/pages/Setup/useStepBusy";
 import { useStepDraft } from "@/pages/Setup/useStepDrafts";
-import type { WizardStepProps } from "./types";
+import { NOTHING_WRITTEN, type WizardStepProps } from "./types";
 
 // The "alongside media" default keeps subtitles next to the video file; any
 // other folder mode needs a companion path, mirroring the Settings page.
@@ -93,7 +93,7 @@ const GeneralStep: FC<WizardStepProps> = ({ onNext, onBack, stepKey }) => {
     }
 
     if (Object.keys(payload).length === 0) {
-      onNext();
+      onNext(NOTHING_WRITTEN);
       return;
     }
 

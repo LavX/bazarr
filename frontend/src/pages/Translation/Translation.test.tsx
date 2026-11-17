@@ -1921,6 +1921,83 @@ describe("Translation page, defaults and activity", () => {
     expect(posted[0]).not.toContain("translator_info");
   });
 
+  it("holds the minimum wait before translating with the other defaults, and saves it typed", async () => {
+    const posted: string[] = [];
+    server.use(
+      http.get("/api/system/settings", () =>
+        HttpResponse.json({
+          general: {},
+          translator: {
+            default_score: 50,
+            min_source_score: 90,
+            min_source_wait_minutes: 15,
+            translator_info: true,
+            openrouter_max_concurrent: 2,
+          },
+        }),
+      ),
+      http.post("/api/system/settings", async ({ request }) => {
+        posted.push(await request.text());
+        return new HttpResponse(null, { status: 204 });
+      }),
+    );
+    const user = userEvent.setup();
+    await showPage();
+    await user.click(screen.getByRole("tab", { name: "Defaults" }));
+    const wait = await screen.findByLabelText(
+      "Minimum wait before translating",
+    );
+    // What is stored is what the field shows.
+    expect(wait).toHaveValue("15");
+    expect(screen.getByText("Timing")).toBeVisible();
+
+    await user.clear(wait);
+    await user.type(wait, "45");
+    await user.click(screen.getByRole("button", { name: "Save defaults" }));
+
+    await waitFor(() => expect(posted).toHaveLength(1));
+    expect(posted[0]).toContain("settings-translator-min_source_wait_minutes");
+    expect(posted[0]).toContain("45");
+    // Only what was changed goes.
+    expect(posted[0]).not.toContain("default_score");
+    expect(posted[0]).not.toContain("min_source_score");
+  });
+
+  it("shows no wait before translating as zero when nothing is stored", async () => {
+    const user = userEvent.setup();
+    await showPage();
+    await user.click(screen.getByRole("tab", { name: "Defaults" }));
+    expect(
+      await screen.findByLabelText("Minimum wait before translating"),
+    ).toHaveValue("0");
+  });
+
+  it("refuses a wait longer than a week and says why, without saving", async () => {
+    const posted: string[] = [];
+    server.use(
+      http.post("/api/system/settings", async ({ request }) => {
+        posted.push(await request.text());
+        return new HttpResponse(null, { status: 204 });
+      }),
+    );
+    const user = userEvent.setup();
+    await showPage();
+    await user.click(screen.getByRole("tab", { name: "Defaults" }));
+    const wait = await screen.findByLabelText(
+      "Minimum wait before translating",
+    );
+    await user.clear(wait);
+    await user.type(wait, "10081");
+
+    expect(
+      await screen.findByText("Enter a number of minutes from 0 to 10080."),
+    ).toBeVisible();
+    expect(
+      screen.getByRole("button", { name: "Save defaults" }),
+    ).toBeDisabled();
+    expect(posted).toEqual([]);
+  });
+
   it("saves the caps through the limits route, an emptied cap as none", async () => {
     state = { ...state, capabilities: ["summary", "limits"] };
     server.use(

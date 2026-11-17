@@ -12,6 +12,7 @@ from app.jobs_queue import jobs_queue
 from sportarr.workflows import require_sports_enabled
 from subtitles.mass_operations import mass_batch_operation, VALID_ACTIONS  # noqa: F401
 from subtitles.tools.translate.availability import translation_available
+from subtitles.tools.translate.pick import pin_value
 from ..queued_job import queued_job_model, queued_job_response
 from ..swaggerui import job_queued_model
 from ..utils import authenticate
@@ -56,6 +57,10 @@ class BatchOperation(Resource):
         'output_mode': fields.String(description='Sync output mode: overwrite or keep_all'),
         'from_lang': fields.String(description='Source language code for translate action'),
         'to_lang': fields.String(description='Target language code for translate action'),
+        'connection_id': fields.Integer(
+            description='Translate only: the id of one back end of the new translator to run every job on'),
+        'engine_id': fields.Integer(
+            description='Translate only: the id of one engine with no back ends to run every job on'),
     })
 
     post_request_model = api_ns_batch.model('BatchRequest', {
@@ -119,7 +124,18 @@ class BatchOperation(Resource):
         # a switched-off or half-configured translator turned one request into
         # one doomed job per item.
         if action == 'translate':
-            availability = translation_available()
+            options = data.get('options') or {}
+            picks = {}
+            for name in ('connection_id', 'engine_id'):
+                value = options.get(name) if isinstance(options, dict) else None
+                if value is not None and (isinstance(value, bool) or not isinstance(value, int)):
+                    return {'error': f'{name} must be a whole number'}, 400
+                picks[name] = value
+            try:
+                pin = pin_value(**picks)
+            except ValueError as exc:
+                return {'error': str(exc)}, 400
+            availability = translation_available(pin=pin) if pin is not None else translation_available()
             if not availability.available:
                 return {'error': availability.reason}, 409
 

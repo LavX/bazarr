@@ -54,7 +54,7 @@ const IntentStep: FC<WizardStepProps> = ({ onNext, onBack }) => {
               </Button>
             )}
           </Group>
-          <Button onClick={onNext} disabled={intent === null}>
+          <Button onClick={() => onNext()} disabled={intent === null}>
             Continue
           </Button>
         </Group>

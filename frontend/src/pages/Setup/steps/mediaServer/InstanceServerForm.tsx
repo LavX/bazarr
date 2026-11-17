@@ -32,7 +32,10 @@ import {
   recordConnectionTest,
 } from "@/pages/Setup/connectionTests";
 import StepLayout from "@/pages/Setup/StepLayout";
-import type { WizardStepProps } from "@/pages/Setup/steps/types";
+import {
+  NOTHING_WRITTEN,
+  type WizardStepProps,
+} from "@/pages/Setup/steps/types";
 import type { MediaServerDraft } from "@/pages/Setup/useOnboardingSelection";
 import { useOnboardingSelection } from "@/pages/Setup/useOnboardingSelection";
 import { useReportStepBusy } from "@/pages/Setup/useStepBusy";
@@ -192,7 +195,7 @@ const InstanceServerForm: FC<Props> = ({ draft, onNext, onBack }) => {
 
   const handleContinue = () => {
     if (!touched) {
-      onNext();
+      onNext(NOTHING_WRITTEN);
       return;
     }
     const savedInstanceId = draft.savedInstanceId;

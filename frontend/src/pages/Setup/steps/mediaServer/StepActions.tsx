@@ -1,8 +1,9 @@
 import { FC, ReactNode } from "react";
 import { Button, Group, Stack, Text } from "@mantine/core";
+import type { StepOutcome } from "@/pages/Setup/steps/types";
 
 interface Props {
-  onNext: () => void;
+  onNext: (outcome?: StepOutcome) => void;
   onBack?: () => void;
   /** Persists before advancing. Omit when the primary button only advances. */
   onContinue?: () => void;
@@ -48,7 +49,10 @@ const StepActions: FC<Props> = ({
       </Group>
       <Group gap="sm">
         {secondary}
-        <Button onClick={onContinue ?? onNext} loading={continuePending}>
+        <Button
+          onClick={onContinue ?? (() => onNext())}
+          loading={continuePending}
+        >
           {continueLabel}
         </Button>
       </Group>

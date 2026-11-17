@@ -128,13 +128,20 @@ function setProfiles(data: unknown) {
 
 // The backend's answer to whether an AI translator is set up: the translation
 // gate's own rule for an AI engine, never a read of the OpenRouter key.
-function setAiTranslator(configured: boolean | undefined) {
+function setAiTranslator(
+  configured: boolean | undefined,
+  runtime: boolean | undefined = undefined,
+) {
   mockedUseSystemStatus.mockReturnValue({
     data:
       configured === undefined
         ? undefined
-        : // eslint-disable-next-line camelcase
-          { ai_translator_configured: configured },
+        : {
+            // eslint-disable-next-line camelcase
+            ai_translator_configured: configured,
+            // eslint-disable-next-line camelcase
+            translation_runtime_v2: runtime,
+          },
   } as unknown as ReturnType<typeof useSystemStatus>);
 }
 
@@ -443,6 +450,20 @@ describe("FinishStep", () => {
     expect(
       screen.queryByText(/starts now|started|already/i),
     ).not.toBeInTheDocument();
+  });
+
+  it("points translation at its own page once the new translator is on", () => {
+    localStorage.setItem("bazarr.onboarding.intent", "library");
+    setArrInstances([]);
+    setGeneral({ use_plex: false, use_jellyfin: false });
+    setAiTranslator(false, true);
+
+    customRender(<FinishStep onNext={vi.fn()} />);
+
+    expect(
+      screen.getByText(/translate subtitles with ai, under translation/i),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/settings, translator/i)).not.toBeInTheDocument();
   });
 
   it("lists what was skipped and where it lives", () => {

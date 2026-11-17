@@ -18,6 +18,7 @@ from app.jobs_queue import jobs_queue, JobCancelled, JobFailed, UNEXPECTED_JOB_E
 from secret_store.scrub import scrub_text
 from utilities.job_dedupe import enqueue_or_existing
 
+from . import pick
 from .services.openrouter_translator import OpenRouterTranslatorService
 
 EDITOR_TRANSLATION_MODULE = 'subtitles.tools.translate.editor'
@@ -92,12 +93,15 @@ def editor_translation_label(title, source_language, target_language, line_count
     return f'Translating {what} in the editor ({languages})'
 
 
-def enqueue_editor_translation(lines, source_language, target_language, title='', media_type=''):
+def enqueue_editor_translation(lines, source_language, target_language, title='', media_type='',
+                               pinned_connection_id=None):
     """Queue an editor translation and return its job id.
 
     ``lines`` is the editor's list of ``{"position", "line"}``. Sending the same
     lines to the same language twice while the first is still running follows the
     first job instead of paying for the translation again.
+
+    ``pinned_connection_id`` runs the lines on that one back end (or engine with none) of the v2 runtime, with no failover.
     """
     ordered = sorted(lines, key=lambda item: item['position'])
     kwargs = {
@@ -108,6 +112,9 @@ def enqueue_editor_translation(lines, source_language, target_language, title=''
         'title': title or '',
         'media_type': media_type or '',
     }
+    if pinned_connection_id is not None:
+        # Only a pick adds the key, so a job queued without one is exactly what it always was.
+        kwargs['pinned_connection_id'] = int(pinned_connection_id)
     label = editor_translation_label(title, source_language, target_language, len(ordered))
     job_id = enqueue_or_existing(label, EDITOR_TRANSLATION_MODULE, EDITOR_TRANSLATION_FUNC, kwargs,
                                  is_progress=True, progress_max=100)
@@ -129,8 +136,9 @@ class _RuntimeEditorService:
     progress, results and failure reasons are the ones the editor already knows.
     """
 
-    def __init__(self, media_type):
+    def __init__(self, media_type, pinned_connection_id=None):
         self.media_type = media_type
+        self.pinned_connection_id = pinned_connection_id
         self.partial_error = None
 
     def submit_content(self, lines, source_language, target_language, title, bazarr_job_id=None, **_ignored):
@@ -139,7 +147,7 @@ class _RuntimeEditorService:
         from .runtime.service import TranslationRuntimeError, translate_lines
         try:
             result = translate_lines(lines, source_language, target_language, title, self.media_type,
-                                     job_id=bazarr_job_id)
+                                     job_id=bazarr_job_id, pinned_connection_id=self.pinned_connection_id)
         except GateClosed as closed:
             raise TranslationRuntimeError(f'{closed.reason}. Fix it on the Translation page.',
                                           failure.GATE_CLOSED) from closed
@@ -152,14 +160,14 @@ class _RuntimeEditorService:
         return [{'position': index, 'line': line} for index, line in enumerate(result.lines)]
 
 
-def _runtime_editor_service(media_type):
+def _runtime_editor_service(media_type, pinned_connection_id=None):
     """The runtime's stand-in for the editor's translation service, or None with the runtime off."""
     from .availability import runtime_active
-    return _RuntimeEditorService(media_type) if runtime_active() else None
+    return _RuntimeEditorService(media_type, pinned_connection_id) if runtime_active() else None
 
 
 def translate_editor_lines(lines, positions, source_language, target_language, title, media_type,
-                           job_id=None):
+                           job_id=None, pinned_connection_id=None):
     """Translate editor lines through the AI Subtitle Translator.
 
     Returns ``{"lines": [{"position", "line"}], "partial": <reason or None>}``.
@@ -173,11 +181,18 @@ def translate_editor_lines(lines, positions, source_language, target_language, t
                                    progress_message='Sending to the AI Subtitle Translator')
 
     try:
-        service = _runtime_editor_service(media_type) or OpenRouterTranslatorService(
-            source_srt_file=None, dest_srt_file=None, lang_obj=None, to_lang=None, from_lang=None,
-            media_type=media_type, video_path=None, orig_to_lang=None, forced=False, hi=False,
-            sonarr_series_id=None, sonarr_episode_id=None, radarr_id=None)
+        runtime_service = _runtime_editor_service(media_type, pinned_connection_id)
+        service = runtime_service
         try:
+            if runtime_service is None:
+                if pinned_connection_id is not None:
+                    # The new translator was switched off while the job waited: the old service cannot honour a
+                    # pick.
+                    raise JobFailed(pick.SWITCHED_OFF, reason=pick.SWITCHED_OFF_REASON, retryable=False)
+                service = OpenRouterTranslatorService(
+                    source_srt_file=None, dest_srt_file=None, lang_obj=None, to_lang=None, from_lang=None,
+                    media_type=media_type, video_path=None, orig_to_lang=None, forced=False, hi=False,
+                    sonarr_series_id=None, sonarr_episode_id=None, radarr_id=None)
             translated = service.submit_content(lines, source_language, target_language, title,
                                                 bazarr_job_id=job_id, mediaType=media_type)
         except JobCancelled:

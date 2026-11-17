@@ -18,7 +18,7 @@ const WelcomeStep: FC<WizardStepProps> = ({ onNext }) => {
       layout="stacked"
       description="A few quick steps and you are running. The next screen asks what you want Bazarr+ to do, and setup only asks for what that needs. You can change any of this later in Settings."
       actions={
-        <Button onClick={onNext} size="md">
+        <Button onClick={() => onNext()} size="md">
           Get started
         </Button>
       }

@@ -65,6 +65,58 @@ export const backendName = (
 export const working = (item: TranslationConnection) =>
   item.enabled && item.usable && !item.awaiting_secrets;
 
+export interface PickChoice {
+  /** Tells choices apart: `connection:<id>` or `engine:<id>`. */
+  key: string;
+  /** The back end's id, for a pick of one back end. */
+  connectionId?: number;
+  /** The engine's id, for a pick of an engine that has no back ends. */
+  engineId?: number;
+  /** What the control says: a back end as a label says it, or the engine's name. */
+  label: string;
+  /** The group it is listed under: its engine, or "Engines" for an engine picked as a whole. */
+  engine: string;
+}
+
+/** The group the engines picked as a whole are listed under. */
+export const ENGINES_GROUP = "Engines";
+
+/**
+ * What a person can pick for one translation. A back end that is on, usable and has its key, served by an
+ * engine that is on and whose plugin runs. And an engine that has no back ends and is ready to take a job (the
+ * free engine with nothing to choose). The server asks the same of a pick and refuses any other, so what is
+ * held back or off is not offered rather than offered and refused. An engine that has back ends is picked
+ * through them, and a legacy engine is set up and used where it always was.
+ */
+export function pickableChoices(state: TranslationState): PickChoice[] {
+  const running = orderedEngines(state.instances)
+    .filter((engine) => engine.enabled && !engine.awaiting_secrets)
+    .filter(canRun);
+  const backEnds = running.flatMap((engine) =>
+    engine.connections.filter(working).map((item) => ({
+      key: `connection:${item.id}`,
+      connectionId: item.id,
+      label: backendName(engine, item),
+      engine: engineName(engine),
+    })),
+  );
+  const engines = running
+    .filter(
+      (engine) =>
+        !engine.legacy &&
+        !hasBackends(engine) &&
+        engine.connections.length === 0 &&
+        engineStatus(engine).tone === "success",
+    )
+    .map((engine) => ({
+      key: `engine:${engine.id}`,
+      engineId: engine.id,
+      label: engineName(engine),
+      engine: ENGINES_GROUP,
+    }));
+  return [...backEnds, ...engines];
+}
+
 /** Whether there is something to run: an engine's plugin, or Bazarr+ itself for an engine it runs. */
 export const canRun = (engine: TranslationEngine) =>
   engine.legacy === true || engine.plugin?.active === true;

@@ -15,6 +15,7 @@ import { StepBusyProvider, useStepBusy } from "@/pages/Setup/useStepBusy";
 import { act, customRender, renderHook, screen, waitFor } from "@/tests";
 import server from "@/tests/mocks/node";
 import MediaServerStep from "./MediaServerStep";
+import { NOTHING_WRITTEN } from "./types";
 
 // Keep the real barrel (AllProviders' ThemeLoader reads useSystemSettings from
 // it) and override only the settings mutation we assert on. The instance rows
@@ -150,7 +151,7 @@ describe("MediaServerStep", () => {
     );
 
     expect(mutate).not.toHaveBeenCalled();
-    expect(onNext).toHaveBeenCalled();
+    expect(onNext).toHaveBeenCalledWith(NOTHING_WRITTEN);
   });
 
   it("the whole card is the hit area, not a label inside it", async () => {
@@ -183,6 +184,17 @@ describe("MediaServerStep", () => {
     expect(
       screen.getByRole("button", { name: /set up 2 servers/i }),
     ).toBeInTheDocument();
+  });
+
+  it("walks past the picker when a server is ticked and nothing is connected, since its own step answers for it", async () => {
+    const user = userEvent.setup();
+    withSelection(<MediaServerStep onNext={onNext} />);
+
+    await tick(user, /^Jellyfin$/);
+    await user.click(screen.getByRole("button", { name: /set up 1 server/i }));
+
+    expect(mutate).not.toHaveBeenCalled();
+    expect(onNext).toHaveBeenCalledWith(NOTHING_WRITTEN);
   });
 
   it("takes two servers of one kind and names them apart", async () => {

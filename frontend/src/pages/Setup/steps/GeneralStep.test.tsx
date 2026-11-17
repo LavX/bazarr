@@ -5,6 +5,7 @@ import { useSettingsMutation, useSystemSettings } from "@/apis/hooks";
 import { customRender, screen, waitFor } from "@/tests";
 import server from "@/tests/mocks/node";
 import GeneralStep from "./GeneralStep";
+import { NOTHING_WRITTEN } from "./types";
 
 // Keep the real barrel (AllProviders' ThemeLoader reads useSystemSettings from
 // it) and override only the hooks this step drives.
@@ -187,7 +188,8 @@ describe("GeneralStep", () => {
     await user.click(screen.getByRole("button", { name: /continue/i }));
 
     expect(mutate).not.toHaveBeenCalled();
-    expect(onNext).toHaveBeenCalled();
+    // Nothing was written, so the shell is told: the rail draws a walk past.
+    expect(onNext).toHaveBeenCalledWith(NOTHING_WRITTEN);
   });
 
   it("renders a Back button when onBack is provided", () => {

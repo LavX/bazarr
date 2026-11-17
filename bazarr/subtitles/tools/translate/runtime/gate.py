@@ -152,6 +152,52 @@ def evaluate(store=None, holds: GateHolds | None = None, workers=None) -> GateRe
         return GateResult(False, f"The translator configuration cannot be read: {error}", UNREADABLE)
 
 
+PICK_MISSING = "The back end that was picked no longer exists"
+PICK_UNUSABLE = "The back end that was picked cannot be used right now"
+PICK_ENGINE_MISSING = "The engine that was picked no longer exists"
+PICK_ENGINE_HAS_BACKENDS = "The engine that was picked has back ends: pick one of them"
+
+
+def pinned_gate(pin: int, store=None, holds: GateHolds | None = None, workers=None) -> GateResult:
+    """The gate for a manual pick: one back end, or one engine with no back ends, whatever engine is selected.
+
+    ``pin`` is what ``pick.pin_value`` made. It asks what the dispatcher asks of a pinned job. For a back end:
+    the connection exists, its engine can take a job, and the connection itself is on, has its keys and is served
+    by a plugin that runs. For an engine: it exists, can take a job and has no back ends, because a pick of an
+    engine that has some says nothing about which to use. Never raises.
+    """
+    from ..pick import split_pin
+
+    kind, target = split_pin(pin)
+    try:
+        if store is None:
+            from app.database import database
+
+            from .store import TranslatorStore
+
+            store = TranslatorStore(database)
+        if kind == "engine":
+            instance = store.get_instance(target, fresh=True)
+            if instance is None:
+                return GateResult(False, PICK_ENGINE_MISSING, ENGINE_MISSING)
+            if store.list_connections(instance.id):
+                return GateResult(False, PICK_ENGINE_HAS_BACKENDS, NOT_CONFIGURED, instance.id)
+            return engine_state(store, instance, holds, workers)
+        connection = store.get_connection(target, fresh=True)
+        instance = store.get_instance(connection.instance_id, fresh=True) if connection is not None else None
+        if connection is None or instance is None:
+            return GateResult(False, PICK_MISSING, ENGINE_MISSING)
+        state = engine_state(store, instance, holds, workers)
+        if not state.available:
+            return state
+        if not store.connection_usable(connection):
+            return GateResult(False, PICK_UNUSABLE, NOT_CONFIGURED, instance.id)
+        return GateResult(True, "", "", instance.id)
+    except Exception as error:
+        logger.error("BAZARR cannot read the translator configuration, so nothing can be translated: %s", error)
+        return GateResult(False, f"The translator configuration cannot be read: {error}", UNREADABLE)
+
+
 def translation_gate(store=None, holds: GateHolds | None = None, workers=None):
     """The gate as the old ``translation_available`` answers it: ``(available, reason)``."""
     from ..availability import TranslationAvailability

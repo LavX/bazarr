@@ -80,6 +80,10 @@ describe("OnboardingWizardView", () => {
     mockedSettingsMutation.mockReturnValue({
       mutate,
     } as unknown as ReturnType<typeof useSettingsMutation>);
+    // The shell asks whether the new translator is on, to pick the translation step.
+    server.use(
+      http.get("/api/system/status", () => HttpResponse.json({ data: {} })),
+    );
   });
 
   afterEach(() => {
@@ -1026,6 +1030,10 @@ describe("the rail, visited and completed", () => {
     mockedSettingsMutation.mockReturnValue({
       mutate,
     } as unknown as ReturnType<typeof useSettingsMutation>);
+    // The shell asks whether the new translator is on, to pick the translation step.
+    server.use(
+      http.get("/api/system/status", () => HttpResponse.json({ data: {} })),
+    );
   });
 
   afterEach(() => {
@@ -1074,7 +1082,95 @@ describe("the rail, visited and completed", () => {
     );
   });
 
-  it("draws the check once one step of the phase was answered", async () => {
+  it("draws the check once one step of the phase was answered with a write", async () => {
+    const user = userEvent.setup();
+    writeLandsAtOnce();
+    server.use(
+      http.get("/api/system/settings", () =>
+        HttpResponse.json({ general: {}, seerr: {} }),
+      ),
+    );
+    localStorage.setItem("bazarr.onboarding.intent", "discover");
+    localStorage.setItem("bazarr.onboarding.step", "media-servers");
+    customRender(<OnboardingWizardView />);
+
+    // The picker is left empty, and Requests is answered with a write.
+    await user.click(
+      await screen.findByRole("button", { name: /continue without a server/i }),
+    );
+    await user.type(
+      await screen.findByLabelText(/server url/i),
+      "http://seerr:5055",
+    );
+    await user.type(screen.getByLabelText(/api key/i), "seerr-key");
+    // Not tested, so the button says what is being saved.
+    await user.click(
+      screen.getByRole("button", { name: /^save and continue anyway$/i }),
+    );
+    await screen.findByRole("heading", { name: /subtitle languages/i });
+
+    // Getting started and Connect are both done: the second has an answer.
+    expect(checks()).toHaveLength(2);
+    expect(within(rail()).queryByText("2")).toBeNull();
+    expect(rail()).not.toHaveAttribute(
+      "aria-valuetext",
+      expect.stringContaining("skipped"),
+    );
+  });
+
+  it("walks past the media server picker left empty, the same as every other empty Continue", async () => {
+    const user = userEvent.setup();
+    localStorage.setItem("bazarr.onboarding.intent", "discover");
+    localStorage.setItem("bazarr.onboarding.step", "media-servers");
+    customRender(<OnboardingWizardView />);
+
+    await user.click(
+      await screen.findByRole("button", { name: /continue without a server/i }),
+    );
+    await screen.findByRole("heading", { name: /^requests$/i });
+
+    expect(
+      JSON.parse(localStorage.getItem("bazarr.onboarding.skipped") ?? "[]"),
+    ).toEqual(["media-servers"]);
+  });
+
+  it("keeps a step answered when it is revisited and passed again with nothing to write", async () => {
+    const user = userEvent.setup();
+    writeLandsAtOnce();
+    localStorage.setItem("bazarr.onboarding.intent", "discover");
+    localStorage.setItem("bazarr.onboarding.step", "translator");
+    customRender(<OnboardingWizardView />);
+
+    await user.type(
+      await screen.findByLabelText(/openrouter api key/i),
+      "sk-or-typed",
+    );
+    await user.click(screen.getByRole("button", { name: /^continue$/i }));
+    await screen.findByRole("heading", { name: /general basics/i });
+    expect(
+      JSON.parse(localStorage.getItem("bazarr.onboarding.answered") ?? "[]"),
+    ).toEqual(["translator"]);
+
+    // Back to it, and on again with the key field empty, as it always is on a revisit.
+    await user.click(screen.getByRole("button", { name: /^back$/i }));
+    await user.click(
+      await screen.findByRole("button", {
+        name: /continue without translation/i,
+      }),
+    );
+    await screen.findByRole("heading", { name: /general basics/i });
+
+    expect(
+      JSON.parse(localStorage.getItem("bazarr.onboarding.skipped") ?? "[]"),
+    ).toEqual([]);
+    expect(
+      JSON.parse(localStorage.getItem("bazarr.onboarding.answered") ?? "[]"),
+    ).toEqual(["translator"]);
+  });
+
+  it("draws no check for a phase whose steps were all continued with nothing written", async () => {
+    // Continue on a step the reader left empty writes nothing, so it was
+    // walked past exactly as a skip is, and the rail says so.
     const user = userEvent.setup();
     customRender(<OnboardingWizardView />);
     await user.click(screen.getByRole("button", { name: /get started/i }));
@@ -1083,27 +1179,72 @@ describe("the rail, visited and completed", () => {
     );
     await user.click(screen.getByRole("button", { name: /^continue$/i }));
 
-    // Sonarr, Radarr and Sportarr skipped, the picker answered with nothing
-    // ticked, Requests skipped.
-    for (let i = 0; i < 3; i += 1) {
+    for (const arr of ["Sonarr", "Radarr", "Sportarr"]) {
       await user.click(
-        await screen.findByRole("button", { name: /do this later/i }),
+        await screen.findByRole("button", {
+          name: new RegExp(`^continue without ${arr}$`, "i"),
+        }),
       );
     }
-    await user.click(
-      await screen.findByRole("button", { name: /continue without a server/i }),
-    );
+    // The picker's own answer is a deliberate "no server", so it is left to
+    // the shell's control here, and Requests is continued empty.
     await user.click(
       await screen.findByRole("button", { name: /do this later/i }),
     );
+    await user.click(
+      await screen.findByRole("button", { name: /continue without requests/i }),
+    );
     await screen.findByRole("heading", { name: /subtitle languages/i });
 
-    expect(checks()).toHaveLength(2);
-    expect(within(rail()).queryByText("2")).toBeNull();
-    expect(rail()).not.toHaveAttribute(
+    expect(checks()).toHaveLength(1);
+    expect(dotFor("2")).toHaveClass(wizardStyles.dotSkipped);
+    expect(rail()).toHaveAttribute(
       "aria-valuetext",
-      expect.stringContaining("skipped"),
+      expect.stringContaining("skipped: Connect"),
     );
+  });
+
+  it("counts a step as answered once its Continue wrote something", async () => {
+    const user = userEvent.setup();
+    writeLandsAtOnce();
+    localStorage.setItem("bazarr.onboarding.intent", "discover");
+    localStorage.setItem("bazarr.onboarding.step", "translator");
+    localStorage.setItem(
+      "bazarr.onboarding.skipped",
+      JSON.stringify(["translator"]),
+    );
+    customRender(<OnboardingWizardView />);
+
+    await user.type(
+      await screen.findByLabelText(/openrouter api key/i),
+      "sk-or-typed",
+    );
+    await user.click(screen.getByRole("button", { name: /^continue$/i }));
+    await screen.findByRole("heading", { name: /general basics/i });
+
+    expect(mutate).toHaveBeenCalled();
+    expect(
+      JSON.parse(localStorage.getItem("bazarr.onboarding.skipped") ?? "[]"),
+    ).toEqual([]);
+  });
+
+  it("counts a step as walked past once its Continue wrote nothing", async () => {
+    const user = userEvent.setup();
+    localStorage.setItem("bazarr.onboarding.intent", "discover");
+    localStorage.setItem("bazarr.onboarding.step", "translator");
+    customRender(<OnboardingWizardView />);
+
+    await user.click(
+      await screen.findByRole("button", {
+        name: /continue without translation/i,
+      }),
+    );
+    await screen.findByRole("heading", { name: /general basics/i });
+
+    expect(mutate).not.toHaveBeenCalled();
+    expect(
+      JSON.parse(localStorage.getItem("bazarr.onboarding.skipped") ?? "[]"),
+    ).toEqual(["translator"]);
   });
 
   it("remembers what was skipped across a reload", async () => {
@@ -1128,22 +1269,94 @@ describe("the rail, visited and completed", () => {
 
   it("answering a step the reader skipped earlier takes the skip back", async () => {
     const user = userEvent.setup();
+    writeLandsAtOnce();
     localStorage.setItem("bazarr.onboarding.intent", "discover");
-    localStorage.setItem("bazarr.onboarding.step", "media-servers");
+    localStorage.setItem("bazarr.onboarding.step", "seerr");
     localStorage.setItem(
       "bazarr.onboarding.skipped",
       JSON.stringify(["media-servers", "seerr"]),
     );
+    server.use(
+      http.get("/api/system/settings", () =>
+        HttpResponse.json({ general: {}, seerr: {} }),
+      ),
+    );
     customRender(<OnboardingWizardView />);
 
-    await user.click(
-      await screen.findByRole("button", { name: /continue without a server/i }),
+    await user.type(
+      await screen.findByLabelText(/server url/i),
+      "http://seerr:5055",
     );
-    await screen.findByRole("heading", { name: /^requests$/i });
+    await user.type(screen.getByLabelText(/api key/i), "seerr-key");
+    // Not tested, so the button says what is being saved.
+    await user.click(
+      screen.getByRole("button", { name: /^save and continue anyway$/i }),
+    );
+    await screen.findByRole("heading", { name: /subtitle languages/i });
 
     expect(
       JSON.parse(localStorage.getItem("bazarr.onboarding.skipped") ?? "[]"),
-    ).toEqual(["seerr"]);
+    ).toEqual(["media-servers"]);
+  });
+});
+
+describe("the translation step and the new translator", () => {
+  beforeEach(() => {
+    localStorage.clear();
+    routeParams = {};
+    vi.clearAllMocks();
+    mockedSettingsMutation.mockReturnValue({
+      mutate,
+    } as unknown as ReturnType<typeof useSettingsMutation>);
+    localStorage.setItem("bazarr.onboarding.intent", "discover");
+    localStorage.setItem("bazarr.onboarding.step", "translator");
+  });
+
+  afterEach(() => {
+    localStorage.clear();
+  });
+
+  it("is the step it always was while the new translator is off", async () => {
+    server.use(
+      http.get("/api/system/status", () => HttpResponse.json({ data: {} })),
+    );
+    customRender(<OnboardingWizardView />);
+
+    expect(
+      await screen.findByLabelText(/openrouter api key/i),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Install Google Translate" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("offers the new engines once the new translator is on", async () => {
+    server.use(
+      http.get("/api/system/status", () =>
+        HttpResponse.json({ data: { translation_runtime_v2: true } }),
+      ),
+      http.get("/api/translation/state", () =>
+        HttpResponse.json({
+          enabled: true,
+          engine: null,
+          fallback_engine: null,
+          instances: [],
+          available_engines: [],
+        }),
+      ),
+    );
+    customRender(<OnboardingWizardView />);
+
+    expect(
+      await screen.findByRole("button", { name: "Install Google Translate" }),
+    ).toBeDisabled();
+    expect(
+      screen.queryByLabelText(/openrouter api key/i),
+    ).not.toBeInTheDocument();
+    // The shell's skip is still the one control for leaving it.
+    expect(
+      screen.getByRole("button", { name: /do this later/i }),
+    ).toBeInTheDocument();
   });
 });
 

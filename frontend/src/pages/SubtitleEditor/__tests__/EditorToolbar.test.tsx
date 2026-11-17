@@ -10,6 +10,10 @@ import { http, HttpResponse } from "msw";
 import { describe, expect, it, vi } from "vitest";
 import queryClient from "@/apis/queries";
 import { QueryKeys } from "@/apis/queries/keys";
+import {
+  stateLoaded,
+  translatorStatus,
+} from "@/components/forms/__tests__/pickFixtures";
 import EditorToolbar from "@/pages/SubtitleEditor/EditorToolbar";
 import { customRender, screen, waitFor } from "@/tests";
 import server from "@/tests/mocks/node";
@@ -70,6 +74,46 @@ describe("EditorToolbar and the translation gate", () => {
       await screen.findByText("No translator is configured"),
     ).toBeInTheDocument();
 
+    await user.click(icon);
+    expect(onAction).not.toHaveBeenCalled();
+  });
+
+  it("opens the panel while a back end can be picked, though the gate for the selected engine is closed", async () => {
+    const user = userEvent.setup();
+    const onAction = vi.fn();
+    translatorStatus(true, {
+      available: false,
+      reason: "No translator is configured",
+    });
+    await renderToolbar(onAction);
+    await stateLoaded();
+    const icon = screen.getByRole("button", { name: "AI Translate" });
+    await waitFor(() => expect(icon).not.toHaveAttribute("data-disabled"));
+
+    await user.click(icon);
+
+    expect(onAction).toHaveBeenCalledWith("translate");
+    // The reason is for what cannot be done, and a pick can.
+    await user.hover(icon);
+    expect(await screen.findByText("AI Translate (Alt+T)")).toBeInTheDocument();
+    expect(
+      screen.queryByText("No translator is configured"),
+    ).not.toBeInTheDocument();
+  });
+
+  it("keeps the icon closed when the gate is closed and nothing can be picked", async () => {
+    const user = userEvent.setup();
+    const onAction = vi.fn();
+    translatorStatus(
+      true,
+      { available: false, reason: "No translator is configured" },
+      { enabled: true, engine: null, fallback_engine: null, instances: [] },
+    );
+    await renderToolbar(onAction);
+    await stateLoaded();
+
+    const icon = screen.getByRole("button", { name: "AI Translate" });
+    expect(icon).toHaveAttribute("data-disabled");
     await user.click(icon);
     expect(onAction).not.toHaveBeenCalled();
   });

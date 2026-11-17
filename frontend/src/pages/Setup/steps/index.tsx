@@ -9,10 +9,12 @@ import IntentStep from "./IntentStep";
 import LanguagesStep from "./LanguagesStep";
 import MediaServerStep from "./MediaServerStep";
 import SeerrStep from "./SeerrStep";
+import TranslationStep from "./TranslationStep";
 import TranslatorStep from "./TranslatorStep";
 import type { WizardIntent, WizardStepDef } from "./types";
 import WelcomeStep from "./WelcomeStep";
 
+export const TRANSLATION_STEP_KEY = "translator";
 export const MEDIA_SERVER_SEGMENT = "Media servers";
 export const MEDIA_SERVER_PICKER_KEY = "media-servers";
 
@@ -125,7 +127,7 @@ export const ONBOARDING_STEPS: WizardStepDef[] = [
     Component: ProvidersStep,
   },
   {
-    key: "translator",
+    key: TRANSLATION_STEP_KEY,
     label: "Translation",
     phase: "subtitles",
     optional: true,
@@ -149,6 +151,12 @@ export const ONBOARDING_STEPS: WizardStepDef[] = [
 export interface WizardStepInput {
   intent: WizardIntent | null;
   mediaServers: MediaServerDraftSummary[];
+  /**
+   * Whether the new translator is on. With it off the registry is exactly as
+   * it always was; with it on the translation step offers the new engines.
+   * Left out, it is off.
+   */
+  translationRuntime?: boolean;
 }
 
 /**
@@ -166,13 +174,23 @@ export interface WizardStepInput {
 export function buildSteps({
   intent,
   mediaServers,
+  translationRuntime = false,
 }: WizardStepInput): WizardStepDef[] {
-  const base =
+  const filtered =
     intent === null
       ? ONBOARDING_STEPS
       : ONBOARDING_STEPS.filter(
           (step) => step.paths === undefined || step.paths.includes(intent),
         );
+  // The same step under the same key, so a cursor saved on it still lands on
+  // it: only what it shows changes.
+  const base = translationRuntime
+    ? filtered.map((step) =>
+        step.key === TRANSLATION_STEP_KEY
+          ? { ...step, Component: TranslationStep }
+          : step,
+      )
+    : filtered;
 
   const generated: WizardStepDef[] = mediaServers
     .filter((draft) => draft.instanceId === undefined)
