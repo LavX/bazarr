@@ -2759,6 +2759,56 @@ describe("Translation page, a quick start with the official engine switched off"
     expect(inputsHolding(SECRET)).toHaveLength(0);
   });
 
+  it("shows the engine as on when it was turned on and could not be selected", async () => {
+    firstRun(() => null);
+    let pointerFails = true;
+    server.use(
+      http.put("/api/translation/pointers", async ({ request }) => {
+        record("put", "pointers", await request.json());
+        if (pointerFails) {
+          return HttpResponse.json(
+            { error: "bad_request", message: "The engine is not ready." },
+            { status: 400 },
+          );
+        }
+        state = { ...state, engine: 1 };
+        return HttpResponse.json({
+          engine: 1,
+          fallback_engine: null,
+          notices: [],
+        });
+      }),
+    );
+    const user = userEvent.setup();
+    customRender(<TranslationView />);
+    await user.type(await screen.findByLabelText("OpenRouter key"), SECRET);
+    await user.click(screen.getByRole("button", { name: "Start translating" }));
+    expect(
+      await screen.findByText(
+        /Your key is saved, but the engine could not be switched on/,
+      ),
+    ).toBeVisible();
+    expect(calls.map((call) => call.path)).toEqual([
+      "connection",
+      "engine",
+      "pointers",
+    ]);
+    // The engine is on now, at a new revision, and nothing is selected. The full page has to show
+    // that: an engine drawn as off, at the revision it had before, would refuse the next thing done to it.
+    await waitFor(() => expect(queryClient.isFetching()).toBe(0));
+    await user.click(screen.getByRole("button", { name: "Set it up by hand" }));
+    await screen.findByRole("radiogroup", { name: "Engine" });
+    const power = screen.getByRole("switch", {
+      name: "Turn AI Subtitle Translator on or off",
+    });
+    expect(power).toBeChecked();
+    // Its switch works from the revision the engine has now.
+    pointerFails = false;
+    await user.click(power);
+    await waitFor(() => expect(calls).toHaveLength(4));
+    expect(calls[3].body).toEqual({ enabled: false, expected_revision: 4 });
+  });
+
   it("says the engine is still off when it cannot be turned on, selects nothing, and leads to its switch", async () => {
     // What the server answers while the engine's saved settings do not fit its plugin.
     firstRun(() =>

@@ -133,7 +133,6 @@ export function useCreateConnection() {
 }
 
 /**
-/**
  * A start that got as far as the engine's switch and no further: the back end
  * is saved, and the engine is still off because the server would not turn it
  * on. Nothing is selected, so the start is not reported as done.
@@ -188,6 +187,7 @@ export function useStartEngine() {
       const engine = (await fresh()).instances.find(
         (item) => item.id === instanceId,
       );
+      let turnedOn = false;
       if (engine && !engine.enabled) {
         try {
           await withInlineErrors(() =>
@@ -197,13 +197,23 @@ export function useStartEngine() {
               expected_revision: engine.revision,
             }),
           );
+          turnedOn = true;
         } catch (error) {
           throw new EngineStillOffError(error);
         }
       }
-      return withInlineErrors(() =>
-        api.translation.setPointers({ engine: instanceId }),
-      );
+      try {
+        return await withInlineErrors(() =>
+          api.translation.setPointers({ engine: instanceId }),
+        );
+      } catch (error) {
+        // The engine was turned on a moment ago and is not selected. The page is shown that, and
+        // not the engine as it was: off, at a revision that is gone.
+        if (turnedOn) {
+          await refresh();
+        }
+        throw error;
+      }
     },
     onSuccess: refresh,
   });

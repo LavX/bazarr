@@ -1603,24 +1603,27 @@ describe("Translation page", () => {
     expect(asked).toBe(5);
   });
 
-  it("shows a test refused because the engine's plugin is not running as not tested yet", async () => {
+  it("shows a test refused because the engine's plugin is not running as not tested yet, and stops offering one", async () => {
     state = { ...state, capabilities: ["test"] };
     server.use(
-      // The page was loaded while the engine ran, and it has stopped since: the route refuses.
-      http.post("/api/translation/connections/:id/test", () =>
-        HttpResponse.json(
+      // The page was loaded while the engine ran, and it has stopped since: the route refuses, and
+      // the server no longer lists the test.
+      http.post("/api/translation/connections/:id/test", () => {
+        state = { ...state, capabilities: [] };
+        return HttpResponse.json(
           {
             error: "plugin_unavailable",
             message:
               "The translation engine is not running, so this back end cannot be tested yet.",
           },
           { status: 409 },
-        ),
-      ),
+        );
+      }),
     );
     const user = userEvent.setup();
     await showPage();
     const name = "OpenAI compatible, model-1";
+    expect(screen.getAllByRole("button", { name: /^Test / })).toHaveLength(2);
     await user.click(screen.getByRole("button", { name: `Test ${name}` }));
     expect(
       await within(row(name)).findByText(
@@ -1631,6 +1634,14 @@ describe("Translation page", () => {
       "data-tone",
       "waiting",
     );
+    // The page asks what the server can do now, and offers no test it would only refuse again.
+    await waitFor(() =>
+      expect(screen.queryByRole("button", { name: /^Test / })).toBeNull(),
+    );
+    // Why it was not tested stays under the row.
+    expect(
+      within(row(name)).getByText(/Not tested yet\. The translation engine/),
+    ).toBeVisible();
   });
 
   it("keeps the failure style for a test the server could not run for another reason", async () => {

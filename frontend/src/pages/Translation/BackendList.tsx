@@ -262,6 +262,9 @@ const BackendList: FunctionComponent<{
             "waiting",
             NOT_TESTED + " " + (refusal.message || TRY_AGAIN_SOON),
           );
+          // The page offered a test the server can no longer run. What the server lists now is loaded,
+          // so Test goes away here once it is no longer listed, and comes back when it is.
+          void fresh().catch(() => undefined);
         } else {
           report(
             "danger",
