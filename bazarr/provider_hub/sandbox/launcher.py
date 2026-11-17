@@ -66,6 +66,9 @@ Spec layout (JSON object)::
 ``deny_connect_ports`` (default none) refuses TCP connections to those ports on kernels with network
 rules and leaves every other connection alone; the provider profile uses it for Bazarr+'s own port.
 
+``block_mptcp`` (default false) installs a small filter that refuses MPTCP sockets where the
+architecture has one, for a spec that leaves the full metadata filter out.
+
 ``seccomp`` (default true) false leaves out the metadata filter; the provider profile does that so
 ``ffmpeg`` can work, and nothing else may.
 
@@ -293,6 +296,10 @@ def _child(spec, landlock, seccomp, capabilities, parent_pid, close_fds, report_
                 seccomp.apply_filter()
             except OSError as exc:
                 _say("metadata filter not applied: %s" % exc)
+        if spec.get("block_mptcp") and seccomp.supported():
+            # Landlock's TCP rules do not cover MPTCP sockets, so a worker given a port rule would walk
+            # around it. A host whose architecture has no filter cannot do this; the host says so.
+            seccomp.apply_socket_filter()
         kind, code = "spec", EXIT_BAD_SPEC
         os.chdir(spec["cwd"])
         kind, code = "sandbox", EXIT_SANDBOX_FAILED

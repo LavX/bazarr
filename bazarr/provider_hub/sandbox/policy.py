@@ -600,6 +600,9 @@ class RuntimeSpec:
     # False leaves out the launcher's metadata filter (chmod, chown, utime and xattr calls). Only
     # the provider profile does, see ``PROVIDER_LIMITS``; every other kind keeps it.
     seccomp: bool = True
+    # True installs a filter that refuses MPTCP sockets (IPPROTO_MPTCP), which Landlock's TCP rules do not
+    # cover, where the architecture has seccomp support. Only meaningful for a spec with ``seccomp`` false.
+    block_mptcp: bool = False
 
     def __post_init__(self) -> None:
         # The spec keeps its own validated copy, read-only: whoever built the mapping, a proxy
@@ -630,6 +633,7 @@ class RuntimeSpec:
             "limits": self.limits.to_dict(),
             "term_grace": float(self.term_grace),
             "seccomp": bool(self.seccomp),
+            "block_mptcp": bool(self.block_mptcp),
         }
         data = json.dumps(payload, separators=(",", ":")).encode("utf-8")
         if len(data) > MAX_SPEC_BYTES:

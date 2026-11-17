@@ -193,11 +193,13 @@ declare namespace System {
     /** The "Sandbox subtitle provider plugins" setting. */
     enabled: boolean;
     /**
-     * enforced: the filesystem ruleset applies in full. partial: it applies on
-     * an older Landlock ABI and the notice names what it leaves open.
-     * unsandboxed: switched on, but the host cannot apply it (see notice).
-     * blocked: the host can, but a start could not apply its ruleset and was
-     * refused. off: switched off. pending: the host check is still running.
+     * enforced: the filesystem ruleset applies in full. partial: it applies,
+     * and the notice names the gaps (an older Landlock ABI, or no way to keep
+     * a plugin off Bazarr+'s own port while authentication is off).
+     * unsandboxed: the kernel has no Landlock, or a client started without the
+     * ruleset (see notice). blocked: the host may enforce it, but its check
+     * failed or a start could not apply the ruleset, so providers are refused.
+     * off: switched off. pending: the host check is still running.
      */
     state:
       | "enforced"
@@ -213,7 +215,7 @@ declare namespace System {
     notice: string | null;
     /** The providers recorded as started without the sandbox. */
     unsandboxed: string[];
-    /** The providers whose start was refused because the ruleset failed. */
+    /** The providers whose start was refused. */
     blocked?: string[];
     /** What the provider profile leaves open on every kernel. */
     limitations?: string[];

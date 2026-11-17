@@ -376,6 +376,23 @@ def _secret_files(config_dir: Path) -> list[Path]:
     return files
 
 
+_PROBE_AGAIN_SECONDS = 60.0
+_probe_again_lock = threading.Lock()
+_probe_again_at = 0.0
+
+
+def _probe_again(probe):
+    """The host check once more, when the last try to confirm it was over a minute ago."""
+    global _probe_again_at
+    with _probe_again_lock:
+        if time.monotonic() - _probe_again_at < _PROBE_AGAIN_SECONDS:
+            return probe
+        _probe_again_at = time.monotonic()
+    from .sandbox import probe_sandbox
+
+    return probe_sandbox(refresh=True)
+
+
 def _is_provider_runner(command, env) -> bool:
     """Whether ``command`` starts the real provider runner for a bundle, whatever interpreter it uses."""
     try:
@@ -399,7 +416,7 @@ def provider_spec(layout: ProviderLayout, command, cwd, env):
     No TCP rules, no file-size or process-count limit and no metadata filter, so ``ffmpeg`` can
     write large temporary files and run its threads.
     """
-    from .provider_roots import backup_folders, binary_folders, listening_port, media_root_folders, program_folders
+    from .provider_roots import backup_folders, binary_folders, media_root_folders, own_ports, program_folders
     from .runtime.environment import worker_environment
     from .sandbox.policy import (
         PROVIDER_EXTRA_READ_PATHS,
@@ -430,9 +447,10 @@ def provider_spec(layout: ProviderLayout, command, cwd, env):
         read_write=[data, temp],
         # The folders, and the files in them: a file that is a link into a granted tree is refused too.
         protected_paths=[layout.config_dir / "config", layout.config_dir / "db", *backups, *_secret_files(layout.config_dir)],
-        # Bazarr+'s own API answers on this port. Where the kernel has network rules (ABI 4 and above)
-        # the worker cannot connect to it; every other connection stays open.
-        deny_connect_ports=[port for port in (listening_port(),) if port],
+        # Bazarr+'s own API answers on these ports (the one the server bound, --port, the setting). Where
+        # the kernel has network rules (ABI 4 and above) the worker cannot connect to them; every other
+        # TCP connection stays open. MPTCP sockets, which those rules do not cover, are refused by the filter.
+        deny_connect_ports=own_ports(),
     )
     environment = worker_environment(
         "subtitle_provider",
@@ -450,6 +468,7 @@ def provider_spec(layout: ProviderLayout, command, cwd, env):
         policy=policy,
         limits=PROVIDER_LIMITS,
         seccomp=False,
+        block_mptcp=True,
     )
 
 
@@ -528,6 +547,7 @@ class ProviderWorkerClient:
         if self._is_launcher(self.process):
             # Every launcher this client started stays on the list until it has confirmed its cleanup:
             # a respawn must not make the previous launcher's descendants forgotten.
+            self.launcher_cleanup_state()  # forgets the launchers that have confirmed their cleanup
             with _GROUPS_LOCK:
                 self._launchers = [*getattr(self, "_launchers", ()), self.process]
         # Every group this client started stays on the list until it is seen
@@ -610,6 +630,10 @@ class ProviderWorkerClient:
         from .sandbox import PROVIDER_MIN_ABI, note_provider_unsandboxed, probe_sandbox, spawn_worker
 
         probe = probe_sandbox()
+        if not probe.enforces(PROVIDER_MIN_ABI) and not probe.absent:
+            # A host check that failed or did not finish may have hit a passing condition. It is asked
+            # again, at most once a minute, before a provider is refused on its word.
+            probe = _probe_again(probe)
         if not probe.enforces(PROVIDER_MIN_ABI):
             if probe.absent:
                 # The kernel genuinely has no Landlock: nothing can be applied, and the provider runs without it.
@@ -619,7 +643,11 @@ class ProviderWorkerClient:
             # error, a canary that escaped). Nothing here says the ruleset would hold, so no worker starts.
             cause = f"the host check could not confirm the ruleset: {probe.reason or 'no result'}"
             self._blocked(cause)
-            raise WorkerError(f"the sandbox could not be confirmed, so the provider was not started: {probe.reason}")
+            raise WorkerError(
+                f"the sandbox could not be confirmed, so the provider was not started: {probe.reason}. "
+                "It is checked again on the next start; restarting Bazarr+ or switching the sandbox off "
+                "in the Subtitle Hub settings ends the refusal."
+            )
 
         def start():
             spec = provider_spec(layout, self.command, self.cwd, self.env)
@@ -938,6 +966,9 @@ class ProviderWorkerClient:
             # Closing the launcher's lifeline makes it kill everything it started at once; a
             # group kill alone would leave the launcher unable to reach a detached descendant.
             process.stop(0.0)
+            if process.returncode is not None:
+                # Reaped by the stop, so its pid may already be somebody else's: nothing is signalled.
+                return True
         if not cls._signal_group(process, _SIGKILL):
             try:
                 process.kill()

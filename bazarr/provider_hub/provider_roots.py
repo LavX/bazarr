@@ -11,6 +11,7 @@ from __future__ import annotations
 import logging
 import os
 import shutil
+import sys
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -94,14 +95,46 @@ def binary_folders() -> list[str]:
     return list(folders)
 
 
-def listening_port() -> int | None:
-    """Bazarr+'s own port, which a provider worker must not be able to call."""
+def own_ports() -> list[int]:
+    """Every TCP port Bazarr+ answers on, whichever way it was started.
+
+    The server binds ``--port`` when it is given and ``general.port`` otherwise, and falls back to
+    6767 when that port is taken, so the setting alone is not the port. The docker supervisor starts
+    the backend on a port of its own (``--port``) and keeps ``general.port`` for its front listener.
+    All of them are listed: the port the running server really bound (its own record, and the
+    socket's), the ``--port`` argument, and the setting.
+    """
+    found: dict[int, None] = {}
+
+    def add(value):
+        try:
+            port = int(value)
+        except (TypeError, ValueError):
+            return
+        if 1 <= port <= 65535:
+            found[port] = None
+
+    server_module = sys.modules.get("app.server")
+    server = getattr(server_module, "webserver", None)
+    if server is not None:
+        add(getattr(server, "port", None))
+        bound = getattr(server, "server", None)
+        add(getattr(bound, "effective_port", None))
+        for entry in getattr(bound, "_map", None) or ():
+            add(getattr(entry, "effective_port", None))
+    try:
+        from app.get_args import args
+
+        add(getattr(args, "port", None))
+    except Exception:
+        logger.debug("Provider Hub: could not read the --port argument", exc_info=True)
     try:
         from app.config import settings
 
-        return int(settings.general.port)
+        add(settings.general.port)
     except Exception:
-        return None
+        logger.debug("Provider Hub: could not read general.port", exc_info=True)
+    return list(found)
 
 
 def authentication_off() -> bool:

@@ -145,21 +145,20 @@ function providerSandboxValue(
       </Text>
     );
   }
+  const notCovered = providers.limitations?.join("; ") ?? "";
   if (providers.state === "partial") {
     return (
       <Text component="span" size="sm" c="orange" fw="bold">
         {providers.notice ??
           "Subtitle provider plugins are sandboxed with gaps on this kernel."}
+        {notCovered ? `. Also not covered: ${notCovered}` : ""}
       </Text>
     );
   }
   if (providers.state === "off") {
     return "Off: subtitle provider plugins run without a sandbox (switched off in the Subtitle Hub settings)";
   }
-  const open = providers.limitations?.length
-    ? `. Not covered: ${providers.limitations.join("; ")}`
-    : "";
-  return `On: subtitle provider plugins cannot read the configuration or the database, and media is read-only to them${open}`;
+  return `On: subtitle provider plugins cannot read the configuration or the database, and media is read-only to them${notCovered ? `. Not covered: ${notCovered}` : ""}`;
 }
 
 function mediaServerValue(server: System.MediaServerStatus): string {

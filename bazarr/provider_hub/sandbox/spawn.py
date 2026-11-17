@@ -45,7 +45,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from . import landlock, seccomp
+from . import capabilities, landlock, seccomp
 from .policy import (
     PolicyError,
     RuntimeSpec,
@@ -271,8 +271,9 @@ def sandbox_limitations(probe: SandboxProbe) -> list[str]:
 # ---------------------------------------------------------------------------------------------
 # The subtitle provider profile: whether it is switched on, and which providers started without it.
 #
-# Provider workers fail open: when the ruleset cannot be applied the worker still starts, and the
-# cause is recorded here so System > Status and the Subtitle Hub can say so. New plugin kinds
+# Provider workers run without the ruleset only where the kernel has no Landlock at all. Where the host
+# can enforce but a check or a start fails, the start is refused. Either way the cause is recorded here
+# so System > Status and the Subtitle Hub can say so. New plugin kinds
 # never come through here; they fail closed.
 
 _provider_notice_lock = threading.Lock()
@@ -324,7 +325,7 @@ def reset_provider_notices() -> None:
         _provider_notices.clear()
 
 
-def provider_profile_gaps(abi: int, *, authentication_off: bool = False) -> list[str]:
+def provider_profile_gaps(abi: int, *, authentication_off: bool = False, mptcp_blocked: bool = True) -> list[str]:
     """What the provider ruleset does not cover on a kernel with Landlock ``abi``, in plain words."""
     gaps: list[str] = []
     if abi < 3:
@@ -337,28 +338,40 @@ def provider_profile_gaps(abi: int, *, authentication_off: bool = False) -> list
             "moving or linking a file from one folder to another is refused, so a plugin that does "
             "that inside its own folders fails"
         )
-    if abi < 4 and authentication_off:
+    if authentication_off and (abi < 4 or not mptcp_blocked):
+        reason = (
+            "this kernel has no network rules"
+            if abi < 4
+            else "this architecture has no seccomp filter, so a plugin can reach the port through an MPTCP socket"
+        )
         gaps.append(
-            "the sandbox cannot stop a plugin calling Bazarr+'s own web API on this machine, and with "
+            "the sandbox cannot stop a plugin calling Bazarr+'s own web API on this machine (%s), and with "
             "authentication off that API hands out the API key, the settings and the backups, so turn "
-            "authentication on in Settings > General > Security"
+            "authentication on in Settings > General > Security" % reason
         )
     return gaps
 
 
 def provider_profile_limitations(abi: int) -> list[str]:
     """What the provider profile leaves open on every kernel with Landlock ``abi``."""
-    return [
+    notes = [
         "the metadata filter (seccomp) is not applied to provider plugins, so a plugin can change the "
         "mode, owner, times or extended attributes of any file the Bazarr+ user owns, media included, "
         "and can lock every provider out by changing the mode of a folder they run from",
         "the file-size and process-count limits are not applied",
         (
-            "TCP connections to Bazarr+'s own port are refused and every other connection is allowed"
+            "TCP connections to Bazarr+'s own port are refused (MPTCP sockets are refused where this "
+            "architecture has a seccomp filter) and every other connection is allowed"
             if abi >= 4
             else "network connections are not restricted"
         ),
+        "only media inside the root folders of Sonarr, Radarr and Sportarr is readable to a plugin",
     ]
+    if abi < 9:
+        notes.append("connections to pathname UNIX sockets (a Docker socket, a user session bus) are not restricted")
+    if abi < 6:
+        notes.append("a plugin can signal other processes of the Bazarr+ user")
+    return notes
 
 
 def provider_profile_status(
@@ -367,9 +380,9 @@ def provider_profile_status(
     """What confines subtitle provider workers, for the status page and the Subtitle Hub.
 
     ``state`` is ``enforced`` (the filesystem ruleset applies in full), ``partial`` (it applies, with
-    gaps ``notice`` names: an older Landlock ABI, or no network rule while authentication is off),
-    ``unsandboxed`` (switched on but the kernel has no Landlock, or a start could not apply it:
-    ``notice`` says why), ``blocked`` (the kernel may enforce, but the host check failed or a start
+    gaps ``notice`` names: an older Landlock ABI, or no way to keep a plugin off Bazarr+'s own port while
+    authentication is off), ``unsandboxed`` (the kernel has no Landlock, or a client started without the
+    ruleset: ``notice`` says why), ``blocked`` (the kernel may enforce, but the host check failed or a start
     could not apply its ruleset, and providers are refused), ``off`` (switched off by the user) or
     ``pending`` (the host check is still running). ``probe`` is None while that check runs.
     ``limitations`` is what the provider profile leaves open on every kernel.
@@ -434,7 +447,9 @@ def provider_profile_status(
     if parts:
         result.update(state="blocked" if result["blocked"] else "unsandboxed", notice=" ".join(parts))
         return result
-    gaps = provider_profile_gaps(probe.abi, authentication_off=bool(authentication_off))
+    gaps = provider_profile_gaps(
+        probe.abi, authentication_off=bool(authentication_off), mptcp_blocked=seccomp.supported()
+    )
     if gaps:
         result.update(
             state="partial",
@@ -654,6 +669,12 @@ def _run_probe(python: str) -> SandboxProbe:
     abi, reason = landlock.probe_abi()
     if abi < 1:
         return SandboxProbe(abi=0, verified=False, absent="probe failed" not in reason, reason=reason)
+    if not capabilities.supported():
+        # The launcher drops every capability before it starts a worker, and cannot on this architecture:
+        # no ruleset can be applied here, which is not the same as a check that failed.
+        return SandboxProbe(
+            abi=abi, verified=False, absent=True, reason="no capability syscalls known for this architecture"
+        )
     # The metadata filter exists for some architectures only. Where it does not, every kind that needs it
     # is not "enforced", but the filesystem canary still runs: the provider profile does not use the filter.
     filter_available = seccomp.supported()

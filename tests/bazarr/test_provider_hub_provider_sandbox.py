@@ -2,14 +2,15 @@
 """The sandbox profile of subtitle provider workers.
 
 A provider worker cannot read the configuration or the database, sees the media library read-only,
-and keeps its ``ffmpeg`` plugins working (large temporary files, no metadata filter). Where the
-ruleset cannot be applied the worker still starts, and a notice says so. The user can switch the
-sandbox off.
+and keeps its ``ffmpeg`` plugins working (large temporary files, no metadata filter). A kernel with
+no Landlock runs it without the ruleset and a notice says so; where the host may enforce but cannot
+confirm or apply the ruleset, the start is refused. The user can switch the sandbox off.
 
 Most tests start the real worker runner with a fixture bundle through a real ``ProviderWorkerClient``;
 the ones that need the kernel's Landlock skip on a host that has none.
 """
 import dataclasses
+import errno as errno_module
 import json
 import os
 import stat
@@ -26,10 +27,12 @@ from provider_hub.sandbox import (
     landlock,
     probe_sandbox,
     provider_profile_gaps,
+    provider_profile_limitations,
     provider_profile_status,
     sandbox_status,
 )
 from provider_hub.sandbox import policy as policy_module
+from provider_hub.sandbox import seccomp as seccomp_module
 from provider_hub.sandbox import spawn as spawn_module
 from provider_hub.worker import ProviderLayout, ProviderWorkerClient, worker_command
 
@@ -69,6 +72,14 @@ class Fixture:
             return [{"result": _try(lambda: (os.chmod(config["path"], 0), "changed")[1])}]
         if op == "exit":
             os._exit(3)
+        if op == "mptcp":
+            import socket
+
+            def mptcp():
+                s = socket.socket(socket.AF_INET, socket.SOCK_STREAM, 262)
+                s.close()
+                return "created"
+            return [{"result": _try(mptcp)}]
         if op == "connect":
             import socket
 
@@ -104,6 +115,7 @@ finally:
 @pytest.fixture(autouse=True)
 def clean_notices():
     spawn_module.reset_provider_notices()
+    worker_module._probe_again_at = 0.0
     yield
     spawn_module.reset_provider_notices()
 
@@ -833,12 +845,13 @@ def test_from_abi_4_the_port_is_refused_so_there_is_no_gap_and_the_limitation_sa
 
 
 def test_the_profile_asks_for_bazarrs_own_port_to_be_refused_and_nothing_else(host, monkeypatch):
-    monkeypatch.setattr("provider_hub.provider_roots.listening_port", lambda: 6767)
+    monkeypatch.setattr("provider_hub.provider_roots.own_ports", lambda: [6767])
     spec = worker_module.provider_spec(host["layout"], worker_command(sys.executable, RUNNER), host["bundle"], {})
     launch = json.loads(spec.to_launch_json(enforce=True, min_abi=4))
 
     assert launch["deny_connect_ports"] == [6767]
     assert launch["connect_ports"] is None
+    assert launch["block_mptcp"] is True and launch["seccomp"] is False
 
 
 def test_a_provider_cannot_connect_to_bazarrs_port_where_the_kernel_has_network_rules(host, client, monkeypatch):
@@ -852,7 +865,7 @@ def test_a_provider_cannot_connect_to_bazarrs_port_where_the_kernel_has_network_
         for listener in (own, other):
             listener.bind(("127.0.0.1", 0))
             listener.listen(4)
-        monkeypatch.setattr("provider_hub.provider_roots.listening_port", lambda: own.getsockname()[1])
+        monkeypatch.setattr("provider_hub.provider_roots.own_ports", lambda: [own.getsockname()[1]])
         worker = client()
 
         refused = _ask(worker, op="connect", port=own.getsockname()[1])["result"]
@@ -971,20 +984,53 @@ def shutil_module():
     return shutil
 
 
-def test_the_backup_folder_the_port_and_the_login_state_come_from_the_settings(tmp_path, monkeypatch):
+def test_the_backup_folder_and_the_login_state_come_from_the_settings(tmp_path, monkeypatch):
     from types import SimpleNamespace
 
     from provider_hub import provider_roots
 
-    def settings(auth, port=6767, folder=str(tmp_path / "backups")):
-        return SimpleNamespace(auth=SimpleNamespace(type=auth), general=SimpleNamespace(port=port), backup=SimpleNamespace(folder=folder))
+    def settings(auth, folder=str(tmp_path / "backups")):
+        return SimpleNamespace(auth=SimpleNamespace(type=auth), general=SimpleNamespace(port=6767), backup=SimpleNamespace(folder=folder))
 
     monkeypatch.setattr("app.config.settings", settings(None))
-    assert provider_roots.authentication_off() is True and provider_roots.listening_port() == 6767
+    assert provider_roots.authentication_off() is True
     assert provider_roots.backup_folders() == [tmp_path / "backups"]
-    monkeypatch.setattr("app.config.settings", settings("form", port=7000, folder=""))
-    assert provider_roots.authentication_off() is False and provider_roots.listening_port() == 7000
+    monkeypatch.setattr("app.config.settings", settings("form", folder=""))
+    assert provider_roots.authentication_off() is False
     assert provider_roots.backup_folders() == []
+
+
+def test_the_own_ports_are_the_ones_the_server_bound_the_port_argument_and_the_setting(monkeypatch):
+    import sys
+    from types import ModuleType, SimpleNamespace
+
+    from provider_hub import provider_roots
+
+    monkeypatch.setattr("app.config.settings", SimpleNamespace(general=SimpleNamespace(port=6767)))
+    # --port overrides the setting, as under the docker supervisor, which also keeps 6767 for its front listener.
+    monkeypatch.setattr("app.get_args.args", SimpleNamespace(port=41234))
+    monkeypatch.delitem(sys.modules, "app.server", raising=False)
+    assert provider_roots.own_ports() == [41234, 6767]
+    # No --port: the setting alone.
+    monkeypatch.setattr("app.get_args.args", SimpleNamespace(port=None))
+    assert provider_roots.own_ports() == [6767]
+    # The running server's own record wins: it fell back to another port, and the socket says what it bound.
+    server_module = ModuleType("app.server")
+    server_module.webserver = SimpleNamespace(port=6768, server=SimpleNamespace(effective_port=6769))
+    monkeypatch.setitem(sys.modules, "app.server", server_module)
+    assert provider_roots.own_ports() == [6768, 6769, 6767]
+
+
+def test_a_port_argument_that_overrides_the_setting_is_refused_to_the_worker(host, monkeypatch):
+    from types import SimpleNamespace
+
+    monkeypatch.setattr("app.config.settings", SimpleNamespace(
+        general=SimpleNamespace(port=6767), auth=SimpleNamespace(type=None), backup=SimpleNamespace(folder="")))
+    monkeypatch.setattr("app.get_args.args", SimpleNamespace(port=41234, config_dir=str(host["config"])))
+    monkeypatch.delitem(sys.modules, "app.server", raising=False)
+    spec = worker_module.provider_spec(host["layout"], worker_command(sys.executable, RUNNER), host["bundle"], {})
+
+    assert json.loads(spec.to_launch_json(enforce=True, min_abi=4))["deny_connect_ports"] == [6767, 41234]
 
 
 def test_the_media_roots_come_from_every_instance_through_its_path_mappings(tmp_path, monkeypatch):
@@ -1043,3 +1089,116 @@ def test_a_link_to_the_configuration_file_in_a_granted_folder_refuses_the_profil
 
     with pytest.raises(policy_module.PolicyError, match="lies inside the granted tree"):
         worker_module.provider_spec(host["layout"], worker_command(sys.executable, RUNNER), host["bundle"], {})
+
+
+# ------------------------------------------------------------------------------------------- MPTCP
+def _run_bpf(program: bytes, arch: int, number: int, args=(0, 0, 0)) -> int:
+    """Evaluate a classic BPF seccomp program against one system call and return its verdict."""
+    import struct
+
+    data = struct.pack("=iIQ6Q", number, arch, 0, *(list(args) + [0] * 6)[:6])
+    code = [struct.unpack_from("=HBBI", program, offset) for offset in range(0, len(program), 8)]
+    accumulator, pc = 0, 0
+    while True:
+        op, jt, jf, k = code[pc]
+        pc += 1
+        if op == 0x20:
+            accumulator = struct.unpack_from("=I", data, k)[0]
+        elif op == 0x15:
+            pc += jt if accumulator == k else jf
+        elif op == 0x45:
+            pc += jt if accumulator & k else jf
+        elif op == 0x06:
+            return k
+        else:
+            raise AssertionError("unexpected instruction %#x" % op)
+
+
+@pytest.mark.parametrize("arch,number", [(seccomp_module.AUDIT_ARCH_X86_64, 41), (seccomp_module.AUDIT_ARCH_AARCH64, 198)])
+def test_the_socket_filter_refuses_mptcp_sockets_and_nothing_else(arch, number):
+    program = seccomp_module.build_socket_filter(arch)
+    deny = seccomp_module.SECCOMP_RET_ERRNO | errno_module.EPROTONOSUPPORT
+    allow, kill = seccomp_module.SECCOMP_RET_ALLOW, seccomp_module.SECCOMP_RET_KILL_PROCESS
+    stream = 1
+
+    assert _run_bpf(program, arch, number, (2, stream, seccomp_module.IPPROTO_MPTCP)) == deny
+    assert _run_bpf(program, arch, number, (10, stream, seccomp_module.IPPROTO_MPTCP)) == deny
+    assert _run_bpf(program, arch, number, (2, stream, 6)) == allow  # plain TCP
+    assert _run_bpf(program, arch, number, (2, stream, 0)) == allow
+    assert _run_bpf(program, arch, number, (2, stream, seccomp_module.IPPROTO_MPTCP | (1 << 32))) == allow
+    assert _run_bpf(program, arch, number + 1, (2, stream, seccomp_module.IPPROTO_MPTCP)) == allow  # another call
+    assert _run_bpf(program, arch ^ 1, number, (2, stream, 6)) == kill  # another syscall ABI
+    if arch == seccomp_module.AUDIT_ARCH_X86_64:
+        assert _run_bpf(program, arch, number | seccomp_module.X32_SYSCALL_BIT, (2, stream, 6)) == kill
+
+
+def test_a_provider_cannot_create_an_mptcp_socket_where_the_architecture_has_the_filter(host, client):
+    _enforcing_kernel()
+    if not seccomp_module.supported():
+        pytest.skip("no seccomp filter for this architecture")
+    worker = client()
+
+    assert _ask(worker, op="mptcp")["result"].startswith("error")
+    # Plain TCP to another port still works.
+    import socket
+
+    with socket.socket() as listener:
+        listener.bind(("127.0.0.1", 0))
+        listener.listen(1)
+        assert _ask(worker, op="connect", port=listener.getsockname()[1])["result"] in ("connected", "denied")
+
+
+def test_without_a_filter_for_the_architecture_the_notice_names_the_mptcp_route_while_authentication_is_off(monkeypatch):
+    probe = SandboxProbe(abi=6, verified=True, reads_verified=True)
+    monkeypatch.setattr(spawn_module.seccomp, "supported", lambda: False)
+
+    status = provider_profile_status(probe, authentication_off=True)
+    quiet = provider_profile_status(probe, authentication_off=False)
+
+    assert status["state"] == "partial" and "MPTCP" in status["notice"] and "turn authentication on" in status["notice"]
+    assert quiet["state"] == "enforced"
+
+
+def test_the_limitations_name_the_unix_socket_and_signal_gaps_of_older_kernels():
+    old = " ".join(provider_profile_limitations(3))
+    new = " ".join(provider_profile_limitations(10))
+
+    assert "pathname UNIX sockets" in old and "signal other processes" in old
+    assert "pathname UNIX sockets" not in new and "signal other processes" not in new
+    assert "root folders of Sonarr, Radarr and Sportarr" in new
+
+
+# ------------------------------------------------------------------------ the host check, again
+def test_a_host_check_that_failed_is_asked_again_and_a_pass_lets_the_start_go_ahead(host, client, monkeypatch):
+    real = _enforcing_kernel()
+    bad = SandboxProbe(abi=real.abi, verified=False, reads_verified=False, reason="canary timed out")
+    calls = []
+
+    def probe(refresh=False, **kwargs):
+        calls.append(refresh)
+        return real if refresh else bad
+
+    monkeypatch.setattr("provider_hub.sandbox.probe_sandbox", probe)
+    worker = client()
+
+    assert _ask(worker, op="read", path=str(host["config"] / "config" / "config.yaml"))["result"] == "denied"
+    assert calls == [False, True]
+
+
+def test_the_refusal_says_how_it_ends(host, client, monkeypatch):
+    bad = SandboxProbe(abi=10, verified=False, reads_verified=False, reason="canary timed out")
+    monkeypatch.setattr("provider_hub.sandbox.probe_sandbox", lambda *a, **k: bad)
+    worker = client()
+
+    with pytest.raises(worker_module.WorkerError, match="switching the sandbox off"):
+        _ask(worker, op="read", path=str(host["media"] / "film.mkv"))
+
+
+def test_an_architecture_without_capability_calls_cannot_sandbox_and_runs_providers_with_a_notice(monkeypatch):
+    monkeypatch.setattr(spawn_module.capabilities, "supported", lambda: False)
+
+    probe = spawn_module._run_probe(sys.executable)
+
+    assert probe.absent is True and probe.enforces(PROVIDER_MIN_ABI) is False
+    assert "capability" in probe.reason
+    assert provider_profile_status(probe)["state"] == "unsandboxed"
