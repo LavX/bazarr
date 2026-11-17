@@ -540,6 +540,8 @@ class _Served:
         self.failure: dict[str, Any] | None = None
         self.pointer: dict[str, str] | None = None
         self.unchanged = False
+        # The signed file could not be read and the legacy catalog stood in for it: the next refresh asks again.
+        self.signed_unreadable = False
 
     def observe(self, origin: str, surface: str, failure: "transport.Failure") -> None:
         if self.failure is not None:
@@ -630,12 +632,19 @@ def _fetch_signed_feed(
         owner, repo, commit, channel, catalog_feed.SIGNED_CATALOG_PATH.format(channel=channel), route, served)
     if body is None:
         return None
-    return catalog_feed.FetchedFeed(
-        catalog=body,
-        envelope=_fetch_catalog_file(
-            owner, repo, commit, channel, catalog_feed.SIGNED_ENVELOPE_PATH.format(channel=channel), route, served),
-        key_file=_fetch_catalog_file(owner, repo, commit, channel, catalog_feed.KEY_FILE_PATH, route, served),
-    )
+    try:
+        return catalog_feed.FetchedFeed(
+            catalog=body,
+            envelope=_fetch_catalog_file(
+                owner, repo, commit, channel, catalog_feed.SIGNED_ENVELOPE_PATH.format(channel=channel), route,
+                served),
+            key_file=_fetch_catalog_file(owner, repo, commit, channel, catalog_feed.KEY_FILE_PATH, route, served),
+        )
+    except Exception as error:
+        # The signed catalog itself was served, so this commit is signed: whatever else it needs and
+        # cannot be read is a failed refresh, never a reason to read the legacy catalog.
+        error.signed_body_read = True
+        raise
 
 
 def _head_from_mirror(
@@ -719,10 +728,23 @@ def _fetch_official_catalog(
             served.unchanged = True
             served.pointer = _pointer_record(pointer, source)
         return None, head, None
+    stored = catalog_feed.stored_record(state, channel)
+    try:
+        fetched = _fetch_signed_feed(owner, repo, head, channel, route, served)
+    except (requests.exceptions.RequestException, transport.TransportError) as error:
+        if stored.latched or host_latched or pointer is not None or getattr(error, "signed_body_read", False):
+            raise
+        # Nothing has ever been accepted as signed here, so a signed file that cannot be read is
+        # the same as one that is not there: the legacy catalog, as before a root was embedded.
+        logging.getLogger(__name__).info(
+            "The signed catalog could not be read (%s); reading the legacy catalog instead.", error)
+        if served is not None:
+            served.signed_unreadable = True
+        fetched = None
     feed = catalog_feed.verify_fetched(
-        _fetch_signed_feed(owner, repo, head, channel, route, served),
+        fetched,
         channel=channel,
-        stored=catalog_feed.stored_record(state, channel), now=catalog_feed.current_time(),
+        stored=stored, now=catalog_feed.current_time(),
         host_build_time=catalog_feed.build_time(), host_latched=host_latched,
     )
     if feed is None:
@@ -1597,11 +1619,13 @@ def refresh_catalog(source_ids: set[str] | None = None, checkpoint=None) -> dict
                     elif (not source.get("dev_ref") and source.get("trusted") is True
                           and (not catalog_feed.signed_feed_enabled() or (
                               source.get("catalog_signature")
+                              and not source.get("signed_feed_retry")
                               and source.get("catalog_channel") == catalog_feed.CHANNEL_MAIN
                               and catalog_feed.supply_refusal(state, source) is None))):
                         # A source refreshed before the signature check existed, on another channel, or
                         # whose cached catalog no longer meets what this host requires of one (a counter,
-                        # a key file version it lacks the record of) is fetched once more.
+                        # a key file version it lacks the record of) is fetched once more. So is one whose
+                        # legacy catalog stood in for a signed file that could not be read.
                         try:
                             url_ref = _parse_github_file_url(source["url"])[2]
                         except CatalogSourceError:
@@ -1683,6 +1707,10 @@ def refresh_catalog(source_ids: set[str] | None = None, checkpoint=None) -> dict
                         _set_official_trust(source, commit, previous_commit, ancestry)
                         _hold_unsigned_ref_to_the_latch(state, source)
                         _note_catalog_signature(state, source, feed, accepted_feeds)
+                        if served is not None and served.signed_unreadable:
+                            source["signed_feed_retry"] = True
+                        else:
+                            source.pop("signed_feed_retry", None)
                     published_ids = set()
                 claimed_kinds: dict[str, set[str]] = {}
                 for item in catalog.get("providers", []):

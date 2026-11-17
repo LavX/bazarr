@@ -1,0 +1,14 @@
+{
+  "key_file_version": 1,
+  "root_key_id": "d2edde7047b7b2fe",
+  "keys": [
+    {
+      "key_id": "e5a4609103600fbd",
+      "algorithm": "ed25519",
+      "public_key": "0Ns1kcQAovA4XkdHnDVGypW+RuU4mCyXj4rSurzK3RM=",
+      "added": "2026-11-17"
+    }
+  ],
+  "revocations": [],
+  "signature": "tgB/Y3RCVPHgqqp4i0YY5JEb8FKGADqSdVJwr7xE24p4AdFOxu/6FDWaAJctvNCBJ7dpY6PrLtaPh9FeEOy3Ag=="
+}

@@ -10,7 +10,7 @@ import pytest
 
 import provider_hub_state_engines as engines
 from plugin_platform_helpers import service_manifest, write_state
-from signed_feed_helpers import HEAD, OLDER, SignedWorld
+from signed_feed_helpers import HEAD, OLDER, FeedResponse, SignedWorld
 from test_provider_hub import _manifest
 
 # Fixtures live in the helper module; binding them here makes pytest find them.
@@ -109,6 +109,204 @@ def test_an_official_branch_other_than_beta_reads_the_legacy_catalog_only(world)
 
     assert world.fetched("catalog.json.sig") == []
     assert {entry["provider_id"] for entry in _entries().values()} == {PROVIDER}
+
+
+@pytest.fixture
+def shipped_root_world(tmp_path, monkeypatch, service_kind):
+    """A host that trusts the root this release ships, and a repository with no signed file in it."""
+    from provider_hub import signing_roots
+
+    shipped = dict(signing_roots.SIGNING_ROOTS)
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(write_state(tmp_path / "state.json")))
+    world = SignedWorld(monkeypatch)
+    monkeypatch.setattr(signing_roots, "SIGNING_ROOTS", shipped)
+    assert shipped
+    return world
+
+
+def test_a_host_with_the_shipped_root_keeps_reading_a_catalog_that_has_no_signed_file(shipped_root_world, tmp_path):
+    from provider_hub import catalog_feed
+
+    world = shipped_root_world
+    assert catalog_feed.signed_feed_enabled()
+    world.legacy(providers=[_provider()], plugins=[_plugin()])
+
+    _refresh()
+
+    source = _official()
+    assert source["last_error"] is None
+    assert source["catalog_signature"] == "unsigned (legacy)" and source["signature_verified"] is False
+    assert {entry["provider_id"] for entry in _entries().values()} == {PROVIDER}
+    assert _state().get("catalog_feeds", {}) == {}
+    assert _counter_file(tmp_path) is None
+    assert world.fetched("signed/main/catalog.json") and not world.fetched("catalog.json.sig")
+    assert _blocked() == {PROVIDER: None}
+
+
+def test_the_legacy_path_survives_a_second_refresh_and_a_new_head_with_the_shipped_root(shipped_root_world):
+    world = shipped_root_world
+    world.legacy(providers=[_provider()])
+    _refresh()
+    _refresh()
+    _move_head(world, "e" * 40)
+    world.legacy(commit="e" * 40, providers=[_provider("1.1.0")])
+
+    _refresh()
+
+    assert _official()["last_error"] is None
+    assert {entry["version"] for entry in _entries().values()} == {"1.1.0"}
+    assert _blocked() == {PROVIDER: None}
+
+
+def test_the_beta_channel_keeps_reading_legacy_with_the_shipped_root(shipped_root_world):
+    from provider_hub.service import update_catalog_source
+
+    world = shipped_root_world
+    world.legacy(providers=[_provider()])
+    update_catalog_source("official", dev_ref="beta")
+
+    _refresh()
+
+    assert _official()["last_error"] is None and _official()["catalog_signature"] == "unsigned (legacy)"
+    assert world.fetched("signed/beta/catalog.json")
+    assert {entry["provider_id"] for entry in _entries().values()} == {PROVIDER}
+
+
+def test_an_install_resolves_from_a_legacy_cache_with_the_shipped_root(shipped_root_world):
+    from provider_hub.service import resolve_catalog_install
+
+    shipped_root_world.legacy(providers=[_provider()])
+    _refresh()
+
+    assert resolve_catalog_install("official", PROVIDER, "1.0.0")
+
+
+def _signed_file_fails(world, monkeypatch, failure):
+    """The raw origin cannot serve the signed catalog: ``failure`` is an HTTP status or an exception."""
+    import requests as http
+
+    def get(url, timeout=None, **kwargs):
+        if "/signed/" in url and url.startswith("https://raw.githubusercontent.com/"):
+            world.requests.append(url)
+            if isinstance(failure, int):
+                return FeedResponse(b"", failure)
+            raise failure
+        return world._get(url, timeout, **kwargs)
+
+    monkeypatch.setattr("provider_hub.service.requests.get", get)
+    return http
+
+
+def _assert_the_outage_is_what_was_raised(error):
+    """The failure of the signed file is what the refresh shows, not the refusal of an unsigned catalog."""
+    assert error and "not signed" not in error and "only accepts a signed" not in error
+    assert "503" in error or "not answering" in error
+
+
+def _legacy_catalog_requests(world):
+    return [url for url in world.requests if url.endswith("/catalog.json") and "/signed/" not in url]
+
+
+@pytest.mark.parametrize("failure", [503, 429, "timeout", "connection"])
+def test_a_signed_file_that_cannot_be_read_never_blocks_the_legacy_refresh_of_an_unlatched_host(
+        shipped_root_world, monkeypatch, failure):
+    import requests as http
+    from provider_hub import transport
+
+    transport.reset_state()
+    world = shipped_root_world
+    failure = {"timeout": http.exceptions.Timeout("slow"), "connection": http.exceptions.ConnectionError("down")}.get(
+        failure, failure)
+    _signed_file_fails(world, monkeypatch, failure)
+    world.legacy(providers=[_provider()])
+
+    _refresh()
+
+    assert _official()["last_error"] is None and _official()["catalog_signature"] == "unsigned (legacy)"
+    assert {entry["version"] for entry in _entries().values()} == {"1.0.0"}
+    # The signed file's failure may park its origin; the next refresh still reads the legacy catalog.
+    _move_head(world, "e" * 40)
+    world.legacy(commit="e" * 40, providers=[_provider("1.1.0")])
+
+    _refresh()
+
+    assert _official()["last_error"] is None
+    assert {entry["version"] for entry in _entries().values()} == {"1.1.0"}
+    assert _blocked() == {PROVIDER: None}
+    transport.reset_state()
+
+
+def test_a_legacy_read_that_stood_in_for_an_unreadable_signed_file_asks_for_the_signed_file_again(
+        shipped_root_world, monkeypatch):
+    from provider_hub import transport
+
+    transport.reset_state()
+    world = shipped_root_world
+    world.legacy(providers=[_provider()])
+    _signed_file_fails(world, monkeypatch, 503)
+    _refresh()
+    assert _official()["catalog_signature"] == "unsigned (legacy)"
+
+    def asked():
+        return len(world.fetched("signed/main/catalog.json"))
+
+    first = asked()
+    assert first >= 1
+
+    # The head has not moved, and the signed file is still asked for.
+    _refresh()
+
+    second = asked()
+    assert second > first
+    assert _official()["last_error"] is None and _blocked() == {PROVIDER: None}
+    transport.reset_state()
+
+
+def test_a_legacy_read_after_a_plain_404_is_settled_for_the_head(shipped_root_world):
+    world = shipped_root_world
+    world.legacy(providers=[_provider()])
+    _refresh()
+    asked = len(world.fetched("signed/main/catalog.json"))
+    assert asked == 1 and "signed_feed_retry" not in _official()
+
+    _refresh()
+
+    assert len(world.fetched("signed/main/catalog.json")) == asked
+
+
+def test_a_signed_file_that_cannot_be_read_still_refuses_a_latched_channel_and_keeps_its_catalog(world, monkeypatch):
+    from provider_hub import transport
+
+    transport.reset_state()
+    _latch(world)
+    _move_head(world, "e" * 40)
+    world.legacy(commit="e" * 40, providers=[_provider("9.9.9")])
+    _signed_file_fails(world, monkeypatch, 503)
+
+    _refresh()
+
+    _assert_the_outage_is_what_was_raised(_official()["last_error"])
+    assert {entry["version"] for entry in _entries().values()} == {"1.0.0"}
+    assert not [url for url in _legacy_catalog_requests(world) if "e" * 40 in url]
+    assert _official()["catalog_signature"] == "verified"
+    transport.reset_state()
+
+
+def test_a_signed_file_that_cannot_be_read_refuses_a_host_latched_on_the_other_channel(world, monkeypatch):
+    from provider_hub import transport
+    from provider_hub.service import update_catalog_source
+
+    transport.reset_state()
+    _latch(world)
+    update_catalog_source("official", dev_ref="beta")
+    _signed_file_fails(world, monkeypatch, 503)
+    world.legacy(providers=[_provider("9.9.9")])
+
+    _refresh()
+
+    _assert_the_outage_is_what_was_raised(_official()["last_error"])
+    assert "9.9.9" not in {entry["version"] for entry in _entries().values()}
+    transport.reset_state()
 
 
 # --- a verified catalog ----------------------------------------------------------------------

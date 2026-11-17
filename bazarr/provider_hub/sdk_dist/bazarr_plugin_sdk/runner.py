@@ -25,7 +25,8 @@ as cancelled and left behind on its thread. So is anything a finished or cancell
 call leaves running that does not stop in time: a task that swallows its cancel, an
 async generator that will not close, an executor thread (``asyncio.to_thread``). The
 worker then refuses new calls and exits after the answer, so the host starts a fresh
-one: a new call must never run beside code that was told to stop and did not.
+one: a new call must never run beside code that was told to stop and did not. A cleanup
+step that raises is treated the same way, since what it was waiting for may still be running.
 
 The whole cleanup, from a cancel to the answer, takes at most SHUTDOWN_TIMEOUT plus
 CLEANUP_SLACK seconds. That is kept well under the host's ``cancel_grace``
@@ -33,8 +34,8 @@ CLEANUP_SLACK seconds. That is kept well under the host's ``cancel_grace``
 races the host's kill. Change one only with the other.
 
 Exit codes: 0 normal, 3 the host broke the protocol or refused the worker, 64
-bad command line or entry, 66 the plugin would not start, 70 a cancelled call would
-not stop and the worker ended after answering it.
+bad command line or entry, 66 the plugin would not start, 70 something a call left
+running would not stop (or a cleanup step failed) and the worker ended after answering it.
 """
 
 from __future__ import annotations
@@ -371,7 +372,9 @@ def _clean_up(loop: asyncio.AbstractEventLoop, grace: Grace, operation: Any = No
     """Every step after the request, each within what is left of the shared budget.
 
     The loop is closed only when every step finished; after an overrun something may
-    still be using it.
+    still be using it. A step that raises is given up on the same way as one that
+    overruns: it did not finish, so whatever it was waiting for may still be running,
+    and the worker is retired.
     """
     steps = (_cancel_remaining_tasks, _shutdown_asyncgens, _shutdown_executor)
     clean = True
@@ -381,7 +384,8 @@ def _clean_up(loop: asyncio.AbstractEventLoop, grace: Grace, operation: Any = No
             if not finished:
                 grace.abandon(step.__name__.lstrip("_"))
             clean = finished and clean
-        except Exception as error:
+        except BaseException as error:  # a step may be stopped by anything its tasks raise, a SystemExit included
+            grace.abandon(step.__name__.lstrip("_"))
             log.warning("a cleanup step failed: %s", scrubbed_traceback(error, channel_secrets(operation)))
             clean = False
     if clean:
@@ -430,11 +434,13 @@ def _shutdown_executor(loop: asyncio.AbstractEventLoop, grace: Grace) -> bool:
     the loop.
     """
 
+    failure: list[BaseException] = []
+
     def run() -> None:
         try:
             loop.run_until_complete(loop.shutdown_default_executor())
-        except BaseException as error:  # nothing to report: the request is over
-            log.debug("the executor shutdown failed: %s", type(error).__name__)
+        except BaseException as error:
+            failure.append(error)
 
     helper = threading.Thread(target=run, name="bazarr-plugin-executor-shutdown", daemon=True)
     helper.start()
@@ -442,6 +448,9 @@ def _shutdown_executor(loop: asyncio.AbstractEventLoop, grace: Grace) -> bool:
     if helper.is_alive():
         log.warning("a thread started by the request did not finish in time and was abandoned")
         return False
+    if failure:
+        # Whether its threads ended is unknown, so it counts as a step that did not finish.
+        raise failure[0]
     return True
 
 

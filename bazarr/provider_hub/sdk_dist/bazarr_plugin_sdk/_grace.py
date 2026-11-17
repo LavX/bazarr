@@ -39,7 +39,7 @@ class Grace:
         return self.started and self.remaining() <= 0.0
 
     def abandon(self, what: str) -> None:
-        """Record that something was left running after the budget ran out."""
+        """Record that something may still be running: it overran the budget, or its cleanup step failed."""
         with self._lock:
             self._abandoned.append(what)
 

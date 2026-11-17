@@ -27,6 +27,15 @@ from plugin_platform_helpers import archive_runtime, provider_manifest_v2, servi
 
 
 @pytest.fixture(autouse=True)
+def _legacy_catalog_host(monkeypatch):
+    # These tests stub the legacy catalog only. They model a host that trusts no root, so the refresh
+    # never asks for the signed files; the signed feed and the shipped root are covered in
+    # test_provider_hub_signed_feed.py and test_provider_hub_signing.py.
+    from provider_hub import signing_roots
+    monkeypatch.setattr(signing_roots, "SIGNING_ROOTS", {})
+
+
+@pytest.fixture(autouse=True)
 def _enable_provider_hub_auto_install(monkeypatch):
     # Startup auto-install is opt-in (default off). These tests predate that gate and
     # exercise the install path, so enable the flag for the whole module. The OFF behavior
