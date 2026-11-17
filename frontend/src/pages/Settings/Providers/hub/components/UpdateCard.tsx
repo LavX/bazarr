@@ -11,8 +11,8 @@ import type {
   ProviderHubCatalogEntry,
   ProviderHubInstallation,
 } from "@/apis/raw/providerHub";
-import { TrustBadge } from "@/pages/Settings/Providers/hub/components/TrustBadge";
-import styles from "@/pages/Settings/Providers/hub/hub.module.scss";
+import { TrustBadge } from "@/components/hub/TrustBadge";
+import styles from "@/components/hub/hub.module.scss";
 
 interface UpdateCardProps {
   provider: ProviderHubInstallation;

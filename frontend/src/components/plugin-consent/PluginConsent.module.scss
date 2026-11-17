@@ -1,0 +1,147 @@
+/* The consent dialog. Tokens only, so both colour schemes follow the app. */
+
+.heading {
+  outline: none;
+}
+
+.body {
+  display: grid;
+  gap: 16px;
+}
+
+.section {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+
+.section + .section {
+  padding-top: 14px;
+  border-top: 1px solid var(--bz-border-divider);
+}
+
+.sectionTitle {
+  margin: 0;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--bz-text-tertiary);
+}
+
+.lines {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-size: 14px;
+  color: var(--bz-text-primary);
+}
+
+.line {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 10px;
+  min-width: 0;
+}
+
+.code {
+  font-family: var(--bz-font-mono, monospace);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+  color: var(--bz-text-secondary);
+}
+
+.quiet {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--bz-text-tertiary);
+}
+
+/* A mark carries its state in words and an icon, never in colour alone. */
+.mark {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 20px;
+  padding: 0 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+  white-space: nowrap;
+  color: var(--bz-text-secondary);
+  background: var(--bz-hover-bg);
+}
+
+.mark[data-mark="enforced"] {
+  color: var(--bz-stat-completed);
+  background: color-mix(in srgb, var(--bz-stat-completed) 14%, transparent);
+}
+
+.member {
+  display: grid;
+  gap: 6px;
+  padding: 10px 12px;
+  border: 1px solid var(--bz-border-card);
+  border-radius: var(--bz-radius-md);
+  background: var(--bz-surface-card);
+}
+
+.memberName {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--bz-text-primary);
+}
+
+/* Old and new next to each other: one row per kind of fact, two columns. */
+.sideBySide {
+  display: grid;
+  grid-template-columns: minmax(0, 7.5rem) minmax(0, 1fr) minmax(0, 1fr);
+  gap: 6px 14px;
+  margin: 0;
+  font-size: 13px;
+  color: var(--bz-text-primary);
+}
+
+.sideBySide > * {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.columnHead {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--bz-text-tertiary);
+}
+
+.corner {
+  display: block;
+}
+
+.rowLabel {
+  color: var(--bz-text-secondary);
+}
+
+.added {
+  font-weight: 600;
+}
+
+@media (max-width: 36em) {
+  .sideBySide {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  }
+
+  /* Two columns: the empty corner goes, so each heading sits over its own column. */
+  .sideBySide .corner {
+    display: none;
+  }
+
+  .rowLabel {
+    grid-column: 1 / -1;
+  }
+}

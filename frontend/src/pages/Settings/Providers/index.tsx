@@ -17,6 +17,7 @@ import {
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import { useProviderHubCatalog, useProviderHubProviders } from "@/apis/hooks";
 import type { ProviderHubInstallation } from "@/apis/raw/providerHub";
+import { summarizeUpdates } from "@/components/hub/utils";
 import {
   Check,
   CollapseBox,
@@ -34,7 +35,6 @@ import {
   UpdateBanner,
   UpdatesPanel,
 } from "@/pages/Settings/Providers/hub";
-import { summarizeUpdates } from "@/pages/Settings/Providers/hub/utils";
 import { antiCaptchaOption } from "@/pages/Settings/Providers/options";
 import { useSettingValue } from "@/pages/Settings/utilities/hooks";
 import { ProviderView } from "./components";

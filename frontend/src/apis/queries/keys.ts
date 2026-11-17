@@ -12,6 +12,7 @@ export enum QueryKeys {
   EmbeddedHidden = "embedded-hidden",
   Providers = "providers",
   ProviderHub = "provider-hub",
+  Plugins = "plugins",
   DistributionHub = "distribution-hub",
   ArrInstances = "arr-instances",
   Languages = "languages",

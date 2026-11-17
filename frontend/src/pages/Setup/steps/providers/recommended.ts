@@ -1,8 +1,5 @@
 import type { ProviderHubManifest } from "@/apis/raw/providerHub";
-import {
-  usesAntiCaptcha,
-  usesFlaresolverr,
-} from "@/pages/Settings/Providers/hub/utils";
+import { usesAntiCaptcha, usesFlaresolverr } from "@/components/hub/utils";
 import { detectAuthFromManifest } from "@/pages/Settings/Providers/meta";
 
 export interface RecommendedCandidate {

@@ -2,7 +2,7 @@ import { FunctionComponent } from "react";
 import { CloseButton, TextInput } from "@mantine/core";
 import { faMagnifyingGlass } from "@fortawesome/free-solid-svg-icons";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
-import styles from "@/pages/Settings/Providers/hub/hub.module.scss";
+import styles from "@/components/hub/hub.module.scss";
 
 interface SearchBarProps {
   value: string;

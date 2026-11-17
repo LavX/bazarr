@@ -17,6 +17,7 @@ const labels: Record<string, string> = {
   wanted: "Wanted",
   blacklist: "Excluded",
   "distribution-hub": "Distribution Hub",
+  "plugin-hub": "Plugin Hub",
 };
 // FontAwesome glyphs do not paint the same share of their viewBox. These run
 // edge to edge, so at the rail's 16px icon box they stand 2px taller than the

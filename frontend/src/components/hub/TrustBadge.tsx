@@ -3,7 +3,7 @@ import { Tooltip } from "@mantine/core";
 import { faShieldHalved, faUsers } from "@fortawesome/free-solid-svg-icons";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import clsx from "clsx";
-import styles from "@/pages/Settings/Providers/hub/hub.module.scss";
+import styles from "@/components/hub/hub.module.scss";
 
 interface TrustBadgeProps {
   trusted: boolean | undefined;

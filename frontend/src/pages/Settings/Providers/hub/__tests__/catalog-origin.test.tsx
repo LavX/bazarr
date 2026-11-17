@@ -12,8 +12,8 @@
 
 import { describe, expect, it } from "vitest";
 import type { ProviderHubCatalogSource } from "@/apis/raw/providerHub";
+import { describeCatalogOrigin } from "@/components/hub/utils";
 import { SourcesDrawer } from "@/pages/Settings/Providers/hub/SourcesDrawer";
-import { describeCatalogOrigin } from "@/pages/Settings/Providers/hub/utils";
 import { customRender, screen } from "@/tests";
 
 const NOW = new Date("2026-11-17T10:00:00Z");

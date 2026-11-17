@@ -16,6 +16,7 @@ import {
   faLanguage,
   faLaptop,
   faPlay,
+  faPlug,
   faStore,
   faTowerBroadcast,
   faTrophy,
@@ -38,6 +39,7 @@ import SeriesHistoryView from "@/pages/History/Series";
 import SportsHistoryView from "@/pages/History/Sports";
 import MovieView from "@/pages/Movies";
 import MovieDetailView from "@/pages/Movies/Details";
+import PluginHubView from "@/pages/PluginHub";
 import SeriesView from "@/pages/Series";
 import SettingsConnectionsView from "@/pages/Settings/Connections";
 import SettingsGeneralView from "@/pages/Settings/General";
@@ -237,6 +239,12 @@ export function useRoutes(): CustomRouteObject[] {
             name: "Subtitle Hub",
             path: "subtitle-hub",
             element: <SettingsProvidersView></SettingsProvidersView>,
+          },
+          {
+            icon: faPlug,
+            name: "Plugin Hub",
+            path: "plugin-hub",
+            element: <PluginHubView></PluginHubView>,
           },
           {
             icon: faLanguage,

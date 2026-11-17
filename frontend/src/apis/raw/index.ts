@@ -9,6 +9,7 @@ import mediaServerLinks from "./mediaServerLinks";
 import mediaServers from "./mediaServers";
 import movies from "./movies";
 import plex from "./plex";
+import plugins from "./plugins";
 import providerHub from "./providerHub";
 import providers from "./providers";
 import seerr from "./seerr";
@@ -36,6 +37,7 @@ const api = {
   utils,
   plex,
   providerHub,
+  plugins,
   distributionHub,
   arrInstances,
   seerr,

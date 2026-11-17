@@ -1,10 +1,10 @@
 /* eslint-disable camelcase -- transport names. */
+import type { Tone } from "@/components/hub/utils";
 import {
   choiceOf,
   isSecretField,
   PluginField,
 } from "@/components/plugin-settings";
-import type { Tone } from "@/pages/Settings/Providers/hub/utils";
 import type {
   TranslationBackendType,
   TranslationConnection,
