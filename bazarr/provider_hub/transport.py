@@ -58,6 +58,7 @@ Open cases:
 from __future__ import annotations
 
 import copy
+import json
 import re
 import socket
 import ssl
@@ -399,7 +400,12 @@ class Origin:
         max_bytes: int = MAX_FETCH_BYTES,
     ) -> FetchResult:
         """One request, no redirects. ``etag`` must be one this origin issued."""
-        url = self.url(key)
+        return self._request(self.url(key), etag, timeout=timeout, max_bytes=max_bytes)
+
+    def _request(
+        self, url: str, etag: str | None, *, timeout: float = DEFAULT_TIMEOUT,
+        max_bytes: int = MAX_FETCH_BYTES,
+    ) -> FetchResult:
         headers = {"If-None-Match": etag} if etag else {}
         response = requests.get(
             url, timeout=timeout, headers=headers, stream=True, allow_redirects=False,
@@ -490,6 +496,12 @@ class PagesOrigin(Origin):
         if not key.channel:
             raise TransportError(FailureKind.MALFORMED, "the mirror is addressed by channel")
         return f"{self.base_url}/v1/{key.channel}/{key.commit}/{key.path}"
+
+    def pointer_url(self, channel: str) -> str:
+        """Where the mirror says which commit a channel is at."""
+        if not _SEGMENT.fullmatch(channel) or ".." in channel:
+            raise TransportError(FailureKind.MALFORMED, "the mirror pointer is addressed by channel")
+        return f"{self.base_url}/v1/{channel}/current"
 
 
 def default_origins() -> list[Origin]:
@@ -793,8 +805,12 @@ def fetch_with_fallback(
     etags: dict[str, str] | None = None, timeout: float = DEFAULT_TIMEOUT,
     max_bytes: int = MAX_FETCH_BYTES, cancel_types: tuple[type[BaseException], ...] = (),
     clock: Callable[[], float] = time.time,
+    observer: Callable[[str, str, Failure], None] | None = None,
 ) -> FetchResult:
     """Fetch ``key`` from the first origin that serves it.
+
+    ``observer(origin, surface, failure)`` is told of each trigger failure
+    after it has been recorded, so a caller can show why a fetch moved on.
 
     Only the official source with the setting on ever leaves the primary, and
     only on a trigger failure of the one before it. With either off, or with
@@ -842,6 +858,8 @@ def fetch_with_fallback(
                     raise last_error from error
                 raise
             record_failure(origin.name, surface, failure, finished, admission)
+            if observer is not None:
+                observer(origin.name, surface, failure)
             last_error = error
             continue
         record_success(origin.name, surface, admission)
@@ -849,3 +867,116 @@ def fetch_with_fallback(
     if last_error is not None:
         raise last_error
     raise NoOriginAvailable("every origin is waiting out a limit or a failure")
+
+
+# -- the mirror's pointer ------------------------------------------------------
+
+# The pointer is a small JSON document, and a history longer than this is not
+# one the mirror publishes.
+POINTER_MAX_BYTES = 64 * 1024
+POINTER_MAX_HISTORY = 64
+_TIMESTAMP = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z")
+
+
+@dataclass(frozen=True)
+class MirrorPointer:
+    """What ``/v1/<channel>/current`` says: the commit the channel is at, when
+    the mirror published it, and the retained commits, newest first, so
+    ``history[0]`` is ``commit``."""
+
+    channel: str
+    commit: str
+    published_at: str
+    history: tuple[str, ...]
+
+
+def parse_pointer(content: bytes, channel: str) -> MirrorPointer:
+    """The pointer ``content`` holds, or ``TransportError`` (malformed) when it
+    is anything else: not an object, another channel, a commit that is not 40
+    lowercase hex digits, a history that does not start at the commit or
+    repeats one, or a time that is not ``YYYY-MM-DDTHH:MM:SSZ``."""
+    def refuse(reason: str) -> TransportError:
+        return TransportError(FailureKind.MALFORMED, f"the mirror pointer is not valid: {reason}")
+
+    try:
+        document = json.loads(content.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError) as error:
+        raise refuse("not JSON") from error
+    if not isinstance(document, dict):
+        raise refuse("not an object")
+    commit, published_at, history = document.get("commit"), document.get("published_at"), document.get("history")
+    if document.get("channel") != channel:
+        raise refuse("another channel")
+    if not isinstance(commit, str) or not _COMMIT.fullmatch(commit):
+        raise refuse("commit")
+    if not isinstance(published_at, str) or not _TIMESTAMP.fullmatch(published_at):
+        raise refuse("published_at")
+    if (
+        not isinstance(history, list) or not 1 <= len(history) <= POINTER_MAX_HISTORY
+        or history[0] != commit or len(set(history)) != len(history)
+        or not all(isinstance(item, str) and _COMMIT.fullmatch(item) for item in history)
+    ):
+        raise refuse("history")
+    return MirrorPointer(channel, commit, published_at, tuple(history))
+
+
+def check_pointer_advance(
+    pointer: MirrorPointer, stored_commit: str | None, accepted_at: str | None,
+) -> bool:
+    """Whether ``pointer`` names the commit already stored.
+
+    Returns True when it does (nothing to fetch) and False when it is strictly
+    ahead of it. Raises ``TransportError`` (kind ``INTEGRITY``) for a pointer
+    that cannot be shown to be ahead: one whose commit is older than the
+    stored one, whose history does not hold the stored commit, or whose
+    ``published_at`` is not later than the last pointer accepted. With no
+    stored commit there is nothing to compare, so the pointer stands and the
+    caller's own verification is the gate.
+
+    The timestamps are fixed-width UTC strings, so they compare as text.
+    """
+    if stored_commit is not None:
+        stored = stored_commit.lower()
+        if pointer.commit == stored:
+            return True
+        if stored not in pointer.history[1:]:
+            raise TransportError(
+                FailureKind.INTEGRITY,
+                "the mirror cannot prove that its catalog is newer than the one held")
+    if accepted_at is not None and not pointer.published_at > accepted_at:
+        raise TransportError(
+            FailureKind.INTEGRITY, "the mirror pointer is not newer than the last one accepted")
+    return False
+
+
+def fetch_pointer(
+    channel: str, *, origin: PagesOrigin | None = None, timeout: float = DEFAULT_TIMEOUT,
+    cancel_types: tuple[type[BaseException], ...] = (), clock: Callable[[], float] = time.time,
+    observer: Callable[[str, str, Failure], None] | None = None,
+) -> MirrorPointer:
+    """Read and parse the mirror's pointer for ``channel``.
+
+    The mirror stands in here for the source of branch heads. It obeys the
+    mirror's own cooldowns for the pointer surface, and a failure is raised as
+    it is. The caller decides whether this source may use the mirror at all.
+    """
+    origin = origin or PagesOrigin()
+    url = origin.pointer_url(channel)
+    admission = _admit(origin.name, SURFACE_POINTER, clock())
+    if admission is None:
+        raise NoOriginAvailable("the mirror is waiting out a failure")
+    try:
+        result = origin._request(url, None, timeout=timeout, max_bytes=POINTER_MAX_BYTES)
+        pointer = parse_pointer(result.content, channel)
+    except Exception as error:
+        finished = clock()
+        failure = classify_failure(error, cancel_types=cancel_types, now=finished)
+        if failure.trigger:
+            record_failure(origin.name, SURFACE_POINTER, failure, finished, admission)
+            if observer is not None:
+                observer(origin.name, SURFACE_POINTER, failure)
+        else:
+            release_probe(origin.name, admission)
+        raise
+    record_success(origin.name, SURFACE_POINTER, admission)
+    return pointer

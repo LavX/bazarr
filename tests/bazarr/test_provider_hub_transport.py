@@ -1492,3 +1492,137 @@ def test_the_mirror_is_not_claimed_while_it_is_parked():
         _fetch([raw, pages], route=route)
 
     assert route.sticky is None and route.failovers == 0
+
+
+# -- the mirror pointer -----------------------------------------------------------
+
+STORED = "a" * 40
+AHEAD = "b" * 40
+STAMP = "2026-11-17T10:00:00Z"
+
+
+def _pointer_document(**overrides):
+    document = {
+        "channel": "main", "commit": AHEAD, "catalog_sha256": "0" * 64, "published_at": STAMP,
+        "history": [AHEAD, STORED],
+    }
+    document.update(overrides)
+    return json.dumps(document).encode()
+
+
+def test_a_pointer_is_parsed_into_its_commit_stamp_and_history():
+    pointer = transport.parse_pointer(_pointer_document(), "main")
+
+    assert pointer.commit == AHEAD and pointer.published_at == STAMP and pointer.history == (AHEAD, STORED)
+
+
+@pytest.mark.parametrize("document", [
+    b"\xff", b"{", b"[]", b"null",
+    _pointer_document(channel="beta"),
+    _pointer_document(commit="A" * 40, history=["A" * 40]),
+    _pointer_document(commit="b" * 39, history=["b" * 39]),
+    _pointer_document(published_at="2026-11-17"),
+    _pointer_document(published_at=7),
+    _pointer_document(history=[]),
+    _pointer_document(history=[STORED, AHEAD]),
+    _pointer_document(history=[AHEAD, AHEAD]),
+    _pointer_document(history=[AHEAD, 7]),
+    _pointer_document(history=[AHEAD] + [f"{n:040x}" for n in range(1, 70)]),
+])
+def test_a_pointer_that_breaks_the_shape_is_malformed(document):
+    with pytest.raises(TransportError) as caught:
+        transport.parse_pointer(document, "main")
+
+    assert caught.value.kind is FailureKind.MALFORMED
+
+
+def _pointer(commit=AHEAD, history=(AHEAD, STORED), published_at=STAMP):
+    return transport.MirrorPointer("main", commit, published_at, tuple(history))
+
+
+def test_a_pointer_strictly_ahead_of_the_stored_commit_advances():
+    assert transport.check_pointer_advance(_pointer(), STORED, None) is False
+    assert transport.check_pointer_advance(_pointer(), STORED, "2026-11-17T09:59:59Z") is False
+
+
+def test_a_pointer_at_the_stored_commit_is_unchanged_whatever_its_stamp():
+    assert transport.check_pointer_advance(_pointer(AHEAD, (AHEAD,)), AHEAD, STAMP) is True
+
+
+@pytest.mark.parametrize("stored, accepted", [
+    ("c" * 40, None),
+    ("d" * 40, STAMP),
+    (STORED, STAMP),
+    (STORED, "2026-11-17T10:00:01Z"),
+])
+def test_a_pointer_that_cannot_prove_progress_is_refused(stored, accepted):
+    with pytest.raises(TransportError) as caught:
+        transport.check_pointer_advance(_pointer(), stored, accepted)
+
+    assert caught.value.kind is FailureKind.INTEGRITY and not classify_failure(caught.value).trigger
+
+
+def test_with_no_stored_commit_only_the_stamp_is_judged():
+    assert transport.check_pointer_advance(_pointer(), None, None) is False
+    with pytest.raises(TransportError):
+        transport.check_pointer_advance(_pointer(), None, STAMP)
+
+
+def test_the_pointer_is_read_from_the_mirror_by_channel(monkeypatch):
+    seen = []
+
+    def get(url, **kwargs):
+        seen.append(url)
+        return _Streamed(200, _pointer_document())
+
+    monkeypatch.setattr(transport.requests, "get", get)
+
+    pointer = transport.fetch_pointer("main", clock=lambda: NOW)
+
+    assert pointer.commit == AHEAD
+    assert seen == ["https://lavx.github.io/bazarr-provider-catalog/v1/main/current"]
+
+
+def test_a_failing_pointer_parks_the_mirror_for_that_surface_only(monkeypatch):
+    calls = []
+    told = []
+
+    def get(url, **kwargs):
+        calls.append(url)
+        return _Streamed(503, b"")
+
+    monkeypatch.setattr(transport.requests, "get", get)
+
+    with pytest.raises(requests.HTTPError):
+        transport.fetch_pointer("main", clock=lambda: NOW, observer=lambda *args: told.append(args))
+    with pytest.raises(NoOriginAvailable):
+        transport.fetch_pointer("main", clock=lambda: NOW + 1)
+
+    assert len(calls) == 1 and told[0][0:2] == ("pages", "pointer")
+    assert "pages:pointer" in transport.export_state()["cooldowns"]
+    assert "pages:catalog" not in transport.export_state()["cooldowns"]
+
+
+def test_a_pointer_that_is_not_valid_does_not_park_the_mirror(monkeypatch):
+    monkeypatch.setattr(transport.requests, "get", lambda url, **kwargs: _Streamed(200, b"{}"))
+
+    with pytest.raises(TransportError):
+        transport.fetch_pointer("main", clock=lambda: NOW)
+
+    assert transport.export_state()["cooldowns"] == {}
+
+
+def test_a_channel_that_is_not_a_segment_is_not_addressed():
+    with pytest.raises(TransportError):
+        PagesOrigin().pointer_url("../x")
+
+
+def test_the_observer_hears_each_trigger_failure_that_moves_a_fetch_on():
+    told = []
+    raw, pages = _Fake("raw", [_http_error(503)]), _Fake("pages", [b"mirror"])
+
+    result = fetch_with_fallback(
+        [raw, pages], KEY, surface="catalog", official=True, clock=lambda: NOW,
+        observer=lambda origin, surface, failure: told.append((origin, surface, failure.kind)))
+
+    assert result.origin == "pages" and told == [("raw", "catalog", FailureKind.SERVER_ERROR)]
