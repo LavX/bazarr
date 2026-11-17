@@ -100,7 +100,12 @@ const rowWith = (scope: HTMLElement, text: string) => {
 
 const open = async (user: ReturnType<typeof userEvent.setup>) => {
   await user.click(screen.getByRole("button", { name: "Ask" }));
-  return screen.findByRole("dialog", { name: /AI Subtitle Translator\?/ });
+  const dialog = await screen.findByRole("dialog", {
+    name: /AI Subtitle Translator\?/,
+  });
+  // The dialog fades in: what is asserted about its contents waits until it can be seen.
+  await waitFor(() => expect(dialog).toBeVisible());
+  return dialog;
 };
 
 describe("the install dialog, mounted alone", () => {

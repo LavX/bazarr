@@ -1,3 +1,4 @@
+/* eslint-disable camelcase -- kind ids are transport names. */
 import type {
   PluginCatalog,
   PluginCatalogEntry,

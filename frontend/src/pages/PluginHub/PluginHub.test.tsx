@@ -108,6 +108,13 @@ const showPage = (search = "") => {
   customRender(<PluginHubView />);
 };
 
+/** The dialog with this name, once it has finished fading in. */
+const dialogNamed = async (name: string) => {
+  const dialog = await screen.findByRole("dialog", { name });
+  await waitFor(() => expect(dialog).toBeVisible());
+  return dialog;
+};
+
 const card = async (name: string) => {
   const title = await screen.findByText(name);
   return title;
@@ -378,9 +385,7 @@ describe("installing and updating from a card", () => {
         name: "Install AI Subtitle Translator",
       }),
     );
-    const dialog = await screen.findByRole("dialog", {
-      name: "Install AI Subtitle Translator?",
-    });
+    const dialog = await dialogNamed("Install AI Subtitle Translator?");
     const confirm = await within(dialog).findByRole("button", {
       name: "Install",
     });
@@ -423,9 +428,7 @@ describe("installing and updating from a card", () => {
     await user.click(
       await screen.findByRole("button", { name: "Install Google Translate" }),
     );
-    const dialog = await screen.findByRole("dialog", {
-      name: "Install Google Translate?",
-    });
+    const dialog = await dialogNamed("Install Google Translate?");
     const confirm = await within(dialog).findByRole("button", {
       name: "Install",
     });
@@ -447,9 +450,7 @@ describe("installing and updating from a card", () => {
         name: "Update AI Subtitle Translator to 2.0.0",
       }),
     );
-    const dialog = await screen.findByRole("dialog", {
-      name: "Update AI Subtitle Translator?",
-    });
+    const dialog = await dialogNamed("Update AI Subtitle Translator?");
     expect(
       await within(dialog).findByRole("group", { name: "What changes" }),
     ).toBeVisible();
