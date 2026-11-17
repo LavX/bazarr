@@ -17,8 +17,11 @@ from pathlib import Path
 import pytest
 import requests
 
+from provider_hub import signing_roots as _signing_roots
+
 ROOT = Path(__file__).resolve().parents[2]
 BUILDER = ROOT / "scripts" / "release" / "catalog_floor.py"
+_SHIPPED_ROOTS = dict(_signing_roots.SIGNING_ROOTS)
 OFFICIAL_REPO = "LavX/bazarr-provider-catalog"
 FLOOR_COMMIT = "a" * 40
 LATER_COMMIT = "c" * 40
@@ -149,6 +152,91 @@ def _online(monkeypatch, service, catalog, commit):
 
 def _official(state):
     return state["catalog_sources"]["official"]
+
+
+# ---- a host that trusts the shipped root ---------------------------------
+
+@pytest.fixture
+def shipped_root(monkeypatch):
+    from provider_hub import signing_roots
+    monkeypatch.setattr(signing_roots, "SIGNING_ROOTS", dict(_SHIPPED_ROOTS))
+
+
+def _unsigned_origin(monkeypatch, commit, catalog):
+    """GitHub as it is today: the heads advertise ``commit``, the catalog is the legacy file, nothing is signed."""
+    from signed_feed_helpers import FeedResponse
+    from test_provider_hub import _AdvertisementResponse, _git_advertisement
+
+    def get(url, timeout=None, **_kwargs):
+        if url.endswith("/info/refs?service=git-upload-pack"):
+            return _AdvertisementResponse(_git_advertisement(
+                [(commit, "refs/heads/main"), (commit, "refs/heads/beta")]))
+        if url.endswith("/catalog.json") and "/signed/" not in url:
+            return FeedResponse(json.dumps(catalog).encode("utf-8"))
+        return FeedResponse(b"", 404)
+
+    monkeypatch.setattr("provider_hub.service.requests.get", get)
+
+
+def _unreachable(monkeypatch):
+    def refuse(*_args, **_kwargs):
+        raise requests.ConnectionError("no route")
+
+    monkeypatch.setattr("provider_hub.service.requests.get", refuse)
+
+
+def test_an_offline_first_refresh_still_seeds_from_the_floor_with_the_shipped_root(
+        snapshot, hub, shipped_root, monkeypatch):
+    from provider_hub.state import load_state
+    _unreachable(monkeypatch)
+
+    hub.refresh_catalog()
+
+    source = _official(load_state())
+    assert source["trust_reason"] == "release floor" and source["floor_seed"]["commit"] == FLOOR_COMMIT
+    assert [entry["provider_id"] for entry in load_state()["catalog_entries"].values()] == ["examplehub"]
+
+
+def test_a_refresh_with_the_shipped_root_replaces_the_seed_with_the_legacy_catalog(
+        snapshot, hub, shipped_root, monkeypatch):
+    from provider_hub.state import load_state
+    _unreachable(monkeypatch)
+    hub.refresh_catalog()
+    _unsigned_origin(monkeypatch, LATER_COMMIT, _catalog(version="2.0.0", with_plugin=False))
+
+    hub.refresh_catalog()
+
+    state = load_state()
+    source = _official(state)
+    assert source["last_error"] is None and "floor_seed" not in source
+    assert source["resolved_commit"] == LATER_COMMIT and source["trust_reason"] == "default branch"
+    assert source["catalog_signature"] == "unsigned (legacy)"
+    assert [entry["version"] for entry in state["catalog_entries"].values()] == ["2.0.0"]
+
+
+def test_a_cache_from_before_the_signature_check_is_fetched_once_then_skipped_with_the_shipped_root(
+        snapshot, hub, shipped_root, monkeypatch):
+    from provider_hub.state import mutate_state
+    calls = []
+    _unsigned_origin(monkeypatch, LATER_COMMIT, _catalog(version="2.0.0", with_plugin=False))
+    hub.refresh_catalog()
+    # What a release without the signature check left behind.
+    mutate_state(lambda state: _official(state).pop("catalog_signature", None))
+    served = hub.requests.get
+
+    def counting(url, *args, **kwargs):
+        calls.append(url)
+        return served(url, *args, **kwargs)
+
+    monkeypatch.setattr("provider_hub.service.requests.get", counting)
+
+    hub.refresh_catalog()
+    assert any(url.endswith("/catalog.json") and "/signed/" not in url for url in calls)
+    calls.clear()
+    hub.refresh_catalog()
+
+    # The second refresh sees the same head and asks for nothing but the advertisement.
+    assert [url for url in calls if not url.endswith("/info/refs?service=git-upload-pack")] == []
 
 
 # ---- reading the snapshot ------------------------------------------------

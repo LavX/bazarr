@@ -1077,7 +1077,7 @@ def test_the_shipped_root_is_a_raw_ed25519_key_under_its_own_id():
     assert key_id(raw) == EMBEDDED_ROOT_ID
 
 
-def test_the_published_key_file_is_signed_by_the_shipped_root_through_the_real_verifier():
+def test_the_key_file_fixture_is_signed_by_the_shipped_root_through_the_real_verifier():
     from provider_hub import signing_roots
 
     roots = signing_roots.SIGNING_ROOTS
@@ -1111,7 +1111,7 @@ def test_the_published_key_file_is_signed_by_the_shipped_root_through_the_real_v
         wire.key_file.signature, statement_for(wire.key_file))
 
 
-def test_the_published_key_file_lists_no_root_as_a_signing_key():
+def test_the_key_file_fixture_lists_no_root_as_a_signing_key():
     from provider_hub import signing_roots
 
     key_file = json.loads(CATALOG_KEY_FILE.read_text(encoding="utf-8"))
