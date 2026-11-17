@@ -45,6 +45,7 @@ import {
   ProviderInfo,
   ProviderList,
 } from "./list";
+import ProviderSandboxSetting from "./ProviderSandbox";
 import TmdbIntegration from "./TmdbIntegration";
 
 type TabKey = "my-providers" | "marketplace" | "updates" | "activity";
@@ -217,6 +218,7 @@ const EnabledProvidersSection: FunctionComponent<{
         clampBehavior="strict"
         allowDecimal={false}
       />
+      <ProviderSandboxSetting />
       {isEmpty && (
         <Stack gap="xs" align="flex-start" py="xs">
           <MantineText fw={600}>No providers enabled</MantineText>

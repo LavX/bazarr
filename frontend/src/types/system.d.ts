@@ -182,6 +182,43 @@ declare namespace System {
      * fields then carry placeholders and the label says it is checking.
      */
     pending?: boolean;
+    /**
+     * What confines subtitle provider workers. Absent on responses from before
+     * the field existed.
+     */
+    providers?: ProviderSandboxStatus;
+  }
+
+  interface ProviderSandboxStatus {
+    /** The "Sandbox subtitle provider plugins" setting. */
+    enabled: boolean;
+    /**
+     * enforced: the filesystem ruleset applies in full. partial: it applies,
+     * and the notice names the gaps (an older Landlock ABI, or no way to keep
+     * a plugin off Bazarr+'s own port while authentication is off).
+     * unsandboxed: the kernel has no Landlock, or a client started without the
+     * ruleset (see notice). blocked: the host may enforce it, but its check
+     * failed or a start could not apply the ruleset, so providers are refused.
+     * off: switched off. pending: the host check is still running.
+     */
+    state:
+      | "enforced"
+      | "partial"
+      | "unsandboxed"
+      | "blocked"
+      | "off"
+      | "pending";
+    /**
+     * Why providers run without the sandbox, or what a partial one leaves
+     * open; null when nothing is wrong.
+     */
+    notice: string | null;
+    /** The providers recorded as started without the sandbox. */
+    unsandboxed: string[];
+    /** The providers whose start was refused. */
+    blocked?: string[];
+    /** What the provider profile leaves open on every kernel. */
+    limitations?: string[];
   }
 
   interface TranslationAvailability {

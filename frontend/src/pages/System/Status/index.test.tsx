@@ -408,6 +408,152 @@ describe("System Status", () => {
     expect(screen.queryByText(/^Sandboxed/)).toBeNull();
   });
 
+  it("names a subtitle provider sandbox that could not be applied, never as protection", async () => {
+    const base: System.SandboxStatus = {
+      abi: 0,
+      enforced: false,
+      workers_sandboxed: false,
+      filesystem: "declared",
+      network: "declared",
+      signal_scope: "declared",
+      capabilities: "declared",
+      label: "Not sandboxed on this host",
+      reason: "kernel has no Landlock (ENOSYS)",
+      limitations: [],
+    };
+    statusWith({
+      sandbox: {
+        ...base,
+        providers: {
+          enabled: true,
+          state: "unsandboxed",
+          notice:
+            "Subtitle provider plugins run without the sandbox on this host: kernel has no Landlock (ENOSYS).",
+          unsandboxed: ["embeddedsubtitles"],
+        },
+      },
+    });
+    customRender(<SystemStatusView />);
+
+    expect(
+      await screen.findByText("Subtitle Provider Sandbox", undefined, {
+        timeout: 8000,
+      }),
+    ).toBeInTheDocument();
+    expect(
+      await screen.findByText(
+        /Subtitle provider plugins run without the sandbox on this host/,
+      ),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/^On:/)).toBeNull();
+  });
+
+  it("names what the subtitle provider sandbox leaves open on an older kernel", async () => {
+    statusWith({
+      sandbox: {
+        abi: 1,
+        enforced: false,
+        workers_sandboxed: false,
+        filesystem: "declared",
+        network: "declared",
+        signal_scope: "declared",
+        capabilities: "declared",
+        label: "Not sandboxed on this host",
+        reason: "Landlock ABI 1 cannot restrict truncate(2)",
+        limitations: [],
+        providers: {
+          enabled: true,
+          state: "partial",
+          notice:
+            "Subtitle provider plugins are sandboxed, and cannot read the configuration or the database. This kernel has Landlock ABI 1, which leaves gaps: truncating a file is not controlled.",
+          unsandboxed: [],
+          limitations: ["network connections are not restricted"],
+        },
+      },
+    });
+    customRender(<SystemStatusView />);
+
+    expect(
+      await screen.findByText(
+        /gaps: truncating a file is not controlled\. Also not covered: network connections are not restricted\.$/,
+        undefined,
+        {
+          timeout: 8000,
+        },
+      ),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/^On:/)).toBeNull();
+  });
+
+  it("says a subtitle provider whose sandbox could not be applied was not started", async () => {
+    statusWith({
+      sandbox: {
+        abi: 10,
+        enforced: true,
+        workers_sandboxed: false,
+        filesystem: "enforced",
+        network: "enforced",
+        signal_scope: "enforced",
+        capabilities: "dropped",
+        label: "Sandbox available: Landlock ABI 10.",
+        reason: "",
+        limitations: [],
+        providers: {
+          enabled: true,
+          state: "blocked",
+          notice:
+            "The sandbox could not be applied to embeddedsubtitles, so it was not started: the ruleset could not be applied.",
+          unsandboxed: [],
+          blocked: ["embeddedsubtitles"],
+          limitations: ["the metadata filter (seccomp) is not applied"],
+        },
+      },
+    });
+    customRender(<SystemStatusView />);
+
+    expect(
+      await screen.findByText(/so it was not started/, undefined, {
+        timeout: 8000,
+      }),
+    ).toBeInTheDocument();
+  });
+
+  it("says the subtitle provider sandbox is on, off, or leaves the row out while the check runs", async () => {
+    const base: System.SandboxStatus = {
+      abi: 10,
+      enforced: true,
+      workers_sandboxed: false,
+      filesystem: "enforced",
+      network: "enforced",
+      signal_scope: "enforced",
+      capabilities: "dropped",
+      label: "Sandbox available: Landlock ABI 10.",
+      reason: "",
+      limitations: [],
+    };
+    statusWith({
+      sandbox: {
+        ...base,
+        providers: {
+          enabled: false,
+          state: "off",
+          notice: null,
+          unsandboxed: [],
+        },
+      },
+    });
+    customRender(<SystemStatusView />);
+    expect(
+      await screen.findByText(
+        /^Off: subtitle provider plugins run without/,
+        undefined,
+        {
+          timeout: 8000,
+        },
+      ),
+    ).toBeInTheDocument();
+  });
+
   it("warns while a development plugin source is set and says nothing otherwise", async () => {
     statusWith({ devPluginSource: "branch-catalog" });
     customRender(<SystemStatusView />);

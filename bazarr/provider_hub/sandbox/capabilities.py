@@ -114,6 +114,11 @@ def _prctl(option: int, arg2: int = 0, arg3: int = 0, arg4: int = 0, arg5: int =
     return int(result)
 
 
+def supported() -> bool:
+    """Whether the capability system calls are known for this architecture."""
+    return platform.machine().lower() in _SYSCALLS
+
+
 def _syscall_numbers() -> tuple[int, int]:
     numbers = _SYSCALLS.get(platform.machine().lower())
     if numbers is None:

@@ -396,6 +396,7 @@ def apply_ruleset(
     devices: Iterable[Grant] = (),
     resolve_unix: Iterable[Grant] = (),
     connect_ports: Iterable[int] | None = None,
+    deny_connect_ports: Iterable[int] = (),
     abi_cap: int | None = None,
     min_abi: int = 1,
 ) -> AppliedRuleset:
@@ -405,6 +406,10 @@ def apply_ruleset(
     ``read_write`` paths must exist (``LandlockError`` otherwise: a worker must
     not start with fewer rules than asked); missing ``read_only``, ``devices``
     and ``resolve_unix`` paths are skipped and reported.
+
+    ``deny_connect_ports`` (with ``connect_ports`` of ``None``) refuses TCP connections to just those
+    ports where the kernel has network rules (ABI 4 and above) and leaves binding and every other
+    connection alone. Landlock only lists what is allowed, so every other port is listed.
 
     ``connect_ports`` of ``None`` leaves TCP unrestricted. An iterable, even an
     empty one, makes TCP connect and bind default-deny at ABI 4 and above, with
@@ -421,6 +426,11 @@ def apply_ruleset(
     ports = None if connect_ports is None else sorted({int(p) for p in connect_ports})
     handled_fs = handled_fs_for_abi(effective)
     handled_net = handled_net_for_abi(effective) if ports is not None else 0
+    denied = {int(p) for p in deny_connect_ports}
+    if ports is None and denied and handled_net_for_abi(effective):
+        # Connect is the only thing handled, so binding stays as free as it was.
+        handled_net = NET_CONNECT_TCP
+        ports = [port for port in range(1, 65536) if port not in denied]
     scoped = scoped_for_abi(effective)
 
     prctl(PR_SET_NO_NEW_PRIVS, 1)

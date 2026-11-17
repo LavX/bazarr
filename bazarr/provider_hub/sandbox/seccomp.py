@@ -329,8 +329,97 @@ def build_filter(arch: int | None = None) -> bytes:
     return b"".join(out)
 
 
+IPPROTO_MPTCP = 262
+IPPROTO_SMC = 256
+AF_SMC = 43
+SOCKET = {AUDIT_ARCH_X86_64: 41, AUDIT_ARCH_AARCH64: 198}
+IO_URING = (425, 426, 427)  # io_uring_setup, io_uring_enter, io_uring_register: the same on both
+
+
+def build_socket_filter(arch: int | None = None) -> bytes:
+    """Classic BPF program that keeps a worker on plain TCP and allows everything else.
+
+    Landlock's TCP rules (connect and bind by port) cover plain TCP sockets only. A worker could reach
+    a port they deny through a socket that falls back to, or is, TCP by another name: ``socket()`` with
+    ``IPPROTO_MPTCP``, ``IPPROTO_SMC`` or the ``AF_SMC`` family, which are refused with
+    ``EPROTONOSUPPORT``; or through ``io_uring``, whose ``IORING_OP_SOCKET`` creates sockets without
+    the system call, so the three ``io_uring`` calls are refused with ``EPERM``. The family and the
+    protocol are ``int`` arguments: the kernel reads the low 32 bits of the register, so only those
+    are compared. A different syscall ABI of the same CPU kills the process, as in ``build_filter``.
+    """
+    arch = arch if arch is not None else native_audit_arch()
+    if arch not in SOCKET:
+        raise ValueError("no seccomp filter for audit arch %#x" % (arch or 0))
+    program: list[list] = []
+    labels: dict[str, int] = {}
+
+    def emit(code, jt, jf, k):
+        program.append([code, jt, jf, k])
+
+    def label(name):
+        labels[name] = len(program)
+
+    emit(_BPF_LD_W_ABS, 0, 0, 4)  # arch
+    emit(_BPF_JEQ_K, 0, "kill", arch)
+    emit(_BPF_LD_W_ABS, 0, 0, 0)  # nr
+    if arch == AUDIT_ARCH_X86_64:
+        emit(_BPF_JSET_K, "kill", 0, X32_SYSCALL_BIT)
+    for number in IO_URING:
+        emit(_BPF_JEQ_K, "deny_perm", 0, number)
+    emit(_BPF_JEQ_K, 0, "allow", SOCKET[arch])
+    emit(_BPF_LD_W_ABS, 0, 0, _ARG_OFFSET)  # domain, low half
+    emit(_BPF_JEQ_K, "deny_proto", 0, AF_SMC)
+    emit(_BPF_LD_W_ABS, 0, 0, _ARG_OFFSET + 8 * 2)  # protocol, low half
+    emit(_BPF_JEQ_K, "deny_proto", 0, IPPROTO_MPTCP)
+    emit(_BPF_JEQ_K, "deny_proto", "allow", IPPROTO_SMC)
+    label("allow")
+    emit(_BPF_RET_K, 0, 0, SECCOMP_RET_ALLOW)
+    label("deny_proto")
+    emit(_BPF_RET_K, 0, 0, SECCOMP_RET_ERRNO | errno.EPROTONOSUPPORT)
+    label("deny_perm")
+    emit(_BPF_RET_K, 0, 0, SECCOMP_RET_ERRNO | errno.EPERM)
+    label("kill")
+    emit(_BPF_RET_K, 0, 0, SECCOMP_RET_KILL_PROCESS)
+
+    out = []
+    for index, (code, jt, jf, k) in enumerate(program):
+        resolved = []
+        for target in (jt, jf):
+            if isinstance(target, str):
+                target = labels[target] - index - 1
+            if not 0 <= target <= 255:
+                raise ValueError("jump out of range in the seccomp program")
+            resolved.append(target)
+        out.append(_insn(code, resolved[0], resolved[1], k))
+    return b"".join(out)
+
+
 class SockFprog(ctypes.Structure):
     _fields_ = [("len", ctypes.c_ushort), ("filter", ctypes.c_void_p)]
+
+
+def _install(program: bytes) -> None:
+    buffer = ctypes.create_string_buffer(program, len(program))
+    prog = SockFprog(len(program) // 8, ctypes.cast(buffer, ctypes.c_void_p))
+    libc = ctypes.CDLL(None, use_errno=True)
+    ctypes.set_errno(0)
+    result = libc.prctl(
+        ctypes.c_int(PR_SET_SECCOMP),
+        ctypes.c_ulong(SECCOMP_MODE_FILTER),
+        ctypes.c_ulong(ctypes.addressof(prog)),
+        ctypes.c_ulong(0),
+        ctypes.c_ulong(0),
+    )
+    if result != 0:
+        err = ctypes.get_errno()
+        raise OSError(err, "seccomp filter install failed: %s" % errno.errorcode.get(err, err))
+
+
+def apply_socket_filter() -> None:
+    """Install the MPTCP filter on the calling thread and its future children (``no_new_privs`` set)."""
+    if native_audit_arch() is None:
+        raise OSError(errno.ENOSYS, "no seccomp filter for this architecture")
+    _install(build_socket_filter())
 
 
 def apply_filter() -> int:

@@ -94,6 +94,177 @@ it("saves the AI subtitle penalty as a bounded integer setting", async () => {
   );
 });
 
+// The sandbox switch for subtitle provider plugins sits in the Subtitle Hub settings. It saves like any
+// other setting, and a provider that runs without the sandbox is named right beside it.
+it("saves the subtitle provider sandbox switch and shows the notice when providers run without it", async () => {
+  const submitted: FormData[] = [];
+  server.use(
+    http.get("/api/system/settings", () =>
+      HttpResponse.json({
+        general: {
+          theme: "auto",
+          enabled_providers: [],
+          provider_hub_sandbox: true,
+        },
+      }),
+    ),
+    http.get("/api/system/status", () =>
+      HttpResponse.json({
+        data: {
+          sandbox: {
+            providers: {
+              enabled: true,
+              state: "unsandboxed",
+              notice:
+                "Subtitle provider plugins run without the sandbox on this host: no Landlock.",
+              unsandboxed: [],
+            },
+          },
+        },
+      }),
+    ),
+    http.post("/api/system/settings", async ({ request }) => {
+      submitted.push(await request.formData());
+      return new HttpResponse(null, { status: 204 });
+    }),
+  );
+  const router = createMemoryRouter(
+    [{ path: "/subtitle-hub", element: <SettingsProvidersView /> }],
+    { initialEntries: ["/subtitle-hub"] },
+  );
+  rawRender(
+    <AllProviders>
+      <RouterProvider router={router} />
+    </AllProviders>,
+  );
+  const user = userEvent.setup();
+  const toggle = await screen.findByRole("switch", {
+    name: "Sandbox subtitle provider plugins",
+  });
+  await waitFor(() => expect(toggle).toBeChecked());
+  expect(
+    await screen.findByText(
+      /run without the sandbox on this host: no Landlock/,
+    ),
+  ).toBeInTheDocument();
+  await user.click(toggle);
+  await user.click(
+    await screen.findByRole("button", { name: /Save 1 pending change/ }),
+  );
+  await waitFor(() => expect(submitted).toHaveLength(1));
+  expect(submitted[0].get("settings-general-provider_hub_sandbox")).toBe(
+    "false",
+  );
+});
+
+// A provider whose ruleset could not be applied is not started, and the Hub says that, not "running without".
+it("titles a refused provider start as not started", async () => {
+  server.use(
+    http.get("/api/system/settings", () =>
+      HttpResponse.json({
+        general: {
+          theme: "auto",
+          enabled_providers: [],
+          provider_hub_sandbox: true,
+        },
+      }),
+    ),
+    http.get("/api/system/status", () =>
+      HttpResponse.json({
+        data: {
+          sandbox: {
+            providers: {
+              enabled: true,
+              state: "blocked",
+              notice:
+                "The sandbox could not be applied to embeddedsubtitles, so it was not started.",
+              unsandboxed: [],
+              blocked: ["embeddedsubtitles"],
+            },
+          },
+        },
+      }),
+    ),
+  );
+  const router = createMemoryRouter(
+    [{ path: "/subtitle-hub", element: <SettingsProvidersView /> }],
+    { initialEntries: ["/subtitle-hub"] },
+  );
+  rawRender(
+    <AllProviders>
+      <RouterProvider router={router} />
+    </AllProviders>,
+  );
+  expect(await screen.findByText("Provider not started")).toBeInTheDocument();
+  expect(screen.queryByText("Running without the sandbox")).toBeNull();
+});
+
+// The host's sandbox check runs once, in the background, after boot. A Subtitle Hub opened before it has
+// answered shows the notice as soon as it has, without a reload.
+it("shows the provider sandbox notice once the pending host check has answered", async () => {
+  let answered = false;
+  server.use(
+    http.get("/api/system/settings", () =>
+      HttpResponse.json({
+        general: {
+          theme: "auto",
+          enabled_providers: [],
+          provider_hub_sandbox: true,
+        },
+      }),
+    ),
+    http.get("/api/system/status", () =>
+      HttpResponse.json({
+        data: {
+          sandbox: answered
+            ? {
+                pending: false,
+                providers: {
+                  enabled: true,
+                  state: "unsandboxed",
+                  notice:
+                    "Subtitle provider plugins run without the sandbox on this host: no Landlock.",
+                  unsandboxed: [],
+                },
+              }
+            : {
+                pending: true,
+                providers: {
+                  enabled: true,
+                  state: "pending",
+                  notice: null,
+                  unsandboxed: [],
+                },
+              },
+        },
+      }),
+    ),
+  );
+  const router = createMemoryRouter(
+    [{ path: "/subtitle-hub", element: <SettingsProvidersView /> }],
+    { initialEntries: ["/subtitle-hub"] },
+  );
+  rawRender(
+    <AllProviders>
+      <RouterProvider router={router} />
+    </AllProviders>,
+  );
+  await screen.findByRole("switch", {
+    name: "Sandbox subtitle provider plugins",
+  });
+  expect(screen.queryByText(/run without the sandbox on this host/)).toBeNull();
+  answered = true;
+  expect(
+    await screen.findByText(
+      /run without the sandbox on this host: no Landlock/,
+      undefined,
+      {
+        timeout: 10000,
+      },
+    ),
+  ).toBeInTheDocument();
+}, 20000);
+
 // The write-only states of a plugin secret on the provider card. The value
 // never comes back from the API, so the card has to say what is stored
 // through the descriptor, and every action has to be explicit: an

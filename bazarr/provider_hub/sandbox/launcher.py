@@ -59,8 +59,22 @@ Spec layout (JSON object)::
       "resolve_unix": [...], "connect_ports": null | [443, 80],
       "limits": {"nofile": 1024, "fsize": 536870912, "core": 0, "nproc": null,
                  "nice": 10, "oom_score_adj": 800, "umask": 63},
-      "term_grace": 3.0
+      "term_grace": 3.0,
+      "seccomp": true
     }
+
+``deny_connect_ports`` (default none) refuses TCP connections to those ports on kernels with network
+rules and leaves every other connection alone; the provider profile uses it for Bazarr+'s own port.
+
+``block_mptcp`` (default false) installs a small filter that keeps a worker on plain TCP (it refuses
+MPTCP and SMC sockets and ``io_uring``) where the architecture has one and the port rule is in effect
+(ABI 4 and above), for a spec that leaves the full metadata filter out.
+
+``require_capabilities`` (default true) false makes dropping the capabilities best effort, for a
+host whose architecture has no capability bindings; the provider profile uses it there.
+
+``seccomp`` (default true) false leaves out the metadata filter; the provider profile does that so
+``ffmpeg`` can work, and nothing else may.
 
 In ``declared`` mode no ruleset is applied; limits, ``no_new_privs``, the
 clean environment and, where the architecture is supported, the metadata
@@ -267,7 +281,7 @@ def _child(spec, landlock, seccomp, capabilities, parent_pid, close_fds, report_
         # it: a host running as root would hand its capabilities to the worker.
         # This goes before the seccomp filter, which is then free to deny calls
         # the drop itself needs. Required when enforced; best effort otherwise.
-        if spec.get("mode", "enforce") == "enforce":
+        if spec.get("mode", "enforce") == "enforce" and spec.get("require_capabilities", True):
             capabilities.drop_all()
         else:
             try:
@@ -277,13 +291,25 @@ def _child(spec, landlock, seccomp, capabilities, parent_pid, close_fds, report_
         # chmod, chown, utime and xattr calls cannot be scoped by Landlock or by
         # a path-blind filter, so they are denied outright. Required when the
         # sandbox is enforced; best effort on a host that only declares.
-        if spec.get("mode", "enforce") == "enforce":
+        if not spec.get("seccomp", True):
+            pass
+        elif spec.get("mode", "enforce") == "enforce":
             seccomp.apply_filter()
         else:
             try:
                 seccomp.apply_filter()
             except OSError as exc:
                 _say("metadata filter not applied: %s" % exc)
+        if (
+            spec.get("block_mptcp")
+            and spec.get("deny_connect_ports")
+            and int(spec.get("min_abi", 1)) >= 4
+            and seccomp.supported()
+        ):
+            # Landlock's TCP rules do not cover MPTCP or SMC sockets, nor io_uring, so a worker given a
+            # port rule would walk around it. Only installed where that rule is in effect (ABI 4 and
+            # above); a host whose architecture has no filter cannot, and the host says so.
+            seccomp.apply_socket_filter()
         kind, code = "spec", EXIT_BAD_SPEC
         os.chdir(spec["cwd"])
         kind, code = "sandbox", EXIT_SANDBOX_FAILED
@@ -294,6 +320,7 @@ def _child(spec, landlock, seccomp, capabilities, parent_pid, close_fds, report_
                 devices=spec.get("devices", ()),
                 resolve_unix=spec.get("resolve_unix", ()),
                 connect_ports=spec.get("connect_ports"),
+                deny_connect_ports=spec.get("deny_connect_ports") or (),
                 abi_cap=spec.get("abi_cap"),
                 min_abi=int(spec.get("min_abi", 1)),
             )

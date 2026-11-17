@@ -119,7 +119,7 @@ class Limits:
 
     core: int = 0
     nofile: int = 1024
-    fsize: int = 512 * 1024 * 1024
+    fsize: int | None = 512 * 1024 * 1024
     nproc: int | None = None
     nice: int = 10
     oom_score_adj: int = 800
@@ -135,6 +135,60 @@ class Limits:
             "oom_score_adj": self.oom_score_adj,
             "umask": self.umask,
         }
+
+
+# Subtitle provider workers run ffprobe and ffmpeg, which write large temporary audio files and
+# start many threads, so they get no file-size or process-count limit. The open-file limit, core
+# size 0, nice, oom_score_adj and umask stay as for every worker.
+PROVIDER_LIMITS = Limits(fsize=None, nproc=None)
+
+# Small files and folders a provider worker reads beyond the system, interpreter and plugin paths:
+# the processor count that ffmpeg sizes its thread pool from.
+PROVIDER_EXTRA_READ_PATHS: tuple[str, ...] = (
+    "/sys/devices/system/cpu",
+    "/proc/cpuinfo",
+    "/proc/meminfo",
+)
+
+
+def provider_tree_grants(roots: Iterable[str | os.PathLike], shields: Iterable[str | os.PathLike]) -> tuple[str, ...]:
+    """Read-only grants for ``roots``, with every shielded tree left out of them.
+
+    Landlock rules only add rights and cannot carve a hole out of a granted folder, so a root that
+    holds a shielded folder (a media root that also holds the configuration or the backups) is
+    replaced by what lies beside the path down to the shield, level by level. A root that is
+    inside a shield, or is one, is dropped, and a root that does not exist is skipped. The shields
+    themselves are never listed, nor is anything that leads into one through a link.
+    """
+    targets = [os.path.realpath(_abs(shield)) for shield in shields]
+    found: list[str] = []
+
+    def inside(path: str, folder: str) -> bool:
+        return path == folder or path.startswith(folder.rstrip("/") + "/")
+
+    def walk(path: str, depth: int = 0) -> None:
+        real = os.path.realpath(path)
+        if any(inside(real, target) for target in targets):
+            return
+        if not any(inside(target, real) for target in targets):
+            if os.path.exists(real) and path not in found:
+                found.append(path)
+            return
+        if depth > 64 or not os.path.isdir(real):
+            return
+        try:
+            names = sorted(os.listdir(real))
+        except OSError:
+            return
+        for name in names:
+            walk(os.path.join(real, name), depth + 1)
+
+    for root in roots:
+        lexical = _abs(root)
+        if lexical == "/":
+            raise PolicyError("the filesystem root cannot be granted")
+        walk(lexical)
+    return tuple(found)
 
 
 def _abs(path: str | os.PathLike) -> str:
@@ -438,6 +492,9 @@ class SandboxPolicy:
     # None: TCP unrestricted (declared). A set: connect only to these ports and
     # bind nothing, where the kernel supports it (ABI 4 and above).
     connect_ports: frozenset[int] | None = None
+    # Ports a worker may not connect to while every other TCP connection stays open (ABI 4 and above).
+    # Ignored when ``connect_ports`` is a set.
+    deny_connect_ports: frozenset[int] = frozenset()
     # Highest Landlock ABI to use, for diagnostics and compatibility pinning.
     abi_cap: int | None = None
     # (device, inode) of each grant when the policy was built. A grant without
@@ -452,6 +509,7 @@ class SandboxPolicy:
         read_only: Iterable[str | os.PathLike] = (),
         read_write: Iterable[str | os.PathLike] = (),
         connect_ports: Iterable[int] | None = None,
+        deny_connect_ports: Iterable[int] = (),
         reserved_ports: Iterable[int] = (),
         protected_paths: Iterable[str | os.PathLike] = (),
         include_dns_tcp: bool = True,
@@ -494,6 +552,7 @@ class SandboxPolicy:
             devices=tuple(p for p, _i, _m in device_items),
             resolve_unix=tuple(p for p, _i, _m in unix_items),
             connect_ports=ports,
+            deny_connect_ports=frozenset(int(p) for p in deny_connect_ports if 1 <= int(p) <= 65535),
             abi_cap=abi_cap,
             identities={p: ident for p, ident, _m in every},
         )
@@ -538,6 +597,16 @@ class RuntimeSpec:
     policy: SandboxPolicy
     limits: Limits = field(default_factory=Limits)
     term_grace: float = 3.0
+    # False leaves out the launcher's metadata filter (chmod, chown, utime and xattr calls). Only
+    # the provider profile does, see ``PROVIDER_LIMITS``; every other kind keeps it.
+    seccomp: bool = True
+    # True installs a filter that keeps a worker on plain TCP (it refuses MPTCP and SMC sockets and io_uring),
+    # which Landlock's TCP rules do not cover, where the architecture has seccomp support and the port rule
+    # is in effect. Only meaningful for a spec with ``seccomp`` false.
+    block_mptcp: bool = False
+    # False makes dropping the capabilities best effort: for a host whose architecture has no capability
+    # bindings, where the provider profile still applies Landlock and says what is missing.
+    require_capabilities: bool = True
 
     def __post_init__(self) -> None:
         # The spec keeps its own validated copy, read-only: whoever built the mapping, a proxy
@@ -564,8 +633,12 @@ class RuntimeSpec:
             "devices": [self.policy.grant(p) for p in self.policy.devices],
             "resolve_unix": [self.policy.grant(p) for p in self.policy.resolve_unix],
             "connect_ports": None if self.policy.connect_ports is None else sorted(self.policy.connect_ports),
+            "deny_connect_ports": sorted(self.policy.deny_connect_ports),
             "limits": self.limits.to_dict(),
             "term_grace": float(self.term_grace),
+            "seccomp": bool(self.seccomp),
+            "block_mptcp": bool(self.block_mptcp),
+            "require_capabilities": bool(self.require_capabilities),
         }
         data = json.dumps(payload, separators=(",", ":")).encode("utf-8")
         if len(data) > MAX_SPEC_BYTES:

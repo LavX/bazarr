@@ -379,6 +379,8 @@ validators = [
     Validator('general.enable_strm_support', must_exist=True, default=False, is_type_of=bool),
     Validator('general.provider_hub_auto_install', must_exist=True, default=False, is_type_of=bool),
     Validator('general.provider_hub_allow_fallback', must_exist=True, default=True, is_type_of=bool),
+    # "Sandbox subtitle provider plugins" in the Subtitle Hub.
+    Validator('general.provider_hub_sandbox', must_exist=True, default=True, is_type_of=bool),
     Validator('general.provider_hub_worker_timeout', must_exist=True, default=120, is_type_of=int,
               gte=30, lte=86400),
     Validator('general.chmod', must_exist=True, default='0640', is_type_of=str),
