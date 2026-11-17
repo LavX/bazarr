@@ -687,20 +687,17 @@ def _park_raw(seconds=600):
     return now + seconds
 
 
-def test_a_parked_primary_and_a_mirror_without_the_file_say_so_and_never_read_the_unsigned_catalog(world):
+def test_a_parked_primary_does_not_stop_a_host_that_never_latched_from_reading_the_legacy_catalog(world):
     until = _park_raw()
     world.legacy(providers=[_provider()])
 
     _refresh()
 
+    # Nothing here was ever accepted as signed, so the signed file that cannot be asked for is as good as
+    # missing: the legacy catalog is read exactly as it was before a root was embedded.
     source = _official()
-    assert "not answering requests right now" in source["last_error"]
-    assert "allows requests again at" in source["last_error"]
-    assert "does not have this catalog source" not in source["last_error"]
-    assert _state()["catalog_entries"] == {} and source.get("catalog_signature") is None
-    assert source["last_failure"]["kind"] == "rate_limited" and source["last_failure"]["retry_at"]
-    # Raw was parked, so it was not asked, and the legacy catalog at it was not either.
-    assert not any(url.startswith("https://raw.githubusercontent.com/") for url in world.requests)
+    assert source["last_error"] is None and source["catalog_signature"] == "unsigned (legacy)"
+    assert {entry["provider_id"] for entry in _state()["catalog_entries"].values()} == {PROVIDER}
     assert until > 0
 
 

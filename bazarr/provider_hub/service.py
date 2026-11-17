@@ -719,10 +719,20 @@ def _fetch_official_catalog(
             served.unchanged = True
             served.pointer = _pointer_record(pointer, source)
         return None, head, None
+    stored = catalog_feed.stored_record(state, channel)
+    try:
+        fetched = _fetch_signed_feed(owner, repo, head, channel, route, served)
+    except (requests.exceptions.RequestException, transport.TransportError) as error:
+        if stored.latched or host_latched or pointer is not None:
+            raise
+        # Nothing has ever been accepted as signed here, so a signed file that cannot be read is
+        # the same as one that is not there: the legacy catalog, as before a root was embedded.
+        logging.getLogger(__name__).info("The signed catalog could not be read (%s); reading the legacy catalog instead.", error)
+        fetched = None
     feed = catalog_feed.verify_fetched(
-        _fetch_signed_feed(owner, repo, head, channel, route, served),
+        fetched,
         channel=channel,
-        stored=catalog_feed.stored_record(state, channel), now=catalog_feed.current_time(),
+        stored=stored, now=catalog_feed.current_time(),
         host_build_time=catalog_feed.build_time(), host_latched=host_latched,
     )
     if feed is None:

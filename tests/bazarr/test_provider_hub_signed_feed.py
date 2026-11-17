@@ -10,7 +10,7 @@ import pytest
 
 import provider_hub_state_engines as engines
 from plugin_platform_helpers import service_manifest, write_state
-from signed_feed_helpers import HEAD, OLDER, SignedWorld
+from signed_feed_helpers import HEAD, OLDER, FeedResponse, SignedWorld
 from test_provider_hub import _manifest
 
 # Fixtures live in the helper module; binding them here makes pytest find them.
@@ -179,6 +179,90 @@ def test_an_install_resolves_from_a_legacy_cache_with_the_shipped_root(shipped_r
     _refresh()
 
     assert resolve_catalog_install("official", PROVIDER, "1.0.0")
+
+
+def _signed_file_fails(world, monkeypatch, failure):
+    """The raw origin cannot serve the signed catalog: ``failure`` is an HTTP status or an exception."""
+    import requests as http
+
+    def get(url, timeout=None, **kwargs):
+        if "/signed/" in url and url.startswith("https://raw.githubusercontent.com/"):
+            world.requests.append(url)
+            if isinstance(failure, int):
+                return FeedResponse(b"", failure)
+            raise failure
+        return world._get(url, timeout, **kwargs)
+
+    monkeypatch.setattr("provider_hub.service.requests.get", get)
+    return http
+
+
+def _legacy_catalog_requests(world):
+    return [url for url in world.requests if url.endswith("/catalog.json") and "/signed/" not in url]
+
+
+@pytest.mark.parametrize("failure", [503, 429, "timeout", "connection"])
+def test_a_signed_file_that_cannot_be_read_never_blocks_the_legacy_refresh_of_an_unlatched_host(
+        shipped_root_world, monkeypatch, failure):
+    import requests as http
+    from provider_hub import transport
+
+    transport.reset_state()
+    world = shipped_root_world
+    failure = {"timeout": http.exceptions.Timeout("slow"), "connection": http.exceptions.ConnectionError("down")}.get(
+        failure, failure)
+    _signed_file_fails(world, monkeypatch, failure)
+    world.legacy(providers=[_provider()])
+
+    _refresh()
+
+    assert _official()["last_error"] is None and _official()["catalog_signature"] == "unsigned (legacy)"
+    assert {entry["version"] for entry in _entries().values()} == {"1.0.0"}
+    # The signed file's failure may park its origin; the next refresh still reads the legacy catalog.
+    _move_head(world, "e" * 40)
+    world.legacy(commit="e" * 40, providers=[_provider("1.1.0")])
+
+    _refresh()
+
+    assert _official()["last_error"] is None
+    assert {entry["version"] for entry in _entries().values()} == {"1.1.0"}
+    assert _blocked() == {PROVIDER: None}
+    transport.reset_state()
+
+
+def test_a_signed_file_that_cannot_be_read_still_refuses_a_latched_channel_and_keeps_its_catalog(world, monkeypatch):
+    from provider_hub import transport
+
+    transport.reset_state()
+    _latch(world)
+    _move_head(world, "e" * 40)
+    world.legacy(commit="e" * 40, providers=[_provider("9.9.9")])
+    _signed_file_fails(world, monkeypatch, 503)
+
+    _refresh()
+
+    assert _official()["last_error"]
+    assert {entry["version"] for entry in _entries().values()} == {"1.0.0"}
+    assert not [url for url in _legacy_catalog_requests(world) if "e" * 40 in url]
+    assert _official()["catalog_signature"] == "verified"
+    transport.reset_state()
+
+
+def test_a_signed_file_that_cannot_be_read_refuses_a_host_latched_on_the_other_channel(world, monkeypatch):
+    from provider_hub import transport
+    from provider_hub.service import update_catalog_source
+
+    transport.reset_state()
+    _latch(world)
+    update_catalog_source("official", dev_ref="beta")
+    _signed_file_fails(world, monkeypatch, 503)
+    world.legacy(providers=[_provider("9.9.9")])
+
+    _refresh()
+
+    assert _official()["last_error"]
+    assert "9.9.9" not in {entry["version"] for entry in _entries().values()}
+    transport.reset_state()
 
 
 # --- a verified catalog ----------------------------------------------------------------------
