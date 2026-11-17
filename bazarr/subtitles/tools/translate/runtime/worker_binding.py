@@ -20,13 +20,17 @@ which the Plugin Hub already reports as "declared".
 Ports. A worker is started with the port set it had at that moment. ``PoolWorkers`` compares the set with the one the
 connections need now before each translation and, when they differ, retires the worker once the jobs it holds are done.
 A short ``test`` or ``options`` request runs in a worker of its own that admits the port its draft names, so a draft never
-waits for a restart and a probe that overruns never ends a worker that holds translations.
+waits for a restart and a probe that overruns never ends a worker that holds translations. That worker has its own pool
+key and its own writable folders under ``run/<plugin>/call/<id>``, with their own size budgets, and the folders are removed
+when the call ends: what a probe writes can neither refuse another call nor count against the folders of the worker that
+holds translations.
 """
 from __future__ import annotations
 
 import logging
 import os
 import re
+import shutil
 import threading
 from dataclasses import dataclass
 from pathlib import Path
@@ -43,6 +47,7 @@ _DEFAULT_PORT_OF = {"http": 80, "https": 443}
 _PLUGIN_ID = re.compile(r"\A[a-z0-9][a-z0-9_.-]{0,63}\Z")
 _ENTRY_PART = re.compile(r"\A[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)*\Z")
 _CLASS_NAME = re.compile(r"\A[A-Za-z_][A-Za-z0-9_]*\Z")
+_CALL_ID = re.compile(r"\A[0-9a-f]{12}\Z")
 MIB = 1024 * 1024
 # What the plugin may leave in its own folders. A translator keeps a few small files at most.
 DATA_BUDGET_BYTES = 64 * MIB
@@ -103,7 +108,8 @@ class TranslatorWorkers:
     # ------------------------------------------------------------------------------------------ what is installed
     def resolve(self, plugin_id: str) -> Resolved | None:
         """The release that is active now, with the interpreter and bundle the Plugin Hub vouches for, or None when
-        the plugin is not installed, is turned off or has nothing it can run."""
+        the plugin is not installed, was held back at boot or has nothing it can run. Whether it is switched on is
+        decided before a request gets here (the gate and the settings service)."""
         from provider_hub.venv import validated_bundle_path, validated_interpreter
 
         if not isinstance(plugin_id, str) or not _PLUGIN_ID.match(plugin_id):
@@ -183,11 +189,12 @@ class TranslatorWorkers:
 
     # ----------------------------------------------------------------------------------------------- definitions
     def definition_for(self, plugin_id: str, *, ports: Callable[[], frozenset[int]] | None = None,
-                       key: str | None = None):
+                       key: str | None = None, call_id: str | None = None):
         """The pool definition of the plugin's worker, or None when nothing can be run for it now.
 
-        ``ports`` says which ports each start admits (default: ``ports_for`` the plugin) and ``key`` names the pool
-        entry (default: the plugin id).
+        ``ports`` says which ports each start admits (default: ``ports_for`` the plugin), ``key`` names the pool
+        entry (default: the plugin id) and ``call_id`` puts the worker's writable folders, and their budgets, in a
+        folder of one short call instead of the plugin's own.
         """
         from provider_hub.runtime.pool import FolderBudget, WorkerDefinition, launcher_spawn
 
@@ -195,26 +202,44 @@ class TranslatorWorkers:
 
         if self.resolve(plugin_id) is None:
             return None
-        data, temp = self._folders(plugin_id)
+        data, temp = self._folders(plugin_id, call_id)
         wanted_ports = ports or (lambda: self.ports_for(plugin_id))
         return WorkerDefinition(
             key or plugin_id, kind=KIND,
-            spawn=launcher_spawn(lambda: self._spec(plugin_id, wanted_ports()), probe=self._probe,
+            spawn=launcher_spawn(lambda: self._spec(plugin_id, wanted_ports(), call_id), probe=self._probe,
                                  require_sandbox=self._require_sandbox),
             host_calls=host_calls(),
             budgets=(FolderBudget(str(data), DATA_BUDGET_BYTES, "the plugin's data folder"),
                      FolderBudget(str(temp), TEMP_BUDGET_BYTES, "the plugin's temp folder")))
 
-    def one_call_for(self, plugin_id: str, params: Mapping[str, Any]):
-        """The definition of the worker a ``test`` or ``options`` request runs in, which admits the draft's ports."""
+    def one_call_for(self, plugin_id: str, params: Mapping[str, Any], call_id: str):
+        """The definition of the worker a ``test`` or ``options`` request runs in: it admits the draft's ports, and has
+        a pool key and writable folders of its own."""
+        if not _CALL_ID.match(call_id):
+            return None
         draft = self.draft_ports(plugin_id, params)
-        return self.definition_for(plugin_id, ports=lambda: draft, key=plugin_id + workers.ONE_CALL_SUFFIX)
+        return self.definition_for(plugin_id, ports=lambda: draft, key=f"{plugin_id}{workers.ONE_CALL_SUFFIX}:{call_id}",
+                                   call_id=call_id)
 
-    def _folders(self, plugin_id: str) -> tuple[Path, Path]:
+    def one_call_done(self, plugin_id: str, call_id: str) -> None:
+        """Remove the folders a short request's worker wrote in. Only the call's own folder is touched, and a link in
+        it is removed as a link, never followed."""
+        if not _CALL_ID.match(call_id) or not _PLUGIN_ID.match(plugin_id):
+            return
+        shutil.rmtree(self._folders(plugin_id, call_id)[0].parent, ignore_errors=True)
+
+    def plugin_removed(self, plugin_id: str) -> None:
+        """Remove the plugin's writable folders once nothing of it is running."""
+        if _PLUGIN_ID.match(plugin_id):
+            shutil.rmtree(Path(self._hub_dir()) / "run" / plugin_id, ignore_errors=True)
+
+    def _folders(self, plugin_id: str, call_id: str | None = None) -> tuple[Path, Path]:
         base = Path(self._hub_dir()) / "run" / plugin_id
+        if call_id is not None:
+            base = base / "call" / call_id
         return base / "data", base / "tmp"
 
-    def _spec(self, plugin_id: str, ports: Iterable[int]):
+    def _spec(self, plugin_id: str, ports: Iterable[int], call_id: str | None = None):
         """One start's launch specification, built from what is installed at this moment."""
         from provider_hub.runtime.environment import worker_environment
         from provider_hub.sandbox.policy import PolicyError, RuntimeSpec, SandboxPolicy
@@ -222,7 +247,7 @@ class TranslatorWorkers:
         resolved = self.resolve(plugin_id)
         if resolved is None:
             raise PolicyError("translator %s has no release that can run" % plugin_id)
-        data, temp = self._folders(plugin_id)
+        data, temp = self._folders(plugin_id, call_id)
         for folder in (data, temp):
             folder.mkdir(parents=True, exist_ok=True, mode=0o700)
         root = Path(self._sdk_root or _sdk_root())
@@ -293,16 +318,17 @@ def _reserved_ports() -> frozenset[int]:
 _lock = threading.Lock()
 _pool = None
 _port: workers.PoolWorkers | None = None
+_definitions: TranslatorWorkers | None = None
 
 
 def bind(pool, definitions: TranslatorWorkers | None = None) -> workers.PoolWorkers:
     """Bind the dispatcher to ``pool``. Returns the port that was bound."""
-    global _pool, _port
+    global _pool, _port, _definitions
     definitions = definitions or TranslatorWorkers()
     port = workers.PoolWorkers(pool, definitions.definition_for, one_call_for=definitions.one_call_for,
-                               ports_for=definitions.ports_for)
+                               one_call_done=definitions.one_call_done, ports_for=definitions.ports_for)
     with _lock:
-        _pool, _port = pool, port
+        _pool, _port, _definitions = pool, port, definitions
     workers.bind(port)
     return port
 
@@ -340,12 +366,30 @@ def plugin_changed(plugin_id: str) -> None:
         port.retire(plugin_id)
 
 
+def plugin_removed(plugin_id: str) -> None:
+    """The plugin was removed: its worker is retired once its jobs are done, and its writable folders go when no worker
+    of it is left. Nothing happens while no binding is in place."""
+    with _lock:
+        port, definitions, pool = _port, _definitions, _pool
+    if port is None or definitions is None:
+        return
+    port.retire(plugin_id)
+    try:
+        from provider_hub.runtime.pool import WorkerState
+
+        running = pool.state(plugin_id) not in (WorkerState.STOPPED,)
+    except Exception:
+        running = False  # never registered: nothing of it ever ran
+    if not running:
+        definitions.plugin_removed(plugin_id)
+
+
 def shutdown() -> None:
     """Stop every translator worker and unbind. Safe to call more than once, or when nothing was bound."""
-    global _pool, _port
+    global _pool, _port, _definitions
     with _lock:
         pool, port = _pool, _port
-        _pool = _port = None
+        _pool = _port = _definitions = None
     if port is None:
         return
     workers.unbind()

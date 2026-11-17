@@ -3479,8 +3479,16 @@ class WorkerPool:
         if process is None or isinstance(process, LauncherProcess):
             self._settle_unverified(slot)
             return
+        if slot.ephemeral and slot.kill_reason is None and getattr(session, "exit_code", None) == 0:
+            # A one-off run whose worker left by itself, with exit code 0, after being asked to and without the pool
+            # having ended it: it is the routine end of a short request, not a plugin that leaks. Counting it would turn the cap into a
+            # quota on how often a person may test a connection or fetch a model list.
+            self._settle_unverified(slot)
+            return
         key = slot.definition.key
         now = self._clock()
+        for other in [name for name, held in self._unverified.items() if not held and name != key]:
+            del self._unverified[other]
         stamps = self._unverified.setdefault(key, deque())
         stamps.append(now)
         # The record replaces the unit that was held for it: same place, counted once.

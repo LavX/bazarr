@@ -2,6 +2,7 @@
 worker that is retired only after its jobs finish."""
 import os
 import subprocess
+import threading
 import sys
 import time
 from pathlib import Path
@@ -17,6 +18,7 @@ from provider_hub.runtime.testing.fake_worker import fake_worker_command, fake_w
 from subtitles.tools.translate.runtime import worker_binding, workers
 
 PLUGIN = "sample"
+CALL = "0123456789ab"
 ENGINE = {"openai_compatible": {"label": "OpenAI compatible", "endpoints": [], "fields": [
     {"key": "base_url", "type": "text", "destination": True, "default": "http://lan.example.test:1234/v1"},
     {"key": "api_key", "type": "secret"}]},
@@ -158,7 +160,7 @@ def test_a_draft_admits_the_port_it_names_and_nothing_a_saved_connection_has(hub
 def test_a_plugin_that_is_not_installed_or_has_nothing_to_run_has_no_definition(hub):
     definitions = hub.definitions()
     assert definitions.definition_for("missing") is None
-    assert definitions.one_call_for("missing", {}) is None
+    assert definitions.one_call_for("missing", {}, CALL) is None
     for broken in ({"entry_module": None}, {"entry_class": "not a class"}, {"entry_module": "../escape"}):
         hub.installation.manifest = {**hub.manifest, **broken}
         assert definitions.definition_for(PLUGIN) is None
@@ -172,9 +174,10 @@ def test_a_plugin_that_is_not_installed_or_has_nothing_to_run_has_no_definition(
 def test_the_definition_names_its_pool_entry_and_the_one_call_worker_has_its_own(hub):
     definitions = hub.definitions()
     resident = definitions.definition_for(PLUGIN)
-    one_call = definitions.one_call_for(PLUGIN, {})
+    one_call = definitions.one_call_for(PLUGIN, {}, CALL)
     assert (resident.key, resident.kind) == (PLUGIN, "translator")
-    assert one_call.key == PLUGIN + workers.ONE_CALL_SUFFIX != resident.key
+    assert one_call.key == f"{PLUGIN}{workers.ONE_CALL_SUFFIX}:{CALL}" != resident.key
+    assert definitions.one_call_for(PLUGIN, {}, "not a call id") is None
     assert set(resident.host_calls) == {"reserve", "usage", "checkpoint"}
     assert [budget.path for budget in resident.budgets] == [str(hub.root / "run" / PLUGIN / "data"),
                                                             str(hub.root / "run" / PLUGIN / "tmp")]
@@ -253,9 +256,10 @@ def test_a_probe_that_ignores_its_cancel_never_ends_the_worker_that_holds_a_tran
         script = {"*": [{"wait_cancel": True}]}
         resident = _fake_definition(PLUGIN, fake_translator_command(), fake_translator_env(script))
 
-        def one_call(plugin_id, params):
+        def one_call(plugin_id, params, call_id):
             # The one-call worker is a worker that sleeps through its cancel: only the grace period ends it.
-            return _fake_definition(plugin_id + workers.ONE_CALL_SUFFIX, fake_worker_command(), fake_worker_env())
+            return _fake_definition(f"{plugin_id}{workers.ONE_CALL_SUFFIX}:{call_id}", fake_worker_command(),
+                                    fake_worker_env())
 
         port = workers.PoolWorkers(pool, lambda plugin_id: resident, one_call_for=one_call)
         held = _translate(port)
@@ -388,7 +392,8 @@ def test_a_draft_test_runs_in_a_one_call_worker_that_admits_the_drafts_port(hub)
                                        "settings": {"base_url": "http://draft.example.test:2468/v1"}}}}
     port.call(PLUGIN, workers.TEST_OP, draft, {"api_key": "k" * 12}, timeout=20)
     ((definition, op, kwargs),) = seen
-    assert (definition.key, op, kwargs["timeout"]) == (PLUGIN + workers.ONE_CALL_SUFFIX, "test", 20)
+    assert definition.key.startswith(PLUGIN + workers.ONE_CALL_SUFFIX + ":")
+    assert (op, kwargs["timeout"]) == ("test", 20)
     assert kwargs["secrets"] == {"api_key": "k" * 12}
     assert 2468 in definitions.draft_ports(PLUGIN, draft)
 
@@ -444,6 +449,9 @@ def test_the_kind_retires_the_worker_when_a_release_activates_or_the_plugin_is_t
         def plugin_disabled(self, plugin_id):
             return SimpleNamespace(notices=[])
 
+    Store.delete_plugin_data = lambda self, plugin_id: None
+    removed = []
+    monkeypatch.setattr(worker_binding, "plugin_removed", removed.append)
     monkeypatch.setattr("provider_hub.kinds.translator._store", lambda: Store())
     monkeypatch.setattr("subtitles.tools.translate.runtime.plugin_update.bring_up_to_date", lambda *a: None)
     kind = TranslatorKind()
@@ -452,6 +460,8 @@ def test_the_kind_retires_the_worker_when_a_release_activates_or_the_plugin_is_t
     assert kind.set_enabled({"provider_id": PLUGIN}, False) is True
     assert kind.set_enabled({"provider_id": PLUGIN}, True) is True  # turning it on retires nothing
     assert retired == [PLUGIN, PLUGIN, PLUGIN]
+    kind.after_removed(PLUGIN)  # the removal is saved: the plugin's folders go too
+    assert removed == [PLUGIN]
 
 
 @pytest.mark.parametrize("switch,bound", [(False, False), (True, True)])
@@ -555,3 +565,238 @@ def test_the_startup_tasks_do_nothing_with_the_switch_off(monkeypatch):
     monkeypatch.setattr(runtime, "_startup_done", False)
     monkeypatch.setattr(runtime, "runtime_v2_flag", lambda: False)
     assert runtime.run_startup_tasks() is False
+
+
+# ------------------------------------------------------------------ a probe has folders and a budget of its own
+def test_a_short_calls_worker_writes_in_folders_of_its_own_with_their_own_budgets(hub):
+    hub.rows = [(PLUGIN, 1, {}, [])]
+    definitions = hub.definitions()
+    resident = definitions.definition_for(PLUGIN)
+    one_call = definitions.one_call_for(PLUGIN, {}, CALL)
+    base = hub.root / "run" / PLUGIN
+    assert [budget.path for budget in resident.budgets] == [str(base / "data"), str(base / "tmp")]
+    assert [budget.path for budget in one_call.budgets] == [str(base / "call" / CALL / "data"),
+                                                            str(base / "call" / CALL / "tmp")]
+    # The two sets of folders do not hold one another, so one's disk use is never counted for the other.
+    for call_path in (budget.path for budget in one_call.budgets):
+        for resident_path in (budget.path for budget in resident.budgets):
+            assert not call_path.startswith(resident_path + "/") and not resident_path.startswith(call_path + "/")
+    spec = definitions._spec(PLUGIN, {443}, CALL)
+    assert set(spec.policy.read_write) == {str(base / "call" / CALL / "data"), str(base / "call" / CALL / "tmp")}
+    assert spec.env["HOME"] == str(base / "call" / CALL / "data")
+    long_lived = definitions._spec(PLUGIN, {443})
+    assert not set(long_lived.policy.read_write) & set(spec.policy.read_write)
+
+
+def test_a_short_calls_folders_go_when_the_call_ends_and_nothing_else_does(hub):
+    hub.rows = [(PLUGIN, 1, {}, [])]
+    definitions = hub.definitions()
+    base = hub.root / "run" / PLUGIN
+    definitions._spec(PLUGIN, {443})
+    definitions._spec(PLUGIN, {443}, CALL)
+    other = "ba9876543210"
+    definitions._spec(PLUGIN, {443}, other)
+    (base / "call" / CALL / "data" / "cache.bin").write_bytes(b"x")
+    outside = hub.root / "outside"
+    outside.mkdir()
+    (outside / "keep.txt").write_text("keep")
+    os.symlink(outside, base / "call" / CALL / "tmp" / "link")  # a plugin can leave a link in its own folder
+    definitions.one_call_done(PLUGIN, CALL)
+    assert not (base / "call" / CALL).exists()
+    assert (outside / "keep.txt").read_text() == "keep"  # the link was removed, not followed
+    assert (base / "call" / other).is_dir() and (base / "data").is_dir() and (base / "tmp").is_dir()
+    definitions.one_call_done(PLUGIN, "../../data")  # not a call id: nothing happens
+    definitions.one_call_done("../x", CALL)
+    assert (base / "data").is_dir()
+
+
+def test_removing_the_plugin_clears_its_folders_when_no_worker_of_it_is_left(hub):
+    hub.rows = [(PLUGIN, 1, {}, [])]
+    definitions = hub.definitions()
+    base = hub.root / "run" / PLUGIN
+    definitions._spec(PLUGIN, {443})
+    definitions.plugin_removed(PLUGIN)
+    assert not base.exists()
+    definitions.plugin_removed("../escape")
+    assert hub.root.is_dir()
+
+
+def test_a_probe_that_fills_its_folders_is_stopped_alone_and_the_translation_worker_goes_on(tmp_path):
+    """A worker is stopped for a folder over its budget. The probe's budget is its own folder's, so a probe that
+    writes too much cannot take down the worker that holds translations."""
+    from provider_hub.runtime.pool import FolderBudget
+
+    resident_folder = tmp_path / "resident"
+    call_folder = tmp_path / "call"
+    resident_folder.mkdir()
+    call_folder.mkdir()
+    (call_folder / "big.bin").write_bytes(b"x" * 4096)  # what the probe wrote: over its budget of 1 KiB
+    pool = WorkerPool(PoolLimits(tick=0.05, heartbeat_interval=0.1, acquire_timeout=2.0, close_grace=1.0,
+                                 budget_interval=0.0, backoff_base=0.05, backoff_cap=0.2), autostart=True)
+    try:
+        script = {"*": [{"wait_cancel": True}]}
+        resident = _fake_definition(PLUGIN, fake_translator_command(), fake_translator_env(script),
+                                    budgets=(FolderBudget(str(resident_folder), 1024, "resident"),))
+
+        def one_call(plugin_id, params, call_id):
+            return _fake_definition(f"{plugin_id}{workers.ONE_CALL_SUFFIX}:{call_id}", fake_worker_command(),
+                                    fake_worker_env(), budgets=(FolderBudget(str(call_folder), 1024, "call"),))
+
+        port = workers.PoolWorkers(pool, lambda plugin_id: resident, one_call_for=one_call)
+        held = _translate(port)
+        time.sleep(0.3)
+        with pytest.raises(workers.NotSent):  # refused at its start: its folder is over its own budget
+            port.call(PLUGIN, "echo", {}, {}, timeout=5)
+        time.sleep(0.4)
+        assert not held.done() and pool.state(PLUGIN).value in ("ready", "busy")
+        held.cancel("done")
+        with pytest.raises((errors.RequestCancelled, errors.RequestFailed)):
+            held.wait(10)
+    finally:
+        pool.close()
+
+
+# --------------------------------------------------------------------- port changes are atomic with the drain
+def test_a_submission_never_sees_the_new_port_set_before_the_worker_has_been_retired():
+    """The set is recorded after the retirement, under the lock a submission takes first: while the retirement runs,
+    another submission waits for it and is then served by the worker that replaces the old one."""
+    restarting = threading.Event()
+    release = threading.Event()
+    order = []
+
+    class Pool:
+        def definition(self, key):
+            return object()
+
+        def restart_after_drain(self, key):
+            order.append("retire-start")
+            restarting.set()
+            release.wait(10)
+            order.append("retire-done")
+
+        def submit(self, key, op, params, **kwargs):
+            order.append("submit")
+            return object()
+
+    wanted = {"ports": frozenset({443})}
+    port = workers.PoolWorkers(Pool(), lambda plugin_id: None, ports_for=lambda plugin_id: wanted["ports"])
+    port._ports[PLUGIN] = frozenset({443})
+    wanted["ports"] = frozenset({443, 1234})
+    first = threading.Thread(target=lambda: port.submit(PLUGIN, {}, {}, context=None, on_progress=None))
+    first.start()
+    assert restarting.wait(5)
+    second = threading.Thread(target=lambda: port.submit(PLUGIN, {}, {}, context=None, on_progress=None))
+    second.start()
+    time.sleep(0.3)
+    assert order == ["retire-start"]  # the second waits for the retirement, it does not run beside it
+    release.set()
+    first.join(10)
+    second.join(10)
+    assert order[:2] == ["retire-start", "retire-done"] and order.count("submit") == 2
+    assert order.index("submit") > order.index("retire-done")
+
+
+def test_a_retirement_that_failed_is_tried_again_by_the_next_submission():
+    attempts = []
+
+    class Pool:
+        def definition(self, key):
+            return object()
+
+        def restart_after_drain(self, key):
+            attempts.append(key)
+            if len(attempts) == 1:
+                raise RuntimeError("busy")
+
+        def submit(self, key, op, params, **kwargs):
+            return object()
+
+    port = workers.PoolWorkers(Pool(), lambda plugin_id: None, ports_for=lambda plugin_id: frozenset({443, 1234}))
+    port._ports[PLUGIN] = frozenset({443})
+    port.submit(PLUGIN, {}, {}, context=None, on_progress=None)
+    port.submit(PLUGIN, {}, {}, context=None, on_progress=None)
+    port.submit(PLUGIN, {}, {}, context=None, on_progress=None)
+    assert attempts == [PLUGIN, PLUGIN]  # the failed one, the one that worked, then nothing more
+
+
+# ------------------------------------------------------------------ overlapping short calls do not refuse each other
+def _fake_calls(pool, work=0.3):
+    return workers.PoolWorkers(pool, lambda plugin_id: None, one_call_for=lambda plugin_id, params, call_id: _fake_definition(
+        f"{plugin_id}{workers.ONE_CALL_SUFFIX}:{call_id}", fake_worker_command(), fake_worker_env()))
+
+
+def test_three_overlapping_short_calls_for_one_plugin_all_run():
+    pool = _pool()
+    try:
+        port = _fake_calls(pool)
+        outcomes = []
+
+        def call():
+            try:
+                outcomes.append(port.call(PLUGIN, "sleep", {"seconds": 0.3}, {}, timeout=20).result)
+            except Exception as error:
+                outcomes.append(error)
+
+        for _round in range(3):
+            threads = [threading.Thread(target=call) for _ in range(3)]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join(30)
+        refused = [item for item in outcomes if isinstance(item, Exception)]
+        assert not refused, refused
+        assert len(outcomes) == 9
+    finally:
+        pool.close()
+
+
+def test_calls_that_start_as_another_ends_are_not_refused_for_its_teardown():
+    pool = _pool()
+    try:
+        port = _fake_calls(pool)
+        errors_seen = []
+
+        def call():
+            try:
+                port.call(PLUGIN, "sleep", {"seconds": 0.3}, {}, timeout=20)
+            except Exception as error:
+                errors_seen.append(error)
+
+        threads = []
+        for _index in range(10):
+            thread = threading.Thread(target=call)
+            thread.start()
+            threads.append(thread)
+            time.sleep(0.35)  # each starts about when the one before it ends
+        for thread in threads:
+            thread.join(30)
+        assert not errors_seen, errors_seen
+    finally:
+        pool.close()
+
+
+# ------------------------------------------------- routine short calls are not a quota on hosts without the launcher
+def test_routine_short_calls_are_never_counted_toward_the_unverified_cap_but_ones_that_are_killed_are():
+    """A plain process (any host without the launcher) is ended without proof that its whole tree went. A one-off run
+    whose worker left by itself is the routine end of a short request and is not counted; one the pool had to kill
+    still is, so the cap still stops a plugin that leaks."""
+    from provider_hub.runtime.pool import PoolUnavailable
+
+    pool = WorkerPool(PoolLimits(tick=0.05, heartbeat_interval=0.1, acquire_timeout=2.0, close_grace=1.0,
+                                 budget_interval=0.0, unverified_limit=3), autostart=True)
+    try:
+        key = "sample:call:aaaaaaaaaaaa"
+        clean = WorkerDefinition(key, kind="translator", command=fake_worker_command(), env=fake_worker_env(),
+                                 session_limits=_fast_session())
+        for _index in range(8):  # more than the cap, one after the other
+            assert pool.run_once(clean, "echo", {"n": 1}).result["echo"] == {"n": 1}
+        assert key not in pool.status()["unverified_teardowns"]
+        for _index in range(3):
+            with pytest.raises((errors.RequestTimeout, errors.RequestCancelled, errors.SessionError)):
+                pool.run_once(clean, "sleep", {"seconds": 60, "ignore_cancel": True}, timeout=0.2)
+        assert pool.status()["unverified_teardowns"][key]["count"] == 3
+        with pytest.raises(PoolUnavailable) as capped:
+            pool.run_once(clean, "echo", {})
+        assert capped.value.code == "unverified_limit"
+    finally:
+        pool.close()

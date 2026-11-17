@@ -24,23 +24,27 @@ Two more hooks, both optional, are what ``worker_binding`` supplies for the real
   started with the set it had then, so when the set changes the port restarts the worker after the jobs it holds have
   finished (``WorkerPool.restart_after_drain``): nothing running is interrupted and a job that arrives meanwhile is
   served by the new worker.
-* ``one_call_for(plugin_id, params)`` is the definition of a one-call worker for a ``test`` or ``options`` request.
+* ``one_call_for(plugin_id, params, call_id)`` is the definition of a one-call worker for a ``test`` or ``options`` request.
   Those requests never go to the long-lived worker. A draft the person has not saved can name an address on a port the
   long-lived worker does not admit, and a request that outlives its deadline against a plugin that ignores the cancel
   ends the worker that holds it: on a worker shared with translations that would end them too. A worker started for
-  the one call has nothing else to lose.
+  the one call has nothing else to lose. Each call has an id of its own, so its pool key and its writable folders are its
+  own too: calls never refuse one another because an earlier worker is still being torn down, and what one writes counts
+  against its own folder budget, not against a worker that holds translations. ``one_call_done(plugin_id, call_id)``,
+  when given, is called once the call has ended, to clear what it left behind.
 """
 from __future__ import annotations
 
 import logging
 import threading
+import uuid
 from typing import Any, Callable, Mapping, Protocol
 
 logger = logging.getLogger(__name__)
 
 TRANSLATE_OP = "translate"
-# The pool key of the one-call worker of a plugin is its key with this added, so a one-call worker never shares a
-# key (and so never shares a breaker, a teardown or a start) with the long-lived worker.
+# The pool key of a one-call worker is the plugin's key with this and the call's id added, so a one-call worker never
+# shares a key (and so never shares a breaker, a teardown or a start) with the long-lived worker or with another call.
 ONE_CALL_SUFFIX = ":call"
 TEST_OP = "test"
 OPTIONS_OP = "options"
@@ -98,12 +102,14 @@ class PoolWorkers:
     """The worker pool as a ``WorkerPort``. One pool key per plugin id."""
 
     def __init__(self, pool, definition_for: Callable[[str], Any], *, key_for: Callable[[str], str] | None = None,
-                 one_call_for: Callable[[str, Mapping[str, Any]], Any] | None = None,
+                 one_call_for: Callable[[str, Mapping[str, Any], str], Any] | None = None,
+                 one_call_done: Callable[[str, str], None] | None = None,
                  ports_for: Callable[[str], frozenset[int] | None] | None = None):
         self._pool = pool
         self._definition_for = definition_for
         self._key_for = key_for or (lambda plugin_id: plugin_id)
         self._one_call_for = one_call_for
+        self._one_call_done = one_call_done
         self._ports_for = ports_for
         self._lock = threading.Lock()
         # The port set each long-lived worker was last asked to run with, by pool key.
@@ -157,18 +163,22 @@ class PoolWorkers:
         wanted = self._current_ports(plugin_id)
         if wanted is None:
             return
+        # The new set is recorded only once the worker has been retired, and both happen under the lock that every
+        # submission takes first. A submission that finds the new set recorded therefore finds the retirement done,
+        # and is served by a worker that is started with the new set, never by the old one.
         with self._lock:
             if key not in self._ports:
                 self._ports[key] = wanted
                 return
             if self._ports[key] == wanted:
                 return
+            try:
+                self._pool.restart_after_drain(key)
+            except Exception:
+                logger.warning("Could not restart the worker of translator %s for its new ports", plugin_id,
+                               exc_info=True)
+                return  # not recorded: the next submission tries again
             self._ports[key] = wanted
-        try:
-            self._pool.restart_after_drain(key)
-        except Exception:
-            logger.warning("Could not restart the worker of translator %s for its new ports", plugin_id,
-                           exc_info=True)
 
     def submit(self, plugin_id, request, secrets, *, context, on_progress):
         key = self._ensure(plugin_id)
@@ -176,41 +186,78 @@ class PoolWorkers:
         return self._pool.submit(key, TRANSLATE_OP, {"request": request}, secrets=dict(secrets) or None,
                                  on_progress=on_progress, context=context)
 
-    def _one_call_definition(self, plugin_id: str, params: Mapping[str, Any]):
+    def _one_call_definition(self, plugin_id: str, params: Mapping[str, Any], call_id: str):
         from dataclasses import replace
 
         if self._one_call_for is not None:
-            definition = self._one_call_for(plugin_id, params)
+            definition = self._one_call_for(plugin_id, params, call_id)
         else:
             definition = self._definition_for(plugin_id)
             if definition is not None:
-                definition = replace(definition, key=self._key_for(plugin_id) + ONE_CALL_SUFFIX)
+                definition = replace(definition, key=f"{self._key_for(plugin_id)}{ONE_CALL_SUFFIX}:{call_id}")
         if definition is None:
             raise NotSent("no translator worker can be started for this plugin")
         return definition
+
+    @staticmethod
+    def _check_encodable(op: str, params: Mapping[str, Any], secrets: Mapping[str, str] | None,
+                         timeout: float) -> None:
+        """Refuse, as the wire would, what cannot be sent, before a worker is started for it.
+
+        Raises ``ValueError`` or ``FrameError`` for a timeout or a secret that is not valid, params that cannot be
+        encoded, or a frame over its cap. Whatever is raised after this passes happened with the request written or
+        about to be.
+        """
+        import math
+
+        from provider_hub.runtime import frames
+
+        if (isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or not math.isfinite(timeout)
+                or timeout < 0):
+            raise ValueError("timeout must be a finite number of seconds, not negative")
+        if secrets and not frames.is_secrets(secrets):
+            raise ValueError("secrets must be a flat mapping of text names to non-empty text values")
+        frames.pack_control({"t": frames.REQ, "id": 0, "op": op, "params": params or {},
+                             "max_result_bytes": frames.DEFAULT_MAX_RESULT_BYTES, "secrets": dict(secrets or {})},
+                            sender="host")
 
     def call(self, plugin_id, op, params, secrets, *, timeout):
         from provider_hub.runtime.errors import SessionBusy
         from provider_hub.runtime.frames import FrameError
         from provider_hub.runtime.pool import PoolCodes, PoolError, WorkerKilled
 
+        call_id = uuid.uuid4().hex[:12]
         try:
-            definition = self._one_call_definition(plugin_id, params)
-            return self._pool.run_once(definition, op, params, secrets=dict(secrets or {}) or None, timeout=timeout)
-        except NotSent:
-            raise
-        except WorkerKilled:
-            # Ended for breaking a limit: it may have been after the request was written, which a provider may
-            # have acted on, so this is not a refusal.
-            raise
-        except (PoolError, SessionBusy) as error:
-            # The pool turned the request away or the worker would not start: nothing was written.
-            busy = isinstance(error, SessionBusy) or getattr(error, "code", None) == PoolCodes.POOL_FULL
-            raise NotSent(f"the worker could not take the request ({type(error).__name__})", busy=busy) from None
-        except (ValueError, FrameError) as error:
-            # What the wire or the pool refuses before it writes anything: a timeout or a secret that is not
-            # valid, params that cannot be encoded, a frame over its cap, a launch policy that was refused.
-            raise NotSent(f"the request could not be sent ({type(error).__name__})") from None
+            # Everything that can refuse the request before a worker exists is settled here, so that what is raised
+            # once a worker has the request is never taken for a refusal.
+            try:
+                definition = self._one_call_definition(plugin_id, params, call_id)
+                self._check_encodable(op, params, secrets, timeout)
+            except NotSent:
+                raise
+            except (ValueError, FrameError) as error:
+                # A timeout or secret that is not valid, params that cannot be encoded, a frame over its cap, a
+                # launch policy that was refused.
+                raise NotSent(f"the request could not be sent ({type(error).__name__})") from None
+            try:
+                return self._pool.run_once(definition, op, params, secrets=dict(secrets or {}) or None,
+                                           timeout=timeout)
+            except WorkerKilled:
+                # Ended for breaking a limit: it may have been after the request was written, which a provider may
+                # have acted on, so this is not a refusal.
+                raise
+            except (PoolError, SessionBusy) as error:
+                # The pool turned the request away or the worker would not start: nothing was written.
+                busy = isinstance(error, SessionBusy) or getattr(error, "code", None) == PoolCodes.POOL_FULL
+                raise NotSent(f"the worker could not take the request ({type(error).__name__})",
+                              busy=busy) from None
+        finally:
+            if self._one_call_done is not None:
+                try:
+                    self._one_call_done(plugin_id, call_id)
+                except Exception:
+                    logger.warning("Could not clear what a short request to translator %s left", plugin_id,
+                                   exc_info=True)
 
     def retire(self, plugin_id):
         """Take the plugin's worker out of service once the jobs it holds are done. The next request starts a new

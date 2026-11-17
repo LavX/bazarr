@@ -75,6 +75,12 @@ class TranslatorKind(Kind):
             _store().delete_plugin_data(plugin_id)
         except Exception:
             logger.exception("Could not remove the engine instances of translator %s", plugin_id)
+        try:
+            from subtitles.tools.translate.runtime import worker_binding
+
+            worker_binding.plugin_removed(plugin_id)
+        except Exception:
+            logger.warning("Could not clear what translator %s left in its folders", plugin_id, exc_info=True)
 
     def on_activated(self, plugin_id: str, previous_manifest, manifest) -> str | None:
         """Bring the plugin's saved engines and back ends in line with the release that just became active."""
