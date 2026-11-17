@@ -317,4 +317,66 @@ describe("TranslationStep", () => {
     );
     expect(onNext).toHaveBeenCalledWith(NOTHING_WRITTEN);
   });
+
+  it("says translation is set up when an engine is selected, and offers no key form that would add a second back end", async () => {
+    serve(
+      firstRun({
+        engine: 1,
+        instances: [
+          aiEngine({ configured: true, connections: [connection(1)] }),
+        ],
+      }),
+    );
+    const user = userEvent.setup();
+    customRender(<TranslationStep onNext={onNext} />);
+
+    expect(await screen.findByText("Translation is set up")).toBeVisible();
+    expect(
+      screen.getByText(/AI Subtitle Translator is selected and ready\./),
+    ).toBeVisible();
+    expect(screen.queryByLabelText("OpenRouter key")).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Start translating" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Continue without translation" }),
+    ).not.toBeInTheDocument();
+
+    // Set up earlier is an answer: nothing is passed, and nothing is sent.
+    await user.click(screen.getByRole("button", { name: "Continue" }));
+    expect(onNext).toHaveBeenCalledWith();
+    expect(calls).toEqual([]);
+  });
+
+  it("does not show the key form again once a start has saved a back end, whatever happened after", async () => {
+    // A key saved while no engine got selected: typing it again would add a second back end.
+    serve(
+      firstRun({
+        engine: null,
+        instances: [aiEngine({ connections: [connection(1)] })],
+      }),
+    );
+    customRender(<TranslationStep onNext={onNext} />);
+
+    expect(await screen.findByText("Translation is set up")).toBeVisible();
+    expect(
+      screen.getByText(/no engine is selected, so nothing translates yet/),
+    ).toBeVisible();
+    expect(screen.queryByLabelText("OpenRouter key")).not.toBeInTheDocument();
+  });
+
+  it("explains a selected engine that cannot take a job yet", async () => {
+    serve(
+      firstRun({
+        engine: 1,
+        instances: [
+          aiEngine({ connections: [connection(1, { enabled: false })] }),
+        ],
+      }),
+    );
+    customRender(<TranslationStep onNext={onNext} />);
+
+    expect(await screen.findByText("Translation is set up")).toBeVisible();
+    expect(screen.getAllByText("No back end is on").length).toBeGreaterThan(0);
+  });
 });

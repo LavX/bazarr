@@ -1082,36 +1082,90 @@ describe("the rail, visited and completed", () => {
     );
   });
 
-  it("draws the check once one step of the phase was answered", async () => {
+  it("draws the check once one step of the phase was answered with a write", async () => {
     const user = userEvent.setup();
-    customRender(<OnboardingWizardView />);
-    await user.click(screen.getByRole("button", { name: /get started/i }));
-    await user.click(
-      await screen.findByRole("radio", { name: /sonarr, radarr or sportarr/i }),
+    writeLandsAtOnce();
+    server.use(
+      http.get("/api/system/settings", () =>
+        HttpResponse.json({ general: {}, seerr: {} }),
+      ),
     );
-    await user.click(screen.getByRole("button", { name: /^continue$/i }));
+    localStorage.setItem("bazarr.onboarding.intent", "discover");
+    localStorage.setItem("bazarr.onboarding.step", "media-servers");
+    customRender(<OnboardingWizardView />);
 
-    // Sonarr, Radarr and Sportarr skipped, the picker answered with nothing
-    // ticked, Requests skipped.
-    for (let i = 0; i < 3; i += 1) {
-      await user.click(
-        await screen.findByRole("button", { name: /do this later/i }),
-      );
-    }
+    // The picker is left empty, and Requests is answered with a write.
     await user.click(
       await screen.findByRole("button", { name: /continue without a server/i }),
     );
+    await user.type(
+      await screen.findByLabelText(/server url/i),
+      "http://seerr:5055",
+    );
+    await user.type(screen.getByLabelText(/api key/i), "seerr-key");
+    // Not tested, so the button says what is being saved.
     await user.click(
-      await screen.findByRole("button", { name: /do this later/i }),
+      screen.getByRole("button", { name: /^save and continue anyway$/i }),
     );
     await screen.findByRole("heading", { name: /subtitle languages/i });
 
+    // Getting started and Connect are both done: the second has an answer.
     expect(checks()).toHaveLength(2);
     expect(within(rail()).queryByText("2")).toBeNull();
     expect(rail()).not.toHaveAttribute(
       "aria-valuetext",
       expect.stringContaining("skipped"),
     );
+  });
+
+  it("walks past the media server picker left empty, the same as every other empty Continue", async () => {
+    const user = userEvent.setup();
+    localStorage.setItem("bazarr.onboarding.intent", "discover");
+    localStorage.setItem("bazarr.onboarding.step", "media-servers");
+    customRender(<OnboardingWizardView />);
+
+    await user.click(
+      await screen.findByRole("button", { name: /continue without a server/i }),
+    );
+    await screen.findByRole("heading", { name: /^requests$/i });
+
+    expect(
+      JSON.parse(localStorage.getItem("bazarr.onboarding.skipped") ?? "[]"),
+    ).toEqual(["media-servers"]);
+  });
+
+  it("keeps a step answered when it is revisited and passed again with nothing to write", async () => {
+    const user = userEvent.setup();
+    writeLandsAtOnce();
+    localStorage.setItem("bazarr.onboarding.intent", "discover");
+    localStorage.setItem("bazarr.onboarding.step", "translator");
+    customRender(<OnboardingWizardView />);
+
+    await user.type(
+      await screen.findByLabelText(/openrouter api key/i),
+      "sk-or-typed",
+    );
+    await user.click(screen.getByRole("button", { name: /^continue$/i }));
+    await screen.findByRole("heading", { name: /general basics/i });
+    expect(
+      JSON.parse(localStorage.getItem("bazarr.onboarding.answered") ?? "[]"),
+    ).toEqual(["translator"]);
+
+    // Back to it, and on again with the key field empty, as it always is on a revisit.
+    await user.click(screen.getByRole("button", { name: /^back$/i }));
+    await user.click(
+      await screen.findByRole("button", {
+        name: /continue without translation/i,
+      }),
+    );
+    await screen.findByRole("heading", { name: /general basics/i });
+
+    expect(
+      JSON.parse(localStorage.getItem("bazarr.onboarding.skipped") ?? "[]"),
+    ).toEqual([]);
+    expect(
+      JSON.parse(localStorage.getItem("bazarr.onboarding.answered") ?? "[]"),
+    ).toEqual(["translator"]);
   });
 
   it("draws no check for a phase whose steps were all continued with nothing written", async () => {
@@ -1215,22 +1269,34 @@ describe("the rail, visited and completed", () => {
 
   it("answering a step the reader skipped earlier takes the skip back", async () => {
     const user = userEvent.setup();
+    writeLandsAtOnce();
     localStorage.setItem("bazarr.onboarding.intent", "discover");
-    localStorage.setItem("bazarr.onboarding.step", "media-servers");
+    localStorage.setItem("bazarr.onboarding.step", "seerr");
     localStorage.setItem(
       "bazarr.onboarding.skipped",
       JSON.stringify(["media-servers", "seerr"]),
     );
+    server.use(
+      http.get("/api/system/settings", () =>
+        HttpResponse.json({ general: {}, seerr: {} }),
+      ),
+    );
     customRender(<OnboardingWizardView />);
 
-    await user.click(
-      await screen.findByRole("button", { name: /continue without a server/i }),
+    await user.type(
+      await screen.findByLabelText(/server url/i),
+      "http://seerr:5055",
     );
-    await screen.findByRole("heading", { name: /^requests$/i });
+    await user.type(screen.getByLabelText(/api key/i), "seerr-key");
+    // Not tested, so the button says what is being saved.
+    await user.click(
+      screen.getByRole("button", { name: /^save and continue anyway$/i }),
+    );
+    await screen.findByRole("heading", { name: /subtitle languages/i });
 
     expect(
       JSON.parse(localStorage.getItem("bazarr.onboarding.skipped") ?? "[]"),
-    ).toEqual(["seerr"]);
+    ).toEqual(["media-servers"]);
   });
 });
 

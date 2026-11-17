@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   readOnboardingValue,
   removeOnboardingValue,
@@ -6,9 +6,10 @@ import {
 } from "./onboardingStorage";
 
 const STORAGE_NAME = "skipped";
+const ANSWERED_NAME = "answered";
 
-function readSkipped(): string[] {
-  const raw = readOnboardingValue(STORAGE_NAME);
+function readKeys(name: string): string[] {
+  const raw = readOnboardingValue(name);
   if (!raw) {
     return [];
   }
@@ -22,46 +23,67 @@ function readSkipped(): string[] {
   }
 }
 
-/** Forgets the record without disturbing a mounted wizard. */
+/** Forgets both records without disturbing a mounted wizard. */
 export function clearPersistedSkips() {
   removeOnboardingValue(STORAGE_NAME);
+  removeOnboardingValue(ANSWERED_NAME);
+}
+
+function mirror(name: string, keys: string[]) {
+  if (keys.length === 0) {
+    removeOnboardingValue(name);
+  } else {
+    writeOnboardingValue(name, JSON.stringify(keys));
+  }
 }
 
 /**
- * Which steps the reader walked past with the shell's skip control, as opposed
- * to answering them with the step's own Continue.
+ * Which steps the reader walked past, and which they answered.
  *
- * It is what lets the rail tell a visited phase from a completed one. The
- * shell cannot read whether a step was answered, because each step decides
- * what that means and several legitimately advance without writing anything,
- * but it does own the skip control, so "skipped" is the one half of the
- * distinction it can know for certain. A step answered after an earlier skip
- * takes the skip back.
+ * Walked past is a skip with the shell's control, or a Continue that wrote
+ * nothing. Answered is a Continue that wrote something. It is what lets the
+ * rail tell a visited phase from a completed one: the shell cannot read
+ * whether a step was answered, because each step decides what that means, but
+ * the step says whether its Continue wrote, and the shell keeps the record.
  *
- * Mirrored to localStorage like the cursor and the intent, because the
- * providers step restarts Bazarr+ and the wizard resumes through a hard
+ * A step answered once stays answered when it is revisited and passed again
+ * with nothing new to write, and an answer after an earlier skip takes the
+ * skip back. Only the shell's own skip control can walk past a step that was
+ * answered.
+ *
+ * Both are mirrored to localStorage like the cursor and the intent, because
+ * the providers step restarts Bazarr+ and the wizard resumes through a hard
  * redirect, which would otherwise hand every skipped phase its check back.
  */
 export function useSkippedSteps() {
-  const [skipped, setSkipped] = useState<string[]>(readSkipped);
+  const [skipped, setSkipped] = useState<string[]>(() =>
+    readKeys(STORAGE_NAME),
+  );
+  const [answered, setAnswered] = useState<string[]>(() =>
+    readKeys(ANSWERED_NAME),
+  );
 
-  // Mirrored from an effect, not from inside the updater, which has to stay
+  // What markUnwritten reads: the latest record, not the one of the render it was made in.
+  const answeredNow = useRef(answered);
+  answeredNow.current = answered;
+
+  // Mirrored from effects, not from inside the updaters, which have to stay
   // pure or StrictMode's double invocation writes twice.
-  useEffect(() => {
-    if (skipped.length === 0) {
-      clearPersistedSkips();
-    } else {
-      writeOnboardingValue(STORAGE_NAME, JSON.stringify(skipped));
-    }
-  }, [skipped]);
+  useEffect(() => mirror(STORAGE_NAME, skipped), [skipped]);
+  useEffect(() => mirror(ANSWERED_NAME, answered), [answered]);
 
   const markSkipped = useCallback((key: string) => {
     setSkipped((current) =>
       current.includes(key) ? current : [...current, key],
     );
+    // The shell's skip control is the reader saying no, whatever was written.
+    setAnswered((current) => current.filter((entry) => entry !== key));
   }, []);
 
   const markAnswered = useCallback((key: string) => {
+    setAnswered((current) =>
+      current.includes(key) ? current : [...current, key],
+    );
     setSkipped((current) =>
       current.includes(key)
         ? current.filter((entry) => entry !== key)
@@ -69,7 +91,20 @@ export function useSkippedSteps() {
     );
   }, []);
 
-  const reset = useCallback(() => setSkipped([]), []);
+  /** A Continue that wrote nothing: a walk past, unless the step was answered earlier. */
+  const markUnwritten = useCallback((key: string) => {
+    if (answeredNow.current.includes(key)) {
+      return;
+    }
+    setSkipped((current) =>
+      current.includes(key) ? current : [...current, key],
+    );
+  }, []);
 
-  return { skipped, markSkipped, markAnswered, reset };
+  const reset = useCallback(() => {
+    setSkipped([]);
+    setAnswered([]);
+  }, []);
+
+  return { skipped, markSkipped, markAnswered, markUnwritten, reset };
 }

@@ -15,6 +15,7 @@ import { StepBusyProvider, useStepBusy } from "@/pages/Setup/useStepBusy";
 import { act, customRender, renderHook, screen, waitFor } from "@/tests";
 import server from "@/tests/mocks/node";
 import MediaServerStep from "./MediaServerStep";
+import { NOTHING_WRITTEN } from "./types";
 
 // Keep the real barrel (AllProviders' ThemeLoader reads useSystemSettings from
 // it) and override only the settings mutation we assert on. The instance rows
@@ -150,7 +151,7 @@ describe("MediaServerStep", () => {
     );
 
     expect(mutate).not.toHaveBeenCalled();
-    expect(onNext).toHaveBeenCalled();
+    expect(onNext).toHaveBeenCalledWith(NOTHING_WRITTEN);
   });
 
   it("the whole card is the hit area, not a label inside it", async () => {

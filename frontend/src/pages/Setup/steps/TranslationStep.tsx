@@ -12,6 +12,7 @@ import {
   canRun,
   engineName,
   engineStatus,
+  isFirstRun,
   keyOnlyTypes,
   orderedEngines,
 } from "@/pages/Translation/model";
@@ -86,6 +87,11 @@ const TranslationStep: FC<WizardStepProps> = ({ onNext, onBack }) => {
       !item.official && !item.legacy && item.plugin_id !== GOOGLE_PLUGIN_ID,
   );
   const busy = starting || pointers.isPending;
+  // Translation is already set up (an engine is selected, or a back end is saved): the step says so and
+  // offers nothing that would add a second back end, as typing the key again after a Back would.
+  const setUp = data !== undefined && !isFirstRun(data);
+  const selected = data?.instances.find((item) => item.id === data.engine);
+  const selectedStatus = selected ? engineStatus(selected) : null;
 
   const use = (id: number) =>
     pointers.mutate({ engine: id }, { onSuccess: () => onNext() });
@@ -142,9 +148,16 @@ const TranslationStep: FC<WizardStepProps> = ({ onNext, onBack }) => {
                 </Button>
               )}
             </Group>
-            <Button onClick={() => onNext(NOTHING_WRITTEN)} disabled={busy}>
-              Continue without translation
-            </Button>
+            {setUp ? (
+              // Set up earlier is an answer, though this visit writes nothing.
+              <Button onClick={() => onNext()} disabled={busy}>
+                Continue
+              </Button>
+            ) : (
+              <Button onClick={() => onNext(NOTHING_WRITTEN)} disabled={busy}>
+                Continue without translation
+              </Button>
+            )}
           </Group>
         </Stack>
       }
@@ -170,6 +183,26 @@ const TranslationStep: FC<WizardStepProps> = ({ onNext, onBack }) => {
             </Button>
           </div>
         </Alert>
+      ) : setUp ? (
+        <section className={styles.startOption} data-primary="true">
+          <h3 className={styles.startOptionHead}>
+            Translation is set up
+            {selectedStatus && (
+              <StatusBadge
+                tone={selectedStatus.tone}
+                label={selectedStatus.label}
+              />
+            )}
+          </h3>
+          <p className={styles.startOptionText}>
+            {selected && selectedStatus?.tone === "success"
+              ? `${engineName(selected)} is selected and ready.`
+              : selected
+                ? `${engineName(selected)} is selected. ${selectedStatus?.next}`
+                : "A back end is saved, but no engine is selected, so nothing translates yet. Finish it on the Translation page."}{" "}
+            Change any of it later on the Translation page.
+          </p>
+        </section>
       ) : (
         <div>
           <section className={styles.startOption} data-primary="true">

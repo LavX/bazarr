@@ -4,7 +4,10 @@ import { useSystemSettings } from "@/apis/hooks";
 import { useMediaServerInstances } from "@/apis/hooks/mediaServers";
 import PlexSettings from "@/pages/Settings/Plex/PlexSettings";
 import StepLayout from "@/pages/Setup/StepLayout";
-import type { WizardStepProps } from "@/pages/Setup/steps/types";
+import {
+  NOTHING_WRITTEN,
+  type WizardStepProps,
+} from "@/pages/Setup/steps/types";
 import type { MediaServerDraft } from "@/pages/Setup/useOnboardingSelection";
 import { useOnboardingSelection } from "@/pages/Setup/useOnboardingSelection";
 import StepActions from "./StepActions";
@@ -83,6 +86,9 @@ const PlexServerForm: FC<Props> = ({ draft, onNext, onBack }) => {
     // the row, and this query holds its answers until something says
     // otherwise, so the cached copy can still be the one from before the
     // sign-in.
+    // Whether the account flow left a row this draft owns. Without one nothing
+    // was connected, and the rail draws the step as walked past.
+    let connected = false;
     void Promise.all([refetch(), refetchSettings()])
       .then(([rows, settings]) => {
         // The account flow owns the row, and which row that is comes from the
@@ -105,6 +111,7 @@ const PlexServerForm: FC<Props> = ({ draft, onNext, onBack }) => {
         );
         if (row) {
           markSaved(draft.draftId, row.id);
+          connected = true;
         }
       })
       .finally(() => {
@@ -112,7 +119,11 @@ const PlexServerForm: FC<Props> = ({ draft, onNext, onBack }) => {
           return;
         }
         setContinuing(false);
-        onNext();
+        if (connected) {
+          onNext();
+        } else {
+          onNext(NOTHING_WRITTEN);
+        }
       });
   };
 

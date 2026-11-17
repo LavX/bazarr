@@ -17,7 +17,7 @@ import { enabledLanguageKey, languageProfileKey } from "@/pages/Settings/keys";
 import StepLayout from "@/pages/Setup/StepLayout";
 import { useReportStepBusy } from "@/pages/Setup/useStepBusy";
 import { useStepDraft } from "@/pages/Setup/useStepDrafts";
-import type { WizardStepProps } from "./types";
+import { NOTHING_WRITTEN, type WizardStepProps } from "./types";
 
 // How long a selection note waits before it is written (see changeSelection).
 const ANNOUNCE_DELAY_MS = 300;
@@ -189,7 +189,13 @@ const LanguagesStep: FC<WizardStepProps> = ({ onNext, onBack, stepKey }) => {
   const profilesUnknown = profilesLoading || profilesFailed;
 
   const handleContinue = () => {
-    if (alreadyConfigured || profilesUnknown) {
+    if (profilesUnknown) {
+      // The profiles could not be read, so nothing is written and nothing is known.
+      onNext(NOTHING_WRITTEN);
+      return;
+    }
+    if (alreadyConfigured) {
+      // Profiles exist already, which is an answer.
       onNext();
       return;
     }

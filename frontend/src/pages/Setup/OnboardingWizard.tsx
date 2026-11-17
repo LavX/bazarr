@@ -67,6 +67,7 @@ const OnboardingWizardBody: FunctionComponent = () => {
     skipped,
     markSkipped,
     markAnswered,
+    markUnwritten,
     reset: resetSkipped,
   } = useSkippedSteps();
   const navigate = useNavigate();
@@ -234,7 +235,8 @@ const OnboardingWizardBody: FunctionComponent = () => {
           // reading `=== false` keeps a click event handed in by mistake an
           // answer.
           if (outcome?.answered === false) {
-            markSkipped(forStep);
+            // A step answered on an earlier visit stays answered.
+            markUnwritten(forStep);
           } else {
             markAnswered(forStep);
           }
@@ -247,7 +249,7 @@ const OnboardingWizardBody: FunctionComponent = () => {
         }
       },
     }),
-    [markAnswered, markSkipped],
+    [markAnswered, markUnwritten],
   );
 
   useEffect(() => {
