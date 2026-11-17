@@ -158,8 +158,12 @@ def _official(state):
 
 @pytest.fixture
 def shipped_root(monkeypatch):
-    from provider_hub import signing_roots
+    from provider_hub import signing_roots, transport
     monkeypatch.setattr(signing_roots, "SIGNING_ROOTS", dict(_SHIPPED_ROOTS))
+    # A refusal reaches the transport through the mirror pointer, which leaves a process-wide cooldown.
+    transport.reset_state()
+    yield
+    transport.reset_state()
 
 
 def _unsigned_origin(monkeypatch, commit, catalog):

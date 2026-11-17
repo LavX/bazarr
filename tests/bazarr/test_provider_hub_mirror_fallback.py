@@ -259,16 +259,22 @@ def test_a_mirror_without_a_signed_file_never_supplies_the_legacy_catalog(world)
 
 
 def test_a_404_from_the_mirror_after_raw_failed_is_not_a_missing_signed_file(world):
-    # Advertisement answers, raw is refusing, and the mirror has nothing at the commit: the legacy catalog
-    # at raw would be the answer to a primary 404, but this is not one.
-    world.legacy(providers=[_provider()])
+    # Advertisement answers, raw is refusing, and the mirror has nothing at the commit: on a latched host
+    # that is not a primary 404, so the legacy catalog is not the answer and nothing is read from raw.
+    _latch(world)
+    world.ancestors.add(HEAD)
+    world.heads["main"] = world.heads["beta"] = NEW
+    world.legacy(commit=NEW, providers=[_provider("9.9.9")])
     world.raw_status = 503
 
     _refresh()
 
     source = _official()
-    assert source["last_error"] and _state()["catalog_entries"] == {}
-    assert source.get("catalog_signature") is None
+    assert source["last_error"] and "only accepts a signed" not in source["last_error"]
+    assert _versions() == {PROVIDER: "1.0.0", SERVICE: "1.0.0"}
+    assert source["catalog_signature"] == "verified" and source["resolved_commit"] == HEAD
+    # Not even an attempt at the unsigned catalog at the new commit.
+    assert world.fetched(f"{NEW}/catalog.json") == []
 
 
 def test_only_the_primarys_404_means_there_is_no_signed_file(world):
@@ -714,6 +720,9 @@ def test_a_mirror_that_has_the_catalog_but_not_its_envelope_is_not_an_unsigned_c
     assert source["last_error"] and _state()["catalog_entries"] == {}
     assert source.get("catalog_signature") is None
     assert "catalog_feeds" not in _state() or "main" not in _state()["catalog_feeds"]
+    # The signed catalog was served, so the commit is signed: the legacy catalog is not even tried, on a
+    # host that has never latched too.
+    assert world.fetched(f"{HEAD}/catalog.json") == []
 
 
 def test_a_signed_source_commit_outside_the_pointers_history_is_checked_against_the_branches(world):

@@ -197,6 +197,12 @@ def _signed_file_fails(world, monkeypatch, failure):
     return http
 
 
+def _assert_the_outage_is_what_was_raised(error):
+    """The failure of the signed file is what the refresh shows, not the refusal of an unsigned catalog."""
+    assert error and "not signed" not in error and "only accepts a signed" not in error
+    assert "503" in error or "not answering" in error
+
+
 def _legacy_catalog_requests(world):
     return [url for url in world.requests if url.endswith("/catalog.json") and "/signed/" not in url]
 
@@ -230,6 +236,44 @@ def test_a_signed_file_that_cannot_be_read_never_blocks_the_legacy_refresh_of_an
     transport.reset_state()
 
 
+def test_a_legacy_read_that_stood_in_for_an_unreadable_signed_file_asks_for_the_signed_file_again(
+        shipped_root_world, monkeypatch):
+    from provider_hub import transport
+
+    transport.reset_state()
+    world = shipped_root_world
+    world.legacy(providers=[_provider()])
+    _signed_file_fails(world, monkeypatch, 503)
+    _refresh()
+    assert _official()["catalog_signature"] == "unsigned (legacy)"
+
+    def asked():
+        return len(world.fetched("signed/main/catalog.json"))
+
+    first = asked()
+    assert first >= 1
+
+    # The head has not moved, and the signed file is still asked for.
+    _refresh()
+
+    second = asked()
+    assert second > first
+    assert _official()["last_error"] is None and _blocked() == {PROVIDER: None}
+    transport.reset_state()
+
+
+def test_a_legacy_read_after_a_plain_404_is_settled_for_the_head(shipped_root_world):
+    world = shipped_root_world
+    world.legacy(providers=[_provider()])
+    _refresh()
+    asked = len(world.fetched("signed/main/catalog.json"))
+    assert asked == 1 and "signed_feed_retry" not in _official()
+
+    _refresh()
+
+    assert len(world.fetched("signed/main/catalog.json")) == asked
+
+
 def test_a_signed_file_that_cannot_be_read_still_refuses_a_latched_channel_and_keeps_its_catalog(world, monkeypatch):
     from provider_hub import transport
 
@@ -241,7 +285,7 @@ def test_a_signed_file_that_cannot_be_read_still_refuses_a_latched_channel_and_k
 
     _refresh()
 
-    assert _official()["last_error"]
+    _assert_the_outage_is_what_was_raised(_official()["last_error"])
     assert {entry["version"] for entry in _entries().values()} == {"1.0.0"}
     assert not [url for url in _legacy_catalog_requests(world) if "e" * 40 in url]
     assert _official()["catalog_signature"] == "verified"
@@ -260,7 +304,7 @@ def test_a_signed_file_that_cannot_be_read_refuses_a_host_latched_on_the_other_c
 
     _refresh()
 
-    assert _official()["last_error"]
+    _assert_the_outage_is_what_was_raised(_official()["last_error"])
     assert "9.9.9" not in {entry["version"] for entry in _entries().values()}
     transport.reset_state()
 
