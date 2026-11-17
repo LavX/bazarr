@@ -616,6 +616,12 @@ it("keeps the current card position when its scroll event is still pending and r
     });
     fireEvent.click(card);
     await screen.findByRole("heading", { name: "The Long Winter" });
+    // Opening a title scrolls the detail page to the top on the next animation
+    // frame. Let that frame land before clearing the spy, otherwise it can be
+    // counted as a second restore call.
+    await waitFor(() =>
+      expect(scrollTo).toHaveBeenCalledWith({ top: 0, behavior: "instant" }),
+    );
     scrollTo.mockClear();
     await user.click(screen.getByRole("button", { name: "Back to Discover" }));
     await waitFor(() =>
