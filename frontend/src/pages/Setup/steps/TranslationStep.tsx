@@ -4,7 +4,7 @@ import {
   usePointersMutation,
   useTranslationState,
 } from "@/apis/hooks/translation";
-import { StatusBadge } from "@/pages/Settings/Providers/hub/components/StatusBadge";
+import { StatusBadge } from "@/components/hub/StatusBadge";
 import StepLayout from "@/pages/Setup/StepLayout";
 import { useReportStepBusy } from "@/pages/Setup/useStepBusy";
 import { OfficialMark } from "@/pages/Translation/EnginePanel";
