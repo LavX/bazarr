@@ -1,0 +1,476 @@
+"""The dispatcher's port bound to real workers: what a worker is started with, one-call workers for short requests, and a
+worker that is retired only after its jobs finish."""
+import os
+import subprocess
+import sys
+import time
+from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
+
+from provider_hub.runtime import errors
+from provider_hub.runtime.pool import PoolLimits, WorkerDefinition, WorkerPool
+from provider_hub.runtime.session import SessionLimits
+from provider_hub.runtime.testing.fake_translator import fake_translator_command, fake_translator_env
+from provider_hub.runtime.testing.fake_worker import fake_worker_command, fake_worker_env
+from subtitles.tools.translate.runtime import worker_binding, workers
+
+PLUGIN = "sample"
+ENGINE = {"openai_compatible": {"label": "OpenAI compatible", "endpoints": [], "fields": [
+    {"key": "base_url", "type": "text", "destination": True, "default": "http://lan.example.test:1234/v1"},
+    {"key": "api_key", "type": "secret"}]},
+    "openrouter": {"label": "OpenRouter", "endpoints": ["https://openrouter.ai:443"],
+                   "fields": [{"key": "api_key", "type": "secret"}]}}
+
+
+def _manifest(plugin_id=PLUGIN, **extra):
+    from plugin_platform_helpers import service_manifest
+
+    return service_manifest(plugin_id, settings_version=2, kind="translator", kind_api="bazarr.translator.v1",
+                            endpoints=["https://updates.example.test:8443"], settings={"fields": [
+                                {"key": "mirror", "type": "text", "destination": True,
+                                 "default": "https://mirror.example.test:9443"}], "backend_types": ENGINE},
+                            entry_module="sample_mod", entry_class="Sample", **extra)
+
+
+def _fast_session(**overrides):
+    values = dict(handshake_timeout=10.0, heartbeat_interval=0.1, heartbeat_timeout=3.0, cancel_grace=0.5,
+                  kill_grace=3.0, tick=0.02)
+    values.update(overrides)
+    return SessionLimits(**values)
+
+
+def _pool():
+    return WorkerPool(PoolLimits(tick=0.05, heartbeat_interval=0.1, acquire_timeout=2.0, close_grace=1.0,
+                                 budget_interval=0.0, backoff_base=0.05, backoff_cap=0.2), autostart=True)
+
+
+# --------------------------------------------------------------------------------------------- the pure parts
+def test_ports_come_from_the_origins_with_the_scheme_default():
+    assert worker_binding.ports_of(["https://a.test", "http://b.test", "http://c.test:1234/v1",
+                                    "https://[::1]:8443/x"]) == {443, 80, 1234, 8443}
+    # What is not a plain web address names no port: the stand-in of a value that could not be read, a scheme
+    # that is not http, a port out of range.
+    assert worker_binding.ports_of(["invalid:0123", "ftp://a.test:21", "http://a.test:99999", "", "http://"]) == set()
+
+
+# ----------------------------------------------------------------------------------- definitions, on a fake hub
+class Hub:
+    """A Plugin Hub folder with one translator installed, an engine instance and two connections."""
+
+    def __init__(self, tmp_path, session_factory=None):
+        self.root = tmp_path / "hub"
+        self.config = tmp_path / "config"
+        (self.config / "config").mkdir(parents=True)
+        env_bin = self.root / "shared_envs" / "env1" / "bin"
+        env_bin.mkdir(parents=True)
+        os.symlink(os.path.realpath(sys.executable), env_bin / "python")
+        self.bundle = self.root / "bundles" / PLUGIN / "1.0"
+        self.bundle.mkdir(parents=True)
+        (self.bundle / "sample_mod.py").write_text(
+            "import asyncio\n"
+            "from bazarr_plugin_sdk.translator.v1 import TranslatorPlugin\n\n\n"
+            "class Sample(TranslatorPlugin):\n"
+            "    max_in_flight = 2\n\n"
+            "    def describe(self):\n"
+            "        return {'name': 'sample'}\n\n"
+            "    async def test(self, config, secrets, ctx=None):\n"
+            "        return {'ok': True, 'message': 'hello', 'ports': sorted((config.get('settings') or {}))}\n",
+            encoding="utf-8")
+        self.manifest = _manifest()
+        self.installation = SimpleNamespace(provider_id=PLUGIN, active_path=str(self.bundle),
+                                            python_path=str(env_bin / "python"), manifest=self.manifest)
+        self.installed = {PLUGIN: self.installation}
+        self.rows = []  # (instance id, plugin id, enabled, settings, [(connection plugin, type, enabled, settings)])
+
+    def store(self):
+        rows = self.rows
+
+        class Store:
+            def list_instances(self_inner, plugin_id=None):
+                return [SimpleNamespace(id=index, plugin_id=plugin, enabled=enabled, settings=settings,
+                                        connections=connections)
+                        for index, (plugin, enabled, settings, connections) in enumerate(rows, 1)]
+
+            def list_connections(self_inner, instance_id):
+                return [SimpleNamespace(plugin_id=plugin, backend_type=kind, enabled=enabled, settings=settings)
+                        for plugin, kind, enabled, settings in rows[instance_id - 1][3]]
+
+            def settings_of(self_inner, row):
+                return dict(row.settings)
+
+        return Store()
+
+    def definitions(self, **kwargs):
+        return worker_binding.TranslatorWorkers(
+            installation_for=lambda plugin_id: self.installed.get(plugin_id), store_factory=self.store,
+            hub_dir=lambda: self.root, config_dir=lambda: str(self.config), reserved_ports=lambda: {6767}, **kwargs)
+
+
+@pytest.fixture
+def hub(tmp_path):
+    return Hub(tmp_path)
+
+
+def test_the_long_lived_worker_is_admitted_to_the_ports_its_connections_and_manifest_need(hub):
+    hub.rows = [(PLUGIN, 1, {}, [("", "openai_compatible", 1, {}), ("", "openrouter", 1, {}),
+                                  ("", "openai_compatible", 0, {"base_url": "http://off.example.test:7777"})]),
+                (PLUGIN, 0, {"mirror": "https://disabled.example.test:4444"},
+                 [("", "openai_compatible", 1, {"base_url": "http://other.example.test:5555"})]),
+                ("other_plugin", 1, {}, [("", "openai_compatible", 1, {"base_url": "http://x.example.test:3333"})])]
+    ports = hub.definitions().ports_for(PLUGIN)
+    # DNS and web ports, the manifest's own origin, the engine's mirror, the enabled connections of the enabled engine.
+    # The default LAN address of the connection that is on, and not the disabled connection, the disabled engine or the
+    # connections of another plugin's engine.
+    assert ports == {80, 443, 8443, 9443, 1234}
+
+
+def test_a_connection_an_extension_serves_adds_its_port_to_the_extension_and_not_the_engine(hub):
+    hub.installed["extension"] = SimpleNamespace(provider_id="extension", active_path=str(hub.bundle),
+                                                 python_path=hub.installation.python_path,
+                                                 manifest=_manifest("extension"))
+    hub.rows = [(PLUGIN, 1, {}, [("extension", "openai_compatible", 1, {"base_url": "http://lan.example.test:4321"})])]
+    definitions = hub.definitions()
+    assert 4321 in definitions.ports_for("extension") and 4321 not in definitions.ports_for(PLUGIN)
+
+
+def test_bazarrs_own_port_is_never_in_a_set(hub):
+    hub.rows = [(PLUGIN, 1, {}, [("", "openai_compatible", 1, {"base_url": "http://lan.example.test:6767"})])]
+    assert 6767 not in hub.definitions().ports_for(PLUGIN)
+    assert 6767 not in hub.definitions().draft_ports(
+        PLUGIN, {"config": {"connection": {"type": "openai_compatible",
+                                           "settings": {"base_url": "http://lan.example.test:6767"}}}})
+
+
+def test_a_draft_admits_the_port_it_names_and_nothing_a_saved_connection_has(hub):
+    hub.rows = [(PLUGIN, 1, {}, [("", "openai_compatible", 1, {"base_url": "http://saved.example.test:5555"})])]
+    definitions = hub.definitions()
+    draft = {"config": {"settings": {}, "connection": {
+        "type": "openai_compatible", "settings": {"base_url": "http://draft.example.test:2468/v1"}}}}
+    assert definitions.draft_ports(PLUGIN, draft) == {80, 443, 8443, 9443, 2468}
+    # A draft that names no address takes the back end's default, a request with no config only the web ports.
+    assert definitions.draft_ports(PLUGIN, {"config": {"connection": {"type": "openai_compatible"}}}) == \
+        {80, 443, 8443, 1234}
+    assert definitions.draft_ports(PLUGIN, {}) == {80, 443}
+
+
+def test_a_plugin_that_is_not_installed_or_has_nothing_to_run_has_no_definition(hub):
+    definitions = hub.definitions()
+    assert definitions.definition_for("missing") is None
+    assert definitions.one_call_for("missing", {}) is None
+    for broken in ({"entry_module": None}, {"entry_class": "not a class"}, {"entry_module": "../escape"}):
+        hub.installation.manifest = {**hub.manifest, **broken}
+        assert definitions.definition_for(PLUGIN) is None
+    hub.installation.manifest = hub.manifest
+    hub.installation.python_path = str(hub.root.parent / "elsewhere" / "bin" / "python")  # not one of the hub's
+    assert definitions.definition_for(PLUGIN) is None
+    hub.installation.python_path = None
+    assert definitions.definition_for(PLUGIN) is None
+
+
+def test_the_definition_names_its_pool_entry_and_the_one_call_worker_has_its_own(hub):
+    definitions = hub.definitions()
+    resident = definitions.definition_for(PLUGIN)
+    one_call = definitions.one_call_for(PLUGIN, {})
+    assert (resident.key, resident.kind) == (PLUGIN, "translator")
+    assert one_call.key == PLUGIN + workers.ONE_CALL_SUFFIX != resident.key
+    assert set(resident.host_calls) == {"reserve", "usage", "checkpoint"}
+    assert [budget.path for budget in resident.budgets] == [str(hub.root / "run" / PLUGIN / "data"),
+                                                            str(hub.root / "run" / PLUGIN / "tmp")]
+
+
+def test_the_launch_spec_confines_the_worker_to_its_bundle_and_two_folders_of_its_own(hub):
+    hub.rows = [(PLUGIN, 1, {}, [("", "openai_compatible", 1, {})])]
+    definitions = hub.definitions()
+    spec = definitions._spec(PLUGIN, definitions.ports_for(PLUGIN))
+    data, temp = hub.root / "run" / PLUGIN / "data", hub.root / "run" / PLUGIN / "tmp"
+    assert data.is_dir() and temp.is_dir()
+    assert spec.args[:2] == ("-I", "-B") and spec.args[2].endswith("bazarr_plugin_sdk/_bootstrap.py")
+    assert spec.args[3:] == ("--entry", "sample_mod:Sample", "--path", str(hub.bundle))
+    assert spec.cwd == str(hub.bundle)
+    assert set(spec.policy.read_write) == {str(data), str(temp)}
+    assert str(hub.bundle) in spec.policy.read_only
+    granted = (*spec.policy.read_only, *spec.policy.read_write, *spec.policy.devices, *spec.policy.resolve_unix)
+    # No /dev/shm, and nothing that holds the configuration or the database.
+    assert not [path for path in granted if path.startswith("/dev/shm") or "shm" in path.split("/")]
+    for protected in (hub.config / "config", hub.config / "db"):
+        assert not [path for path in granted if str(protected).startswith(path.rstrip("/") + "/")]
+    assert spec.policy.connect_ports == {53, 80, 443, 8443, 9443, 1234}
+    assert spec.env["HOME"] == str(data) and spec.env["TMPDIR"] == str(temp)
+    assert spec.env["BAZARR_PLUGIN_DATA_DIR"] == str(data)
+    assert not [name for name in spec.env if "proxy" in name.lower()]
+
+
+def test_every_start_reads_the_release_and_the_ports_that_are_current_then(hub):
+    hub.rows = [(PLUGIN, 1, {}, [])]
+    definitions = hub.definitions()
+    ports = {"now": frozenset({443})}
+    first = definitions._spec(PLUGIN, ports["now"])
+    other = hub.root / "bundles" / PLUGIN / "2.0"
+    other.mkdir(parents=True)
+    hub.installation.active_path = str(other)
+    second = definitions._spec(PLUGIN, frozenset({443, 9999}))
+    assert first.cwd == str(hub.bundle) and second.cwd == str(other)
+    assert first.policy.connect_ports == {53, 443} and second.policy.connect_ports == {53, 443, 9999}
+    hub.installed.pop(PLUGIN)
+    from provider_hub.sandbox.policy import PolicyError
+
+    with pytest.raises(PolicyError):
+        definitions._spec(PLUGIN, frozenset({443}))
+
+
+def test_a_real_sdk_worker_starts_through_the_launcher_and_answers_a_short_request(hub):
+    """The definition is good enough to start a real plugin worker: the SDK runner in isolated mode, from the
+    bundle, in the sandbox where the host has one, and a one-call worker that is gone afterwards."""
+    pool = WorkerPool(autostart=True)
+    try:
+        definitions = hub.definitions()
+        port = workers.PoolWorkers(pool, definitions.definition_for, one_call_for=definitions.one_call_for,
+                                   ports_for=definitions.ports_for)
+        answer = port.call(PLUGIN, workers.TEST_OP, {"config": {"settings": {"mirror": "https://m.example.test"}}},
+                           {}, timeout=30)
+        assert answer.result["ok"] is True and answer.result["message"] == "hello"
+    finally:
+        pool.close()
+
+
+# -------------------------------------------------- short requests never touch the worker that holds translations
+def _fake_definition(key, command, env, **kwargs):
+    return WorkerDefinition(key, kind="translator", command=command, env=env, session_limits=_fast_session(),
+                            **kwargs)
+
+
+def _translate(port, plugin=PLUGIN, job="job-1"):
+    request = {"job_id": job, "target": {"code": "fr"}, "lines": [{"position": 0, "text": "One"}],
+               "config": {"connection": {"id": "1", "type": "openrouter", "settings": {}}}}
+    return port.submit(plugin, request, {}, context=None, on_progress=None)
+
+
+def test_a_probe_that_ignores_its_cancel_never_ends_the_worker_that_holds_a_translation():
+    pool = _pool()
+    try:
+        script = {"*": [{"wait_cancel": True}]}
+        resident = _fake_definition(PLUGIN, fake_translator_command(), fake_translator_env(script))
+
+        def one_call(plugin_id, params):
+            # The one-call worker is a worker that sleeps through its cancel: only the grace period ends it.
+            return _fake_definition(plugin_id + workers.ONE_CALL_SUFFIX, fake_worker_command(), fake_worker_env())
+
+        port = workers.PoolWorkers(pool, lambda plugin_id: resident, one_call_for=one_call)
+        held = _translate(port)
+        time.sleep(0.3)  # the translation is running
+        started = time.monotonic()
+        with pytest.raises((errors.RequestTimeout, errors.RequestCancelled, errors.SessionError)):
+            port.call(PLUGIN, "sleep", {"seconds": 60, "ignore_cancel": True}, {}, timeout=0.3)
+        assert time.monotonic() - started < 15
+        # The probe overran its deadline and its worker was ended after the cancel grace. The worker that holds the
+        # translation was not touched: its request is still running, and answers its cancel like any other.
+        assert not held.done()
+        assert pool.state(PLUGIN).value in ("ready", "busy")
+        held.cancel("done")
+        with pytest.raises((errors.RequestCancelled, errors.RequestFailed)):
+            held.wait(10)
+    finally:
+        pool.close()
+
+
+# ------------------------------------------------------------------------------- a port change waits for the jobs
+class CountingStarts:
+    """A ``spawn`` that counts the workers it starts, each one a fake translator."""
+
+    def __init__(self, script):
+        self.starts = []
+        self.script = script
+
+    def __call__(self):
+        env = {**os.environ, **fake_translator_env(self.script)}
+        process = subprocess.Popen(fake_translator_command(), stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                   stderr=subprocess.PIPE, env=env, start_new_session=True)
+        self.starts.append(process)
+        return process
+
+
+def test_a_changed_port_set_restarts_the_worker_only_after_its_jobs_finish():
+    pool = _pool()
+    try:
+        starts = CountingStarts({"*": [{"wait_cancel": True}]})
+        definition = WorkerDefinition(PLUGIN, kind="translator", spawn=starts, session_limits=_fast_session())
+        wanted = {"ports": frozenset({443})}
+        port = workers.PoolWorkers(pool, lambda plugin_id: definition, ports_for=lambda plugin_id: wanted["ports"])
+        first = _translate(port, job="job-1")
+        time.sleep(0.3)
+        assert len(starts.starts) == 1
+        # A connection now needs another port. The job that is running is not interrupted ...
+        wanted["ports"] = frozenset({443, 1234})
+        second = _translate(port, job="job-2")
+        time.sleep(0.3)
+        assert len(starts.starts) == 2  # a new worker serves the new job
+        assert not first.done() and starts.starts[0].poll() is None  # ... and the old worker is still up for it
+        # The old worker goes only when its job is done.
+        first.cancel("done")
+        with pytest.raises((errors.RequestCancelled, errors.RequestFailed)):
+            first.wait(10)
+        deadline = time.monotonic() + 10
+        while starts.starts[0].poll() is None and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert starts.starts[0].poll() is not None
+        assert not second.done() and starts.starts[1].poll() is None
+        # Nothing changed since: the next job reuses the worker it has.
+        third = _translate(port, job="job-3")
+        time.sleep(0.2)
+        assert len(starts.starts) == 2
+        for handle in (second, third):
+            handle.cancel("done")
+    finally:
+        pool.close()
+
+
+def test_a_port_set_that_cannot_be_read_changes_nothing():
+    pool = _pool()
+    try:
+        starts = CountingStarts({"*": [{"wait_cancel": True}]})
+        definition = WorkerDefinition(PLUGIN, kind="translator", spawn=starts, session_limits=_fast_session())
+        answers = iter([frozenset({443}), RuntimeError("the database is busy"), frozenset({443})])
+
+        def ports_for(plugin_id):
+            answer = next(answers)
+            if isinstance(answer, Exception):
+                raise answer
+            return answer
+
+        port = workers.PoolWorkers(pool, lambda plugin_id: definition, ports_for=ports_for)
+        handles = [_translate(port, job=f"job-{index}") for index in range(3)]
+        time.sleep(0.3)
+        assert len(starts.starts) == 1
+        for handle in handles:
+            handle.cancel("done")
+    finally:
+        pool.close()
+
+
+def test_retiring_a_plugin_that_never_had_a_worker_is_a_no_op_and_one_that_has_is_retired_after_its_jobs():
+    pool = _pool()
+    try:
+        starts = CountingStarts({"*": [{"wait_cancel": True}]})
+        definition = WorkerDefinition(PLUGIN, kind="translator", spawn=starts, session_limits=_fast_session())
+        port = workers.PoolWorkers(pool, lambda plugin_id: definition)
+        port.retire("nobody")
+        held = _translate(port)
+        time.sleep(0.3)
+        port.retire(PLUGIN)
+        time.sleep(0.2)
+        assert not held.done() and starts.starts[0].poll() is None
+        held.cancel("done")
+        with pytest.raises((errors.RequestCancelled, errors.RequestFailed)):
+            held.wait(10)
+    finally:
+        pool.close()
+
+
+# ------------------------------------------------------------------------------------------ a draft's one-call worker
+def test_a_draft_test_runs_in_a_one_call_worker_that_admits_the_drafts_port(hub):
+    hub.rows = [(PLUGIN, 1, {}, [])]
+    seen = []
+
+    class Pool:
+        def definition(self, key):
+            raise AssertionError("a test never reaches the long-lived worker")
+
+        def run_once(self, definition, op, params, **kwargs):
+            seen.append((definition, op, kwargs))
+            return SimpleNamespace(result={"ok": True}, data=b"")
+
+    definitions = hub.definitions()
+    port = workers.PoolWorkers(Pool(), definitions.definition_for, one_call_for=definitions.one_call_for,
+                               ports_for=definitions.ports_for)
+    draft = {"config": {"connection": {"type": "openai_compatible",
+                                       "settings": {"base_url": "http://draft.example.test:2468/v1"}}}}
+    port.call(PLUGIN, workers.TEST_OP, draft, {"api_key": "k" * 12}, timeout=20)
+    ((definition, op, kwargs),) = seen
+    assert (definition.key, op, kwargs["timeout"]) == (PLUGIN + workers.ONE_CALL_SUFFIX, "test", 20)
+    assert kwargs["secrets"] == {"api_key": "k" * 12}
+    assert 2468 in definitions.draft_ports(PLUGIN, draft)
+
+
+# ------------------------------------------------------------------------------------------------------ binding
+@pytest.fixture
+def unbound():
+    workers.unbind()
+    worker_binding.shutdown()
+    yield
+    worker_binding.shutdown()
+    workers.unbind()
+
+
+def test_with_the_switch_off_nothing_is_bound(unbound, monkeypatch):
+    monkeypatch.setattr("subtitles.tools.translate.runtime.runtime_v2_flag", lambda: False)
+    assert worker_binding.bind_when_enabled() is False
+    assert not workers.is_bound()
+    worker_binding.plugin_changed(PLUGIN)  # nothing to retire
+    worker_binding.shutdown()
+
+
+def test_with_the_switch_on_the_dispatcher_is_bound_to_the_pool_once_and_shutdown_unbinds(unbound, monkeypatch, tmp_path):
+    monkeypatch.setattr("subtitles.tools.translate.runtime.runtime_v2_flag", lambda: True)
+    monkeypatch.setattr(worker_binding, "_config_dir", lambda: str(tmp_path))
+    assert worker_binding.bind_when_enabled() is True
+    port = workers.bound_port()
+    assert workers.is_bound() and isinstance(port, workers.PoolWorkers)
+    assert worker_binding.bind_when_enabled() is True and workers.bound_port() is port  # once
+    worker_binding.shutdown()
+    assert not workers.is_bound()
+    worker_binding.shutdown()  # twice is fine
+
+
+def test_the_kind_retires_the_worker_when_a_release_activates_or_the_plugin_is_turned_off_or_removed(unbound, monkeypatch):
+    from provider_hub.kinds.translator import TranslatorKind
+
+    retired = []
+
+    class Port(workers.PoolWorkers):
+        def __init__(self):
+            pass
+
+        def retire(self, plugin_id):
+            retired.append(plugin_id)
+
+    monkeypatch.setattr(worker_binding, "_port", Port())
+
+    class Store:
+        def release_plugin(self, plugin_id):
+            return SimpleNamespace(notices=[])
+
+        def plugin_disabled(self, plugin_id):
+            return SimpleNamespace(notices=[])
+
+    monkeypatch.setattr("provider_hub.kinds.translator._store", lambda: Store())
+    monkeypatch.setattr("subtitles.tools.translate.runtime.plugin_update.bring_up_to_date", lambda *a: None)
+    kind = TranslatorKind()
+    assert kind.on_activated(PLUGIN, None, {}) is None
+    assert kind.on_removed(PLUGIN) is True
+    assert kind.set_enabled({"provider_id": PLUGIN}, False) is True
+    assert kind.set_enabled({"provider_id": PLUGIN}, True) is True  # turning it on retires nothing
+    assert retired == [PLUGIN, PLUGIN, PLUGIN]
+
+
+@pytest.mark.parametrize("switch,bound", [(False, False), (True, True)])
+def test_startup_binds_the_workers_only_with_the_switch_on(tmp_path, switch, bound):
+    """``init`` is what a start imports first. With the switch off it never loads the binding."""
+    import yaml
+
+    root = Path(__file__).resolve().parents[2]
+    config_dir = tmp_path / "data"
+    (config_dir / "config").mkdir(parents=True)
+    (config_dir / "config" / "config.yaml").write_text(yaml.safe_dump({"translator": {"runtime_v2": switch}}),
+                                                       encoding="utf-8")
+    start = ("import sys, time; sys.path[:0] = [sys.argv[1], sys.argv[2]]; "
+             "wait = time.sleep; time.sleep = lambda seconds: wait(min(seconds, 0.01)); "
+             "import init; from subtitles.tools.translate.runtime import workers; "
+             "print('state', 'subtitles.tools.translate.runtime.worker_binding' in sys.modules, workers.is_bound()); "
+             "from subtitles.tools.translate.runtime import worker_binding as b; b.shutdown()")
+    environment = {**os.environ, "BAZARR_CONFIG_DIR": str(config_dir), "NO_CLI": "true", "PYTHONDONTWRITEBYTECODE": "1"}
+    done = subprocess.run([sys.executable, "-c", start, str(root / "bazarr"), str(root / "custom_libs")],
+                          cwd=root / "bazarr", env=environment, capture_output=True, text=True, timeout=180)
+    assert done.returncode == 0, done.stderr[-2000:]
+    assert done.stdout.strip().splitlines()[-1] == f"state {bound} {bound}"

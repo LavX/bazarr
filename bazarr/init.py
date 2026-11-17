@@ -322,6 +322,15 @@ try:
             recover_after_restart()
 except Exception:  # pragma: no cover - recovery must not prevent startup
     logging.exception("Unable to recover interrupted translations on startup")
+try:
+    # The dispatcher reaches translator plugins through the worker pool once it is bound to it. Nothing is
+    # bound, and nothing here is imported, with the switch off. The binding reads no table, so it does not wait
+    # for the migrations.
+    if getattr(settings.translator, "runtime_v2", False) is True:
+        from subtitles.tools.translate.runtime import worker_binding
+        worker_binding.bind_when_enabled()
+except Exception:  # pragma: no cover - a dark feature must not prevent startup
+    logging.exception("Unable to bind the translation runtime to its workers on startup")
 init_binaries()
 path_mappings.update()
 

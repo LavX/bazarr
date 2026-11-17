@@ -32,6 +32,18 @@ def _store():
     return TranslatorStore(database)
 
 
+def _retire_worker(plugin_id: str) -> None:
+    """Let the plugin's worker go once the jobs it holds are done, so the next one starts from what is installed
+    and switched on then. Nothing happens while the runtime has bound no worker, and a failure here never undoes the
+    change that asked for it."""
+    try:
+        from subtitles.tools.translate.runtime import worker_binding
+
+        worker_binding.plugin_changed(plugin_id)
+    except Exception:
+        logger.warning("Could not retire the worker of translator %s", plugin_id, exc_info=True)
+
+
 class TranslatorKind(Kind):
     name = TRANSLATOR
     kind_apis = frozenset({TRANSLATOR_KIND_API})
@@ -55,6 +67,7 @@ class TranslatorKind(Kind):
         except Exception:
             logger.exception("Could not release the engine pointers of translator %s", plugin_id)
             return False
+        _retire_worker(plugin_id)
         return True
 
     def after_removed(self, plugin_id: str) -> None:
@@ -67,7 +80,10 @@ class TranslatorKind(Kind):
         """Bring the plugin's saved engines and back ends in line with the release that just became active."""
         from subtitles.tools.translate.runtime.plugin_update import bring_up_to_date
 
-        return bring_up_to_date(_store(), plugin_id, manifest)
+        message = bring_up_to_date(_store(), plugin_id, manifest)
+        # A worker that is running was started from the release this one replaces.
+        _retire_worker(plugin_id)
+        return message
 
     def set_enabled(self, installation: dict[str, Any], enabled: bool) -> bool:
         installation["enabled"] = bool(enabled)
@@ -80,6 +96,7 @@ class TranslatorKind(Kind):
             logger.exception("Could not release the engine pointers of translator %s",
                              installation.get("provider_id"))
             return False
+        _retire_worker(str(installation.get("provider_id") or ""))
         return True
 
     def validate_manifest(self, manifest: dict[str, Any], trusted: bool):

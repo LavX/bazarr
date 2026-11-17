@@ -966,6 +966,7 @@ jobs:
             tests/bazarr/test_translator_wire.py \
             tests/bazarr/test_translator_dispatch.py \
             tests/bazarr/test_translator_dispatch_entrypoints.py \
+            tests/bazarr/test_translator_worker_binding.py \
             tests/bazarr/test_sportarr_library_migration.py \
             tests/bazarr/test_sportarr_review_guards.py \
             tests/bazarr/test_sportarr_output.py \

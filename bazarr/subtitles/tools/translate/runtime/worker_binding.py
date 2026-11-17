@@ -1,0 +1,355 @@
+# coding=utf-8
+"""Binds the dispatcher to the real translator workers.
+
+``workers.bind(PoolWorkers(...))`` is the one call that turns the dispatcher's port from "no worker" into the worker
+pool. This module makes it, once, at boot, and only while the ``translator.runtime_v2`` switch is on
+(``bind_when_enabled``, called from init.py). With the switch off nothing here runs and the port stays unbound.
+
+What a worker is. Any installed plugin of the translator kind is served the same way, so the AI Subtitle Translator
+and the Google Translate plugin share this binding: its interpreter and bundle are the ones the Plugin Hub built and
+verified for the release that is active now, it runs the vendored plugin SDK's runner in isolated mode through the sandbox
+launcher, and it gets the host calls the dispatcher answers (reserve, usage, checkpoint). The interpreter, bundle and port
+set are read again at every start, so a new release or a changed connection is what the next worker starts with.
+
+What a worker may reach. Its filesystem is its bundle, the SDK, the system libraries and two folders of its own
+(``HOME`` and ``TMPDIR``); ``config.yaml`` and the database are outside every grant, and so is ``/dev/shm``. Its
+network is DNS, ports 80 and 443, the ports of the origins its manifest declares and the ports of the addresses its
+enabled connections use, never Bazarr+'s own port. A host without Landlock runs it with the same limits and no ruleset,
+which the Plugin Hub already reports as "declared".
+
+Ports. A worker is started with the port set it had at that moment. ``PoolWorkers`` compares the set with the one the
+connections need now before each translation and, when they differ, retires the worker once the jobs it holds are done.
+A short ``test`` or ``options`` request runs in a worker of its own that admits the port its draft names, so a draft never
+waits for a restart and a probe that overruns never ends a worker that holds translations.
+"""
+from __future__ import annotations
+
+import logging
+import os
+import re
+import threading
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Callable, Iterable, Mapping
+from urllib.parse import urlsplit
+
+from . import workers
+
+logger = logging.getLogger(__name__)
+
+KIND = "translator"
+DEFAULT_PORTS = frozenset({80, 443})
+_DEFAULT_PORT_OF = {"http": 80, "https": 443}
+_PLUGIN_ID = re.compile(r"\A[a-z0-9][a-z0-9_.-]{0,63}\Z")
+_ENTRY_PART = re.compile(r"\A[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)*\Z")
+_CLASS_NAME = re.compile(r"\A[A-Za-z_][A-Za-z0-9_]*\Z")
+MIB = 1024 * 1024
+# What the plugin may leave in its own folders. A translator keeps a few small files at most.
+DATA_BUDGET_BYTES = 64 * MIB
+TEMP_BUDGET_BYTES = 128 * MIB
+
+
+def ports_of(origins: Iterable[str]) -> frozenset[int]:
+    """The TCP ports a set of origins or addresses names, the default of the scheme where none is written.
+
+    Anything that is not a plain http or https address (the stand-in for a value that could not be read, for one)
+    names no port.
+    """
+    ports: set[int] = set()
+    for origin in origins:
+        try:
+            parts = urlsplit(str(origin))
+            scheme = parts.scheme.lower()
+            port = parts.port or _DEFAULT_PORT_OF.get(scheme)
+        except ValueError:
+            continue
+        if scheme in _DEFAULT_PORT_OF and parts.hostname and port and 1 <= port <= 65535:
+            ports.add(port)
+    return frozenset(ports)
+
+
+@dataclass(frozen=True)
+class Resolved:
+    """What a worker of one plugin starts from, as the Plugin Hub has it now."""
+
+    plugin_id: str
+    interpreter: Path
+    bundle: Path
+    entry: str
+    manifest: Mapping[str, Any]
+
+
+class TranslatorWorkers:
+    """Builds the worker definitions for translator plugins.
+
+    Everything that reaches outside this module is a parameter, so tests supply a state, a store and folders of their
+    own: ``installation_for`` (plugin id to its running installation, or None), ``store_factory``, ``hub_dir``,
+    ``config_dir`` and ``reserved_ports`` (callables, read at every use).
+    """
+
+    def __init__(self, *, installation_for: Callable[[str], Any] | None = None,
+                 store_factory: Callable[[], Any] | None = None, hub_dir: Callable[[], Path] | None = None,
+                 config_dir: Callable[[], str] | None = None, reserved_ports: Callable[[], Iterable[int]] | None = None,
+                 sdk_root: Path | None = None, require_sandbox: bool = False, probe: Any = None):
+        self._installation_for = installation_for or _running_installation
+        self._store_factory = store_factory or _default_store
+        self._hub_dir = hub_dir or _hub_dir
+        self._config_dir = config_dir or _config_dir
+        self._reserved_ports = reserved_ports or _reserved_ports
+        self._sdk_root = sdk_root
+        self._require_sandbox = require_sandbox
+        self._probe = probe
+
+    # ------------------------------------------------------------------------------------------ what is installed
+    def resolve(self, plugin_id: str) -> Resolved | None:
+        """The release that is active now, with the interpreter and bundle the Plugin Hub vouches for, or None when
+        the plugin is not installed, is turned off or has nothing it can run."""
+        from provider_hub.venv import validated_bundle_path, validated_interpreter
+
+        if not isinstance(plugin_id, str) or not _PLUGIN_ID.match(plugin_id):
+            return None
+        installation = self._installation_for(plugin_id)
+        if installation is None or not installation.active_path or not installation.python_path:
+            return None
+        manifest = installation.manifest if isinstance(installation.manifest, Mapping) else {}
+        module, name = manifest.get("entry_module"), manifest.get("entry_class")
+        if (not isinstance(module, str) or not isinstance(name, str) or not _ENTRY_PART.match(module)
+                or not _CLASS_NAME.match(name)):
+            return None
+        hub = self._hub_dir()
+        bundle = validated_bundle_path(hub, installation.active_path)
+        interpreter = validated_interpreter(hub, installation.python_path)
+        if bundle is None or interpreter is None:
+            return None
+        return Resolved(plugin_id, Path(interpreter), Path(bundle), f"{module}:{name}", manifest)
+
+    def _manifest(self, plugin_id: str) -> Mapping[str, Any] | None:
+        installation = self._installation_for(plugin_id)
+        manifest = None if installation is None else installation.manifest
+        return manifest if isinstance(manifest, Mapping) else None
+
+    # ---------------------------------------------------------------------------------------------------- ports
+    def _fixed_ports(self, manifest: Mapping[str, Any]) -> frozenset[int]:
+        """The ports of the origins the plugin's manifest declares for its own code."""
+        from provider_hub.plugin_manifest import parse_plugin_manifest
+
+        return ports_of(parse_plugin_manifest(dict(manifest)).all_endpoints)
+
+    def ports_for(self, plugin_id: str) -> frozenset[int]:
+        """The ports the plugin's long-lived worker is admitted to connect to: DNS and the web ports, the origins its
+        manifest declares and the addresses of the enabled connections it serves (and of its own enabled engines).
+
+        Never Bazarr+'s own port: a connection to it is refused by the sandbox like any port that is not listed.
+        """
+        from .destinations import effective_destinations, schema_for_backend, schema_for_engine
+
+        manifest = self._manifest(plugin_id)
+        if manifest is None:
+            return frozenset(DEFAULT_PORTS - set(self._reserved_ports()))
+        found: set[int] = set(DEFAULT_PORTS)
+        found |= self._fixed_ports(manifest)
+        store = self._store_factory()
+        for instance in store.list_instances():
+            if not instance.enabled:
+                continue
+            if instance.plugin_id == plugin_id:
+                found |= ports_of(effective_destinations(schema_for_engine(manifest), store.settings_of(instance)))
+            for connection in store.list_connections(instance.id):
+                if not connection.enabled or (connection.plugin_id or instance.plugin_id) != plugin_id:
+                    continue
+                schema = schema_for_backend(manifest, connection.backend_type)
+                found |= ports_of(effective_destinations(schema, store.settings_of(connection)))
+        return frozenset(found - set(self._reserved_ports()))
+
+    def draft_ports(self, plugin_id: str, params: Mapping[str, Any]) -> frozenset[int]:
+        """The ports a one-call worker needs for a ``test`` or ``options`` request: DNS and the web ports, the origins
+        the manifest declares, and the addresses the draft in the request names."""
+        from .destinations import effective_destinations, schema_for_backend, schema_for_engine
+
+        manifest = self._manifest(plugin_id)
+        found: set[int] = set(DEFAULT_PORTS)
+        config = params.get("config") if isinstance(params, Mapping) else None
+        if manifest is not None and isinstance(config, Mapping):
+            found |= self._fixed_ports(manifest)
+            settings = config.get("settings")
+            if isinstance(settings, Mapping):
+                found |= ports_of(effective_destinations(schema_for_engine(manifest), settings))
+            connection = config.get("connection")
+            if isinstance(connection, Mapping) and isinstance(connection.get("type"), str):
+                values = connection.get("settings")
+                schema = schema_for_backend(manifest, connection["type"])
+                found |= ports_of(effective_destinations(schema, values if isinstance(values, Mapping) else {}))
+        return frozenset(found - set(self._reserved_ports()))
+
+    # ----------------------------------------------------------------------------------------------- definitions
+    def definition_for(self, plugin_id: str, *, ports: Callable[[], frozenset[int]] | None = None,
+                       key: str | None = None):
+        """The pool definition of the plugin's worker, or None when nothing can be run for it now.
+
+        ``ports`` says which ports each start admits (default: ``ports_for`` the plugin) and ``key`` names the pool
+        entry (default: the plugin id).
+        """
+        from provider_hub.runtime.pool import FolderBudget, WorkerDefinition, launcher_spawn
+
+        from .host_calls import host_calls
+
+        if self.resolve(plugin_id) is None:
+            return None
+        data, temp = self._folders(plugin_id)
+        wanted_ports = ports or (lambda: self.ports_for(plugin_id))
+        return WorkerDefinition(
+            key or plugin_id, kind=KIND,
+            spawn=launcher_spawn(lambda: self._spec(plugin_id, wanted_ports()), probe=self._probe,
+                                 require_sandbox=self._require_sandbox),
+            host_calls=host_calls(),
+            budgets=(FolderBudget(str(data), DATA_BUDGET_BYTES, "the plugin's data folder"),
+                     FolderBudget(str(temp), TEMP_BUDGET_BYTES, "the plugin's temp folder")))
+
+    def one_call_for(self, plugin_id: str, params: Mapping[str, Any]):
+        """The definition of the worker a ``test`` or ``options`` request runs in, which admits the draft's ports."""
+        draft = self.draft_ports(plugin_id, params)
+        return self.definition_for(plugin_id, ports=lambda: draft, key=plugin_id + workers.ONE_CALL_SUFFIX)
+
+    def _folders(self, plugin_id: str) -> tuple[Path, Path]:
+        base = Path(self._hub_dir()) / "run" / plugin_id
+        return base / "data", base / "tmp"
+
+    def _spec(self, plugin_id: str, ports: Iterable[int]):
+        """One start's launch specification, built from what is installed at this moment."""
+        from provider_hub.runtime.environment import worker_environment
+        from provider_hub.sandbox.policy import PolicyError, RuntimeSpec, SandboxPolicy
+
+        resolved = self.resolve(plugin_id)
+        if resolved is None:
+            raise PolicyError("translator %s has no release that can run" % plugin_id)
+        data, temp = self._folders(plugin_id)
+        for folder in (data, temp):
+            folder.mkdir(parents=True, exist_ok=True, mode=0o700)
+        root = Path(self._sdk_root or _sdk_root())
+        config = Path(self._config_dir())
+        policy = SandboxPolicy.for_interpreter(
+            resolved.interpreter, read_only=[resolved.bundle, root], read_write=[data, temp],
+            connect_ports=ports, reserved_ports=self._reserved_ports(),
+            protected_paths=[config / "config", config / "db"])
+        env = worker_environment(
+            KIND, home=data, tmpdir=temp, path_prepend=[resolved.interpreter.parent],
+            extra={"BAZARR_PLUGIN_DATA_DIR": os.fspath(data), "BAZARR_PLUGIN_TEMP_DIR": os.fspath(temp)})
+        return RuntimeSpec(
+            interpreter=os.fspath(resolved.interpreter),
+            args=("-I", "-B", os.fspath(root / "bazarr_plugin_sdk" / "_bootstrap.py"), "--entry", resolved.entry,
+                  "--path", os.fspath(resolved.bundle)),
+            cwd=os.fspath(resolved.bundle), env=env, policy=policy)
+
+
+# ------------------------------------------------------------------------------------------------ real sources
+def _running_installation(plugin_id: str):
+    from provider_hub.kinds import TRANSLATOR
+    from provider_hub.state import running_installations
+
+    for installation in running_installations(kind=TRANSLATOR):
+        if installation.provider_id == plugin_id:
+            return installation
+    return None
+
+
+def _default_store():
+    from app.database import database
+
+    from .store import TranslatorStore
+
+    return TranslatorStore(database)
+
+
+def _sdk_root() -> Path:
+    """The folder that holds the vendored plugin SDK package."""
+    import provider_hub
+
+    return Path(provider_hub.__file__).resolve().parent / "sdk_dist"
+
+
+def _hub_dir() -> Path:
+    from provider_hub.state import provider_hub_dir
+
+    return Path(provider_hub_dir())
+
+
+def _config_dir() -> str:
+    from app.get_args import args
+
+    return args.config_dir
+
+
+def _reserved_ports() -> frozenset[int]:
+    """Bazarr+'s own port: never in a worker's set."""
+    from app.config import settings
+
+    try:
+        return frozenset({int(settings.general.port)})
+    except (AttributeError, TypeError, ValueError):
+        return frozenset()
+
+
+# ------------------------------------------------------------------------------------------------------ binding
+_lock = threading.Lock()
+_pool = None
+_port: workers.PoolWorkers | None = None
+
+
+def bind(pool, definitions: TranslatorWorkers | None = None) -> workers.PoolWorkers:
+    """Bind the dispatcher to ``pool``. Returns the port that was bound."""
+    global _pool, _port
+    definitions = definitions or TranslatorWorkers()
+    port = workers.PoolWorkers(pool, definitions.definition_for, one_call_for=definitions.one_call_for,
+                               ports_for=definitions.ports_for)
+    with _lock:
+        _pool, _port = pool, port
+    workers.bind(port)
+    return port
+
+
+def bind_when_enabled() -> bool:
+    """Bind the real workers when the runtime switch is on, once. True when a binding is in place.
+
+    Reads the switch itself and touches no table, so it runs at boot before the database is migrated.
+    """
+    from . import runtime_v2_flag
+
+    if not runtime_v2_flag():
+        return False
+    with _lock:
+        if _port is not None:
+            return True
+    from provider_hub.runtime.pool import WorkerPool
+
+    try:
+        pool = WorkerPool(config_dir=_config_dir())
+    except Exception:
+        logger.exception("Could not start the translator worker pool")
+        return False
+    bind(pool)
+    logger.debug("The translation runtime is bound to its translator workers")
+    return True
+
+
+def plugin_changed(plugin_id: str) -> None:
+    """A new release of the plugin is active, or it was turned off or removed: its worker is retired once the jobs it
+    holds are done, and the next start reads what is installed then. Nothing happens while no binding is in place."""
+    with _lock:
+        port = _port
+    if port is not None:
+        port.retire(plugin_id)
+
+
+def shutdown() -> None:
+    """Stop every translator worker and unbind. Safe to call more than once, or when nothing was bound."""
+    global _pool, _port
+    with _lock:
+        pool, port = _pool, _port
+        _pool = _port = None
+    if port is None:
+        return
+    workers.unbind()
+    try:
+        pool.close()
+    except Exception:
+        logger.warning("The translator worker pool did not close cleanly", exc_info=True)

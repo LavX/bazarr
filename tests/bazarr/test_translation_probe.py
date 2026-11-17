@@ -201,7 +201,7 @@ def test_a_worker_busy_with_a_translation_is_not_charged_and_the_person_is_told(
         "values": {"price_input_per_million": 1.0, "price_output_per_million": 2.0}})
     workers.bind(Busy({}))
     result = service.test_connection(app_service.connection_id)
-    assert result["ok"] is False and "busy translating" in result["message"]
+    assert result["ok"] is False and "Other tests are running" in result["message"]
     # Through the real probe: the busy worker never took the request, and the answer says so.
     assert result["outcome"] == "not_ready"
     rows = service._store.session.query(TableTranslationUsage).all()
@@ -220,30 +220,117 @@ def test_a_worker_that_would_not_start_took_nothing_and_the_answer_says_try_agai
     assert result == {"ok": False, "message": probe.UNSTARTED_TEST, "latency_ms": None, "outcome": "not_ready"}
 
 
-def _pool(handle_factory):
-    class Pool:
-        def __init__(self):
-            self.sent = []
+class _Pool:
+    """A pool whose one-call runs are scripted: ``outcome`` is an answer, or an exception to raise."""
 
-        def definition(self, key):
-            return object()
+    def __init__(self, outcome="answer"):
+        self.outcome = outcome
+        self.runs = []
 
-        def submit(self, key, op, params, **kwargs):
-            self.sent.append((key, op, params, kwargs))
-            return handle_factory()
+    def definition(self, key):
+        raise AssertionError("a short request never touches the long-lived worker")
 
-    return Pool()
+    def submit(self, *args, **kwargs):
+        raise AssertionError("a short request never touches the long-lived worker")
+
+    def run_once(self, definition, op, params, **kwargs):
+        self.runs.append((definition.key, op, params, kwargs))
+        if isinstance(self.outcome, BaseException):
+            raise self.outcome
+        return self.outcome
+
+
+def _definition(plugin_id):
+    from provider_hub.runtime.pool import WorkerDefinition
+
+    return WorkerDefinition(plugin_id, kind="translator", command=["unused"])
+
+
+def test_the_pool_port_sends_a_short_request_to_a_worker_of_its_own():
+    pool = _Pool()
+    port = workers.PoolWorkers(pool, _definition)
+    assert port.call("engine", "test", {"config": {}}, {"api_key": "x"}, timeout=5) == "answer"
+    assert pool.runs == [("engine" + workers.ONE_CALL_SUFFIX, "test", {"config": {}},
+                          {"secrets": {"api_key": "x"}, "timeout": 5})]
+    pool.runs.clear()
+    port.call("engine", "test", {}, {}, timeout=5)
+    assert pool.runs[-1][3]["secrets"] is None
+
+
+def test_a_plugin_with_no_worker_to_start_is_not_sent():
+    port = workers.PoolWorkers(_Pool(), lambda plugin_id: None)
+    with pytest.raises(workers.NotSent):
+        port.call("engine", "test", {}, {}, timeout=5)
+
+
+def _refusals():
+    from provider_hub.runtime import errors, frames, pool as pool_module
+
+    return [
+        pytest.param(errors.SessionBusy("busy"), True, id="session busy"),
+        pytest.param(pool_module.PoolUnavailable("full", code=pool_module.PoolCodes.POOL_FULL), True, id="pool full"),
+        pytest.param(pool_module.PoolUnavailable("no disk", code=pool_module.PoolCodes.DISK_RESERVE), False,
+                     id="pool unavailable"),
+        pytest.param(pool_module.UnknownWorker("who"), False, id="unknown worker"),
+        pytest.param(pool_module.PoolClosed("closed"), False, id="pool closed"),
+        pytest.param(ValueError("timeout must be a finite number of seconds, not negative"), False, id="bad timeout"),
+        pytest.param(ValueError("secrets must be a flat mapping of text names to non-empty text values"), False,
+                     id="bad secrets"),
+        pytest.param(frames.UnencodableFrame("not JSON"), False, id="unencodable frame"),
+        pytest.param(frames.FrameTooLarge("over its cap"), False, id="frame too large"),
+        pytest.param(frames.FrameError("a refused frame"), False, id="frame error"),
+    ]
+
+
+@pytest.mark.parametrize("error,busy", _refusals())
+def test_a_refusal_before_the_request_is_written_is_not_sent(error, busy):
+    port = workers.PoolWorkers(_Pool(error), _definition)
+    with pytest.raises(workers.NotSent) as raised:
+        port.call("engine", "test", {}, {}, timeout=5)
+    assert raised.value.busy is busy
+
+
+@pytest.mark.parametrize("error", ["worker killed", "timeout", "failed", "exited"])
+def test_a_failure_after_the_request_may_have_gone_out_is_not_a_refusal(error):
+    """It may have been acted on, so the test stays charged at its worst case."""
+    from provider_hub.runtime import errors, pool as pool_module
+
+    raised = {"worker killed": pool_module.WorkerKilled("over its memory limit", code="memory_limit"),
+              "timeout": errors.RequestTimeout("request exceeded its deadline"),
+              "failed": errors.RequestFailed("it failed", code="internal"),
+              "exited": errors.WorkerExited("the worker exited")}[error]
+    port = workers.PoolWorkers(_Pool(raised), _definition)
+    with pytest.raises(type(raised)):
+        port.call("engine", "test", {}, {}, timeout=5)
+
+
+@pytest.mark.parametrize("kind", ["value error", "unencodable frame", "frame error"])
+def test_a_refusal_the_wire_made_is_not_charged_through_the_real_probe(app_service, kind):
+    """The probe tells the service nothing was sent, so a priced test is settled at nothing."""
+    from app.database import TableTranslationUsage
+    from provider_hub.runtime import frames
+    from subtitles.tools.translate.runtime import probe
+
+    refused = {"value error": ValueError("timeout must be a finite number of seconds, not negative"),
+               "unencodable frame": frames.UnencodableFrame("not JSON"), "frame error": frames.FrameError("refused")}
+    service = app_service.service
+    service.update_connection(app_service.connection_id, {
+        "expected_revision": service._store.get_connection(app_service.connection_id, fresh=True).revision,
+        "values": {"price_input_per_million": 1.0, "price_output_per_million": 2.0}})
+    workers.bind(workers.PoolWorkers(_Pool(refused[kind]), _definition))
+    result = service.test_connection(app_service.connection_id)
+    assert result["ok"] is False and result["outcome"] == "not_ready" and probe.UNSTARTED_TEST in result["message"]
+    rows = service._store.session.query(TableTranslationUsage).all()
+    assert [(row.state, row.actual_micros) for row in rows] == [("settled", 0)]
 
 
 class _Handle:
-    """A request that answers, or runs on until it is cancelled and then takes ``cancel_takes`` seconds to stop."""
+    """A request that runs on until it is cancelled, and then takes ``cancel_takes`` seconds to stop."""
 
-    def __init__(self, answer=None, runs=False, cancel_takes=0.0):
-        self.answer, self.runs, self.cancel_takes = answer, runs, cancel_takes
+    def __init__(self, cancel_takes=0.0):
+        self.cancel_takes = cancel_takes
         self.cancelled = []
         self._ended = threading.Event()
-        if not runs:
-            self._ended.set()
 
     def done(self):
         return self._ended.is_set()
@@ -255,68 +342,32 @@ class _Handle:
     def wait(self, timeout=None):
         if not self._ended.wait(timeout):
             raise TimeoutError("still running")
-        if self.runs:
-            raise RuntimeError("cancelled")
-        return self.answer
+        raise RuntimeError("cancelled")
 
 
-def test_the_pool_port_sends_a_short_request_to_the_plugins_worker():
-    pool = _pool(lambda: _Handle("answer"))
-    port = workers.PoolWorkers(pool, lambda plugin_id: None)
-    assert port.call("engine", "test", {"config": {}}, {"api_key": "x"}, timeout=5) == "answer"
-    assert pool.sent == [("engine", "test", {"config": {}}, {"secrets": {"api_key": "x"}, "timeout": 5})]
-    pool.sent.clear()
-    port.call("engine", "test", {}, {}, timeout=5)
-    assert pool.sent[-1][3]["secrets"] is None
-
-
-@pytest.mark.parametrize("error_name,busy", [("SessionBusy", True), ("PoolUnavailable", False),
-                                             ("UnknownWorker", False)])
-def test_a_refusal_before_the_request_is_written_is_not_sent(error_name, busy):
-    from provider_hub.runtime import errors, pool as pool_module
-
-    error_class = getattr(errors, error_name, None) or getattr(pool_module, error_name)
-
-    class Refusing:
-        def definition(self, key):
-            return object()
-
-        def submit(self, *args, **kwargs):
-            raise error_class("refused")
-
-    port = workers.PoolWorkers(Refusing(), lambda plugin_id: None)
-    with pytest.raises(workers.NotSent) as raised:
-        port.call("engine", "test", {}, {}, timeout=5)
-    assert raised.value.busy is busy
-
-
-def test_a_request_that_runs_out_of_time_is_waited_for_until_the_session_says_it_is_gone(monkeypatch):
-    handle = _Handle(runs=True, cancel_takes=1.5)
-    port = workers.PoolWorkers(_pool(lambda: handle), lambda plugin_id: None)
-    monkeypatch.setattr(workers, "STOP_SETTLE_SECONDS", 30.0)
-    started = time.monotonic()
-    with pytest.raises(TimeoutError):
-        port.call("engine", "test", {}, {}, timeout=0.2)
-    assert handle.cancelled == ["timeout"]
-    assert handle.done() and time.monotonic() - started >= 1.5
-
-
-def test_a_second_test_cannot_start_while_a_slow_cancel_of_the_first_is_still_running(app_service, monkeypatch):
+def test_a_second_test_cannot_start_while_the_first_ones_worker_is_still_stopping(app_service, monkeypatch):
     """The claim on a connection is released when the probe thread ends, and the probe thread ends only when the
-    port returns, which it does after the session confirms the stopped request."""
+    port returns, which it does once the one-call worker is gone."""
     from subtitles.tools.translate.runtime import settings_service
 
     service = app_service.service
-    handle = _Handle(runs=True, cancel_takes=2.0)
-    workers.bind(workers.PoolWorkers(_pool(lambda: handle), lambda plugin_id: None))
+    release = threading.Event()
+
+    class Slow(_Pool):
+        def run_once(self, definition, op, params, **kwargs):
+            release.wait(10)
+            raise TimeoutError("request exceeded its deadline")
+
+    workers.bind(workers.PoolWorkers(Slow(), _definition))
     monkeypatch.setattr(settings_service, "TEST_TIMEOUT_SECONDS", 0.3)
     monkeypatch.setattr(settings_service, "TEST_TIMEOUT_GRACE_SECONDS", 0.2)
     first = service.test_connection(app_service.connection_id)
-    assert first["ok"] is False  # the first stopped waiting, its worker request is still being stopped
+    assert first["ok"] is False  # the first stopped waiting, its worker is still being stopped
     assert app_service.connection_id in settings_service._RUNNING_TESTS
     second = service.test_connection(app_service.connection_id)
     assert second["ok"] is False and "already running" in second["message"]
+    release.set()
     deadline = time.monotonic() + 10
     while app_service.connection_id in settings_service._RUNNING_TESTS and time.monotonic() < deadline:
         time.sleep(0.05)
-    assert handle.done() and app_service.connection_id not in settings_service._RUNNING_TESTS
+    assert app_service.connection_id not in settings_service._RUNNING_TESTS
