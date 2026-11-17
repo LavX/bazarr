@@ -106,7 +106,8 @@ def test_a_manual_pick_replaces_a_queued_job_and_ends_it_superseded(env, queue_s
 
 def test_a_request_that_follows_a_manual_pick_joins_the_pinned_job(env, queue_status):
     pick = enqueue.decide(SOURCE, "fr", pinned_connection_id=3, session=env.session, clock=env.clock)
-    later = enqueue.decide(SOURCE, "fr", session=env.session, clock=env.clock)  # the request that queues it
+    # The request that recorded the pick and queues the job owns it.
+    later = enqueue.decide(SOURCE, "fr", owns_pin=True, session=env.session, clock=env.clock)
     assert later.translator_job_id == pick.translator_job_id
     assert jobs_of(env).get(pick.translator_job_id).pinned_connection_id == 3
 

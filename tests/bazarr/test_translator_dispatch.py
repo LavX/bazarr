@@ -314,7 +314,8 @@ def test_the_pin_a_manual_pick_recorded_on_the_job_is_honoured(env):
     instance, first, second = two_connections(env)
     jobs = TranslationJobs(env.session, clock=env.clock)
     jobs.request(SOURCE, TARGET, manual=True, pinned_connection_id=second.id)
-    env.dispatcher().run(make_spec())  # the spec itself names no pin
+    # The library job's spec names no pin: the record the request made carries it.
+    env.dispatcher().run(make_spec(pin_from_job=True))
     assert env.served() == [str(second.id)]
 
 
@@ -349,7 +350,7 @@ def test_the_engine_a_manual_pick_recorded_on_the_job_is_honoured(env):
     pinned = env.engine(SECOND_PLUGIN, select=False)
     jobs = TranslationJobs(env.session, clock=env.clock)
     jobs.request(SOURCE, TARGET, manual=True, pinned_connection_id=pin_value(engine_id=pinned.id))
-    env.dispatcher().run(make_spec())  # the spec itself names no pin
+    env.dispatcher().run(make_spec(pin_from_job=True))  # the spec itself names no pin
     assert env.last_job().engine_instance_id == pinned.id
 
 
@@ -363,6 +364,76 @@ def test_a_pinned_engine_that_has_back_ends_or_is_gone_closes_the_job(env):
     with pytest.raises(GateClosed) as gone:
         env.dispatcher().run(make_spec(source_key="/media/other.en.srt", pinned_connection_id=pin_value(engine_id=404)))
     assert "no longer exists" in gone.value.reason and env.requests() == []
+
+
+def test_a_pick_respects_the_retry_time_the_back_end_reported(env):
+    from subtitles.tools.translate.runtime import failure as fail
+
+    instance, first, second = two_connections(env)
+    env.windows.note(second.id, fail.AttemptFailure("rate_limited", "slow down", retry_after=600.0))
+    with pytest.raises(DispatchFailed) as caught:
+        env.dispatcher().run(make_spec(pinned_connection_id=second.id))
+    assert caught.value.error_class == "rate_limited" and caught.value.retry_later is True
+    assert "asked to be left alone" in caught.value.message
+    assert env.requests() == [], "the back end was not asked inside its retry time"
+    job = env.last_job()
+    assert (job.state, job.error_class) == ("awaiting_retry", "rate_limited")
+    # Once the time has passed the pick runs.
+    env.monotonic.advance(601)
+    env.dispatcher().run(make_spec(pinned_connection_id=second.id, source_key="/media/other.en.srt"))
+    assert env.served() == [str(second.id)]
+
+
+def _fail_once_on(env, connection, code="rate_limited"):
+    env.scripts[PLUGIN] = {str(connection.id): [{"fail": {"code": code, "message": "slow", "retry_after": 30.0},
+                                                 "fail_at_batch": 1}, {}]}
+
+
+def test_a_new_pick_replaces_the_old_one_and_resets_its_checkpoints(env):
+    instance, first, second = two_connections(env)
+    _fail_once_on(env, first)
+    with pytest.raises(DispatchFailed):
+        env.dispatcher().run(make_spec(pinned_connection_id=first.id))
+    before = env.last_job()
+    assert before.pinned_connection_id == first.id and len(env.checkpoints()) == 1
+    env.monotonic.advance(60)
+    env.clock.advance(minutes=5)
+    env.dispatcher().run(make_spec(pinned_connection_id=second.id))
+    after = env.last_job()
+    assert after.id != before.id and after.pinned_connection_id == second.id
+    assert env.served()[-1] == str(second.id)
+    assert env.history(before)["status"] == "superseded"
+    assert jobs_state(env, before.id) == "superseded"
+
+
+def jobs_state(env, job_id):
+    return TranslationJobs(env.session, clock=env.clock).get(job_id).state
+
+
+def test_a_request_with_no_pick_does_not_inherit_the_pick_of_an_earlier_one(env):
+    instance, first, second = two_connections(env)
+    _fail_once_on(env, second)
+    with pytest.raises(DispatchFailed):
+        env.dispatcher().run(make_spec(pinned_connection_id=second.id))
+    row = env.last_job()
+    assert row.pinned_connection_id == second.id and row.state == "awaiting_retry"
+    env.monotonic.advance(60)
+    # The editor makes its record in the dispatcher and names no pick.
+    env.dispatcher().run(make_spec())
+    served = env.served()
+    assert served[-1] == str(first.id), "the automatic request went to the first back end, not the picked one"
+    assert env.last_job().pinned_connection_id is None and env.last_job().manual == 0
+
+
+def test_a_retry_of_the_same_pick_keeps_its_pick(env):
+    instance, first, second = two_connections(env)
+    _fail_once_on(env, second)
+    with pytest.raises(DispatchFailed):
+        env.dispatcher().run(make_spec(pinned_connection_id=second.id))
+    env.monotonic.advance(60)
+    job_id = env.last_job().id
+    env.dispatcher().run(make_spec(pinned_connection_id=second.id))
+    assert env.last_job().id == job_id and env.served()[-1] == str(second.id)
 
 
 def test_a_pinned_connection_that_cannot_be_used_closes_the_job(env):

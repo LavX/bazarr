@@ -18,6 +18,7 @@ from app.jobs_queue import jobs_queue, JobCancelled, JobFailed, UNEXPECTED_JOB_E
 from secret_store.scrub import scrub_text
 from utilities.job_dedupe import enqueue_or_existing
 
+from . import pick
 from .services.openrouter_translator import OpenRouterTranslatorService
 
 EDITOR_TRANSLATION_MODULE = 'subtitles.tools.translate.editor'
@@ -180,11 +181,18 @@ def translate_editor_lines(lines, positions, source_language, target_language, t
                                    progress_message='Sending to the AI Subtitle Translator')
 
     try:
-        service = _runtime_editor_service(media_type, pinned_connection_id) or OpenRouterTranslatorService(
-            source_srt_file=None, dest_srt_file=None, lang_obj=None, to_lang=None, from_lang=None,
-            media_type=media_type, video_path=None, orig_to_lang=None, forced=False, hi=False,
-            sonarr_series_id=None, sonarr_episode_id=None, radarr_id=None)
+        runtime_service = _runtime_editor_service(media_type, pinned_connection_id)
+        service = runtime_service
         try:
+            if runtime_service is None:
+                if pinned_connection_id is not None:
+                    # The new translator was switched off while the job waited: the old service cannot honour a
+                    # pick.
+                    raise JobFailed(pick.SWITCHED_OFF, reason=pick.SWITCHED_OFF_REASON, retryable=False)
+                service = OpenRouterTranslatorService(
+                    source_srt_file=None, dest_srt_file=None, lang_obj=None, to_lang=None, from_lang=None,
+                    media_type=media_type, video_path=None, orig_to_lang=None, forced=False, hi=False,
+                    sonarr_series_id=None, sonarr_episode_id=None, radarr_id=None)
             translated = service.submit_content(lines, source_language, target_language, title,
                                                 bazarr_job_id=job_id, mediaType=media_type)
         except JobCancelled:

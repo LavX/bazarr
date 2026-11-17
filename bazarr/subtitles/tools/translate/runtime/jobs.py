@@ -399,6 +399,11 @@ class TranslationJobs:
         return RequestResult(Outcome.REPLACED, new_id, replaced_job_id=replaced_id)
 
     # ------------------------------------------------------------- life cycle
+    def clear_pin(self, job_id: int) -> bool:
+        """The job is no longer a picked one: a request with no pick took it over, or the request that picked it
+        is gone. Its checkpoints stay, since the connection is not part of their key."""
+        return self._transition(job_id, (QUEUED, AWAITING_RETRY), None, manual=0, pinned_connection_id=None)
+
     def attach_queue_job(self, job_id: int, queue_job_id: int) -> bool:
         return self._transition(job_id, ACTIVE_STATES, None, queue_job_id=queue_job_id)
 

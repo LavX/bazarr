@@ -37,9 +37,14 @@ class Decision:
 
 
 def decide(source_key: str, to_lang: str, forced: bool = False, hi: bool = False, *,
-           pinned_connection_id: int | None = None, session=None,
+           pinned_connection_id: int | None = None, owns_pin: bool = False, session=None,
            clock: Callable[[], datetime] = datetime.now) -> Decision:
-    """Make or join the job for this request. Raises ``TranslationJobError`` with the reason when refused."""
+    """Make or join the job for this request. Raises ``TranslationJobError`` with the reason when refused.
+
+    A pick belongs to the request that made it. A request with no pick that finds a picked job which is not on the
+    queue any more, or whose retry time has come, takes it over as an ordinary job and clears the pick. ``owns_pin``
+    is for the request that has just recorded the pick itself: it joins the job it made, pick and all.
+    """
     from .jobs import TranslationJobError
 
     if session is None:
@@ -61,6 +66,14 @@ def decide(source_key: str, to_lang: str, forced: bool = False, hi: bool = False
     row = jobs.get(result.job_id)
     if result.outcome in (Outcome.CREATED, Outcome.REPLACED):
         return Decision(QUEUE, row.id)
+    if pinned_connection_id is None and not owns_pin and row.pinned_connection_id is not None \
+            and row.state in (QUEUED, AWAITING_RETRY) and not _live(row):
+        # A request with no pick finds a picked job that is not on the queue any more (its queue job was removed or
+        # died before it ran) or that waits for its retry: the pick belongs to the request that made it, so this
+        # job is queued again as an ordinary one.
+        if row.state != AWAITING_RETRY or row.retry_at is None or row.retry_at <= clock():
+            jobs.clear_pin(row.id)
+            row = jobs.get(row.id)
     # Joined: an equal request already has a job.
     if row.state == AWAITING_RETRY:
         if row.retry_at is not None and row.retry_at > clock():
@@ -72,6 +85,12 @@ def decide(source_key: str, to_lang: str, forced: bool = False, hi: bool = False
     if row.state == RUNNING:
         return Decision(FOLLOW, row.id)  # it runs, but no queue job of the queue's is known for it
     return Decision(QUEUE, row.id)
+
+
+def _live(row) -> bool:
+    """Whether the queue still has the job this record says it is on, pending or running."""
+    return (row.state in (QUEUED, RUNNING) and row.queue_job_id is not None
+            and JobsQueuePort().status(row.queue_job_id) in ("pending", "running"))
 
 
 def attach_for(queue_job_id, source_key: str, to_lang: str, forced: bool = False, hi: bool = False, *,

@@ -185,7 +185,7 @@ class RuntimeTranslatorService:
                                  self.arr_instance_id, self.sports_operation),
             history_media={"media_type": self.media_type, "media_id": media_id, "media_title": title or None,
                            "arr_instance_id": self.arr_instance_id},
-            check_cancel=self._check, progress=self._progress, legacy=self._legacy)
+            pin_from_job=True, check_cancel=self._check, progress=self._progress, legacy=self._legacy)
         try:
             outcome = (self._dispatcher or Dispatcher()).run(spec)
         except DispatchFailed as failed:
