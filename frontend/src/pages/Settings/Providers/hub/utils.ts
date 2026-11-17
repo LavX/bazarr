@@ -10,6 +10,7 @@ import {
 import type {
   ProviderHubCatalog,
   ProviderHubCatalogEntry,
+  ProviderHubCatalogSource,
   ProviderHubInstallation,
   ProviderHubManifest,
 } from "@/apis/raw/providerHub";
@@ -358,6 +359,28 @@ export function formatAbsoluteTime(iso: string | null | undefined): string {
     .toISOString()
     .replace("T", " ")
     .replace(/\.\d+Z$/, " UTC");
+}
+
+/**
+ * What to tell the user about the origin of a source's catalog, or null when
+ * it came from GitHub. The mirror carries the same signed catalog, so the
+ * note is a plain statement of where it was read from, with the time GitHub
+ * says it will answer again when it said one.
+ */
+export function describeCatalogOrigin(
+  source: Pick<ProviderHubCatalogSource, "last_origin" | "last_failure">,
+  now: Date = new Date(),
+): string | null {
+  if (source.last_origin !== "pages") return null;
+  const base =
+    "This catalog was read from the GitHub Pages mirror because GitHub did not answer.";
+  const retryAt = source.last_failure?.retry_at;
+  const reset = retryAt ? new Date(retryAt) : null;
+  if (!reset || Number.isNaN(reset.getTime())) return base;
+  if (reset.getTime() > now.getTime()) {
+    return `${base} GitHub allows requests again at ${formatAbsoluteTime(retryAt)}.`;
+  }
+  return `${base} GitHub's limit has passed, so the next refresh asks GitHub first.`;
 }
 
 export function formatDuration(durationMs: number | null | undefined): string {

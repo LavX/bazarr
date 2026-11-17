@@ -21,6 +21,24 @@ export interface ProviderHubCatalogSource {
    * image, because the source has not refreshed successfully yet.
    */
   catalog_status?: string | null;
+  /**
+   * Where the catalog of the last refresh came from: "raw" for GitHub, or
+   * "pages" for the mirror that stands in when GitHub refuses. Absent for a
+   * source that never uses the mirror.
+   */
+  last_origin?: "raw" | "pages" | null;
+  /** Why the last refresh moved on from GitHub, when it did. */
+  last_failure?: ProviderHubCatalogFailure | null;
+}
+
+export interface ProviderHubCatalogFailure {
+  surface: string;
+  origin: string;
+  kind: string;
+  status?: number | null;
+  at?: string | null;
+  /** When GitHub says it will answer again, if it said. */
+  retry_at?: string | null;
 }
 
 export interface ProviderHubCatalogEntry {

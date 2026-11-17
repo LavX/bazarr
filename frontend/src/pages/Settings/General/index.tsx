@@ -354,6 +354,17 @@ const SettingsGeneralView: FunctionComponent = () => {
           Installing or replacing providers manually from the Provider Hub
           Marketplace always works regardless of this setting.
         </Message>
+        <Check
+          label="Read the catalog from the GitHub Pages mirror when GitHub refuses"
+          settingKey="settings-general-provider_hub_allow_fallback"
+        ></Check>
+        <Message>
+          When GitHub rate limits or cannot serve the official catalog, Bazarr
+          reads the same signed catalog and provider files from a GitHub Pages
+          mirror, and checks every file the way it checks one from GitHub. Only
+          the official catalog uses the mirror. On by default. Turn it off to
+          read from GitHub only.
+        </Message>
         <Number
           label="Default worker timeout (seconds)"
           settingKey="settings-general-provider_hub_worker_timeout"
