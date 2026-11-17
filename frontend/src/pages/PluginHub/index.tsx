@@ -1,4 +1,10 @@
-import { FunctionComponent, useCallback, useMemo, useState } from "react";
+import {
+  FunctionComponent,
+  useCallback,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { useSearchParams } from "react-router";
 import {
   Alert,
@@ -9,6 +15,7 @@ import {
   Tabs,
 } from "@mantine/core";
 import { useDocumentTitle } from "@mantine/hooks";
+import { showNotification } from "@mantine/notifications";
 import {
   faListCheck,
   faPlug,
@@ -20,7 +27,12 @@ import { useQuery } from "@tanstack/react-query";
 import {
   usePluginCatalog,
   usePluginCheckUpdates,
+  usePluginDismissReview,
   usePluginInstallations,
+  usePluginJobs,
+  usePluginRemove,
+  usePluginRepair,
+  usePluginSetEnabled,
 } from "@/apis/hooks/plugins";
 import { useAppTitle } from "@/apis/hooks/site";
 import { useSystemStatus } from "@/apis/hooks/system";
@@ -28,10 +40,16 @@ import { QueryKeys } from "@/apis/queries/keys";
 import api from "@/apis/raw";
 import { withInlineErrors } from "@/apis/raw/inlineWrites";
 import { SearchBar } from "@/components/hub/SearchBar";
+import { useGatedAction } from "@/components/modals/PasswordConfirmModal";
 import {
   PluginCostCaps,
   usePluginConsentFlow,
 } from "@/components/plugin-consent";
+import { needsPassword, reasonOf } from "@/components/plugin-consent/refusal";
+import { notification } from "@/modules/notification";
+import { explainFailure } from "./components/failure";
+import { LogDialog } from "./components/LogDialog";
+import { RemoveDialog } from "./components/RemoveDialog";
 import { ActivityPanel } from "./ActivityPanel";
 import {
   entryKind,
@@ -48,6 +66,7 @@ import {
 } from "./model";
 import { InstalledPanel, MarketplacePanel, UpdatesPanel } from "./Panels";
 import { SourceBand } from "./SourceBand";
+import { openJobs } from "./status";
 import styles from "./PluginHub.module.scss";
 
 type TabKey = "marketplace" | "installed" | "updates" | "activity";
@@ -134,6 +153,32 @@ const PluginHubView: FunctionComponent = () => {
     },
   });
 
+  const jobs = usePluginJobs();
+  const open = useMemo(() => openJobs(jobs.data), [jobs.data]);
+  const setEnabled = usePluginSetEnabled();
+  const repair = usePluginRepair();
+  const remove = usePluginRemove();
+  const dismissReview = usePluginDismissReview();
+  const runGated = useGatedAction();
+  const [working, setWorking] = useState<string | null>(null);
+  const [logOf, setLogOf] = useState<PluginRow | null>(null);
+  const [removing, setRemoving] = useState<PluginRow | null>(null);
+  const [removeProblem, setRemoveProblem] = useState("");
+  // Focus goes back to the button that opened a dialog when it is not there any more.
+  const lastTrigger = useRef<HTMLElement | null>(null);
+  const rememberTrigger = () => {
+    lastTrigger.current =
+      document.activeElement instanceof HTMLElement
+        ? document.activeElement
+        : null;
+  };
+  const restoreFocus = () => {
+    const trigger = lastTrigger.current;
+    if (trigger && document.body.contains(trigger)) {
+      trigger.focus();
+    }
+  };
+
   const setParam = useCallback(
     (key: "tab" | "type", value: string, fallback: string) => {
       const updated = new URLSearchParams(params);
@@ -204,11 +249,107 @@ const PluginHubView: FunctionComponent = () => {
   };
   const update = (row: PluginRow) =>
     void flow.begin({ action: "update", pluginId: row.id, name: row.name });
+  /** One request that starts code, behind the password question, asked again once if the server still wanted it. */
+  const gated = async (send: () => Promise<unknown>, label: string) => {
+    try {
+      return await runGated(async () => void (await send()), label);
+    } catch (error) {
+      if (!needsPassword(error)) {
+        throw error;
+      }
+      return runGated(async () => void (await send()), label);
+    }
+  };
+  /** Runs one action for one plugin and says in words what happened. */
+  const perform = async (
+    row: PluginRow,
+    run: () => Promise<unknown>,
+    done: string,
+    failed: string,
+  ) => {
+    if (working !== null) {
+      return false;
+    }
+    setWorking(row.id);
+    try {
+      await run();
+      showNotification(notification.info(done, row.name));
+      return true;
+    } catch (error) {
+      const copy = explainFailure(reasonOf(error));
+      showNotification(
+        notification.error(
+          failed,
+          copy ? `${copy.cause} ${copy.next}` : `${row.name} did not change.`,
+        ),
+      );
+      return false;
+    } finally {
+      setWorking(null);
+    }
+  };
+  const toggle = (row: PluginRow) => {
+    const turnOn = row.installation?.enabled === false;
+    void perform(
+      row,
+      () => setEnabled.mutateAsync({ id: row.id, enabled: turnOn }),
+      turnOn ? "Turned on" : "Turned off",
+      turnOn ? "Could not turn it on" : "Could not turn it off",
+    );
+  };
+  const doRepair = (row: PluginRow) =>
+    void perform(
+      row,
+      () => gated(() => repair.mutateAsync(row.id), `repair ${row.name}`),
+      "Repaired",
+      "The repair did not finish",
+    );
+  const askRemove = (row: PluginRow) => {
+    rememberTrigger();
+    setRemoveProblem("");
+    setRemoving(row);
+  };
+  const confirmRemove = async () => {
+    if (!removing || working !== null) {
+      return;
+    }
+    setWorking(removing.id);
+    setRemoveProblem("");
+    try {
+      await remove.mutateAsync(removing.id);
+      showNotification(notification.info("Removed", removing.name));
+      setRemoving(null);
+    } catch (error) {
+      const copy = explainFailure(reasonOf(error));
+      setRemoveProblem(
+        copy
+          ? `${copy.cause} ${copy.next}`
+          : `${removing.name} could not be removed.`,
+      );
+    } finally {
+      setWorking(null);
+    }
+  };
+  const showLog = (row: PluginRow) => {
+    rememberTrigger();
+    setLogOf(row);
+  };
   const actions = {
     sandbox,
     onInstall: install,
     onUpdate: update,
     updating: flow.updating,
+    installations: installed,
+    openJobs: open,
+    working,
+    dismissing: dismissReview.isPending
+      ? (dismissReview.variables ?? null)
+      : null,
+    onToggle: toggle,
+    onRepair: doRepair,
+    onLog: showLog,
+    onRemove: askRemove,
+    onDismissReview: (row: PluginRow) => dismissReview.mutate(row.id),
   };
 
   if (catalog.isLoading && !catalog.data) {
@@ -381,6 +522,19 @@ const PluginHubView: FunctionComponent = () => {
         </Tabs.Panel>
       </Tabs>
       {flow.dialog}
+      <RemoveDialog
+        row={removing}
+        busy={working !== null && working === removing?.id}
+        problem={removeProblem}
+        onConfirm={() => void confirmRemove()}
+        onClose={() => setRemoving(null)}
+        onClosed={restoreFocus}
+      />
+      <LogDialog
+        row={logOf}
+        onClose={() => setLogOf(null)}
+        onClosed={restoreFocus}
+      />
     </Container>
   );
 };

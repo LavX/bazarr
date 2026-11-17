@@ -58,10 +58,28 @@ export function usePluginInstallation(id: string | null) {
   });
 }
 
+/** A job that has not finished. */
+export const jobIsOpen = (job: { state?: string }) =>
+  job.state === "pending" || job.state === "running";
+
 export function usePluginJobs() {
   return useQuery({
     queryKey: [...pluginsKey, QueryKeys.Jobs],
     queryFn: () => api.plugins.jobs(),
+    // Cards say "Installing" or "Rebuilding" while a job runs, so the list is read again until it ends.
+    refetchInterval: (query) =>
+      query.state.data?.some(jobIsOpen) ? 3_000 : false,
+  });
+}
+
+/** The recent output of one plugin. Asked only while a person has the log open. */
+export function usePluginLog(id: string | null) {
+  return useQuery({
+    queryKey: [...pluginsKey, "log", id],
+    queryFn: () => api.plugins.log(id!),
+    enabled: id !== null,
+    gcTime: 0,
+    refetchInterval: 5_000,
   });
 }
 
@@ -159,6 +177,57 @@ export function usePluginApplyUpdate({
       },
     ),
     // A failed update is recorded on the installation, so the lists are read again either way.
+    onSettled: refresh,
+  });
+}
+
+/** Turn a plugin on or off. A refusal (a plugin that needs it is on) is reported by the caller. */
+export function usePluginSetEnabled() {
+  const refresh = useRefreshAfterChange();
+  return useMutation({
+    mutationKey: [...pluginsKey, QueryKeys.Actions, "set-enabled"],
+    mutationFn: ({ id, enabled }: { id: string; enabled: boolean }) =>
+      withInlineErrors(() => api.plugins.setEnabled(id, enabled)),
+    onSettled: refresh,
+  });
+}
+
+/** Rebuild the plugin's environment. Resolves when the job has finished and rejects with its reason. */
+export function usePluginRepair() {
+  const client = useQueryClient();
+  const refresh = useRefreshAfterChange();
+  return useMutation({
+    mutationKey: [...pluginsKey, QueryKeys.Actions, "repair"],
+    mutationFn: async (id: string) => {
+      const { job_id: jobId } = await withInlineErrors(() =>
+        api.plugins.repair(id),
+      );
+      await waitForJob(client, jobId);
+    },
+    onSettled: refresh,
+  });
+}
+
+export function usePluginRemove() {
+  const client = useQueryClient();
+  const refresh = useRefreshAfterChange();
+  return useMutation({
+    mutationKey: [...pluginsKey, QueryKeys.Actions, "remove"],
+    mutationFn: async (id: string) => {
+      const { job_id: jobId } = await withInlineErrors(() =>
+        api.plugins.remove(id),
+      );
+      await waitForJob(client, jobId);
+    },
+    onSettled: refresh,
+  });
+}
+
+export function usePluginDismissReview() {
+  const refresh = useRefreshAfterChange();
+  return useMutation({
+    mutationKey: [...pluginsKey, QueryKeys.Actions, "dismiss-review"],
+    mutationFn: (id: string) => api.plugins.dismissReview(id),
     onSettled: refresh,
   });
 }

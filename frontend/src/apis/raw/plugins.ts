@@ -116,11 +116,45 @@ export type PluginCatalog = {
   entries: PluginCatalogEntry[];
 };
 
+/**
+ * How a plugin's worker is doing: starting, healthy (running a request), idle (up and waiting),
+ * backing_off (the last start or run failed and requests wait out a delay), broken, stopping or stopped.
+ */
+export type PluginRuntimePhase =
+  | "starting"
+  | "healthy"
+  | "idle"
+  | "backing_off"
+  | "broken"
+  | "stopping"
+  | "stopped";
+
+export interface PluginRuntime {
+  phase: PluginRuntimePhase;
+  in_flight: number;
+  /** Seconds until a request can be tried again, while backing off. */
+  retry_after: number | null;
+  last_error: string | null;
+  starts: number;
+  crashes: number;
+  memory_bytes: number;
+}
+
 export interface PluginInstallation extends ProviderHubInstallation {
   /** Absent on a row written before kinds existed, which is a subtitle provider. */
   kind?: string;
   enabled?: boolean;
   development_source?: boolean;
+  /** Absent while the plugin has no worker, or nothing is bound to run one. */
+  runtime?: PluginRuntime;
+  /** True while a plugin installed for the person has a review notice they have not dismissed. */
+  review_pending?: boolean;
+}
+
+/** A plugin's recent output, secrets already scrubbed. */
+export interface PluginLog {
+  lines: string[];
+  last_error: string | null;
 }
 
 export type PluginJob = ProviderHubJob;
@@ -200,6 +234,36 @@ class PluginsApi extends BaseApi {
   async jobs() {
     const response = await this.get<{ data: PluginJob[] }>("/jobs");
     return response.data;
+  }
+
+  async setEnabled(id: string, enabled: boolean) {
+    const response = await this.patchRaw<PluginInstallation>(
+      `/installations/${id}`,
+      { enabled },
+    );
+    return response.data;
+  }
+
+  async repair(id: string) {
+    const response = await this.postRaw<ProviderHubJobRef>(
+      `/installations/${id}/repair`,
+    );
+    return response.data;
+  }
+
+  async remove(id: string) {
+    const response = await this.delete<ProviderHubJobRef>(
+      `/installations/${id}`,
+    );
+    return response.data;
+  }
+
+  log(id: string) {
+    return this.get<PluginLog>(`/installations/${id}/log`);
+  }
+
+  async dismissReview(id: string) {
+    await this.postRaw(`/installations/${id}/review/dismiss`);
   }
 }
 

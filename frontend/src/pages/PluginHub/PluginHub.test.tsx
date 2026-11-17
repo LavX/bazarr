@@ -147,7 +147,9 @@ describe("the tabs", () => {
       screen.getAllByRole("list", { name: "Dependencies" })[0],
     );
     expect(dependencies.getByText(/Opencode back end/)).toBeVisible();
-    expect(screen.getAllByText("Active")).toHaveLength(2);
+    // The translator has a newer release listed, so its status says that, and the back end is active.
+    expect(screen.getByText("Update available")).toBeVisible();
+    expect(screen.getByText("Active")).toBeVisible();
     // Installed cards offer no install.
     expect(
       screen.queryByRole("button", { name: /^Install / }),

@@ -7,35 +7,53 @@ import {
   faStore,
 } from "@fortawesome/free-solid-svg-icons";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
+import type { PluginInstallation } from "@/apis/raw/plugins";
 import { EmptyState } from "@/components/hub/EmptyState";
 import { KIND_PURPOSE, PluginRow, TypeFilter } from "./model";
-import { PluginCard } from "./PluginCard";
+import { PluginCard, PluginCardProps } from "./PluginCard";
+import { enabledDependents } from "./status";
 import styles from "@/components/hub/hub.module.scss";
 
-export interface CardActions {
-  sandbox: Parameters<typeof PluginCard>[0]["sandbox"];
-  onInstall: (row: PluginRow) => void;
-  onUpdate: (row: PluginRow) => void;
+export interface CardActions extends Pick<
+  PluginCardProps,
+  | "sandbox"
+  | "onInstall"
+  | "onUpdate"
+  | "openJobs"
+  | "onToggle"
+  | "onRepair"
+  | "onLog"
+  | "onRemove"
+  | "onDismissReview"
+> {
   updating: string | null;
+  /** Every installation, to tell which plugins need which. */
+  installations: PluginInstallation[];
+  /** The plugin a turn on or off, a repair or a removal is on its way for. */
+  working: string | null;
+  /** The plugin whose review notice is being dismissed. */
+  dismissing: string | null;
 }
 
 const Grid: FunctionComponent<{ rows: PluginRow[] } & CardActions> = ({
   rows,
-  sandbox,
-  onInstall,
-  onUpdate,
   updating,
+  installations,
+  working,
+  dismissing,
+  ...actions
 }) => (
   <div className={styles.cardGrid}>
     {rows.map((row) => (
       <PluginCard
         key={`${row.key}-${row.version}`}
         row={row}
-        sandbox={sandbox}
-        onInstall={onInstall}
-        onUpdate={onUpdate}
+        {...actions}
         updating={updating === row.id}
         blocked={updating !== null && updating !== row.id}
+        enabledDependents={enabledDependents(row, installations)}
+        working={working === row.id}
+        dismissing={dismissing === row.id}
       />
     ))}
   </div>
