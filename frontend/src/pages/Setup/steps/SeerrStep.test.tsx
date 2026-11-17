@@ -5,6 +5,7 @@ import { useSeerrTestConnectionMutation } from "@/apis/hooks/seerr";
 import { StepBusyProvider, useStepBusy } from "@/pages/Setup/useStepBusy";
 import { customRender, screen } from "@/tests";
 import SeerrStep from "./SeerrStep";
+import { NOTHING_WRITTEN } from "./types";
 
 // Keep the real barrel (AllProviders' ThemeLoader reads useSystemSettings from
 // it) and override only the hooks the step drives.
@@ -149,7 +150,8 @@ describe("SeerrStep", () => {
       },
       expect.anything(),
     );
-    expect(onNext).toHaveBeenCalled();
+    // A write is an answer: nothing is passed.
+    expect(onNext).toHaveBeenCalledWith();
   });
 
   it("Continue with nothing filled in writes no settings", async () => {
@@ -161,7 +163,7 @@ describe("SeerrStep", () => {
     );
 
     expect(mutate).not.toHaveBeenCalled();
-    expect(onNext).toHaveBeenCalled();
+    expect(onNext).toHaveBeenCalledWith(NOTHING_WRITTEN);
   });
 
   it("tests the typed connection", async () => {

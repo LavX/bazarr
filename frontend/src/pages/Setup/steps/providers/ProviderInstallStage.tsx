@@ -37,6 +37,7 @@ import type {
 import { parseManifest } from "@/components/hub/utils";
 import { useGatedAction } from "@/components/modals/PasswordConfirmModal";
 import StepLayout from "@/pages/Setup/StepLayout";
+import { NOTHING_WRITTEN, type StepOutcome } from "@/pages/Setup/steps/types";
 import { useReportStepBusy } from "@/pages/Setup/useStepBusy";
 import { isRecommendedProvider } from "./recommended";
 import { redirectToSetup } from "./redirect";
@@ -80,7 +81,7 @@ export interface ProviderInstallStageProps {
   // is where its only control gets its choices, so an install that cannot
   // reach it has nothing to select, "Install & restart" stays disabled, and
   // the rest of the wizard was unreachable. Not a way to decline the step.
-  onNext: () => void;
+  onNext: (outcome?: StepOutcome) => void;
   onBack?: () => void;
 }
 
@@ -841,7 +842,10 @@ const ProviderInstallStage: FC<ProviderInstallStageProps> = ({
                 Retry
               </Button>
               {!hasInstalled && (
-                <Button variant="subtle" onClick={onNext}>
+                <Button
+                  variant="subtle"
+                  onClick={() => onNext(NOTHING_WRITTEN)}
+                >
                   Continue without providers
                 </Button>
               )}
@@ -860,7 +864,7 @@ const ProviderInstallStage: FC<ProviderInstallStageProps> = ({
                 A catalog that failed to load has its own branch above, so this
                 one is only ever a catalog that answered with nothing. */}
             {!hasInstalled && (
-              <Button variant="default" onClick={onNext}>
+              <Button variant="default" onClick={() => onNext(NOTHING_WRITTEN)}>
                 Continue without providers
               </Button>
             )}

@@ -34,7 +34,7 @@ import {
 import StepLayout from "@/pages/Setup/StepLayout";
 import { useReportStepBusy } from "@/pages/Setup/useStepBusy";
 import { useStepDraft } from "@/pages/Setup/useStepDrafts";
-import type { WizardStepProps } from "./types";
+import { NOTHING_WRITTEN, type WizardStepProps } from "./types";
 
 export interface ArrStepProps extends WizardStepProps {
   kind: "sonarr" | "radarr" | "sportarr";
@@ -347,7 +347,7 @@ const ArrStep: FC<ArrStepProps> = ({ kind, onNext, onBack, stepKey }) => {
       return;
     }
     if (!touched) {
-      onNext();
+      onNext(NOTHING_WRITTEN);
       return;
     }
     const found = validate();

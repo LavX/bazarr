@@ -11,7 +11,7 @@ import {
 import { useSettingsMutation } from "@/apis/hooks";
 import StepLayout from "@/pages/Setup/StepLayout";
 import { useReportStepBusy } from "@/pages/Setup/useStepBusy";
-import type { WizardStepProps } from "./types";
+import { NOTHING_WRITTEN, type WizardStepProps } from "./types";
 
 /**
  * Optional onboarding step for the AI translator. It ships with every install
@@ -44,7 +44,7 @@ const TranslatorStep: FC<WizardStepProps> = ({ onNext, onBack }) => {
 
   const handleContinue = () => {
     if (trimmedKey.length === 0) {
-      onNext();
+      onNext(NOTHING_WRITTEN);
       return;
     }
     setSaveFailed(false);

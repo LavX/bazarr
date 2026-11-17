@@ -24,7 +24,8 @@ import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import { useQueryClient } from "@tanstack/react-query";
 import { useSettingsMutation } from "@/apis/hooks";
 import { useInstanceName } from "@/apis/hooks/site";
-import { PHASE_LABELS, WIZARD_PHASES } from "./steps/types";
+import { useTranslationRuntime } from "@/apis/hooks/translation";
+import { PHASE_LABELS, type StepOutcome, WIZARD_PHASES } from "./steps/types";
 import { clearPersistedConnectionTests } from "./connectionTests";
 import { settleSetupComplete } from "./setupCompleteCache";
 import { buildSteps } from "./steps";
@@ -96,9 +97,12 @@ const OnboardingWizardBody: FunctionComponent = () => {
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [signature],
   );
+  // The translation step offers the new engines while the new translator is
+  // on, and is the step it always was while it is off.
+  const translationRuntime = useTranslationRuntime();
   const steps = useMemo(
-    () => buildSteps({ intent, mediaServers }),
-    [intent, mediaServers],
+    () => buildSteps({ intent, mediaServers, translationRuntime }),
+    [intent, mediaServers, translationRuntime],
   );
 
   const { index, step: current, goTo, reset } = useWizardStep(steps);
@@ -222,11 +226,18 @@ const OnboardingWizardBody: FunctionComponent = () => {
   latest.current = { steps, index };
   const movesFor = useCallback(
     (forStep: string, forVisit: number) => ({
-      next: () => {
+      next: (outcome?: StepOutcome) => {
         if (shownVisit.current === forVisit) {
-          // The step's own Continue is an answer, whatever it wrote, so an
-          // earlier skip of this step no longer stands.
-          markAnswered(forStep);
+          // The step's own Continue is an answer unless the step says nothing
+          // was written, so an earlier skip of this step no longer stands. A
+          // Continue that wrote nothing is a walk past, drawn like a skip:
+          // reading `=== false` keeps a click event handed in by mistake an
+          // answer.
+          if (outcome?.answered === false) {
+            markSkipped(forStep);
+          } else {
+            markAnswered(forStep);
+          }
           moves.current.next();
         }
       },
@@ -236,7 +247,7 @@ const OnboardingWizardBody: FunctionComponent = () => {
         }
       },
     }),
-    [markAnswered],
+    [markAnswered, markSkipped],
   );
 
   useEffect(() => {

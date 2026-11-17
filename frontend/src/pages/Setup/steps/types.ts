@@ -35,8 +35,21 @@ export const PHASE_LABELS: Record<WizardPhase, string> = {
   finish: "Finish",
 };
 
+/**
+ * What a step tells the shell when it advances. `answered: false` says the
+ * reader pressed Continue and nothing was written: the shell then draws the
+ * step as skipped on the rail, the same as the skip control, instead of as
+ * done. Anything else, including no argument, is an answer.
+ */
+export interface StepOutcome {
+  answered?: boolean;
+}
+
+/** The outcome of a Continue that wrote nothing. */
+export const NOTHING_WRITTEN: StepOutcome = { answered: false };
+
 export interface WizardStepProps {
-  onNext: () => void; // advance + persist
+  onNext: (outcome?: StepOutcome) => void; // advance + persist
   onBack?: () => void; // go back one step
   // Which media server draft this step configures. Only the generated media
   // server steps carry one; every other step ignores it.

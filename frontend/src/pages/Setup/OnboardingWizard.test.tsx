@@ -80,6 +80,10 @@ describe("OnboardingWizardView", () => {
     mockedSettingsMutation.mockReturnValue({
       mutate,
     } as unknown as ReturnType<typeof useSettingsMutation>);
+    // The shell asks whether the new translator is on, to pick the translation step.
+    server.use(
+      http.get("/api/system/status", () => HttpResponse.json({ data: {} })),
+    );
   });
 
   afterEach(() => {
@@ -1026,6 +1030,10 @@ describe("the rail, visited and completed", () => {
     mockedSettingsMutation.mockReturnValue({
       mutate,
     } as unknown as ReturnType<typeof useSettingsMutation>);
+    // The shell asks whether the new translator is on, to pick the translation step.
+    server.use(
+      http.get("/api/system/status", () => HttpResponse.json({ data: {} })),
+    );
   });
 
   afterEach(() => {
@@ -1106,6 +1114,85 @@ describe("the rail, visited and completed", () => {
     );
   });
 
+  it("draws no check for a phase whose steps were all continued with nothing written", async () => {
+    // Continue on a step the reader left empty writes nothing, so it was
+    // walked past exactly as a skip is, and the rail says so.
+    const user = userEvent.setup();
+    customRender(<OnboardingWizardView />);
+    await user.click(screen.getByRole("button", { name: /get started/i }));
+    await user.click(
+      await screen.findByRole("radio", { name: /sonarr, radarr or sportarr/i }),
+    );
+    await user.click(screen.getByRole("button", { name: /^continue$/i }));
+
+    for (const arr of ["Sonarr", "Radarr", "Sportarr"]) {
+      await user.click(
+        await screen.findByRole("button", {
+          name: new RegExp(`^continue without ${arr}$`, "i"),
+        }),
+      );
+    }
+    // The picker's own answer is a deliberate "no server", so it is left to
+    // the shell's control here, and Requests is continued empty.
+    await user.click(
+      await screen.findByRole("button", { name: /do this later/i }),
+    );
+    await user.click(
+      await screen.findByRole("button", { name: /continue without requests/i }),
+    );
+    await screen.findByRole("heading", { name: /subtitle languages/i });
+
+    expect(checks()).toHaveLength(1);
+    expect(dotFor("2")).toHaveClass(wizardStyles.dotSkipped);
+    expect(rail()).toHaveAttribute(
+      "aria-valuetext",
+      expect.stringContaining("skipped: Connect"),
+    );
+  });
+
+  it("counts a step as answered once its Continue wrote something", async () => {
+    const user = userEvent.setup();
+    writeLandsAtOnce();
+    localStorage.setItem("bazarr.onboarding.intent", "discover");
+    localStorage.setItem("bazarr.onboarding.step", "translator");
+    localStorage.setItem(
+      "bazarr.onboarding.skipped",
+      JSON.stringify(["translator"]),
+    );
+    customRender(<OnboardingWizardView />);
+
+    await user.type(
+      await screen.findByLabelText(/openrouter api key/i),
+      "sk-or-typed",
+    );
+    await user.click(screen.getByRole("button", { name: /^continue$/i }));
+    await screen.findByRole("heading", { name: /general basics/i });
+
+    expect(mutate).toHaveBeenCalled();
+    expect(
+      JSON.parse(localStorage.getItem("bazarr.onboarding.skipped") ?? "[]"),
+    ).toEqual([]);
+  });
+
+  it("counts a step as walked past once its Continue wrote nothing", async () => {
+    const user = userEvent.setup();
+    localStorage.setItem("bazarr.onboarding.intent", "discover");
+    localStorage.setItem("bazarr.onboarding.step", "translator");
+    customRender(<OnboardingWizardView />);
+
+    await user.click(
+      await screen.findByRole("button", {
+        name: /continue without translation/i,
+      }),
+    );
+    await screen.findByRole("heading", { name: /general basics/i });
+
+    expect(mutate).not.toHaveBeenCalled();
+    expect(
+      JSON.parse(localStorage.getItem("bazarr.onboarding.skipped") ?? "[]"),
+    ).toEqual(["translator"]);
+  });
+
   it("remembers what was skipped across a reload", async () => {
     // The providers step restarts Bazarr+ and the wizard resumes through a
     // hard redirect, so the record cannot live in memory alone.
@@ -1144,6 +1231,66 @@ describe("the rail, visited and completed", () => {
     expect(
       JSON.parse(localStorage.getItem("bazarr.onboarding.skipped") ?? "[]"),
     ).toEqual(["seerr"]);
+  });
+});
+
+describe("the translation step and the new translator", () => {
+  beforeEach(() => {
+    localStorage.clear();
+    routeParams = {};
+    vi.clearAllMocks();
+    mockedSettingsMutation.mockReturnValue({
+      mutate,
+    } as unknown as ReturnType<typeof useSettingsMutation>);
+    localStorage.setItem("bazarr.onboarding.intent", "discover");
+    localStorage.setItem("bazarr.onboarding.step", "translator");
+  });
+
+  afterEach(() => {
+    localStorage.clear();
+  });
+
+  it("is the step it always was while the new translator is off", async () => {
+    server.use(
+      http.get("/api/system/status", () => HttpResponse.json({ data: {} })),
+    );
+    customRender(<OnboardingWizardView />);
+
+    expect(
+      await screen.findByLabelText(/openrouter api key/i),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Install Google Translate" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("offers the new engines once the new translator is on", async () => {
+    server.use(
+      http.get("/api/system/status", () =>
+        HttpResponse.json({ data: { translation_runtime_v2: true } }),
+      ),
+      http.get("/api/translation/state", () =>
+        HttpResponse.json({
+          enabled: true,
+          engine: null,
+          fallback_engine: null,
+          instances: [],
+          available_engines: [],
+        }),
+      ),
+    );
+    customRender(<OnboardingWizardView />);
+
+    expect(
+      await screen.findByRole("button", { name: "Install Google Translate" }),
+    ).toBeDisabled();
+    expect(
+      screen.queryByLabelText(/openrouter api key/i),
+    ).not.toBeInTheDocument();
+    // The shell's skip is still the one control for leaving it.
+    expect(
+      screen.getByRole("button", { name: /do this later/i }),
+    ).toBeInTheDocument();
   });
 });
 

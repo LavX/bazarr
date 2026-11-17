@@ -15,7 +15,7 @@ import { seerrEnabledKey } from "@/pages/Settings/keys";
 import StepLayout from "@/pages/Setup/StepLayout";
 import { useReportStepBusy } from "@/pages/Setup/useStepBusy";
 import { useStepDraft } from "@/pages/Setup/useStepDrafts";
-import type { WizardStepProps } from "./types";
+import { NOTHING_WRITTEN, type WizardStepProps } from "./types";
 
 /**
  * Optional onboarding step for Seerr (Jellyseerr / Overseerr). Same shape as
@@ -59,7 +59,7 @@ const SeerrStep: FC<WizardStepProps> = ({ onNext, onBack, stepKey }) => {
 
   const handleContinue = () => {
     if (!filled) {
-      onNext();
+      onNext(NOTHING_WRITTEN);
       return;
     }
     setSaveError(null);

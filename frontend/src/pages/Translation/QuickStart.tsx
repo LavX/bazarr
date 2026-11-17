@@ -32,7 +32,7 @@ import { useGuardedSave } from "./useGuardedSave";
 import styles from "./Translation.module.scss";
 
 /** The key form of the official engine: pick a service, type its key, start. */
-const KeyStart: FunctionComponent<{
+export const KeyStart: FunctionComponent<{
   engine: TranslationEngine;
   onPin: (pinned: boolean) => void;
   /** Told while a start is on its way, so the rest of the panel can wait for it. */
@@ -41,7 +41,19 @@ const KeyStart: FunctionComponent<{
   locked: boolean;
   /** Opens the engine's set-up in the full page, where its switch is. */
   onOpenSetup: () => void;
-}> = ({ engine, onPin, onBusy, locked, onOpenSetup }) => {
+  /** Told once, when a start has gone through: the back end is saved and the engine is selected. */
+  onStarted?: () => void;
+  /** What the button that leaves for the engine's set-up says. */
+  openLabel?: string;
+}> = ({
+  engine,
+  onPin,
+  onBusy,
+  locked,
+  onOpenSetup,
+  onStarted,
+  openLabel = "Open its set-up",
+}) => {
   const types = keyOnlyTypes(engine);
   const [typeId, setTypeId] = useState(types[0]?.typeId ?? "");
   const [key, setKey] = useState("");
@@ -100,6 +112,7 @@ const KeyStart: FunctionComponent<{
       onBusy(false);
     }
     onPin(false);
+    onStarted?.();
   });
 
   if (!picked) {
@@ -189,7 +202,7 @@ const KeyStart: FunctionComponent<{
               disabled={form.busy || locked}
               onClick={onOpenSetup}
             >
-              Open its set-up
+              {openLabel}
             </Button>
           </div>
         </Alert>
