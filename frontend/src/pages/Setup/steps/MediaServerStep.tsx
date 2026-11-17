@@ -170,7 +170,10 @@ const MediaServerStep: FC<WizardStepProps> = ({ onNext, onBack }) => {
   // Continue with nothing connected writes nothing, whether or not a server was
   // ticked: the ticked one is set up on its own step, which answers for itself.
   // The rail draws this one as a walk past, like every other step left empty.
-  const untouched = ORDER.every((kind) => connected[kind].length === 0);
+  // A server whose row was just written counts, though the list has not caught up yet.
+  const untouched =
+    ORDER.every((kind) => connected[kind].length === 0) &&
+    drafts.every((draft) => draft.instanceId === undefined);
 
   // Whether the kind's master switch is on. The dispatcher reads it before it
   // reads any row, so an enabled instance under a switched-off kind refreshes

@@ -419,6 +419,10 @@ describe("TranslationStep", () => {
       ),
     ).toBeVisible();
     expect(screen.queryByText("Translation is set up")).not.toBeInTheDocument();
+    // A back end was written, so leaving is an answer and not a walk past.
+    await user.click(screen.getByRole("button", { name: "Continue" }));
+    expect(onNext).toHaveBeenCalledWith();
+    onNext.mockClear();
     // The key is stored; trying again only selects the engine.
     expect(
       screen.getByRole("button", { name: "Switch the engine on" }),

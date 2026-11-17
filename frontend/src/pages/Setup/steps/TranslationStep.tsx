@@ -92,7 +92,8 @@ const TranslationStep: FC<WizardStepProps> = ({ onNext, onBack }) => {
   const busy = starting || pointers.isPending;
   // Translation is already set up (an engine is selected, or a back end is saved): the step says so and
   // offers nothing that would add a second back end, as typing the key again after a Back would.
-  const setUp = data !== undefined && !isFirstRun(data) && !pinned && !starting;
+  const saved = data !== undefined && !isFirstRun(data);
+  const setUp = saved && !pinned && !starting;
   const selected = data?.instances.find((item) => item.id === data.engine);
   const selectedStatus = selected ? engineStatus(selected) : null;
 
@@ -151,8 +152,9 @@ const TranslationStep: FC<WizardStepProps> = ({ onNext, onBack }) => {
                 </Button>
               )}
             </Group>
-            {setUp ? (
-              // Set up earlier is an answer, though this visit writes nothing.
+            {saved ? (
+              // Something was saved, by this visit or an earlier one: that is an answer, though
+              // Continue writes nothing.
               <Button onClick={() => onNext()} disabled={busy}>
                 Continue
               </Button>
