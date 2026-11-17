@@ -800,3 +800,210 @@ def test_routine_short_calls_are_never_counted_toward_the_unverified_cap_but_one
         assert capped.value.code == "unverified_limit"
     finally:
         pool.close()
+
+
+def test_short_calls_with_a_key_each_are_capped_together_as_one_plugin():
+    """Each call has its own pool key, and the cap on workers ended without whole-tree proof is the plugin's: killed
+    probes under different keys count toward one limit, and routine ones still count for nothing."""
+    from provider_hub.runtime.pool import PoolUnavailable
+
+    pool = WorkerPool(PoolLimits(tick=0.05, heartbeat_interval=0.1, acquire_timeout=2.0, close_grace=1.0,
+                                 budget_interval=0.0, unverified_limit=3), autostart=True)
+    try:
+        def definition(index):
+            return WorkerDefinition(f"sample:call:{index:012x}", kind="translator", command=fake_worker_command(),
+                                    env=fake_worker_env(), session_limits=_fast_session(), cap_key="sample:call")
+
+        for index in range(8):  # routine: a worker that leaves by itself is never counted
+            assert pool.run_once(definition(index), "echo", {"n": 1}).result["echo"] == {"n": 1}
+        assert "sample:call" not in pool.status()["unverified_teardowns"]
+        for index in range(100, 103):  # three that have to be killed, each under a key of its own
+            with pytest.raises((errors.RequestTimeout, errors.RequestCancelled, errors.SessionError)):
+                pool.run_once(definition(index), "sleep", {"seconds": 60, "ignore_cancel": True}, timeout=0.2)
+        assert pool.status()["unverified_teardowns"]["sample:call"]["count"] == 3
+        with pytest.raises(PoolUnavailable) as capped:  # a key never seen before is refused all the same
+            pool.run_once(definition(200), "echo", {})
+        assert capped.value.code == "unverified_limit"
+        # A plugin of another name is not affected.
+        other = WorkerDefinition("other:call:000000000001", kind="translator", command=fake_worker_command(),
+                                 env=fake_worker_env(), session_limits=_fast_session(), cap_key="other:call")
+        assert pool.run_once(other, "echo", {"n": 2}).result["echo"] == {"n": 2}
+    finally:
+        pool.close()
+
+
+def test_the_one_call_definition_is_counted_under_its_plugin_apart_from_the_long_lived_worker(hub):
+    definitions = hub.definitions()
+    first = definitions.one_call_for(PLUGIN, {}, CALL)
+    second = definitions.one_call_for(PLUGIN, {}, "ba9876543210")
+    assert first.key != second.key and first.count_key == second.count_key == PLUGIN + workers.ONE_CALL_SUFFIX
+    assert definitions.definition_for(PLUGIN).count_key == PLUGIN
+
+
+# ---------------------------------------------------------- a refusal before the request is given to a worker
+def test_a_worker_over_its_memory_limit_as_it_starts_is_a_refusal_and_one_killed_later_is_not():
+    from provider_hub.runtime.pool import WorkerKilled
+
+    early = WorkerKilled("over its limit", code="memory_limit")
+    early.before_send = True
+    late = WorkerKilled("over its limit", code="memory_limit")
+    for killed, refused in ((early, True), (late, False)):
+        class Pool:
+            def run_once(self, definition, op, params, **kwargs):
+                raise killed
+
+        port = workers.PoolWorkers(Pool(), _definition_of)
+        if refused:
+            with pytest.raises(workers.NotSent):
+                port.call(PLUGIN, "test", {}, {}, timeout=5)
+        else:
+            with pytest.raises(WorkerKilled):
+                port.call(PLUGIN, "test", {}, {}, timeout=5)
+
+
+def _definition_of(plugin_id):
+    return WorkerDefinition(plugin_id, kind="translator", command=["unused"])
+
+
+def test_the_real_pool_refuses_a_worker_that_starts_over_its_memory_limit_before_sending_anything():
+    pool = _pool()
+    try:
+        def one_call(plugin_id, params, call_id):
+            return _fake_definition(f"{plugin_id}{workers.ONE_CALL_SUFFIX}:{call_id}", fake_worker_command(),
+                                    fake_worker_env(), memory_limit_bytes=1)
+
+        port = workers.PoolWorkers(pool, lambda plugin_id: None, one_call_for=one_call)
+        with pytest.raises(workers.NotSent):
+            port.call(PLUGIN, "echo", {"n": 1}, {}, timeout=10)
+    finally:
+        pool.close()
+
+
+def test_the_pre_send_check_is_the_frame_the_session_writes():
+    """A request a few bytes under the frame cap without its deadline is refused here, not after a worker started."""
+    from provider_hub.runtime import frames
+
+    def fits(size, with_deadline):
+        message = {"t": frames.REQ, "id": 2 ** 53, "op": "test", "params": {"text": "x" * size},
+                   "max_result_bytes": frames.DEFAULT_MAX_RESULT_BYTES, "secrets": {}}
+        if with_deadline:
+            message["deadline_ms"] = 20000
+        try:
+            frames.pack_control(message, sender="host")
+            return True
+        except frames.FrameError:
+            return False
+
+    low, high = 0, frames.MAX_CONTROL_BYTES
+    while low < high:  # the largest text that fits without a deadline
+        middle = (low + high + 1) // 2
+        low, high = (middle, high) if fits(middle, False) else (low, middle - 1)
+    assert fits(low, False) and not fits(low, True)  # the deadline is what tips it over
+    with pytest.raises((ValueError, frames.FrameError)):
+        workers.PoolWorkers._check_encodable("test", {"text": "x" * low}, {}, 20)
+    workers.PoolWorkers._check_encodable("test", {"text": "x" * (low - 100)}, {}, 20)
+
+
+@pytest.mark.parametrize("error", [OSError("disk"), KeyError("manifest"), ValueError("policy")])
+def test_a_failure_building_the_definition_is_a_refusal_but_a_bug_is_raised(error):
+    def broken(plugin_id, params, call_id):
+        raise error
+
+    port = workers.PoolWorkers(object(), lambda plugin_id: None, one_call_for=broken)
+    with pytest.raises(workers.NotSent):
+        port.call(PLUGIN, "test", {}, {}, timeout=5)
+
+    def bug(plugin_id, params, call_id):
+        raise TypeError("a bug of ours")
+
+    with pytest.raises(TypeError):
+        workers.PoolWorkers(object(), lambda plugin_id: None, one_call_for=bug).call(PLUGIN, "test", {}, {}, timeout=5)
+
+
+# ----------------------------------------------------------------------------- removal clears the run folders
+@pytest.fixture
+def bound(hub, monkeypatch):
+    """A real pool bound with the fake hub's definitions, for the removal tests."""
+    monkeypatch.setattr(worker_binding, "REMOVAL_RECHECK_SECONDS", 0.1)
+    hub.rows = [(PLUGIN, 1, {}, [])]
+    pool = WorkerPool(autostart=True)
+    definitions = hub.definitions()
+    port = worker_binding.bind(pool, definitions)
+    yield SimpleNamespace(hub=hub, pool=pool, port=port, definitions=definitions)
+    worker_binding.shutdown()
+    pool.close()
+    workers.unbind()
+
+
+def _wait(condition, seconds=20):
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        if condition():
+            return True
+        time.sleep(0.05)
+    return False
+
+
+def test_removal_clears_the_run_folders_once_a_running_worker_has_stopped(bound):
+    hub, base = bound.hub, bound.hub.root / "run" / PLUGIN
+    bound.port._ensure(PLUGIN)
+    bound.pool.warm(PLUGIN)  # an idle worker of the plugin is up
+    assert (base / "data").is_dir()
+    hub.installed.pop(PLUGIN)  # the removal has gone through
+    worker_binding.plugin_removed(PLUGIN)
+    # The worker is only retired, so it is still on its way out when the removal is saved.
+    assert _wait(lambda: not base.exists()), "the folders were left behind"
+    assert bound.port.idle(PLUGIN)
+    assert PLUGIN not in worker_binding._pending_removal
+
+
+def test_removal_waits_for_a_short_call_that_has_a_worker_and_keeps_the_folders_meanwhile(bound):
+    hub, base = bound.hub, bound.hub.root / "run" / PLUGIN
+    (base / "call" / CALL).mkdir(parents=True)
+    gate, started = threading.Event(), threading.Event()
+
+    class Pool:
+        def state(self, key):
+            from provider_hub.runtime.pool import UnknownWorker
+
+            raise UnknownWorker("never started")
+
+        def run_once(self, definition, op, params, **kwargs):
+            started.set()
+            gate.wait(20)
+            return SimpleNamespace(result={}, data=b"")
+
+    port = workers.PoolWorkers(Pool(), lambda plugin_id: None,
+                               one_call_for=lambda plugin_id, params, call_id: _definition_of(plugin_id))
+    with worker_binding._lock:
+        worker_binding._port = port  # the removal looks at this port
+    caller = threading.Thread(target=lambda: port.call(PLUGIN, "test", {}, {}, timeout=5))
+    caller.start()
+    assert started.wait(5)
+    hub.installed.pop(PLUGIN)
+    worker_binding.plugin_removed(PLUGIN)
+    time.sleep(0.5)
+    assert base.exists() and not port.idle(PLUGIN)  # a probe is running in a folder of it
+    gate.set()
+    caller.join(10)
+    assert _wait(lambda: not base.exists())
+
+
+def test_a_removal_that_is_only_staged_keeps_the_folders_until_the_plugin_is_gone(bound):
+    hub, base = bound.hub, bound.hub.root / "run" / PLUGIN
+    bound.definitions._spec(PLUGIN, {443})
+    worker_binding.plugin_removed(PLUGIN)  # still installed: the removal waits for a restart
+    time.sleep(0.5)
+    assert base.exists() and PLUGIN in worker_binding._pending_removal
+    hub.installed.pop(PLUGIN)
+    assert _wait(lambda: not base.exists())
+
+
+def test_a_start_clears_the_folders_of_plugins_that_are_not_installed(hub):
+    for plugin in (PLUGIN, "ghost"):
+        (hub.root / "run" / plugin / "data").mkdir(parents=True)
+    (hub.root / "run" / "not a plugin id").mkdir()
+    (hub.root / "run" / "stray-file").write_text("x")
+    assert hub.definitions().sweep_orphans() == ["ghost"]
+    assert (hub.root / "run" / PLUGIN / "data").is_dir() and (hub.root / "run" / "not a plugin id").is_dir()
+    assert hub.definitions().sweep_orphans() == []

@@ -112,6 +112,8 @@ class PoolWorkers:
         self._one_call_done = one_call_done
         self._ports_for = ports_for
         self._lock = threading.Lock()
+        # Short calls running now, by plugin: a plugin is not idle while one of them has a worker.
+        self._calls: dict[str, int] = {}
         # The port set each long-lived worker was last asked to run with, by pool key.
         self._ports: dict[str, frozenset[int] | None] = {}
 
@@ -217,9 +219,10 @@ class PoolWorkers:
             raise ValueError("timeout must be a finite number of seconds, not negative")
         if secrets and not frames.is_secrets(secrets):
             raise ValueError("secrets must be a flat mapping of text names to non-empty text values")
-        frames.pack_control({"t": frames.REQ, "id": 0, "op": op, "params": params or {},
-                             "max_result_bytes": frames.DEFAULT_MAX_RESULT_BYTES, "secrets": dict(secrets or {})},
-                            sender="host")
+        # The frame the session writes: its deadline in milliseconds and an id as long as any it hands out.
+        frames.pack_control({"t": frames.REQ, "id": 2 ** 53, "op": op, "params": params or {},
+                             "max_result_bytes": frames.DEFAULT_MAX_RESULT_BYTES, "deadline_ms": int(timeout * 1000),
+                             "secrets": dict(secrets or {})}, sender="host")
 
     def call(self, plugin_id, op, params, secrets, *, timeout):
         from provider_hub.runtime.errors import SessionBusy
@@ -227,6 +230,8 @@ class PoolWorkers:
         from provider_hub.runtime.pool import PoolCodes, PoolError, WorkerKilled
 
         call_id = uuid.uuid4().hex[:12]
+        with self._lock:
+            self._calls[plugin_id] = self._calls.get(plugin_id, 0) + 1
         try:
             # Everything that can refuse the request before a worker exists is settled here, so that what is raised
             # once a worker has the request is never taken for a refusal.
@@ -235,16 +240,19 @@ class PoolWorkers:
                 self._check_encodable(op, params, secrets, timeout)
             except NotSent:
                 raise
-            except (ValueError, FrameError) as error:
+            except (ValueError, FrameError, OSError, LookupError) as error:
                 # A timeout or secret that is not valid, params that cannot be encoded, a frame over its cap, a
-                # launch policy that was refused.
+                # launch policy or a folder that was refused: all of it before any worker exists.
                 raise NotSent(f"the request could not be sent ({type(error).__name__})") from None
             try:
                 return self._pool.run_once(definition, op, params, secrets=dict(secrets or {}) or None,
                                            timeout=timeout)
-            except WorkerKilled:
-                # Ended for breaking a limit: it may have been after the request was written, which a provider may
-                # have acted on, so this is not a refusal.
+            except WorkerKilled as error:
+                if error.before_send:
+                    # Over its memory limit as it started, before it was given anything.
+                    raise NotSent("the worker was over its limits as it started") from None
+                # Ended for breaking a limit after the request was written, which a provider may have acted on:
+                # not a refusal.
                 raise
             except (PoolError, SessionBusy) as error:
                 # The pool turned the request away or the worker would not start: nothing was written.
@@ -252,12 +260,32 @@ class PoolWorkers:
                 raise NotSent(f"the worker could not take the request ({type(error).__name__})",
                               busy=busy) from None
         finally:
+            with self._lock:
+                left = self._calls.get(plugin_id, 0) - 1
+                if left > 0:
+                    self._calls[plugin_id] = left
+                else:
+                    self._calls.pop(plugin_id, None)
             if self._one_call_done is not None:
                 try:
                     self._one_call_done(plugin_id, call_id)
                 except Exception:
                     logger.warning("Could not clear what a short request to translator %s left", plugin_id,
                                    exc_info=True)
+
+    def idle(self, plugin_id) -> bool:
+        """Whether nothing of the plugin is running: no short call has a worker, and the long-lived worker is not
+        there, or is stopped, or is waiting out a failure with no process."""
+        from provider_hub.runtime.pool import UnknownWorker, WorkerState
+
+        with self._lock:
+            if self._calls.get(plugin_id):
+                return False
+        try:
+            state = self._pool.state(self._key_for(plugin_id))
+        except UnknownWorker:
+            return True
+        return state in (WorkerState.STOPPED, WorkerState.BACKOFF, WorkerState.BROKEN)
 
     def retire(self, plugin_id):
         """Take the plugin's worker out of service once the jobs it holds are done. The next request starts a new

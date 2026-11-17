@@ -383,3 +383,25 @@ def test_a_second_test_cannot_start_while_the_first_ones_worker_is_still_stoppin
     while app_service.connection_id in settings_service._RUNNING_TESTS and time.monotonic() < deadline:
         time.sleep(0.05)
     assert app_service.connection_id not in settings_service._RUNNING_TESTS
+
+def test_a_priced_test_whose_worker_started_over_its_memory_limit_is_settled_at_nothing(app_service):
+    """The pool turned it away before it gave the worker anything, so nothing was sent and nothing is charged."""
+    from app.database import TableTranslationUsage
+    from provider_hub.runtime.pool import WorkerKilled
+
+    early = WorkerKilled("over its memory limit", code="memory_limit")
+    early.before_send = True
+
+    class Early(_Pool):
+        def run_once(self, definition, op, params, **kwargs):
+            raise early
+
+    service = app_service.service
+    service.update_connection(app_service.connection_id, {
+        "expected_revision": service._store.get_connection(app_service.connection_id, fresh=True).revision,
+        "values": {"price_input_per_million": 1.0, "price_output_per_million": 2.0}})
+    workers.bind(workers.PoolWorkers(Early(), _definition))
+    result = service.test_connection(app_service.connection_id)
+    assert result["ok"] is False and result["outcome"] == "not_ready"
+    rows = service._store.session.query(TableTranslationUsage).all()
+    assert [(row.state, row.actual_micros) for row in rows] == [("settled", 0)]
