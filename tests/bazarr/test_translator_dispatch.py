@@ -580,6 +580,27 @@ def test_a_reservation_that_does_not_fit_stops_the_attempt_as_a_budget_failure(e
     assert caught.value.error_class == "budget_exhausted" and caught.value.retry_later is True
 
 
+def test_raising_the_job_cap_lets_an_editor_retry_with_the_same_pick_run_at_once(env):
+    """What dispatch really stores for a job stopped on its cap is not held by the stored retry time: the cap is the
+    person's to raise."""
+
+    instance = env.engine()
+    connection = env.connection(instance, price_input_per_million=1.0, price_output_per_million=1.0)
+    env.limits = CostLimits(job_cap=usd(0.01), translation_limit=1)
+    env.scripts[PLUGIN] = {"*": [{"reserve": 0.5}, {}]}
+    with pytest.raises(DispatchFailed) as caught:
+        env.dispatcher().run(make_spec(pinned_connection_id=connection.id))
+    assert caught.value.error_class == "budget_exhausted"
+    row = env.last_job()
+    assert row.state == "awaiting_retry" and row.error_class == "budget_exhausted"
+    assert row.retry_at is not None and row.retry_at > env.clock(), "the stored time is still in the future"
+    asked = len(env.requests())
+    # The person raises the cap and asks again with the same pick, at once.
+    env.limits = CostLimits(job_cap=usd(5), translation_limit=1)
+    env.dispatcher().run(make_spec(pinned_connection_id=connection.id))
+    assert len(env.requests()) == asked + 1 and env.last_job().id == row.id
+
+
 def test_a_worker_killed_between_its_hold_and_its_settlement_leaves_the_worst_case_counted(env):
     instance = env.engine()
     env.connection(instance, price_input_per_million=1.0, price_output_per_million=1.0)

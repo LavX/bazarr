@@ -78,17 +78,20 @@ def _write(session):
     return write_transaction(session)
 
 
+# What a job is refused or stopped for when money is the reason: the month's, the job's own cap, and the budget that ran
+# out while it ran. A cap is the person's to raise, so none of these holds a repeated pick.
+BUDGET_REFUSALS = frozenset({"month_cap", "job_cap", "budget_exhausted"})
+
+
 def retry_hold(row, pin, now) -> str | None:
     """Why this pick has to wait, or None when it may go.
 
     A job that waits to be retried with the same pick is held until its stored time: that time is on the job, so it
     holds across a restart and for an engine, which has no in-memory window. Another pick is a different question,
-    and a cost cap is the person's to raise, so neither is held.
+    and a cost cap is the person's to raise (``BUDGET_REFUSALS``), so neither is held.
     """
-    from . import failure as fail
-
     if row is None or pin is None or row.state != AWAITING_RETRY or row.retry_at is None or row.retry_at <= now \
-            or row.pinned_connection_id != pin or row.error_class in (fail.MONTH_CAP, fail.JOB_CAP):
+            or row.pinned_connection_id != pin or row.error_class in BUDGET_REFUSALS:
         return None
     when = (f"{row.retry_at:%H:%M}" if row.retry_at.date() == now.date() else f"{row.retry_at:%Y-%m-%d %H:%M}")
     return (f"This translation waits to be retried at {when} with what you picked. Pick another back end or "
