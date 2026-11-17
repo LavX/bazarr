@@ -111,6 +111,76 @@ def test_an_official_branch_other_than_beta_reads_the_legacy_catalog_only(world)
     assert {entry["provider_id"] for entry in _entries().values()} == {PROVIDER}
 
 
+@pytest.fixture
+def shipped_root_world(tmp_path, monkeypatch, service_kind):
+    """A host that trusts the root this release ships, and a repository with no signed file in it."""
+    from provider_hub import signing_roots
+
+    shipped = dict(signing_roots.SIGNING_ROOTS)
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(write_state(tmp_path / "state.json")))
+    world = SignedWorld(monkeypatch)
+    monkeypatch.setattr(signing_roots, "SIGNING_ROOTS", shipped)
+    assert shipped
+    return world
+
+
+def test_a_host_with_the_shipped_root_keeps_reading_a_catalog_that_has_no_signed_file(shipped_root_world, tmp_path):
+    from provider_hub import catalog_feed
+
+    world = shipped_root_world
+    assert catalog_feed.signed_feed_enabled()
+    world.legacy(providers=[_provider()], plugins=[_plugin()])
+
+    _refresh()
+
+    source = _official()
+    assert source["last_error"] is None
+    assert source["catalog_signature"] == "unsigned (legacy)" and source["signature_verified"] is False
+    assert {entry["provider_id"] for entry in _entries().values()} == {PROVIDER}
+    assert _state().get("catalog_feeds", {}) == {}
+    assert _counter_file(tmp_path) is None
+    assert world.fetched("signed/main/catalog.json") and not world.fetched("catalog.json.sig")
+    assert _blocked() == {PROVIDER: None}
+
+
+def test_the_legacy_path_survives_a_second_refresh_and_a_new_head_with_the_shipped_root(shipped_root_world):
+    world = shipped_root_world
+    world.legacy(providers=[_provider()])
+    _refresh()
+    _refresh()
+    _move_head(world, "e" * 40)
+    world.legacy(commit="e" * 40, providers=[_provider("1.1.0")])
+
+    _refresh()
+
+    assert _official()["last_error"] is None
+    assert {entry["version"] for entry in _entries().values()} == {"1.1.0"}
+    assert _blocked() == {PROVIDER: None}
+
+
+def test_the_beta_channel_keeps_reading_legacy_with_the_shipped_root(shipped_root_world):
+    from provider_hub.service import update_catalog_source
+
+    world = shipped_root_world
+    world.legacy(providers=[_provider()])
+    update_catalog_source("official", dev_ref="beta")
+
+    _refresh()
+
+    assert _official()["last_error"] is None and _official()["catalog_signature"] == "unsigned (legacy)"
+    assert world.fetched("signed/beta/catalog.json")
+    assert {entry["provider_id"] for entry in _entries().values()} == {PROVIDER}
+
+
+def test_an_install_resolves_from_a_legacy_cache_with_the_shipped_root(shipped_root_world):
+    from provider_hub.service import resolve_catalog_install
+
+    shipped_root_world.legacy(providers=[_provider()])
+    _refresh()
+
+    assert resolve_catalog_install("official", PROVIDER, "1.0.0")
+
+
 # --- a verified catalog ----------------------------------------------------------------------
 
 

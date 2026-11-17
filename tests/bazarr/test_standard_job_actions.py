@@ -21,6 +21,15 @@ from flask import Flask
 from test_settings_profile_deletion import post_settings  # noqa: F401
 
 
+@pytest.fixture(autouse=True)
+def _legacy_catalog_host(monkeypatch):
+    # These tests stub the legacy catalog only. They model a host that trusts no root, so the refresh
+    # never asks for the signed files; the signed feed and the shipped root are covered in
+    # test_provider_hub_signed_feed.py and test_provider_hub_signing.py.
+    from provider_hub import signing_roots
+    monkeypatch.setattr(signing_roots, "SIGNING_ROOTS", {})
+
+
 @pytest.fixture
 def queue(monkeypatch):
     """A private queue wired into every module these actions enqueue through."""

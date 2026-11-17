@@ -3,10 +3,11 @@ import copy
 import hashlib
 import json
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import pytest
 from cryptography.hazmat.primitives import serialization
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey, Ed25519PublicKey
 
 from provider_hub.signing import (
     CLOCK_SKEW,
@@ -17,6 +18,7 @@ from provider_hub.signing import (
     key_file_statement,
     key_id,
     parse_wire_format,
+    statement_for,
     verify_catalog,
 )
 
@@ -1057,3 +1059,62 @@ def test_largest_counters_are_accepted(keys):
     data = catalog_bytes(version=2**63 - 1)
 
     assert verify(keys, data, key_file=keys.key_file(version=2**63 - 1)).ok
+
+
+# --- the root this release ships -------------------------------------------------------------
+
+EMBEDDED_ROOT_ID = "d2edde7047b7b2fe"
+CATALOG_KEY_FILE = Path(__file__).parent / "fixtures" / "provider_hub" / "catalog-signing-keys.json"
+
+
+def test_the_shipped_root_is_a_raw_ed25519_key_under_its_own_id():
+    from provider_hub import signing_roots
+
+    assert set(signing_roots.SIGNING_ROOTS) == {EMBEDDED_ROOT_ID}
+    raw = signing_roots.SIGNING_ROOTS[EMBEDDED_ROOT_ID]
+    assert isinstance(raw, bytes) and len(raw) == 32
+    assert EMBEDDED_ROOT_ID == hashlib.sha256(raw).hexdigest()[:16]
+    assert key_id(raw) == EMBEDDED_ROOT_ID
+
+
+def test_the_published_key_file_is_signed_by_the_shipped_root_through_the_real_verifier():
+    from provider_hub import signing_roots
+
+    roots = signing_roots.SIGNING_ROOTS
+    key_file = json.loads(CATALOG_KEY_FILE.read_text(encoding="utf-8"))
+    assert key_file["root_key_id"] == EMBEDDED_ROOT_ID
+    signer = key_file["keys"][0]
+    # The catalog is not signed by the real CI key, which is not here. Everything up to the signer
+    # lookup is checked first, so reaching it proves the root signed this key file.
+    data = catalog_bytes()
+    forged = Ed25519PrivateKey.generate()
+    envelope = {
+        "schema_version": 1,
+        "signatures": [{"algorithm": "ed25519", "key_id": signer["key_id"], "signature": b64(forged.sign(data))}],
+    }
+
+    result = verify_catalog(data, envelope, key_file, roots=roots, channel="main", now=NOW)
+
+    assert result.status is Status.BAD_SIGNATURE
+    assert result.root_key_id == EMBEDDED_ROOT_ID and result.key_file_version == key_file["key_file_version"]
+    assert "not signed by a trusted root" not in result.detail
+
+    # The same file, checked against a root that is not ours, is refused at the root.
+    other = Keys()
+    refused = verify_catalog(data, envelope, key_file, roots=other.roots, channel="main", now=NOW)
+    assert refused.status is Status.BAD_SIGNATURE and refused.root_key_id is None
+    assert "not signed by a trusted root" in refused.detail
+
+    # And the signature itself checks out against the shipped key, not just the lookup.
+    wire = parse_wire_format(key_file, envelope, data)
+    Ed25519PublicKey.from_public_bytes(roots[EMBEDDED_ROOT_ID]).verify(
+        wire.key_file.signature, statement_for(wire.key_file))
+
+
+def test_the_published_key_file_lists_no_root_as_a_signing_key():
+    from provider_hub import signing_roots
+
+    key_file = json.loads(CATALOG_KEY_FILE.read_text(encoding="utf-8"))
+    roots = set(signing_roots.SIGNING_ROOTS)
+    assert not roots & {entry["key_id"] for entry in key_file["keys"]}
+    assert all(key_id(base64.b64decode(entry["public_key"])) == entry["key_id"] for entry in key_file["keys"])
