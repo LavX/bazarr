@@ -95,11 +95,20 @@ class ConfigLingarr:
         value = getattr(settings.translator, TOKEN_SETTING, "")
         return value.strip() if isinstance(value, str) else ""
 
-    def set(self, url: str, token: str | None) -> bool:
-        """Write the address, and the token unless it is None. False, with the live values put back, on failure."""
+    def set(self, url: str, token: str | None, *, restoring: bool = False) -> bool:
+        """Write the address, and the token unless it is None. False, with the live values put back, on failure.
+
+        The mask text is never written as a new token: a client that sends back what it was shown would
+        replace the stored token with three asterisks. ``restoring`` is for putting a value this process
+        itself read back, which is not a new token.
+        """
         from app.config import settings, write_config
+        from secret_store.scrub import mask_credential_refusal
 
         section = settings.translator
+        if token is not None and not restoring and mask_credential_refusal(TOKEN_KEY, token, self.token() or None):
+            logger.error("The Lingarr token cannot be the mask text")
+            return False
         previous = (section.lingarr_url, section.lingarr_token)
         try:
             section.lingarr_url = url
@@ -113,6 +122,18 @@ class ConfigLingarr:
             section.lingarr_url, section.lingarr_token = previous
             return False
         return True
+
+
+def request_target(config: ConfigLingarr | None = None) -> tuple[str, str]:
+    """The address and the token of one request, read together under the config lock.
+
+    A save that changes the address takes the stored token away in the same write, so a pair read under
+    the lock is always one the person set up together. Every request, a retry included, reads its own pair:
+    a header kept from an earlier attempt could otherwise reach an address saved since.
+    """
+    config = config or ConfigLingarr()
+    with config.lock():
+        return config.url().rstrip("/"), config.token()
 
 
 def configured(config: ConfigLingarr | None = None, instance_settings: Mapping[str, Any] | None = None) -> bool:

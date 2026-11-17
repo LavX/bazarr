@@ -4358,6 +4358,57 @@ def _latest_catalog_manifest(
     return entry["manifest"] if entry else None
 
 
+def offered_update_version(provider_id: str) -> str | None:
+    """The newer version the hub offers for an installed plugin, or None. Reads the stored catalog, changes nothing.
+
+    It is the same answer an update check gives, so a page that shows an "update available" chip never
+    names a version the Updates tab would not offer.
+    """
+    state = load_state()
+    installation = (state.get("installations") or {}).get(provider_id)
+    if not isinstance(installation, dict) or installation.get("origin") == "local":
+        return None
+    active_version = installation.get("active_version")
+    if not active_version or installation.get("state") == "removed":
+        return None
+    latest = _latest_catalog_manifest(
+        state, provider_id, active_version, _bound_source_id(installation), _installed_catalog_list(installation),
+        installed_kind=kind_of(installation))
+    version = latest.get("version") if isinstance(latest, dict) else None
+    return str(version) if version else None
+
+
+def installable_catalog_plugins(kind: str) -> list[dict[str, Any]]:
+    """The newest installable entry of each catalog plugin of ``kind`` that is not installed or staged.
+
+    It asks what the install path asks, with the same functions: the entry's source may supply its kind (a kind
+    other than the subtitle provider only from the trusted official source, whose signed feed must be current),
+    this host can run it, its kind accepts its manifest and its dependencies resolve. An entry any of those
+    refuses is left out, so the page never starts an install the Hub
+    would refuse. A trusted source is preferred when two list the same version. Consent is not a refusal: the
+    install asks for it. Each item is the stored entry: ``source``, ``provider_id``, ``name``, ``version``,
+    ``trusted`` and ``manifest``.
+    """
+    state = load_state()
+    # A row that only records a failed install is not an installation, so the engine can be offered again.
+    installed = {str(plugin_id) for plugin_id, row in (state.get("installations") or {}).items()
+                 if isinstance(row, dict) and (row.get("active_version") or row.get("staged_version"))}
+    host = current_host()
+    entries = sorted((entry for entry in _stored_manifest_entries(state) if catalog_kind_of(entry) == kind),
+                     key=lambda entry: not bool(entry.get("trusted", False)))
+    entry_usable = _entry_usable(state, host)
+
+    def usable(entry: dict[str, Any]) -> bool:
+        return entry_usable(entry) and _closure_refusal(state, entry, host) is None
+
+    found = []
+    for provider_id in sorted({str(entry.get("provider_id") or "") for entry in entries} - installed - {""}):
+        entry = select_entry(entries, provider_id, usable=usable)
+        if entry is not None:
+            found.append(entry)
+    return found
+
+
 def _refused_update_reason(
     state: dict[str, Any], provider_id: str, active_version: Any, source_id: str | None,
     catalog_list: str | None = None, installed_kind: str = SUBTITLE_PROVIDER,

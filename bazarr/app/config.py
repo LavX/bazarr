@@ -474,6 +474,15 @@ validators = [
     Validator('translator.runtime_v2', must_exist=True, default=False, is_type_of=bool),
     Validator('translator.engine', must_exist=True, default='', is_type_of=str, cast=str),
     Validator('translator.fallback_engine', must_exist=True, default='', is_type_of=str, cast=str),
+    # The translation cost caps, in whole micro-dollars (millionths of a dollar), None for no cap. They are
+    # server-owned for the same reason as the pointers: the typed limits route checks the revision a client
+    # loaded, and a plain write would skip that. limits_revision goes up on every save of either cap.
+    Validator('translator.month_cap_micros', must_exist=True, default=None, is_type_of=(NoneType, int),
+              condition=lambda value: value is None or (not isinstance(value, bool) and value >= 0)),
+    Validator('translator.job_cap_micros', must_exist=True, default=None, is_type_of=(NoneType, int),
+              condition=lambda value: value is None or (not isinstance(value, bool) and value >= 0)),
+    Validator('translator.limits_revision', must_exist=True, default=1, is_type_of=int, gte=1,
+              condition=is_not_bool),
 
     # sonarr section
     Validator('sonarr.ip', must_exist=True, default='127.0.0.1', is_type_of=str),
@@ -1385,7 +1394,7 @@ def _get_settings():
             secret_descriptors = {}
             for subk, subv in v.items():
                 full_path = f"{k}.{subk.lower()}"
-                if full_path in SERVER_OWNED_SETTING_PATHS:
+                if is_server_owned_setting(full_path):
                     continue
                 if is_write_only_secret(full_path):
                     continue
@@ -2836,7 +2845,29 @@ SERVER_OWNED_SETTING_PATHS = frozenset({
     'translator.runtime_v2',
     'translator.engine',
     'translator.fallback_engine',
+    'translator.month_cap_micros',
+    'translator.job_cap_micros',
+    'translator.limits_revision',
 })
+
+# Settings only the server writes while the v2 translation runtime is on. The old settings route could change
+# the Lingarr address without the consent the typed API asks for, so while the runtime owns the engine it does
+# not show or write it.
+RUNTIME_OWNED_SETTING_PATHS = frozenset({
+    'translator.lingarr_url',
+})
+
+
+def is_server_owned_setting(path):
+    """Whether the settings API must leave this setting alone: always for the server's own, and for the
+    runtime's while the runtime is on, which is when the switch is set and its tables exist (the same condition
+    the translation routes use)."""
+    if path in SERVER_OWNED_SETTING_PATHS:
+        return True
+    if path not in RUNTIME_OWNED_SETTING_PATHS or getattr(settings.translator, 'runtime_v2', False) is not True:
+        return False
+    from subtitles.tools.translate.runtime import runtime_v2_enabled
+    return runtime_v2_enabled()
 
 
 def _auth_identity():
@@ -2967,7 +2998,7 @@ def _save_settings(settings_items, native_configuration=None, *, strict_metadata
 
         settings_keys = key.split('-')
 
-        if '.'.join(part.lower() for part in settings_keys[1:3]) in SERVER_OWNED_SETTING_PATHS:
+        if is_server_owned_setting('.'.join(part.lower() for part in settings_keys[1:3])):
             continue
 
         if settings_keys[-1].startswith('__'):

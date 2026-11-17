@@ -17,6 +17,12 @@ the helpers in opposite orders cannot each hold one lock and wait for the other'
   that wait ends and the totals would be stale, which is why the level is set here
   and not left to the server's default.
 
+Lock order: a writer that touches both config.yaml (the engine pointers, the Lingarr settings, the cost caps)
+and these tables takes the config lock first and opens its write transaction second, never the other way round.
+``TranslatorStore.set_instance_enabled`` and ``hold_back_for_attention`` do it for the pointers, and an engine
+save in the settings service does it for everything it writes. A step that would persist the master
+encryption key (which writes config.yaml) does it before the transaction opens, never inside it.
+
 Two helpers share the rules below: ``write_transaction`` (jobs, checkpoints, settings) and
 ``ledger_transaction`` (usage and history, which adds the advisory lock on PostgreSQL).
 

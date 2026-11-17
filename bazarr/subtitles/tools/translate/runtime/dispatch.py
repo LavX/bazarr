@@ -194,18 +194,14 @@ def installed_info(plugin_id: str) -> PluginInfo | None:
 
 
 def configured_cost_limits() -> CostLimits:
-    """The caps in force: the month and job caps (micro-dollars, none for no cap) and the translation limit."""
-    from app.config import settings
+    """The caps in force: the month and job caps (micro-dollars, none for no cap) and the translation limit.
 
-    section = settings.translator
+    It reads through the limits module, under the config lock, so a save in progress is waited for: a caller
+    never sees caps that a failed write is about to take back.
+    """
+    from .limits import current_cost_limits
 
-    def cap(name):
-        value = getattr(section, name, None)
-        return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else None
-
-    limit = getattr(section, "openrouter_max_concurrent", 1)
-    limit = limit if isinstance(limit, int) and not isinstance(limit, bool) and limit >= 1 else 1
-    return CostLimits(cap("month_cap_micros"), cap("job_cap_micros"), limit)
+    return current_cost_limits()
 
 
 class RetryWindows:

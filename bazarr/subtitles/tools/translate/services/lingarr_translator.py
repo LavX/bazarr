@@ -11,7 +11,6 @@ import time
 from retry.api import retry
 from deep_translator.exceptions import TooManyRequests, RequestError
 
-from app.config import settings
 from app.database import TableShows, TableEpisodes, TableMovies, database, select  # noqa: F401
 from app.jobs_queue import jobs_queue, JobCancelled
 from sportarr.connection import check_cancelled
@@ -22,6 +21,7 @@ from sonarr.history import history_log
 from subtitles.processing import ProcessSubtitlesResult  # noqa: F401
 from utilities.path_mappings import path_mappings  # noqa: F401
 
+from ..runtime.legacy_engines import request_target
 from ..core.translator_utils import (add_translator_info, create_process_result, get_title,
                                      translation_write_kwargs)
 
@@ -187,14 +187,15 @@ class LingarrTranslatorService:
         return completed or None
 
     def _translate_sports_line(self, payload, job_id):
-        headers = {'Content-Type': 'application/json', 'Accept': 'text/plain'}
-        if settings.translator.lingarr_token:
-            headers['X-Api-Key'] = settings.translator.lingarr_token
         for attempt in range(3):
             self._check_cancelled(job_id)
             try:
+                url, token = request_target()
+                headers = {'Content-Type': 'application/json', 'Accept': 'text/plain'}
+                if token:
+                    headers['X-Api-Key'] = token
                 response = requests.post(
-                    f"{settings.translator.lingarr_url.rstrip('/')}/api/translate/line",
+                    f"{url}/api/translate/line",
                     json=payload, headers=headers, timeout=1800,
                 )
                 self._check_cancelled(job_id)
@@ -270,12 +271,13 @@ class LingarrTranslatorService:
 
             logger.debug(f'BAZARR is sending {len(lines_payload)} lines to Lingarr with full media context')  # noqa: G004
 
+            url, token = request_target()
             headers = {"Content-Type": "application/json"}
-            if settings.translator.lingarr_token:
-                headers["X-Api-Key"] = settings.translator.lingarr_token
+            if token:
+                headers["X-Api-Key"] = token
 
             response = requests.post(
-                f"{settings.translator.lingarr_url}/api/translate/content",
+                f"{url}/api/translate/content",
                 json=payload,
                 headers=headers,
                 timeout=1800

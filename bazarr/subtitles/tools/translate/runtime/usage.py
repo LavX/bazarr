@@ -168,6 +168,12 @@ class UsageLedger:
         with ledger_transaction(self._session):
             return self._committed(month or self._month(self._clock()))
 
+    def month_usage(self) -> tuple[str, int]:
+        """The month that counts now and what it has committed, read together in one step."""
+        with ledger_transaction(self._session):
+            month = self._month(self._clock())
+            return month, self._committed(month)
+
     def month_remainder(self, limits: CostLimits, month: str | None = None) -> int | None:
         """What is still unreserved in the month, or ``None`` when it has no cap."""
         with ledger_transaction(self._session):

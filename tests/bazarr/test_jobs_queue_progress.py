@@ -192,6 +192,32 @@ def test_a_failed_jobs_message_is_scrubbed_before_the_socket_and_the_api(scrub_r
         assert key not in str(job.error)
 
 
+def short_secret_failure(job_id=None):
+    from app.jobs_queue import JobFailed
+    raise JobFailed("pw12", reason="provider_error")
+
+
+def test_a_failed_jobs_message_that_is_a_short_credential_is_masked_whole(scrub_registry):
+    from pytest import MonkeyPatch
+    import app.jobs_queue as module
+    from test_sportarr_workflows import private_queue
+
+    scrub_registry(["pw12"])  # pragma: allowlist secret
+    with MonkeyPatch.context() as monkeypatch:
+        queue = private_queue(monkeypatch)
+        events = []
+        monkeypatch.setattr(module, "event_stream", lambda **kwargs: events.append(kwargs["payload"]))
+        monkeypatch.setattr(module.activity, "finish", lambda *args, **kwargs: None)
+
+        queue.feed_jobs_pending_queue("Example", __name__, "short_secret_failure", retryable=True)
+        job = queue.jobs_pending_queue.popleft()
+        queue.jobs_running_queue.append(job)
+        queue._run_job(job)
+
+        assert job.error == {"reason": "provider_error", "message": "***"}
+        assert events[-1]["error"] == job.error
+
+
 def test_a_job_action_is_scrubbed_before_the_socket_and_the_api(scrub_registry):
     """A discover download offers Save with the provider-chosen filename in
     the action. That name is the provider's text and can echo a credential,

@@ -1,5 +1,5 @@
 # coding=utf-8
-"""The typed settings service behind the Settings > Translation page.
+"""The typed settings service behind the Translation page.
 
 It reads and writes engine instances, their back-end connections, their secrets and the two engine pointers
 through ``TranslatorStore``, with the manifest as the only source of what a setting is. Nothing here knows
@@ -21,17 +21,27 @@ from __future__ import annotations
 import json
 import logging
 import math
-from dataclasses import dataclass
-from typing import Any, Callable, Mapping
+import re
+import threading
+import time
+import traceback
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Any, Callable, Mapping
+from uuid import uuid4
 
 from provider_hub.plugin_manifest import parse_plugin_manifest
+from secret_store.scrub import mask_credential_refusal
 
+from . import catalog_view, legacy_engines
 from .destinations import DestinationError, DestinationSchema, effective_destinations, normalize_destination
 from .field_schema import (ValidatedValues, field_visible, is_finite_number, is_secret_field, validate_draft)
 from .host_fields import (HOST_FIELDS, HOST_KEYS, MODEL_KEY, PRICE_KEYS, host_default, host_definitions, host_of,
                           validate_owner)
 from .store import (CONNECTION, INSTANCE, OFFICIAL_ENGINE_PLUGIN_ID, StaleRevisionError as StoreStale,
                     TranslatorStore, TranslatorStoreError)
+
+if TYPE_CHECKING:
+    from .usage import CostLimits, UsageLedger
 
 logger = logging.getLogger(__name__)
 
@@ -109,6 +119,101 @@ PluginValidator = Callable[[str, str, str, Mapping[str, Any]], Mapping[str, str]
 # (engine instance id, back-end type or '' for the engine's own field, field key, draft values without secrets)
 OptionsSource = Callable[[int, str, str, Mapping[str, Any]], Mapping[str, Any] | None]
 
+# The most a connection test may send and receive, so its worst-case charge is small and known before it runs.
+TEST_INPUT_TOKENS = 64
+TEST_OUTPUT_TOKENS = 16
+TEST_MESSAGE_LIMIT = 300
+# A probe is told to give up after this long, and is not waited for much longer: a hung worker must not hold a
+# request thread, and its worst-case charge stays counted.
+TEST_TIMEOUT_SECONDS = 20.0
+TEST_TIMEOUT_GRACE_SECONDS = 5.0
+# What a probe may fail with and still be a failed test. A bug in our own code or in a binding (a wrong type, a
+# missing attribute or key) is not turned into "the back end did not answer": it is raised.
+PROGRAMMING_ERRORS = (TypeError, AttributeError, NameError, LookupError, AssertionError, ImportError,
+                      NotImplementedError, SyntaxError)
+
+
+def _is_bug(error: BaseException) -> bool:
+    """A mistake in our own code or in a binding, as opposed to a failure of the back end or the provider. A
+    failed lookup (a missing key or index) in what a provider answered is the provider's."""
+    return isinstance(error, PROGRAMMING_ERRORS) and not isinstance(error, LookupError)
+
+
+UNFINISHED_TEST = "The test could not be completed. The Bazarr+ log has the cause when debug logging is on."
+# One test at a time per connection: a second request while one runs is told so instead of starting another.
+_RUNNING_TESTS: set[int] = set()
+_RUNNING_LOCK = threading.Lock()
+
+
+class _Claim:
+    """The right to run one test of a connection. Released once, by whoever finishes with it last: the request,
+    or the probe's own thread when the request has stopped waiting for a probe that is still running."""
+
+    def __init__(self, connection_id: int):
+        self.connection_id = connection_id
+        self.handed_to_probe = False
+        self._released = False
+
+    def release(self) -> None:
+        with _RUNNING_LOCK:
+            if not self._released:
+                self._released = True
+                _RUNNING_TESTS.discard(self.connection_id)
+
+
+def _claim_test(connection_id: int) -> "_Claim | None":
+    with _RUNNING_LOCK:
+        if connection_id in _RUNNING_TESTS:
+            return None
+        _RUNNING_TESTS.add(connection_id)
+        return _Claim(connection_id)
+
+
+OPEN_TEST = "The translation engine is not running, so this back end cannot be tested yet."
+
+
+@dataclass(frozen=True)
+class ProbeRequest:
+    """One small request to a saved connection, as the engine's worker is asked to make it.
+
+    It is one snapshot, taken by the caller in one pass: the settings the destinations were worked out from and
+    the secrets cut to them. A probe sends exactly this and never reads the connection again, so an address
+    saved in the meantime cannot pair a new address with an old key.
+
+    ``secrets`` holds what the engine's and the connection's stored secrets may carry to their own
+    destinations, as for a real translation (the connection's win a name they share): a secret bound to other
+    addresses is left out. The worker must send them nowhere else, follow no redirect, and put none of them in
+    what it answers.
+    """
+
+    instance_id: int
+    connection_id: int
+    backend_type: str
+    model: str
+    values: Mapping[str, Any]
+    destinations: frozenset[str]
+    input_token_limit: int
+    output_token_limit: int
+    timeout_seconds: float = TEST_TIMEOUT_SECONDS
+    secrets: Mapping[str, str] = field(default_factory=dict, repr=False)
+    # The plugin whose worker answers: the connection's own when an extension serves it, else its engine's.
+    plugin_id: str = ""
+    # The engine's own saved settings, without secrets, and the connection's prices, as they were when read.
+    engine_values: Mapping[str, Any] = field(default_factory=dict)
+    price_input_per_million: float = 0
+    price_output_per_million: float = 0
+
+
+# A probe runs on a thread of its own, not the request's. It must not use the request's database session, must be
+# safe to call from any thread, and must give up within ``ProbeRequest.timeout_seconds``: the caller stops waiting
+# a few seconds after that and the test counts as failed.
+#
+# A probe answers ``{"ok": bool, "message": str, "input_tokens": int, "output_tokens": int, "sent": bool}``.
+# The tokens are what the request used, settled against the cost caps. Without them the test keeps its
+# worst-case charge, because the provider may have billed a request whose answer never came; only ``sent:
+# false`` (the request never left) settles it at nothing.
+ConnectionProbe = Callable[[ProbeRequest], Mapping[str, Any]]
+
 
 def _json_secret(value: Any) -> str:
     return value if isinstance(value, str) else json.dumps(value)
@@ -155,13 +260,78 @@ def _price(value: Any) -> float:
     return value if is_finite_number(value) else 0
 
 
+def _entries_of(secret: str) -> list[str]:
+    """The entries of a list secret (a JSON array of strings), so each one is masked on its own."""
+    if not secret.startswith("["):
+        return []
+    try:
+        parsed = json.loads(secret)
+    except ValueError:
+        return []
+    return [item for item in parsed if isinstance(item, str)] if isinstance(parsed, list) else []
+
+
+def _rendered_forms(value: str) -> set[str]:
+    """A secret as it is, and as formatting renders it: repr without its quotes (either quote style), repr of
+    that again (a dict inside a message), JSON with and without ensure_ascii, and the unicode-escape form,
+    each with the quote characters escaped as well."""
+    escaped = value.encode("unicode_escape").decode("ascii")
+    once = repr(value)[1:-1]
+    base = {value, once, escaped, repr(once)[1:-1], repr(repr(value))[1:-1],
+            json.dumps(value)[1:-1], json.dumps(value, ensure_ascii=False)[1:-1]}
+    forms = (base | {form.replace("'", "\\'") for form in base} | {form.replace('"', '\\"') for form in base})
+    return {form for form in forms if form}
+
+
+def _configured_limits() -> "CostLimits":
+    from .limits import current_cost_limits
+
+    return current_cost_limits()
+
+
+def _cap_message(reason: str | None, caps: "CostLimits", remainder: int | None) -> str:
+    """Why a priced test was not sent, naming the cap that binds.
+
+    With both caps set, the one that leaves less room is named: ``remainder`` is what is left of the month.
+    """
+    if reason == "wait":
+        return "Other translations are holding this month's budget. Try the test again in a moment."
+    month = ("This back end is priced and what is left of this month's cost limit cannot cover a test, so no "
+             "test was sent. Raise the monthly limit, or wait for next month.")
+    job = ("This back end is priced and the cost limit for one translation is too low to cover a test, so no "
+           "test was sent. Raise that limit, or test a free back end.")
+    if caps.month_cap is None:
+        return job
+    if caps.job_cap is None or reason == "month_spent":
+        return month
+    if reason == "job_cap_spent":
+        return job
+    return month if remainder is not None and remainder < caps.job_cap else job
+
+
 class TranslatorSettingsService:
     def __init__(self, store: TranslatorStore, *, plugin_lookup: Callable[[str], InstalledPlugin | None] | None = None,
-                 plugin_validator: PluginValidator | None = None, options_source: OptionsSource | None = None):
+                 plugin_validator: PluginValidator | None = None, options_source: OptionsSource | None = None,
+                 connection_probe: ConnectionProbe | None = None,
+                 catalog_engines: Callable[[], list[dict[str, Any]]] | None = None,
+                 update_lookup: Callable[[str], str | None] | None = None,
+                 cost_limits: Callable[[], "CostLimits"] | None = None, legacy: bool = False,
+                 lingarr: legacy_engines.ConfigLingarr | None = None,
+                 test_ready: Callable[[], bool] | None = None):
         self._store = store
         self._plugin = plugin_lookup or installed_plugin
         self._validator = plugin_validator
         self._options_source = options_source
+        self._probe = connection_probe
+        # Whether something can answer a test right now (a worker is bound). None means always.
+        self._test_ready = test_ready
+        self._catalog_engines = catalog_engines or catalog_view.available_engines
+        self._update_lookup = update_lookup or catalog_view.update_version
+        self._cost_limits = cost_limits
+        # Whether the engines served by code in Bazarr+ itself (Lingarr) are listed. Their settings stay in the
+        # settings they always used, so nothing is migrated.
+        self._legacy = legacy
+        self._lingarr = lingarr or legacy_engines.ConfigLingarr()
 
     # ------------------------------------------------------------- schema
     def _parsed(self, plugin: InstalledPlugin | None):
@@ -217,28 +387,75 @@ class TranslatorSettingsService:
         return self._store.pointers()
 
     def snapshot(self) -> dict[str, Any]:
+        if self._legacy:
+            for legacy in legacy_engines.LEGACY_ENGINES.values():
+                self._store.ensure_instance(legacy.plugin_id, name=legacy.name, settings_version=1)
         engine, fallback = self.pointers()
         return {"enabled": True, "engine": engine, "fallback_engine": fallback,
-                "instances": [self.instance_view(row) for row in self._store.list_instances()]}
+                "instances": [self.instance_view(row) for row in self._store.list_instances()],
+                "capabilities": self.capabilities(), "available_engines": self._catalog_engines()}
+
+    def can_test(self) -> bool:
+        """Whether a connection test has anything to ask: a probe, or the model list the engine can fetch."""
+        if self._probe is None and self._options_source is None:
+            return False
+        return self._test_ready() if self._test_ready is not None else True
+
+    def capabilities(self) -> list[str]:
+        """The routes of the page that work now. The page shows a control only for one listed here."""
+        listed = ["summary", "limits"]
+        if self.can_test():
+            listed.append("test")
+        return listed + ["queue"]
 
     def instance_view(self, instance) -> dict[str, Any]:
+        legacy = legacy_engines.legacy_engine_for(instance.plugin_id)
+        if legacy is not None:
+            return self._legacy_view(instance, legacy)
         store = self._store
         plugin = self._plugin(instance.plugin_id)
         schema = self._engine_schema(plugin)
         owner = (INSTANCE, instance.id)
         settings = store.settings_of(instance)
         destinations = effective_destinations(schema, settings)
-        return {
+        description = self._parsed(plugin).raw.get("description") if plugin is not None and self._parsed(plugin) else None
+        view = {
             "id": instance.id, "plugin_id": instance.plugin_id, "name": instance.name or (plugin.name if plugin else ""),
             "official": instance.plugin_id == OFFICIAL_ENGINE_PLUGIN_ID, "enabled": bool(instance.enabled),
             "revision": instance.revision, "awaiting_secrets": bool(instance.awaiting_secrets),
             "configured": store.instance_configured(instance), "settings_version": instance.settings_version,
             "plugin_version": instance.plugin_version,
             "plugin": None if plugin is None else {"name": plugin.name, "version": plugin.version,
-                                                    "active": plugin.active},
+                                                    "active": plugin.active,
+                                                    "update_version": self._update_lookup(plugin.plugin_id)},
             "schema": self._display_schema(plugin), "values": _clean(_shown_settings(schema.fields, settings)),
             "secrets": self._secret_view(owner, schema.fields, destinations),
             "connections": [self.connection_view(instance, row) for row in store.list_connections(instance.id)],
+        }
+        if isinstance(description, str) and description.strip():
+            view["description"] = description.strip()[:300]
+        return view
+
+    def _legacy_view(self, instance, legacy) -> dict[str, Any]:
+        """An engine Bazarr+ runs itself: its address, and whether a token is set, never the token."""
+        fields = legacy_engines.LINGARR_FIELDS
+        token = self._lingarr.token()
+        secrets: dict[str, Any] = {}
+        if token:
+            secrets[legacy_engines.TOKEN_KEY] = {"configured": True}
+            if len(token) >= legacy_engines.LAST_FOUR_MIN_LENGTH:
+                secrets[legacy_engines.TOKEN_KEY]["last4"] = token[-4:]
+        return {
+            "id": instance.id, "plugin_id": instance.plugin_id, "name": instance.name or legacy.name,
+            "official": False, "legacy": True, "description": legacy_engines.DESCRIPTION,
+            "enabled": bool(instance.enabled), "revision": instance.revision, "awaiting_secrets": False,
+            "configured": self._store.instance_configured(instance), "settings_version": 1, "plugin_version": None,
+            "plugin": None,
+            "schema": {"settings_version": 1, "endpoints": [], "backend_types": {},
+                       "fields": [dict(item) for item in fields]},
+            "values": _without_unsafe_addresses(fields, {legacy_engines.URL_KEY: self._lingarr.url()}),
+            "secrets": secrets,
+            "connections": [],
         }
 
     def connection_view(self, instance, connection) -> dict[str, Any]:
@@ -319,25 +536,48 @@ class TranslatorSettingsService:
         expected = self._expected(payload, required=values is not None or bool(clear) or enabled is not None)
         if expected is not None and instance.revision != expected:
             raise StaleRevisionError("The engine settings changed since they were loaded.", revision=instance.revision)
-        # The settings and the switch are one save: if the switch loses a race, the settings are not kept either.
-        with self._store.transaction():
-            if values is not None or clear:
+        # Everything that may call the plugin (its validate hook) or read the manifest is done first, before any
+        # lock is taken: a slow plugin must not hold the config lock. The revision check inside the transaction
+        # still refuses a save whose state moved in the meantime.
+        legacy = legacy_engines.legacy_engine_for(instance.plugin_id) is not None
+        commit: Callable[[], None] | None = None
+        if values is not None or clear:
+            if not legacy:
                 plugin = self._plugin(instance.plugin_id)
                 if plugin is None or not plugin.active:
                     raise PluginUnavailableError("The plugin for this engine is not installed.")
-                self._save_engine_values(instance, plugin, values, clear, payload, expected)
-            elif enabled is True:
-                self._check_engine_before_turning_on(instance)
-            if enabled is not None and bool(instance.enabled) != enabled:
-                # The switch is swapped against the revision the client sent. Only when this request's own save
-                # has just moved it on does the switch use the revision that save produced.
-                produced = expected + 1 if (values is not None or clear) else expected
-                try:
-                    change = self._store.set_instance_enabled(instance_id, enabled, expected_revision=produced)
-                except StoreStale as error:
-                    raise StaleRevisionError("The engine settings changed since they were loaded.",
-                                             revision=error.revision) from error
-                notices += [self._notice(item) for item in change.notices]
+                commit = self._prepare_engine_values(instance, plugin, values, clear, payload, expected)
+        elif enabled is True:
+            self._check_engine_before_turning_on(instance)
+        # The config lock is taken before the write transaction, the one order every writer of both keeps, and it
+        # is held to the end, the undo included, so nothing else writes config.yaml between the save and its undo.
+        #
+        # The settings and the switch are one save: if the switch loses a race, the settings are not kept either.
+        # An engine that keeps its settings in config.yaml has already written them when the database part fails,
+        # so it hands back an undo that puts them as they were.
+        with self._lingarr.lock():
+            undo: Callable[[], None] | None = None
+            try:
+                with self._store.transaction():
+                    if legacy and (values is not None or clear):
+                        undo = self._save_legacy_values(instance, values or {}, clear, payload, expected)
+                    elif commit is not None:
+                        commit()
+                    if enabled is not None and bool(instance.enabled) != enabled:
+                        # The switch is swapped against the revision the client sent. Only when this request's own
+                        # save has just moved it on does the switch use the revision that save produced.
+                        produced = expected + 1 if (values is not None or clear) else expected
+                        try:
+                            change = self._store.set_instance_enabled(instance_id, enabled,
+                                                                      expected_revision=produced)
+                        except StoreStale as error:
+                            raise StaleRevisionError("The engine settings changed since they were loaded.",
+                                                     revision=error.revision) from error
+                        notices += [self._notice(item) for item in change.notices]
+            except BaseException:
+                if undo is not None:
+                    undo()
+                raise
         return {"engine": self.instance_view(self._instance(instance_id)), "notices": notices}
 
     def _check_engine_before_turning_on(self, instance) -> None:
@@ -351,7 +591,8 @@ class TranslatorSettingsService:
         self._validate(schema, self._merged(self._store.settings_of(instance), {}, schema), stored, plugin.plugin_id,
                        "engine", "", contents=self._store.secret_contents(owner, schema.fields))
 
-    def _save_engine_values(self, instance, plugin, values, clear, payload, expected) -> None:
+    def _prepare_engine_values(self, instance, plugin, values, clear, payload, expected) -> Callable[[], None]:
+        """Check an engine save against its manifest and its plugin, and return the step that commits it."""
         schema = self._engine_schema(plugin)
         owner = (INSTANCE, instance.id)
         before = self._store.settings_of(instance)
@@ -367,22 +608,109 @@ class TranslatorSettingsService:
         after = validated.settings
         self._require_consent(schema, before, after, payload, new_owner=False)
         parsed = self._parsed(plugin)
-        # The revision claim, the settings and every secret write or clear commit together. A save that only
-        # clears a secret still claims a revision, so a concurrent save of the same engine is never overwritten
-        # behind its back.
-        with self._store.transaction():
+        self._make_key_durable(validated)  # before the lock and the transaction, never inside them
+
+        def commit() -> None:
+            # The revision claim, the settings and every secret write or clear commit together. A save that only
+            # clears a secret still claims a revision, so a concurrent save of the same engine is never
+            # overwritten behind its back.
+            with self._store.transaction():
+                try:
+                    self._store.save_instance_settings(
+                        instance.id, after, schema=schema,
+                        settings_version=parsed.settings_version if parsed else None,
+                        plugin_version=plugin.version, expected_revision=expected)
+                except StoreStale as error:
+                    raise StaleRevisionError("The engine settings changed since they were loaded.",
+                                             revision=error.revision) from error
+                self._write_secrets(owner, validated, clear, effective_destinations(schema, after))
+
+        return commit
+
+    def _save_legacy_values(self, instance, values: Mapping[str, Any], clear: list[str], payload,
+                            expected) -> Callable[[], None]:
+        """Save the address and token of an engine served by code in Bazarr+, in the settings it always used.
+
+        The rules are those of any engine: the address is a destination, so a new one needs the person's
+        consent in the same request, a changed address never keeps the stored token, a token goes in and never
+        comes out, and the save claims the revision the caller loaded.
+        """
+        # From the read of the old address to the write of the new one no other writer of config.yaml gets in.
+        with self._lingarr.lock():
+            errors: dict[str, str] = {}
+            for key in values:
+                if key not in (legacy_engines.URL_KEY, legacy_engines.TOKEN_KEY):
+                    errors[str(key)] = "is not a setting of this engine"
+            for name in clear:
+                if name != legacy_engines.TOKEN_KEY:
+                    errors[name] = "is not a secret of this engine"
+            before = self._lingarr.url()
+            before_token = self._lingarr.token()
+            url = before
+            if legacy_engines.URL_KEY in values:
+                raw = values[legacy_engines.URL_KEY]
+                if raw is None or (isinstance(raw, str) and not raw.strip()):
+                    errors[legacy_engines.URL_KEY] = "is required"
+                elif not isinstance(raw, str):
+                    errors[legacy_engines.URL_KEY] = "must be text"
+                elif len(raw) > legacy_engines.URL_LIMIT:
+                    errors[legacy_engines.URL_KEY] = f"must be at most {legacy_engines.URL_LIMIT} characters"
+                else:
+                    try:
+                        url = normalize_destination(raw)
+                    except DestinationError as error:
+                        errors[legacy_engines.URL_KEY] = error.message
+            token: str | None = None  # None keeps the stored token
+            if legacy_engines.TOKEN_KEY in values:
+                given = values[legacy_engines.TOKEN_KEY]
+                if given is not None and not isinstance(given, str):
+                    errors[legacy_engines.TOKEN_KEY] = "must be text"
+                elif isinstance(given, str) and given.strip():
+                    refusal = mask_credential_refusal(legacy_engines.TOKEN_KEY, given, before_token or None)
+                    if refusal:
+                        errors[legacy_engines.TOKEN_KEY] = refusal
+                    else:
+                        token = given.strip()
+            if legacy_engines.TOKEN_KEY in clear and token is None:
+                token = ""
+            if errors:
+                raise InvalidValuesError("The values are not valid.", field_errors=errors)
+            schema = DestinationSchema(fields=legacy_engines.LINGARR_FIELDS)
+            self._require_consent(schema, {legacy_engines.URL_KEY: before}, {legacy_engines.URL_KEY: url}, payload,
+                                  new_owner=False)
+            if (effective_destinations(schema, {legacy_engines.URL_KEY: before})
+                    != effective_destinations(schema, {legacy_engines.URL_KEY: url}) and token is None):
+                token = ""  # a changed address never reuses a stored token
+            kept = dict(self._store.settings_of(instance))
+            if legacy_engines.URL_KEY in values:
+                kept[legacy_engines.SAVED_FLAG] = True  # the person has set the address, the default included
             try:
-                self._store.save_instance_settings(
-                    instance.id, after, schema=schema, settings_version=parsed.settings_version if parsed else None,
-                    plugin_version=plugin.version, expected_revision=expected)
+                self._store.save_instance_settings(instance.id, kept, schema=DestinationSchema(), settings_version=1,
+                                                   expected_revision=expected)
             except StoreStale as error:
                 raise StaleRevisionError("The engine settings changed since they were loaded.",
                                          revision=error.revision) from error
-            self._write_secrets(owner, validated, clear, effective_destinations(schema, after))
+            if not self._lingarr.set(url, token):
+                raise ServiceError("The Lingarr settings could not be saved.")
+
+            wrote = (url, before_token if token is None else token)
+
+            def undo() -> None:
+                # Compare and restore: only the values this save wrote are put back. Anything that changed
+                # them since belongs to a newer save and stays.
+                with self._lingarr.lock():
+                    if (self._lingarr.url(), self._lingarr.token()) != wrote:
+                        return
+                    if not self._lingarr.set(before, before_token, restoring=True):
+                        logger.error("The Lingarr settings could not be put back after a failed save")
+
+            return undo
 
     # -------------------------------------------------------- connections
     def create_connection(self, instance_id: int, payload: Mapping[str, Any]) -> dict[str, Any]:
         instance = self._instance(instance_id)
+        if legacy_engines.legacy_engine_for(instance.plugin_id) is not None:
+            raise ServiceError("This engine has no back ends to add.")
         backend_type = payload.get("backend_type")
         if not isinstance(backend_type, str) or not backend_type:
             raise ServiceError("backend_type is required")
@@ -403,6 +731,7 @@ class TranslatorSettingsService:
                                    host=host)
         self._require_consent(schema, {}, validated.settings, payload, new_owner=True)
         parsed = self._parsed(plugin)
+        self._make_key_durable(validated)
         with self._store.transaction():
             row = self._store.add_connection(
                 instance_id, backend_type, plugin_id=plugin_id, model=host[MODEL_KEY], settings=validated.settings,
@@ -453,6 +782,7 @@ class TranslatorSettingsService:
         after = validated.settings if checked else before
         self._require_consent(schema, before, after, payload, new_owner=False)
         parsed = self._parsed(plugin)
+        self._make_key_durable(validated)
         with self._store.transaction():
             try:
                 self._store.update_connection(
@@ -504,7 +834,7 @@ class TranslatorSettingsService:
 
     # ------------------------------------------------------------ options
     def options(self, instance_id: int, backend_type: str, field_key: str,
-                draft: Mapping[str, Any]) -> dict[str, Any]:
+                draft: Mapping[str, Any], *, plugin: InstalledPlugin | None = None) -> dict[str, Any]:
         """The live choices of an ``options`` field, or ``available: false`` so the page offers free text.
 
         The request is checked against the manifest before a source sees it: the back-end type and the
@@ -513,7 +843,7 @@ class TranslatorSettingsService:
         ``TranslatorStore.secrets_for_request`` covers that address, and no redirect is followed.
         """
         instance = self._instance(instance_id)
-        plugin = self._plugin(instance.plugin_id)
+        plugin = plugin or self._plugin(instance.plugin_id)  # a connection served by an extension names its own
         display = self._display_schema(plugin)
         unavailable = {"available": False, "items": [], "reason": "The model list could not be fetched."}
         if display is None:
@@ -543,6 +873,334 @@ class TranslatorSettingsService:
         if not answer or not isinstance(answer.get("items"), list):
             return unavailable
         return {"available": True, "items": answer["items"], "reason": ""}
+
+    # --------------------------------------------------------------- test
+    def test_connection(self, connection_id: int, payload: Any = None) -> dict[str, Any]:
+        """Send one small request to a saved connection and say whether it answered.
+
+        The connection is tested as it is saved, never as a draft, and under the rules a save and a
+        translation keep: its stored secrets reach only the addresses they were entered under, an
+        address that is not a clean web address is refused before anything is sent, and a connection that
+        waits for its secrets is not tested with stale ones. A refusal of this kind and a back end that
+        does not answer are both ``ok: false`` with a sentence that says what to do; the answer never carries a
+        key. A priced test is reserved against the cost caps and settled in the usage ledger like any call.
+        """
+        if payload not in (None, {}):
+            raise InvalidValuesError("A test uses the settings as they are saved. Save your changes first.")
+        connection = self._connection(connection_id)
+        instance = self._instance(connection.instance_id)
+        plugin = self._serving_plugin(instance, connection)
+        schema = self._backend_schema(plugin, connection.backend_type) if plugin is not None and plugin.active else None
+        if schema is None:
+            raise PluginUnavailableError("The plugin that serves this back end is not installed or not running.")
+        if not self.can_test():
+            raise PluginUnavailableError(OPEN_TEST)
+        owner = (CONNECTION, connection.id)
+        saved = self._store.settings_of(connection)
+        # The addresses are read from what is stored, not from what a response may show: an address that is not
+        # clean must stop the test, not be swapped for the manifest's default.
+        destinations = effective_destinations(schema, saved)
+        values = _shown_settings(schema.fields, saved)
+        if any(item.startswith("invalid:") for item in destinations):
+            return self._test_result(False, "The saved address is not a valid web address. Open this back end, "
+                                            "correct the address and save it.")
+        summary = self._store.secret_summary(owner, destinations)
+        if connection.awaiting_secrets or any(entry.get("stale") for entry in summary.values()):
+            return self._test_result(False, "The address changed after the key was saved, so the saved key is not "
+                                            "sent to the new one. Enter the key again and save.")
+        secrets = self._store.secrets_for_request(owner, destinations)
+        engine_values = dict(self._store.settings_of(instance))
+        engine_refusal, engine_secrets = self._engine_secrets(instance, engine_values)
+        if engine_refusal:
+            return self._test_result(False, engine_refusal)
+        secrets = {**engine_secrets, **secrets}  # the connection's win a name they share
+        # Every saved secret of the connection and of its engine, for masking only.
+        held = {**{f"engine.{name}": value for name, value in
+                   self._store.secrets_for_request((INSTANCE, instance.id), frozenset()).items()},
+                **self._store.secrets_for_request(owner, frozenset())}
+        where = self._typed_origin(schema, values)
+        claim = _claim_test(connection.id)
+        if claim is None:
+            return self._test_result(False, "A test of this back end is already running. Wait for it to finish.")
+        bug: BaseException | None = None
+        result: dict[str, Any] | None = None
+        try:
+            if self._probe is not None:
+                result = self._paid_test(connection, instance, values, destinations, secrets, held, where, claim,
+                                         engine_values)
+            else:
+                result = self._listing_test(connection, instance, values, where)
+        except Exception as error:
+            # Whatever a probe or a model list raised, a refusal of ours included, may carry an address or a key
+            # in its text or its fields: only its type is said, and the scrubbed traceback goes to the debug log.
+            # A bug in our own code is raised, as a copy with the secrets masked. The copy is built here and
+            # raised after this block, so it carries no context and no traceback of the original.
+            if _is_bug(error):
+                if getattr(error, "_test_sanitized", False):
+                    bug = error
+                else:
+                    self._log_failure(error, held)
+                    bug = self._sanitized(error, held)
+            else:
+                self._log_failure(error, held)
+                result = self._test_result(False, UNFINISHED_TEST)
+        finally:
+            if not claim.handed_to_probe:
+                claim.release()
+        if bug is not None:
+            raise bug
+        return result
+
+    @classmethod
+    def _sanitized(cls, error: BaseException, held: Mapping[str, str]) -> BaseException:
+        """A copy of the error of the same family whose text has every saved secret masked, with no traceback or
+        cause attached: what reaches the framework's own logging cannot carry a key."""
+        text = cls._mask(str(error), held)
+        clean: BaseException | None = None
+        try:
+            clean = type(error)(text)
+        except Exception:
+            for base in PROGRAMMING_ERRORS:
+                if isinstance(error, base):
+                    clean = base(text)
+                    break
+        clean = clean if clean is not None else RuntimeError(text)
+        clean._test_sanitized = True  # the outer handler does not clean it twice
+        return clean
+
+    @classmethod
+    def _log_failure(cls, error: BaseException, held: Mapping[str, str]) -> None:
+        logger.warning("A connection test failed with %s", type(error).__name__)
+        if logger.isEnabledFor(logging.DEBUG):
+            text = "".join(traceback.format_exception(type(error), error, error.__traceback__))
+            logger.debug("The connection test failed:\n%s", cls._mask(text, held))
+
+    def _listing_test(self, connection, instance, values, where) -> dict[str, Any]:
+        """Ask for the model list, which the engine fetches with no charge. It answers when the back end does."""
+        plugin = self._serving_plugin(instance, connection)
+        definition = (self._display_schema(plugin) or {}).get("backend_types", {})
+        fields = (definition.get(connection.backend_type) or {}).get("fields") or []
+        listing = next((item["key"] for item in fields if item.get("type") == "options"), None)
+        if listing is None:
+            return self._test_result(False, "This back end has no check that can run without translating.")
+        draft = {**values, **({MODEL_KEY: connection.model} if connection.model else {})}
+        started = time.monotonic()
+        try:
+            answer = self.options(instance.id, connection.backend_type, listing, draft, plugin=plugin)
+        except InvalidValuesError:
+            return self._test_result(False, "The saved settings no longer fit this version of the plugin. Open "
+                                            "this back end and save it again.")
+        if answer.get("available") is True:
+            return self._test_result(True, "", started)
+        return self._test_result(False, self._unanswered(where))
+
+    def _engine_secrets(self, instance, engine_values: Mapping[str, Any]) -> tuple[str, dict[str, str]]:
+        """The engine's stored secrets a test may send, cut to the engine's own destinations, or a refusal.
+
+        The same rule a translation keeps: a key entered for other addresses is never sent to these.
+        """
+        owner = (INSTANCE, instance.id)
+        if not self._store.secrets_for_request(owner, frozenset()):
+            return "", {}
+        parsed = self._parsed(self._plugin(instance.plugin_id))
+        if parsed is None:
+            return "", {}
+        destinations = effective_destinations(DestinationSchema(fields=parsed.settings_fields,
+                                                                endpoints=parsed.endpoints), engine_values)
+        if (instance.awaiting_secrets or self._store.has_stale_secrets(owner, destinations)
+                or any(item.startswith("invalid:") for item in destinations)):
+            return ("The address of the engine changed after its key was saved, so the saved key is not sent to "
+                    "the new one. Enter the key again and save."), {}
+        return "", dict(self._store.secrets_for_request(owner, destinations))
+
+    def _paid_test(self, connection, instance, values, destinations, secrets, held, where,
+                   claim: _Claim, engine_values: Mapping[str, Any] | None = None) -> dict[str, Any]:
+        # Imported here: the ledger reads the database tables at import, and a caller that only lists
+        # engines or saves settings must not need them.
+        from .usage import RESERVED, CostLimits, UsageLedger, worst_case_micros
+
+        worst = worst_case_micros(TEST_INPUT_TOKENS, TEST_OUTPUT_TOKENS, _price(connection.price_input_per_million),
+                                  _price(connection.price_output_per_million))
+        ledger = UsageLedger(self._store.session)
+        caps = self._cost_limits() if self._cost_limits is not None else _configured_limits()
+        # The test holds what it may cost, not a whole job's share of the month.
+        limits = CostLimits(caps.month_cap, worst if caps.job_cap is None else min(caps.job_cap, worst),
+                            caps.translation_limit)
+        job_id = f"connection-test-{connection.id}-{uuid4().hex[:12]}"
+        call_id = "test"
+        if worst > 0:
+            # A priced test is a call like any other: it fits the month and job caps or it does not run.
+            def refused(reason):
+                remainder = (ledger.month_remainder(caps)
+                             if caps.month_cap is not None and caps.job_cap is not None else None)
+                return self._test_result(False, _cap_message(reason, caps, remainder))
+
+            try:
+                budget = ledger.reserve_job_budget(job_id, limits)
+                if budget.status != RESERVED:
+                    return refused(budget.status)
+                reservation = ledger.reserve_call(job_id, call_id, worst_case_micros=worst, limits=limits,
+                                                  connection_id=connection.id, backend_type=connection.backend_type,
+                                                  model=connection.model)
+                if not reservation.admitted:
+                    ledger.release_job(job_id)
+                    return refused(reservation.reason)
+            except BaseException:
+                # Whatever failed part way, the budget the first step committed is given back.
+                try:
+                    ledger.release_job(job_id)
+                except Exception:
+                    logger.warning("A connection test could not give back its budget")
+                raise
+        request = ProbeRequest(
+            instance_id=instance.id, connection_id=connection.id, backend_type=connection.backend_type,
+            model=connection.model, values=dict(values), destinations=destinations,
+            input_token_limit=TEST_INPUT_TOKENS, output_token_limit=TEST_OUTPUT_TOKENS,
+            timeout_seconds=TEST_TIMEOUT_SECONDS, secrets=dict(secrets),
+            plugin_id=connection.plugin_id or instance.plugin_id, engine_values=dict(engine_values or {}),
+            price_input_per_million=_price(connection.price_input_per_million),
+            price_output_per_million=_price(connection.price_output_per_million))
+        started = time.monotonic()
+        answer: Mapping[str, Any] = {}
+        failure: Exception | None = None
+        try:
+            answer = self._run_probe(request, claim)
+        except Exception as error:  # settled below, then said as a failure without its text
+            failure = error
+        finally:
+            if worst > 0:
+                try:
+                    self._settle_test(ledger, job_id, call_id, connection, answer, limits)
+                finally:
+                    ledger.release_job(job_id)
+        if failure is not None:
+            # A bug in our code is raised, with the secrets masked in what is raised. A lookup that failed on an
+            # odd answer from a provider (a missing key, an index) is that provider's failure, not ours.
+            if _is_bug(failure):
+                self._log_failure(failure, held)
+                raise self._sanitized(failure, held)
+            self._log_failure(failure, held)
+            return self._test_result(False, UNFINISHED_TEST)
+        if answer.get("ok") is True:
+            return self._test_result(True, "", started)
+        return self._test_result(False, self._said(answer.get("message"), held) or self._unanswered(where))
+
+    def _run_probe(self, request: ProbeRequest, claim: _Claim) -> Mapping[str, Any]:
+        """Call the probe, and stop waiting for it a little after the time it was given.
+
+        The claim on the connection goes with the probe's thread: if this stops waiting, the connection stays
+        claimed until the probe really returns, so a second test cannot start beside one that still runs.
+        """
+        box: dict[str, Any] = {}
+
+        def run() -> None:
+            try:
+                box["answer"] = self._probe(request)
+            except Exception as error:  # handed to the caller, which says only its type
+                box["error"] = error
+            finally:
+                claim.release()
+
+        thread = threading.Thread(target=run, name="translation-connection-test", daemon=True)
+        try:
+            thread.start()
+        except Exception as error:
+            # Nothing was sent, so a priced test is settled at nothing and the request releases the claim.
+            logger.warning("A connection test could not start its probe: %s", type(error).__name__)
+            return {"ok": False, "sent": False, "message": "The test could not be started. Try again in a moment."}
+        claim.handed_to_probe = True  # only once the thread exists: if it never started, the request releases
+        thread.join(request.timeout_seconds + TEST_TIMEOUT_GRACE_SECONDS)
+        if thread.is_alive():
+            raise TimeoutError("the probe did not answer in time")
+        if "error" in box:
+            raise box["error"]
+        return box.get("answer") or {}
+
+    @staticmethod
+    def _settle_test(ledger: "UsageLedger", job_id: str, call_id: str, connection, answer: Mapping[str, Any],
+                     limits: "CostLimits") -> None:
+        """Replace the test's worst-case charge with what it used, when that is known.
+
+        The provider may bill a request whose answer never arrived, so a call that failed, raised or reported
+        no usage keeps its worst-case charge. It is settled at nothing only when the probe says the request
+        never left (``sent`` is false), which is the one definite free result besides reported usage.
+        """
+        from .usage import UsageError, worst_case_micros
+
+        prices = (_price(connection.price_input_per_million), _price(connection.price_output_per_million))
+        used_in, used_out = answer.get("input_tokens"), answer.get("output_tokens")
+        if all(isinstance(item, int) and not isinstance(item, bool) and item >= 0 for item in (used_in, used_out)):
+            actual = worst_case_micros(used_in, used_out, *prices)
+        elif answer.get("sent") is False:
+            used_in = used_out = actual = 0
+        else:
+            used_in, used_out = TEST_INPUT_TOKENS, TEST_OUTPUT_TOKENS
+            actual = worst_case_micros(used_in, used_out, *prices)
+        try:
+            ledger.settle_call(job_id, call_id, input_tokens=used_in, output_tokens=used_out, actual_micros=actual,
+                               limits=limits)
+        except UsageError:
+            logger.warning("A connection test could not be settled in the usage ledger")
+
+    @staticmethod
+    def _typed_origin(schema: DestinationSchema, values: Mapping[str, Any]) -> str:
+        """The first address the person typed for this back end, as scheme and host, or an empty string."""
+        typed = DestinationSchema(fields=schema.fields)
+        baseline = effective_destinations(typed, {})
+        for item in sorted(effective_destinations(typed, values) - baseline):
+            try:
+                return catalog_view._shown(normalize_destination(item))
+            except DestinationError:
+                continue
+        return ""
+
+    @staticmethod
+    def _unanswered(where: str) -> str:
+        at = f" at {where}" if where else ""
+        return (f"No answer{at}. Check the address and the key, and that the server is running and reachable "
+                "from the Bazarr+ container.")
+
+    @staticmethod
+    def _mask(text: str, held: Mapping[str, str]) -> str:
+        """The text with every saved secret and credential shape masked, whitespace left as it was.
+
+        ``held`` is every secret the connection stores, whatever its length. A secret is masked as it is and in
+        the forms it takes when something renders it (repr, a dict or tuple inside a message, JSON, unicode
+        escapes), so a key with a backslash, a quote or a newline in it does not get through escaped. A short
+        value is masked only as a whole word, so it does not eat the letters of an ordinary word.
+        """
+        pieces = {piece for value in held.values() for piece in [value, *_entries_of(value)] if piece}
+        forms: set[str] = set()
+        for piece in pieces:
+            forms |= _rendered_forms(piece)
+        for form in sorted(forms, key=len, reverse=True):
+            pattern = re.escape(form) if len(form) >= 4 else r"(?<!\w)" + re.escape(form) + r"(?!\w)"
+            text = re.sub(pattern, "***", text)
+        try:
+            from secret_store.scrub import scrub_text
+
+            return scrub_text(text)
+        except Exception:
+            return "[the text could not be scrubbed and is left out]"
+
+    @classmethod
+    def _said(cls, message: Any, held: Mapping[str, str]) -> str:
+        """A probe's message as it may leave: one short line with every saved secret and credential masked.
+
+        The masking runs on the text as it came, before whitespace is collapsed, so a value cannot hide across
+        a line break.
+        """
+        if not isinstance(message, str):
+            return ""
+        text = cls._mask(message, held)
+        if text.startswith("[the text could not"):
+            return ""
+        return " ".join(text.split())[:TEST_MESSAGE_LIMIT]
+
+    @staticmethod
+    def _test_result(ok: bool, message: str, started: float | None = None) -> dict[str, Any]:
+        latency = int((time.monotonic() - started) * 1000) if ok and started is not None else None
+        return {"ok": ok, "message": message, "latency_ms": latency}
 
     # ------------------------------------------------------------ helpers
     @staticmethod
@@ -681,6 +1339,22 @@ class TranslatorSettingsService:
             if text:
                 clean.add(text)
         return clean
+
+    @staticmethod
+    def _make_key_durable(validated: ValidatedValues) -> None:
+        """Make sure the master encryption key is on disk before a secret under it is written.
+
+        Persisting it writes config.yaml, which takes the config lock. That has to happen before the write
+        transaction opens, never inside it: the config lock comes first.
+        """
+        if not validated.secrets:
+            return
+        from secret_store import persist_master_key
+
+        try:
+            persist_master_key()
+        except ValueError:
+            raise ServiceError("The encryption key could not be saved, so no secret was stored. Try again.") from None
 
     def _write_secrets(self, owner, validated: ValidatedValues, clear: list[str], destinations) -> None:
         for name in clear:

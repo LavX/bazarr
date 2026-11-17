@@ -27,6 +27,7 @@ from datetime import datetime
 from typing import Any, Callable, Iterable, Mapping, Sequence
 
 from sqlalchemy import delete, func, select, update
+from sqlalchemy.exc import IntegrityError
 
 from app.database import (TableTranslatorConnection, TableTranslatorEngineInstance,
                           TableTranslatorSecret)
@@ -195,6 +196,11 @@ class TranslatorStore:
         self._pointers = pointers if pointers is not None else ConfigPointers()
         self._plugin_active = plugin_active if plugin_active is not None else default_plugin_active
 
+    @property
+    def session(self):
+        """The session the store reads and writes through, for a caller that keeps its own ledger rows in it."""
+        return self._session
+
     # ------------------------------------------------------------------ reads
     def get_instance(self, instance_id: int, *, fresh: bool = False):
         """The instance. ``fresh`` reads it from the database even if this session has seen it before; use it at
@@ -266,9 +272,25 @@ class TranslatorStore:
         return row
 
     def ensure_instance(self, plugin_id: str, **kwargs):
-        """The plugin's first instance, created when it has none."""
+        """The plugin's first instance, created when it has none.
+
+        The check is made again inside the write transaction, so two callers that both saw none do not both
+        create one. A second process is stopped by the unique index of an engine served by Bazarr+ itself,
+        and the loser reads the row the winner made.
+        """
         existing = self.list_instances(plugin_id)
-        return existing[0] if existing else self.create_instance(plugin_id, **kwargs)
+        if existing:
+            return existing[0]
+        try:
+            with write_transaction(self._session):
+                existing = self.list_instances(plugin_id)
+                return existing[0] if existing else self.create_instance(plugin_id, **kwargs)
+        except IntegrityError:
+            self._session.expire_all()
+            existing = self.list_instances(plugin_id)
+            if existing:
+                return existing[0]
+            raise
 
     def save_instance_settings(self, instance_id: int, settings: Mapping[str, Any], *,
                                schema: DestinationSchema, settings_version: int | None = None,
@@ -316,7 +338,9 @@ class TranslatorStore:
         instance = self._require_instance(instance_id)
         if expected_revision is not None and instance.revision != expected_revision:
             raise StaleRevisionError("the engine settings changed since they were loaded", instance.revision)
-        with write_transaction(self._session):
+        # The config lock first, then the write transaction: the one order every writer of both keeps, so a
+        # turn-off that has to release a pointer cannot wait on a transaction that waits on it.
+        with self._pointer_cycle(), write_transaction(self._session):
             current = int(instance.revision)
             claimed = self._session.execute(
                 update(TableTranslatorEngineInstance)
@@ -739,7 +763,8 @@ class TranslatorStore:
         that was turned off lets the pointers go.
         """
         engine_ids: set[int] = set()
-        with self.transaction():
+        # Config lock first, then the transaction, as in ``set_instance_enabled``.
+        with self._pointer_cycle(), self.transaction():
             for kind, owner_id in owners:
                 row = self._require_owner((kind, owner_id))
                 row.enabled = 0

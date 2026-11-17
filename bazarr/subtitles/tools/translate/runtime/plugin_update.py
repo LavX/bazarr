@@ -22,7 +22,7 @@ from .store import INSTANCE, TranslatorStore
 logger = logging.getLogger(__name__)
 
 NEEDS_ATTENTION = ("Some saved translation settings no longer fit this version of the plugin and were turned "
-                   "off. Open Settings > Translation to review them.")
+                   "off. Open Translation in the main menu to review them.")
 
 
 def bring_up_to_date(store: TranslatorStore, plugin_id: str, manifest: Mapping[str, Any]) -> str | None:

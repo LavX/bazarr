@@ -1,0 +1,377 @@
+"""The state snapshot's catalog fields: engines that could be installed, and a newer release of an installed one.
+
+The hub's own rules decide both. An engine is offered only when its source may install it and this host can run
+it, and an update is shown only when the Updates tab would offer it, so the page never names a release the hub
+would not stage.
+"""
+import json
+
+import pytest
+from flask import Blueprint, Flask
+from flask_restx import Api
+
+from plugin_platform_helpers import verified_official_source, service_manifest
+from subtitles.tools.translate.runtime import catalog_view
+from subtitles.tools.translate.runtime.settings_service import InstalledPlugin, TranslatorSettingsService
+from subtitles.tools.translate.runtime.store import OFFICIAL_ENGINE_PLUGIN_ID, TranslatorStore
+from test_provider_hub import _manifest as provider_manifest
+
+API_KEY = "translation-state-test-key"  # pragma: allowlist secret
+PLUGIN = OFFICIAL_ENGINE_PLUGIN_ID
+GOOGLE = "google_translate"
+
+
+@pytest.fixture(autouse=True)
+def translator_kind():
+    from provider_hub import kinds
+    from provider_hub.kinds.translator import register_translator_kind
+
+    before = kinds._KINDS.pop("translator", None)
+    register_translator_kind()
+    try:
+        yield
+    finally:
+        kinds._KINDS.pop("translator", None)
+        if before is not None:
+            kinds._KINDS["translator"] = before
+
+
+def _ai_manifest(version="2.2.0", **extra):
+    return service_manifest(
+        PLUGIN, version, kind="translator", kind_api="bazarr.translator.v1", name="AI Subtitle Translator",
+        settings_version=1,
+        settings={"fields": [], "backend_types": {
+            "openrouter": {"label": "OpenRouter", "endpoints": ["https://openrouter.ai:443"],
+                           "fields": [{"key": "api_key", "type": "secret"}]},
+            "lmstudio": {"label": "LM Studio", "fields": [
+                {"key": "base_url", "type": "text", "destination": True, "default": "http://localhost:1234/v1"}]}}},
+        **extra)
+
+
+def _google_manifest(version="1.0.0", **extra):
+    fields = {"description": "Free, with no key. Plainer translations than the AI engine.", **extra}
+    return service_manifest(
+        GOOGLE, version, kind="translator", kind_api="bazarr.translator.v1", name="Google Translate",
+        settings_version=1, endpoints=["https://translate.googleapis.com:443"], settings={"fields": []}, **fields)
+
+
+def _entry(manifest, source="official", trusted=True):
+    return {"source": source, "source_name": source.title(), "provider_id": manifest["id"], "name": manifest["name"],
+            "version": manifest["version"], "trusted": trusted, "manifest": manifest, "catalog_list": "plugins"}
+
+
+def _state(tmp_path, monkeypatch, entries=(), installations=None, official=None):
+    """A hub state whose official source is a verified, current one, unless ``official`` says otherwise."""
+    state_file = tmp_path / "state.json"
+    state_file.write_text(json.dumps({
+        "catalog_sources": {"official": official or verified_official_source(),
+                            "community": {"id": "community", "name": "Community", "type": "github",
+                                          "enabled": True, "trusted": False}},
+        "catalog_entries": {f"{e['source']}:plugins:{e['provider_id']}:{e['version']}": e for e in entries},
+        "installations": installations or {}, "jobs": []}), encoding="utf-8")
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(state_file))
+
+
+# ----------------------------------------------------------------- catalog view
+
+def test_an_engine_is_described_for_the_page_with_its_destinations_and_no_key_needed():
+    item = catalog_view.describe_entry(_entry(_google_manifest()))
+    assert item == {
+        "plugin_id": GOOGLE, "name": "Google Translate", "version": "1.0.0", "source": "official",
+        "official": False, "free": True, "destinations": ["https://translate.googleapis.com"],
+        "description": "Free, with no key. Plainer translations than the AI engine."}
+
+
+def test_the_official_engine_needs_a_key_and_lists_every_address_it_may_send_to():
+    item = catalog_view.describe_entry(_entry(_ai_manifest()))
+    assert item["official"] is True and item["free"] is False
+    assert item["destinations"] == ["http://localhost:1234", "https://openrouter.ai"]
+    assert "description" not in item
+
+
+def test_only_the_official_sources_entry_is_shown_and_sorted_as_the_official_engine(monkeypatch):
+    import provider_hub.service as hub
+
+    renamed = _ai_manifest()
+    renamed["name"] = "Zeta Translator"
+    imposter = _entry(renamed, source="dev", trusted=False)
+    assert catalog_view.describe_entry(imposter)["official"] is False
+    assert catalog_view.describe_entry(_entry(_ai_manifest()))["official"] is True
+    other = _entry(_google_manifest())
+    monkeypatch.setattr(hub, "installable_catalog_plugins", lambda kind: [imposter, other])
+    listed = catalog_view.available_engines()
+    assert [(item["plugin_id"], item["official"]) for item in listed] == [(GOOGLE, False), (PLUGIN, False)]
+
+
+def test_a_description_is_trimmed_and_a_manifest_that_does_not_parse_is_skipped():
+    long_text = "word " * 200
+    assert len(catalog_view.describe_entry(_entry(_google_manifest(description=long_text)))["description"]) <= 300
+    broken = _google_manifest()
+    broken["kind_api"] = "not-a-kind-api"
+    assert catalog_view.describe_entry(_entry(broken)) is None
+
+
+# ---------------------------------------------------------------- the hub side
+
+def test_an_uninstalled_engine_is_installable_and_an_installed_one_is_not(tmp_path, monkeypatch):
+    from provider_hub.service import installable_catalog_plugins
+
+    _state(tmp_path, monkeypatch, [_entry(_ai_manifest()), _entry(_google_manifest())],
+           installations={GOOGLE: {"provider_id": GOOGLE, "name": "Google Translate", "active_version": "1.0.0",
+                                   "state": "active", "kind": "translator"}})
+    assert [entry["provider_id"] for entry in installable_catalog_plugins("translator")] == [PLUGIN]
+
+
+def test_the_newest_version_of_each_engine_is_the_one_offered(tmp_path, monkeypatch):
+    from provider_hub.service import installable_catalog_plugins
+
+    _state(tmp_path, monkeypatch, [_entry(_google_manifest("1.0.0")), _entry(_google_manifest("1.2.0")),
+                                   _entry(_google_manifest("1.1.0"))])
+    (entry,) = installable_catalog_plugins("translator")
+    assert entry["version"] == "1.2.0"
+
+
+def test_a_subtitle_provider_is_not_an_engine_and_a_trusted_source_wins_a_tie(tmp_path, monkeypatch):
+    from provider_hub.service import installable_catalog_plugins
+
+    provider = provider_manifest(provider_id="examplehub", version="1.0.0")
+    entry = {"source": "official", "source_name": "Official", "provider_id": "examplehub", "name": "Example",
+             "version": "1.0.0", "trusted": True, "manifest": provider}
+    _state(tmp_path, monkeypatch, [entry, _entry(_google_manifest(), source="community", trusted=False),
+                                   _entry(_google_manifest(), source="official", trusted=True)])
+    (found,) = installable_catalog_plugins("translator")
+    assert (found["provider_id"], found["source"]) == (GOOGLE, "official")
+
+
+def test_an_engine_only_the_official_signed_catalog_may_supply_is_the_only_one_offered(tmp_path, monkeypatch):
+    from provider_hub.service import installable_catalog_plugins
+
+    _state(tmp_path, monkeypatch, [_entry(_google_manifest(), source="community", trusted=False)])
+    # A kind other than the subtitle provider comes only from the trusted official source.
+    assert installable_catalog_plugins("translator") == []
+    assert catalog_view.available_engines() == []
+    _state(tmp_path, monkeypatch, [_entry(_google_manifest())])
+    assert [entry["provider_id"] for entry in installable_catalog_plugins("translator")] == [GOOGLE]
+    _state(tmp_path, monkeypatch, [_entry(_google_manifest())], official=verified_official_source(trusted=False))
+    assert installable_catalog_plugins("translator") == []
+
+
+def test_a_failed_first_install_does_not_count_as_installed_so_the_engine_is_offered_again(tmp_path, monkeypatch):
+    from provider_hub.service import installable_catalog_plugins
+
+    failed = {GOOGLE: {"provider_id": GOOGLE, "name": "Google Translate", "state": "failed", "kind": "translator",
+                       "last_error": "The download failed.", "source_bound": True, "source_id": "official"}}
+    _state(tmp_path, monkeypatch, [_entry(_google_manifest())], installations=failed)
+    assert [entry["provider_id"] for entry in installable_catalog_plugins("translator")] == [GOOGLE]
+    # One that is installed, or staged, still is not offered.
+    for held in ({"active_version": "1.0.0"}, {"staged_version": "1.0.0"}):
+        _state(tmp_path, monkeypatch, [_entry(_google_manifest())],
+               installations={GOOGLE: {**failed[GOOGLE], **held}})
+        assert installable_catalog_plugins("translator") == []
+
+
+def test_an_engine_from_an_expired_signed_catalog_is_not_offered(tmp_path, monkeypatch):
+    from provider_hub.service import installable_catalog_plugins
+
+    _state(tmp_path, monkeypatch, [_entry(_google_manifest())],
+           official=verified_official_source(catalog_signature="verified", catalog_expires_at="2001-01-01T00:00:00Z"))
+    assert installable_catalog_plugins("translator") == []
+    assert catalog_view.available_engines() == []
+
+
+def test_an_engine_whose_dependencies_do_not_resolve_is_not_offered(tmp_path, monkeypatch):
+    from provider_hub.service import installable_catalog_plugins
+
+    needy = _google_manifest(extends={"id": "gone", "capability": "gone.v1"})
+    _state(tmp_path, monkeypatch, [_entry(needy)])
+    assert installable_catalog_plugins("translator") == []
+
+
+def test_offering_an_engine_never_reaches_the_network(tmp_path, monkeypatch):
+    import requests
+
+    def refuse(*args, **kwargs):
+        raise AssertionError("the catalog view must read the stored catalog only")
+
+    monkeypatch.setattr(requests, "get", refuse)
+    monkeypatch.setattr(requests, "Session", refuse)
+    _state(tmp_path, monkeypatch, [_entry(_google_manifest()), _entry(_ai_manifest("2.3.0"))],
+           installations={PLUGIN: {"provider_id": PLUGIN, "name": "AI", "active_version": "2.2.0", "state": "active",
+                                   "pending_restart": False, "source_bound": True, "source_id": "official",
+                                   "kind": "translator", "manifest": _ai_manifest("2.2.0")}})
+    assert [item["plugin_id"] for item in catalog_view.available_engines()] == [GOOGLE]
+    assert catalog_view.update_version(PLUGIN) == "2.3.0"
+
+
+def test_an_entry_whose_manifest_is_not_a_valid_translator_is_not_offered(tmp_path, monkeypatch):
+    from provider_hub.service import installable_catalog_plugins
+
+    wrong_api = _google_manifest(version="1.0.1")
+    wrong_api["kind_api"] = "bazarr.subtitle_provider.v1"
+    _state(tmp_path, monkeypatch, [_entry(wrong_api), _entry(_ai_manifest())])
+    assert [entry["provider_id"] for entry in installable_catalog_plugins("translator")] == [PLUGIN]
+
+
+def test_the_update_a_page_shows_is_the_one_the_updates_tab_offers(tmp_path, monkeypatch):
+    from provider_hub.service import check_updates, offered_update_version
+
+    installed = provider_manifest(provider_id="examplehub", version="1.0.0")
+    newer = provider_manifest(provider_id="examplehub", version="1.1.0")
+    row = {"provider_id": "examplehub", "name": "Example", "active_version": "1.0.0", "active_path": "/old",
+           "python_path": "/old/python", "state": "active", "pending_restart": False, "source_bound": True,
+           "source_id": "official", "manifest": installed}
+    entry = {"source": "official", "source_name": "Official", "provider_id": "examplehub", "name": "Example",
+             "version": "1.1.0", "trusted": True, "manifest": newer}
+    _state(tmp_path, monkeypatch, [entry], installations={"examplehub": row})
+    assert offered_update_version("examplehub") == "1.1.0"
+    assert check_updates()["details"]["updates_available"] == 1
+    assert offered_update_version("missing") is None
+    row["state"] = "removed"
+    _state(tmp_path, monkeypatch, [entry], installations={"examplehub": row})
+    assert offered_update_version("examplehub") is None
+
+
+def _installed_engine(**fields):
+    row = {"provider_id": PLUGIN, "name": "AI", "active_version": "2.2.0", "active_path": "/old", "state": "active",
+           "pending_restart": False, "source_bound": True, "source_id": "official", "kind": "translator",
+           "manifest": _ai_manifest("2.2.0")}
+    row.update(fields)
+    return {PLUGIN: row}
+
+
+def test_a_newer_engine_release_from_the_bound_official_source_is_announced(tmp_path, monkeypatch):
+    from provider_hub.service import offered_update_version
+
+    _state(tmp_path, monkeypatch, [_entry(_ai_manifest("2.3.0"))], installations=_installed_engine())
+    assert offered_update_version(PLUGIN) == "2.3.0"
+
+
+def test_an_update_the_hub_would_refuse_for_an_engine_is_not_announced(tmp_path, monkeypatch):
+    from provider_hub.service import offered_update_version
+
+    # Not from the official source: a translator is never updated from a community one.
+    _state(tmp_path, monkeypatch, [_entry(_ai_manifest("2.3.0"), source="community", trusted=False)],
+           installations=_installed_engine(source_id="community"))
+    assert offered_update_version(PLUGIN) is None
+    # A signed catalog that has expired offers nothing.
+    _state(tmp_path, monkeypatch, [_entry(_ai_manifest("2.3.0"))], installations=_installed_engine(),
+           official=verified_official_source(catalog_signature="verified", catalog_expires_at="2001-01-01T00:00:00Z"))
+    assert offered_update_version(PLUGIN) is None
+    # A release whose dependencies do not resolve.
+    needy = _ai_manifest("2.3.0", extends={"id": "gone", "capability": "gone.v1"})
+    _state(tmp_path, monkeypatch, [_entry(needy)], installations=_installed_engine())
+    assert offered_update_version(PLUGIN) is None
+
+
+def test_an_update_that_drops_a_capability_an_installed_plugin_relies_on_is_not_announced(tmp_path, monkeypatch):
+    from provider_hub.service import offered_update_version
+
+    capability = "demo_ai.engine.v1"
+    installed = _ai_manifest("2.2.0", provides=[capability])
+    user = service_manifest("demo_user", "1.0.0", requires=[capability])
+    dependents = {"demo_user": {"provider_id": "demo_user", "kind": user["kind"], "name": "User",
+                                "active_version": "1.0.0", "state": "active", "pending_restart": False,
+                                "manifest": user, "enabled": True}}
+    _state(tmp_path, monkeypatch, [_entry(_ai_manifest("2.3.0"))],
+           installations={**_installed_engine(manifest=installed), **dependents})
+    assert offered_update_version(PLUGIN) is None
+    # With nobody relying on it, the same release is announced.
+    _state(tmp_path, monkeypatch, [_entry(_ai_manifest("2.3.0"))], installations=_installed_engine(manifest=installed))
+    assert offered_update_version(PLUGIN) == "2.3.0"
+
+
+def test_a_catalog_that_cannot_be_read_leaves_the_list_empty_and_the_chip_off(monkeypatch):
+    import provider_hub.service as hub
+
+    def broken(*args, **kwargs):
+        raise OSError("no state")
+
+    monkeypatch.setattr(hub, "installable_catalog_plugins", broken)
+    monkeypatch.setattr(hub, "offered_update_version", broken)
+    assert catalog_view.available_engines() == []
+    assert catalog_view.update_version(PLUGIN) is None
+
+
+def test_an_engine_bazarr_runs_itself_is_never_offered_from_the_catalog(monkeypatch):
+    import provider_hub.service as hub
+
+    lingarr = service_manifest("lingarr", kind="translator", kind_api="bazarr.translator.v1", name="Lingarr",
+                               settings_version=1, settings={"fields": []})
+    monkeypatch.setattr(hub, "installable_catalog_plugins",
+                        lambda kind: [_entry(lingarr), _entry(_google_manifest())])
+    assert [item["plugin_id"] for item in catalog_view.available_engines()] == [GOOGLE]
+
+
+def test_the_official_engine_is_listed_first(monkeypatch):
+    import provider_hub.service as hub
+
+    monkeypatch.setattr(hub, "installable_catalog_plugins",
+                        lambda kind: [_entry(_google_manifest()), _entry(_ai_manifest())])
+    assert [item["plugin_id"] for item in catalog_view.available_engines()] == [PLUGIN, GOOGLE]
+
+
+# -------------------------------------------------------------------- the route
+
+class MemoryPointers:
+    def __init__(self):
+        self.engine = self.fallback = None
+
+    def get(self):
+        return self.engine, self.fallback
+
+    def set(self, engine, fallback):
+        self.engine, self.fallback = engine, fallback
+        return True
+
+
+@pytest.fixture
+def world(monkeypatch, schema_session):
+    from subtitles.tools.translate import runtime
+
+    import api.translation.translation as module
+    from app.config import settings
+
+    monkeypatch.setattr(settings.auth, "apikey", API_KEY)
+    monkeypatch.setattr(runtime, "runtime_v2_enabled", lambda: True)
+    plugins = {PLUGIN: InstalledPlugin(PLUGIN, "AI Subtitle Translator", "2.2.0", True, _ai_manifest())}
+    store = TranslatorStore(schema_session, pointers=MemoryPointers(), plugin_active=lambda pid: pid in plugins)
+
+    class World:
+        pass
+
+    w = World()
+    w.available, w.updates, w.hooks = [], {}, {}
+    monkeypatch.setattr(module, "get_service", lambda: TranslatorSettingsService(
+        store, plugin_lookup=plugins.get, catalog_engines=lambda: w.available,
+        update_lookup=lambda plugin_id: w.updates.get(plugin_id), **w.hooks))
+    blueprint = Blueprint("translation_state_test", __name__, url_prefix="/api")
+    Api(blueprint, authorizations={"apikey": {"type": "apiKey", "in": "header", "name": "X-API-KEY"}},
+        security="apikey").add_namespace(module.api_ns_translation, "/")
+    app = Flask(__name__)
+    app.register_blueprint(blueprint)
+    client = app.test_client()
+    store.create_instance(PLUGIN, name="AI", settings_version=1, plugin_version="2.2.0")
+    w.state = lambda: client.get("/api/translation/state", headers={"X-API-KEY": API_KEY}).json
+    return w
+
+
+def test_the_state_lists_the_routes_that_work_and_leaves_test_out_until_something_can_answer_one(world):
+    state = world.state()
+    assert state["capabilities"] == ["summary", "limits", "queue"]
+    assert state["available_engines"] == []
+    world.hooks["connection_probe"] = lambda request: {"ok": True}
+    assert world.state()["capabilities"] == ["summary", "limits", "test", "queue"]
+
+
+def test_the_state_carries_the_engines_the_catalog_offers_as_the_page_reads_them(world):
+    world.available = [catalog_view.describe_entry(_entry(_google_manifest()))]
+    (engine,) = world.state()["available_engines"]
+    assert (engine["plugin_id"], engine["source"], engine["version"]) == (GOOGLE, "official", "1.0.0")
+    assert engine["free"] is True and engine["destinations"] == ["https://translate.googleapis.com"]
+
+
+def test_an_instance_shows_the_release_the_hub_offers_and_null_when_it_offers_none(world):
+    assert world.state()["instances"][0]["plugin"]["update_version"] is None
+    world.updates[PLUGIN] = "2.3.0"
+    plugin = world.state()["instances"][0]["plugin"]
+    assert plugin == {"name": "AI Subtitle Translator", "version": "2.2.0", "active": True, "update_version": "2.3.0"}

@@ -146,7 +146,7 @@ def test_a_held_back_engine_with_a_removed_secret_can_be_repaired_and_turned_bac
     lifecycle.stage(_manifest("1.0.0", old_fields, endpoints=[old_origin]),
                     _manifest("2.0.0", new_fields, endpoints=[new_origin]))
     # The release drops a secret, requires a field the engine does not have and moves the address.
-    assert "Settings > Translation" in _activate()["last_error"]
+    assert "Translation in the main menu" in _activate()["last_error"]
     store._session.expire_all()
     held = store.get_instance(instance.id)
     assert held.enabled == 0 and held.awaiting_secrets == 1
@@ -178,7 +178,7 @@ def test_a_release_whose_new_rules_the_saved_settings_do_not_meet_holds_them_bac
     installation = _activate()
     # The release is active, but what could not be carried over is switched off and flagged.
     assert installation["state"] == "active" and installation["active_version"] == "2.0.0"
-    assert "Settings > Translation" in installation["last_error"] and SECRET not in installation["last_error"]
+    assert "Translation in the main menu" in installation["last_error"] and SECRET not in installation["last_error"]
     store._session.expire_all()
     held = store.get_instance(instance.id)
     assert held.enabled == 0 and held.awaiting_secrets == 1
@@ -214,7 +214,7 @@ def test_a_release_that_requires_a_model_holds_back_the_connections_that_have_no
         [{"key": "label", "type": "text"}, {"key": "model", "type": "options", "required": True}])
     assert rows["bare"].enabled == 0 and rows["bare"].awaiting_secrets == 1
     assert rows["named"].enabled == 1 and rows["named"].awaiting_secrets == 0
-    assert engine.enabled == 1 and "Settings > Translation" in installation["last_error"]
+    assert engine.enabled == 1 and "Translation in the main menu" in installation["last_error"]
 
 
 def test_a_release_that_tightens_a_price_limit_holds_back_the_connections_over_it(lifecycle):
@@ -298,7 +298,7 @@ def test_a_held_back_engine_with_a_removed_plain_field_can_be_repaired_and_turne
     instance = store.create_instance(PLUGIN, settings={"label": "mine", "legacy": "old"})
     lifecycle.stage(_manifest("1.0.0", old_fields), _manifest("2.0.0", new_fields))
     # The release drops a populated field and requires one the engine does not have: it is held back as it was.
-    assert "Settings > Translation" in _activate()["last_error"]
+    assert "Translation in the main menu" in _activate()["last_error"]
     store._session.expire_all()
     held = store.get_instance(instance.id)
     assert held.enabled == 0 and store.settings_of(held) == {"label": "mine", "legacy": "old"}
@@ -339,5 +339,5 @@ def test_a_release_that_tightens_a_secret_limit_holds_back_the_owners_whose_stor
     assert store.get_connection(fine.id).enabled == 1
     # Held back as it was: the secrets stay where they are, and nothing about them appears in the message.
     assert json.loads(store.secrets_for_request(("connection", many.id), frozenset())["keys"]) == keys
-    assert "Settings > Translation" in installation["last_error"]
+    assert "Translation in the main menu" in installation["last_error"]
     assert not any(value in installation["last_error"] for value in keys + ["t" * 30])
