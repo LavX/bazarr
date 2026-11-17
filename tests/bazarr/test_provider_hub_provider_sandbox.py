@@ -34,9 +34,12 @@ from provider_hub.sandbox import (
 from provider_hub.sandbox import policy as policy_module
 from provider_hub.sandbox import seccomp as seccomp_module
 from provider_hub.sandbox import spawn as spawn_module
+from provider_hub import provider_roots as _provider_roots
 from provider_hub.worker import ProviderLayout, ProviderWorkerClient, worker_command
 
 RUNNER = Path(worker_module._RUNNER_PATH)
+# The reader itself, which the autouse fixture replaces for the other tests.
+REAL_AUTHENTICATION_OFF = _provider_roots.authentication_off
 
 PROVIDER_SOURCE = '''
 import os
@@ -72,6 +75,17 @@ class Fixture:
             return [{"result": _try(lambda: (os.chmod(config["path"], 0), "changed")[1])}]
         if op == "exit":
             os._exit(3)
+        if op == "raw":
+            import ctypes
+
+            libc = ctypes.CDLL(None, use_errno=True)
+            ctypes.set_errno(0)
+            args = [ctypes.c_long(a) for a in config["args"]]
+            result = libc.syscall(ctypes.c_long(config["number"]), *args)
+            if result >= 0:
+                os.close(result) if config.get("close") else None
+                return [{"result": "created"}]
+            return [{"result": "errno:%d" % ctypes.get_errno()}]
         if op == "mptcp":
             import socket
 
@@ -113,9 +127,11 @@ finally:
 
 
 @pytest.fixture(autouse=True)
-def clean_notices():
+def clean_notices(monkeypatch):
     spawn_module.reset_provider_notices()
     worker_module._probe_again_at = 0.0
+    # A login is set unless a test says otherwise: with none, the status always names the web API route.
+    monkeypatch.setattr("provider_hub.provider_roots.authentication_off", lambda: False)
     yield
     spawn_module.reset_provider_notices()
 
@@ -835,13 +851,26 @@ def test_before_abi_4_the_notice_says_a_plugin_can_call_the_web_api_while_authen
     assert "network connections are not restricted" in " ".join(off["limitations"])
 
 
-def test_from_abi_4_the_port_is_refused_so_there_is_no_gap_and_the_limitation_says_so():
-    probe = SandboxProbe(abi=4, verified=True, reads_verified=True)
+@pytest.mark.parametrize("abi", [4, 6, 10])
+def test_with_authentication_off_the_status_is_partial_at_every_abi_and_names_the_forwarded_port_route(abi):
+    probe = SandboxProbe(abi=abi, verified=True, reads_verified=True)
 
-    status = provider_profile_status(probe, authentication_off=True)
+    off = provider_profile_status(probe, authentication_off=True)
+    on = provider_profile_status(probe, authentication_off=False)
 
-    assert status["state"] == "enforced" and status["notice"] is None
-    assert "own port are refused" in " ".join(status["limitations"])
+    assert off["state"] == "partial"
+    assert "own web API" in off["notice"] and "turn authentication on" in off["notice"]
+    assert "forwards to it" in off["notice"] and "reverse proxy" in off["notice"]
+    assert on["state"] == "enforced" and on["notice"] is None
+    text = " ".join(off["limitations"])
+    assert "own ports are refused" in text and "io_uring" in text and "not covered" in text
+
+
+def test_the_profile_asks_for_a_missing_capability_drop_to_be_best_effort_and_says_so():
+    gaps = " ".join(provider_profile_gaps(10, capabilities_dropped=False))
+
+    assert "no capability bindings" in gaps and "filesystem rules still apply" in gaps
+    assert provider_profile_status(SandboxProbe(abi=10, verified=True, reads_verified=True), authentication_off=False)["state"] == "enforced"
 
 
 def test_the_profile_asks_for_bazarrs_own_port_to_be_refused_and_nothing_else(host, monkeypatch):
@@ -993,10 +1022,10 @@ def test_the_backup_folder_and_the_login_state_come_from_the_settings(tmp_path, 
         return SimpleNamespace(auth=SimpleNamespace(type=auth), general=SimpleNamespace(port=6767), backup=SimpleNamespace(folder=folder))
 
     monkeypatch.setattr("app.config.settings", settings(None))
-    assert provider_roots.authentication_off() is True
+    assert REAL_AUTHENTICATION_OFF() is True
     assert provider_roots.backup_folders() == [tmp_path / "backups"]
     monkeypatch.setattr("app.config.settings", settings("form", folder=""))
-    assert provider_roots.authentication_off() is False
+    assert REAL_AUTHENTICATION_OFF() is False
     assert provider_roots.backup_folders() == []
 
 
@@ -1115,37 +1144,86 @@ def _run_bpf(program: bytes, arch: int, number: int, args=(0, 0, 0)) -> int:
 
 
 @pytest.mark.parametrize("arch,number", [(seccomp_module.AUDIT_ARCH_X86_64, 41), (seccomp_module.AUDIT_ARCH_AARCH64, 198)])
-def test_the_socket_filter_refuses_mptcp_sockets_and_nothing_else(arch, number):
+def test_the_socket_filter_keeps_a_worker_on_plain_tcp_and_allows_everything_else(arch, number):
     program = seccomp_module.build_socket_filter(arch)
-    deny = seccomp_module.SECCOMP_RET_ERRNO | errno_module.EPROTONOSUPPORT
+    proto = errno_module.EPROTONOSUPPORT
+    deny_proto = seccomp_module.SECCOMP_RET_ERRNO | proto
+    deny_perm = seccomp_module.SECCOMP_RET_ERRNO | errno_module.EPERM
     allow, kill = seccomp_module.SECCOMP_RET_ALLOW, seccomp_module.SECCOMP_RET_KILL_PROCESS
-    stream = 1
+    stream, mptcp, smc = 1, seccomp_module.IPPROTO_MPTCP, seccomp_module.IPPROTO_SMC
 
-    assert _run_bpf(program, arch, number, (2, stream, seccomp_module.IPPROTO_MPTCP)) == deny
-    assert _run_bpf(program, arch, number, (10, stream, seccomp_module.IPPROTO_MPTCP)) == deny
-    assert _run_bpf(program, arch, number, (2, stream, 6)) == allow  # plain TCP
-    assert _run_bpf(program, arch, number, (2, stream, 0)) == allow
-    assert _run_bpf(program, arch, number, (2, stream, seccomp_module.IPPROTO_MPTCP | (1 << 32))) == allow
-    assert _run_bpf(program, arch, number + 1, (2, stream, seccomp_module.IPPROTO_MPTCP)) == allow  # another call
+    for domain in (2, 10):
+        assert _run_bpf(program, arch, number, (domain, stream, mptcp)) == deny_proto
+        assert _run_bpf(program, arch, number, (domain, stream, smc)) == deny_proto
+        # The kernel reads an int: whatever the upper half of the register holds, the low half decides.
+        assert _run_bpf(program, arch, number, (domain, stream, mptcp | (1 << 32))) == deny_proto
+        assert _run_bpf(program, arch, number, (domain, stream, mptcp | (0xFFFFFFFF << 32))) == deny_proto
+        assert _run_bpf(program, arch, number, (domain, stream, 6)) == allow  # plain TCP
+        assert _run_bpf(program, arch, number, (domain, stream, 0)) == allow
+        assert _run_bpf(program, arch, number, (domain, stream, 6 | (1 << 32))) == allow  # still plain TCP
+    assert _run_bpf(program, arch, number, (seccomp_module.AF_SMC, stream, 0)) == deny_proto
+    assert _run_bpf(program, arch, number, (seccomp_module.AF_SMC | (1 << 32), stream, 0)) == deny_proto
+    for ring in seccomp_module.IO_URING:
+        assert _run_bpf(program, arch, ring) == deny_perm
+    assert _run_bpf(program, arch, number + 1, (2, stream, mptcp)) == allow  # another call
     assert _run_bpf(program, arch ^ 1, number, (2, stream, 6)) == kill  # another syscall ABI
     if arch == seccomp_module.AUDIT_ARCH_X86_64:
         assert _run_bpf(program, arch, number | seccomp_module.X32_SYSCALL_BIT, (2, stream, 6)) == kill
 
 
-def test_a_provider_cannot_create_an_mptcp_socket_where_the_architecture_has_the_filter(host, client):
-    _enforcing_kernel()
+def _network_rules_here():
+    probe = _enforcing_kernel()
+    if probe.abi < 4:
+        pytest.skip("Landlock ABI %d has no network rules, so the socket filter is not installed" % probe.abi)
     if not seccomp_module.supported():
         pytest.skip("no seccomp filter for this architecture")
+
+
+def test_a_provider_cannot_open_an_mptcp_or_smc_socket_even_with_the_upper_half_of_the_protocol_set(host, client):
+    _network_rules_here()
     worker = client()
+    sock = 41 if seccomp_module.native_audit_arch() == seccomp_module.AUDIT_ARCH_X86_64 else 198
 
     assert _ask(worker, op="mptcp")["result"].startswith("error")
-    # Plain TCP to another port still works.
-    import socket
+    mptcp = seccomp_module.IPPROTO_MPTCP
+    for protocol in (mptcp, mptcp | (1 << 32), seccomp_module.IPPROTO_SMC):
+        answer = _ask(worker, op="raw", number=sock, args=[2, 1, protocol], close=True)["result"]
+        assert answer == "errno:%d" % errno_module.EPROTONOSUPPORT, protocol
+    assert _ask(worker, op="raw", number=sock, args=[seccomp_module.AF_SMC, 1, 0], close=True)["result"] == (
+        "errno:%d" % errno_module.EPROTONOSUPPORT
+    )
+    # Plain TCP is untouched.
+    assert _ask(worker, op="raw", number=sock, args=[2, 1, 0], close=True)["result"] == "created"
 
-    with socket.socket() as listener:
-        listener.bind(("127.0.0.1", 0))
-        listener.listen(1)
-        assert _ask(worker, op="connect", port=listener.getsockname()[1])["result"] in ("connected", "denied")
+
+def test_a_provider_cannot_use_io_uring_to_open_sockets_around_the_filter(host, client):
+    _network_rules_here()
+    worker = client()
+
+    for number in seccomp_module.IO_URING:
+        answer = _ask(worker, op="raw", number=number, args=[0, 0, 0, 0, 0, 0])["result"]
+        assert answer == "errno:%d" % errno_module.EPERM, number
+
+
+def test_the_socket_filter_is_not_installed_where_there_is_no_port_rule(host, client, monkeypatch):
+    # Below ABI 4 there is nothing for it to protect, and a failure to install it would only refuse providers.
+    probe = _enforcing_kernel()
+    if not seccomp_module.supported():
+        pytest.skip("no seccomp filter for this architecture")
+    capped = SandboxProbe(abi=3, verified=True, reads_verified=True)
+    monkeypatch.setattr("provider_hub.sandbox.probe_sandbox", lambda *a, **k: capped)
+    sock = 41 if seccomp_module.native_audit_arch() == seccomp_module.AUDIT_ARCH_X86_64 else 198
+    worker = client()
+
+    assert _ask(worker, op="raw", number=sock, args=[2, 1, 0], close=True)["result"] == "created"
+    try:
+        disabled = int(Path("/proc/sys/kernel/io_uring_disabled").read_text())
+    except (OSError, ValueError):
+        disabled = 0
+    if not disabled:
+        ring = _ask(worker, op="raw", number=425, args=[0, 0])["result"]
+        assert ring != "errno:%d" % errno_module.EPERM  # io_uring is the kernel's to answer, not the filter's
+    assert probe.abi >= 3
 
 
 def test_without_a_filter_for_the_architecture_the_notice_names_the_mptcp_route_while_authentication_is_off(monkeypatch):
@@ -1194,11 +1272,22 @@ def test_the_refusal_says_how_it_ends(host, client, monkeypatch):
         _ask(worker, op="read", path=str(host["media"] / "film.mkv"))
 
 
-def test_an_architecture_without_capability_calls_cannot_sandbox_and_runs_providers_with_a_notice(monkeypatch):
+def test_an_architecture_without_capability_bindings_still_gets_landlock_and_the_notice_names_the_missing_part(
+    host, client, monkeypatch
+):
+    real = _enforcing_kernel()
     monkeypatch.setattr(spawn_module.capabilities, "supported", lambda: False)
 
     probe = spawn_module._run_probe(sys.executable)
 
-    assert probe.absent is True and probe.enforces(PROVIDER_MIN_ABI) is False
+    assert probe.absent is False and probe.reads_verified is True
+    assert probe.enforced is False and probe.enforces(PROVIDER_MIN_ABI) is True
     assert "capability" in probe.reason
-    assert provider_profile_status(probe)["state"] == "unsandboxed"
+    status = provider_profile_status(probe, authentication_off=False)
+    assert status["state"] == "partial" and "no capability bindings" in status["notice"]
+    # The worker starts, under the filesystem rules, with the capability drop best effort.
+    monkeypatch.setattr("provider_hub.sandbox.probe_sandbox", lambda *a, **k: probe)
+    worker = client()
+    assert _ask(worker, op="read", path=str(host["config"] / "config" / "config.yaml"))["result"] == "denied"
+    assert getattr(worker.process, "enforcement", None) == "enforced"
+    assert real.abi >= 1

@@ -413,9 +413,11 @@ def provider_spec(layout: ProviderLayout, command, cwd, env):
     plugin's bundle and environment, the programs on ``PATH`` and the media root folders; read-write
     for the plugin's own data and temp folders. Everything else is denied: the configuration folder
     (``config.yaml`` and the database), the backup folder, home folders and other services' data.
-    No TCP rules, no file-size or process-count limit and no metadata filter, so ``ffmpeg`` can
-    write large temporary files and run its threads.
+    No port allowlist (only Bazarr+'s own ports are refused, where the kernel can), no file-size or
+    process-count limit and no metadata filter, so ``ffmpeg`` can write large temporary files and run
+    its threads.
     """
+    from .sandbox import capabilities
     from .provider_roots import backup_folders, binary_folders, media_root_folders, own_ports, program_folders
     from .runtime.environment import worker_environment
     from .sandbox.policy import (
@@ -469,6 +471,7 @@ def provider_spec(layout: ProviderLayout, command, cwd, env):
         limits=PROVIDER_LIMITS,
         seccomp=False,
         block_mptcp=True,
+        require_capabilities=capabilities.supported(),
     )
 
 
@@ -582,9 +585,10 @@ class ProviderWorkerClient:
     def _spawn(self, env: dict[str, str]):
         """Start the worker process: through the provider sandbox when it applies, else directly.
 
-        A provider worker is sandboxed unless the user switched that off or the host cannot do it
-        (no Landlock, or a canary that escaped): then it starts without it and the status page
-        says so. Where the host can, a start that cannot prepare its ruleset fails: a worker that
+        A provider worker is sandboxed unless the user switched that off or the kernel has no Landlock
+        at all: then it starts without it and the status page says so. Where the host may enforce, a
+        failed or unfinished host check refuses the start, and so does a start that cannot prepare its
+        ruleset: a worker that
         can damage the files the ruleset is built from must not be able to turn the sandbox off
         for its next start. Everything that is not a hub provider worker starts as before.
         """

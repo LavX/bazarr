@@ -467,6 +467,7 @@ describe("System Status", () => {
           notice:
             "Subtitle provider plugins are sandboxed, and cannot read the configuration or the database. This kernel has Landlock ABI 1, which leaves gaps: truncating a file is not controlled.",
           unsandboxed: [],
+          limitations: ["network connections are not restricted"],
         },
       },
     });
@@ -474,7 +475,7 @@ describe("System Status", () => {
 
     expect(
       await screen.findByText(
-        /This kernel has Landlock ABI 1, which leaves gaps/,
+        /gaps: truncating a file is not controlled\. Also not covered: network connections are not restricted\.$/,
         undefined,
         {
           timeout: 8000,

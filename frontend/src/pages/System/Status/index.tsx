@@ -149,9 +149,11 @@ function providerSandboxValue(
   if (providers.state === "partial") {
     return (
       <Text component="span" size="sm" c="orange" fw="bold">
-        {providers.notice ??
-          "Subtitle provider plugins are sandboxed with gaps on this kernel."}
-        {notCovered ? `. Also not covered: ${notCovered}` : ""}
+        {(
+          providers.notice ??
+          "Subtitle provider plugins are sandboxed with gaps on this kernel."
+        ).replace(/\.$/, "")}
+        {notCovered ? `. Also not covered: ${notCovered}.` : "."}
       </Text>
     );
   }

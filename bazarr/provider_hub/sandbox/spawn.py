@@ -325,7 +325,9 @@ def reset_provider_notices() -> None:
         _provider_notices.clear()
 
 
-def provider_profile_gaps(abi: int, *, authentication_off: bool = False, mptcp_blocked: bool = True) -> list[str]:
+def provider_profile_gaps(
+    abi: int, *, authentication_off: bool = False, mptcp_blocked: bool = True, capabilities_dropped: bool = True
+) -> list[str]:
     """What the provider ruleset does not cover on a kernel with Landlock ``abi``, in plain words."""
     gaps: list[str] = []
     if abi < 3:
@@ -338,16 +340,25 @@ def provider_profile_gaps(abi: int, *, authentication_off: bool = False, mptcp_b
             "moving or linking a file from one folder to another is refused, so a plugin that does "
             "that inside its own folders fails"
         )
-    if authentication_off and (abi < 4 or not mptcp_blocked):
-        reason = (
-            "this kernel has no network rules"
-            if abi < 4
-            else "this architecture has no seccomp filter, so a plugin can reach the port through an MPTCP socket"
-        )
+    if not capabilities_dropped:
         gaps.append(
-            "the sandbox cannot stop a plugin calling Bazarr+'s own web API on this machine (%s), and with "
+            "this architecture has no capability bindings, so the process keeps the capabilities it was "
+            "started with (the filesystem rules still apply)"
+        )
+    if authentication_off:
+        if abi < 4:
+            how = "this kernel has no network rules"
+        elif not mptcp_blocked:
+            how = "this architecture has no seccomp filter, so a plugin can reach Bazarr+'s port through an MPTCP socket or io_uring"
+        else:
+            how = (
+                "Bazarr+'s own ports are refused, but a different port that forwards to it (a Docker "
+                "port mapping, a reverse proxy) is not covered"
+            )
+        gaps.append(
+            "a plugin may be able to call Bazarr+'s own web API on this machine (%s), and with "
             "authentication off that API hands out the API key, the settings and the backups, so turn "
-            "authentication on in Settings > General > Security" % reason
+            "authentication on in Settings > General > Security" % how
         )
     return gaps
 
@@ -360,8 +371,9 @@ def provider_profile_limitations(abi: int) -> list[str]:
         "and can lock every provider out by changing the mode of a folder they run from",
         "the file-size and process-count limits are not applied",
         (
-            "TCP connections to Bazarr+'s own port are refused (MPTCP sockets are refused where this "
-            "architecture has a seccomp filter) and every other connection is allowed"
+            "TCP connections to Bazarr+'s own ports are refused (MPTCP and SMC sockets and io_uring are "
+            "refused too, where this architecture has a seccomp filter) and every other connection is "
+            "allowed, so a different port that forwards to Bazarr+ is not covered"
             if abi >= 4
             else "network connections are not restricted"
         ),
@@ -380,8 +392,8 @@ def provider_profile_status(
     """What confines subtitle provider workers, for the status page and the Subtitle Hub.
 
     ``state`` is ``enforced`` (the filesystem ruleset applies in full), ``partial`` (it applies, with
-    gaps ``notice`` names: an older Landlock ABI, or no way to keep a plugin off Bazarr+'s own port while
-    authentication is off), ``unsandboxed`` (the kernel has no Landlock, or a client started without the
+    gaps ``notice`` names: an older Landlock ABI, no capability bindings, or a plugin that may still call
+    Bazarr+'s own web API while authentication is off), ``unsandboxed`` (the kernel has no Landlock, or a client started without the
     ruleset: ``notice`` says why), ``blocked`` (the kernel may enforce, but the host check failed or a start
     could not apply its ruleset, and providers are refused), ``off`` (switched off by the user) or
     ``pending`` (the host check is still running). ``probe`` is None while that check runs.
@@ -448,7 +460,10 @@ def provider_profile_status(
         result.update(state="blocked" if result["blocked"] else "unsandboxed", notice=" ".join(parts))
         return result
     gaps = provider_profile_gaps(
-        probe.abi, authentication_off=bool(authentication_off), mptcp_blocked=seccomp.supported()
+        probe.abi,
+        authentication_off=bool(authentication_off),
+        mptcp_blocked=seccomp.supported(),
+        capabilities_dropped=capabilities.supported(),
     )
     if gaps:
         result.update(
@@ -669,15 +684,12 @@ def _run_probe(python: str) -> SandboxProbe:
     abi, reason = landlock.probe_abi()
     if abi < 1:
         return SandboxProbe(abi=0, verified=False, absent="probe failed" not in reason, reason=reason)
-    if not capabilities.supported():
-        # The launcher drops every capability before it starts a worker, and cannot on this architecture:
-        # no ruleset can be applied here, which is not the same as a check that failed.
-        return SandboxProbe(
-            abi=abi, verified=False, absent=True, reason="no capability syscalls known for this architecture"
-        )
     # The metadata filter exists for some architectures only. Where it does not, every kind that needs it
     # is not "enforced", but the filesystem canary still runs: the provider profile does not use the filter.
     filter_available = seccomp.supported()
+    # Without capability bindings the launcher cannot drop capabilities. Landlock still works, so the
+    # canary runs with that part best effort, and only the kinds that need the drop are "not enforced".
+    capabilities_available = capabilities.supported()
     if getattr(sys, "frozen", False) and python == sys.executable:
         return SandboxProbe(abi=abi, verified=False, reason="frozen build has no stand-alone interpreter for the launcher")
     base = tempfile.mkdtemp(prefix="bazarr-landlock-")
@@ -708,6 +720,7 @@ def _run_probe(python: str) -> SandboxProbe:
                 policy=policy,
                 term_grace=1.0,
                 seccomp=use_filter,
+                require_capabilities=capabilities_available,
             )
             process = _start(spec, enforce=True, min_abi=1, enforcement="enforced", stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             try:
@@ -736,11 +749,18 @@ def _run_probe(python: str) -> SandboxProbe:
         reads_verified = result.get("write_inside") == "allowed" and all(
             result.get(k) == "denied" for k in _CANARY_READS_DENIED
         )
-        if not filter_available:
+        if not filter_available or not capabilities_available:
             if not reads_verified:
                 return SandboxProbe(abi=abi, verified=False, reason="canary escaped the sandbox: %s" % result)
             return SandboxProbe(
-                abi=abi, verified=False, reads_verified=True, reason="the metadata filter is not available or could not be applied"
+                abi=abi,
+                verified=False,
+                reads_verified=True,
+                reason=(
+                    "the metadata filter is not available or could not be applied"
+                    if capabilities_available
+                    else "no capability syscalls known for this architecture"
+                ),
             )
         if abi < MIN_ENFORCED_ABI:
             # Below ABI 3 the full canary cannot pass (truncate is not covered), so the host is not

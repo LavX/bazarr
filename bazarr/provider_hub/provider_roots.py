@@ -120,8 +120,8 @@ def own_ports() -> list[int]:
         add(getattr(server, "port", None))
         bound = getattr(server, "server", None)
         add(getattr(bound, "effective_port", None))
-        for entry in getattr(bound, "_map", None) or ():
-            add(getattr(entry, "effective_port", None))
+        for entry in getattr(bound, "effective_listen", None) or ():
+            add(entry[1] if isinstance(entry, (tuple, list)) and len(entry) > 1 else None)
     try:
         from app.get_args import args
 

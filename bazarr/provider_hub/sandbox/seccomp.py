@@ -330,40 +330,68 @@ def build_filter(arch: int | None = None) -> bytes:
 
 
 IPPROTO_MPTCP = 262
+IPPROTO_SMC = 256
+AF_SMC = 43
 SOCKET = {AUDIT_ARCH_X86_64: 41, AUDIT_ARCH_AARCH64: 198}
+IO_URING = (425, 426, 427)  # io_uring_setup, io_uring_enter, io_uring_register: the same on both
 
 
 def build_socket_filter(arch: int | None = None) -> bytes:
-    """Classic BPF program that refuses ``socket(..., IPPROTO_MPTCP)`` with ``EPERM`` and allows the rest.
+    """Classic BPF program that keeps a worker on plain TCP and allows everything else.
 
-    Landlock's TCP rules (connect and bind by port) do not cover MPTCP sockets, which a worker could
-    use to reach a port the rules deny. A different syscall ABI of the same CPU kills the process,
-    as in ``build_filter``.
+    Landlock's TCP rules (connect and bind by port) cover plain TCP sockets only. A worker could reach
+    a port they deny through a socket that falls back to, or is, TCP by another name: ``socket()`` with
+    ``IPPROTO_MPTCP``, ``IPPROTO_SMC`` or the ``AF_SMC`` family, which are refused with
+    ``EPROTONOSUPPORT``; or through ``io_uring``, whose ``IORING_OP_SOCKET`` creates sockets without
+    the system call, so the three ``io_uring`` calls are refused with ``EPERM``. The family and the
+    protocol are ``int`` arguments: the kernel reads the low 32 bits of the register, so only those
+    are compared. A different syscall ABI of the same CPU kills the process, as in ``build_filter``.
     """
     arch = arch if arch is not None else native_audit_arch()
     if arch not in SOCKET:
         raise ValueError("no seccomp filter for audit arch %#x" % (arch or 0))
-    program = [
-        (_BPF_LD_W_ABS, 0, 0, 4),  # arch
-        (_BPF_JEQ_K, 1, 0, arch),
-        (_BPF_RET_K, 0, 0, SECCOMP_RET_KILL_PROCESS),
-        (_BPF_LD_W_ABS, 0, 0, 0),  # nr
-    ]
+    program: list[list] = []
+    labels: dict[str, int] = {}
+
+    def emit(code, jt, jf, k):
+        program.append([code, jt, jf, k])
+
+    def label(name):
+        labels[name] = len(program)
+
+    emit(_BPF_LD_W_ABS, 0, 0, 4)  # arch
+    emit(_BPF_JEQ_K, 0, "kill", arch)
+    emit(_BPF_LD_W_ABS, 0, 0, 0)  # nr
     if arch == AUDIT_ARCH_X86_64:
-        program += [
-            (_BPF_JSET_K, 0, 1, X32_SYSCALL_BIT),
-            (_BPF_RET_K, 0, 0, SECCOMP_RET_KILL_PROCESS),
-        ]
-    program += [
-        (_BPF_JEQ_K, 0, 4, SOCKET[arch]),
-        (_BPF_LD_W_ABS, 0, 0, _ARG_OFFSET + 8 * 2),  # protocol, low half
-        (_BPF_JEQ_K, 0, 2, IPPROTO_MPTCP),
-        (_BPF_LD_W_ABS, 0, 0, _ARG_OFFSET + 8 * 2 + 4),  # protocol, high half (a socket protocol is an int)
-        (_BPF_JEQ_K, 1, 0, 0),
-        (_BPF_RET_K, 0, 0, SECCOMP_RET_ALLOW),
-        (_BPF_RET_K, 0, 0, SECCOMP_RET_ERRNO | errno.EPROTONOSUPPORT),
-    ]
-    return b"".join(_insn(*instruction) for instruction in program)
+        emit(_BPF_JSET_K, "kill", 0, X32_SYSCALL_BIT)
+    for number in IO_URING:
+        emit(_BPF_JEQ_K, "deny_perm", 0, number)
+    emit(_BPF_JEQ_K, 0, "allow", SOCKET[arch])
+    emit(_BPF_LD_W_ABS, 0, 0, _ARG_OFFSET)  # domain, low half
+    emit(_BPF_JEQ_K, "deny_proto", 0, AF_SMC)
+    emit(_BPF_LD_W_ABS, 0, 0, _ARG_OFFSET + 8 * 2)  # protocol, low half
+    emit(_BPF_JEQ_K, "deny_proto", 0, IPPROTO_MPTCP)
+    emit(_BPF_JEQ_K, "deny_proto", "allow", IPPROTO_SMC)
+    label("allow")
+    emit(_BPF_RET_K, 0, 0, SECCOMP_RET_ALLOW)
+    label("deny_proto")
+    emit(_BPF_RET_K, 0, 0, SECCOMP_RET_ERRNO | errno.EPROTONOSUPPORT)
+    label("deny_perm")
+    emit(_BPF_RET_K, 0, 0, SECCOMP_RET_ERRNO | errno.EPERM)
+    label("kill")
+    emit(_BPF_RET_K, 0, 0, SECCOMP_RET_KILL_PROCESS)
+
+    out = []
+    for index, (code, jt, jf, k) in enumerate(program):
+        resolved = []
+        for target in (jt, jf):
+            if isinstance(target, str):
+                target = labels[target] - index - 1
+            if not 0 <= target <= 255:
+                raise ValueError("jump out of range in the seccomp program")
+            resolved.append(target)
+        out.append(_insn(code, resolved[0], resolved[1], k))
+    return b"".join(out)
 
 
 class SockFprog(ctypes.Structure):
