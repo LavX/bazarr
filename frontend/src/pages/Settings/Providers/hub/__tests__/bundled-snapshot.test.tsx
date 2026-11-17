@@ -18,13 +18,13 @@ import type {
   ProviderHubCatalogEntry,
   ProviderHubInstallation,
 } from "@/apis/raw/providerHub";
-import { CatalogCard } from "@/pages/Settings/Providers/hub/components/CatalogCard";
-import { SourcesDrawer } from "@/pages/Settings/Providers/hub/SourcesDrawer";
 import {
   getLatestCatalogEntry,
   isUpdateAvailable,
   summarizeUpdates,
-} from "@/pages/Settings/Providers/hub/utils";
+} from "@/components/hub/utils";
+import { CatalogCard } from "@/pages/Settings/Providers/hub/components/CatalogCard";
+import { SourcesDrawer } from "@/pages/Settings/Providers/hub/SourcesDrawer";
 import { customRender, screen } from "@/tests";
 
 const manifest = {

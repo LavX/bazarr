@@ -3,7 +3,7 @@ import { Tooltip } from "@mantine/core";
 import { faRobot } from "@fortawesome/free-solid-svg-icons";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import clsx from "clsx";
-import styles from "@/pages/Settings/Providers/hub/hub.module.scss";
+import styles from "@/components/hub/hub.module.scss";
 
 /**
  * Warns that a provider needs an external anti-captcha service to solve

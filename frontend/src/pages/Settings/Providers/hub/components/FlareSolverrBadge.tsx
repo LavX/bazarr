@@ -3,7 +3,7 @@ import { Tooltip } from "@mantine/core";
 import { faCloud } from "@fortawesome/free-solid-svg-icons";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import clsx from "clsx";
-import styles from "@/pages/Settings/Providers/hub/hub.module.scss";
+import styles from "@/components/hub/hub.module.scss";
 
 /**
  * Indicates that a provider can use FlareSolverr to clear Cloudflare browser

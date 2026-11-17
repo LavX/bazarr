@@ -26,16 +26,16 @@ import {
   useProviderHubRemoveCatalogSource,
 } from "@/apis/hooks";
 import type { ProviderHubCatalogSource } from "@/apis/raw/providerHub";
-import { useGatedAction } from "@/components/modals/PasswordConfirmModal";
-import { EmptyState } from "@/pages/Settings/Providers/hub/components/EmptyState";
-import { TrustBadge } from "@/pages/Settings/Providers/hub/components/TrustBadge";
+import { EmptyState } from "@/components/hub/EmptyState";
+import { TrustBadge } from "@/components/hub/TrustBadge";
 import {
   describeCatalogOrigin,
   formatRelativeTime,
   parseGitHubRef,
   parseGitHubUrl,
-} from "@/pages/Settings/Providers/hub/utils";
-import styles from "@/pages/Settings/Providers/hub/hub.module.scss";
+} from "@/components/hub/utils";
+import { useGatedAction } from "@/components/modals/PasswordConfirmModal";
+import styles from "@/components/hub/hub.module.scss";
 
 // The official source stays trusted only on these branches.
 const TRUSTED_OFFICIAL_REFS = ["main", "beta"];

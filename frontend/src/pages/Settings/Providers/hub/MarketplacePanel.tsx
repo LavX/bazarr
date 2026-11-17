@@ -26,17 +26,14 @@ import type {
   ProviderHubCatalogEntry,
   ProviderHubInstallation,
 } from "@/apis/raw/providerHub";
+import { EmptyState } from "@/components/hub/EmptyState";
+import { SearchBar } from "@/components/hub/SearchBar";
+import { getLatestCatalogEntry, parseManifest } from "@/components/hub/utils";
 import { useGatedAction } from "@/components/modals/PasswordConfirmModal";
 import { notification } from "@/modules/notification";
 import { CatalogCard } from "@/pages/Settings/Providers/hub/components/CatalogCard";
-import { EmptyState } from "@/pages/Settings/Providers/hub/components/EmptyState";
-import { SearchBar } from "@/pages/Settings/Providers/hub/components/SearchBar";
 import { SourcesDrawer } from "@/pages/Settings/Providers/hub/SourcesDrawer";
-import {
-  getLatestCatalogEntry,
-  parseManifest,
-} from "@/pages/Settings/Providers/hub/utils";
-import styles from "@/pages/Settings/Providers/hub/hub.module.scss";
+import styles from "@/components/hub/hub.module.scss";
 
 // The backend refuses a larger package (MAX_LOCAL_PACKAGE_SIZE in
 // provider_hub/service.py); saying so here saves uploading it first.

@@ -16,8 +16,8 @@ import {
   useTestConnection,
   useUpdateConnection,
 } from "@/apis/hooks/translation";
+import { StatusBadge } from "@/components/hub/StatusBadge";
 import { SortableList } from "@/components/plugin-settings";
-import { StatusBadge } from "@/pages/Settings/Providers/hub/components/StatusBadge";
 import type {
   TranslationConnection,
   TranslationEngine,

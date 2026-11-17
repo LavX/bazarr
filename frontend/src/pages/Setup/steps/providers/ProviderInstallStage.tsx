@@ -34,8 +34,8 @@ import type {
   ProviderHubCatalogEntry,
   ProviderHubManifest,
 } from "@/apis/raw/providerHub";
+import { parseManifest } from "@/components/hub/utils";
 import { useGatedAction } from "@/components/modals/PasswordConfirmModal";
-import { parseManifest } from "@/pages/Settings/Providers/hub/utils";
 import StepLayout from "@/pages/Setup/StepLayout";
 import { useReportStepBusy } from "@/pages/Setup/useStepBusy";
 import { isRecommendedProvider } from "./recommended";

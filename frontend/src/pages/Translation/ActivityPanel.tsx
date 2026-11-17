@@ -6,12 +6,9 @@ import {
   useTranslationHistory,
   useTranslationQueue,
 } from "@/apis/hooks/translation";
-import { EmptyState } from "@/pages/Settings/Providers/hub/components/EmptyState";
-import { StatusBadge } from "@/pages/Settings/Providers/hub/components/StatusBadge";
-import {
-  formatAbsoluteTime,
-  formatRelativeTime,
-} from "@/pages/Settings/Providers/hub/utils";
+import { EmptyState } from "@/components/hub/EmptyState";
+import { StatusBadge } from "@/components/hub/StatusBadge";
+import { formatAbsoluteTime, formatRelativeTime } from "@/components/hub/utils";
 import type {
   TranslationHistoryJob,
   TranslationState,

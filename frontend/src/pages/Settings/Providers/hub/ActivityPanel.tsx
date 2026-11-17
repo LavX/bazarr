@@ -13,10 +13,10 @@ import { useQueryClient } from "@tanstack/react-query";
 import { useProviderHubJobs } from "@/apis/hooks";
 import { QueryKeys } from "@/apis/queries/keys";
 import type { ProviderHubJob } from "@/apis/raw/providerHub";
-import { ActivityRow } from "@/pages/Settings/Providers/hub/components/ActivityRow";
-import { EmptyState } from "@/pages/Settings/Providers/hub/components/EmptyState";
-import { SearchBar } from "@/pages/Settings/Providers/hub/components/SearchBar";
-import styles from "@/pages/Settings/Providers/hub/hub.module.scss";
+import { ActivityRow } from "@/components/hub/ActivityRow";
+import { EmptyState } from "@/components/hub/EmptyState";
+import { SearchBar } from "@/components/hub/SearchBar";
+import styles from "@/components/hub/hub.module.scss";
 
 type StateFilter = "all" | "running" | "failed";
 

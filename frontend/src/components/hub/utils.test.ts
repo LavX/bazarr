@@ -18,7 +18,7 @@ import {
   summarizeUpdates,
   usesAntiCaptcha,
   usesFlaresolverr,
-} from "@/pages/Settings/Providers/hub/utils";
+} from "@/components/hub/utils";
 
 describe("parseManifest", () => {
   it("returns null for null/undefined/empty inputs", () => {

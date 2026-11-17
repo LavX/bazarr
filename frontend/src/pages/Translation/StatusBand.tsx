@@ -1,5 +1,5 @@
 import { FunctionComponent } from "react";
-import { StatusBadge } from "@/pages/Settings/Providers/hub/components/StatusBadge";
+import { StatusBadge } from "@/components/hub/StatusBadge";
 import type { TranslationState, TranslationSummary } from "@/types/translation";
 import {
   backendName,

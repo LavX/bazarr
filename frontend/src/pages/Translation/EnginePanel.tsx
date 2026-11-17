@@ -9,7 +9,7 @@ import {
   readRefusal,
   usePointersMutation,
 } from "@/apis/hooks/translation";
-import { StatusBadge } from "@/pages/Settings/Providers/hub/components/StatusBadge";
+import { StatusBadge } from "@/components/hub/StatusBadge";
 import type {
   TranslationAvailableEngine,
   TranslationEngine,

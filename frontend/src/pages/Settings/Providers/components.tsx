@@ -85,7 +85,7 @@ import {
   getLanguageName,
   getShippedMeta,
 } from "./meta";
-import styles from "@/pages/Settings/Providers/hub/hub.module.scss";
+import styles from "@/components/hub/hub.module.scss";
 
 type SettingsKey =
   | "settings-general-enabled_providers"

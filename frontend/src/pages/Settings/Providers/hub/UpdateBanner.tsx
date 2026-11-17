@@ -13,9 +13,9 @@ import type {
   ProviderHubCatalog,
   ProviderHubInstallation,
 } from "@/apis/raw/providerHub";
-import { summarizeUpdates } from "@/pages/Settings/Providers/hub/utils";
+import { summarizeUpdates } from "@/components/hub/utils";
 import { markRestartReloadPending } from "@/utilities/restart";
-import styles from "@/pages/Settings/Providers/hub/hub.module.scss";
+import styles from "@/components/hub/hub.module.scss";
 
 interface UpdateBannerProps {
   providers: ProviderHubInstallation[] | undefined;

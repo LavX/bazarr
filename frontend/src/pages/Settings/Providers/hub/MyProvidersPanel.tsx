@@ -1,6 +1,6 @@
 import { FunctionComponent, ReactNode } from "react";
 import { Stack } from "@mantine/core";
-import styles from "@/pages/Settings/Providers/hub/hub.module.scss";
+import styles from "@/components/hub/hub.module.scss";
 
 interface MyProvidersPanelProps {
   enabledProviders: ReactNode;

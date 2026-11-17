@@ -1,31 +1,30 @@
 import { FunctionComponent, useMemo } from "react";
-import { ActionIcon, Badge, Button, Group, Menu, Tooltip } from "@mantine/core";
+import { ActionIcon, Badge, Button, Menu, Tooltip } from "@mantine/core";
 import {
   faCheck,
   faDownload,
   faEllipsis,
-  faPuzzlePiece,
   faRotate,
   faScrewdriverWrench,
   faTrash,
   faVial,
 } from "@fortawesome/free-solid-svg-icons";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
-import clsx from "clsx";
 import type {
   ProviderHubCatalogEntry,
   ProviderHubInstallation,
 } from "@/apis/raw/providerHub";
-import { AntiCaptchaBadge } from "@/pages/Settings/Providers/hub/components/AntiCaptchaBadge";
-import { FlareSolverrBadge } from "@/pages/Settings/Providers/hub/components/FlareSolverrBadge";
-import { ProviderStatusBadge } from "@/pages/Settings/Providers/hub/components/StatusBadge";
-import { TranslationQuotaLine } from "@/pages/Settings/Providers/hub/components/TranslationQuotaLine";
-import { TrustBadge } from "@/pages/Settings/Providers/hub/components/TrustBadge";
+import { HubCard } from "@/components/hub/HubCard";
+import { ProviderStatusBadge } from "@/components/hub/StatusBadge";
+import { TrustBadge } from "@/components/hub/TrustBadge";
 import {
   parseManifest,
   usesAntiCaptcha,
   usesFlaresolverr,
-} from "@/pages/Settings/Providers/hub/utils";
+} from "@/components/hub/utils";
+import { AntiCaptchaBadge } from "@/pages/Settings/Providers/hub/components/AntiCaptchaBadge";
+import { FlareSolverrBadge } from "@/pages/Settings/Providers/hub/components/FlareSolverrBadge";
+import { TranslationQuotaLine } from "@/pages/Settings/Providers/hub/components/TranslationQuotaLine";
 import {
   AUTH_LABEL,
   detectAuthFromManifest,
@@ -33,7 +32,7 @@ import {
   getLanguagesFromManifest,
 } from "@/pages/Settings/Providers/meta";
 import { getProviderLanguages } from "@/pages/Settings/Providers/provider-languages";
-import styles from "@/pages/Settings/Providers/hub/hub.module.scss";
+import styles from "@/components/hub/hub.module.scss";
 
 const LANGUAGE_CHIP_THRESHOLD = 3;
 
@@ -238,41 +237,15 @@ export const CatalogCard: FunctionComponent<CatalogCardProps> = ({
   const langTooltip = languages.map((c) => getLanguageName(c)).join(", ");
 
   return (
-    <div className={clsx(styles.hubCard)}>
-      <div className={styles.hubCardHeader}>
-        <div
-          style={{
-            display: "flex",
-            gap: 10,
-            alignItems: "center",
-            minWidth: 0,
-          }}
-        >
-          <div
-            aria-hidden="true"
-            style={{
-              width: 36,
-              height: 36,
-              borderRadius: 10,
-              background: "var(--bz-hover-bg)",
-              color: "var(--bz-text-secondary)",
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "center",
-              flex: "0 0 auto",
-              fontSize: 16,
-            }}
-          >
-            <FontAwesomeIcon icon={faPuzzlePiece} />
-          </div>
-          <div style={{ minWidth: 0 }}>
-            <div className={styles.hubCardTitle}>{displayName}</div>
-            <div className={styles.hubCardMeta}>
-              v{entry.version} from {sourceLabel}
-            </div>
-          </div>
-        </div>
-        {canShowActions && installed && (
+    <HubCard
+      name={displayName}
+      meta={
+        <>
+          v{entry.version} from {sourceLabel}
+        </>
+      }
+      menu={
+        canShowActions && installed ? (
           <Menu position="bottom-end" withinPortal>
             <Menu.Target>
               <ActionIcon
@@ -302,36 +275,32 @@ export const CatalogCard: FunctionComponent<CatalogCardProps> = ({
               </Menu.Item>
             </Menu.Dropdown>
           </Menu>
-        )}
-      </div>
-      {description && (
-        <div className={styles.hubCardDescription}>{description}</div>
-      )}
-      {installed?.trust_note && (
-        <div className={styles.hubCardDescription} role="note">
-          {installed.trust_note}
-        </div>
-      )}
-      <TranslationQuotaLine status={installed?.runtime_status} />
-      <div className={styles.hubCardChips}>
-        <Badge size="xs" variant="outline" color="gray">
-          {AUTH_LABEL[auth]}
-        </Badge>
-        {languages.length > 0 &&
-          showAllLangs &&
-          languages.map((code) => (
-            <Badge key={code} size="xs" variant="outline" color="gray">
-              {getLanguageName(code)}
-            </Badge>
-          ))}
-        {languages.length > LANGUAGE_CHIP_THRESHOLD && (
-          <Badge size="xs" variant="outline" color="gray" title={langTooltip}>
-            {languages.length} languages
+        ) : undefined
+      }
+      description={description}
+      note={installed?.trust_note}
+      extra={<TranslationQuotaLine status={installed?.runtime_status} />}
+      chips={
+        <>
+          <Badge size="xs" variant="outline" color="gray">
+            {AUTH_LABEL[auth]}
           </Badge>
-        )}
-      </div>
-      <div className={styles.hubCardFooter}>
-        <Group gap={6} className={styles.hubCardPills}>
+          {languages.length > 0 &&
+            showAllLangs &&
+            languages.map((code) => (
+              <Badge key={code} size="xs" variant="outline" color="gray">
+                {getLanguageName(code)}
+              </Badge>
+            ))}
+          {languages.length > LANGUAGE_CHIP_THRESHOLD && (
+            <Badge size="xs" variant="outline" color="gray" title={langTooltip}>
+              {languages.length} languages
+            </Badge>
+          )}
+        </>
+      }
+      pills={
+        <>
           {installed && (
             <ProviderStatusBadge
               state={installed.state}
@@ -351,9 +320,9 @@ export const CatalogCard: FunctionComponent<CatalogCardProps> = ({
           )}
           {usesAntiCaptcha(entry) && <AntiCaptchaBadge />}
           {usesFlaresolverr(entry) && <FlareSolverrBadge />}
-        </Group>
-        <div className={styles.hubCardAction}>{ctaButton}</div>
-      </div>
-    </div>
+        </>
+      }
+      action={ctaButton}
+    />
   );
 };

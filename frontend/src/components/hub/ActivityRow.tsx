@@ -14,8 +14,8 @@ import {
   formatRelativeTime,
   getActionLabel,
   getJobStateMeta,
-} from "@/pages/Settings/Providers/hub/utils";
-import styles from "@/pages/Settings/Providers/hub/hub.module.scss";
+} from "@/components/hub/utils";
+import styles from "@/components/hub/hub.module.scss";
 
 interface ActivityRowProps {
   job: ProviderHubJob;

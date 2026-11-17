@@ -10,14 +10,14 @@ import type {
   ProviderHubCatalog,
   ProviderHubInstallation,
 } from "@/apis/raw/providerHub";
-import { useGatedAction } from "@/components/modals/PasswordConfirmModal";
-import { EmptyState } from "@/pages/Settings/Providers/hub/components/EmptyState";
-import { UpdateCard } from "@/pages/Settings/Providers/hub/components/UpdateCard";
+import { EmptyState } from "@/components/hub/EmptyState";
 import {
   getLatestCatalogEntry,
   summarizeUpdates,
-} from "@/pages/Settings/Providers/hub/utils";
-import styles from "@/pages/Settings/Providers/hub/hub.module.scss";
+} from "@/components/hub/utils";
+import { useGatedAction } from "@/components/modals/PasswordConfirmModal";
+import { UpdateCard } from "@/pages/Settings/Providers/hub/components/UpdateCard";
+import styles from "@/components/hub/hub.module.scss";
 
 interface UpdatesPanelProps {
   providers: ProviderHubInstallation[] | undefined;
