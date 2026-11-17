@@ -17,6 +17,7 @@ from .policy import (
     clean_env,
 )
 from .spawn import (
+    PROVIDER_MIN_ABI,
     LauncherProcess,
     LauncherFailure,
     SandboxApplyError,
@@ -26,6 +27,7 @@ from .spawn import (
     note_provider_unsandboxed,
     probe_sandbox,
     provider_profile_enabled,
+    provider_profile_gaps,
     provider_profile_status,
     reset_probe_cache,
     sandbox_limitations,
@@ -43,6 +45,7 @@ __all__ = [
     "LauncherProcess",
     "Limits",
     "PROVIDER_LIMITS",
+    "PROVIDER_MIN_ABI",
     "PolicyError",
     "RuntimeSpec",
     "SandboxApplyError",
@@ -56,6 +59,7 @@ __all__ = [
     "note_provider_unsandboxed",
     "probe_sandbox",
     "provider_profile_enabled",
+    "provider_profile_gaps",
     "provider_profile_status",
     "reset_probe_cache",
     "sandbox_limitations",

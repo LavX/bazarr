@@ -448,6 +448,42 @@ describe("System Status", () => {
     expect(screen.queryByText(/^On:/)).toBeNull();
   });
 
+  it("names what the subtitle provider sandbox leaves open on an older kernel", async () => {
+    statusWith({
+      sandbox: {
+        abi: 1,
+        enforced: false,
+        workers_sandboxed: false,
+        filesystem: "declared",
+        network: "declared",
+        signal_scope: "declared",
+        capabilities: "declared",
+        label: "Not sandboxed on this host",
+        reason: "Landlock ABI 1 cannot restrict truncate(2)",
+        limitations: [],
+        providers: {
+          enabled: true,
+          state: "partial",
+          notice:
+            "Subtitle provider plugins are sandboxed, and cannot read the configuration or the database. This kernel has Landlock ABI 1, which leaves gaps: truncating a file is not controlled.",
+          unsandboxed: [],
+        },
+      },
+    });
+    customRender(<SystemStatusView />);
+
+    expect(
+      await screen.findByText(
+        /This kernel has Landlock ABI 1, which leaves gaps/,
+        undefined,
+        {
+          timeout: 8000,
+        },
+      ),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/^On:/)).toBeNull();
+  });
+
   it("says the subtitle provider sandbox is on, off, or leaves the row out while the check runs", async () => {
     const base: System.SandboxStatus = {
       abi: 10,

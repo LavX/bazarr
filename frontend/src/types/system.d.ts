@@ -193,12 +193,16 @@ declare namespace System {
     /** The "Sandbox subtitle provider plugins" setting. */
     enabled: boolean;
     /**
-     * enforced: the filesystem ruleset applies. unsandboxed: switched on, but
-     * the host or a start could not apply it (see notice). off: switched off.
-     * pending: the host check is still running.
+     * enforced: the filesystem ruleset applies in full. partial: it applies on
+     * an older Landlock ABI and the notice names what it leaves open.
+     * unsandboxed: switched on, but the host or a start could not apply it (see
+     * notice). off: switched off. pending: the host check is still running.
      */
-    state: "enforced" | "unsandboxed" | "off" | "pending";
-    /** Why providers run without the sandbox; null when nothing is wrong. */
+    state: "enforced" | "partial" | "unsandboxed" | "off" | "pending";
+    /**
+     * Why providers run without the sandbox, or what a partial one leaves
+     * open; null when nothing is wrong.
+     */
     notice: string | null;
     /** The providers recorded as started without the sandbox. */
     unsandboxed: string[];

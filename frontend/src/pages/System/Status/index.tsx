@@ -145,6 +145,14 @@ function providerSandboxValue(
       </Text>
     );
   }
+  if (providers.state === "partial") {
+    return (
+      <Text component="span" size="sm" c="orange" fw="bold">
+        {providers.notice ??
+          "Subtitle provider plugins are sandboxed with gaps on this kernel."}
+      </Text>
+    );
+  }
   if (providers.state === "off") {
     return "Off: subtitle provider plugins run without a sandbox (switched off in the Subtitle Hub settings)";
   }

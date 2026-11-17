@@ -21,8 +21,11 @@ import pytest
 
 from provider_hub import worker as worker_module
 from provider_hub.sandbox import (
+    PROVIDER_MIN_ABI,
     SandboxProbe,
+    landlock,
     probe_sandbox,
+    provider_profile_gaps,
     provider_profile_status,
     sandbox_status,
 )
@@ -433,3 +436,140 @@ def test_a_client_that_is_not_a_provider_worker_never_asks_the_sandbox(tmp_path,
         assert getattr(worker.process, "enforcement", None) is None
     finally:
         worker.stop()
+
+
+# --------------------------------------------------------------------- the rules each ABI supports
+def test_the_provider_profile_accepts_landlock_from_abi_1_and_every_other_kind_still_needs_abi_3():
+    assert PROVIDER_MIN_ABI == 1
+    assert spawn_module.MIN_ENFORCED_ABI == 3
+    for abi in (1, 2):
+        probe = SandboxProbe(abi=abi, verified=False, reads_verified=True)
+        assert probe.enforces(PROVIDER_MIN_ABI) is True
+        assert probe.enforced is False
+        assert probe.enforces() is False
+        assert probe.enforces(spawn_module.MIN_ENFORCED_ABI) is False
+    full = SandboxProbe(abi=3, verified=True, reads_verified=True)
+    assert full.enforced and full.enforces() and full.enforces(PROVIDER_MIN_ABI)
+    # No Landlock at all, or a canary that escaped, is not enough for either.
+    assert not SandboxProbe(abi=0, verified=False).enforces(PROVIDER_MIN_ABI)
+    assert not SandboxProbe(abi=2, verified=False, reads_verified=False).enforces(PROVIDER_MIN_ABI)
+
+
+@pytest.mark.parametrize("abi", [1, 2, 3, 6])
+def test_spawn_asks_for_a_mandatory_ruleset_per_abi_only_for_the_kinds_that_accept_it(abi, monkeypatch):
+    seen = []
+
+    def fake_start(spec, **kwargs):
+        seen.append(kwargs)
+        return object()
+
+    monkeypatch.setattr(spawn_module, "_start", fake_start)
+    probe = SandboxProbe(abi=abi, verified=abi >= 3, reads_verified=True)
+    spec = object.__new__(policy_module.RuntimeSpec)
+    object.__setattr__(spec, "policy", policy_module.SandboxPolicy(read_only=(), read_write=()))
+    spawn_module.spawn_worker(spec, probe=probe, minimum_abi=PROVIDER_MIN_ABI)
+    spawn_module.spawn_worker(spec, probe=probe)
+
+    provider, other = seen
+    assert provider["enforce"] is True and provider["enforcement"] == "enforced"
+    assert other["enforce"] is (abi >= 3)
+    assert other["enforcement"] == ("enforced" if abi >= 3 else "declared")
+    assert provider["min_abi"] == abi
+
+
+def test_each_abi_handles_only_the_rights_it_knows_so_the_profile_grants_what_the_kernel_supports():
+    read_write = landlock.RIGHTS_READ_WRITE
+    device = landlock.RIGHTS_DEVICE
+    by_abi = {abi: landlock.handled_fs_for_abi(abi) for abi in (1, 2, 3, 4, 5)}
+
+    # ABI 1 has neither file moves between folders nor truncation; ABI 2 adds the first; ABI 3 the second.
+    assert not by_abi[1] & landlock.FS_REFER and not by_abi[1] & landlock.FS_TRUNCATE
+    assert by_abi[2] & landlock.FS_REFER and not by_abi[2] & landlock.FS_TRUNCATE
+    assert by_abi[3] & landlock.FS_REFER and by_abi[3] & landlock.FS_TRUNCATE
+    # Reading, writing, creating and removing files are handled from ABI 1, so the shield and the
+    # read-only media rules exist everywhere the profile runs.
+    for right in (landlock.FS_READ_FILE, landlock.FS_READ_DIR, landlock.FS_WRITE_FILE, landlock.FS_MAKE_REG, landlock.FS_REMOVE_FILE):
+        assert all(by_abi[abi] & right for abi in by_abi)
+    # What a read-write grant of the plugin's own folders carries is the part of it the ABI handles.
+    assert read_write & by_abi[1] & landlock.FS_WRITE_FILE
+    assert not read_write & by_abi[1] & landlock.FS_TRUNCATE
+    assert device & by_abi[1] & landlock.FS_WRITE_FILE
+    # ABI 4 and 5 add nothing to the filesystem the profile uses beyond ioctl on devices (ABI 5).
+    assert by_abi[4] == by_abi[3]
+    assert by_abi[5] & landlock.FS_IOCTL_DEV and not by_abi[4] & landlock.FS_IOCTL_DEV
+
+
+def test_the_gaps_below_abi_3_are_named_and_a_full_abi_names_none():
+    assert provider_profile_gaps(3) == [] == provider_profile_gaps(10)
+    abi2 = " ".join(provider_profile_gaps(2))
+    abi1 = " ".join(provider_profile_gaps(1))
+    assert "truncating" in abi2 and "moving or linking" not in abi2
+    assert "truncating" in abi1 and "moving or linking" in abi1
+
+
+@pytest.mark.parametrize("abi,gap,state", [(1, "moving or linking", "partial"), (2, "truncating", "partial"), (3, None, "enforced")])
+def test_the_notice_names_what_is_not_covered_on_each_abi(abi, gap, state):
+    probe = SandboxProbe(abi=abi, verified=abi >= 3, reads_verified=True, reason="kernel reports ABI %d" % abi)
+    status = provider_profile_status(probe)
+
+    assert status["state"] == state
+    if gap is None:
+        assert status["notice"] is None
+        return
+    assert "ABI %d" % abi in status["notice"]
+    assert "cannot read the configuration or the database" in status["notice"]
+    assert gap in status["notice"]
+    # It is still sandboxed, so no provider is listed as running without it.
+    assert status["unsandboxed"] == []
+
+
+def test_a_kernel_without_landlock_or_a_canary_that_escaped_still_fails_open_with_a_notice():
+    for probe in (
+        SandboxProbe(abi=0, verified=False, reason="Landlock is not available"),
+        SandboxProbe(abi=2, verified=False, reads_verified=False, reason="canary escaped the sandbox: {}"),
+    ):
+        status = provider_profile_status(probe)
+        assert status["state"] == "unsandboxed"
+        assert probe.reason.split(":")[0] in status["notice"]
+
+
+@pytest.mark.parametrize("abi", [1, 2])
+def test_the_probe_on_an_older_abi_verifies_reads_and_writes_but_not_the_full_sandbox(abi, monkeypatch):
+    # The canary runs on this kernel's real Landlock; only the ABI the probe reports is lowered.
+    _enforcing_kernel()
+    monkeypatch.setattr(landlock, "probe_abi", lambda: (abi, "kernel reports ABI %d" % abi))
+
+    probe = spawn_module._run_probe(sys.executable)
+
+    assert probe.abi == abi
+    assert probe.reads_verified is True
+    assert probe.verified is False and probe.enforced is False
+    assert probe.enforces(PROVIDER_MIN_ABI) is True
+    assert "truncate" in probe.reason
+
+
+@pytest.mark.parametrize("abi", [1, 2])
+def test_on_an_older_abi_a_provider_cannot_read_the_configuration_and_ffmpeg_still_works(abi, host, client, monkeypatch):
+    # A real ruleset of the older ABI on this kernel: the policy is capped, the probe reports that ABI.
+    _enforcing_kernel()
+    probe = SandboxProbe(abi=abi, verified=False, reads_verified=True, reason="Landlock ABI %d" % abi)
+    monkeypatch.setattr("provider_hub.sandbox.probe_sandbox", lambda *a, **k: probe)
+    real_spec = worker_module.provider_spec
+
+    def capped(layout, command, cwd, env):
+        spec = real_spec(layout, command, cwd, env)
+        return dataclasses.replace(spec, policy=dataclasses.replace(spec.policy, abi_cap=abi))
+
+    monkeypatch.setattr(worker_module, "provider_spec", capped)
+    worker = client()
+    size = 700 * 1024 * 1024
+
+    assert _ask(worker, op="read", path=str(host["config"] / "config" / "config.yaml"))["result"] == "denied"
+    assert _ask(worker, op="read", path=str(host["config"] / "db" / "bazarr.db"))["result"] == "denied"
+    assert _ask(worker, op="read", path=str(host["media"] / "film.mkv"))["result"] == "film"
+    assert _ask(worker, op="write", path=str(host["media"] / "film.mkv"))["result"] == "denied"
+    assert _ask(worker, op="write", path=str(host["media"] / "new.srt"))["result"] == "denied"
+    answer = _ask(worker, op="stub", stub=str(host["stub"]), size=str(size))
+    assert answer["code"] == 0 and answer["result"] == "wrote %d" % (size + 1)
+    assert getattr(worker.process, "enforcement", None) == "enforced"
+    assert worker._sandbox_failed_open is False

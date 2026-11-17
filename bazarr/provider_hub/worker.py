@@ -518,10 +518,10 @@ class ProviderWorkerClient:
 
         if not provider_profile_enabled():
             return None
-        from .sandbox import note_provider_unsandboxed, probe_sandbox, spawn_worker
+        from .sandbox import PROVIDER_MIN_ABI, note_provider_unsandboxed, probe_sandbox, spawn_worker
 
         probe = probe_sandbox()
-        if not probe.enforced:
+        if not probe.enforces(PROVIDER_MIN_ABI):
             note_provider_unsandboxed(layout.key, probe.reason or "this host has no Landlock")
             self._sandbox_layout = None
             return None
@@ -529,7 +529,13 @@ class ProviderWorkerClient:
         def start():
             spec = provider_spec(layout, self.command, self.cwd, self.env)
             process = spawn_worker(
-                spec, probe=probe, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+                spec,
+                probe=probe,
+                minimum_abi=PROVIDER_MIN_ABI,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
             )
             self._sandbox_layout = layout
             return process

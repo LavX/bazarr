@@ -61,6 +61,7 @@ __all__ = [
     "LauncherFailure",
     "LauncherProcess",
     "MIN_ENFORCED_ABI",
+    "PROVIDER_MIN_ABI",
     "SandboxApplyError",
     "SandboxProbe",
     "WorkerProcess",
@@ -68,6 +69,7 @@ __all__ = [
     "note_provider_unsandboxed",
     "probe_sandbox",
     "provider_profile_enabled",
+    "provider_profile_gaps",
     "provider_profile_status",
     "reset_probe_cache",
     "sandbox_limitations",
@@ -104,6 +106,12 @@ class LauncherFailure:
 # same-user worker could empty any file the user owns, wherever it lives, so
 # the filesystem is not enforced there.
 MIN_ENFORCED_ABI = 3
+
+# The subtitle provider profile is the one user of Landlock below ABI 3. What it needs is that a
+# worker cannot read the configuration or the database and cannot write outside its own folders,
+# and ABI 1 already does both. What ABI 1 and 2 leave open (truncate(2), and on ABI 1 moving a
+# file between folders) is named in the status notice. Every other worker keeps ``MIN_ENFORCED_ABI``.
+PROVIDER_MIN_ABI = 1
 
 # Longest the launcher needs after the worker is gone or the lifeline closed:
 # one poll tick, two seconds of kill rounds and five of reaping. The host waits
@@ -154,10 +162,20 @@ class SandboxProbe:
     # The canary held no effective, permitted or ambient capability.
     capabilities_dropped: bool = False
     reason: str = ""
+    # A canary applied the ruleset this kernel has and could neither read a file outside its
+    # tree nor write there. True on ABI 3 and above whenever ``verified`` is, and also on ABI 1
+    # and 2, where ``verified`` stays False because truncate(2) is not covered.
+    reads_verified: bool = False
 
     @property
     def enforced(self) -> bool:
         return self.abi >= MIN_ENFORCED_ABI and self.verified
+
+    def enforces(self, minimum_abi: int = MIN_ENFORCED_ABI) -> bool:
+        """Whether a ruleset can be mandatory for a worker that accepts ``minimum_abi`` and above."""
+        if minimum_abi >= MIN_ENFORCED_ABI:
+            return self.enforced
+        return self.abi >= max(1, minimum_abi) and (self.reads_verified or self.enforced)
 
     @property
     def network_enforced(self) -> bool:
@@ -284,12 +302,29 @@ def reset_provider_notices() -> None:
         _provider_notices.clear()
 
 
+def provider_profile_gaps(abi: int) -> list[str]:
+    """What the provider ruleset does not cover on a kernel with Landlock ``abi``, in plain words."""
+    gaps: list[str] = []
+    if abi < 3:
+        gaps.append(
+            "truncating a file is not controlled, so a plugin can still empty a file the Bazarr+ user "
+            "can write, the media library included"
+        )
+    if abi < 2:
+        gaps.append(
+            "moving or linking a file from one folder to another is refused, so a plugin that does "
+            "that inside its own folders fails"
+        )
+    return gaps
+
+
 def provider_profile_status(probe: "SandboxProbe | None", *, enabled: bool | None = None) -> dict[str, Any]:
     """What confines subtitle provider workers, for the status page and the Subtitle Hub.
 
-    ``state`` is ``enforced`` (the filesystem ruleset applies), ``unsandboxed`` (switched on but
-    the host, or a start, could not apply it: ``notice`` says why), ``off`` (switched off by the
-    user) or ``pending`` (the host check is still running). ``probe`` is None while that check runs.
+    ``state`` is ``enforced`` (the filesystem ruleset applies in full), ``partial`` (it applies, on
+    a Landlock ABI older than 3: ``notice`` names what it leaves open), ``unsandboxed`` (switched
+    on but the host, or a start, could not apply it: ``notice`` says why), ``off`` (switched off by
+    the user) or ``pending`` (the host check is still running). ``probe`` is None while that check runs.
     """
     if enabled is None:
         enabled = provider_profile_enabled()
@@ -302,7 +337,7 @@ def provider_profile_status(probe: "SandboxProbe | None", *, enabled: bool | Non
     if probe is None:
         result["state"] = "pending"
         return result
-    if not probe.enforced:
+    if not probe.enforces(PROVIDER_MIN_ABI):
         reason = probe.reason or "this host has no Landlock"
         result.update(
             state="unsandboxed",
@@ -316,6 +351,14 @@ def provider_profile_status(probe: "SandboxProbe | None", *, enabled: bool | Non
             state="unsandboxed",
             notice="The sandbox could not be applied to %s, which runs without it: %s."
             % (names, "; ".join(sorted(set(v.rstrip(".") for v in recorded.values())))),
+        )
+        return result
+    gaps = provider_profile_gaps(probe.abi)
+    if gaps:
+        result.update(
+            state="partial",
+            notice="Subtitle provider plugins are sandboxed, and cannot read the configuration or the "
+            "database. This kernel has Landlock ABI %d, which leaves gaps: %s." % (probe.abi, "; ".join(gaps)),
         )
         return result
     result["state"] = "enforced"
@@ -465,6 +508,9 @@ _CANARY_REQUIRED_DENIED = (
     "io_uring_setup",
 )
 
+# The part of the canary the provider profile relies on.
+_CANARY_READS_DENIED = ("read_outside", "write_outside")
+
 _probe_lock = threading.Lock()
 _probe_cache: SandboxProbe | None = None
 
@@ -527,12 +573,6 @@ def _run_probe(python: str) -> SandboxProbe:
     abi, reason = landlock.probe_abi()
     if abi < 1:
         return SandboxProbe(abi=0, verified=False, reason=reason)
-    if abi < MIN_ENFORCED_ABI:
-        return SandboxProbe(
-            abi=abi,
-            verified=False,
-            reason="Landlock ABI %d cannot restrict truncate(2); ABI %d is the minimum" % (abi, MIN_ENFORCED_ABI),
-        )
     if not seccomp.supported():
         return SandboxProbe(abi=abi, verified=False, reason="no metadata filter for this architecture")
     if getattr(sys, "frozen", False) and python == sys.executable:
@@ -576,16 +616,30 @@ def _run_probe(python: str) -> SandboxProbe:
             detail = failure.message if failure else (err.decode("utf-8", "replace").strip().splitlines()[-1:] or ["no output"])[0]
             return SandboxProbe(abi=abi, verified=False, reason="canary could not run: %s" % detail)
         result = json.loads(out.decode("utf-8").strip().splitlines()[-1])
-        verified = result.get("write_inside") == "allowed" and all(
-            result.get(k) == "denied" for k in _CANARY_REQUIRED_DENIED
+        reads_verified = result.get("write_inside") == "allowed" and all(
+            result.get(k) == "denied" for k in _CANARY_READS_DENIED
         )
+        if abi < MIN_ENFORCED_ABI:
+            # Below ABI 3 the full canary cannot pass (truncate is not covered), so the host is not
+            # "enforced" for any worker that needs that. The reads and writes it did hold back are
+            # what the provider profile relies on.
+            if not reads_verified:
+                return SandboxProbe(abi=abi, verified=False, reason="canary escaped the sandbox: %s" % result)
+            return SandboxProbe(
+                abi=abi,
+                verified=False,
+                reads_verified=True,
+                reason="Landlock ABI %d cannot restrict truncate(2); ABI %d is the minimum" % (abi, MIN_ENFORCED_ABI),
+            )
+        verified = reads_verified and all(result.get(k) == "denied" for k in _CANARY_REQUIRED_DENIED)
         if verified and Path(base, "trunc.txt").read_text(encoding="utf-8") != "keep me":
             verified = False
         if not verified:
-            return SandboxProbe(abi=abi, verified=False, reason="canary escaped the sandbox: %s" % result)
+            return SandboxProbe(abi=abi, verified=False, reads_verified=reads_verified, reason="canary escaped the sandbox: %s" % result)
         return SandboxProbe(
             abi=abi,
             verified=True,
+            reads_verified=True,
             network_verified=abi >= 4 and result.get("connect") == "denied",
             signal_scope_verified=abi >= 6 and result.get("signal") == "denied",
             capabilities_dropped=result.get("capabilities") == "dropped",
@@ -1524,6 +1578,7 @@ def spawn_worker(
     probe: SandboxProbe | None = None,
     require_sandbox: bool = False,
     launcher_python: str | None = None,
+    minimum_abi: int = MIN_ENFORCED_ABI,
     stdin: Any = subprocess.PIPE,
     stdout: Any = subprocess.PIPE,
     stderr: Any = subprocess.PIPE,
@@ -1544,7 +1599,9 @@ def spawn_worker(
       "declared"``. With ``require_sandbox=True`` this raises
       ``SandboxRefused`` instead.
     * A policy whose ``abi_cap`` is below 3 gets the weaker ruleset it asks
-      for and is reported as declared: truncate(2) is not covered.
+      for and is reported as declared: truncate(2) is not covered. A caller
+      that accepts that (the subtitle provider profile passes
+      ``minimum_abi=PROVIDER_MIN_ABI``) gets it as ``enforced``.
 
     "Enforced" means all of: the ruleset (filesystem, plus network and signal
     scope where the ABI has them), every Linux capability dropped, the seccomp
@@ -1573,12 +1630,14 @@ def spawn_worker(
     effective = min(probe.abi, cap) if cap else probe.abi
     # Filesystem integrity needs truncate(2) covered, which is ABI 3. A policy
     # capped below that still gets the weaker ruleset, but it is not "enforced".
-    sandboxed = probe.enforced and effective >= MIN_ENFORCED_ABI
+    # ``minimum_abi`` stays at ``MIN_ENFORCED_ABI`` for every kind but the subtitle provider profile.
+    usable = probe.enforces(minimum_abi)
+    sandboxed = usable and effective >= max(1, minimum_abi)
     if not sandboxed and require_sandbox:
         raise SandboxRefused("this host cannot sandbox workers: %s" % (probe.reason or "no Landlock"))
     return _start(
         spec,
-        enforce=probe.enforced,
+        enforce=usable,
         min_abi=probe.abi,
         enforcement="enforced" if sandboxed else "declared",
         launcher_python=launcher_python,

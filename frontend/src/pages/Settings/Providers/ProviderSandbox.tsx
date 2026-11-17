@@ -13,7 +13,9 @@ import { Check, Message } from "@/pages/Settings/components";
  */
 const ProviderSandboxSetting: FunctionComponent = () => {
   const { data } = useSystemStatus();
-  const notice = data?.sandbox?.providers?.notice ?? null;
+  const providers = data?.sandbox?.providers;
+  const notice = providers?.notice ?? null;
+  const partial = providers?.state === "partial";
   return (
     <Stack gap="xs">
       <Check
@@ -23,16 +25,16 @@ const ProviderSandboxSetting: FunctionComponent = () => {
       <Message>
         Subtitle provider plugins cannot read the configuration file or the
         database, and the media library is read-only to them. They keep their
-        own data and temporary folders. If this host cannot apply the sandbox,
-        providers still run without it and a notice appears here and on System
-        &gt; Status. Takes effect when a provider worker next starts. On by
-        default.
+        own data and temporary folders. Where this host's kernel covers only
+        part of it, or none, providers still run and a notice appears here and
+        on System &gt; Status. Takes effect when a provider worker next starts.
+        On by default.
       </Message>
       {notice ? (
         <Alert
           color="yellow"
           variant="light"
-          title="Running without the sandbox"
+          title={partial ? "Sandbox with gaps" : "Running without the sandbox"}
         >
           {notice}
         </Alert>
