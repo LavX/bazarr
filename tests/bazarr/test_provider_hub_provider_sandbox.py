@@ -1216,11 +1216,15 @@ def test_the_socket_filter_is_not_installed_where_there_is_no_port_rule(host, cl
     worker = client()
 
     assert _ask(worker, op="raw", number=sock, args=[2, 1, 0], close=True)["result"] == "created"
-    try:
-        disabled = int(Path("/proc/sys/kernel/io_uring_disabled").read_text())
-    except (OSError, ValueError):
-        disabled = 0
-    if not disabled:
+    # An outer policy (a container's seccomp profile, the sysctl) may refuse io_uring with EPERM for every
+    # process here, which says nothing about our filter. Only where this test process gets another answer
+    # does the worker's answer tell whether the filter was installed.
+    import ctypes
+
+    libc = ctypes.CDLL(None, use_errno=True)
+    ctypes.set_errno(0)
+    libc.syscall(ctypes.c_long(425), ctypes.c_long(0), ctypes.c_long(0))
+    if ctypes.get_errno() != errno_module.EPERM:
         ring = _ask(worker, op="raw", number=425, args=[0, 0])["result"]
         assert ring != "errno:%d" % errno_module.EPERM  # io_uring is the kernel's to answer, not the filter's
     assert probe.abi >= 3
@@ -1291,3 +1295,56 @@ def test_an_architecture_without_capability_bindings_still_gets_landlock_and_the
     assert _ask(worker, op="read", path=str(host["config"] / "config" / "config.yaml"))["result"] == "denied"
     assert getattr(worker.process, "enforcement", None) == "enforced"
     assert real.abi >= 1
+
+
+@pytest.fixture
+def launcher_without_capability_calls(tmp_path, monkeypatch):
+    """A copy of the launcher whose capability drop fails in the child, as on an architecture with no bindings.
+
+    The launcher imports its siblings by path, so the parent's own modules never reach it: this is
+    the only way to exercise what the child does when the drop raises.
+    """
+    folder = tmp_path / "launcher"
+    folder.mkdir()
+    source = Path(spawn_module.LAUNCHER_PATH).parent
+    for name in ("launcher.py", "landlock.py", "seccomp.py", "capabilities.py"):
+        (folder / name).write_text((source / name).read_text(encoding="utf-8"), encoding="utf-8")
+    broken = (folder / "capabilities.py").read_text(encoding="utf-8")
+    (folder / "capabilities.py").write_text(
+        broken
+        + "\n\ndef drop_all(status_path=None):\n    raise OSError(1, 'no capability bindings for this test')\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(spawn_module, "LAUNCHER_PATH", folder / "launcher.py")
+    return folder
+
+
+def test_when_the_childs_capability_drop_fails_the_landlock_rules_still_apply_if_the_spec_allows_it(
+    host, client, monkeypatch, launcher_without_capability_calls
+):
+    _enforcing_kernel()
+    # The parent believes the architecture has no bindings, so the spec makes the drop best effort.
+    monkeypatch.setattr(spawn_module.capabilities, "supported", lambda: False)
+    probe = spawn_module._run_probe(sys.executable)
+    assert probe.reads_verified is True and probe.enforces(PROVIDER_MIN_ABI) is True
+    monkeypatch.setattr("provider_hub.sandbox.probe_sandbox", lambda *a, **k: probe)
+    worker = client()
+
+    assert _ask(worker, op="read", path=str(host["config"] / "config" / "config.yaml"))["result"] == "denied"
+    assert _ask(worker, op="write", path=str(host["media"] / "film.mkv"))["result"] == "denied"
+    assert getattr(worker.process, "enforcement", None) == "enforced"
+    assert worker._sandbox_failed_open is False
+
+
+def test_when_the_childs_capability_drop_fails_and_the_spec_requires_it_the_start_is_refused(
+    host, client, monkeypatch, launcher_without_capability_calls
+):
+    # The control: the same broken child with the drop required (the parent thinks the bindings exist).
+    real = _enforcing_kernel()
+    probe = SandboxProbe(abi=real.abi, verified=True, reads_verified=True)
+    monkeypatch.setattr("provider_hub.sandbox.probe_sandbox", lambda *a, **k: probe)
+    worker = client()
+
+    with pytest.raises(worker_module.WorkerError, match="was not started"):
+        _ask(worker, op="read", path=str(host["media"] / "film.mkv"))
+    assert worker._sandbox_failed_open is False
