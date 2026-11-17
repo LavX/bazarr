@@ -1,7 +1,7 @@
 import BaseApi from "./base";
 import type {
-  ProviderHubCatalog,
   ProviderHubCatalogEntry,
+  ProviderHubCatalogSource,
   ProviderHubInstallation,
   ProviderHubJob,
   ProviderHubJobRef,
@@ -100,7 +100,19 @@ export interface PluginCatalogEntry extends ProviderHubCatalogEntry {
   development_source?: boolean;
 }
 
-export type PluginCatalog = Omit<ProviderHubCatalog, "entries"> & {
+/** A catalog source as Bazarr+ records it, with what the signature check of the official one came to. */
+export interface PluginCatalogSource extends ProviderHubCatalogSource {
+  /** "verified" for a signed catalog, "unsigned (legacy)" for the old one. */
+  catalog_signature?: string | null;
+  signature_verified?: boolean;
+  catalog_channel?: string | null;
+  /** When the signed catalog stops being installable from, as an ISO time. */
+  catalog_expires_at?: string | null;
+  development_source?: boolean;
+}
+
+export type PluginCatalog = {
+  sources: PluginCatalogSource[];
   entries: PluginCatalogEntry[];
 };
 

@@ -87,14 +87,15 @@ it("keeps it out on a status that predates the field, after the status has arriv
   expect(list("navigation")).not.toContain("translation");
 });
 
-it("shows it as a first-level entry after Subtitle Hub once the switch is on, with the old page still in Settings", async () => {
+it("shows it as a first-level entry in the System group once the switch is on, with the old page still in Settings", async () => {
   showStatus(true);
   showRoutes();
   expect(await screen.findByText("status loaded")).toBeInTheDocument();
   await waitFor(() => expect(list("navigation")).toContain("translation"));
   const navigation = list("navigation");
+  // Plugin Hub sits directly after Subtitle Hub, and Translation follows it.
   expect(navigation.indexOf("translation")).toBe(
-    navigation.indexOf("subtitle-hub") + 1,
+    navigation.indexOf("plugin-hub") + 1,
   );
   expect(list("settings")).toContain("translator");
   expect(list("settings")).not.toContain("translation");
@@ -132,4 +133,14 @@ it("shows neither the page nor Not Found before the status has answered", async 
   expect(screen.queryByText("the translation page")).not.toBeInTheDocument();
   answer?.();
   expect(await screen.findByText("the translation page")).toBeVisible();
+});
+
+it("lists the Plugin Hub directly after Subtitle Hub whatever the switch says", async () => {
+  showStatus(false);
+  showRoutes();
+  expect(await screen.findByText("status loaded")).toBeInTheDocument();
+  const navigation = list("navigation");
+  expect(navigation.indexOf("plugin-hub")).toBe(
+    navigation.indexOf("subtitle-hub") + 1,
+  );
 });

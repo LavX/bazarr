@@ -93,6 +93,7 @@ const sectionGroups = [
     label: "System",
     paths: [
       "subtitle-hub",
+      "plugin-hub",
       "translation",
       "distribution-hub",
       "settings",
