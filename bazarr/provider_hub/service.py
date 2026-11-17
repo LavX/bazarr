@@ -539,6 +539,7 @@ class _Served:
         self.origin: str | None = None
         self.failure: dict[str, Any] | None = None
         self.pointer: dict[str, str] | None = None
+        self.unchanged = False
 
     def observe(self, origin: str, surface: str, failure: "transport.Failure") -> None:
         if self.failure is not None:
@@ -556,6 +557,10 @@ class _Served:
 
 def _note_served(source: dict[str, Any], served: "_Served | None") -> None:
     """Record on the official source where its catalog came from and what made it move."""
+    if served is not None and served.unchanged:
+        if served.pointer is not None:
+            source["mirror_pointer"] = served.pointer
+        return
     if served is None or served.origin is None and served.failure is None:
         source.pop("last_origin", None)
         source.pop("last_failure", None)
@@ -604,6 +609,8 @@ def _fetch_catalog_file(
     except Exception as error:
         if _primary_has_no_file(error, route):
             return None
+        if served is not None and isinstance(error, transport.NoOriginAvailable) and error.failure is not None:
+            served.observe(transport.RAW_ORIGIN, transport.SURFACE_CATALOG, error.failure)
         raise
     if served is not None:
         served.note_origin(result.origin)
@@ -641,7 +648,7 @@ def _head_from_mirror(
     failure of GitHub is the one raised, so it is the one shown.
     """
     if served is not None:
-        served.observe(transport.RAW_ORIGIN, transport.SURFACE_POINTER, transport.classify_failure(advertisement_error))
+        served.observe("github", transport.SURFACE_POINTER, transport.classify_failure(advertisement_error))
     try:
         pointer = transport.fetch_pointer(channel, observer=served.observe if served is not None else None)
         stored = source.get("resolved_commit")
@@ -708,7 +715,8 @@ def _fetch_official_catalog(
         head = pointer.commit
     if unchanged_commit is not None and head == unchanged_commit.lower() and not _is_commit_sha(ref):
         if served is not None and mirror:
-            served.note_origin(transport.PAGES_ORIGIN if pointer is not None else transport.RAW_ORIGIN)
+            # Nothing was read, so where the held catalog came from is unchanged.
+            served.unchanged = True
             served.pointer = _pointer_record(pointer, source)
         return None, head, None
     feed = catalog_feed.verify_fetched(
@@ -729,7 +737,7 @@ def _fetch_official_catalog(
         if served is not None and mirror:
             served.note_origin(transport.RAW_ORIGIN)
         return payload, head, None
-    if feed.source_commit != head and not (pointer is not None and feed.source_commit in pointer.history):
+    if feed.source_commit != head:
         verdict, _reason = ancestry.check(feed.source_commit)
         if verdict is False:
             raise catalog_feed.FeedRefused(
@@ -744,13 +752,16 @@ def _fetch_official_catalog(
 def _pointer_record(pointer: "transport.MirrorPointer | None", source: dict[str, Any]) -> dict[str, str] | None:
     """What to remember of the mirror pointer a refresh relied on: the commit and when it was published.
 
-    A refresh that did not use the pointer keeps the last one, so a later stale pointer is still judged
-    against it.
+    The stamp is a high-water mark: a pointer for the stored commit with an older stamp never lowers it,
+    so a later pointer cannot slip in under it. A refresh that did not use the pointer keeps the last one.
     """
+    held = source.get("mirror_pointer")
+    held = held if isinstance(held, dict) else None
     if pointer is None:
-        held = source.get("mirror_pointer")
-        return held if isinstance(held, dict) else None
-    return {"commit": pointer.commit, "published_at": pointer.published_at}
+        return held
+    held_at = held.get("published_at") if held else None
+    stamp = max(pointer.published_at, held_at) if isinstance(held_at, str) else pointer.published_at
+    return {"commit": pointer.commit, "published_at": stamp}
 
 
 # The official source is trusted only on these branches of the official catalog
@@ -1491,58 +1502,33 @@ def _note_catalog_signature(
         catalog_feed.clear_refusal(state, feed.channel)
 
 
-def _merge_transport(saved: Any, record: dict[str, Any]) -> dict[str, Any]:
-    """``saved`` and ``record`` as one transport section, the later expiry winning per key, so no writer
-    shortens a cooldown another one stored."""
-    merged: dict[str, Any] = {name: dict(section) for name, section in record.items()}
-    if not isinstance(saved, dict):
-        return merged
-    for name in ("cooldowns", "retry_after"):
-        section = saved.get(name)
-        for key, value in (section.items() if isinstance(section, dict) else ()):
-            held = merged.setdefault(name, {}).get(key)
-            until = value.get("until") if isinstance(value, dict) else None
-            if (isinstance(until, (int, float)) and not isinstance(until, bool)
-                    and (not isinstance(held, dict) or not isinstance(held.get("until"), (int, float))
-                         or until > held["until"])):
-                merged[name][key] = value
-    section = saved.get("probes")
-    for key, value in (section.items() if isinstance(section, dict) else ()):
-        held = merged.setdefault("probes", {}).get(key)
-        mark = value.get("at") if isinstance(value, dict) else None
-        if (isinstance(mark, (int, float)) and not isinstance(mark, bool)
-                and (not isinstance(held, dict) or not isinstance(held.get("at"), (int, float))
-                     or mark > held["at"])):
-            merged["probes"][key] = value
-    return merged
-
-
 def _store_transport(state: dict[str, Any]) -> None:
     """Put what the transport has learnt about each origin into ``state``, inside the write that holds it.
 
-    Nothing is written while the transport has learnt nothing and the state holds nothing.
+    The process record is authoritative once it has been restored, so it is stored as it is: a restriction
+    lifted by a success stays lifted after a restart. Nothing is written while the transport has learnt
+    nothing and the state holds nothing.
     """
     record = transport.export_state()
     if any(record.values()) or "transport" in state:
-        state["transport"] = _merge_transport(state.get("transport"), record)
+        state["transport"] = record
 
 
 def _persist_transport() -> None:
     """The same, for a caller that is not inside a state write (an install): one write, only when the
-    stored section differs."""
-    if not _fallback_setting_on():
-        return
-    record = transport.export_state()
-    held = load_state().get("transport")
-    if not any(record.values()) and held is None:
-        return
-    if _merge_transport(held, record) == held:
-        return
+    stored section differs. A failure is logged and goes no further."""
     try:
+        if not _fallback_setting_on():
+            return
+        record = transport.export_state()
+        held = load_state().get("transport")
+        if (not any(record.values()) and held is None) or record == held:
+            return
         mutate_state(lambda state: _store_transport(state))
     except Exception:
         # What the transport learnt is kept in memory too, so a failed write costs a restart's memory only.
-        logging.getLogger(__name__).warning("The Provider Hub could not store what it learnt about its catalog origins", exc_info=True)
+        logging.getLogger(__name__).warning(
+            "The Provider Hub could not store what it learnt about its catalog origins", exc_info=True)
 
 
 def refresh_catalog(source_ids: set[str] | None = None, checkpoint=None) -> dict[str, Any]:
@@ -2943,6 +2929,11 @@ _BUNDLE_MIRROR_CHANNEL: contextvars.ContextVar[str | None] = contextvars.Context
     "provider_hub_bundle_mirror_channel", default=None)
 
 
+# The largest single bundle file read through the origins. The old fetch had no limit, and no file of the
+# catalog comes near this.
+_BUNDLE_FILE_MAX_BYTES = 64 * 1024 * 1024
+
+
 def _bundle_mirror_channel(state: dict[str, Any], source_id: str | None) -> str | None:
     """The mirror channel the bundle of an entry of ``source_id`` may be read from, or None.
 
@@ -2964,13 +2955,15 @@ def _fetch_github_bundle_file(
     if bundled is not None:
         return bundled
     channel = _BUNDLE_MIRROR_CHANNEL.get()
-    if channel is not None and str(manifest.source_repo).lower() == transport.OFFICIAL_REPO.lower():
-        raw_path = "/".join(part for part in (manifest.source_path, relative_path) if part)
-        key = transport.FetchKey(manifest.source_repo, channel, manifest.source_commit, raw_path)
+    raw_path = "/".join(part for part in (manifest.source_path, relative_path) if part)
+    key = transport.FetchKey(str(manifest.source_repo), channel or "", manifest.source_commit, raw_path)
+    # A file whose path the origins cannot address is read from GitHub the old way, mirror or not.
+    if (channel is not None and str(manifest.source_repo).lower() == transport.OFFICIAL_REPO.lower()
+            and transport.key_is_addressable(key)):
         content = transport.fetch_with_fallback(
             transport.default_origins(), key, surface=transport.SURFACE_BUNDLE, official=True,
             allow_fallback=True, route=route if route is not None else transport.JobRoute(),
-            timeout=_deadline_request_timeout(deadline)).content
+            timeout=_deadline_request_timeout(deadline), max_bytes=_BUNDLE_FILE_MAX_BYTES).content
     else:
         response = requests.get(
             _github_raw_url(manifest, relative_path),

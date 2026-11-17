@@ -57,6 +57,8 @@ class MirrorWorld(SignedWorld):
         self.pages_status = None
         self.raw_headers = {}
         self.advert_headers = {}
+        # How many advertisement requests are refused before it answers again; None means all of them.
+        self.advert_refusals = None
 
     def mirror(self, commit):
         """Serve what the repository holds at ``commit`` from the mirror too."""
@@ -86,8 +88,11 @@ class MirrorWorld(SignedWorld):
                 content = self.pages.get((commit, path))
             return FeedResponse(b"", 404) if content is None else FeedResponse(content)
         if url.endswith("/info/refs?service=git-upload-pack") and self.advert_status is not None:
-            self.requests.append(url)
-            return self._refusal(self.advert_status, self.advert_headers)
+            if self.advert_refusals is None or self.advert_refusals > 0:
+                if self.advert_refusals is not None:
+                    self.advert_refusals -= 1
+                self.requests.append(url)
+                return self._refusal(self.advert_status, self.advert_headers)
         if url.startswith("https://raw.githubusercontent.com/") and self.raw_status is not None:
             self.requests.append(url)
             return self._refusal(self.raw_status, self.raw_headers)
@@ -168,7 +173,7 @@ def test_a_refused_advertisement_is_replaced_by_the_mirror_pointer_and_the_mirro
     assert source["last_error"] is None and source["resolved_commit"] == NEW
     assert _versions() == {PROVIDER: "2.0.0", SERVICE: "2.0.0"}
     assert source["last_origin"] == "pages"
-    assert source["last_failure"]["origin"] == "raw" and source["last_failure"]["status"] == 503
+    assert source["last_failure"]["origin"] == "github" and source["last_failure"]["status"] == 503
     assert source["last_failure"]["surface"] == "pointer" and source["last_failure"]["kind"] == "server_error"
     assert source["mirror_pointer"] == {"commit": NEW, "published_at": STAMP}
     # The channel's counter moved on the mirror's signed bytes, the way it does on raw's.
@@ -326,7 +331,8 @@ def test_a_pointer_listing_the_stored_commit_as_its_own_head_only_is_the_stored_
 
     source = _official()
     assert source["last_error"] is None and source["resolved_commit"] == HEAD
-    assert source["last_origin"] == "pages"
+    # Nothing was read, so the held catalog is still the one raw served.
+    assert source["last_origin"] == "raw"
     assert not any("/signed/" in url for url in world.pages_requests())
 
 
@@ -666,3 +672,171 @@ def test_stage_install_sets_the_mirror_channel_for_the_bound_source_only(tmp_pat
 
     assert seen == ["main", None]
     assert service._BUNDLE_MIRROR_CHANNEL.get() is None
+
+
+# --- a parked primary and a mirror that has nothing -----------------------------------------------
+
+
+def _park_raw(seconds=600):
+    import time
+
+    from provider_hub import transport
+
+    now = time.time()
+    transport.restore_state({"retry_after": {"raw": {"until": now + seconds, "at": now, "kind": "rate_limited"}}})
+    return now + seconds
+
+
+def test_a_parked_primary_and_a_mirror_without_the_file_say_so_and_never_read_the_unsigned_catalog(world):
+    until = _park_raw()
+    world.legacy(providers=[_provider()])
+
+    _refresh()
+
+    source = _official()
+    assert "not answering requests right now" in source["last_error"]
+    assert "allows requests again at" in source["last_error"]
+    assert "does not have this catalog source" not in source["last_error"]
+    assert _state()["catalog_entries"] == {} and source.get("catalog_signature") is None
+    assert source["last_failure"]["kind"] == "rate_limited" and source["last_failure"]["retry_at"]
+    # Raw was parked, so it was not asked, and the legacy catalog at it was not either.
+    assert not any(url.startswith("https://raw.githubusercontent.com/") for url in world.requests)
+    assert until > 0
+
+
+def test_a_mirror_that_has_the_catalog_but_not_its_envelope_is_not_an_unsigned_catalog(world):
+    world.publish(version=100, plugins=[_plugin()], providers=[_provider()])
+    world.mirror(HEAD)
+    del world.pages[(HEAD, "signed/main/catalog.json.sig")]
+    # The first file fails over, so the rest of the job stays on the mirror.
+    world.raw_status = 503
+
+    _refresh()
+
+    source = _official()
+    assert source["last_error"] and _state()["catalog_entries"] == {}
+    assert source.get("catalog_signature") is None
+    assert "catalog_feeds" not in _state() or "main" not in _state()["catalog_feeds"]
+
+
+def test_a_signed_source_commit_outside_the_pointers_history_is_checked_against_the_branches(world):
+    # The pointer is not signed, so its history is no proof that a commit is on main or beta.
+    world.legacy(commit=OLD)
+    world.publish(commit=NEW, version=101, source_commit=OLD, plugins=[_plugin()], providers=[_provider()])
+    world.mirror(NEW)
+    # The advertisement refuses the refresh once and answers the trust check that follows.
+    _github_down(world, pointer_bytes(NEW, [NEW, OLD]), raw=False)
+    world.advert_refusals = 1
+
+    _refresh()
+
+    assert "not on the official catalog's main or beta" in _official()["last_error"]
+    assert _state()["catalog_entries"] == {}
+
+
+def test_a_pointer_for_the_stored_commit_with_an_older_stamp_never_lowers_the_floor(world):
+    from provider_hub import transport
+
+    _latch(world)
+    _publish_new(world)
+    _github_down(world, pointer_bytes(NEW, [NEW, HEAD], published_at=LATER_STAMP))
+    _refresh()
+    assert _official()["mirror_pointer"]["published_at"] == LATER_STAMP
+
+    world.pointers["main"] = pointer_bytes(NEW, [NEW, HEAD], published_at=STAMP)
+    transport.reset_state()
+    _refresh()
+    assert _official()["mirror_pointer"] == {"commit": NEW, "published_at": LATER_STAMP}
+
+    _publish_new(world, commit=NEWER, version=102, plugins=[_plugin("3.0.0")], providers=[_provider("3.0.0")])
+    world.pointers["main"] = pointer_bytes(NEWER, [NEWER, NEW, HEAD], published_at="2026-11-17T10:30:00Z")
+    transport.reset_state()
+    _refresh()
+
+    assert "not newer" in _official()["last_error"] and _versions()[SERVICE] == "2.0.0"
+
+
+def test_a_restriction_lifted_by_a_success_stays_lifted_after_a_restart(world):
+    import time
+
+    from provider_hub import transport
+    from provider_hub.state import mutate_state
+
+    now = time.time()
+    mutate_state(lambda state: state.__setitem__("transport", {
+        "cooldowns": {}, "retry_after": {"raw": {"until": now - 5, "at": now - 100, "kind": "rate_limited"}},
+        "probes": {"raw": {"at": now - 100}}}))
+    world.publish(version=100, plugins=[_plugin()], providers=[_provider()])
+
+    _refresh()
+
+    assert _official()["last_origin"] == "raw"
+    saved = _state()["transport"]
+    assert saved["retry_after"] == {} and saved["probes"] == {}
+    transport.reset_state()
+    transport.restore_state(saved)
+    assert transport.export_state()["retry_after"] == {}
+
+
+def test_an_unchanged_check_leaves_where_the_held_catalog_came_from(world):
+    _latch(world)
+    _publish_new(world)
+    _github_down(world, pointer_bytes(NEW, [NEW, HEAD]))
+    _refresh()
+    assert _official()["last_origin"] == "pages"
+    failure = _official()["last_failure"]
+
+    world.advert_status = world.raw_status = None
+    world.heads["main"] = world.heads["beta"] = NEW
+    _refresh()
+
+    source = _official()
+    assert source["last_error"] is None and source["last_origin"] == "pages"
+    assert source["last_failure"] == failure
+
+
+def test_a_failed_advertisement_is_not_recorded_as_a_failure_of_raw(world):
+    _latch(world)
+    _publish_new(world)
+    _github_down(world, pointer_bytes(NEW, [NEW, HEAD]), raw=False)
+
+    _refresh()
+
+    assert _official()["last_failure"]["origin"] == "github"
+
+
+def test_a_parked_primary_and_a_mirror_without_a_bundle_file_fail_with_that_state(bundle_env):
+    from provider_hub import transport
+
+    service, served, calls = bundle_env
+    served.clear()
+    _park_raw()
+
+    with pytest.raises(transport.NoOriginAvailable) as caught:
+        _fetch(service, _bundle_manifest())
+
+    assert "not answering requests right now" in str(caught.value)
+    assert caught.value.failure.retry_at is not None
+    assert all(url.startswith(PAGES) for url in calls)
+
+
+def test_a_bundle_path_the_origins_cannot_address_is_read_from_github_only(bundle_env):
+    from provider_hub.manifest import validate_manifest
+
+    service, _served, calls = bundle_env
+    token = service._BUNDLE_MIRROR_CHANNEL.set("main")
+    try:
+        with pytest.raises(requests.exceptions.HTTPError):
+            service._fetch_github_bundle_file(validate_manifest(_bundle_manifest()), "my file.py")
+    finally:
+        service._BUNDLE_MIRROR_CHANNEL.reset(token)
+
+    assert calls and all(url.startswith("https://raw.githubusercontent.com/") for url in calls)
+
+
+def test_a_failed_store_of_the_origin_record_does_not_fail_the_install(monkeypatch):
+    from provider_hub import service
+
+    monkeypatch.setattr(service, "load_state", lambda: (_ for _ in ()).throw(RuntimeError("unreadable")))
+
+    service._persist_transport()

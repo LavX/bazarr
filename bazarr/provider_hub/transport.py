@@ -199,6 +199,15 @@ _COMMIT = re.compile(r"[0-9a-f]{40}")
 _PATH_SEGMENT = re.compile(r"[A-Za-z0-9_@+=,~-][A-Za-z0-9._@+=,~-]*")
 
 
+def key_is_addressable(key: FetchKey) -> bool:
+    """Whether the origins can address ``key``. A path they cannot is read from GitHub the old way."""
+    try:
+        _validate_key(key)
+    except TransportError:
+        return False
+    return True
+
+
 def _validate_key(key: FetchKey) -> None:
     """Refuse a key that could address anything but a file of the catalog.
 
@@ -342,7 +351,7 @@ def classify_failure(
     if cancel_types and isinstance(error, cancel_types):
         return Failure(FailureKind.CANCELLED)
     if isinstance(error, TransportError):
-        return Failure(error.kind, error.status)
+        return Failure(error.kind, error.status, getattr(getattr(error, "failure", None), "retry_at", None))
     if isinstance(error, ssl.SSLError):
         # Ahead of ValueError: a certificate verification error is both.
         return Failure(FailureKind.TLS)
@@ -793,10 +802,48 @@ def _admit_for_route(
 
 
 class NoOriginAvailable(TransportError):
-    """Every origin the job may use is parked or has failed."""
+    """Every origin the job may use is parked or has failed.
 
-    def __init__(self, message: str):
+    ``failure`` is what the primary is waiting out, when it is, so a caller can show why and until when.
+    """
+
+    def __init__(self, message: str, failure: "Failure | None" = None):
         super().__init__(FailureKind.UNAVAILABLE, message)
+        self.failure = failure
+
+
+def parked_failure(origin: str, surface: str, now: float) -> "Failure | None":
+    """What ``origin`` is waiting out for ``surface`` as of ``now``, or None when it is not parked.
+
+    A reset time held for the whole origin shows as a rate limit until it. A cooldown of the surface shows as
+    the failure that set it.
+    """
+    with _RESTRICTIONS_LOCK:
+        held = _clamped("retry_after", origin, now) if origin in _STATE["retry_after"] else 0.0
+        if held > now:
+            return Failure(FailureKind.RATE_LIMITED, None, held)
+        key = _cooldown_key(origin, surface)
+        until = _clamped("cooldowns", key, now) if key in _STATE["cooldowns"] else 0.0
+        if until <= now:
+            return None
+        entry = _STATE["cooldowns"][key]
+        try:
+            kind = FailureKind(entry.get("kind")) if isinstance(entry, dict) else FailureKind.UNKNOWN
+        except ValueError:
+            kind = FailureKind.UNKNOWN
+        status = entry.get("status") if isinstance(entry, dict) else None
+        return Failure(kind, status if isinstance(status, int) else None, until)
+
+
+def _parked_message(failure: "Failure | None") -> str:
+    text = "GitHub is not answering requests right now, and the mirror does not have this file yet."
+    if failure is not None and failure.retry_at is not None:
+        try:
+            moment = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(failure.retry_at))
+            text += f" GitHub allows requests again at {moment} UTC."
+        except (ValueError, OverflowError, OSError):
+            pass
+    return text + " Try again later."
 
 
 def fetch_with_fallback(
@@ -848,14 +895,17 @@ def fetch_with_fallback(
             failure = classify_failure(error, cancel_types=cancel_types, now=finished)
             if not failure.trigger:
                 release_probe(origin.name, admission)
-                if (
-                    origin is not primary and failure.kind is FailureKind.NOT_FOUND
-                    and last_error is not None
-                ):
+                if origin is not primary and failure.kind is FailureKind.NOT_FOUND:
                     # A mirror that lags behind the repository has not got the
-                    # file yet. That must not read as the source lacking it:
-                    # the primary's own failure is the one to report.
-                    raise last_error from error
+                    # file yet. That must not read as the source lacking it.
+                    if last_error is not None:
+                        # The primary's own failure is the one to report.
+                        raise last_error from error
+                    # The primary was not asked because it is waiting out a
+                    # limit or a failure, so the mirror's 404 is the only
+                    # answer there is. Report that state, with its reset time.
+                    parked = parked_failure(primary.name, surface, finished)
+                    raise NoOriginAvailable(_parked_message(parked), parked) from error
                 raise
             record_failure(origin.name, surface, failure, finished, admission)
             if observer is not None:

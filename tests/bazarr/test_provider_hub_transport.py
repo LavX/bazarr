@@ -1626,3 +1626,38 @@ def test_the_observer_hears_each_trigger_failure_that_moves_a_fetch_on():
         observer=lambda origin, surface, failure: told.append((origin, surface, failure.kind)))
 
     assert result.origin == "pages" and told == [("raw", "catalog", FailureKind.SERVER_ERROR)]
+
+
+# -- a parked primary and a mirror that has no such file -----------------------------
+
+def test_a_parked_primary_and_a_mirror_404_report_the_primarys_state_and_do_not_ask_it():
+    transport.restore_state({"retry_after": {"raw": {"until": NOW + 300, "at": NOW}}})
+    raw, pages = _Fake("raw", [b"never"]), _Fake("pages", [_http_error(404)])
+
+    with pytest.raises(NoOriginAvailable) as caught:
+        _fetch([raw, pages])
+
+    assert raw.calls == 0
+    assert caught.value.failure.kind is FailureKind.RATE_LIMITED and caught.value.failure.retry_at == NOW + 300
+    assert "not answering requests right now" in str(caught.value) and "allows requests again" in str(caught.value)
+    # The refusal carries the reset time, and is not a trigger or a missing file.
+    failure = classify_failure(caught.value)
+    assert failure.kind is FailureKind.UNAVAILABLE and failure.retry_at == NOW + 300 and not failure.trigger
+
+
+def test_a_cooldown_of_the_surface_is_what_a_parked_primary_reports():
+    transport.restore_state({"cooldowns": {"raw:catalog": {"until": NOW + 50, "kind": "server_error", "status": 503}}})
+    raw, pages = _Fake("raw", [b"never"]), _Fake("pages", [_http_error(404)])
+
+    with pytest.raises(NoOriginAvailable) as caught:
+        _fetch([raw, pages])
+
+    assert caught.value.failure.kind is FailureKind.SERVER_ERROR and caught.value.failure.status == 503
+    assert transport.parked_failure("raw", "bundle", NOW) is None
+    assert transport.parked_failure("raw", "catalog", NOW + 60) is None
+
+
+def test_a_path_the_origins_cannot_address_is_known_in_advance():
+    assert transport.key_is_addressable(KEY)
+    assert not transport.key_is_addressable(FetchKey(KEY.repo, "main", KEY.commit, "my file.py"))
+    assert not transport.key_is_addressable(FetchKey(KEY.repo, "main", KEY.commit, ".hidden/x.py"))
