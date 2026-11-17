@@ -104,7 +104,10 @@ const PluginConsent: FunctionComponent<PluginConsentProps> = ({
   const digest = installing
     ? summaryQuery.data?.digest
     : deltaQuery.data?.digest;
-  const ready = digest !== undefined && !query.isFetching;
+  // What the person confirms is what is on screen: the set is shown only once everything it is drawn
+  // from has arrived, and the buttons that agree to it wait for the same moment.
+  const complete = !query.isPending && !(updating && installedQuery.isPending);
+  const ready = digest !== undefined && !query.isFetching && complete;
 
   const run = async () => {
     if (!target || !digest || running.current) {
@@ -193,7 +196,7 @@ const PluginConsent: FunctionComponent<PluginConsentProps> = ({
     >
       {target && (
         <Stack gap="md">
-          {query.isPending || (updating && installedQuery.isPending) ? (
+          {!complete ? (
             <div
               role="status"
               aria-busy="true"

@@ -1,5 +1,5 @@
 import { FunctionComponent } from "react";
-import { Badge, Button, Tooltip } from "@mantine/core";
+import { Badge, Button, Tooltip, VisuallyHidden } from "@mantine/core";
 import {
   faArrowUp,
   faCheck,
@@ -214,6 +214,11 @@ export const PluginCard: FunctionComponent<PluginCardProps> = (props) => {
           </Badge>
           {facts.permissions.map((name) => {
             const mark = permissionMark(name, sandbox);
+            // On hover for a mouse, and in the text for a screen reader, since a badge has no role to name.
+            const explanation =
+              mark === "enforced"
+                ? "This host holds the plugin to this permission."
+                : "The plugin says it needs this, and nothing here confines it.";
             return (
               <Badge
                 key={name}
@@ -226,13 +231,10 @@ export const PluginCard: FunctionComponent<PluginCardProps> = (props) => {
                     aria-hidden="true"
                   />
                 }
-                aria-label={`${permissionLabel(name)}: ${mark}. ${
-                  mark === "enforced"
-                    ? "This host holds the plugin to this permission."
-                    : "The plugin says it needs this, and nothing here confines it."
-                }`}
+                title={explanation}
               >
                 {permissionLabel(name)}: {mark}
+                <VisuallyHidden>. {explanation}</VisuallyHidden>
               </Badge>
             );
           })}

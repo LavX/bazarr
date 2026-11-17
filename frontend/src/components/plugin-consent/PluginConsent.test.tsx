@@ -2,6 +2,7 @@
 import { FunctionComponent, useState } from "react";
 import userEvent from "@testing-library/user-event";
 import { http, HttpResponse } from "msw";
+import { readFileSync } from "node:fs";
 import { beforeEach, describe, expect, it } from "vitest";
 import queryClient from "@/apis/queries";
 import { QueryKeys } from "@/apis/queries/keys";
@@ -606,6 +607,13 @@ describe("what the dialog waits for and leaves out", () => {
     customRender(<Alone target={updateTarget} />);
     const dialog = await open(user);
     expect(await within(dialog).findByRole("status")).toBeVisible();
+    // The delta has arrived, but the set is not on screen yet, so it cannot be agreed to.
+    await waitFor(() =>
+      expect(calls.map((call) => call.path)).toContain("update-consent"),
+    );
+    expect(
+      within(dialog).getByRole("button", { name: "Update" }),
+    ).toBeDisabled();
     expect(
       within(dialog).queryByRole("group", { name: "What changes" }),
     ).not.toBeInTheDocument();
@@ -613,6 +621,11 @@ describe("what the dialog waits for and leaves out", () => {
     const table = await within(dialog).findByRole("group", {
       name: "What changes",
     });
+    await waitFor(() =>
+      expect(
+        within(dialog).getByRole("button", { name: "Update" }),
+      ).toBeEnabled(),
+    );
     expect(
       within(table).queryByText(/could not be read/),
     ).not.toBeInTheDocument();
@@ -685,5 +698,21 @@ describe("a subtitle provider through the flow", () => {
     await user.click(screen.getByRole("button", { name: "Install it" }));
     expect(await screen.findByRole("dialog")).toBeInTheDocument();
     expect(calls.map((call) => call.path)).not.toContain("install");
+  });
+});
+
+describe("the narrow layout of the update table", () => {
+  // jsdom does no layout, so this reads the stylesheet: at phone width the table has two columns and
+  // the empty corner cell has to leave the grid, or every heading lands over the wrong column.
+  it("hides the empty corner cell where the table drops to two columns", () => {
+    const css = readFileSync(
+      "src/components/plugin-consent/PluginConsent.module.scss",
+      "utf8",
+    );
+    const narrow = css.slice(css.indexOf("@media (max-width: 36em)"));
+    expect(narrow).toMatch(
+      /grid-template-columns:\s*minmax\(0, 1fr\) minmax\(0, 1fr\)/,
+    );
+    expect(narrow).toMatch(/\.corner\s*\{[^}]*display:\s*none/);
   });
 });

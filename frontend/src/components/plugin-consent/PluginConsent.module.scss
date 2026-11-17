@@ -136,8 +136,9 @@
     grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
   }
 
+  /* Two columns: the empty corner goes, so each heading sits over its own column. */
   .sideBySide .corner {
-    display: block;
+    display: none;
   }
 
   .rowLabel {
