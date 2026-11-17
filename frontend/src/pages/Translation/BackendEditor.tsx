@@ -92,12 +92,17 @@ const BackendEditor: FunctionComponent<BackendEditorProps> = ({
   }, [fields, values]);
   // One request per pause in typing, not one per key.
   const [settledDraft] = useDebouncedValue(draft, 400);
+  // Asked only where there is a list to ask for: a type the engine still has, whose model is picked
+  // from a list. The server refuses anything else, and that refusal would only be noise here.
+  const hasModelList = fields.some(
+    (field) => field.key === "model" && field.type === "options",
+  );
   const options = useFieldOptions(
     engine.id,
     backendType,
     "model",
     settledDraft,
-    backendType !== "",
+    hasModelList,
   );
 
   const form = useGuardedSave(

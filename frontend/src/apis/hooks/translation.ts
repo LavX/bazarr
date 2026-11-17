@@ -133,14 +133,39 @@ export function useCreateConnection() {
 }
 
 /**
- * First run in one step: add the engine's first back end, then select the
- * engine. `created` skips the first request on a retry after only the second
- * one failed, so a retry never adds the back end twice. The state is loaded
- * again as soon as the back end exists: if the second request then fails, the
- * rest of the page already shows that back end and does not ask for it again.
+/**
+ * A start that got as far as the engine's switch and no further: the back end
+ * is saved, and the engine is still off because the server would not turn it
+ * on. Nothing is selected, so the start is not reported as done.
+ */
+export class EngineStillOffError extends Error {
+  /** The server's refusal, when it gave one. */
+  readonly refusal: TranslationRefusal | null;
+
+  constructor(cause: unknown) {
+    super("The engine is still switched off.");
+    this.name = "EngineStillOffError";
+    this.refusal = readRefusal(cause);
+  }
+}
+
+/**
+ * First run in one step: add the engine's first back end, turn the engine on
+ * when it is off, then select it. `created` skips the first request on a retry
+ * after only a later one failed, so a retry never adds the back end twice. The
+ * state is loaded again as soon as the back end exists: if a later request then
+ * fails, the rest of the page already shows that back end and does not ask for
+ * it again.
+ *
+ * An engine can be off when the start is pressed: turned off by hand in the
+ * full page, or by a plugin update. Selecting it as it is would report a start
+ * that translates nothing, so it is turned on first, from the state as it is
+ * after the back end was added, and a refusal stops the start before anything
+ * is selected.
  */
 export function useStartEngine() {
   const refresh = useRefresh();
+  const fresh = useFreshState();
   return useMutation({
     mutationFn: async ({
       instanceId,
@@ -159,6 +184,22 @@ export function useStartEngine() {
         );
         onCreated();
         await refresh();
+      }
+      const engine = (await fresh()).instances.find(
+        (item) => item.id === instanceId,
+      );
+      if (engine && !engine.enabled) {
+        try {
+          await withInlineErrors(() =>
+            api.translation.saveEngine(instanceId, {
+              enabled: true,
+              // eslint-disable-next-line camelcase -- transport name
+              expected_revision: engine.revision,
+            }),
+          );
+        } catch (error) {
+          throw new EngineStillOffError(error);
+        }
       }
       return withInlineErrors(() =>
         api.translation.setPointers({ engine: instanceId }),

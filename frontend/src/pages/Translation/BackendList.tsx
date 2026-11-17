@@ -253,12 +253,23 @@ const BackendList: FunctionComponent<{
           report("danger", result.message);
         }
       },
-      onError: (error) =>
-        report(
-          "danger",
-          readRefusal(error)?.message ||
-            "The test could not run. Check that Bazarr+ is reachable and try again.",
-        ),
+      onError: (error) => {
+        const refusal = readRefusal(error);
+        if (refusal?.code === "plugin_unavailable") {
+          // The engine's plugin is not running, so nothing was sent: the same as an engine that says
+          // so in its answer, and not a failure of this back end.
+          report(
+            "waiting",
+            NOT_TESTED + " " + (refusal.message || TRY_AGAIN_SOON),
+          );
+        } else {
+          report(
+            "danger",
+            refusal?.message ||
+              "The test could not run. Check that Bazarr+ is reachable and try again.",
+          );
+        }
+      },
       onSettled: () => setTesting(null),
     });
   };

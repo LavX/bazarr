@@ -606,6 +606,8 @@ def test_a_failure_while_reserving_gives_the_budget_back_and_sends_nothing(world
     response = world.call("post", f"connections/{connection_id}/test", {})
     assert response.status_code == 200 and response.json["ok"] is False
     assert world.requests == []
+    # It stopped before the probe was started, so nothing was sent: not a failed back end.
+    assert response.json["outcome"] == "not_ready"
     usage, budgets = _calls(world)
     assert usage == [] and [item.state for item in budgets] == ["released"]
     _nothing_leaked(world, caplog)
@@ -920,6 +922,8 @@ def test_a_lookup_failure_in_a_model_list_source_is_a_failed_test_too(world, cap
     connection_id = world.lan_connection()
     response = world.call("post", f"connections/{connection_id}/test", {})
     assert response.status_code == 200 and response.json["ok"] is False
+    # The model list was asked, and whether that request went out is not known: it is not called unsent.
+    assert response.json["outcome"] == "failed"
 
 
 def test_a_probe_thread_that_could_not_start_leaves_no_claim_behind(world, monkeypatch):

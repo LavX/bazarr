@@ -179,7 +179,7 @@ OPEN_TEST = "The translation engine is not running, so this back end cannot be t
 # waiting is enough. A page shows a back end that failed differently from a test that never ran.
 ANSWERED = "answered"    # the back end answered: ``ok`` is true
 FAILED = "failed"        # a request went out, or may have, and the back end did not answer as it should
-NOT_READY = "not_ready"  # nothing was sent: the engine could not take the test just now, and may in a moment
+NOT_READY = "not_ready"  # nothing was sent: the test could not be started just now, and may be in a moment
 REFUSED = "refused"      # nothing was sent: what is saved, or a cost cap, does not allow the test
 
 
@@ -909,10 +909,10 @@ class TranslatorSettingsService:
         key. A priced test is reserved against the cost caps and settled in the usage ledger like any call.
 
         ``outcome`` says what ``ok: false`` alone does not: ``failed`` when a request went out (or may have) and
-        the back end did not answer as it should, ``not_ready`` when nothing was sent because the engine could
-        not take the test just now (busy with a translation, not started, a test of this back end still
-        running), and ``refused`` when nothing was sent because what is saved, or a cost cap, does not allow
-        it. A test that worked is ``answered``.
+        the back end did not answer as it should, ``not_ready`` when nothing was sent because the test could
+        not be started just now (the engine busy with a translation or not started, a test of this back end
+        still running, the test stopping before its request was handed over), and ``refused`` when nothing
+        was sent because what is saved, or a cost cap, does not allow it. A test that worked is ``answered``.
         """
         if payload not in (None, {}):
             raise InvalidValuesError("A test uses the settings as they are saved. Save your changes first.")
@@ -973,7 +973,11 @@ class TranslatorSettingsService:
                     bug = self._sanitized(error, held)
             else:
                 self._log_failure(error, held)
-                result = self._test_result(False, UNFINISHED_TEST)
+                # A priced test that stopped before its probe was started (its budget could not be reserved)
+                # sent nothing, so that is not a failed back end. Once the probe has the request, or when the
+                # model list was asked instead, the request may have gone out.
+                unsent = self._probe is not None and not claim.handed_to_probe
+                result = self._test_result(False, UNFINISHED_TEST, outcome=NOT_READY if unsent else FAILED)
         finally:
             if not claim.handed_to_probe:
                 claim.release()

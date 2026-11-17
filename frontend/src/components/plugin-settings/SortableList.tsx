@@ -2,7 +2,7 @@ import {
   CSSProperties,
   ReactNode,
   useCallback,
-  useEffect,
+  useLayoutEffect,
   useRef,
 } from "react";
 import { ActionIcon, Group } from "@mantine/core";
@@ -78,18 +78,30 @@ function SortableRow({
   } = useSortable({ id, disabled });
   const upRef = useRef<HTMLButtonElement>(null);
   const downRef = useRef<HTMLButtonElement>(null);
-  // The button that was pressed, until the row has taken its new place.
+  // The button that was pressed, for the one draw that press causes.
   const pressed = useRef<"up" | "down" | null>(null);
   // A move to the first or last place disables the button that made it, and a disabled button drops the
   // focus. The focus goes to the row's other button, so the keyboard stays on the row that was moved.
-  useEffect(() => {
+  //
+  // The flag belongs to its own press. It is read on the next draw, whatever that draw changed, and
+  // dropped there. A caller that does not apply the move draws nothing, so the press drops the flag
+  // itself once it is over: a later change of order, made by something else, never finds it.
+  useLayoutEffect(() => {
     if (pressed.current === "up" && index === 0) {
       downRef.current?.focus();
     } else if (pressed.current === "down" && index === count - 1) {
       upRef.current?.focus();
     }
     pressed.current = null;
-  }, [index, count]);
+  });
+  const press = (direction: "up" | "down") => {
+    pressed.current = direction;
+    onMove(index, direction === "up" ? index - 1 : index + 1);
+    // A move that is applied is drawn before this runs. One that is not leaves the flag for this to drop.
+    window.setTimeout(() => {
+      pressed.current = null;
+    }, 0);
+  };
   const style: CSSProperties = {
     transform: CSS.Transform.toString(transform),
     transition,
@@ -117,10 +129,7 @@ function SortableRow({
           ref={upRef}
           aria-label={`Move ${name} up`}
           disabled={disabled || index === 0}
-          onClick={() => {
-            pressed.current = "up";
-            onMove(index, index - 1);
-          }}
+          onClick={() => press("up")}
         >
           <FontAwesomeIcon icon={faArrowUp} />
         </ActionIcon>
@@ -130,10 +139,7 @@ function SortableRow({
           ref={downRef}
           aria-label={`Move ${name} down`}
           disabled={disabled || index === count - 1}
-          onClick={() => {
-            pressed.current = "down";
-            onMove(index, index + 1);
-          }}
+          onClick={() => press("down")}
         >
           <FontAwesomeIcon icon={faArrowDown} />
         </ActionIcon>

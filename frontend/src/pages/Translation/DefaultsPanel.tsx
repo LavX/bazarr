@@ -17,20 +17,68 @@ import {
 import type { TranslationSummary } from "@/types/translation";
 import styles from "./Translation.module.scss";
 
+/**
+ * A number field's value as the field reports it. It is a number once what is typed is a whole number,
+ * and the typed text until then ("0." on the way to "0.15", "1.50", an empty field), so it is kept as
+ * it comes: turning the text into something else would rewrite the field under the person's hands.
+ */
+type Typed = number | string;
+
 interface Draft {
-  default_score?: number | "";
-  min_source_score?: number | "";
+  default_score?: Typed;
+  min_source_score?: Typed;
   translator_info?: boolean;
-  max_concurrent?: number | "";
-  job_cap?: number | "";
-  month_cap?: number | "";
+  max_concurrent?: Typed;
+  job_cap?: Typed;
+  month_cap?: Typed;
 }
 
-const asNumber = (value: string | number): number | "" =>
-  typeof value === "number" ? value : "";
+/** What a field holds, as a number: null when it is empty, NaN when the text is not a number. */
+const amount = (value: Typed): number | null => {
+  if (typeof value === "number") {
+    return value;
+  }
+  const text = value.trim();
+  if (text === "") {
+    return null;
+  }
+  const parsed = Number(text);
+  return Number.isFinite(parsed) ? parsed : Number.NaN;
+};
 
-const cap = (value: number | "" | undefined, saved: number | null) =>
-  value === undefined ? saved : value === "" ? null : value;
+/** Why a whole-number field cannot be saved as it stands, or nothing when it can or was not touched. */
+const wholeNumberProblem = (
+  value: Typed | undefined,
+  min: number,
+  max: number,
+  what: string,
+) => {
+  if (value === undefined) {
+    return undefined;
+  }
+  const number = amount(value);
+  if (number === null || Number.isNaN(number)) {
+    return `Enter a ${what}.`;
+  }
+  // The field brings a number back into its range when it is left. Enter saves without leaving it.
+  return Number.isInteger(number) && number >= min && number <= max
+    ? undefined
+    : `Enter a ${what} from ${min} to ${max}.`;
+};
+
+/** A cap is an amount of 0 or more, or empty for none. */
+const capProblem = (value: Typed | undefined) => {
+  if (value === undefined) {
+    return undefined;
+  }
+  const number = amount(value);
+  return number === null || number >= 0
+    ? undefined
+    : "Enter an amount, or leave it empty for no cap.";
+};
+
+const cap = (value: Typed | undefined, saved: number | null) =>
+  value === undefined ? saved : amount(value);
 
 /**
  * What applies to every translation, whatever engine runs it: the score a
@@ -82,25 +130,39 @@ const DefaultsPanel: FunctionComponent<{ summary?: TranslationSummary }> = ({
   };
   const dirty = Object.keys(draft).length > 0;
   const busy = saveSettings.isPending || saveLimits.isPending || confirming;
-  const invalid =
-    draft.default_score === "" ||
-    draft.min_source_score === "" ||
-    draft.max_concurrent === "";
+  const problems = {
+    default_score: wholeNumberProblem(draft.default_score, 0, 100, "score"),
+    min_source_score: wholeNumberProblem(
+      draft.min_source_score,
+      0,
+      100,
+      "score",
+    ),
+    max_concurrent: wholeNumberProblem(draft.max_concurrent, 1, 10, "number"),
+    job_cap: summary ? capProblem(draft.job_cap) : undefined,
+    month_cap: summary ? capProblem(draft.month_cap) : undefined,
+  };
+  const invalid = Object.values(problems).some(Boolean);
 
   const save = async () => {
     const changes: Record<string, number | boolean> = {};
-    if (typeof draft.default_score === "number") {
-      changes["settings-translator-default_score"] = draft.default_score;
+    // Checked above: a field that was touched holds a whole number in its range.
+    const whole = (value: Typed | undefined) =>
+      value === undefined ? null : amount(value);
+    const defaultScore = whole(draft.default_score);
+    if (defaultScore !== null) {
+      changes["settings-translator-default_score"] = defaultScore;
     }
-    if (typeof draft.min_source_score === "number") {
-      changes["settings-translator-min_source_score"] = draft.min_source_score;
+    const minSourceScore = whole(draft.min_source_score);
+    if (minSourceScore !== null) {
+      changes["settings-translator-min_source_score"] = minSourceScore;
     }
     if (draft.translator_info !== undefined) {
       changes["settings-translator-translator_info"] = draft.translator_info;
     }
-    if (typeof draft.max_concurrent === "number") {
-      changes["settings-translator-openrouter_max_concurrent"] =
-        draft.max_concurrent;
+    const maxConcurrent = whole(draft.max_concurrent);
+    if (maxConcurrent !== null) {
+      changes["settings-translator-openrouter_max_concurrent"] = maxConcurrent;
     }
     // A new attempt starts clean: what is said below belongs to this one.
     setProblem("");
@@ -181,9 +243,9 @@ const DefaultsPanel: FunctionComponent<{ summary?: TranslationSummary }> = ({
             max={100}
             allowDecimal={false}
             value={draft.default_score ?? stored.default_score}
-            error={draft.default_score === "" ? "Enter a score." : undefined}
+            error={problems.default_score}
             disabled={busy}
-            onChange={(value) => set({ default_score: asNumber(value) })}
+            onChange={(value) => set({ default_score: value })}
           />
           <NumberInput
             label="Minimum source score"
@@ -192,9 +254,9 @@ const DefaultsPanel: FunctionComponent<{ summary?: TranslationSummary }> = ({
             max={100}
             allowDecimal={false}
             value={draft.min_source_score ?? stored.min_source_score ?? 90}
-            error={draft.min_source_score === "" ? "Enter a score." : undefined}
+            error={problems.min_source_score}
             disabled={busy}
-            onChange={(value) => set({ min_source_score: asNumber(value) })}
+            onChange={(value) => set({ min_source_score: value })}
           />
         </div>
       </section>
@@ -234,9 +296,9 @@ const DefaultsPanel: FunctionComponent<{ summary?: TranslationSummary }> = ({
           allowDecimal={false}
           maw={summary ? undefined : 313}
           value={draft.max_concurrent ?? stored.openrouter_max_concurrent ?? 2}
-          error={draft.max_concurrent === "" ? "Enter a number." : undefined}
+          error={problems.max_concurrent}
           disabled={busy}
-          onChange={(value) => set({ max_concurrent: asNumber(value) })}
+          onChange={(value) => set({ max_concurrent: value })}
         />
         {summary && (
           <div className={styles.fieldPair}>
@@ -252,8 +314,9 @@ const DefaultsPanel: FunctionComponent<{ summary?: TranslationSummary }> = ({
                   ? (summary.job_cap ?? "")
                   : draft.job_cap
               }
+              error={problems.job_cap}
               disabled={busy}
-              onChange={(value) => set({ job_cap: asNumber(value) })}
+              onChange={(value) => set({ job_cap: value })}
             />
             <NumberInput
               label="Cost cap per month"
@@ -267,8 +330,9 @@ const DefaultsPanel: FunctionComponent<{ summary?: TranslationSummary }> = ({
                   ? (summary.month.cap ?? "")
                   : draft.month_cap
               }
+              error={problems.month_cap}
               disabled={busy}
-              onChange={(value) => set({ month_cap: asNumber(value) })}
+              onChange={(value) => set({ month_cap: value })}
             />
           </div>
         )}

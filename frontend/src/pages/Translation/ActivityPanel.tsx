@@ -78,7 +78,8 @@ const JobRow: FunctionComponent<{
         type="button"
         className={styles.jobButton}
         aria-expanded={open}
-        aria-controls={detailId}
+        // The detail exists only while the row is open: closed, there is nothing to point at.
+        aria-controls={open ? detailId : undefined}
         onClick={() => setOpen((value) => !value)}
       >
         <span className={styles.jobTitle}>

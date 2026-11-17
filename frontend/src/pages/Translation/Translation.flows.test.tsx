@@ -70,8 +70,31 @@ beforeEach(() => {
         },
       }),
     ),
-    http.post("/api/translation/engines/:id/options", () =>
-      HttpResponse.json({ available: false, items: [], reason: "none" }),
+    // As the server answers: a model list only for a back-end type the engine has, a refusal for any other.
+    http.post(
+      "/api/translation/engines/:id/options",
+      async ({ request, params }) => {
+        const { backend_type } = (await request.json()) as {
+          backend_type: string;
+        };
+        const owner = state.instances.find(
+          (item) => item.id === Number(params.id),
+        );
+        if (!owner?.schema?.backend_types[backend_type]) {
+          return HttpResponse.json(
+            {
+              error: "bad_request",
+              message: `${owner?.name ?? "The engine"} has no back end of type ${backend_type}`,
+            },
+            { status: 400 },
+          );
+        }
+        return HttpResponse.json({
+          available: false,
+          items: [],
+          reason: "none",
+        });
+      },
     ),
   );
 });
@@ -2508,5 +2531,313 @@ describe("Translation page, defaults saved in part", () => {
       ).toBeDisabled(),
     );
     expect(screen.queryByText(said)).not.toBeInTheDocument();
+  });
+});
+
+describe("Translation page, typing the defaults", () => {
+  const summary = (job: number | null, month: number | null) => ({
+    month: { key: "2026-11", spent: 3.21, cap: month },
+    job_cap: job,
+    queue: { running: 0, pending: 0, limit: 2 },
+    limits_revision: 4,
+  });
+
+  it("keeps an amount with decimals as it is typed in both cap fields, and saves exactly that", async () => {
+    state = { ...state, capabilities: ["summary", "limits"] };
+    let saved = summary(1, 20);
+    server.use(
+      http.get("/api/translation/summary", () => HttpResponse.json(saved)),
+      http.put("/api/translation/limits", async ({ request }) => {
+        const body = (await request.json()) as {
+          job_cap: number | null;
+          month_cap: number | null;
+        };
+        record("put", "limits", body);
+        saved = summary(body.job_cap, body.month_cap);
+        return HttpResponse.json(saved);
+      }),
+    );
+    const user = userEvent.setup();
+    await showPage();
+    await user.click(screen.getByRole("tab", { name: "Defaults" }));
+
+    // Typed key by key, as a person does. The field reports "0." before it reports 0.15, and that
+    // half-typed amount has to stay in the field: dropped, the next keys would spell $15.
+    const job = await screen.findByLabelText("Cost cap per job");
+    await user.clear(job);
+    await user.type(job, "0");
+    expect(job).toHaveValue("$0");
+    await user.type(job, ".");
+    expect(job).toHaveValue("$0.");
+    await user.type(job, "1");
+    expect(job).toHaveValue("$0.1");
+    await user.type(job, "5");
+    expect(job).toHaveValue("$0.15");
+
+    // An amount that passes through a zero after the point, and ends on one.
+    const month = screen.getByLabelText("Cost cap per month");
+    await user.clear(month);
+    await user.type(month, "7.0");
+    expect(month).toHaveValue("$7.0");
+    await user.type(month, "5");
+    expect(month).toHaveValue("$7.05");
+    await user.type(month, "{Backspace}{Backspace}");
+    expect(month).toHaveValue("$7.");
+    await user.type(month, "50");
+    expect(month).toHaveValue("$7.50");
+
+    await user.click(screen.getByRole("button", { name: "Save defaults" }));
+    await waitFor(() => expect(calls).toHaveLength(1));
+    expect(calls[0].body).toEqual({ job_cap: 0.15, month_cap: 7.5 });
+    await waitFor(() =>
+      expect(
+        screen.getByRole("button", { name: "Save defaults" }),
+      ).toBeDisabled(),
+    );
+    expect(screen.getByLabelText("Cost cap per job")).toHaveValue("$0.15");
+    expect(screen.getByLabelText("Cost cap per month")).toHaveValue("$7.5");
+  });
+
+  it("takes an emptied cap as no cap, and a cap that is not an amount is not saved", async () => {
+    state = { ...state, capabilities: ["summary", "limits"] };
+    server.use(
+      http.get("/api/translation/summary", () =>
+        HttpResponse.json(summary(1, 20)),
+      ),
+      http.put("/api/translation/limits", async ({ request }) => {
+        const body = await request.json();
+        record("put", "limits", body);
+        return HttpResponse.json(summary(null, 20));
+      }),
+    );
+    const user = userEvent.setup();
+    await showPage();
+    await user.click(screen.getByRole("tab", { name: "Defaults" }));
+    const job = await screen.findByLabelText("Cost cap per job");
+    await user.clear(job);
+    // A point alone is not an amount yet.
+    await user.type(job, ".");
+    expect(
+      screen.getByText("Enter an amount, or leave it empty for no cap."),
+    ).toBeVisible();
+    expect(
+      screen.getByRole("button", { name: "Save defaults" }),
+    ).toBeDisabled();
+    await user.type(job, "{Enter}");
+    expect(calls).toHaveLength(0);
+    await user.clear(job);
+    await user.click(screen.getByRole("button", { name: "Save defaults" }));
+    await waitFor(() => expect(calls).toHaveLength(1));
+    expect(calls[0].body).toEqual({ job_cap: null, month_cap: 20 });
+  });
+
+  it("does not save a score above 100 when Enter is pressed before the field is left", async () => {
+    server.use(
+      http.post("/api/system/settings", async ({ request }) => {
+        record("post", "settings", await request.text());
+        return new HttpResponse(null, { status: 204 });
+      }),
+    );
+    const user = userEvent.setup();
+    await showPage();
+    await user.click(screen.getByRole("tab", { name: "Defaults" }));
+    const score = await screen.findByLabelText(
+      "Score of a translated subtitle",
+    );
+    await user.clear(score);
+    // The field brings 500 back to 100 when it is left. Enter submits the form without leaving it.
+    await user.type(score, "500{Enter}");
+    expect(screen.getByText("Enter a score from 0 to 100.")).toBeVisible();
+    expect(
+      screen.getByRole("button", { name: "Save defaults" }),
+    ).toBeDisabled();
+    expect(calls).toHaveLength(0);
+
+    const atOnce = screen.getByLabelText("Translations at once");
+    await user.clear(atOnce);
+    await user.type(atOnce, "0{Enter}");
+    expect(screen.getByText("Enter a number from 1 to 10.")).toBeVisible();
+    expect(calls).toHaveLength(0);
+
+    // In range again, Enter saves.
+    await user.clear(atOnce);
+    await user.type(atOnce, "4");
+    await user.clear(score);
+    await user.type(score, "100{Enter}");
+    await waitFor(() => expect(calls).toHaveLength(1));
+    expect(calls[0].body).toContain("settings-translator-default_score");
+    expect(calls[0].body).toContain("100");
+    expect(calls[0].body).toContain(
+      "settings-translator-openrouter_max_concurrent",
+    );
+  });
+});
+
+describe("Translation page, a quick start with the official engine switched off", () => {
+  // The engine was turned off in the full page and has no back end yet, so a reload shows the first-run panel.
+  const offEngine = () =>
+    engine({ enabled: false, configured: false, connections: [] });
+
+  const firstRun = (enable: (body: unknown) => Response | null) => {
+    state = {
+      enabled: true,
+      engine: null,
+      fallback_engine: null,
+      instances: [offEngine()],
+    };
+    server.use(
+      http.post(
+        "/api/translation/engines/:id/connections",
+        async ({ request }) => {
+          record("post", "connection", await request.json());
+          const created = connection(3, { backend_type: "openrouter" });
+          state = {
+            ...state,
+            instances: [{ ...state.instances[0], connections: [created] }],
+          };
+          return HttpResponse.json({ connection: created }, { status: 201 });
+        },
+      ),
+      http.patch("/api/translation/engines/:id", async ({ request }) => {
+        const body = await request.json();
+        record("patch", "engine", body);
+        const refused = enable(body);
+        if (refused) {
+          return refused;
+        }
+        const on = {
+          ...state.instances[0],
+          enabled: true,
+          configured: true,
+          revision: 4,
+        };
+        state = { ...state, instances: [on] };
+        return HttpResponse.json({ engine: on, notices: [] });
+      }),
+      http.put("/api/translation/pointers", async ({ request }) => {
+        record("put", "pointers", await request.json());
+        state = { ...state, engine: 1 };
+        return HttpResponse.json({
+          engine: 1,
+          fallback_engine: null,
+          notices: [],
+        });
+      }),
+    );
+  };
+
+  it("turns the engine on before it selects it, so the start that is reported does translate", async () => {
+    firstRun(() => null);
+    const user = userEvent.setup();
+    customRender(<TranslationView />);
+    await user.type(await screen.findByLabelText("OpenRouter key"), SECRET);
+    await user.click(screen.getByRole("button", { name: "Start translating" }));
+
+    // The full page, with the engine picked, on, and ready.
+    const group = await screen.findByRole("radiogroup", { name: "Engine" });
+    expect(calls.map((call) => call.path)).toEqual([
+      "connection",
+      "engine",
+      "pointers",
+    ]);
+    // It is turned on from the revision it has once the back end exists, before anything is selected.
+    expect(calls[1].body).toEqual({ enabled: true, expected_revision: 3 });
+    expect(calls[2].body).toEqual({ engine: 1 });
+    expect(
+      within(group).getByRole("radio", { name: /AI Subtitle Translator/ }),
+    ).toBeChecked();
+    expect(
+      screen.getByRole("switch", {
+        name: "Turn AI Subtitle Translator on or off",
+      }),
+    ).toBeChecked();
+    expect(
+      within(
+        screen.getByRole("group", { name: "Translation status" }),
+      ).getByText("Ready"),
+    ).toBeVisible();
+    expect(inputsHolding(SECRET)).toHaveLength(0);
+  });
+
+  it("says the engine is still off when it cannot be turned on, selects nothing, and leads to its switch", async () => {
+    // What the server answers while the engine's saved settings do not fit its plugin.
+    firstRun(() =>
+      HttpResponse.json(
+        {
+          error: "invalid",
+          message: "The values are not valid.",
+          field_errors: { credit_line: "is required" },
+        },
+        { status: 400 },
+      ),
+    );
+    const user = userEvent.setup();
+    customRender(<TranslationView />);
+    await user.type(await screen.findByLabelText("OpenRouter key"), SECRET);
+    await user.click(screen.getByRole("button", { name: "Start translating" }));
+
+    expect(
+      await screen.findByText(
+        /Your key is saved, but AI Subtitle Translator is turned off and cannot be turned on until its settings are checked\. Nothing translates yet\./,
+      ),
+    ).toBeVisible();
+    // No success: the panel is still here, and the engine was not selected while it is off.
+    expect(
+      screen.getByRole("heading", {
+        name: "Translate the subtitles you cannot find",
+      }),
+    ).toBeVisible();
+    expect(calls.map((call) => call.path)).toEqual(["connection", "engine"]);
+    expect(
+      screen.queryByText(/the engine could not be switched on/),
+    ).toBeNull();
+    expect(inputsHolding(SECRET)).toHaveLength(0);
+
+    // The way to the switch is in the message.
+    await user.click(screen.getByRole("button", { name: "Open its set-up" }));
+    await screen.findByRole("radiogroup", { name: "Engine" });
+    const power = screen.getByRole("switch", {
+      name: "Turn AI Subtitle Translator on or off",
+    });
+    expect(power).not.toBeChecked();
+    // The back end that was saved is there, so nothing is typed twice.
+    expect(
+      screen.getByRole("button", { name: /^Edit OpenRouter/ }),
+    ).toBeVisible();
+  });
+
+  it("says so too when the refusal names no setting, and a second press tries again without adding the back end twice", async () => {
+    let refuse = true;
+    firstRun(() =>
+      refuse
+        ? HttpResponse.json(
+            {
+              error: "plugin_unavailable",
+              message: "The plugin could not check these settings.",
+            },
+            { status: 409 },
+          )
+        : null,
+    );
+    const user = userEvent.setup();
+    customRender(<TranslationView />);
+    await user.type(await screen.findByLabelText("OpenRouter key"), SECRET);
+    await user.click(screen.getByRole("button", { name: "Start translating" }));
+    expect(
+      await screen.findByText(
+        /Your key is saved, but AI Subtitle Translator is turned off and could not be turned on\. Nothing translates yet\. Try again, or open its set-up and turn it on there\./,
+      ),
+    ).toBeVisible();
+    refuse = false;
+    await user.click(
+      screen.getByRole("button", { name: "Switch the engine on" }),
+    );
+    await screen.findByRole("radiogroup", { name: "Engine" });
+    expect(calls.map((call) => call.path)).toEqual([
+      "connection",
+      "engine",
+      "engine",
+      "pointers",
+    ]);
   });
 });

@@ -436,7 +436,8 @@ validators = [
     Validator('translator.min_source_score', must_exist=True, default=90, is_type_of=int, gte=0, lte=100),
     Validator('translator.min_source_wait_minutes', must_exist=True, default=0, is_type_of=int, gte=0, lte=10080,
               condition=is_not_bool),
-    Validator('translator.default_score', must_exist=True, default=50, is_type_of=int, gte=0),
+    # A share of the full score, like min_source_score above: more than 100 is no score a subtitle can have.
+    Validator('translator.default_score', must_exist=True, default=50, is_type_of=int, gte=0, lte=100),
     Validator('translator.gemini_keys', must_exist=True, default=[], is_type_of=list),
     Validator('translator.gemini_model', must_exist=True, default='gemini-3.6-flash', is_type_of=str, cast=str),
     Validator('translator.gemini_batch_size', must_exist=True, default=300, is_type_of=int, gte=1),

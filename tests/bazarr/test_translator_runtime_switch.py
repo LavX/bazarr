@@ -339,6 +339,29 @@ def test_the_settings_save_cannot_flip_the_switch_or_repoint_the_engine(saveable
         settings.translator.runtime_v2, settings.translator.engine, settings.translator.fallback_engine = before
 
 
+def test_the_score_of_a_translated_subtitle_is_a_share_of_100_and_no_more(saveable):
+    from dynaconf.validator import ValidationError
+
+    from app.config import settings, validators
+
+    by_name = {validator.names[0]: validator for validator in validators if validator.names}
+    bounds = by_name["translator.default_score"].operations
+    assert (bounds["gte"], bounds["lte"]) == (0, 100)
+    score = settings.translator.default_score
+    try:
+        saveable.save_settings([("settings-translator-default_score", ["100"])])
+        assert settings.translator.default_score == 100
+        # Above the scale: refused, and what was saved stays.
+        with pytest.raises(ValidationError):
+            saveable.save_settings([("settings-translator-default_score", ["101"])])
+        assert settings.translator.default_score == 100
+        with pytest.raises(ValidationError):
+            saveable.save_settings([("settings-translator-default_score", ["-1"])])
+        assert settings.translator.default_score == 100
+    finally:
+        settings.translator.default_score = score
+
+
 def test_the_switch_and_pointers_are_written_to_the_config_file():
     import yaml
 

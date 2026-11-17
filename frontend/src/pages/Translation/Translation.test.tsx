@@ -23,6 +23,8 @@ import TranslationView from ".";
 
 let state: TranslationState;
 let calls: Array<{ method: string; path: string; body: unknown }>;
+/** The back-end types a model list was asked for. */
+let optionsAsked: string[];
 
 function record(method: string, path: string, body: unknown) {
   calls.push({ method, path, body });
@@ -30,6 +32,7 @@ function record(method: string, path: string, body: unknown) {
 
 beforeEach(() => {
   calls = [];
+  optionsAsked = [];
   window.history.replaceState({}, "", "/");
   state = {
     enabled: true,
@@ -63,8 +66,32 @@ beforeEach(() => {
         },
       }),
     ),
-    http.post("/api/translation/engines/:id/options", () =>
-      HttpResponse.json({ available: false, items: [], reason: "none" }),
+    // As the server answers: a model list only for a back-end type the engine has, a refusal for any other.
+    http.post(
+      "/api/translation/engines/:id/options",
+      async ({ request, params }) => {
+        const { backend_type } = (await request.json()) as {
+          backend_type: string;
+        };
+        optionsAsked.push(backend_type);
+        const owner = state.instances.find(
+          (item) => item.id === Number(params.id),
+        );
+        if (!owner?.schema?.backend_types[backend_type]) {
+          return HttpResponse.json(
+            {
+              error: "bad_request",
+              message: `${owner?.name ?? "The engine"} has no back end of type ${backend_type}`,
+            },
+            { status: 400 },
+          );
+        }
+        return HttpResponse.json({
+          available: false,
+          items: [],
+          reason: "none",
+        });
+      },
     ),
   );
 });
@@ -1026,6 +1053,26 @@ describe("Translation page", () => {
     expect(
       within(editor).getByRole("button", { name: "Remove back end" }),
     ).toBeVisible();
+    // The engine has no such type any more, so no model list is asked for: the server would refuse,
+    // and the refusal would come up as an error on a form that is only here to remove the back end.
+    await waitFor(() => expect(queryClient.isFetching()).toBe(0));
+    expect(optionsAsked).toEqual([]);
+    expect(screen.queryByText(/has no back end of type/)).toBeNull();
+  });
+
+  it("asks for a model list only for a back end whose model is picked from one", async () => {
+    const typed = engine();
+    // This type takes its model as plain text.
+    typed.schema!.backend_types.openai_compatible.fields = [
+      { key: "model", type: "text", label: "Model" },
+      { key: "base_url", type: "text", label: "Base URL", destination: true },
+    ];
+    state = { ...state, instances: [second, typed] };
+    await showPage();
+    const editor = await openEditor("OpenAI compatible, model-1");
+    expect(within(editor).getByLabelText("Model")).toHaveValue("model-1");
+    await waitFor(() => expect(queryClient.isFetching()).toBe(0));
+    expect(optionsAsked).toEqual([]);
   });
 
   it("falls back to a free text model field when the list cannot be fetched", async () => {
@@ -1556,6 +1603,59 @@ describe("Translation page", () => {
     expect(asked).toBe(5);
   });
 
+  it("shows a test refused because the engine's plugin is not running as not tested yet", async () => {
+    state = { ...state, capabilities: ["test"] };
+    server.use(
+      // The page was loaded while the engine ran, and it has stopped since: the route refuses.
+      http.post("/api/translation/connections/:id/test", () =>
+        HttpResponse.json(
+          {
+            error: "plugin_unavailable",
+            message:
+              "The translation engine is not running, so this back end cannot be tested yet.",
+          },
+          { status: 409 },
+        ),
+      ),
+    );
+    const user = userEvent.setup();
+    await showPage();
+    const name = "OpenAI compatible, model-1";
+    await user.click(screen.getByRole("button", { name: `Test ${name}` }));
+    expect(
+      await within(row(name)).findByText(
+        "Not tested yet. The translation engine is not running, so this back end cannot be tested yet.",
+      ),
+    ).toBeVisible();
+    expect(within(row(name)).getByTestId("test-result")).toHaveAttribute(
+      "data-tone",
+      "waiting",
+    );
+  });
+
+  it("keeps the failure style for a test the server could not run for another reason", async () => {
+    state = { ...state, capabilities: ["test"] };
+    server.use(
+      http.post("/api/translation/connections/:id/test", () =>
+        HttpResponse.json(
+          { error: "not_found", message: "No such back end." },
+          { status: 404 },
+        ),
+      ),
+    );
+    const user = userEvent.setup();
+    await showPage();
+    const name = "OpenAI compatible, model-1";
+    await user.click(screen.getByRole("button", { name: `Test ${name}` }));
+    expect(
+      await within(row(name)).findByText("No such back end."),
+    ).toBeVisible();
+    expect(within(row(name)).getByTestId("test-result")).toHaveAttribute(
+      "data-tone",
+      "danger",
+    );
+  });
+
   it("shows no Test, spend, queue or caps, and asks for none of them, on a server that lists no capabilities", async () => {
     const user = userEvent.setup();
     await showPage();
@@ -1881,12 +1981,20 @@ describe("Translation page, defaults and activity", () => {
     expect(
       within(history).getAllByText(/English to Hungarian/)[0],
     ).toBeVisible();
-    await user.click(within(history).getByRole("button", { name: /Flow/ }));
+    const flow = within(history).getByRole("button", { name: /Flow/ });
+    // Closed, the row has no detail on the page, so it names none.
+    expect(flow).toHaveAttribute("aria-expanded", "false");
+    expect(flow).not.toHaveAttribute("aria-controls");
+    await user.click(flow);
     expect(
       await screen.findByText(
         "The model returned 211 lines for 214. (content_error)",
       ),
     ).toBeVisible();
+    expect(flow).toHaveAttribute("aria-expanded", "true");
+    expect(flow).toHaveAttribute("aria-controls");
+    await user.click(flow);
+    expect(flow).not.toHaveAttribute("aria-controls");
   });
 
   it("says so when nothing has been translated yet", async () => {

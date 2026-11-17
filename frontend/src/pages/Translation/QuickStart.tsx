@@ -7,7 +7,11 @@ import {
   PasswordInput,
   SegmentedControl,
 } from "@mantine/core";
-import { usePointersMutation, useStartEngine } from "@/apis/hooks/translation";
+import {
+  EngineStillOffError,
+  usePointersMutation,
+  useStartEngine,
+} from "@/apis/hooks/translation";
 import { StatusBadge } from "@/pages/Settings/Providers/hub/components/StatusBadge";
 import type {
   TranslationAvailableEngine,
@@ -35,7 +39,9 @@ const KeyStart: FunctionComponent<{
   onBusy: (busy: boolean) => void;
   /** Another choice on the panel is on its way: this form waits for it. */
   locked: boolean;
-}> = ({ engine, onPin, onBusy, locked }) => {
+  /** Opens the engine's set-up in the full page, where its switch is. */
+  onOpenSetup: () => void;
+}> = ({ engine, onPin, onBusy, locked, onOpenSetup }) => {
   const types = keyOnlyTypes(engine);
   const [typeId, setTypeId] = useState(types[0]?.typeId ?? "");
   const [key, setKey] = useState("");
@@ -44,12 +50,16 @@ const KeyStart: FunctionComponent<{
   // Set once the back end exists, so a retry only selects the engine.
   const created = useRef(false);
   const [keySaved, setKeySaved] = useState(false);
+  // The engine was off and the server would not turn it on: "settings" when it named settings that
+  // do not fit, "refused" for any other answer. Nothing was selected, so the start did not go through.
+  const [stillOff, setStillOff] = useState<"settings" | "refused" | null>(null);
   const picked = types.find((item) => item.typeId === typeId) ?? types[0];
   const form = useGuardedSave(async (accepted) => {
     // The panel stays up from here until the start has gone through: a refresh in between would
     // otherwise replace it, and the reason a step failed would go with it.
     onPin(true);
     onBusy(true);
+    setStillOff(null);
     try {
       await start.mutateAsync({
         instanceId: engine.id,
@@ -77,6 +87,13 @@ const KeyStart: FunctionComponent<{
       // Nothing was saved: the panel is where it would be anyway.
       if (!created.current) {
         onPin(false);
+      }
+      if (error instanceof EngineStillOffError) {
+        setStillOff(
+          Object.keys(error.refusal?.fieldErrors ?? {}).length > 0
+            ? "settings"
+            : "refused",
+        );
       }
       throw error;
     } finally {
@@ -159,7 +176,25 @@ const KeyStart: FunctionComponent<{
           setMissing(false);
         }}
       />
-      {(form.message || otherErrors.length > 0) && !keyError && (
+      {stillOff && (
+        <Alert color="red" role="alert">
+          {stillOff === "settings"
+            ? `Your key is saved, but ${engineName(engine)} is turned off and cannot be turned on until its settings are checked. Nothing translates yet. Open its set-up, check and save its settings, then turn it on there.`
+            : `Your key is saved, but ${engineName(engine)} is turned off and could not be turned on. Nothing translates yet. Try again, or open its set-up and turn it on there.`}
+          <div>
+            <Button
+              mt="xs"
+              size="xs"
+              variant="default"
+              disabled={form.busy || locked}
+              onClick={onOpenSetup}
+            >
+              Open its set-up
+            </Button>
+          </div>
+        </Alert>
+      )}
+      {(form.message || otherErrors.length > 0) && !keyError && !stillOff && (
         <Alert color="red" role="alert">
           {keySaved
             ? "Your key is saved, but the engine could not be switched on. Try again; nothing needs typing again."
@@ -248,6 +283,11 @@ const QuickStart: FunctionComponent<QuickStartProps> = ({
               onPin={onPin}
               onBusy={setStarting}
               locked={pointers.isPending}
+              onOpenSetup={() => {
+                // The start is over as far as this panel goes: the full page takes it from here.
+                onPin(false);
+                onByHand(official.id);
+              }}
             />
           ) : (
             <div className={styles.startForm}>

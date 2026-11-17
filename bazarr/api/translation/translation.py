@@ -176,8 +176,9 @@ class TranslationConnectionTest(Resource):
 
         The answer is ``ok``, ``message``, ``latency_ms`` and ``outcome``. ``outcome`` tells a failed back end
         from a test that never ran: ``answered``, ``failed`` (a request went out, or may have), ``not_ready``
-        (nothing was sent because the engine was busy or not started; try again in a moment) or ``refused``
-        (nothing was sent because what is saved, or a cost cap, does not allow it).
+        (nothing was sent because the engine was busy or not started, a test of this back end was already
+        running, or the test stopped before its request was handed over; try again in a moment) or
+        ``refused`` (nothing was sent because what is saved, or a cost cap, does not allow it).
         """
         payload = request.get_json(silent=True)
         if payload is not None and not isinstance(payload, dict):
