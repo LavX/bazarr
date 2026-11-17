@@ -316,6 +316,38 @@ def test_a_request_with_no_pick_clears_the_pick_of_a_job_that_waited_for_its_ret
     assert _active(env).pinned_connection_id is None
 
 
+def test_a_pick_of_what_a_job_waits_to_retry_with_waits_out_the_time_on_the_job(env, queue_status):
+    """The time is on the job, so it holds for an engine and across a restart, where no in-memory window does."""
+    instance = env.engine()
+    first, second = env.connection(instance), env.connection(instance, model="second")
+    google = env.engine(SECOND_PLUGIN, select=False)
+    _picked_job(env, queue_status, first.id)
+    jobs = TranslationJobs(env.session, clock=env.clock)
+    row = _active(env)
+    jobs.start(row.id, source_digest="d", engine_instance_id=1, settings_revision=1)
+    jobs.await_retry(row.id, "rate_limited", "later", retry_at=env.clock() + timedelta(minutes=5))
+    with pytest.raises(TranslationJobError, match="waits to be retried"):
+        enqueue.decide(SOURCE, "fr", pinned_connection_id=first.id, session=env.session, clock=env.clock)
+    assert _active(env).id == row.id, "nothing was replaced"
+    # Another pick is another question.
+    other = enqueue.decide(SOURCE, "fr", pinned_connection_id=second.id, session=env.session, clock=env.clock)
+    assert other.action == enqueue.QUEUE and other.translator_job_id != row.id
+    # An engine is held the same way once its job waits.
+    row = _active(env)
+    jobs.start(row.id, source_digest="d", engine_instance_id=1, settings_revision=1)
+    jobs.await_retry(row.id, "rate_limited", "later", retry_at=env.clock() + timedelta(minutes=5))
+    engine_pin = pick.pin_value(engine_id=google.id)
+    enqueue.decide(SOURCE, "fr", pinned_connection_id=engine_pin, session=env.session, clock=env.clock)
+    row = _active(env)
+    jobs.start(row.id, source_digest="d", engine_instance_id=google.id, settings_revision=1)
+    jobs.await_retry(row.id, "rate_limited", "later", retry_at=env.clock() + timedelta(minutes=5))
+    with pytest.raises(TranslationJobError, match="waits to be retried"):
+        enqueue.decide(SOURCE, "fr", pinned_connection_id=engine_pin, session=env.session, clock=env.clock)
+    env.clock.advance(minutes=6)
+    assert enqueue.decide(SOURCE, "fr", pinned_connection_id=engine_pin, session=env.session,
+                          clock=env.clock).action == enqueue.QUEUE
+
+
 def test_a_request_with_the_same_pick_keeps_it_and_a_different_one_replaces_it(env, queue_status):
     instance = env.engine()
     first, second = env.connection(instance), env.connection(instance, model="second")
@@ -795,39 +827,136 @@ def test_an_editor_job_with_a_pick_fails_with_the_reason_when_the_new_translator
     assert state["status"] == "failed" and state["error"] == pick.SWITCHED_OFF
 
 
-def test_a_queued_translation_with_a_pick_fails_with_the_reason_when_the_new_translator_was_switched_off(
-        monkeypatch):
+@pytest.fixture
+def queued_job(monkeypatch):
+    """``translate_subtitles_file`` as the queue runs it, with the new translator on and everything around it stubbed."""
+    from subzero.language import Language
+
     from subtitles.tools.translate import main
 
+    ids = iter(range(101, 200))
     monkeypatch.setattr(main, "jobs_queue", SimpleNamespace(
-        add_job_from_function=lambda label, **kwargs: 101, get_job_name=lambda job_id: "Translating Film",
+        add_job_from_function=lambda label, **kwargs: next(ids), get_job_name=lambda job_id: "Translating Film",
         update_job_name=lambda **kwargs: None))
     monkeypatch.setattr(main, "get_title", lambda *args, **kwargs: "Film")
     monkeypatch.setattr(main, "activity", Mock())
+    monkeypatch.setattr(main, "validate_translation_params", lambda *args, **kwargs: None)
+    monkeypatch.setattr(main, "convert_language_codes", lambda to_lang, _f, _h: (Language("fra"), to_lang))
+    monkeypatch.setattr(main, "translated_destination_path", lambda *args: "/v/film.fr.srt")
+    monkeypatch.setattr(main, "alpha3_from_alpha2", lambda code: "fra")
+    monkeypatch.setattr(main, "record_failed_translation", lambda *args, **kwargs: None)
     monkeypatch.setattr(main, "_runtime_active", lambda: True)
     monkeypatch.setattr(enqueue, "decide", lambda *a, **k: None)
     monkeypatch.setattr(main, "_runtime_attach", lambda *a, **k: None)
     monkeypatch.setattr(main, "_runtime_follow", lambda *a, **k: None)
-    # The request with the pick adds the queue job.
-    _pin(main, 5)
-    assert _request(main) == 101
-    # The new translator is switched off while that job waits.
+    monkeypatch.setattr("api.subtitles.subtitles.postprocess_subtitles", lambda *args, **kwargs: None)
+    monkeypatch.setattr("subtitles.tools.combine.main.try_combine_for_video", lambda **kwargs: None)
+    return main
+
+
+def _switch_off(main, monkeypatch):
     monkeypatch.setattr(main, "_runtime_active", lambda: False)
     monkeypatch.setattr(main, "TranslatorFactory", SimpleNamespace(
         create_translator=lambda *a, **k: pytest.fail("the old translator ran without the pick")))
+
+
+def test_a_queued_translation_with_a_pick_fails_with_the_reason_when_the_new_translator_was_switched_off(
+        queued_job, monkeypatch):
+    main = queued_job
+    _pin(main, 5)  # the request with the pick adds the queue job
+    assert _request(main) == 101
+    _switch_off(main, monkeypatch)  # the new translator is switched off while that job waits
     with pytest.raises(main.JobFailed) as caught:
         _request(main, job_id=101)
     assert str(caught.value) == pick.SWITCHED_OFF and caught.value.reason == pick.SWITCHED_OFF_REASON
-    # A job with no pick is not touched, and a picked one is only reported once.
-    assert pick.take(101) is False
 
 
-def test_a_queue_job_added_by_a_request_with_no_pick_is_not_a_picked_one(monkeypatch):
-    from subtitles.tools.translate import main
+def test_a_retry_through_the_jobs_page_of_a_picked_translation_is_still_a_picked_one(queued_job, monkeypatch):
+    """A retryable failure, a retry (a new queue job for the same call), the switch turned off, then the job runs."""
+    from subtitles.tools.translate.runtime import service
 
-    monkeypatch.setattr(main, "jobs_queue", SimpleNamespace(add_job_from_function=lambda label, **kwargs: 102))
-    monkeypatch.setattr(main, "get_title", lambda *args, **kwargs: "Film")
-    monkeypatch.setattr(main, "_runtime_active", lambda: False)
-    _pin(main, 5)  # with the new translator off a pick records nothing and expects nothing
+    main = queued_job
+    _pin(main, 5)
+    assert _request(main) == 101
+
+    class Failing:
+        partial_error = None
+        skipped = False
+
+        def __init__(self, **kwargs):
+            pass
+
+        def translate(self, job_id=None):
+            from subtitles.tools.translate.runtime.service import TranslationRuntimeError
+
+            raise TranslationRuntimeError("The engine is rate limited.", "rate_limited", retry_later=True)
+
+    monkeypatch.setattr(service, "RuntimeTranslatorService", Failing)
+    with pytest.raises(Exception, match="rate limited"):
+        _request(main, job_id=101)  # the first attempt runs and fails with a retryable error
+    # The Jobs page retries it: the same call under a new queue id. Then the switch is turned off.
+    _switch_off(main, monkeypatch)
+    with pytest.raises(main.JobFailed) as caught:
+        _request(main, job_id=102)
+    assert str(caught.value) == pick.SWITCHED_OFF and caught.value.reason == pick.SWITCHED_OFF_REASON
+    # It stays a picked one for the next retry too.
+    with pytest.raises(main.JobFailed):
+        _request(main, job_id=103)
+
+
+def test_a_finished_picked_translation_forgets_its_pick(queued_job, monkeypatch):
+    from subtitles.tools.translate.runtime import service
+
+    main = queued_job
+    _pin(main, 5)
+    assert _request(main) == 101
+
+    class Done:
+        partial_error = None
+        skipped = False
+
+        def __init__(self, **kwargs):
+            pass
+
+        def translate(self, job_id=None):
+            return "/v/film.fr.srt"
+
+    monkeypatch.setattr(service, "RuntimeTranslatorService", Done)
+    _request(main, job_id=101)
+    key = main._pick_key("/v/film.mkv", SOURCE, "fr", False, False, None)
+    assert pick.noted(key) is False
+
+
+def test_a_later_request_for_the_same_pair_replaces_the_note_of_an_earlier_pick(queued_job, monkeypatch):
+    main = queued_job
+    _pin(main, 5)
+    assert _request(main) == 101
+    key = main._pick_key("/v/film.mkv", SOURCE, "fr", False, False, None)
+    assert pick.noted(key) is True
+    # A request with no pick queues its own job: the pair is no longer a picked one.
     assert _request(main) == 102
-    assert pick.take(102) is False
+    assert pick.noted(key) is False
+
+
+def test_a_request_that_joins_a_picked_job_leaves_it_picked(queued_job, monkeypatch):
+    main = queued_job
+    _pin(main, 5)
+    assert _request(main) == 101
+    monkeypatch.setattr(main, "_runtime_follow", lambda *a, **k: 101)  # a live job is joined
+    assert _request(main) == 101
+    assert pick.noted(main._pick_key("/v/film.mkv", SOURCE, "fr", False, False, None)) is True
+
+
+def test_a_request_that_fails_before_queuing_does_not_lend_its_pick_to_the_next_one(queued_job, monkeypatch):
+    main = queued_job
+    _pin(main, 5)
+    monkeypatch.setattr(main, "_runtime_follow", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("queue error")))
+    with pytest.raises(RuntimeError):
+        _request(main)
+    assert pick.expecting() is False
+
+
+def test_a_queue_job_added_by_a_request_with_no_pick_is_not_a_picked_one(queued_job):
+    main = queued_job
+    assert _request(main) == 101
+    assert pick.noted(main._pick_key("/v/film.mkv", SOURCE, "fr", False, False, None)) is False

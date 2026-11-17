@@ -53,6 +53,16 @@ def decide(source_key: str, to_lang: str, forced: bool = False, hi: bool = False
         session = database
     jobs = TranslationJobs(session, clock=clock)
     target = target_key(to_lang, forced, hi)
+    if pinned_connection_id is not None:
+        # A pick of what a job is waiting to retry with waits out that time. That time is on the job, so
+        # it holds across a restart and for an engine, which has no in-memory window. Another pick is a different
+        # question and goes through.
+        waiting = jobs.active_for(source_key, target)
+        if waiting is not None and waiting.state == AWAITING_RETRY and waiting.retry_at is not None \
+                and waiting.retry_at > clock() and waiting.pinned_connection_id == pinned_connection_id:
+            raise TranslationJobError(
+                f"This translation waits to be retried at {waiting.retry_at:%H:%M} with what you picked. Pick another "
+                "back end or engine, or try again then.")
     result = jobs.request(source_key, target, manual=pinned_connection_id is not None,
                           pinned_connection_id=pinned_connection_id)
     if result.outcome == Outcome.REFUSED:

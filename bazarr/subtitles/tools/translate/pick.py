@@ -43,11 +43,14 @@ SWITCHED_OFF_REASON = 'pick_switched_off'
 SWITCHED_OFF = ('The new translator was switched off while this translation waited, so the back end or engine '
                 'you picked was not used. Translate again once it is back on.')
 
-# The queue jobs that carry a pick, so a job that finds the new translator switched off can say so instead of
-# running on the old one without the pick. A request notes that its pick is on its way (``expect``), and the queue
-# job it adds takes the note (``bind``). In memory: the queue itself is, and with the switch off nothing reads a
-# table. Bounded, oldest first out.
-_NOTED_LIMIT = 1000
+# The requests whose queued job carries a pick, so a job that finds the new translator switched off can say so
+# instead of running on the old one without the pick. They are kept by the request's own key (its source and
+# target), never by the queue job's id: a retry through the Jobs page adds a new queue job for the same call, and it
+# is still the picked one. A request notes that its pick is on its way (``expect``), and the queue job it adds binds
+# it (``bind``). Any later request for the same key, picked or not, replaces the note, and a translation that
+# finishes forgets it. In memory: the queue itself is, and with the switch off nothing reads a table. Bounded,
+# oldest first out.
+_NOTED_LIMIT = 20000
 _noted: dict = {}
 _local = threading.local()
 
@@ -67,18 +70,26 @@ def forget_expected() -> None:
     _local.expected = False
 
 
-def bind(queue_job_id) -> None:
-    """The request added this queue job: it is a picked one when the request said so. Always clears the note."""
+def bind(key) -> None:
+    """The request for this key has queued its job (or joined one): it is a picked one when the request said so.
+
+    Always clears the thread's note, so a request that never got here cannot lend its pick to the next one.
+    """
     expected = getattr(_local, 'expected', False)
     _local.expected = False
-    if not expected or not queue_job_id:
+    _noted.pop(key, None)
+    if not expected:
         return
-    _noted.pop(queue_job_id, None)
-    _noted[queue_job_id] = True
+    _noted[key] = True
     while len(_noted) > _NOTED_LIMIT:
         _noted.pop(next(iter(_noted)))
 
 
-def take(queue_job_id) -> bool:
-    """Whether this queue job is a picked one. Reading it forgets it."""
-    return _noted.pop(queue_job_id, None) is not None
+def noted(key) -> bool:
+    """Whether the queued job for this key was made for a pick. Reading it keeps it: a retry asks again."""
+    return key in _noted
+
+
+def forget(key) -> None:
+    """The translation for this key is done: its pick no longer waits on anything."""
+    _noted.pop(key, None)
