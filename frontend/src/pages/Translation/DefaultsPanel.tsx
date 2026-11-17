@@ -27,6 +27,7 @@ type Typed = number | string;
 interface Draft {
   default_score?: Typed;
   min_source_score?: Typed;
+  min_source_wait_minutes?: Typed;
   translator_info?: boolean;
   max_concurrent?: Typed;
   job_cap?: Typed;
@@ -138,6 +139,12 @@ const DefaultsPanel: FunctionComponent<{ summary?: TranslationSummary }> = ({
       100,
       "score",
     ),
+    min_source_wait_minutes: wholeNumberProblem(
+      draft.min_source_wait_minutes,
+      0,
+      10080,
+      "number of minutes",
+    ),
     max_concurrent: wholeNumberProblem(draft.max_concurrent, 1, 10, "number"),
     job_cap: summary ? capProblem(draft.job_cap) : undefined,
     month_cap: summary ? capProblem(draft.month_cap) : undefined,
@@ -156,6 +163,10 @@ const DefaultsPanel: FunctionComponent<{ summary?: TranslationSummary }> = ({
     const minSourceScore = whole(draft.min_source_score);
     if (minSourceScore !== null) {
       changes["settings-translator-min_source_score"] = minSourceScore;
+    }
+    const minSourceWait = whole(draft.min_source_wait_minutes);
+    if (minSourceWait !== null) {
+      changes["settings-translator-min_source_wait_minutes"] = minSourceWait;
     }
     if (draft.translator_info !== undefined) {
       changes["settings-translator-translator_info"] = draft.translator_info;
@@ -259,6 +270,32 @@ const DefaultsPanel: FunctionComponent<{ summary?: TranslationSummary }> = ({
             onChange={(value) => set({ min_source_score: value })}
           />
         </div>
+      </section>
+
+      <section className={styles.fieldGroup} aria-labelledby="defaults-timing">
+        <div>
+          <h2 className={styles.sectionTitle} id="defaults-timing">
+            Timing
+          </h2>
+          <p className={styles.sectionHint}>
+            Give a published subtitle a chance to turn up before one is
+            translated.
+          </p>
+        </div>
+        <NumberInput
+          label="Minimum wait before translating"
+          description="In minutes, from 0 to 10080. Counted from when the source subtitle was downloaded or uploaded, or from its file time when there is no record of that. 0 translates as soon as a source exists. Sports ignore this."
+          min={0}
+          max={10080}
+          allowDecimal={false}
+          maw={313}
+          value={
+            draft.min_source_wait_minutes ?? stored.min_source_wait_minutes ?? 0
+          }
+          error={problems.min_source_wait_minutes}
+          disabled={busy}
+          onChange={(value) => set({ min_source_wait_minutes: value })}
+        />
       </section>
 
       <section className={styles.fieldGroup} aria-labelledby="defaults-output">

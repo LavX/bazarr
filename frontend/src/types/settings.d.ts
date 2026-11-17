@@ -240,6 +240,7 @@ declare namespace Settings {
   interface Translator {
     default_score: number;
     min_source_score?: number;
+    min_source_wait_minutes?: number;
     gemini_keys: string[];
     gemini_model: string;
     gemini_batch_size: number;
