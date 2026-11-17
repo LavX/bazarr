@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import queue
+import re
 import signal
 import subprocess
 import threading
@@ -284,6 +285,102 @@ def release_when_gone(client, release, label: str, budget: float = 3.0) -> bool:
     return False
 
 
+# The runner every provider worker starts. A client is a provider worker, and so gets the provider
+# sandbox profile, only when it starts this file from an interpreter of the hub's own.
+_RUNNER_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "worker_runner.py"))
+
+_SAFE_KEY = re.compile(r"[^A-Za-z0-9_.-]")
+
+
+@dataclass(frozen=True)
+class ProviderLayout:
+    """Where one provider worker lives, enough to build its sandbox profile."""
+
+    key: str
+    interpreter: Path
+    runner: str
+    bundle: str
+    hub_dir: Path
+    config_dir: Path
+
+
+def provider_layout(command, cwd, env, provider_id) -> ProviderLayout | None:
+    """The layout of a hub provider worker, or None for any other process this client starts.
+
+    Only the real runner, started by an interpreter the hub built, with a bundle named in its
+    environment, is a provider worker. Anything else (a fixture, a script a test writes) runs as
+    it always did.
+    """
+    try:
+        if not command or len(command) < 2 or os.path.abspath(str(command[-1])) != _RUNNER_PATH:
+            return None
+        bundle = (env or {}).get("BAZARR_PROVIDER_HUB_BUNDLE") or cwd
+        if not bundle:
+            return None
+        from app.get_args import args
+
+        from .state import provider_hub_dir
+        from .venv import validated_interpreter
+
+        hub_dir = Path(provider_hub_dir())
+        interpreter = validated_interpreter(hub_dir, command[0])
+        if interpreter is None:
+            return None
+        key = _SAFE_KEY.sub("_", provider_id or "temporary").lstrip(".") or "temporary"
+        return ProviderLayout(
+            key=key[:64],
+            interpreter=interpreter,
+            runner=_RUNNER_PATH,
+            bundle=os.fspath(bundle),
+            hub_dir=hub_dir,
+            config_dir=Path(args.config_dir),
+        )
+    except Exception:
+        logger.debug("Provider Hub: could not work out the sandbox layout of a worker", exc_info=True)
+        return None
+
+
+def provider_spec(layout: ProviderLayout, command, cwd, env):
+    """The launch specification of one provider worker: the softer provider profile.
+
+    Filesystem: read-only for everything the host can see outside the configuration folder (the
+    media library included), read-write for the plugin's own data and temp folders, read-only for
+    its bundle and environment. The configuration folder, with its ``config.yaml`` and the
+    database, is not granted. No TCP rules, no file-size or process-count limit and no metadata
+    filter, so ``ffmpeg`` can write large temporary files and run its threads.
+    """
+    from .runtime.environment import worker_environment
+    from .sandbox.policy import PROVIDER_LIMITS, RuntimeSpec, SandboxPolicy, provider_outside_paths
+
+    base = layout.hub_dir / "run" / layout.key
+    data, temp = base / "data", base / "tmp"
+    for folder in (data, temp):
+        folder.mkdir(parents=True, exist_ok=True, mode=0o700)
+    policy = SandboxPolicy.for_interpreter(
+        layout.interpreter,
+        read_only=[*provider_outside_paths(layout.config_dir), layout.bundle, layout.runner],
+        read_write=[data, temp],
+        protected_paths=[layout.config_dir / "config", layout.config_dir / "db"],
+    )
+    environment = worker_environment(
+        "subtitle_provider",
+        home=data,
+        tmpdir=temp,
+        extra={key: value for key, value in (env or {}).items() if key != "PATH"},
+    )
+    # The host's own search path stays: the plugins find ffmpeg and ffprobe through it.
+    environment["PATH"] = os.environ.get("PATH") or environment["PATH"]
+    return RuntimeSpec(
+        interpreter=os.fspath(layout.interpreter),
+        args=tuple(str(part) for part in command[1:]),
+        cwd=os.fspath(cwd or layout.bundle),
+        env=environment,
+        policy=policy,
+        limits=PROVIDER_LIMITS,
+        seccomp=False,
+    )
+
+
 # The real process class, taken at import so a patched ``subprocess.Popen`` does not change
 # which objects are treated as real processes.
 _POPEN = subprocess.Popen
@@ -328,6 +425,10 @@ class ProviderWorkerClient:
         self._stdout_queue: queue.Queue[Any] | None = None
         self._stdout_thread: threading.Thread | None = None
         self._stderr_thread: threading.Thread | None = None
+        # Set when the sandbox ruleset could not be applied to this client's worker: it starts
+        # without it from then on. ``_sandbox_layout`` is set while the live worker is sandboxed.
+        self._sandbox_failed_open = False
+        self._sandbox_layout: ProviderLayout | None = None
 
     def start(self) -> bool:
         if self.process:
@@ -351,16 +452,7 @@ class ProviderWorkerClient:
             env.update(self.env)
 
         self.last_used = time.monotonic()
-        self.process = subprocess.Popen(
-            self.command,
-            cwd=self.cwd,
-            env=env,
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            start_new_session=True,
-        )
+        self.process = self._spawn(env)
         # Every group this client started stays on the list until it is seen
         # empty: a respawn must not make the previous worker's survivors
         # forgotten while they still run from the environment.
@@ -389,6 +481,114 @@ class ProviderWorkerClient:
         if provider_id is not None:
             runtime_status.worker_started(provider_id)
         return True
+
+    def _spawn(self, env: dict[str, str]):
+        """Start the worker process: through the provider sandbox when it applies, else directly.
+
+        A provider worker is sandboxed unless the user switched that off, this client already
+        failed open, or the host cannot do it (then the worker starts without it and the status
+        page says so). Everything that is not a hub provider worker starts as before.
+        """
+        profile = self._sandbox_profile()
+        if profile is not None:
+            try:
+                return profile()
+            except Exception as error:
+                # Whatever stops the ruleset being prepared, the provider still starts.
+                self._fail_open(f"the sandbox could not be prepared: {error}")
+        return subprocess.Popen(
+            self.command,
+            cwd=self.cwd,
+            env=env,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            start_new_session=True,
+        )
+
+    def _sandbox_profile(self):
+        """A callable that starts the sandboxed worker, or None when this start is unsandboxed."""
+        if getattr(self, "_sandbox_failed_open", False):
+            return None
+        layout = provider_layout(self.command, self.cwd, self.env, getattr(self, "provider_id", None))
+        if layout is None:
+            return None
+        from .sandbox import provider_profile_enabled
+
+        if not provider_profile_enabled():
+            return None
+        from .sandbox import note_provider_unsandboxed, probe_sandbox, spawn_worker
+
+        probe = probe_sandbox()
+        if not probe.enforced:
+            note_provider_unsandboxed(layout.key, probe.reason or "this host has no Landlock")
+            self._sandbox_layout = None
+            return None
+
+        def start():
+            spec = provider_spec(layout, self.command, self.cwd, self.env)
+            process = spawn_worker(
+                spec, probe=probe, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+            )
+            self._sandbox_layout = layout
+            return process
+
+        return start
+
+    def _fail_open(self, cause: str) -> None:
+        """Remember that this client's workers start without the sandbox from now on, and say why."""
+        from .sandbox import note_provider_unsandboxed
+
+        self._sandbox_failed_open = True
+        self._sandbox_layout = None
+        layout = provider_layout(self.command, self.cwd, self.env, getattr(self, "provider_id", None))
+        note_provider_unsandboxed(layout.key if layout else (getattr(self, "provider_id", None) or "temporary"), cause)
+
+    def _opened_after_apply_failure(self) -> bool:
+        """After a worker that said nothing: True when the launcher reports the ruleset was not applied.
+
+        The client then starts its workers without the sandbox from now on, so the caller starts one
+        and sends the request again. A worker that is merely gone, for any other reason, is not
+        this: the request fails as it always did.
+        """
+        process = self.process
+        if process is None or not getattr(self, "_sandbox_layout", None):
+            return False
+        deadline = time.monotonic() + 2.0
+        while True:
+            exited = self._has_exited(process)
+            cause = self._sandbox_apply_failure()
+            if cause or exited or time.monotonic() >= deadline:
+                break
+            time.sleep(0.02)
+        if not cause:
+            return False
+        self._kill_tree(process, 5.0)
+        self._fail_open(f"the sandbox could not be applied: {cause}")
+        return True
+
+    def _sandboxed_answer(self, line: str) -> None:
+        """A sandboxed worker answered, so its ruleset is in force: any earlier notice for it is out of date."""
+        layout = getattr(self, "_sandbox_layout", None)
+        if line and layout is not None and getattr(self.process, "enforcement", None) == "enforced":
+            from .sandbox import clear_provider_notice
+
+            clear_provider_notice(layout.key)
+
+    def _sandbox_apply_failure(self) -> str | None:
+        """The launcher's own report that the ruleset could not be applied, when this worker never ran."""
+        process = self.process
+        report = getattr(process, "launcher_failure", None)
+        if process is None or report is None or not getattr(self, "_sandbox_layout", None):
+            return None
+        try:
+            failure = report()
+        except Exception:
+            return None
+        if failure is not None and failure.kind == "sandbox":
+            return failure.message
+        return None
 
     @staticmethod
     def _enqueue_stdout(process: subprocess.Popen, stdout_queue: queue.Queue[Any]) -> None:
@@ -465,6 +665,13 @@ class ProviderWorkerClient:
         except (ProcessLookupError, PermissionError, OSError):
             return False
         return True
+
+    @staticmethod
+    def _is_launcher(process) -> bool:
+        """Whether ``process`` is a sandbox launcher, which ends its own tree through ``stop``."""
+        from .sandbox import LauncherProcess
+
+        return isinstance(process, LauncherProcess)
 
     @staticmethod
     def _has_exited(process) -> bool:
@@ -556,6 +763,13 @@ class ProviderWorkerClient:
         that had made itself a group leader in that window would be reachable
         by it.
         """
+        if cls._is_launcher(process):
+            # The launcher passes the signal on and ends the whole tree, the detached
+            # processes a plugin started included, which a group signal cannot reach.
+            process.stop(grace_seconds)
+            if process.poll() is None:
+                raise subprocess.TimeoutExpired(getattr(process, "args", "worker"), grace_seconds)
+            return
         if not cls._signal_group(process, signal.SIGTERM):
             process.terminate()
         cls._wait_exit(process, grace_seconds)
@@ -570,6 +784,10 @@ class ProviderWorkerClient:
         True only when the worker is confirmed gone; the caller must not
         deregister a process this could not end.
         """
+        if cls._is_launcher(process):
+            # Closing the launcher's lifeline makes it kill everything it started at once; a
+            # group kill alone would leave the launcher unable to reach a detached descendant.
+            process.stop(0.0)
         if not cls._signal_group(process, _SIGKILL):
             try:
                 process.kill()
@@ -830,28 +1048,38 @@ class ProviderWorkerClient:
                 # between the caller's check and this request has nothing left
                 # to shut down.
                 raise WorkerError("worker is not running")
-            worker_started = self.start() is True
-            provider_id = getattr(self, "provider_id", None)
-            status_generation = (
-                runtime_status.generation(provider_id)
-                if provider_id is not None
-                else None
-            )
-            status_configuration_generation = (
-                runtime_status.configuration_generation(provider_id)
-                if provider_id is not None
-                else None
-            )
-            self.last_used = time.monotonic()
-            if self.process is None or self.process.stdin is None or self.process.stdout is None:
-                raise WorkerError("worker process did not start")
+            encoded = json.dumps(message, separators=(",", ":"), default=_json_default) + "\n"
+            # A second pass only happens when the sandbox ruleset could not be applied to the
+            # worker just started: the provider then runs without it (see ``_fail_open``).
+            for attempt in (0, 1):
+                worker_started = self.start() is True
+                provider_id = getattr(self, "provider_id", None)
+                status_generation = (
+                    runtime_status.generation(provider_id)
+                    if provider_id is not None
+                    else None
+                )
+                status_configuration_generation = (
+                    runtime_status.configuration_generation(provider_id)
+                    if provider_id is not None
+                    else None
+                )
+                self.last_used = time.monotonic()
+                if self.process is None or self.process.stdin is None or self.process.stdout is None:
+                    raise WorkerError("worker process did not start")
 
-            self.process.stdin.write(
-                json.dumps(message, separators=(",", ":"), default=_json_default)
-                + "\n"
-            )
-            self.process.stdin.flush()
-            line = self._read_line_with_deadline(timeout)
+                try:
+                    self.process.stdin.write(encoded)
+                    self.process.stdin.flush()
+                except OSError:
+                    if attempt == 0 and self._opened_after_apply_failure():
+                        continue
+                    raise
+                line = self._read_line_with_deadline(timeout)
+                if not line and attempt == 0 and self._opened_after_apply_failure():
+                    continue
+                break
+            self._sandboxed_answer(line)
             # Stamped on the way out as well as the way in. A single request may
             # legitimately run for hours (transcription is allowed up to the 24
             # hour ceiling), and a worker judged only on when its request

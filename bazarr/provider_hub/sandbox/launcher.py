@@ -59,8 +59,12 @@ Spec layout (JSON object)::
       "resolve_unix": [...], "connect_ports": null | [443, 80],
       "limits": {"nofile": 1024, "fsize": 536870912, "core": 0, "nproc": null,
                  "nice": 10, "oom_score_adj": 800, "umask": 63},
-      "term_grace": 3.0
+      "term_grace": 3.0,
+      "seccomp": true
     }
+
+``seccomp`` (default true) false leaves out the metadata filter; the provider profile does that so
+``ffmpeg`` can work, and nothing else may.
 
 In ``declared`` mode no ruleset is applied; limits, ``no_new_privs``, the
 clean environment and, where the architecture is supported, the metadata
@@ -277,7 +281,9 @@ def _child(spec, landlock, seccomp, capabilities, parent_pid, close_fds, report_
         # chmod, chown, utime and xattr calls cannot be scoped by Landlock or by
         # a path-blind filter, so they are denied outright. Required when the
         # sandbox is enforced; best effort on a host that only declares.
-        if spec.get("mode", "enforce") == "enforce":
+        if not spec.get("seccomp", True):
+            pass
+        elif spec.get("mode", "enforce") == "enforce":
             seccomp.apply_filter()
         else:
             try:

@@ -119,7 +119,7 @@ class Limits:
 
     core: int = 0
     nofile: int = 1024
-    fsize: int = 512 * 1024 * 1024
+    fsize: int | None = 512 * 1024 * 1024
     nproc: int | None = None
     nice: int = 10
     oom_score_adj: int = 800
@@ -135,6 +135,53 @@ class Limits:
             "oom_score_adj": self.oom_score_adj,
             "umask": self.umask,
         }
+
+
+# Subtitle provider workers run ffprobe and ffmpeg, which write large temporary audio files and
+# start many threads, so they get no file-size or process-count limit. The open-file limit, core
+# size 0, nice, oom_score_adj and umask stay as for every worker.
+PROVIDER_LIMITS = Limits(fsize=None, nproc=None)
+
+# Top-level entries a provider worker is not given as read-only trees. Landlock rules only add
+# rights, so "read-only everywhere but the config folder" is built by listing what lies beside
+# the config folder's ancestors, and these four are left out of that list: /proc and /dev are
+# granted as the single entries a worker needs (``/proc/self`` and the device nodes), /etc
+# is granted file by file (TLS trust, name resolution, time zone: it also holds private keys
+# and password hashes a root worker could read) and /run holds service sockets and secrets.
+PROVIDER_SKIPPED_TOP_LEVEL: frozenset[str] = frozenset({"proc", "dev", "etc", "run"})
+
+
+def provider_outside_paths(shield: str | os.PathLike, *, skip_top: Iterable[str] = PROVIDER_SKIPPED_TOP_LEVEL) -> tuple[str, ...]:
+    """Everything the host can see outside ``shield``, as the read-only grants of a provider worker.
+
+    Walks from ``/`` down to ``shield`` and lists, at every level, the entries beside the one on
+    the way down: the media library, the interpreter's prefix, the application's own code and
+    the rest. The ancestors themselves are never granted (a grant on one would cover the
+    shielded folder), and neither is any entry that is or leads into ``shield`` or into one of
+    its ancestors. A level that cannot be listed adds nothing: the worker gets less, never more.
+    """
+    skipped = frozenset(skip_top)
+    target = os.path.realpath(_abs(shield))
+    parts = Path(target).parts[1:]
+    if not parts:
+        raise PolicyError("the shielded folder cannot be the filesystem root")
+    found: list[str] = []
+    current = "/"
+    for depth, part in enumerate(parts):
+        try:
+            names = sorted(os.listdir(current))
+        except OSError:
+            names = []
+        for name in names:
+            if name == part or (depth == 0 and name in skipped):
+                continue
+            entry = os.path.join(current, name)
+            real = os.path.realpath(entry)
+            if real == target or target.startswith(real.rstrip("/") + "/") or real.startswith(target + "/"):
+                continue
+            found.append(entry)
+        current = os.path.join(current, part)
+    return tuple(found)
 
 
 def _abs(path: str | os.PathLike) -> str:
@@ -538,6 +585,9 @@ class RuntimeSpec:
     policy: SandboxPolicy
     limits: Limits = field(default_factory=Limits)
     term_grace: float = 3.0
+    # False leaves out the launcher's metadata filter (chmod, chown, utime and xattr calls). Only
+    # the provider profile does, see ``PROVIDER_LIMITS``; every other kind keeps it.
+    seccomp: bool = True
 
     def __post_init__(self) -> None:
         # The spec keeps its own validated copy, read-only: whoever built the mapping, a proxy
@@ -566,6 +616,7 @@ class RuntimeSpec:
             "connect_ports": None if self.policy.connect_ports is None else sorted(self.policy.connect_ports),
             "limits": self.limits.to_dict(),
             "term_grace": float(self.term_grace),
+            "seccomp": bool(self.seccomp),
         }
         data = json.dumps(payload, separators=(",", ":")).encode("utf-8")
         if len(data) > MAX_SPEC_BYTES:

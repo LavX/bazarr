@@ -64,7 +64,11 @@ __all__ = [
     "SandboxApplyError",
     "SandboxProbe",
     "WorkerProcess",
+    "clear_provider_notice",
+    "note_provider_unsandboxed",
     "probe_sandbox",
+    "provider_profile_enabled",
+    "provider_profile_status",
     "reset_probe_cache",
     "sandbox_limitations",
     "sandbox_status",
@@ -237,6 +241,87 @@ def sandbox_limitations(probe: SandboxProbe) -> list[str]:
     return notes
 
 
+# ---------------------------------------------------------------------------------------------
+# The subtitle provider profile: whether it is switched on, and which providers started without it.
+#
+# Provider workers fail open: when the ruleset cannot be applied the worker still starts, and the
+# cause is recorded here so System > Status and the Subtitle Hub can say so. New plugin kinds
+# never come through here; they fail closed.
+
+_provider_notice_lock = threading.Lock()
+_provider_notices: dict[str, str] = {}
+
+
+def provider_profile_enabled() -> bool:
+    """The "Sandbox subtitle provider plugins" setting. On unless the setting says otherwise."""
+    try:
+        from app.config import settings
+
+        return bool(getattr(settings.general, "provider_hub_sandbox", True))
+    except Exception:
+        return True
+
+
+def note_provider_unsandboxed(provider: str, cause: str) -> None:
+    """Record that a provider worker started without the ruleset, and why. One entry per provider."""
+    cause = " ".join(str(cause or "unknown reason").split())[:300]
+    with _provider_notice_lock:
+        first = _provider_notices.get(provider) != cause
+        _provider_notices[provider] = cause
+    if first:
+        logging.getLogger(__name__).warning(
+            "Subtitle provider %s runs without the worker sandbox: %s", provider, cause
+        )
+
+
+def clear_provider_notice(provider: str) -> None:
+    with _provider_notice_lock:
+        _provider_notices.pop(provider, None)
+
+
+def reset_provider_notices() -> None:
+    with _provider_notice_lock:
+        _provider_notices.clear()
+
+
+def provider_profile_status(probe: "SandboxProbe | None", *, enabled: bool | None = None) -> dict[str, Any]:
+    """What confines subtitle provider workers, for the status page and the Subtitle Hub.
+
+    ``state`` is ``enforced`` (the filesystem ruleset applies), ``unsandboxed`` (switched on but
+    the host, or a start, could not apply it: ``notice`` says why), ``off`` (switched off by the
+    user) or ``pending`` (the host check is still running). ``probe`` is None while that check runs.
+    """
+    if enabled is None:
+        enabled = provider_profile_enabled()
+    with _provider_notice_lock:
+        recorded = dict(_provider_notices)
+    result: dict[str, Any] = {"enabled": bool(enabled), "state": "off", "notice": None, "unsandboxed": sorted(recorded)}
+    if not enabled:
+        result["unsandboxed"] = []
+        return result
+    if probe is None:
+        result["state"] = "pending"
+        return result
+    if not probe.enforced:
+        reason = probe.reason or "this host has no Landlock"
+        result.update(
+            state="unsandboxed",
+            notice="Subtitle provider plugins run without the sandbox on this host, so nothing keeps them "
+            "from reading the configuration or the database: %s." % reason.rstrip("."),
+        )
+        return result
+    if recorded:
+        names = ", ".join(sorted(recorded))
+        result.update(
+            state="unsandboxed",
+            notice="The sandbox could not be applied to %s, which runs without it: %s."
+            % (names, "; ".join(sorted(set(v.rstrip(".") for v in recorded.values())))),
+        )
+        return result
+    result["state"] = "enforced"
+    return result
+
+
 def sandbox_status(probe: SandboxProbe | None = None) -> dict[str, Any]:
     """Status payload for System > Status and plugin cards.
 
@@ -264,6 +349,7 @@ def sandbox_status(probe: SandboxProbe | None = None) -> dict[str, Any]:
         "reason": probe.reason,
         "limitations": sandbox_limitations(probe),
         "pending": False,
+        "providers": provider_profile_status(probe),
     }
 
 
@@ -292,6 +378,7 @@ def sandbox_status_nowait() -> dict[str, Any]:
             "reason": "",
             "limitations": [],
             "pending": True,
+            "providers": provider_profile_status(None),
         }
     return sandbox_status(probe)
 
