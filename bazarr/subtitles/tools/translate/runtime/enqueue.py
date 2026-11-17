@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Callable
 
+from . import failure as fail
 from .history import HistoryStore
 from .jobs import AWAITING_RETRY, QUEUED, RUNNING, JobsQueuePort, Outcome, TranslationJobs, target_key
 
@@ -56,13 +57,16 @@ def decide(source_key: str, to_lang: str, forced: bool = False, hi: bool = False
     if pinned_connection_id is not None:
         # A pick of what a job is waiting to retry with waits out that time. That time is on the job, so
         # it holds across a restart and for an engine, which has no in-memory window. Another pick is a different
-        # question and goes through.
+        # question and goes through. A cost cap is the person's to raise, so it does not hold a pick.
         waiting = jobs.active_for(source_key, target)
         if waiting is not None and waiting.state == AWAITING_RETRY and waiting.retry_at is not None \
-                and waiting.retry_at > clock() and waiting.pinned_connection_id == pinned_connection_id:
+                and waiting.retry_at > clock() and waiting.pinned_connection_id == pinned_connection_id \
+                and waiting.error_class not in (fail.MONTH_CAP, fail.JOB_CAP):
+            when = (f"{waiting.retry_at:%H:%M}" if waiting.retry_at.date() == clock().date()
+                    else f"{waiting.retry_at:%Y-%m-%d %H:%M}")
             raise TranslationJobError(
-                f"This translation waits to be retried at {waiting.retry_at:%H:%M} with what you picked. Pick another "
-                "back end or engine, or try again then.")
+                f"This translation waits to be retried at {when} with what you picked. Pick another back end or "
+                "engine, or try again then.")
     result = jobs.request(source_key, target, manual=pinned_connection_id is not None,
                           pinned_connection_id=pinned_connection_id)
     if result.outcome == Outcome.REFUSED:

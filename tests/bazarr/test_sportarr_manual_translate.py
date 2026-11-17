@@ -29,7 +29,8 @@ def test_the_route_binds_an_operation_and_drops_the_media_metadata():
     from api.subtitles import subtitles
 
     source = inspect.getsource(subtitles.Subtitles.patch)
-    branch = source[source.index("sports_operation = None"):source.index("except ValueError as exc:")]
+    start = source.index("sports_operation = None")
+    branch = source[start:source.index("except ValueError as exc:", start)]
     assert "manual_translation_operation(" in branch
     assert "metadata=None if media_type == \"sports\" else metadata" in branch
     assert "sports_operation=sports_operation" in branch

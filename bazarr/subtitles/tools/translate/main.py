@@ -246,7 +246,7 @@ def translate_subtitles_file(video_path, source_srt_file, from_lang, to_lang, fo
                 is_progress=True, return_existing=True)
             _runtime_attach(job_id, video_path, source_srt_file, to_lang, forced, hi, embedded_source)
             # The queue job carries the pick the request noted, if it noted one.
-            _pick.bind(_pick_key(video_path, source_srt_file, to_lang, forced, hi, embedded_source))
+            _pick.bind(_pick_key(video_path, source_srt_file, to_lang, forced, hi, embedded_source), job_id)
             return job_id or None
         except BaseException:
             # The request never queued its job: its pick must not be lent to the next request on this thread.
@@ -283,7 +283,8 @@ def translate_subtitles_file(video_path, source_srt_file, from_lang, to_lang, fo
         # and not the file the extraction below produces.
         runtime_on = _runtime_active()
         source_key = _job_source_key(video_path, source_srt_file, embedded_source) if runtime_on else None
-        if not runtime_on and _pick.noted(_pick_key(video_path, source_srt_file, to_lang, forced, hi, embedded_source)):
+        if not runtime_on and _pick.noted(
+                _pick_key(video_path, source_srt_file, to_lang, forced, hi, embedded_source), job_id):
             # A pick was made for this job and the new translator was switched off while it waited. Running
             # it on the old translator would drop the pick without a word.
             raise JobFailed(_pick.SWITCHED_OFF, reason=_pick.SWITCHED_OFF_REASON, retryable=False)
@@ -420,7 +421,7 @@ def translate_subtitles_file(video_path, source_srt_file, from_lang, to_lang, fo
             done_name = f'{completion_label} {from_lang.upper()} \u2192 {to_lang.upper()} using {translator_label}'
         jobs_queue.update_job_name(job_id=job_id, new_job_name=done_name)
         # Done: whatever pick this request had no longer waits on anything.
-        _pick.forget(_pick_key(video_path, source_srt_file, to_lang, forced, hi, embedded_source))
+        _pick.forget(_pick_key(video_path, source_srt_file, to_lang, forced, hi, embedded_source), job_id)
         return result
 
     except JobCancelled:

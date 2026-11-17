@@ -33,9 +33,11 @@ def env(request, tmp_path, monkeypatch):
 @pytest.fixture(autouse=True)
 def _no_noted_picks():
     pick._noted.clear()
+    pick._noted_ids.clear()
     pick.forget_expected()
     yield
     pick._noted.clear()
+    pick._noted_ids.clear()
     pick.forget_expected()
 
 
@@ -326,7 +328,7 @@ def test_a_pick_of_what_a_job_waits_to_retry_with_waits_out_the_time_on_the_job(
     row = _active(env)
     jobs.start(row.id, source_digest="d", engine_instance_id=1, settings_revision=1)
     jobs.await_retry(row.id, "rate_limited", "later", retry_at=env.clock() + timedelta(minutes=5))
-    with pytest.raises(TranslationJobError, match="waits to be retried"):
+    with pytest.raises(TranslationJobError, match="waits to be retried at 12:05 "):
         enqueue.decide(SOURCE, "fr", pinned_connection_id=first.id, session=env.session, clock=env.clock)
     assert _active(env).id == row.id, "nothing was replaced"
     # Another pick is another question.
@@ -938,6 +940,41 @@ def test_a_later_request_for_the_same_pair_replaces_the_note_of_an_earlier_pick(
     assert pick.noted(key) is False
 
 
+def test_a_request_with_no_pick_that_the_queue_dedupes_onto_a_picked_job_cannot_take_its_guard_away(
+        queued_job, monkeypatch):
+    """The queue hands an identical pending call its own job id back. With the switch off the picked job must still
+    fail with the reason, not run on the old translator because a second request wiped its note."""
+    main = queued_job
+    _pin(main, 5)
+    assert _request(main) == 101
+    # The switch is turned off, and the identical request with no pick is deduplicated onto job 101.
+    monkeypatch.setattr(main, "_runtime_active", lambda: False)
+    monkeypatch.setattr(main, "jobs_queue", SimpleNamespace(add_job_from_function=lambda label, **kwargs: 101))
+    assert _request(main) == 101
+    _switch_off(main, monkeypatch)
+    monkeypatch.setattr(main, "jobs_queue", SimpleNamespace(
+        get_job_name=lambda job_id: "Translating Film", update_job_name=lambda **kwargs: None))
+    with pytest.raises(main.JobFailed) as caught:
+        _request(main, job_id=101)
+    assert str(caught.value) == pick.SWITCHED_OFF
+
+
+def test_a_request_with_no_pick_that_makes_its_own_job_runs_on_its_own(queued_job, monkeypatch):
+    main = queued_job
+    _pin(main, 5)
+    assert _request(main) == 101
+    assert _request(main) == 102  # another job: the arguments differ, so the queue did not deduplicate
+    monkeypatch.setattr(main, "_runtime_active", lambda: False)
+    monkeypatch.setattr(main, "TranslatorFactory", SimpleNamespace(create_translator=lambda *a, **k: Mock(
+        partial_error=None, skipped=False, translate=lambda job_id=None: True)))
+    monkeypatch.setattr(main, "jobs_queue", SimpleNamespace(
+        get_job_name=lambda job_id: "Translating Film", update_job_name=lambda **kwargs: None))
+    monkeypatch.setattr(main, "settings", SimpleNamespace(translator=SimpleNamespace(translator_type="google_translate")))
+    _request(main, job_id=102)  # the job with no pick runs, and is not failed by the other job's note
+    with pytest.raises(main.JobFailed):
+        _request(main, job_id=101)
+
+
 def test_a_request_that_joins_a_picked_job_leaves_it_picked(queued_job, monkeypatch):
     main = queued_job
     _pin(main, 5)
@@ -960,3 +997,20 @@ def test_a_queue_job_added_by_a_request_with_no_pick_is_not_a_picked_one(queued_
     main = queued_job
     assert _request(main) == 101
     assert pick.noted(main._pick_key("/v/film.mkv", SOURCE, "fr", False, False, None)) is False
+
+
+def test_a_retry_time_on_another_day_is_said_with_its_date_and_a_cost_cap_does_not_hold_a_pick(env, queue_status):
+    picked = env.connection(env.engine())
+    _picked_job(env, queue_status, picked.id)
+    jobs = TranslationJobs(env.session, clock=env.clock)
+    row = _active(env)
+    jobs.start(row.id, source_digest="d", engine_instance_id=1, settings_revision=1)
+    jobs.await_retry(row.id, "rate_limited", "later", retry_at=env.clock() + timedelta(days=3))
+    with pytest.raises(TranslationJobError, match=r"retried at \d{4}-\d{2}-\d{2} \d{2}:\d{2} "):
+        enqueue.decide(SOURCE, "fr", pinned_connection_id=picked.id, session=env.session, clock=env.clock)
+    # A month cap waits for the first of next month, and the person can raise it today.
+    jobs.requeue(row.id, 5)
+    jobs.start(row.id, source_digest="d", engine_instance_id=1, settings_revision=1)
+    jobs.await_retry(row.id, "month_cap", "spent", retry_at=env.clock() + timedelta(days=20))
+    decision = enqueue.decide(SOURCE, "fr", pinned_connection_id=picked.id, session=env.session, clock=env.clock)
+    assert decision.action == enqueue.QUEUE

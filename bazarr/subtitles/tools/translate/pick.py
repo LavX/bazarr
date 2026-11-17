@@ -52,6 +52,9 @@ SWITCHED_OFF = ('The new translator was switched off while this translation wait
 # oldest first out.
 _NOTED_LIMIT = 20000
 _noted: dict = {}
+# The queue jobs made for a pick, by id. A request with no pick that the queue deduplicates onto a picked job gets
+# that job's own id back, and must not take the pick's guard away from it.
+_noted_ids: dict = {}
 _local = threading.local()
 
 
@@ -70,26 +73,42 @@ def forget_expected() -> None:
     _local.expected = False
 
 
-def bind(key) -> None:
+def _remember(table, key) -> None:
+    table.pop(key, None)
+    table[key] = True
+    while len(table) > _NOTED_LIMIT:
+        table.pop(next(iter(table)))
+
+
+def bind(key, queue_job_id=None) -> None:
     """The request for this key has queued its job (or joined one): it is a picked one when the request said so.
 
-    Always clears the thread's note, so a request that never got here cannot lend its pick to the next one.
+    Always clears the thread's note, so a request that never got here cannot lend its pick to the next one. A
+    request with no pick never takes a picked job's guard away: when the queue handed back a picked job's own id
+    the guard stays, and when it made another job the pair's note is replaced (that job runs on its own).
     """
     expected = getattr(_local, 'expected', False)
     _local.expected = False
-    _noted.pop(key, None)
-    if not expected:
+    if expected:
+        _remember(_noted, key)
+        if queue_job_id:
+            _remember(_noted_ids, queue_job_id)
         return
-    _noted[key] = True
-    while len(_noted) > _NOTED_LIMIT:
-        _noted.pop(next(iter(_noted)))
+    if queue_job_id and queue_job_id in _noted_ids:
+        return
+    _noted.pop(key, None)
 
 
-def noted(key) -> bool:
-    """Whether the queued job for this key was made for a pick. Reading it keeps it: a retry asks again."""
-    return key in _noted
+def noted(key, queue_job_id=None) -> bool:
+    """Whether the queued job was made for a pick, by its own id or, for a retry (a new id), by its pair's key.
+
+    Reading it keeps it: a retry asks again.
+    """
+    return (queue_job_id is not None and queue_job_id in _noted_ids) or key in _noted
 
 
-def forget(key) -> None:
+def forget(key, queue_job_id=None) -> None:
     """The translation for this key is done: its pick no longer waits on anything."""
     _noted.pop(key, None)
+    if queue_job_id is not None:
+        _noted_ids.pop(queue_job_id, None)

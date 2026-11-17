@@ -101,7 +101,7 @@ def batch(monkeypatch):
     monkeypatch.setattr(mass_operations, 'jobs_queue', SimpleNamespace(
         update_job_progress=lambda **kwargs: None, update_job_name=lambda **kwargs: None,
         publish_job_result=lambda job_id, result: published.append((job_id, result)) or True))
-    monkeypatch.setattr(mass_operations, '_translation_gate_refusal', lambda job_id=None: None)
+    monkeypatch.setattr(mass_operations, '_translation_gate_refusal', lambda job_id=None, options=None: None)
     monkeypatch.setattr(availability, 'translation_available',
                         lambda *a, **k: availability.TranslationAvailability(True, ''))
     monkeypatch.setattr(mass_operations, '_collect_subtitle_items',
