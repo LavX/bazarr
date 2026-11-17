@@ -33,14 +33,14 @@ const RULES: Rule[] = [
     }),
   },
   {
-    test: /signature|signed with a key|revoked key|replayed|malformed/i,
+    test: /signature|signed with a key|signed catalog|revoked key|replayed|catalog.*malformed/i,
     copy: () => ({
       cause: "The catalog's signature did not check out.",
       next: "Refresh the catalog. If this keeps happening, do not install from it.",
     }),
   },
   {
-    test: /rate.?limit|could not be reached|unreachable|timed out|time budget|connection (refused|reset|error)|name resolution|temporary failure/i,
+    test: /rate.?limit|could not be asked|could not be reached|time budget|name resolution|temporary failure/i,
     copy: () => ({
       cause: "The catalog or the download could not be reached.",
       next: "Wait a few minutes and try again.",

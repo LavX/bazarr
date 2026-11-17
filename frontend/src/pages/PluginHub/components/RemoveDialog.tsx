@@ -10,18 +10,22 @@ import styles from "@/pages/PluginHub/PluginHub.module.scss";
 
 /**
  * What removing a plugin does to the translation engines, from the Translation API: the engine the plugin
- * is, which goes with it, and an engine whose last enabled connection goes through the plugin. Empty when
- * the server does not run the new translator or cannot say.
+ * is, and an engine whose last enabled connection goes through the plugin. With the data kept the engine
+ * stays on the page with its settings, and with it deleted the engine goes. Empty when the server does not
+ * run the new translator or cannot say.
  */
 export function engineEffects(
   state: TranslationState | null | undefined,
   pluginId: string,
+  keepData: boolean,
 ): string[] {
   const effects: string[] = [];
   for (const engine of state?.instances ?? []) {
     if (engine.plugin_id === pluginId) {
       effects.push(
-        `${engine.name} is an engine on the Translation page. Removing the plugin removes the engine and its connections.`,
+        keepData
+          ? `${engine.name} is an engine on the Translation page. It stays there with its settings and connections, and cannot translate until the plugin is installed again.`
+          : `${engine.name} is an engine on the Translation page. Removing the plugin removes the engine and its connections.`,
       );
       continue;
     }
@@ -37,7 +41,7 @@ export function engineEffects(
 }
 
 /** What the Translation page would lose, asked only while the dialog is open and only of a server that has it. */
-function useEngineEffects(pluginId: string | null) {
+function useEngineEffects(pluginId: string | null, keepData: boolean) {
   const query = useQuery({
     queryKey: [QueryKeys.Translation, "plugin-hub-remove", pluginId],
     queryFn: async () => {
@@ -52,7 +56,7 @@ function useEngineEffects(pluginId: string | null) {
     refetchOnWindowFocus: false,
     gcTime: 0,
   });
-  return pluginId ? engineEffects(query.data, pluginId) : [];
+  return pluginId ? engineEffects(query.data, pluginId, keepData) : [];
 }
 
 interface RemoveDialogProps {
@@ -83,9 +87,9 @@ export const RemoveDialog: FunctionComponent<RemoveDialogProps> = ({
     shown.current = row;
   }
   const current = row ?? shown.current;
-  const effects = useEngineEffects(row?.id ?? null);
   // Keeping is the default, and every removal starts from it.
   const [choice, setChoice] = useState<"keep" | "delete">("keep");
+  const effects = useEngineEffects(row?.id ?? null, choice === "keep");
   const openedFor = row?.id ?? null;
   useEffect(() => {
     if (openedFor !== null) {

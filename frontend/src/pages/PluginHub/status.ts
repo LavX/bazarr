@@ -108,7 +108,8 @@ export function pluginStatus(
       tooltip: "Rebuilding the plugin's environment.",
     };
   }
-  if (actions?.has("install")) {
+  // The server records the staging of a new release as "stage_update", and putting it in place as "activate".
+  if (actions?.has("install") || actions?.has("stage_update")) {
     return {
       key: "installing",
       label: "Installing",
@@ -117,7 +118,7 @@ export function pluginStatus(
       spin: true,
     };
   }
-  if (actions?.has("update") || installation.state === "staged") {
+  if (actions?.has("activate") || installation.state === "staged") {
     return {
       key: "activating",
       label: "Activating",

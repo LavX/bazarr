@@ -164,13 +164,13 @@ const PluginHubView: FunctionComponent = () => {
   const [logOf, setLogOf] = useState<PluginRow | null>(null);
   const [removing, setRemoving] = useState<PluginRow | null>(null);
   const [removeProblem, setRemoveProblem] = useState("");
-  // Focus goes back to the button that opened a dialog when it is not there any more.
+  // Focus goes back to the card's actions button when a dialog opened from its menu is closed. The menu
+  // item that was used is gone by then, so the button that stays is the one remembered.
   const lastTrigger = useRef<HTMLElement | null>(null);
-  const rememberTrigger = () => {
-    lastTrigger.current =
-      document.activeElement instanceof HTMLElement
-        ? document.activeElement
-        : null;
+  const rememberTrigger = (row: PluginRow) => {
+    lastTrigger.current = document.querySelector<HTMLElement>(
+      `[data-plugin-actions="${CSS.escape(row.id)}"]`,
+    );
   };
   const restoreFocus = () => {
     const trigger = lastTrigger.current;
@@ -260,27 +260,37 @@ const PluginHubView: FunctionComponent = () => {
       return runGated(async () => void (await send()), label);
     }
   };
-  /** Runs one action for one plugin and says in words what happened. */
+  /**
+   * Runs one action for one plugin and says in words what happened. An action behind the password question
+   * that was not confirmed returns false: nothing was sent, so nothing is said.
+   */
   const perform = async (
     row: PluginRow,
     run: () => Promise<unknown>,
     done: string,
     failed: string,
+    // A refusal from the server is already a sentence for a person. Only a failed job is put in the fixed words.
+    explain = false,
   ) => {
     if (working !== null) {
       return false;
     }
     setWorking(row.id);
     try {
-      await run();
+      if ((await run()) === false) {
+        return false;
+      }
       showNotification(notification.info(done, row.name));
       return true;
     } catch (error) {
-      const copy = explainFailure(reasonOf(error));
+      const reason = reasonOf(error);
+      const copy = explain ? explainFailure(reason) : null;
       showNotification(
         notification.error(
           failed,
-          copy ? `${copy.cause} ${copy.next}` : `${row.name} did not change.`,
+          copy
+            ? `${copy.cause} ${copy.next}`
+            : reason || `${row.name} did not change.`,
         ),
       );
       return false;
@@ -303,9 +313,10 @@ const PluginHubView: FunctionComponent = () => {
       () => gated(() => repair.mutateAsync(row.id), `repair ${row.name}`),
       "Repaired",
       "The repair did not finish",
+      true,
     );
   const askRemove = (row: PluginRow) => {
-    rememberTrigger();
+    rememberTrigger(row);
     setRemoveProblem("");
     setRemoving(row);
   };
@@ -316,7 +327,15 @@ const PluginHubView: FunctionComponent = () => {
     setWorking(removing.id);
     setRemoveProblem("");
     try {
-      await remove.mutateAsync({ id: removing.id, keepData });
+      // Removing a plugin can delete its settings and keys, so the server asks for the password first, as it
+      // does for a repair. A prompt that is closed leaves the dialog as it was and says nothing.
+      const confirmed = await gated(
+        () => remove.mutateAsync({ id: removing.id, keepData }),
+        `remove ${removing.name}`,
+      );
+      if (confirmed === false) {
+        return;
+      }
       showNotification(
         notification.info(
           keepData ? "Removed, its data is kept" : "Removed with its data",
@@ -325,18 +344,15 @@ const PluginHubView: FunctionComponent = () => {
       );
       setRemoving(null);
     } catch (error) {
-      const copy = explainFailure(reasonOf(error));
       setRemoveProblem(
-        copy
-          ? `${copy.cause} ${copy.next}`
-          : `${removing.name} could not be removed.`,
+        reasonOf(error) || `${removing.name} could not be removed.`,
       );
     } finally {
       setWorking(null);
     }
   };
   const showLog = (row: PluginRow) => {
-    rememberTrigger();
+    rememberTrigger(row);
     setLogOf(row);
   };
   const actions = {

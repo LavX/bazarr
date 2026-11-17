@@ -53,6 +53,7 @@ const Grid: FunctionComponent<{ rows: PluginRow[] } & CardActions> = ({
         blocked={updating !== null && updating !== row.id}
         enabledDependents={enabledDependents(row, installations)}
         working={working === row.id}
+        elsewhere={working !== null && working !== row.id}
         dismissing={dismissing === row.id}
       />
     ))}

@@ -40,6 +40,8 @@ export interface PluginCardProps {
   enabledDependents: string[];
   /** A request for this plugin (turn on or off, repair, remove) is on its way. */
   working: boolean;
+  /** A request for another plugin is on its way. */
+  elsewhere: boolean;
   /** The review notice of this plugin is being dismissed. */
   dismissing: boolean;
   onToggle: (row: PluginRow) => void;
@@ -192,6 +194,7 @@ export const PluginCard: FunctionComponent<PluginCardProps> = (props) => {
             row={row}
             enabledDependents={props.enabledDependents}
             busy={busy}
+            elsewhere={props.elsewhere}
             onToggle={props.onToggle}
             onRepair={props.onRepair}
             onLog={props.onLog}

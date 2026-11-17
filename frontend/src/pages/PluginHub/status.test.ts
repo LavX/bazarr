@@ -51,10 +51,16 @@ describe("the status badge precedence", () => {
       expected: "activating",
     },
     {
-      name: "an update job is activating",
+      name: "an activation job is activating",
       item: base,
-      jobs: [job("update")],
+      jobs: [job("activate")],
       expected: "activating",
+    },
+    {
+      name: "the staging of a new release is installing",
+      item: base,
+      jobs: [job("stage_update")],
+      expected: "installing",
     },
     {
       name: "an install job is installing",

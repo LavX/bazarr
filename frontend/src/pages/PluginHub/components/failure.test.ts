@@ -52,6 +52,18 @@ describe("the failure copy", () => {
     expect(explainFailure(null)).toBeNull();
   });
 
+  it("does not take a worker's own failure for a catalog problem", () => {
+    for (const message of [
+      "worker handshake failed: timed out",
+      "the reply was malformed",
+    ]) {
+      expect(explainFailure(message)).toEqual({
+        cause: message,
+        next: "Open the log for more detail.",
+      });
+    }
+  });
+
   it("never offers a command line", () => {
     for (const message of [
       "pip install failed: no matching distribution",

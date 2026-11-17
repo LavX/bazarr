@@ -17,6 +17,8 @@ export interface PluginMenuProps {
   enabledDependents: string[];
   /** Something is being done to this plugin now (a job is open, or a request is on its way). */
   busy: boolean;
+  /** Another plugin is being changed, and only one change at a time goes ahead. */
+  elsewhere: boolean;
   onToggle: (row: PluginRow) => void;
   onRepair: (row: PluginRow) => void;
   onLog: (row: PluginRow) => void;
@@ -43,11 +45,24 @@ const Item: FunctionComponent<{
   onClick: () => void;
   children?: ReactNode;
 }> = ({ icon, label, reason, disabled = false, color, onClick }) => (
+  // Not the native disabled state: that takes the item out of the arrow-key order, and with it the reason.
   <Menu.Item
     color={color}
-    disabled={disabled}
+    // Set on the element itself: the menu item component does not pass the attribute through.
+    ref={(node) => {
+      if (disabled) {
+        node?.setAttribute("aria-disabled", "true");
+      } else {
+        node?.removeAttribute("aria-disabled");
+      }
+    }}
+    className={disabled ? styles.menuDisabled : undefined}
     leftSection={<FontAwesomeIcon icon={icon} />}
-    onClick={onClick}
+    onClick={() => {
+      if (!disabled) {
+        onClick();
+      }
+    }}
   >
     <Entry label={label} reason={disabled ? reason : null} />
   </Menu.Item>
@@ -58,6 +73,7 @@ export const PluginMenu: FunctionComponent<PluginMenuProps> = ({
   row,
   enabledDependents,
   busy,
+  elsewhere,
   onToggle,
   onRepair,
   onLog,
@@ -72,7 +88,9 @@ export const PluginMenu: FunctionComponent<PluginMenuProps> = ({
     ? "Restart Bazarr+ to finish the change in progress."
     : busy
       ? "Something is being done to this plugin. Wait for it to finish."
-      : null;
+      : elsewhere
+        ? "Another plugin is being changed. Wait for it to finish."
+        : null;
   const needed =
     isOn && enabledDependents.length > 0
       ? `${enabledDependents.join(", ")} needs it. Turn that off first.`
@@ -84,6 +102,7 @@ export const PluginMenu: FunctionComponent<PluginMenuProps> = ({
           variant="subtle"
           color="gray"
           aria-label={`${row.name} actions`}
+          data-plugin-actions={row.id}
         >
           <FontAwesomeIcon icon={faEllipsis} />
         </ActionIcon>

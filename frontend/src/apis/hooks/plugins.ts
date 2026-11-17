@@ -1,4 +1,9 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import {
+  QueryClient,
+  useMutation,
+  useQuery,
+  useQueryClient,
+} from "@tanstack/react-query";
 import { QueryKeys } from "@/apis/queries/keys";
 import api from "@/apis/raw";
 import { inlineWhen, withInlineErrors } from "@/apis/raw/inlineWrites";
@@ -28,6 +33,18 @@ function useRefreshAfterChange() {
     void client.invalidateQueries({ queryKey: [QueryKeys.ProviderHub] });
     void client.invalidateQueries({ queryKey: [QueryKeys.Translation] });
   };
+}
+
+/**
+ * Waits for a job the way every plugin action does, after the list of jobs has been read again, so the
+ * cards say what the job is doing from its first moment and not only once it is over.
+ */
+function waitForPluginJob(
+  client: QueryClient,
+  jobId: Parameters<typeof waitForJob>[1],
+) {
+  void client.invalidateQueries({ queryKey: [...pluginsKey, QueryKeys.Jobs] });
+  return waitForJob(client, jobId);
 }
 
 /** The catalog, all of it, or one kind of it. */
@@ -67,8 +84,9 @@ export function usePluginJobs() {
     queryKey: [...pluginsKey, QueryKeys.Jobs],
     queryFn: () => api.plugins.jobs(),
     // Cards say "Installing" or "Rebuilding" while a job runs, so the list is read again until it ends.
+    // A slow read while nothing is open finds a job somebody else started.
     refetchInterval: (query) =>
-      query.state.data?.some(jobIsOpen) ? 3_000 : false,
+      query.state.data?.some(jobIsOpen) ? 3_000 : 15_000,
   });
 }
 
@@ -155,7 +173,7 @@ export function usePluginInstall({
       inlineErrors,
       async (request: PluginInstallRequest) => {
         const { job_id: jobId } = await api.plugins.install(request);
-        await waitForJob(client, jobId);
+        await waitForPluginJob(client, jobId);
       },
     ),
     onSettled: refresh,
@@ -173,7 +191,7 @@ export function usePluginApplyUpdate({
       inlineErrors,
       async (request: PluginUpdateApplyRequest) => {
         const { job_id: jobId } = await api.plugins.applyUpdate(request);
-        await waitForJob(client, jobId);
+        await waitForPluginJob(client, jobId);
       },
     ),
     // A failed update is recorded on the installation, so the lists are read again either way.
@@ -202,7 +220,7 @@ export function usePluginRepair() {
       const { job_id: jobId } = await withInlineErrors(() =>
         api.plugins.repair(id),
       );
-      await waitForJob(client, jobId);
+      await waitForPluginJob(client, jobId);
     },
     onSettled: refresh,
   });
@@ -217,7 +235,7 @@ export function usePluginRemove() {
       const { job_id: jobId } = await withInlineErrors(() =>
         api.plugins.remove(id, keepData),
       );
-      await waitForJob(client, jobId);
+      await waitForPluginJob(client, jobId);
     },
     onSettled: refresh,
   });

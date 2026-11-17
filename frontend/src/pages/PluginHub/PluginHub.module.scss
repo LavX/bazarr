@@ -170,3 +170,9 @@
   font-size: 13px;
   color: var(--bz-text-tertiary);
 }
+
+/* An item that cannot be used, kept in the keyboard order so that its reason can be read. */
+.menuDisabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
