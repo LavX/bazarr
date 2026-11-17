@@ -195,7 +195,9 @@ describe("Movies subtitles filter", () => {
     user: ReturnType<typeof userEvent.setup>,
     option: string,
   ) {
-    const input = screen.getByRole("combobox", { name: "Subtitles" });
+    // The filter panel opens over animation frames, so the control is not in the
+    // accessibility tree the instant the toggle click resolves.
+    const input = await screen.findByRole("combobox", { name: "Subtitles" });
     await user.click(input);
     if (input.getAttribute("aria-expanded") !== "true")
       await user.keyboard("{ArrowDown}");
@@ -409,7 +411,9 @@ describe("Movies score filter", () => {
     user: ReturnType<typeof userEvent.setup>,
     option: string,
   ) {
-    const input = screen.getByRole("combobox", { name: "Score" });
+    // The filter panel opens over animation frames, so the control is not in the
+    // accessibility tree the instant the toggle click resolves.
+    const input = await screen.findByRole("combobox", { name: "Score" });
     await user.click(input);
     if (input.getAttribute("aria-expanded") !== "true")
       await user.keyboard("{ArrowDown}");
