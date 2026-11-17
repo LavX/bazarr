@@ -90,24 +90,24 @@ def _job_source_key(video_path, source_srt_file, embedded_source):
     return str(source_srt_file)
 
 
-def pin_translation(video_path, source_srt_file, to_lang, forced, hi, embedded_source, connection_id):
-    """Record a manual pick of one back end for the translation about to be requested.
+def pin_translation(video_path, source_srt_file, to_lang, forced, hi, embedded_source, pin):
+    """Record a manual pick (``pick.pin_value``: one back end, or one engine with none) for the translation about to be requested.
 
     A manual translate, a mass translate item or a pick on the Translation page calls this just before
     ``translate_subtitles_file`` with the same source and target. The runtime makes the job with the pick on it,
     replacing one that has not started, and the request that follows joins that job, so the job runs on that
-    back end alone. A job that already runs refuses the pick: ``TranslationJobError`` (a ``ValueError``) carries
+    back end or engine alone. A job that already runs refuses the pick: ``TranslationJobError`` (a ``ValueError``) carries
     the reason. Without a pick, or with the runtime off, nothing is recorded.
 
     ``translate_subtitles_file`` takes no parameter for this on purpose: the queue records every parameter of
     the call, and the callers that look for an identical pending job compare all of them.
     """
-    if connection_id is None or not _runtime_active():
+    if pin is None or not _runtime_active():
         return
     from .runtime import enqueue
 
     enqueue.decide(_job_source_key(video_path, source_srt_file, embedded_source), to_lang, forced, hi,
-                   pinned_connection_id=connection_id)
+                   pinned_connection_id=pin)
 
 
 def _runtime_follow(video_path, source_srt_file, to_lang, forced, hi, embedded_source):

@@ -12,6 +12,7 @@ from flask import Flask
 import translator_dispatch_helpers as helpers
 from translator_dispatch_helpers import PLUGIN, SECOND_PLUGIN, SOURCE
 from subtitles.tools.translate import availability
+from subtitles.tools.translate import pick
 from subtitles.tools.translate.runtime import enqueue, gate
 from subtitles.tools.translate.runtime.jobs import JobsQueuePort, TranslationJobError, TranslationJobs
 
@@ -80,6 +81,44 @@ def test_a_back_end_of_a_paused_engine_is_refused_with_the_cause(env):
     assert (answer.available, answer.cause) == (False, gate.SIDECAR_DRAIN)
 
 
+def test_a_pick_is_a_back_end_or_an_engine_and_the_job_record_tells_them_apart():
+    assert pick.pin_value() is None
+    assert pick.pin_value(connection_id=6) == 6 and pick.split_pin(6) == ("connection", 6)
+    assert pick.pin_value(engine_id=6) == -6 and pick.split_pin(-6) == ("engine", 6)
+    with pytest.raises(ValueError, match="not both"):
+        pick.pin_value(connection_id=1, engine_id=2)
+
+
+def test_an_engine_with_no_back_ends_is_available_whatever_engine_is_selected(env):
+    env.ai_engine()
+    google = env.engine(SECOND_PLUGIN, select=False)
+    answer = gate.pinned_gate(pick.pin_value(engine_id=google.id), env.store, env.holds, env.workers)
+    assert (answer.available, answer.instance_id) == (True, google.id)
+
+
+def test_an_engine_that_does_not_exist_is_refused_with_its_reason(env):
+    answer = gate.pinned_gate(pick.pin_value(engine_id=404), env.store, env.holds, env.workers)
+    assert (answer.available, answer.reason, answer.cause) == (
+        False, gate.PICK_ENGINE_MISSING, gate.ENGINE_MISSING)
+
+
+def test_an_engine_that_has_back_ends_is_refused_because_it_says_nothing_about_which(env):
+    instance = env.ai_engine()
+    answer = gate.pinned_gate(pick.pin_value(engine_id=instance.id), env.store, env.holds, env.workers)
+    assert (answer.available, answer.reason) == (False, gate.PICK_ENGINE_HAS_BACKENDS)
+
+
+def test_an_engine_that_cannot_take_a_job_is_refused_with_the_engines_reason(env):
+    google = env.engine(SECOND_PLUGIN, select=False)
+    env.active.discard(SECOND_PLUGIN)
+    answer = gate.pinned_gate(pick.pin_value(engine_id=google.id), env.store, env.holds, env.workers)
+    assert answer.available is False and "plugin is not installed" in answer.reason
+    env.active.add(SECOND_PLUGIN)
+    env.holds.pause_for_drain(google.id)
+    assert gate.pinned_gate(pick.pin_value(engine_id=google.id), env.store, env.holds, env.workers).cause == (
+        gate.SIDECAR_DRAIN)
+
+
 def test_a_gate_that_cannot_read_the_configuration_is_closed_and_says_why(env):
     class Broken:
         def get_connection(self, *_args, **_kwargs):
@@ -101,8 +140,8 @@ def test_with_the_runtime_on_a_pick_is_answered_for_that_back_end(runtime_on, mo
 
     monkeypatch.setattr(gate, "pinned_gate", pinned)
     monkeypatch.setattr(gate, "evaluate", lambda *a, **k: pytest.fail("the selected engine was asked"))
-    assert tuple(availability.translation_available(connection_id=7)) == (False, "closed for the pick")
-    assert tuple(availability.translation_available("openrouter", connection_id=7)) == (False, "closed for the pick")
+    assert tuple(availability.translation_available(pin=7)) == (False, "closed for the pick")
+    assert tuple(availability.translation_available("openrouter", pin=7)) == (False, "closed for the pick")
     assert seen == [7, 7]
 
 
@@ -116,7 +155,7 @@ def test_with_the_runtime_off_a_pick_is_refused_and_never_dropped_silently(monke
     for name in [name for name in sys.modules if name.startswith("subtitles.tools.translate.runtime")]:
         monkeypatch.delitem(sys.modules, name)
     monkeypatch.setitem(sys.modules, "subtitles.tools.translate.runtime", None)  # an import now raises
-    assert tuple(availability.translation_available(connection_id=3)) == (False, availability.PICK_NEEDS_RUNTIME)
+    assert tuple(availability.translation_available(pin=3)) == (False, availability.PICK_NEEDS_RUNTIME)
     # Without a pick the old gate answers as it always did.
     assert tuple(availability.translation_available()) == (True, "")
 
@@ -132,9 +171,9 @@ def _request(main, **overrides):
     return main.translate_subtitles_file(**values)
 
 
-def _pin(main, connection_id, **overrides):
+def _pin(main, pin, **overrides):
     values = dict(video_path="/v/film.mkv", source_srt_file=SOURCE, to_lang="fr", forced=False, hi=False,
-                  embedded_source=None, connection_id=connection_id)
+                  embedded_source=None, pin=pin)
     values.update(overrides)
     return main.pin_translation(**values)
 
@@ -203,6 +242,15 @@ def test_a_pick_is_refused_with_the_reason_while_the_job_runs(env, queued):
     with pytest.raises(TranslationJobError) as caught:
         _pin(main, picked.id)
     assert "already being translated" in str(caught.value) and queued == []
+
+
+def test_a_pick_of_an_engine_is_recorded_on_the_job_as_an_engine(env, queued):
+    from subtitles.tools.translate import main
+
+    google = env.engine(SECOND_PLUGIN, select=False)
+    _pin(main, pick.pin_value(engine_id=google.id))
+    row = TranslationJobs(env.session, clock=env.clock).active_for(SOURCE, "fr")
+    assert (row.manual, pick.split_pin(row.pinned_connection_id)) == (1, ("engine", google.id))
 
 
 def test_a_pick_for_an_embedded_track_is_keyed_by_the_track(env, queued):
@@ -348,8 +396,8 @@ def test_the_translate_action_records_the_pick_before_it_queues(schema_session, 
     answer, events = call(connection_id=6)
     assert answer == ("", 204) and asked == [6]
     assert [kind for kind, _ in events] == ["pin", "queue"]
-    video_path, source, to_lang, forced, hi, embedded, connection_id = events[0][1]
-    assert (to_lang, forced, hi, connection_id) == ("hu", False, False, 6)
+    video_path, source, to_lang, forced, hi, embedded, pin = events[0][1]
+    assert (to_lang, forced, hi, pin) == ("hu", False, False, 6)
     assert "pinned_connection_id" not in events[1][1], "the queued call is exactly what it always was"
 
 
@@ -369,6 +417,21 @@ def test_the_translate_action_refuses_a_pick_with_the_reason_and_queues_nothing(
     call = _manual_translate(schema_session, monkeypatch)
     answer, events = call(connection_id=6)
     assert answer == (gate.PICK_UNUSABLE, 409) and events == []
+
+
+def test_the_translate_action_hands_an_engine_pick_to_the_queue_as_an_engine(schema_session, monkeypatch):
+    asked = _open_the_gate(monkeypatch)
+    call = _manual_translate(schema_session, monkeypatch)
+    answer, events = call(engine_id=2)
+    assert answer == ("", 204) and asked == [-2]
+    assert events[0][1][-1] == -2 and pick.split_pin(events[0][1][-1]) == ("engine", 2)
+
+
+def test_the_translate_action_refuses_both_a_back_end_and_an_engine(schema_session, monkeypatch):
+    _open_the_gate(monkeypatch)
+    call = _manual_translate(schema_session, monkeypatch)
+    answer, events = call(connection_id=6, engine_id=2)
+    assert answer == (pick.BOTH, 400) and events == []
 
 
 def test_the_translate_action_refuses_a_pick_while_the_runtime_is_off(schema_session, monkeypatch):
@@ -417,6 +480,19 @@ def test_the_batch_refuses_a_pick_that_is_not_a_whole_number(monkeypatch, bad):
     _open_the_gate(monkeypatch)
     answer, fed = _batch_call(monkeypatch)({"connection_id": bad})
     assert answer == ({"error": "connection_id must be a whole number"}, 400) and fed == []
+
+
+def test_the_batch_carries_an_engine_pick_into_the_job(monkeypatch):
+    asked = _open_the_gate(monkeypatch)
+    answer, fed = _batch_call(monkeypatch)({"engine_id": 2})
+    assert answer[1] == 200 and asked == [-2]
+    assert fed[0]["kwargs"]["options"]["engine_id"] == 2
+
+
+def test_the_batch_refuses_both_a_back_end_and_an_engine(monkeypatch):
+    _open_the_gate(monkeypatch)
+    answer, fed = _batch_call(monkeypatch)({"connection_id": 6, "engine_id": 2})
+    assert answer == ({"error": pick.BOTH}, 400) and fed == []
 
 
 def test_the_batch_refuses_a_pick_the_gate_refuses(monkeypatch):
@@ -504,6 +580,37 @@ def test_the_editor_endpoint_refuses_a_pick_that_is_not_a_whole_number(monkeypat
     _open_the_gate(monkeypatch)
     answer, queued = _editor_call(monkeypatch, {**EDITOR_BODY, "connectionId": bad})
     assert answer == ({"error": "connectionId must be a whole number"}, 400) and queued == []
+
+
+def test_the_editor_endpoint_queues_an_engine_pick_as_an_engine(monkeypatch):
+    asked = _open_the_gate(monkeypatch)
+    answer, queued = _editor_call(monkeypatch, {**EDITOR_BODY, "engineId": 2})
+    assert answer == ({"jobId": 12}, 202) and asked == [-2]
+    assert queued[0]["pinned_connection_id"] == -2
+
+
+def test_the_editor_endpoint_refuses_both_a_back_end_and_an_engine(monkeypatch):
+    _open_the_gate(monkeypatch)
+    answer, queued = _editor_call(monkeypatch, {**EDITOR_BODY, "connectionId": 6, "engineId": 2})
+    assert answer == ({"error": pick.BOTH}, 400) and queued == []
+
+
+def test_the_editor_runs_on_the_picked_engine_alone(env, editor_queue, monkeypatch):
+    from subtitles.tools.translate import editor
+    from subtitles.tools.translate.runtime import service
+
+    env.ai_engine()
+    google = env.engine(SECOND_PLUGIN, select=False)
+    monkeypatch.setattr(service, "Dispatcher", lambda: env.dispatcher())
+    monkeypatch.setattr(editor, "_runtime_editor_service",
+                        lambda media_type, pinned_connection_id=None: editor._RuntimeEditorService(
+                            media_type, pinned_connection_id))
+    job_id = editor.enqueue_editor_translation([{"position": 1, "line": "Hello"}], "en", "fr",
+                                               pinned_connection_id=pick.pin_value(engine_id=google.id))
+    _run_editor_job(editor_queue, job_id)
+    state = editor.editor_translation_state(job_id)
+    assert state["status"] == "completed" and env.served() == ["-"]
+    assert env.last_job().engine_instance_id == google.id
 
 
 def test_the_editor_endpoint_refuses_a_pick_the_gate_refuses(monkeypatch):

@@ -344,6 +344,9 @@ const MassTranslateForm: FunctionComponent<Props> = ({ items, onComplete }) => {
           ...(pick.connectionId !== null && {
             connectionId: pick.connectionId,
           }),
+          ...("engine_id" in pick.fields && {
+            engineId: pick.fields.engine_id,
+          }),
         },
       });
 
@@ -372,7 +375,7 @@ const MassTranslateForm: FunctionComponent<Props> = ({ items, onComplete }) => {
   return (
     <form onSubmit={form.onSubmit(handleSubmit)}>
       <Stack>
-        {pick.connectionId !== null ? (
+        {pick.picked ? (
           <Alert>
             <Text size="sm">
               {pick.label} will be used to translate{" "}
@@ -470,7 +473,7 @@ const MassTranslateForm: FunctionComponent<Props> = ({ items, onComplete }) => {
             loading={isPending}
             disabled={
               items.length === 0 ||
-              (!translation.available && pick.connectionId === null)
+              (!translation.available && pick.picked === null)
             }
           >
             Translate {items.length} Item(s)

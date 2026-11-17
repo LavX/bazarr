@@ -236,6 +236,7 @@ describe("MassTranslateForm and the manual pick", () => {
     expect(await optionsOf(user, "Translate with")).toEqual([
       "Automatic",
       "OpenAI compatible, usable-model",
+      "Google Translate",
     ]);
   });
 
@@ -276,6 +277,39 @@ describe("MassTranslateForm and the manual pick", () => {
       to_lang: "hu",
       connection_id: 1,
     });
+  });
+
+  it("sends the picked engine in the batch options when it has no back ends", async () => {
+    const user = userEvent.setup();
+    settings();
+    translatorStatus(true, { available: true, reason: "" });
+    let sent: { options?: Record<string, unknown> } | undefined;
+    server.use(
+      http.post("/api/subtitles/batch", async ({ request }) => {
+        sent = (await request.json()) as typeof sent;
+        return HttpResponse.json({
+          queued: 1,
+          skipped: 0,
+          errors: [],
+          job_id: 5,
+        });
+      }),
+    );
+    customRender(<MassTranslateForm items={[MOVIE]} />);
+    await languagesLoaded();
+    await screen.findByRole("combobox", { name: "Translate with" });
+    await stateLoaded();
+
+    await choose(user, "Translate with", "Google Translate");
+    await choose(user, "Source Language", "English");
+    await choose(user, "Target Language", "Hungarian");
+    await user.click(
+      screen.getByRole("button", { name: "Translate 1 Item(s)" }),
+    );
+
+    await waitFor(() => expect(sent).toBeDefined());
+    expect(sent?.options).toMatchObject({ engine_id: 2 });
+    expect(sent?.options).not.toHaveProperty("connection_id");
   });
 
   it("sends no back end for Automatic", async () => {

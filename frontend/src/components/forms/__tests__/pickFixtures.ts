@@ -5,13 +5,14 @@ import { http, HttpResponse } from "msw";
 import { expect } from "vitest";
 import queryClient from "@/apis/queries";
 import { QueryKeys } from "@/apis/queries/keys";
-import { connection, engine } from "@/pages/Translation/fixtures";
+import { connection, engine, second } from "@/pages/Translation/fixtures";
 import server from "@/tests/mocks/node";
 import type { TranslationState } from "@/types/translation";
 
 /**
- * The back ends the Translation page would list: one that can take a job, one switched off, one the
- * server marks not usable and one waiting for its key. Only the first can be picked.
+ * What the Translation page would list: an engine with a back end that can take a job, one switched off, one
+ * the server marks not usable and one waiting for its key, and a second engine with no back ends. Only the
+ * first back end and the second engine can be picked.
  */
 export const PICK_STATE: TranslationState = {
   enabled: true,
@@ -26,6 +27,8 @@ export const PICK_STATE: TranslationState = {
         connection(4, { model: "keyless-model", awaiting_secrets: true }),
       ],
     }),
+    // An engine with no back ends that is ready: picked as a whole.
+    second,
   ],
 };
 

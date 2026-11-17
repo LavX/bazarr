@@ -372,6 +372,7 @@ export default function TranslatePanel({
         title: mediaTitle || "",
         mediaType: "",
         ...(pick.connectionId !== null && { connectionId: pick.connectionId }),
+        ...("engine_id" in pick.fields && { engineId: pick.fields.engine_id }),
       });
 
       if (queued.jobId) {
@@ -410,6 +411,7 @@ export default function TranslatePanel({
     onTranslatingChange,
     refetchTranslationStatus,
     pick.connectionId,
+    pick.fields,
   ]);
 
   const handleCancel = useCallback(() => {
@@ -447,7 +449,7 @@ export default function TranslatePanel({
   const modelUsed = modelsData?.default_model || "";
   // A pick is answered for its own back end by the server, so the gate for the selected engine does not
   // hold it back.
-  const gateClosed = !translation.available && pick.connectionId === null;
+  const gateClosed = !translation.available && pick.picked === null;
   const isWorking = phase === "submitting" || phase === "translating";
 
   return (
@@ -621,11 +623,9 @@ export default function TranslatePanel({
           <select
             aria-label="Translate with"
             style={styles.select}
-            value={pick.connectionId === null ? "" : String(pick.connectionId)}
+            value={pick.picked?.key ?? ""}
             onChange={(e) =>
-              pick.setConnectionId(
-                e.target.value === "" ? null : Number(e.target.value),
-              )
+              pick.setKey(e.target.value === "" ? null : e.target.value)
             }
             disabled={isWorking}
           >
@@ -636,7 +636,7 @@ export default function TranslatePanel({
                   {pick.choices
                     .filter((item) => item.engine === engine)
                     .map((item) => (
-                      <option key={item.id} value={item.id}>
+                      <option key={item.key} value={item.key}>
                         {item.label}
                       </option>
                     ))}
@@ -646,9 +646,9 @@ export default function TranslatePanel({
           </select>
         </div>
       )}
-      {pick.runtime && pick.connectionId !== null && (
+      {pick.runtime && pick.picked !== null && (
         <div style={styles.statusText}>
-          This back end does the whole translation alone.
+          This one does the whole translation alone.
         </div>
       )}
 

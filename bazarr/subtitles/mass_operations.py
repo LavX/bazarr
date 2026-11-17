@@ -1224,8 +1224,9 @@ def _process_subtitle_item(item, action, options, job_id, children=None, *,
         # items. The item fails with the gate's reason instead of queueing
         # one doomed translation job after another.
         from subtitles.tools.translate.availability import translation_available
-        pick = options.get('connection_id')
-        availability = translation_available(connection_id=pick) if pick is not None else translation_available()
+        from subtitles.tools.translate.pick import pin_value
+        pick = pin_value(options.get('connection_id'), options.get('engine_id'))
+        availability = translation_available(pin=pick) if pick is not None else translation_available()
         if not availability.available:
             raise ValueError(availability.reason)
         from subtitles.tools.translate.main import pin_translation, translate_subtitles_file

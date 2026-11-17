@@ -1363,7 +1363,11 @@ describe("TranslatePanel and the manual pick", () => {
         within(pick)
           .getAllByRole("option")
           .map((item) => item.textContent),
-      ).toEqual(["Automatic", "OpenAI compatible, usable-model"]),
+      ).toEqual([
+        "Automatic",
+        "OpenAI compatible, usable-model",
+        "Google Translate",
+      ]),
     );
   });
 
@@ -1378,11 +1382,11 @@ describe("TranslatePanel and the manual pick", () => {
     });
     await stateLoaded();
     await waitFor(() =>
-      expect(within(pick).getAllByRole("option")).toHaveLength(2),
+      expect(within(pick).getAllByRole("option")).toHaveLength(3),
     );
     await user.selectOptions(pick, "OpenAI compatible, usable-model");
     expect(
-      screen.getByText("This back end does the whole translation alone."),
+      screen.getByText("This one does the whole translation alone."),
     ).toBeVisible();
     await user.click(await screen.findByRole("button", { name: "Translate" }));
 
@@ -1392,6 +1396,27 @@ describe("TranslatePanel and the manual pick", () => {
       targetLanguage: "Hungarian",
       connectionId: PICK_STATE.instances[0].connections[0].id,
     });
+  });
+
+  it("queues the picked engine, with no back end, when it has none", async () => {
+    translatorStatus(true, OPEN);
+    const submitted = queued();
+    renderPanel();
+    const user = userEvent.setup();
+
+    const pick = await screen.findByRole("combobox", {
+      name: "Translate with",
+    });
+    await stateLoaded();
+    await waitFor(() =>
+      expect(within(pick).getAllByRole("option")).toHaveLength(3),
+    );
+    await user.selectOptions(pick, "Google Translate");
+    await user.click(await screen.findByRole("button", { name: "Translate" }));
+
+    await screen.findByRole("button", { name: "Cancel" });
+    expect(submitted[0]).toMatchObject({ engineId: 2 });
+    expect(submitted[0]).not.toHaveProperty("connectionId");
   });
 
   it("queues no back end for Automatic", async () => {
@@ -1426,7 +1451,7 @@ describe("TranslatePanel and the manual pick", () => {
     });
     await stateLoaded();
     await waitFor(() =>
-      expect(within(pick).getAllByRole("option")).toHaveLength(2),
+      expect(within(pick).getAllByRole("option")).toHaveLength(3),
     );
     await user.selectOptions(pick, "OpenAI compatible, usable-model");
 

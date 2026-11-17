@@ -19,6 +19,7 @@ from subtitles.tools.subsyncer import SubSyncer  # noqa: F401
 from subtitles.tools.subsync_engines import is_sync_engine_output
 from subtitles.tools.translate.availability import translation_available
 from subtitles.tools.translate.main import pin_translation, translate_subtitles_file
+from subtitles.tools.translate.pick import pin_value
 from subtitles.tools.translate.batch import extract_embedded_subtitle
 from subtitles.tools.mods import apply_subtitle_mods
 from subtitles.indexer.series import store_subtitles
@@ -231,6 +232,12 @@ class Subtitles(Resource):
         help="Translate only: the id of one back end of the new translator to run the job on, with no failover",
     )
     patch_request_parser.add_argument(
+        "engine_id",
+        type=int,
+        required=False,
+        help="Translate only: the id of one engine with no back ends to run the job on (not with connection_id)",
+    )
+    patch_request_parser.add_argument(
         "codec",
         type=str,
         required=False,
@@ -269,10 +276,13 @@ class Subtitles(Resource):
         # persistent extracted_subs directory, so a closed gate must not run
         # the extractor, and it must not lose to the missing-file error for a
         # request it refuses anyway.
-        connection_id = args.get("connection_id") if action == "translate" else None
+        pin = None
         if action == "translate":
-            availability = (translation_available(connection_id=connection_id) if connection_id is not None
-                            else translation_available())
+            try:
+                pin = pin_value(args.get("connection_id"), args.get("engine_id"))
+            except ValueError as exc:
+                return str(exc), 400
+            availability = translation_available(pin=pin) if pin is not None else translation_available()
             if not availability.available:
                 return availability.reason, 409
 
@@ -685,7 +695,7 @@ class Subtitles(Resource):
                         return BUSY, 409
                     # A manual pick is recorded on the job first, and the request below joins it.
                     pin_translation(video_path, subtitles_path, dest_language, forced, hi, embedded_source,
-                                    connection_id)
+                                    pin)
                     job_id = translate_subtitles_file(
                         video_path=video_path,
                         source_srt_file=subtitles_path,

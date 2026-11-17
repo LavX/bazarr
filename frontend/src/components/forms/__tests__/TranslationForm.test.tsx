@@ -267,6 +267,7 @@ describe("TranslationForm and the manual pick", () => {
     expect(await optionsOf(user, "Translate with")).toEqual([
       "Automatic",
       "OpenAI compatible, usable-model",
+      "Google Translate",
     ]);
   });
 
@@ -317,6 +318,42 @@ describe("TranslationForm and the manual pick", () => {
 
     await waitFor(() => expect(sent).toBeDefined());
     expect(sent).toMatchObject({ language: "hu", connection_id: "1" });
+  });
+
+  it("sends the picked engine, with no back end, when it has none", async () => {
+    const user = userEvent.setup();
+    settings();
+    translatorStatus(true, { available: true, reason: "" });
+    let sent: Record<string, FormDataEntryValue> | undefined;
+    server.use(
+      http.patch("/api/subtitles", async ({ request }) => {
+        sent = Object.fromEntries((await request.formData()).entries());
+        return HttpResponse.json({ job_id: 3 }, { status: 202 });
+      }),
+    );
+    customRender(<TranslationForm selections={selection} />);
+    await languagesLoaded();
+    await screen.findByRole("combobox", { name: "Translate with" });
+    await stateLoaded();
+
+    await choose(user, "Translate with", "Google Translate");
+    expect(
+      screen.getByText(
+        "Google Translate will be used for this translation alone.",
+      ),
+    ).toBeInTheDocument();
+    const language = screen
+      .getAllByRole("combobox")
+      .find((item) => !item.getAttribute("aria-label")?.includes("with"))!;
+    await user.type(language, "Hung");
+    await user.click(
+      await screen.findByRole("option", { name: "Hungarian", hidden: true }),
+    );
+    await user.click(screen.getByRole("button", { name: "Start" }));
+
+    await waitFor(() => expect(sent).toBeDefined());
+    expect(sent).toMatchObject({ language: "hu", engine_id: "2" });
+    expect(sent).not.toHaveProperty("connection_id");
   });
 
   it("sends no back end for Automatic, and the request is what it always was", async () => {

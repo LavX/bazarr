@@ -125,6 +125,8 @@ export interface EditorTranslationRequest {
   mediaType: string;
   /** The one back end of the new translator to run on, with no failover. Left out for the selected engine. */
   connectionId?: number;
+  /** The one engine with no back ends to run on, with no failover. Left out for the selected engine. */
+  engineId?: number;
 }
 
 export interface EditorTranslationState {

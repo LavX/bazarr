@@ -229,10 +229,7 @@ const TranslationForm: FunctionComponent<Props> = ({
                     language: language.code2,
                     // eslint-disable-next-line camelcase
                     arr_instance_id: s.arr_instance_id,
-                    ...(pick.connectionId !== null
-                      ? // eslint-disable-next-line camelcase
-                        { connection_id: pick.connectionId }
-                      : {}),
+                    ...pick.fields,
                   },
                 }),
               ),
@@ -263,7 +260,7 @@ const TranslationForm: FunctionComponent<Props> = ({
     >
       <Stack pos="relative">
         <LoadingOverlay visible={isPending} />
-        {pick.connectionId !== null ? (
+        {pick.picked ? (
           <Alert>{pick.label} will be used for this translation alone.</Alert>
         ) : translation.available ? (
           <Alert>
@@ -298,7 +295,7 @@ const TranslationForm: FunctionComponent<Props> = ({
         <Button
           type="submit"
           loading={isPending}
-          disabled={!translation.available && pick.connectionId === null}
+          disabled={!translation.available && pick.picked === null}
         >
           Start
         </Button>

@@ -35,6 +35,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Any, Callable, Sequence
 
+from ..pick import split_pin
 from . import failure as fail
 from . import gate as gate_module
 from . import legacy_engines
@@ -80,6 +81,7 @@ class JobSpec:
     media: dict = field(default_factory=dict)
     # What the history row says about the media: media_type, media_id, media_title, arr_instance_id.
     history_media: dict = field(default_factory=dict)
+    # A manual pick as ``pick.pin_value`` makes it: a connection's id, or an engine's id as its negative.
     pinned_connection_id: int | None = None
     # Raises JobCancelled when the person stopped the job.
     check_cancel: Callable[[], None] = lambda: None
@@ -355,6 +357,17 @@ class Dispatcher:
         """The engines to try, in order. Raises ``GateClosed`` when the job cannot run at all."""
         store = self.store
         notices: list[Notice] = []
+        if spec.pinned_connection_id is not None and split_pin(spec.pinned_connection_id)[0] == "engine":
+            # An engine picked by hand, one with no back ends: that engine alone, no failover and no fallback.
+            instance = store.get_instance(split_pin(spec.pinned_connection_id)[1], fresh=True)
+            if instance is None:
+                raise GateClosed(gate_module.PICK_ENGINE_MISSING, gate_module.ENGINE_MISSING)
+            if store.list_connections(instance.id):
+                raise GateClosed(gate_module.PICK_ENGINE_HAS_BACKENDS, gate_module.NOT_CONFIGURED)
+            state = gate_module.engine_state(store, instance, self.holds, self.workers)
+            if not state.available:
+                raise GateClosed(state.reason, state.cause)
+            return [_Choice(instance)], notices
         if spec.pinned_connection_id is not None:
             connection = store.get_connection(spec.pinned_connection_id, fresh=True)
             instance = store.get_instance(connection.instance_id, fresh=True) if connection is not None else None

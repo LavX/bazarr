@@ -318,6 +318,53 @@ def test_the_pin_a_manual_pick_recorded_on_the_job_is_honoured(env):
     assert env.served() == [str(second.id)]
 
 
+def test_a_pinned_engine_with_no_back_ends_runs_alone_whatever_engine_is_selected(env):
+    from subtitles.tools.translate.pick import pin_value
+
+    env.ai_engine()
+    pinned = env.engine(SECOND_PLUGIN, select=False)
+    outcome = env.dispatcher().run(make_spec(pinned_connection_id=pin_value(engine_id=pinned.id)))
+    outcome.complete()
+    assert outcome.engine_instance_id == pinned.id and outcome.plugin_id == SECOND_PLUGIN
+    assert env.served() == ["-"], "one attempt, on the picked engine, and the selected one was never asked"
+
+
+def test_a_pinned_engine_gives_its_result_or_its_error_with_no_fallback(env):
+    from subtitles.tools.translate.pick import pin_value
+
+    fallback = env.ai_engine()
+    pinned = env.engine(SECOND_PLUGIN, select=False)
+    env.pointers.fallback = fallback.id
+    env.scripts[SECOND_PLUGIN] = {"*": [decline("not for this pair")]}
+    with pytest.raises(Declined) as caught:
+        env.dispatcher().run(make_spec(pinned_connection_id=pin_value(engine_id=pinned.id)))
+    assert caught.value.reasons == ["not for this pair"]
+    assert env.served() == ["-"], "the fallback engine was not asked"
+
+
+def test_the_engine_a_manual_pick_recorded_on_the_job_is_honoured(env):
+    from subtitles.tools.translate.pick import pin_value
+
+    env.ai_engine()
+    pinned = env.engine(SECOND_PLUGIN, select=False)
+    jobs = TranslationJobs(env.session, clock=env.clock)
+    jobs.request(SOURCE, TARGET, manual=True, pinned_connection_id=pin_value(engine_id=pinned.id))
+    env.dispatcher().run(make_spec())  # the spec itself names no pin
+    assert env.last_job().engine_instance_id == pinned.id
+
+
+def test_a_pinned_engine_that_has_back_ends_or_is_gone_closes_the_job(env):
+    from subtitles.tools.translate.pick import pin_value
+
+    instance = env.ai_engine()
+    with pytest.raises(GateClosed) as caught:
+        env.dispatcher().run(make_spec(pinned_connection_id=pin_value(engine_id=instance.id)))
+    assert "has back ends" in caught.value.reason
+    with pytest.raises(GateClosed) as gone:
+        env.dispatcher().run(make_spec(source_key="/media/other.en.srt", pinned_connection_id=pin_value(engine_id=404)))
+    assert "no longer exists" in gone.value.reason and env.requests() == []
+
+
 def test_a_pinned_connection_that_cannot_be_used_closes_the_job(env):
     instance, first, second = two_connections(env)
     env.store.update_connection(second.id, schema=helpers_schema(), enabled=False)

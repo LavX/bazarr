@@ -100,7 +100,7 @@ def enqueue_editor_translation(lines, source_language, target_language, title=''
     lines to the same language twice while the first is still running follows the
     first job instead of paying for the translation again.
 
-    ``pinned_connection_id`` runs the lines on that one back end of the v2 runtime, with no failover.
+    ``pinned_connection_id`` runs the lines on that one back end (or engine with none) of the v2 runtime, with no failover.
     """
     ordered = sorted(lines, key=lambda item: item['position'])
     kwargs = {

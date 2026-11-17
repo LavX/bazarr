@@ -9,6 +9,7 @@ from app.config import settings
 from app.jobs_queue import jobs_queue
 from secret_store.scrub import scrub_text
 from subtitles.tools.translate.availability import translation_available
+from subtitles.tools.translate.pick import pin_value
 from subtitles.tools.translate.editor import (cancel_editor_translation, editor_translation_state,
                                               release_editor_translation,
                                               enqueue_editor_translation)
@@ -108,12 +109,19 @@ class TranslatorEditorJobs(Resource):
         # engine. The gate's reason replaces the URL-only refusal, which said
         # nothing about an encryption key the client cannot even use.
         data = flask_request.get_json(silent=True) or {}
-        connection_id = data.get("connectionId")
-        if connection_id is not None and (isinstance(connection_id, bool) or not isinstance(connection_id, int)):
-            return {"error": "connectionId must be a whole number"}, 400
-        # A manual pick is answered for that one back end, whatever engine is selected.
-        availability = (translation_available('openrouter', connection_id=connection_id)
-                        if connection_id is not None else translation_available('openrouter'))
+        picks = {}
+        for name, key in (("connection_id", "connectionId"), ("engine_id", "engineId")):
+            value = data.get(key)
+            if value is not None and (isinstance(value, bool) or not isinstance(value, int)):
+                return {"error": f"{key} must be a whole number"}, 400
+            picks[name] = value
+        try:
+            pin = pin_value(**picks)
+        except ValueError as exc:
+            return {"error": str(exc)}, 400
+        # A manual pick is answered for that one back end or engine, whatever engine is selected.
+        availability = (translation_available('openrouter', pin=pin)
+                        if pin is not None else translation_available('openrouter'))
         if not availability.available:
             return {"error": availability.reason}, 409
 
@@ -127,7 +135,7 @@ class TranslatorEditorJobs(Resource):
 
         job_id = enqueue_editor_translation(lines, data.get("sourceLanguage", ""), data["targetLanguage"],
                                             title=data.get("title", ""), media_type=data.get("mediaType", ""),
-                                            **({"pinned_connection_id": connection_id} if connection_id is not None else {}))
+                                            **({"pinned_connection_id": pin} if pin is not None else {}))
         if not job_id:
             return {"error": "The translation could not be queued, try again"}, 409
         return {"jobId": job_id}, 202
