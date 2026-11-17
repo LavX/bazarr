@@ -21,6 +21,7 @@ import {
   communitySource,
   flaresolverr,
   googleTranslate,
+  installation,
   installedBackend,
   installedTranslator,
   jobs as fixtureJobs,
@@ -496,5 +497,134 @@ describe("a page that cannot load", () => {
     ).toBeVisible();
     expect(screen.getByRole("button", { name: "Try again" })).toBeVisible();
     expect(screen.queryByRole("tab")).not.toBeInTheDocument();
+  });
+});
+
+describe("a first install that failed", () => {
+  const failed = installation(
+    "ai_translator",
+    "translator",
+    {},
+    {
+      name: "AI Subtitle Translator",
+      state: "failed",
+      active_version: null,
+      last_error: "Your proxy blocked the download.",
+    },
+  );
+
+  it("is not shown as installed, says why, and offers the install again, on both tabs", async () => {
+    installed = [failed];
+    const user = userEvent.setup();
+    showPage();
+    expect(
+      await screen.findByRole("button", {
+        name: "Install AI Subtitle Translator",
+      }),
+    ).toBeEnabled();
+    expect(
+      screen.queryByRole("button", { name: "Installed" }),
+    ).not.toBeInTheDocument();
+    expect(screen.getByText("Failed")).toBeVisible();
+    expect(screen.getByText("Your proxy blocked the download.")).toBeVisible();
+    await user.click(screen.getByRole("tab", { name: "Installed" }));
+    expect(
+      await screen.findByRole("button", {
+        name: "Install AI Subtitle Translator",
+      }),
+    ).toBeEnabled();
+  });
+
+  it("goes through the consent dialog and sends the digest when it is tried again", async () => {
+    installed = [failed];
+    const user = userEvent.setup();
+    showPage("?tab=installed");
+    await user.click(
+      await screen.findByRole("button", {
+        name: "Install AI Subtitle Translator",
+      }),
+    );
+    const dialog = await dialogNamed("Install AI Subtitle Translator?");
+    const confirm = await within(dialog).findByRole("button", {
+      name: "Install",
+    });
+    await waitFor(() => expect(confirm).toBeEnabled());
+    await user.click(confirm);
+    await waitFor(() =>
+      expect(calls.map((call) => call.path)).toContain("install"),
+    );
+    expect(calls.at(-1)?.body).toEqual({
+      source: "official",
+      id: "ai_translator",
+      version: "2.0.0",
+      consent: "sha256:aaaa",
+    });
+  });
+
+  it("does not make the plugin it was meant to extend look needed", async () => {
+    installed = [
+      installedTranslator,
+      { ...installedBackend, state: "failed", active_version: null },
+    ];
+    showPage("?tab=installed");
+    await card("AI Subtitle Translator");
+    expect(screen.queryByText(/Needed by/)).not.toBeInTheDocument();
+  });
+});
+
+describe("the Updates tab under a type filter", () => {
+  it("says there are none for this type, and that others have some", async () => {
+    installed = [installedTranslator];
+    showPage("?tab=updates&type=service");
+    expect(await screen.findByText("No updates for this type")).toBeVisible();
+    expect(
+      screen.getByText(/1 update is waiting for other types/),
+    ).toBeVisible();
+  });
+
+  it("holds the other Update buttons while one update goes ahead on its own", async () => {
+    installed = [
+      installedTranslator,
+      installation(
+        "google_translate",
+        "translator",
+        {},
+        { name: "Google Translate" },
+      ),
+    ];
+    current = catalog([aiTranslator, { ...googleTranslate, version: "1.1.0" }]);
+    let release: () => void = () => undefined;
+    const held = new Promise<void>((resolve) => (release = resolve));
+    server.use(
+      http.get("/api/plugins/updates/consent", () =>
+        HttpResponse.json(quietDelta),
+      ),
+      http.post("/api/plugins/updates/apply", async () => {
+        await held;
+        return HttpResponse.json({ job_id: null }, { status: 202 });
+      }),
+    );
+    const user = userEvent.setup();
+    showPage("?tab=updates");
+    await user.click(
+      await screen.findByRole("button", {
+        name: "Update AI Subtitle Translator to 2.0.0",
+      }),
+    );
+    await waitFor(() =>
+      expect(
+        screen.getByRole("button", {
+          name: "Update Google Translate to 1.1.0",
+        }),
+      ).toBeDisabled(),
+    );
+    release();
+    await waitFor(() =>
+      expect(
+        screen.getByRole("button", {
+          name: "Update Google Translate to 1.1.0",
+        }),
+      ).toBeEnabled(),
+    );
   });
 });

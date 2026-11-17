@@ -35,6 +35,7 @@ const Grid: FunctionComponent<{ rows: PluginRow[] } & CardActions> = ({
         onInstall={onInstall}
         onUpdate={onUpdate}
         updating={updating === row.id}
+        blocked={updating !== null && updating !== row.id}
       />
     ))}
   </div>
@@ -126,8 +127,13 @@ export const InstalledPanel: FunctionComponent<
 );
 
 export const UpdatesPanel: FunctionComponent<
-  PanelProps & { onCheck: () => void; checking: boolean }
-> = ({ rows, onCheck, checking, searching: _searching, ...actions }) => (
+  Omit<PanelProps, "searching"> & {
+    onCheck: () => void;
+    checking: boolean;
+    /** Updates there are for plugins of the other types, which the filter hides. */
+    elsewhere: number;
+  }
+> = ({ rows, filter, onCheck, checking, elsewhere, ...actions }) => (
   <Stack gap="md">
     <Header
       eyebrow="Updates"
@@ -149,8 +155,16 @@ export const UpdatesPanel: FunctionComponent<
     ) : (
       <EmptyState
         icon={faListCheck}
-        title="Everything is up to date"
-        body="When the catalog lists a newer release of a plugin you have, it shows here."
+        title={
+          filter === "all" || elsewhere === 0
+            ? "Everything is up to date"
+            : "No updates for this type"
+        }
+        body={
+          elsewhere > 0 && filter !== "all"
+            ? `${elsewhere} update${elsewhere === 1 ? " is" : "s are"} waiting for other types. Choose All to see ${elsewhere === 1 ? "it" : "them"}.`
+            : "When the catalog lists a newer release of a plugin you have, it shows here."
+        }
       />
     )}
   </Stack>

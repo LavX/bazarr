@@ -20,6 +20,8 @@ export interface PluginCostCaps {
   /** Dollars, or null for no cap. */
   jobCap: number | null;
   monthCap: number | null;
+  /** The one plugin the caps are about. Left out, they are shown for every install. */
+  pluginId?: string;
 }
 
 const capText = (cap: number | null) =>
@@ -151,14 +153,15 @@ export const InstallSummary: FunctionComponent<{
           </p>
         </Section>
       )}
-      {costCaps && (
-        <Section title="Spending">
-          <p className={styles.quiet}>
-            Cost caps right now: {capText(costCaps.jobCap)} per job,{" "}
-            {capText(costCaps.monthCap)} per month.
-          </p>
-        </Section>
-      )}
+      {costCaps &&
+        (!costCaps.pluginId || costCaps.pluginId === summary.plugin.id) && (
+          <Section title="Spending">
+            <p className={styles.quiet}>
+              Cost caps right now: {capText(costCaps.jobCap)} per job,{" "}
+              {capText(costCaps.monthCap)} per month.
+            </p>
+          </Section>
+        )}
       <Section title="Removing it">
         <p className={styles.quiet}>
           You can remove it at any time from the Plugin Hub. Its settings and

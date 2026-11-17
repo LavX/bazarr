@@ -179,6 +179,20 @@ export interface PluginRow {
 
 const UNKNOWN_SOURCE = "Unknown source";
 
+/**
+ * Whether an installation is one. A row that only records a failed first install has no active and
+ * no staged version, and the backend does not count it as installed, so neither does this page: the
+ * card offers the install again.
+ */
+export function isInstalled(
+  installation: PluginInstallation | null | undefined,
+): boolean {
+  return Boolean(
+    installation &&
+    (installation.active_version || installation.staged_version),
+  );
+}
+
 /** An installed plugin that extends this one, or requires a capability it provides. */
 export function dependentsOf(
   id: string,
@@ -187,7 +201,11 @@ export function dependentsOf(
 ): string[] {
   const names: string[] = [];
   for (const other of installations) {
-    if (other.provider_id === id || other.state === "removed") {
+    if (
+      other.provider_id === id ||
+      other.state === "removed" ||
+      !isInstalled(other)
+    ) {
       continue;
     }
     const facts = manifestFacts(other);
@@ -202,13 +220,25 @@ export function dependentsOf(
 }
 
 function rowOf(
-  entry: PluginCatalogEntry | null,
+  given: PluginCatalogEntry | null,
   installation: PluginInstallation | null,
   catalog: PluginCatalog | undefined,
   installations: PluginInstallation[],
 ): PluginRow {
+  // A failed first install has nothing installed to describe, so it is shown as the catalog's entry
+  // that can be installed again, when its source still lists one.
+  const retry = !given && installation && !isInstalled(installation);
+  const entry = retry
+    ? (getLatestCatalogEntry(
+        catalog,
+        installation.provider_id,
+        installation.source_id ?? null,
+      ) as PluginCatalogEntry | null)
+    : given;
   // What is installed is described by what was installed, and a catalog row by its entry.
-  const facts = manifestFacts((installation ?? entry)!);
+  const facts = manifestFacts(
+    (isInstalled(installation) ? installation : (entry ?? installation))!,
+  );
   const id = installation?.provider_id ?? entry!.provider_id;
   const sourceId = entry
     ? (entry.source ?? null)

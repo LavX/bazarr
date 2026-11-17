@@ -119,6 +119,10 @@
   color: var(--bz-text-tertiary);
 }
 
+.corner {
+  display: block;
+}
+
 .rowLabel {
   color: var(--bz-text-secondary);
 }
@@ -132,7 +136,11 @@
     grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
   }
 
-  .sideBySide .rowLabel {
+  .sideBySide .corner {
+    display: block;
+  }
+
+  .rowLabel {
     grid-column: 1 / -1;
   }
 }

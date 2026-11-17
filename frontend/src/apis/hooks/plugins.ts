@@ -1,7 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { QueryKeys } from "@/apis/queries/keys";
 import api from "@/apis/raw";
-import { inlineWhen } from "@/apis/raw/inlineWrites";
+import { inlineWhen, withInlineErrors } from "@/apis/raw/inlineWrites";
 import type {
   PluginInstallRequest,
   PluginUpdateApplyRequest,
@@ -51,7 +51,7 @@ export function usePluginInstallations(kind?: string) {
 export function usePluginInstallation(id: string | null) {
   return useQuery({
     queryKey: [...pluginsKey, "installation", id],
-    queryFn: () => api.plugins.installation(id!),
+    queryFn: () => withInlineErrors(() => api.plugins.installation(id!)),
     enabled: id !== null,
     retry: false,
     refetchOnWindowFocus: false,
@@ -71,11 +71,14 @@ export function usePluginInstallConsent(
 ) {
   return useQuery({
     queryKey: [...pluginsKey, CONSENT, "install", request],
+    // The dialog says why a read was refused, so the client's own toast would say it twice.
     queryFn: () =>
-      api.plugins.installConsent(
-        request!.source,
-        request!.id,
-        request!.version,
+      withInlineErrors(() =>
+        api.plugins.installConsent(
+          request!.source,
+          request!.id,
+          request!.version,
+        ),
       ),
     enabled: request !== null,
     staleTime: Infinity,
@@ -88,7 +91,7 @@ export function usePluginInstallConsent(
 export function usePluginUpdateConsent(id: string | null) {
   return useQuery({
     queryKey: [...pluginsKey, CONSENT, "update", id],
-    queryFn: () => api.plugins.updateConsent(id!),
+    queryFn: () => withInlineErrors(() => api.plugins.updateConsent(id!)),
     enabled: id !== null,
     staleTime: Infinity,
     gcTime: 0,

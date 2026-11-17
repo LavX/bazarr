@@ -55,7 +55,7 @@ const TABS: TabKey[] = ["marketplace", "installed", "updates", "activity"];
 
 /** The page while its first answer is on the way, in the shape it will take. */
 const LoadingPage: FunctionComponent = () => (
-  <div aria-busy="true" aria-label="Loading the Plugin Hub">
+  <div role="status" aria-busy="true" aria-label="Loading the Plugin Hub">
     <Skeleton height={54} radius="lg" mb="md" />
     <Skeleton height={36} width={360} radius="sm" mb="lg" />
     <div style={{ display: "grid", gap: 16 }}>
@@ -80,7 +80,11 @@ function useCostCaps(enabled: boolean): PluginCostCaps | undefined {
         return null;
       }
       const summary = await withInlineErrors(() => api.translation.summary());
-      return { jobCap: summary.job_cap, monthCap: summary.month.cap };
+      return {
+        jobCap: summary.job_cap,
+        monthCap: summary.month.cap,
+        pluginId: OFFICIAL_PLUGIN_ID,
+      };
     },
     enabled,
     retry: false,
@@ -114,7 +118,21 @@ const PluginHubView: FunctionComponent = () => {
       entry.source === OFFICIAL_SOURCE_ID,
   );
   const costCaps = useCostCaps(hasAiEngine);
-  const flow = usePluginConsentFlow({ costCaps });
+  const flow = usePluginConsentFlow({
+    costCaps,
+    // A finished install replaces the button that opened the dialog, and focus would fall to the
+    // page. It goes to the tab in use instead, so the next keypress starts from a known place.
+    onClosed: () => {
+      if (
+        document.activeElement === document.body ||
+        document.activeElement === null
+      ) {
+        document
+          .querySelector<HTMLElement>('[role="tab"][aria-selected="true"]')
+          ?.focus();
+      }
+    },
+  });
 
   const setParam = useCallback(
     (key: "tab" | "type", value: string, fallback: string) => {
@@ -181,6 +199,7 @@ const PluginHubView: FunctionComponent = () => {
       name: row.name,
       source: row.entry.source,
       version: row.entry.version,
+      kind: row.kind,
     });
   };
   const update = (row: PluginRow) =>
@@ -351,7 +370,7 @@ const PluginHubView: FunctionComponent = () => {
           <UpdatesPanel
             rows={updates}
             filter={filter}
-            searching={false}
+            elsewhere={allUpdates.length - updates.length}
             checking={checkUpdates.isPending}
             onCheck={() => checkUpdates.mutate()}
             {...actions}

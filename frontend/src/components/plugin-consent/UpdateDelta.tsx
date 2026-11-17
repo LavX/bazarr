@@ -51,9 +51,12 @@ export function installedFacts(
   };
 }
 
-const Cell: FunctionComponent<{ items: ReactNode[] }> = ({ items }) =>
+const Cell: FunctionComponent<{ items: ReactNode[]; none?: string }> = ({
+  items,
+  none = "None",
+}) =>
   items.length === 0 ? (
-    <span className={styles.quiet}>None</span>
+    <span className={styles.quiet}>{none}</span>
   ) : (
     <ul className={styles.lines}>
       {items.map((item, index) => (
@@ -62,36 +65,24 @@ const Cell: FunctionComponent<{ items: ReactNode[] }> = ({ items }) =>
     </ul>
   );
 
-/** The update half of the dialog: the old release and the new one side by side, then what joins it. */
+/**
+ * The update half of the dialog: what the installed release declares beside what the update adds to it.
+ * The server's delta lists only additions, so the second column says exactly that and never guesses
+ * at what the new release drops.
+ */
 export const UpdateDelta: FunctionComponent<{
   delta: PluginUpdateDelta;
   before: InstalledFacts | null;
 }> = ({ delta, before }) => {
   const { added } = delta;
-  const newPermissions = added.permissions.map((item) => item.name);
-  const afterPermissions = before
-    ? [...before.permissions, ...newPermissions]
-    : newPermissions;
-  const afterDestinations = before
-    ? [...before.destinations, ...added.destinations]
-    : added.destinations;
-  const newBinaries = added.binaries.map(binaryText);
   const beforeBinaries = before?.binaries.map(binaryText) ?? [];
-  const mark = (name: string) =>
-    newPermissions.includes(name) ? (
-      <span className={styles.added}>{permissionLabel(name)} (new)</span>
-    ) : (
-      permissionLabel(name)
-    );
-  const newest = (value: string, fresh: boolean) =>
-    fresh ? <span className={styles.added}>{value} (new)</span> : value;
   return (
     <>
       <Section title="What changes">
         <div className={styles.sideBySide}>
-          <span />
+          <span className={styles.corner} />
           <span className={styles.columnHead}>Installed now</span>
-          <span className={styles.columnHead}>After the update</span>
+          <span className={styles.columnHead}>This update adds</span>
 
           <span className={styles.rowLabel}>Version</span>
           <span>{delta.plugin.from_version ?? "Unknown"}</span>
@@ -103,28 +94,23 @@ export const UpdateDelta: FunctionComponent<{
               permissionLabel(name),
             )}
           />
-          <Cell items={afterPermissions.map(mark)} />
+          <Cell
+            none="Nothing new"
+            items={added.permissions.map((item) => permissionLabel(item.name))}
+          />
 
           <span className={styles.rowLabel}>Sends data to</span>
           <Cell items={before?.destinations ?? []} />
-          <Cell
-            items={afterDestinations.map((item) =>
-              newest(item, added.destinations.includes(item)),
-            )}
-          />
+          <Cell none="Nothing new" items={added.destinations} />
 
           <span className={styles.rowLabel}>Runs</span>
           <Cell items={beforeBinaries} />
-          <Cell
-            items={[...beforeBinaries, ...newBinaries].map((item) =>
-              newest(item, newBinaries.includes(item)),
-            )}
-          />
+          <Cell none="Nothing new" items={added.binaries.map(binaryText)} />
         </div>
         {before === null && (
           <p className={styles.quiet}>
-            The installed release could not be read, so only what is new is
-            listed in the second column.
+            The installed release could not be read, so only what the update
+            adds is listed.
           </p>
         )}
       </Section>

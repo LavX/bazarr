@@ -13,7 +13,7 @@ import { HubCard } from "@/components/hub/HubCard";
 import { ProviderStatusBadge, StatusBadge } from "@/components/hub/StatusBadge";
 import { TrustBadge } from "@/components/hub/TrustBadge";
 import { kindLabel, permissionLabel } from "@/components/plugin-consent/format";
-import { permissionMark, PluginRow, SandboxFacts } from "./model";
+import { isInstalled, permissionMark, PluginRow, SandboxFacts } from "./model";
 import pageStyles from "./PluginHub.module.scss";
 import styles from "@/components/hub/hub.module.scss";
 
@@ -24,6 +24,8 @@ interface PluginCardProps {
   onUpdate: (row: PluginRow) => void;
   /** This plugin's update is being applied. */
   updating: boolean;
+  /** Another plugin's install or update is going ahead, so this one waits its turn. */
+  blocked?: boolean;
 }
 
 /** The mark of the one plugin Bazarr+ ships itself, shown only when its source is the official one. */
@@ -46,8 +48,11 @@ const Action: FunctionComponent<PluginCardProps> = ({
   onInstall,
   onUpdate,
   updating,
+  blocked = false,
 }) => {
-  const { entry, installation } = row;
+  const { entry } = row;
+  // A row that only records a failed install is not an installation: the install is offered again.
+  const installation = isInstalled(row.installation) ? row.installation : null;
   if (installation?.pending_restart) {
     return (
       <Tooltip label="Restart Bazarr+ to finish this change">
@@ -62,6 +67,12 @@ const Action: FunctionComponent<PluginCardProps> = ({
         variant="light"
         color="yellow"
         loading={updating}
+        disabled={blocked}
+        title={
+          blocked
+            ? "Another plugin is being changed. Wait for it to finish."
+            : undefined
+        }
         onClick={() => onUpdate(row)}
         leftSection={<FontAwesomeIcon icon={faArrowUp} />}
         aria-label={`Update ${row.name} to ${row.update}`}
@@ -100,10 +111,23 @@ const Action: FunctionComponent<PluginCardProps> = ({
       </Tooltip>
     );
   }
+  if (!entry) {
+    return (
+      <Button size="xs" variant="light" color="gray" disabled>
+        Unavailable
+      </Button>
+    );
+  }
   return (
     <Button
       size="xs"
       variant="light"
+      disabled={blocked}
+      title={
+        blocked
+          ? "Another plugin is being changed. Wait for it to finish."
+          : undefined
+      }
       onClick={() => onInstall(row)}
       leftSection={<FontAwesomeIcon icon={faDownload} />}
       aria-label={`Install ${row.name}`}
@@ -139,7 +163,13 @@ export const PluginCard: FunctionComponent<PluginCardProps> = (props) => {
         </>
       }
       description={facts.description || undefined}
-      note={installation?.trust_note}
+      note={
+        installation?.trust_note ??
+        (row.installation && !isInstalled(row.installation)
+          ? (row.installation.last_error ??
+            "The last install did not finish. You can try it again.")
+          : undefined)
+      }
       extra={
         <>
           {(needs.length > 0 ||
@@ -196,11 +226,11 @@ export const PluginCard: FunctionComponent<PluginCardProps> = (props) => {
                     aria-hidden="true"
                   />
                 }
-                title={
+                aria-label={`${permissionLabel(name)}: ${mark}. ${
                   mark === "enforced"
-                    ? "This host holds the plugin to this permission"
-                    : "The plugin says it needs this, and nothing here confines it"
-                }
+                    ? "This host holds the plugin to this permission."
+                    : "The plugin says it needs this, and nothing here confines it."
+                }`}
               >
                 {permissionLabel(name)}: {mark}
               </Badge>

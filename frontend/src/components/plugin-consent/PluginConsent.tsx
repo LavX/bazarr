@@ -27,6 +27,8 @@ export type PluginConsentTarget =
       name?: string;
       source: string;
       version: string;
+      /** The kind of the plugin, when the caller knows it. A subtitle provider whose closure adds no other kind installs without the dialog. */
+      kind?: string;
     }
   | { action: "update"; pluginId: string; name?: string };
 
@@ -36,6 +38,8 @@ export interface PluginConsentProps {
   onClose: () => void;
   /** Called once the install or the update has finished, before the dialog closes. */
   onDone?: (target: PluginConsentTarget) => void;
+  /** Called when the dialog has finished closing, for a page that has to put focus somewhere itself. */
+  onClosed?: () => void;
   /** The spending caps to show for an AI engine. Left out, no spending line is shown. */
   costCaps?: PluginCostCaps;
 }
@@ -58,6 +62,7 @@ const PluginConsent: FunctionComponent<PluginConsentProps> = ({
   target,
   onClose,
   onDone,
+  onClosed,
   costCaps,
 }) => {
   const client = useQueryClient();
@@ -141,15 +146,18 @@ const PluginConsent: FunctionComponent<PluginConsentProps> = ({
       onDone?.(target);
       close();
     } catch (error) {
+      // A refusal can come twice. An install is refused at the request with a 409. An update is
+      // accepted and then refused by its job, and an install is checked again when its job starts.
+      // Either way what was shown may no longer be what the action would add, so the set and its
+      // digest are read again, and the person confirms what is shown next.
+      void client.invalidateQueries({
+        queryKey: [QueryKeys.Plugins, CONSENT],
+      });
       if (consentChanged(error)) {
-        // What the action adds is not what was shown. Show it again, and let the person decide again.
         setProblem(
           reasonOf(error) ||
             "What this would add has changed since it was shown to you. Review it again before you agree.",
         );
-        void client.invalidateQueries({
-          queryKey: [QueryKeys.Plugins, CONSENT],
-        });
         return;
       }
       setProblem(reasonOf(error) || FAILED[target.action]);
@@ -171,6 +179,7 @@ const PluginConsent: FunctionComponent<PluginConsentProps> = ({
       onClose={busy ? () => undefined : close}
       withCloseButton={!busy}
       closeButtonProps={{ "aria-label": "Close" }}
+      onExitTransitionEnd={onClosed}
       closeOnEscape={!busy}
       closeOnClickOutside={!busy}
       centered
@@ -184,8 +193,9 @@ const PluginConsent: FunctionComponent<PluginConsentProps> = ({
     >
       {target && (
         <Stack gap="md">
-          {query.isPending ? (
+          {query.isPending || (updating && installedQuery.isPending) ? (
             <div
+              role="status"
               aria-busy="true"
               aria-label="Loading what this would add"
               className={styles.body}

@@ -3,6 +3,8 @@ import { FunctionComponent, useState } from "react";
 import userEvent from "@testing-library/user-event";
 import { http, HttpResponse } from "msw";
 import { beforeEach, describe, expect, it } from "vitest";
+import queryClient from "@/apis/queries";
+import { QueryKeys } from "@/apis/queries/keys";
 import { customRender, screen, waitFor, within } from "@/tests";
 import server from "@/tests/mocks/node";
 import {
@@ -12,6 +14,7 @@ import {
   quietDelta,
   updateDelta,
 } from "./fixtures";
+import type { PluginCostCaps } from "./InstallSummary";
 import PluginConsent, { PluginConsentTarget } from "./PluginConsent";
 import { usePluginConsentFlow } from "./usePluginConsentFlow";
 
@@ -38,7 +41,7 @@ const updateTarget: PluginConsentTarget = {
 /** The dialog on its own, opened by one button and nothing else around it. */
 const Alone: FunctionComponent<{
   target: PluginConsentTarget;
-  costCaps?: { jobCap: number | null; monthCap: number | null };
+  costCaps?: PluginCostCaps;
   onDone?: (target: PluginConsentTarget) => void;
 }> = ({ target, costCaps, onDone }) => {
   const [open, setOpen] = useState(false);
@@ -57,7 +60,22 @@ const Alone: FunctionComponent<{
   );
 };
 
+/** The server's record of a job that ended badly, as the jobs cache holds it. */
+const failJob = (jobId: number, message: string) =>
+  queryClient.setQueryData(
+    [QueryKeys.System, QueryKeys.Jobs],
+    [
+      {
+        job_id: jobId,
+        job_name: "Plugin",
+        status: "failed",
+        error: { reason: "failed", message },
+      },
+    ],
+  );
+
 beforeEach(() => {
+  queryClient.clear();
   calls = [];
   server.use(
     http.get("/api/system/settings", () => HttpResponse.json({ general: {} })),
@@ -408,19 +426,15 @@ describe("the update dialog", () => {
       name: "What changes",
     });
     expect(within(table).getByText("Installed now")).toBeVisible();
-    expect(within(table).getByText("After the update")).toBeVisible();
+    expect(within(table).getByText("This update adds")).toBeVisible();
     expect(within(table).getByText("1.0.0")).toBeVisible();
     expect(within(table).getByText("1.1.0")).toBeVisible();
-    // The destination it adds is marked new; the one it had is in both columns.
-    expect(
-      within(table).getByText("https://api.deepl.com:443 (new)"),
-    ).toBeVisible();
-    expect(
-      within(table).getAllByText("https://openrouter.ai:443"),
-    ).toHaveLength(2);
-    expect(
-      within(table).getByText("Read your media folders (new)"),
-    ).toBeVisible();
+    // What it had stays in the first column; the second lists only what the update adds.
+    expect(within(table).getByText("https://openrouter.ai:443")).toBeVisible();
+    expect(within(table).getByText("https://api.deepl.com:443")).toBeVisible();
+    expect(within(table).getByText("Network access")).toBeVisible();
+    expect(within(table).getByText("Read your media folders")).toBeVisible();
+    expect(within(table).getAllByText("Nothing new")).toHaveLength(1);
     await user.click(within(dialog).getByRole("button", { name: "Update" }));
     await waitFor(() =>
       expect(calls.map((call) => call.path)).toContain("apply"),
@@ -477,5 +491,199 @@ describe("an update through the flow", () => {
     });
     await within(dialog).findByRole("group", { name: "What changes" });
     expect(calls.map((call) => call.path)).not.toContain("apply");
+  });
+});
+
+describe("a refusal that comes from the job, not the request", () => {
+  const stale =
+    "This update needs your consent first: it contacts https://api.deepl.com:443.";
+
+  it("reads an update's set again and sends the new digest on the next confirmation", async () => {
+    let delta = updateDelta;
+    let applies = 0;
+    server.use(
+      http.get("/api/plugins/updates/consent", () => {
+        record("get", "update-consent");
+        return HttpResponse.json(delta);
+      }),
+      http.post("/api/plugins/updates/apply", async ({ request }) => {
+        const body = (await request.json()) as { consent: string };
+        record("post", "apply", body);
+        applies += 1;
+        if (applies === 1) {
+          // The catalog moved on while the dialog was open: accepted, then refused by the job.
+          delta = { ...updateDelta, digest: "sha256:moved" };
+          failJob(77, stale);
+          return HttpResponse.json({ job_id: 77 }, { status: 202 });
+        }
+        return HttpResponse.json({ job_id: null }, { status: 202 });
+      }),
+    );
+    const user = userEvent.setup();
+    customRender(<Alone target={updateTarget} />);
+    const dialog = await open(user);
+    const update = await within(dialog).findByRole("button", {
+      name: "Update",
+    });
+    await waitFor(() => expect(update).toBeEnabled());
+    await user.click(update);
+    expect(await within(dialog).findByText(stale)).toBeVisible();
+    // The set is read again, and the dialog stays up for the person to decide again.
+    await waitFor(() =>
+      expect(
+        calls.filter((call) => call.path === "update-consent"),
+      ).toHaveLength(2),
+    );
+    await waitFor(() =>
+      expect(
+        within(dialog).getByRole("button", { name: "Update" }),
+      ).toBeEnabled(),
+    );
+    expect(calls.filter((call) => call.path === "apply")).toHaveLength(1);
+    await user.click(within(dialog).getByRole("button", { name: "Update" }));
+    await waitFor(() =>
+      expect(calls.filter((call) => call.path === "apply")).toHaveLength(2),
+    );
+    expect(calls.filter((call) => call.path === "apply").at(-1)?.body).toEqual({
+      id: "ai_translator",
+      consent: "sha256:moved",
+    });
+  });
+
+  it("shows an install job's own reason and reads the set again", async () => {
+    server.use(
+      http.post("/api/plugins/installations", async ({ request }) => {
+        record("post", "install", await request.json());
+        failJob(78, "Your proxy blocked the download.");
+        return HttpResponse.json({ job_id: 78 }, { status: 202 });
+      }),
+    );
+    const user = userEvent.setup();
+    customRender(<Alone target={installTarget} />);
+    const dialog = await open(user);
+    const install = await within(dialog).findByRole("button", {
+      name: "Install",
+    });
+    await waitFor(() => expect(install).toBeEnabled());
+    await user.click(install);
+    expect(
+      await within(dialog).findByText("Your proxy blocked the download."),
+    ).toBeVisible();
+    await waitFor(() =>
+      expect(
+        calls.filter((call) => call.path === "install-consent"),
+      ).toHaveLength(2),
+    );
+  });
+});
+
+describe("what the dialog waits for and leaves out", () => {
+  it("shows the spending line only for the plugin the caps are about", async () => {
+    const user = userEvent.setup();
+    customRender(
+      <Alone
+        target={installTarget}
+        costCaps={{ jobCap: 1, monthCap: 5, pluginId: "google_translate" }}
+      />,
+    );
+    const dialog = await open(user);
+    await within(dialog).findByRole("group", { name: "What it may do" });
+    expect(
+      within(dialog).queryByRole("group", { name: "Spending" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("does not say the installed release could not be read while it is still being read", async () => {
+    let release: () => void = () => undefined;
+    const held = new Promise<void>((resolve) => (release = resolve));
+    server.use(
+      http.get("/api/plugins/installations/:id", async () => {
+        await held;
+        return HttpResponse.json(installedTranslator);
+      }),
+    );
+    const user = userEvent.setup();
+    customRender(<Alone target={updateTarget} />);
+    const dialog = await open(user);
+    expect(await within(dialog).findByRole("status")).toBeVisible();
+    expect(
+      within(dialog).queryByRole("group", { name: "What changes" }),
+    ).not.toBeInTheDocument();
+    release();
+    const table = await within(dialog).findByRole("group", {
+      name: "What changes",
+    });
+    expect(
+      within(table).queryByText(/could not be read/),
+    ).not.toBeInTheDocument();
+  });
+
+  it("says so when the installed release cannot be read", async () => {
+    server.use(
+      http.get(
+        "/api/plugins/installations/:id",
+        () => new HttpResponse(null, { status: 500 }),
+      ),
+    );
+    const user = userEvent.setup();
+    customRender(<Alone target={updateTarget} />);
+    const dialog = await open(user);
+    expect(
+      await within(dialog).findByText(/installed release could not be read/),
+    ).toBeVisible();
+  });
+});
+
+describe("a subtitle provider through the flow", () => {
+  const Flow: FunctionComponent = () => {
+    const { begin, dialog } = usePluginConsentFlow();
+    return (
+      <>
+        <button
+          type="button"
+          onClick={() =>
+            void begin({ ...installTarget, kind: "subtitle_provider" })
+          }
+        >
+          Install it
+        </button>
+        {dialog}
+      </>
+    );
+  };
+
+  it("installs without the dialog when nothing but providers is in the set", async () => {
+    server.use(
+      http.get("/api/plugins/catalog/consent", () =>
+        HttpResponse.json({
+          ...plainSummary,
+          members: plainSummary.members.map((member) => ({
+            ...member,
+            kind: "subtitle_provider",
+          })),
+        }),
+      ),
+    );
+    const user = userEvent.setup();
+    customRender(<Flow />);
+    await user.click(screen.getByRole("button", { name: "Install it" }));
+    await waitFor(() =>
+      expect(calls.map((call) => call.path)).toContain("install"),
+    );
+    expect(calls.at(-1)?.body).toEqual({
+      source: "official",
+      id: "ai_translator",
+      version: "2.0.0",
+      consent: "sha256:plain",
+    });
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  });
+
+  it("opens the dialog when the set adds a plugin of another kind", async () => {
+    const user = userEvent.setup();
+    customRender(<Flow />);
+    await user.click(screen.getByRole("button", { name: "Install it" }));
+    expect(await screen.findByRole("dialog")).toBeInTheDocument();
+    expect(calls.map((call) => call.path)).not.toContain("install");
   });
 });
