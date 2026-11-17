@@ -98,6 +98,8 @@ class InstalledPlugin:
     version: str
     active: bool
     manifest: Mapping[str, Any]
+    # The catalog source the installation came from; None when the hub state does not say.
+    source_id: str | None = None
 
 
 def installed_plugin(plugin_id: str) -> InstalledPlugin | None:
@@ -109,8 +111,10 @@ def installed_plugin(plugin_id: str) -> InstalledPlugin | None:
         return None
     manifest = item["manifest"]
     active = bool(item.get("active_version")) and item.get("state") != "removed" and not item.get("blocked")
+    source = item.get("source_id")
     return InstalledPlugin(plugin_id, str(item.get("name") or manifest.get("name") or plugin_id),
-                           str(item.get("active_version") or manifest.get("version") or ""), active, manifest)
+                           str(item.get("active_version") or manifest.get("version") or ""), active, manifest,
+                           source if isinstance(source, str) else None)
 
 
 # Hooks the translation worker binds once it exists. With no worker, a value that passes the schema is accepted as is and the
@@ -421,7 +425,7 @@ class TranslatorSettingsService:
         description = self._parsed(plugin).raw.get("description") if plugin is not None and self._parsed(plugin) else None
         view = {
             "id": instance.id, "plugin_id": instance.plugin_id, "name": instance.name or (plugin.name if plugin else ""),
-            "official": instance.plugin_id == OFFICIAL_ENGINE_PLUGIN_ID, "enabled": bool(instance.enabled),
+            "official": self._is_official(instance, plugin), "enabled": bool(instance.enabled),
             "revision": instance.revision, "awaiting_secrets": bool(instance.awaiting_secrets),
             "configured": store.instance_configured(instance), "settings_version": instance.settings_version,
             "plugin_version": instance.plugin_version,
@@ -435,6 +439,18 @@ class TranslatorSettingsService:
         if isinstance(description, str) and description.strip():
             view["description"] = description.strip()[:300]
         return view
+
+    @staticmethod
+    def _is_official(instance, plugin: InstalledPlugin | None) -> bool:
+        """The official engine is the official plugin id installed from the official catalog source.
+
+        The same rule the catalog side applies to an engine on offer: a plugin that borrows the id from
+        another source is not the official engine.
+        """
+        from provider_hub.state import OFFICIAL_CATALOG_SOURCE_ID
+
+        return (instance.plugin_id == OFFICIAL_ENGINE_PLUGIN_ID and plugin is not None
+                and plugin.source_id == OFFICIAL_CATALOG_SOURCE_ID)
 
     def _legacy_view(self, instance, legacy) -> dict[str, Any]:
         """An engine Bazarr+ runs itself: its address, and whether a token is set, never the token."""
