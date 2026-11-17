@@ -39,14 +39,21 @@ def _kind_filter():
     return kind
 
 
-def _with_runtime(installation):
-    """The installation with how its worker is doing now, when it has one."""
+def _with_runtime(installation, state=None):
+    """The installation with how its worker is doing now, when it has one, and which installed plugins depend on
+    it. The dependents come from the same check that refuses a removal or a switch-off, so the page shows exactly
+    what the server would refuse over: ``dependents`` for a removal and ``enabled_dependents`` for a switch-off."""
     from subtitles.tools.translate.runtime import workers
 
     if not isinstance(installation, dict) or not installation.get("provider_id"):
         return installation
-    runtime = workers.runtime_of(installation["provider_id"])
-    return installation if runtime is None else {**installation, "runtime": runtime}
+    plugin_id = installation["provider_id"]
+    state = state if state is not None else service.load_state()
+    decorated = {**installation,
+                 "dependents": service.installed_dependents(plugin_id, state=state),
+                 "enabled_dependents": service.installed_dependents(plugin_id, enabled_only=True, state=state)}
+    runtime = workers.runtime_of(plugin_id)
+    return decorated if runtime is None else {**decorated, "runtime": runtime}
 
 
 def _installation(plugin_id):
@@ -110,7 +117,8 @@ class PluginsInstallations(Resource):
             kind = _kind_filter()
         except UnknownKindError as error:
             return str(error), 400
-        return {"data": [_with_runtime(item) for item in service.list_installations(kind=kind)]}
+        state = service.load_state()
+        return {"data": [_with_runtime(item, state) for item in service.list_installations(kind=kind)]}
 
     @authenticate
     @require_password_confirmation

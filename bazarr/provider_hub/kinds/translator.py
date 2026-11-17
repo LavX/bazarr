@@ -49,6 +49,19 @@ class TranslatorKind(Kind):
     kind_apis = frozenset({TRANSLATOR_KIND_API})
     attach_policy = ATTACH_ON_RESTART
     noun = "translator"
+    keeps_data = True
+
+    def discard_kept_data(self, plugin_id: str) -> None:
+        try:
+            _store().delete_plugin_data(plugin_id)
+        except Exception:
+            logger.exception("Could not discard the kept engine instances of translator %s", plugin_id)
+        try:
+            from subtitles.tools.translate.runtime import worker_binding
+
+            worker_binding.discard_folders(plugin_id)
+        except Exception:
+            logger.warning("Could not discard the kept folders of translator %s", plugin_id, exc_info=True)
 
     def on_installed(self, plugin_id: str, missing_required: Sequence[str] = ()) -> bool:
         try:

@@ -549,6 +549,26 @@ def test_removing_a_translator_keeps_or_deletes_what_it_stored_as_asked(store, p
         assert store.list_connections(instance.id) == []
 
 
+def test_deleting_a_plugins_data_takes_the_connections_it_serves_on_other_engines_and_only_those(store, pointers):
+    """A connection of another engine whose type and settings the removed plugin declares is the plugin's own. It
+    goes with the data, its keys with it, and the engine closes the gap. What the plugin does not serve stays."""
+    engine = _ai_engine(store, with_connection=False)
+    own = store.add_connection(engine.id, "openrouter", model="a", plugin_id=OFFICIAL_ENGINE_PLUGIN_ID)
+    served = store.add_connection(engine.id, "cli", model="b", plugin_id="cli_backend")
+    last = store.add_connection(engine.id, "lmstudio", model="c", plugin_id=OFFICIAL_ENGINE_PLUGIN_ID)
+    store.set_secret((CONNECTION, served.id), "token", KEY, destinations=frozenset({"https://cli.test"}))
+    backend_own = store.create_instance("cli_backend", name="CLI")
+    store.add_connection(backend_own.id, "cli", plugin_id="cli_backend")
+
+    store.delete_plugin_data("cli_backend")
+
+    assert store.list_instances("cli_backend") == []
+    remaining = store.list_connections(engine.id)
+    assert [(row.id, row.position) for row in remaining] == [(own.id, 0), (last.id, 1)]
+    assert store._secret_rows((CONNECTION, served.id)) == []
+    assert [row.id for row in store.list_instances(OFFICIAL_ENGINE_PLUGIN_ID)] == [engine.id]
+
+
 def test_disabling_a_plugin_releases_the_pointers_but_keeps_its_instances(store, pointers):
     google = store.create_instance("google_translate")
     store.set_engine(google.id)

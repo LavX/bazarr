@@ -1082,6 +1082,21 @@ def test_the_mark_is_written_and_cleared_while_no_binding_is_in_place(hub, monke
     assert not (folder / worker_binding.KEPT_MARKER).exists()
 
 
+def test_discarding_kept_folders_removes_them_with_their_mark(hub, monkeypatch):
+    folder = hub.root / "run" / PLUGIN
+    (folder / "data").mkdir(parents=True)
+    monkeypatch.setattr(worker_binding, "_definitions", None)
+    monkeypatch.setattr(worker_binding, "_port", None)
+    monkeypatch.setattr(worker_binding, "_hub_dir", lambda: hub.root)
+    worker_binding.plugin_kept(PLUGIN)
+    assert (folder / worker_binding.KEPT_MARKER).exists()
+
+    worker_binding.discard_folders(PLUGIN)
+
+    assert not folder.exists()
+    worker_binding.discard_folders("not a plugin id")  # nothing to do, and no error
+
+
 def test_keeping_the_data_of_a_plugin_that_never_ran_marks_nothing(hub, monkeypatch):
     definitions = hub.definitions()
     monkeypatch.setattr(worker_binding, "_definitions", definitions)

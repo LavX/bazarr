@@ -59,6 +59,13 @@ class Kind:
         """This plugin was removed or its removal was staged. Same return rule."""
         return True
 
+    # Whether the kind has anything of a plugin's to keep when it is removed (``after_removed`` with ``keep_data``).
+    keeps_data: bool = False
+
+    def discard_kept_data(self, plugin_id: str) -> None:
+        """Delete what an earlier removal kept of this plugin, because the plugin about to be installed under the
+        same id is not the one it was kept for."""
+
     def after_removed(self, plugin_id: str, keep_data: bool = False) -> None:
         """This plugin's removal has been saved. The place for cleanup that cannot be undone.
 

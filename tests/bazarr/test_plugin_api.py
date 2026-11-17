@@ -562,3 +562,46 @@ def test_the_choice_about_a_plugins_data_travels_through_the_job_queue_to_the_re
     jobs.uninstall_provider("exampleservice", "Service", keep_data=True, job_id=None)
     jobs.uninstall_provider("exampleservice", "Service", job_id=None)
     assert seen == [{"keep_data": True}, {"keep_data": False}]
+
+
+def _service_row(plugin_id, enabled=True, **manifest):
+    return {"provider_id": plugin_id, "kind": SERVICE_KIND, "name": plugin_id.title(), "active_version": "1.0.0",
+            "state": "active", "pending_restart": False, "enabled": enabled,
+            "manifest": service_manifest(plugin_id, **manifest)}
+
+
+def test_the_listing_names_the_dependents_the_removal_and_the_switch_off_would_refuse_over(
+        client, monkeypatch, tmp_path):
+    from provider_hub import jobs, service
+
+    monkeypatch.setattr(jobs, "queue_uninstall", lambda *a, **k: "job-1")
+    need = {"extends": {"id": "exampleservice", "capability": "example.v1"}}
+    write_state(tmp_path / "state.json", installations={
+        "exampleservice": _service_row("exampleservice", provides=["example.v1"]),
+        "dependent": _service_row("dependent", **need),
+        "sleeper": _service_row("sleeper", enabled=False, **need)})
+
+    listed = {item["provider_id"]: item for item in _get(client, "/api/plugins/installations").json["data"]}
+    item = listed["exampleservice"]
+
+    assert item["dependents"] == service.installed_dependents("exampleservice") == ["dependent", "sleeper"]
+    assert item["enabled_dependents"] == service.installed_dependents("exampleservice", enabled_only=True)
+    assert listed["dependent"]["dependents"] == [] and listed["dependent"]["enabled_dependents"] == []
+    refusal = client.delete("/api/plugins/installations/exampleservice", headers={"X-API-KEY": API_KEY})
+    assert refusal.status_code == 400
+    assert all(name in refusal.get_data(as_text=True) for name in item["dependents"])
+
+
+def test_a_capability_another_enabled_plugin_also_provides_leaves_nobody_depending_on_either(
+        client, monkeypatch, tmp_path):
+    from provider_hub import jobs
+
+    monkeypatch.setattr(jobs, "queue_uninstall", lambda *a, **k: "job-1")
+    write_state(tmp_path / "state.json", installations={
+        "supplier_a": _service_row("supplier_a", provides=["shared.v1"]),
+        "supplier_b": _service_row("supplier_b", provides=["shared.v1"]),
+        "user": _service_row("user", requires=["shared.v1"])})
+    listed = {item["provider_id"]: item for item in _get(client, "/api/plugins/installations").json["data"]}
+    assert listed["supplier_a"]["dependents"] == [] and listed["supplier_b"]["dependents"] == []
+    assert client.delete("/api/plugins/installations/supplier_a?keep_data=false",
+                         headers={"X-API-KEY": API_KEY}).status_code == 202

@@ -3674,6 +3674,8 @@ def _stage_validated(
             _discard_stopped_install(staged, existing)
             raise
         missing_required = [] if is_update else missing_required_fields(installation)
+        if not is_update:
+            claim_kept_data(validated.provider_id, source_id, validated.kind)
         if not is_update and not get_kind(validated.kind).on_installed(
                 validated.provider_id, missing_required=missing_required):
             # First install: opt the provider into Bazarr's enabled_providers so
@@ -4479,9 +4481,16 @@ def dependents_refusal_text(provider_id: str, names: list[str], action: str) -> 
     return closure.dependents_text(provider_id, names, action)
 
 
+def installed_dependents(provider_id: str, *, enabled_only: bool = False,
+                         state: dict[str, Any] | None = None) -> list[str]:
+    """The ids of the installed plugins that depend on ``provider_id``: the one answer the refusal to remove or
+    switch it off and the listing both give. With ``enabled_only``, plugins that are switched off do not count."""
+    return closure.dependents(state if state is not None else load_state(), provider_id, enabled_only=enabled_only)
+
+
 def dependent_refusal(provider_id: str, action: str, *, enabled_only: bool = False) -> str | None:
     """Why ``provider_id`` cannot be removed or switched off while others depend on it, or None."""
-    names = closure.dependents(load_state(), provider_id, enabled_only=enabled_only)
+    names = installed_dependents(provider_id, enabled_only=enabled_only)
     return closure.dependents_text(provider_id, names, action) if names else None
 
 
@@ -4561,6 +4570,7 @@ def remove_installation(provider_id: str, *, ignoring_dependents: frozenset[str]
             return False
         from . import runtime_status
         runtime_status.clear(provider_id)
+        _record_kept_data(provider_id, item, kind_hooks, keep_data)
         try:
             kind_hooks.after_removed(provider_id, keep_data=keep_data)
         except Exception:
@@ -4570,6 +4580,51 @@ def remove_installation(provider_id: str, *, ignoring_dependents: frozenset[str]
             return True
         job.update(message=f"Staged removal of '{target_name}' (restart Bazarr+ to finalize)")
         return True
+
+
+def _record_kept_data(provider_id: str, item: Any, kind_hooks: Any, keep_data: bool) -> None:
+    """Remember whose data was kept, so only the same plugin from the same source finds it again.
+
+    The kept data belongs to a plugin id, a source and a kind. A later install of the same id from another source,
+    or as another kind, is a different package, and ``claim_kept_data`` discards what was kept instead of handing
+    it over. A removal that deletes the data takes the record with it.
+    """
+    if not keep_data and not (load_state().get("kept_data") or {}).get(provider_id):
+        return
+    row = item if isinstance(item, dict) else {}
+    entry = {"source_id": row.get("source_id"), "kind": kind_of(row) if row else None}
+
+    def record(state: dict[str, Any]) -> None:
+        kept = state.setdefault("kept_data", {})
+        if keep_data and getattr(kind_hooks, "keeps_data", False):
+            kept[provider_id] = entry
+        else:
+            kept.pop(provider_id, None)
+
+    try:
+        mutate_state(record)
+    except Exception:
+        logging.getLogger(__name__).warning("Could not record the kept data of %s", provider_id, exc_info=True)
+
+
+def claim_kept_data(provider_id: str, source_id: str | None, kind: str) -> None:
+    """A first install is about to create what the plugin needs. Data kept by an earlier removal is handed over
+    only when it is the same plugin from the same source and of the same kind; otherwise it is discarded first,
+    so a different package under the same id never inherits settings and keys it was not given."""
+    taken: dict[str, Any] = {}
+
+    def claim(state: dict[str, Any]) -> None:
+        entry = (state.get("kept_data") or {}).pop(provider_id, None)
+        if isinstance(entry, dict):
+            taken.update(entry)
+
+    mutate_state(claim)
+    if not taken or (taken.get("source_id") == source_id and taken.get("kind") == kind):
+        return
+    try:
+        get_kind(str(taken.get("kind"))).discard_kept_data(provider_id)
+    except Exception:
+        logging.getLogger(__name__).warning("Could not discard the kept data of %s", provider_id, exc_info=True)
 
 
 def check_updates(*, kind: str | None = None) -> dict[str, Any]:

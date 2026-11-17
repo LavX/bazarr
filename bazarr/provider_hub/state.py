@@ -113,6 +113,8 @@ def default_state() -> dict[str, Any]:
         # removed plugin keeps its registrations: the row goes at the next
         # restart, the path never leaves.
         "plugin_secret_paths": [],
+        # plugin id -> {"source_id", "kind"} for a removal that kept the plugin's data.
+        "kept_data": {},
         # fingerprint -> {"path": venv directory}. Which environment each
         # dependency set runs in; see env_registry.
         "plugin_envs": {},
@@ -764,6 +766,8 @@ def _normalized_state(data: dict[str, Any]) -> dict[str, Any]:
                 installation["kind"] = SUBTITLE_PROVIDER
     data.setdefault("jobs", [])
     data.setdefault("plugin_secret_paths", [])
+    if not isinstance(data.get("kept_data"), dict):
+        data["kept_data"] = {}
     data.setdefault("plugin_envs", {})
     return data
 

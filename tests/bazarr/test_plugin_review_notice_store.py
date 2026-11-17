@@ -33,3 +33,56 @@ def test_dismissing_the_notice_of_a_plugin_that_is_not_there_writes_nothing_it_d
 
     assert service.dismiss_review_notice("ghost") is False
     assert "ghost" not in load_state()["installations"]
+
+
+class _Kind:
+    keeps_data = True
+
+    def __init__(self):
+        self.discarded = []
+
+    def discard_kept_data(self, plugin_id):
+        self.discarded.append(plugin_id)
+
+
+def _removal(service, kind, plugin_id, keep, **row):
+    service._record_kept_data(plugin_id, {"provider_id": plugin_id, "kind": "translator", "source_id": "official",
+                                           **row}, kind, keep)
+
+
+def test_kept_data_goes_back_only_to_the_same_plugin_from_the_same_source_and_kind(hub_store, hub_engine, monkeypatch):
+    from provider_hub import service
+    from provider_hub.state import load_state
+
+    kind = _Kind()
+    monkeypatch.setattr(service, "get_kind", lambda name: kind)
+    _removal(service, kind, "engine", True)
+    assert load_state()["kept_data"]["engine"] == {"source_id": "official", "kind": "translator"}
+
+    service.claim_kept_data("engine", "official", "translator")
+    assert kind.discarded == [] and "engine" not in load_state()["kept_data"]
+
+    for source, kind_name in (("community", "translator"), (None, "translator"), ("official", "service")):
+        _removal(service, kind, "engine", True)
+        service.claim_kept_data("engine", source, kind_name)
+        assert "engine" not in load_state()["kept_data"], (source, kind_name)
+    assert kind.discarded == ["engine"] * 3
+
+
+def test_a_removal_that_deletes_the_data_forgets_what_was_kept_and_a_kind_with_nothing_to_keep_records_nothing(
+        hub_store, hub_engine, monkeypatch):
+    from provider_hub import service
+    from provider_hub.state import load_state
+
+    kind = _Kind()
+    monkeypatch.setattr(service, "get_kind", lambda name: kind)
+    _removal(service, kind, "engine", True)
+    _removal(service, kind, "engine", False)
+    assert "engine" not in load_state()["kept_data"]
+
+    kind.keeps_data = False
+    _removal(service, kind, "provider", True)
+    assert "provider" not in load_state()["kept_data"]
+    # Nothing was kept for it, so a first install has nothing to discard either.
+    service.claim_kept_data("provider", "official", "subtitle_provider")
+    assert kind.discarded == []

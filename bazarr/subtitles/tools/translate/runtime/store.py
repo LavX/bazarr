@@ -384,9 +384,18 @@ class TranslatorStore:
         return self.release_pointers(ids, why="removed") if ids else PointerChange()
 
     def delete_plugin_data(self, plugin_id: str) -> None:
-        """Delete every instance of the plugin with its connections and secrets. Call it once the removal is saved."""
+        """Delete every instance of the plugin with its connections and secrets. Call it once the removal is saved.
+
+        A connection of another engine that the plugin serves is the plugin's too: its type, settings and keys are
+        declared by the plugin, and nothing else can use them. It goes as well, and the engine it was on closes the
+        gap in its order.
+        """
         for instance in self.list_instances(plugin_id):
             self._delete_instance_rows(instance.id)
+        served = self._session.execute(select(TableTranslatorConnection.id).where(
+            TableTranslatorConnection.plugin_id == plugin_id)).scalars().all()
+        for connection_id in served:
+            self.delete_connection(connection_id)
 
     def remove_plugin(self, plugin_id: str) -> PointerChange:
         """The plugin was uninstalled: the pointers that named an instance reset, then every instance goes."""
