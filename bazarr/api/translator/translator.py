@@ -107,11 +107,16 @@ class TranslatorEditorJobs(Resource):
         # whatever the settings page selected, so it asks the gate about that
         # engine. The gate's reason replaces the URL-only refusal, which said
         # nothing about an encryption key the client cannot even use.
-        availability = translation_available('openrouter')
+        data = flask_request.get_json(silent=True) or {}
+        connection_id = data.get("connectionId")
+        if connection_id is not None and (isinstance(connection_id, bool) or not isinstance(connection_id, int)):
+            return {"error": "connectionId must be a whole number"}, 400
+        # A manual pick is answered for that one back end, whatever engine is selected.
+        availability = (translation_available('openrouter', connection_id=connection_id)
+                        if connection_id is not None else translation_available('openrouter'))
         if not availability.available:
             return {"error": availability.reason}, 409
 
-        data = flask_request.get_json(silent=True) or {}
         lines = data.get("lines")
         if not lines or not data.get("targetLanguage"):
             return {"error": "Missing required fields: lines, targetLanguage"}, 400
@@ -121,7 +126,8 @@ class TranslatorEditorJobs(Resource):
             return {"error": "Each line needs a position and a line"}, 400
 
         job_id = enqueue_editor_translation(lines, data.get("sourceLanguage", ""), data["targetLanguage"],
-                                            title=data.get("title", ""), media_type=data.get("mediaType", ""))
+                                            title=data.get("title", ""), media_type=data.get("mediaType", ""),
+                                            **({"pinned_connection_id": connection_id} if connection_id is not None else {}))
         if not job_id:
             return {"error": "The translation could not be queued, try again"}, 409
         return {"jobId": job_id}, 202

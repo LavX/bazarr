@@ -152,6 +152,38 @@ def evaluate(store=None, holds: GateHolds | None = None, workers=None) -> GateRe
         return GateResult(False, f"The translator configuration cannot be read: {error}", UNREADABLE)
 
 
+PICK_MISSING = "The back end that was picked no longer exists"
+PICK_UNUSABLE = "The back end that was picked cannot be used right now"
+
+
+def pinned_gate(connection_id: int, store=None, holds: GateHolds | None = None, workers=None) -> GateResult:
+    """The gate for a manual pick: one back end, whatever engine the Translation page has selected.
+
+    It asks what the dispatcher asks of a pinned job: the connection exists, its engine can take a job, and the
+    connection itself is on, has its keys and is served by a plugin that runs. Never raises.
+    """
+    try:
+        if store is None:
+            from app.database import database
+
+            from .store import TranslatorStore
+
+            store = TranslatorStore(database)
+        connection = store.get_connection(connection_id, fresh=True)
+        instance = store.get_instance(connection.instance_id, fresh=True) if connection is not None else None
+        if connection is None or instance is None:
+            return GateResult(False, PICK_MISSING, ENGINE_MISSING)
+        state = engine_state(store, instance, holds, workers)
+        if not state.available:
+            return state
+        if not store.connection_usable(connection):
+            return GateResult(False, PICK_UNUSABLE, NOT_CONFIGURED, instance.id)
+        return GateResult(True, "", "", instance.id)
+    except Exception as error:
+        logger.error("BAZARR cannot read the translator configuration, so nothing can be translated: %s", error)
+        return GateResult(False, f"The translator configuration cannot be read: {error}", UNREADABLE)
+
+
 def translation_gate(store=None, holds: GateHolds | None = None, workers=None):
     """The gate as the old ``translation_available`` answers it: ``(available, reason)``."""
     from ..availability import TranslationAvailability

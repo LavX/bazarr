@@ -1224,10 +1224,11 @@ def _process_subtitle_item(item, action, options, job_id, children=None, *,
         # items. The item fails with the gate's reason instead of queueing
         # one doomed translation job after another.
         from subtitles.tools.translate.availability import translation_available
-        availability = translation_available()
+        pick = options.get('connection_id')
+        availability = translation_available(connection_id=pick) if pick is not None else translation_available()
         if not availability.available:
             raise ValueError(availability.reason)
-        from subtitles.tools.translate.main import translate_subtitles_file
+        from subtitles.tools.translate.main import pin_translation, translate_subtitles_file
         if item.get('sports_event_id'):
             media_type = 'sports'
         else:
@@ -1260,6 +1261,10 @@ def _process_subtitle_item(item, action, options, job_id, children=None, *,
         # Don't pass the batch job_id to translate. translate_subtitles_file
         # has its own job/progress lifecycle that would hijack the batch job.
         # Calling without job_id makes it queue as its own separate job.
+        if pick is not None:
+            # The pick is recorded on the job this item's request then joins.
+            pin_translation(item['video_path'], source_srt_file, options.get('to_lang', 'en'), item['forced'],
+                            item['hi'], None, pick)
         child_id = translate_subtitles_file(
             video_path=item['video_path'],
             source_srt_file=source_srt_file,

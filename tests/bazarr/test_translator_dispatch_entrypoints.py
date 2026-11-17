@@ -557,7 +557,9 @@ def test_the_editor_translates_through_the_selected_engine_when_the_runtime_is_o
 
     env.ai_engine()
     monkeypatch.setattr(service, "Dispatcher", lambda: env.dispatcher())
-    monkeypatch.setattr(editor, "_runtime_editor_service", lambda media_type: editor._RuntimeEditorService(media_type))
+    monkeypatch.setattr(editor, "_runtime_editor_service",
+                        lambda media_type, pinned_connection_id=None: editor._RuntimeEditorService(
+                            media_type, pinned_connection_id))
     lines = [{"position": 4, "line": "Hello"}, {"position": 9, "line": "World"}]
     job_id = editor.enqueue_editor_translation(lines, "en", "fr", title="Example")
     _run_editor_job(editor_queue, job_id)
@@ -573,7 +575,9 @@ def test_the_editor_says_why_when_the_gate_is_closed(env, editor_queue, monkeypa
     from subtitles.tools.translate.runtime import service
 
     monkeypatch.setattr(service, "Dispatcher", lambda: env.dispatcher())
-    monkeypatch.setattr(editor, "_runtime_editor_service", lambda media_type: editor._RuntimeEditorService(media_type))
+    monkeypatch.setattr(editor, "_runtime_editor_service",
+                        lambda media_type, pinned_connection_id=None: editor._RuntimeEditorService(
+                            media_type, pinned_connection_id))
     job_id = editor.enqueue_editor_translation([{"position": 0, "line": "Hello"}], "en", "fr")
     _run_editor_job(editor_queue, job_id)
     state = editor.editor_translation_state(job_id)

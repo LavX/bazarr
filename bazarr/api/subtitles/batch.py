@@ -56,6 +56,8 @@ class BatchOperation(Resource):
         'output_mode': fields.String(description='Sync output mode: overwrite or keep_all'),
         'from_lang': fields.String(description='Source language code for translate action'),
         'to_lang': fields.String(description='Target language code for translate action'),
+        'connection_id': fields.Integer(
+            description='Translate only: the id of one back end of the new translator to run every job on'),
     })
 
     post_request_model = api_ns_batch.model('BatchRequest', {
@@ -119,7 +121,12 @@ class BatchOperation(Resource):
         # a switched-off or half-configured translator turned one request into
         # one doomed job per item.
         if action == 'translate':
-            availability = translation_available()
+            options = data.get('options') or {}
+            connection_id = options.get('connection_id') if isinstance(options, dict) else None
+            if connection_id is not None and (isinstance(connection_id, bool) or not isinstance(connection_id, int)):
+                return {'error': 'connection_id must be a whole number'}, 400
+            availability = (translation_available(connection_id=connection_id) if connection_id is not None
+                            else translation_available())
             if not availability.available:
                 return {'error': availability.reason}, 409
 

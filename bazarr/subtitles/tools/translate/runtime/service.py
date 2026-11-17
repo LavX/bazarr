@@ -288,12 +288,14 @@ class EditorTranslation:
 
 
 def translate_lines(lines, source_language, target_language, title="", media_type="", job_id=None,
-                    dispatcher=None) -> EditorTranslation | None:
+                    dispatcher=None, pinned_connection_id=None) -> EditorTranslation | None:
     """Translate lines the subtitle editor sent, through the selected engine with its failover and fallback.
 
     Returns the lines in the order given, or None when the job found itself replaced or already running. Raises
     ``dispatch.GateClosed`` (the selected engine cannot translate), ``dispatch.Declined`` or
     ``TranslationRuntimeError``.
+
+    ``pinned_connection_id`` runs the lines on that back end alone, with no failover and no fallback engine.
     """
     def check():
         if job_id:
@@ -333,6 +335,7 @@ def translate_lines(lines, source_language, target_language, title="", media_typ
         source_key="editor:" + line_digest(lines), target_key=target_key(target_language), lines=list(lines),
         source_language=source_language or None, target_language=target_language,
         media={"type": media_type or "", "title": title or ""} if (media_type or title) else {},
+        pinned_connection_id=pinned_connection_id,
         history_media={"media_type": media_type or "editor", "media_title": title or None},
         check_cancel=check, progress=progress, legacy=legacy)
     try:

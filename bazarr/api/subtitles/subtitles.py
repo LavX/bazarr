@@ -18,7 +18,7 @@ from utilities.video_analyzer import subtitles_sync_references
 from subtitles.tools.subsyncer import SubSyncer  # noqa: F401
 from subtitles.tools.subsync_engines import is_sync_engine_output
 from subtitles.tools.translate.availability import translation_available
-from subtitles.tools.translate.main import translate_subtitles_file
+from subtitles.tools.translate.main import pin_translation, translate_subtitles_file
 from subtitles.tools.translate.batch import extract_embedded_subtitle
 from subtitles.tools.mods import apply_subtitle_mods
 from subtitles.indexer.series import store_subtitles
@@ -225,6 +225,12 @@ class Subtitles(Resource):
         help="Comma-separated sync engines to use",
     )
     patch_request_parser.add_argument(
+        "connection_id",
+        type=int,
+        required=False,
+        help="Translate only: the id of one back end of the new translator to run the job on, with no failover",
+    )
+    patch_request_parser.add_argument(
         "codec",
         type=str,
         required=False,
@@ -263,8 +269,10 @@ class Subtitles(Resource):
         # persistent extracted_subs directory, so a closed gate must not run
         # the extractor, and it must not lose to the missing-file error for a
         # request it refuses anyway.
+        connection_id = args.get("connection_id") if action == "translate" else None
         if action == "translate":
-            availability = translation_available()
+            availability = (translation_available(connection_id=connection_id) if connection_id is not None
+                            else translation_available())
             if not availability.available:
                 return availability.reason, 409
 
@@ -675,6 +683,9 @@ class Subtitles(Resource):
                 with queue_lock:
                     if reads_with_ocr and ocr_job_waiting_or_running():
                         return BUSY, 409
+                    # A manual pick is recorded on the job first, and the request below joins it.
+                    pin_translation(video_path, subtitles_path, dest_language, forced, hi, embedded_source,
+                                    connection_id)
                     job_id = translate_subtitles_file(
                         video_path=video_path,
                         source_srt_file=subtitles_path,
