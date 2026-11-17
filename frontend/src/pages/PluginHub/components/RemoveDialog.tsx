@@ -29,6 +29,17 @@ export function engineEffects(
       );
       continue;
     }
+    const served = engine.connections.filter(
+      (item) => item.plugin_id === pluginId,
+    );
+    if (served.length > 0) {
+      const these = served.length === 1 ? "connection goes" : "connections go";
+      effects.push(
+        keepData
+          ? `${served.length} ${these} through this plugin on ${engine.name}. ${served.length === 1 ? "It stays" : "They stay"}, and cannot be used until the plugin is installed again.`
+          : `${served.length} ${these} through this plugin on ${engine.name}. ${served.length === 1 ? "It is" : "They are"} deleted with the plugin, keys included.`,
+      );
+    }
     const enabled = engine.connections.filter((item) => item.enabled);
     const left = enabled.filter((item) => item.plugin_id !== pluginId);
     if (enabled.length > 0 && left.length === 0) {

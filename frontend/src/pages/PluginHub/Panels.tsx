@@ -7,11 +7,9 @@ import {
   faStore,
 } from "@fortawesome/free-solid-svg-icons";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
-import type { PluginInstallation } from "@/apis/raw/plugins";
 import { EmptyState } from "@/components/hub/EmptyState";
 import { KIND_PURPOSE, PluginRow, TypeFilter } from "./model";
 import { PluginCard, PluginCardProps } from "./PluginCard";
-import { enabledDependents } from "./status";
 import styles from "@/components/hub/hub.module.scss";
 
 export interface CardActions extends Pick<
@@ -27,8 +25,6 @@ export interface CardActions extends Pick<
   | "onDismissReview"
 > {
   updating: string | null;
-  /** Every installation, to tell which plugins need which. */
-  installations: PluginInstallation[];
   /** The plugin a turn on or off, a repair or a removal is on its way for. */
   working: string | null;
   /** The plugin whose review notice is being dismissed. */
@@ -38,7 +34,6 @@ export interface CardActions extends Pick<
 const Grid: FunctionComponent<{ rows: PluginRow[] } & CardActions> = ({
   rows,
   updating,
-  installations,
   working,
   dismissing,
   ...actions
@@ -51,7 +46,6 @@ const Grid: FunctionComponent<{ rows: PluginRow[] } & CardActions> = ({
         {...actions}
         updating={updating === row.id}
         blocked={updating !== null && updating !== row.id}
-        enabledDependents={enabledDependents(row, installations)}
         working={working === row.id}
         elsewhere={working !== null && working !== row.id}
         dismissing={dismissing === row.id}

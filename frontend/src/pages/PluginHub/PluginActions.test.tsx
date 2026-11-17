@@ -15,6 +15,7 @@ import {
   installedBackend,
   installedTranslator,
   opencodeBackend,
+  translatorWithBackend,
 } from "./fixtures";
 import { installedRows } from "./model";
 import PluginHubView from ".";
@@ -52,7 +53,7 @@ beforeEach(() => {
   jobs = [];
   logAnswer = { lines: [], last_error: null };
   translationState = null;
-  installed = [installedTranslator, installedBackend];
+  installed = [translatorWithBackend, installedBackend];
   window.history.replaceState({}, "", "/?tab=installed");
   server.use(
     http.get("/api/plugins/catalog", () => HttpResponse.json(sameReleases())),
@@ -273,6 +274,44 @@ describe("removing a plugin", () => {
         },
       ]),
     );
+  });
+
+  it("says how many connections on other engines go through the plugin, and what becomes of them", async () => {
+    installed = [installedBackend];
+    translationState = {
+      enabled: true,
+      engine: 1,
+      fallback_engine: null,
+      instances: [
+        {
+          id: 1,
+          plugin_id: "ai_translator",
+          name: "AI Subtitle Translator",
+          enabled: true,
+          connections: [
+            { id: 5, plugin_id: "opencode_backend", enabled: true },
+            { id: 6, plugin_id: "ai_translator", enabled: true },
+          ],
+        },
+      ],
+    };
+    showPage();
+    const { user, dialog } = await openRemove("Opencode back end");
+    expect(
+      await within(dialog).findByText(
+        /1 connection goes through this plugin on AI Subtitle Translator. It stays/,
+      ),
+    ).toBeInTheDocument();
+    await user.click(
+      within(dialog).getByRole("radio", {
+        name: /Delete its settings and data/,
+      }),
+    );
+    expect(
+      await within(dialog).findByText(
+        /It is deleted with the plugin, keys included/,
+      ),
+    ).toBeInTheDocument();
   });
 
   it("says when it would leave the engine with no enabled connection", async () => {

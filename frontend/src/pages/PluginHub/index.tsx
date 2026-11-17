@@ -360,7 +360,6 @@ const PluginHubView: FunctionComponent = () => {
     onInstall: install,
     onUpdate: update,
     updating: flow.updating,
-    installations: installed,
     openJobs: open,
     working,
     dismissing: dismissReview.isPending

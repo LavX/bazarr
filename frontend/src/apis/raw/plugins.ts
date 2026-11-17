@@ -147,6 +147,10 @@ export interface PluginInstallation extends ProviderHubInstallation {
   development_source?: boolean;
   /** Absent while the plugin has no worker, or nothing is bound to run one. */
   runtime?: PluginRuntime;
+  /** Ids of the installed plugins that depend on this one, by the server's own check: what a removal refuses over. */
+  dependents?: string[];
+  /** The same, counting only the plugins that are switched on: what switching it off refuses over. */
+  enabled_dependents?: string[];
   /** True while a plugin installed for the person has a review notice they have not dismissed. */
   review_pending?: boolean;
 }

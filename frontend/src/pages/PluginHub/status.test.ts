@@ -4,13 +4,7 @@ import "@/tests";
 import type { PluginInstallation, PluginJob } from "@/apis/raw/plugins";
 import { installation } from "./fixtures";
 import { installedRows } from "./model";
-import {
-  attentionCause,
-  enabledDependents,
-  openJobs,
-  pluginStatus,
-  runtimeLine,
-} from "./status";
+import { attentionCause, openJobs, pluginStatus, runtimeLine } from "./status";
 
 const rowFor = (item: PluginInstallation, others: PluginInstallation[] = []) =>
   installedRows(undefined, [item, ...others], "all")[0];
@@ -162,13 +156,18 @@ describe("the runtime line", () => {
 });
 
 describe("who needs a plugin", () => {
-  it("counts only the dependents that are switched on", () => {
+  it("shows exactly the dependents the server lists, by name, and works nothing out itself", () => {
     const needed = installation(
       "engine",
       "translator",
       { provides: ["engine.v1"] },
-      { name: "Engine" },
+      {
+        name: "Engine",
+        dependents: ["backend_off", "backend_on"],
+        enabled_dependents: ["backend_on"],
+      },
     );
+    // These two would be found by reading manifests. The page ignores that and takes the server's lists.
     const on = installation(
       "backend_on",
       "translator_backend",
@@ -181,9 +180,21 @@ describe("who needs a plugin", () => {
       { extends: { id: "engine", capability: "engine.v1" } },
       { name: "Backend off", enabled: false },
     );
-    const all = [needed, on, off];
     const row = rowFor(needed, [on, off]);
     expect(row.dependents).toEqual(["Backend off", "Backend on"]);
-    expect(enabledDependents(row, all)).toEqual(["Backend on"]);
+    expect(row.enabledDependents).toEqual(["Backend on"]);
+  });
+
+  it("lists nobody when the server lists nobody, even if a manifest says it extends the plugin", () => {
+    const needed = installation(
+      "engine",
+      "translator",
+      {},
+      { name: "Engine", dependents: [] },
+    );
+    const extender = installation("extender", "translator_backend", {
+      extends: { id: "engine", capability: "engine.v1" },
+    });
+    expect(rowFor(needed, [extender]).dependents).toEqual([]);
   });
 });

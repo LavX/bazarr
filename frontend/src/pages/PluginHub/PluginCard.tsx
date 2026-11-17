@@ -36,8 +36,6 @@ export interface PluginCardProps {
   blocked?: boolean;
   /** What the open jobs are doing, by plugin id. */
   openJobs: Map<string, Set<string>>;
-  /** The names of the installed plugins that need this one and are switched on. */
-  enabledDependents: string[];
   /** A request for this plugin (turn on or off, repair, remove) is on its way. */
   working: boolean;
   /** A request for another plugin is on its way. */
@@ -192,7 +190,7 @@ export const PluginCard: FunctionComponent<PluginCardProps> = (props) => {
         installed ? (
           <PluginMenu
             row={row}
-            enabledDependents={props.enabledDependents}
+            enabledDependents={row.enabledDependents}
             busy={busy}
             elsewhere={props.elsewhere}
             onToggle={props.onToggle}

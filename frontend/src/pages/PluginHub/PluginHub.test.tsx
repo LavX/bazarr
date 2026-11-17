@@ -29,6 +29,7 @@ import {
   officialSource,
   opencodeBackend,
   subdl,
+  translatorWithBackend,
 } from "./fixtures";
 import PluginHubView from ".";
 
@@ -139,7 +140,7 @@ describe("the tabs", () => {
   });
 
   it("lists what is installed on the Installed tab, with who needs what", async () => {
-    installed = [installedTranslator, installedBackend];
+    installed = [translatorWithBackend, installedBackend];
     showPage("?tab=installed");
     expect(await card("AI Subtitle Translator")).toBeVisible();
     // The back end extends the translator, so the translator says it is needed.

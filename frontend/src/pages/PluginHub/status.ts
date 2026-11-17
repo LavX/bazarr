@@ -174,16 +174,3 @@ export function runtimeLine(runtime: PluginRuntime | undefined): string | null {
       return null;
   }
 }
-
-/** The names of the installed plugins that need this one and are switched on. */
-export function enabledDependents(
-  row: PluginRow,
-  installations: PluginInstallation[],
-): string[] {
-  return row.dependents.filter((name) => {
-    const other = installations.find(
-      (item) => (item.name ?? item.provider_id) === name,
-    );
-    return other?.enabled !== false;
-  });
-}
