@@ -13,7 +13,8 @@ The gate lives here, at the API layer, and never inside the modules that do
 the work. Startup auto-install, activation at boot and the restore that runs
 at the next start call those modules directly, with no request and no user,
 and must keep working. Listing, creating and deleting the things the gate
-protects stays open.
+protects stays open, except that removing a plugin through the plugin routes
+is gated too: it can delete the plugin's settings, stored keys and data.
 """
 
 from functools import wraps

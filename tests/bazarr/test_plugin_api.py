@@ -505,3 +505,60 @@ def test_removing_a_plugin_refuses_an_answer_that_is_neither_keep_nor_delete(cli
     response = client.delete("/api/plugins/installations/exampleservice?keep_data=maybe",
                             headers={"X-API-KEY": API_KEY})
     assert response.status_code == 400
+
+
+@pytest.mark.parametrize("query", ["", "?keep_data=false"])
+def test_removing_a_plugin_needs_the_password_confirmation_whichever_answer_is_given_about_its_data(
+        client, monkeypatch, query):
+    from app.config import settings
+    from provider_hub import jobs
+
+    queued = []
+    monkeypatch.setattr(jobs, "queue_uninstall", lambda *a, **k: queued.append((a, k)) or "job-1")
+    monkeypatch.setattr(settings.auth, "type", "form")
+    path = f"/api/plugins/installations/exampleservice{query}"
+
+    keyed = client.delete(path, headers={"X-API-KEY": API_KEY})
+    assert keyed.status_code == 403 and keyed.get_json()["code"] == "confirm_password"
+    assert queued == []
+
+    _prime(client)
+    confirmed = client.delete(path, headers={"X-API-KEY": API_KEY})
+    assert confirmed.status_code == 202 and len(queued) == 1
+
+
+def test_a_removal_of_a_plugin_another_one_needs_is_refused_whatever_is_said_about_its_data(
+        client, monkeypatch, tmp_path):
+    from provider_hub import jobs
+
+    monkeypatch.setattr(jobs, "queue_uninstall", lambda *a, **k: pytest.fail("nothing is queued"))
+
+    def row(plugin_id, **manifest):
+        return {"provider_id": plugin_id, "kind": SERVICE_KIND, "name": plugin_id, "active_version": "1.0.0",
+                "state": "active", "pending_restart": False, "manifest": service_manifest(plugin_id, **manifest)}
+
+    write_state(tmp_path / "state.json", installations={
+        "exampleservice": row("exampleservice", provides=["example.v1"]),
+        "dependent": row("dependent", extends={"id": "exampleservice", "capability": "example.v1"})})
+    for query in ("", "?keep_data=false"):
+        response = client.delete(f"/api/plugins/installations/exampleservice{query}", headers={"X-API-KEY": API_KEY})
+        assert response.status_code == 400 and "dependent" in response.get_data(as_text=True)
+
+
+def test_the_choice_about_a_plugins_data_travels_through_the_job_queue_to_the_removal(monkeypatch):
+    from provider_hub import jobs, service
+
+    enqueued = []
+    monkeypatch.setattr(jobs, "_enqueue", lambda label, func, kwargs: enqueued.append((func, kwargs)) or "job-1")
+    jobs.queue_uninstall("exampleservice", "Service", keep_data=True)
+    jobs.queue_uninstall("exampleservice", "Service")
+    assert enqueued[0] == ("uninstall_provider", {"provider_id": "exampleservice", "name": "Service",
+                                                  "keep_data": True})
+    assert "keep_data" not in enqueued[1][1]
+
+    seen = []
+    monkeypatch.setattr(jobs.jobs_queue, "update_job_progress", lambda **kwargs: None)
+    monkeypatch.setattr(service, "remove_installation", lambda provider_id, **kwargs: seen.append(kwargs) or True)
+    jobs.uninstall_provider("exampleservice", "Service", keep_data=True, job_id=None)
+    jobs.uninstall_provider("exampleservice", "Service", job_id=None)
+    assert seen == [{"keep_data": True}, {"keep_data": False}]

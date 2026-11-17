@@ -56,6 +56,13 @@ class TranslatorKind(Kind):
         except Exception:
             logger.exception("Could not create the engine instance for translator %s", plugin_id)
             return False
+        try:
+            from subtitles.tools.translate.runtime import worker_binding
+
+            # Data kept when the plugin was removed is in use again, so the mark that kept it goes.
+            worker_binding.plugin_installed(plugin_id)
+        except Exception:
+            logger.warning("Could not clear the kept mark of translator %s", plugin_id, exc_info=True)
         return True
 
     def on_removed(self, plugin_id: str) -> bool:

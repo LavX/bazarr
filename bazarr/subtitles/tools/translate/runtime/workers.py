@@ -40,6 +40,8 @@ import threading
 import uuid
 from typing import Any, Callable, Mapping, Protocol
 
+from secret_store.scrub import scrub_text
+
 logger = logging.getLogger(__name__)
 
 TRANSLATE_OP = "translate"
@@ -363,7 +365,7 @@ def runtime_summary(worker: Mapping[str, Any]) -> dict:
         "phase": phase,
         "in_flight": in_flight,
         "retry_after": worker.get("retry_after"),
-        "last_error": worker.get("last_error"),
+        "last_error": scrub_text(str(worker["last_error"])) if worker.get("last_error") else None,
         "starts": int(worker.get("starts") or 0),
         "crashes": int(worker.get("crashes") or 0),
         "memory_bytes": int(worker.get("memory_bytes") or 0),

@@ -45,3 +45,10 @@ def test_a_pool_that_cannot_answer_reads_as_no_runtime():
 def test_nothing_is_reported_while_no_port_is_bound():
     workers.unbind()
     assert workers.runtime_of("any") is None and workers.stderr_tail_of("any") == []
+
+
+def test_a_start_failure_is_scrubbed_before_it_leaves_the_host():
+    secret = "sk-" + "a1b2c3d4" * 4  # pragma: allowlist secret
+    summary = workers.runtime_summary({"state": "backoff", "last_error": f"handshake failed, Bearer {secret}"})
+    assert secret not in summary["last_error"] and summary["last_error"].startswith("handshake failed")
+    assert workers.runtime_summary({"state": "ready"})["last_error"] is None

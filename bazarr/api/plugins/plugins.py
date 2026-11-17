@@ -225,10 +225,12 @@ class PluginsInstallation(Resource):
         return installation
 
     @authenticate
+    @require_password_confirmation
     @api_ns_plugins.param('keep_data', 'true (the default) keeps its saved settings and data folder, false deletes them')
     @api_ns_plugins.response(202, 'Uninstall queued as a job')
     @api_ns_plugins.response(400, 'Another plugin depends on it, or keep_data is not true or false')
     @api_ns_plugins.response(401, 'Not Authenticated')
+    @api_ns_plugins.response(403, 'Password confirmation required')
     @api_ns_plugins.response(404, 'Plugin not found')
     def delete(self, plugin_id):
         installation = _installation(plugin_id)
