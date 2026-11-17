@@ -63,6 +63,9 @@ Spec layout (JSON object)::
       "seccomp": true
     }
 
+``deny_connect_ports`` (default none) refuses TCP connections to those ports on kernels with network
+rules and leaves every other connection alone; the provider profile uses it for Bazarr+'s own port.
+
 ``seccomp`` (default true) false leaves out the metadata filter; the provider profile does that so
 ``ffmpeg`` can work, and nothing else may.
 
@@ -300,6 +303,7 @@ def _child(spec, landlock, seccomp, capabilities, parent_pid, close_fds, report_
                 devices=spec.get("devices", ()),
                 resolve_unix=spec.get("resolve_unix", ()),
                 connect_ports=spec.get("connect_ports"),
+                deny_connect_ports=spec.get("deny_connect_ports") or (),
                 abi_cap=spec.get("abi_cap"),
                 min_abi=int(spec.get("min_abi", 1)),
             )

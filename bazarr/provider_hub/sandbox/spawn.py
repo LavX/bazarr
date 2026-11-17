@@ -69,7 +69,7 @@ __all__ = [
     "note_provider_blocked",
     "note_provider_unsandboxed",
     "probe_sandbox",
-    "PROVIDER_PROFILE_LIMITATIONS",
+    "provider_profile_limitations",
     "provider_profile_enabled",
     "provider_profile_gaps",
     "provider_profile_status",
@@ -168,6 +168,10 @@ class SandboxProbe:
     # tree nor write there. True on ABI 3 and above whenever ``verified`` is, and also on ABI 1
     # and 2, where ``verified`` stays False because truncate(2) is not covered.
     reads_verified: bool = False
+    # The kernel genuinely has no Landlock to give (no syscall, disabled at boot, blocked by a seccomp
+    # profile). False for a check that failed or could not finish: that is not the same as absent, and
+    # the provider profile refuses to start workers on a host that may enforce but could not confirm it.
+    absent: bool = False
 
     @property
     def enforced(self) -> bool:
@@ -320,7 +324,7 @@ def reset_provider_notices() -> None:
         _provider_notices.clear()
 
 
-def provider_profile_gaps(abi: int) -> list[str]:
+def provider_profile_gaps(abi: int, *, authentication_off: bool = False) -> list[str]:
     """What the provider ruleset does not cover on a kernel with Landlock ``abi``, in plain words."""
     gaps: list[str] = []
     if abi < 3:
@@ -333,40 +337,62 @@ def provider_profile_gaps(abi: int) -> list[str]:
             "moving or linking a file from one folder to another is refused, so a plugin that does "
             "that inside its own folders fails"
         )
+    if abi < 4 and authentication_off:
+        gaps.append(
+            "the sandbox cannot stop a plugin calling Bazarr+'s own web API on this machine, and with "
+            "authentication off that API hands out the API key, the settings and the backups, so turn "
+            "authentication on in Settings > General > Security"
+        )
     return gaps
 
 
-# True on every kernel: provider plugins run without the metadata filter (seccomp) that the other
-# plugin kinds get, because ffmpeg needs the calls it blocks to be cheap and the limits it sets to be absent.
-PROVIDER_PROFILE_LIMITATIONS: tuple[str, ...] = (
-    "the metadata filter (seccomp) is not applied to provider plugins, so a plugin can change the mode, "
-    "owner, times or extended attributes of any file the Bazarr+ user owns, media included",
-    "the file-size and process-count limits are not applied",
-    "network connections are not restricted",
-)
+def provider_profile_limitations(abi: int) -> list[str]:
+    """What the provider profile leaves open on every kernel with Landlock ``abi``."""
+    return [
+        "the metadata filter (seccomp) is not applied to provider plugins, so a plugin can change the "
+        "mode, owner, times or extended attributes of any file the Bazarr+ user owns, media included, "
+        "and can lock every provider out by changing the mode of a folder they run from",
+        "the file-size and process-count limits are not applied",
+        (
+            "TCP connections to Bazarr+'s own port are refused and every other connection is allowed"
+            if abi >= 4
+            else "network connections are not restricted"
+        ),
+    ]
 
 
-def provider_profile_status(probe: "SandboxProbe | None", *, enabled: bool | None = None) -> dict[str, Any]:
+def provider_profile_status(
+    probe: "SandboxProbe | None", *, enabled: bool | None = None, authentication_off: bool | None = None
+) -> dict[str, Any]:
     """What confines subtitle provider workers, for the status page and the Subtitle Hub.
 
-    ``state`` is ``enforced`` (the filesystem ruleset applies in full), ``partial`` (it applies, on
-    a Landlock ABI older than 3: ``notice`` names what it leaves open), ``unsandboxed`` (switched
-    on but the host, or a start, could not apply it: ``notice`` says why), ``blocked`` (the host
-    can, but a start could not apply its ruleset and was refused), ``off`` (switched off by the
-    user) or ``pending`` (the host check is still running). ``probe`` is None while that check
-    runs. ``limitations`` is what the provider profile leaves open on every kernel.
+    ``state`` is ``enforced`` (the filesystem ruleset applies in full), ``partial`` (it applies, with
+    gaps ``notice`` names: an older Landlock ABI, or no network rule while authentication is off),
+    ``unsandboxed`` (switched on but the kernel has no Landlock, or a start could not apply it:
+    ``notice`` says why), ``blocked`` (the kernel may enforce, but the host check failed or a start
+    could not apply its ruleset, and providers are refused), ``off`` (switched off by the user) or
+    ``pending`` (the host check is still running). ``probe`` is None while that check runs.
+    ``limitations`` is what the provider profile leaves open on every kernel.
     """
     if enabled is None:
         enabled = provider_profile_enabled()
+    if authentication_off is None:
+        try:
+            from provider_hub.provider_roots import authentication_off as read_authentication_off
+
+            authentication_off = read_authentication_off()
+        except Exception:
+            authentication_off = False
     with _provider_notice_lock:
         recorded = dict(_provider_notices)
+    abi = probe.abi if probe is not None else 0
     result: dict[str, Any] = {
         "enabled": bool(enabled),
         "state": "off",
         "notice": None,
         "unsandboxed": sorted(name for name, (kind, _cause) in recorded.items() if kind == "unsandboxed"),
         "blocked": sorted(name for name, (kind, _cause) in recorded.items() if kind == "blocked"),
-        "limitations": list(PROVIDER_PROFILE_LIMITATIONS),
+        "limitations": provider_profile_limitations(abi),
     }
     if not enabled:
         result["unsandboxed"] = result["blocked"] = []
@@ -376,29 +402,39 @@ def provider_profile_status(probe: "SandboxProbe | None", *, enabled: bool | Non
         return result
     if not probe.enforces(PROVIDER_MIN_ABI):
         reason = probe.reason or "this host has no Landlock"
-        result.update(
-            state="unsandboxed",
-            notice="Subtitle provider plugins run without the sandbox on this host, so nothing keeps them "
-            "from reading the configuration or the database: %s." % reason.rstrip("."),
+        if not probe.absent:
+            result.update(
+                state="blocked",
+                notice="Subtitle provider plugins are not started: the host could not confirm that the "
+                "sandbox holds, and a provider is never run unconfined on a kernel that may enforce it (%s)."
+                % reason.rstrip("."),
+            )
+            return result
+        notice = (
+            "Subtitle provider plugins run without the sandbox on this host, so nothing keeps them "
+            "from reading the configuration or the database: %s." % reason.rstrip(".")
         )
+        if authentication_off:
+            notice += " Authentication is off, so a plugin can also read the settings through Bazarr+'s own API: turn authentication on."
+        result.update(state="unsandboxed", notice=notice)
         return result
+    parts: list[str] = []
     if result["blocked"]:
         causes = "; ".join(sorted({c.rstrip(".") for _n, (k, c) in recorded.items() if k == "blocked"}))
-        result.update(
-            state="blocked",
-            notice="The sandbox could not be applied to %s, so it was not started: %s."
-            % (", ".join(result["blocked"]), causes),
+        parts.append(
+            "The sandbox could not be applied to %s, so it was not started: %s."
+            % (", ".join(result["blocked"]), causes)
         )
-        return result
     if result["unsandboxed"]:
         causes = "; ".join(sorted({c.rstrip(".") for _n, (k, c) in recorded.items() if k == "unsandboxed"}))
-        result.update(
-            state="unsandboxed",
-            notice="The sandbox could not be applied to %s, which runs without it: %s."
-            % (", ".join(result["unsandboxed"]), causes),
+        parts.append(
+            "The sandbox could not be applied to %s, which runs without it: %s."
+            % (", ".join(result["unsandboxed"]), causes)
         )
+    if parts:
+        result.update(state="blocked" if result["blocked"] else "unsandboxed", notice=" ".join(parts))
         return result
-    gaps = provider_profile_gaps(probe.abi)
+    gaps = provider_profile_gaps(probe.abi, authentication_off=bool(authentication_off))
     if gaps:
         result.update(
             state="partial",
@@ -596,7 +632,7 @@ def _probe_in_background() -> None:
         # Store an honest "not enforced" answer so the status stops reading pending.
         with _probe_lock:
             if _probe_cache is None:
-                _probe_cache = SandboxProbe(abi=0, verified=False, reason="the sandbox probe failed: %s" % exc)
+                _probe_cache = SandboxProbe(abi=0, verified=False, absent=False, reason="the sandbox probe failed: %s" % exc)
 
 
 def start_probe_in_background() -> bool:
@@ -617,7 +653,7 @@ def start_probe_in_background() -> bool:
 def _run_probe(python: str) -> SandboxProbe:
     abi, reason = landlock.probe_abi()
     if abi < 1:
-        return SandboxProbe(abi=0, verified=False, reason=reason)
+        return SandboxProbe(abi=0, verified=False, absent="probe failed" not in reason, reason=reason)
     # The metadata filter exists for some architectures only. Where it does not, every kind that needs it
     # is not "enforced", but the filesystem canary still runs: the provider profile does not use the filter.
     filter_available = seccomp.supported()
@@ -641,27 +677,40 @@ def _run_probe(python: str) -> SandboxProbe:
             read_write=[allowed],
             connect_ports=[1] if abi >= 4 else None,
         )
-        spec = RuntimeSpec(
-            interpreter=python,
-            args=("-I", "-c", _CANARY_SCRIPT, base, allowed, str(port)),
-            cwd=allowed,
-            env=clean_env(home=allowed, tmpdir=allowed),
-            policy=policy,
-            term_grace=1.0,
-            seccomp=filter_available,
-        )
-        process = _start(spec, enforce=True, min_abi=1, enforcement="enforced", stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        try:
-            out, err = process.communicate(timeout=20)
-        except subprocess.TimeoutExpired:
-            process.stop(0.5)
-            return SandboxProbe(abi=abi, verified=False, reason="canary timed out")
-        finally:
-            process.stop(0.5)
-        if process.returncode != 0:
-            failure = process.launcher_failure()
-            detail = failure.message if failure else (err.decode("utf-8", "replace").strip().splitlines()[-1:] or ["no output"])[0]
-            return SandboxProbe(abi=abi, verified=False, reason="canary could not run: %s" % detail)
+        def attempt(use_filter: bool):
+            """Run the canary once. ``(output, None)``, or ``(None, why it did not run)``."""
+            spec = RuntimeSpec(
+                interpreter=python,
+                args=("-I", "-c", _CANARY_SCRIPT, base, allowed, str(port)),
+                cwd=allowed,
+                env=clean_env(home=allowed, tmpdir=allowed),
+                policy=policy,
+                term_grace=1.0,
+                seccomp=use_filter,
+            )
+            process = _start(spec, enforce=True, min_abi=1, enforcement="enforced", stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            try:
+                out, err = process.communicate(timeout=20)
+            except subprocess.TimeoutExpired:
+                process.stop(0.5)
+                return None, "canary timed out"
+            finally:
+                process.stop(0.5)
+            if process.returncode != 0:
+                failure = process.launcher_failure()
+                detail = failure.message if failure else (err.decode("utf-8", "replace").strip().splitlines()[-1:] or ["no output"])[0]
+                return None, "canary could not run: %s" % detail
+            return out, None
+
+        out, why = attempt(filter_available)
+        if out is None and filter_available:
+            # The filter failing to install must not cost the provider profile its filesystem check:
+            # run the canary again without it. Every kind that needs the filter stays not enforced.
+            retry, _ = attempt(False)
+            if retry is not None:
+                out, filter_available = retry, False
+        if out is None:
+            return SandboxProbe(abi=abi, verified=False, reason=why)
         result = json.loads(out.decode("utf-8").strip().splitlines()[-1])
         reads_verified = result.get("write_inside") == "allowed" and all(
             result.get(k) == "denied" for k in _CANARY_READS_DENIED
@@ -670,7 +719,7 @@ def _run_probe(python: str) -> SandboxProbe:
             if not reads_verified:
                 return SandboxProbe(abi=abi, verified=False, reason="canary escaped the sandbox: %s" % result)
             return SandboxProbe(
-                abi=abi, verified=False, reads_verified=True, reason="no metadata filter for this architecture"
+                abi=abi, verified=False, reads_verified=True, reason="the metadata filter is not available or could not be applied"
             )
         if abi < MIN_ENFORCED_ABI:
             # Below ABI 3 the full canary cannot pass (truncate is not covered), so the host is not

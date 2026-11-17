@@ -34,16 +34,24 @@ const ProviderSandboxSetting: FunctionComponent = () => {
         Subtitle provider plugins cannot read the configuration file or the
         database, and the media library is read-only to them. They keep their
         own data and temporary folders. They are not stopped from changing the
-        mode, owner or times of files the Bazarr+ user owns, and they have no
-        network restriction. Where this host's kernel covers only part of it, or
-        none, providers still run and a notice appears here and on System &gt;
-        Status. Takes effect when a provider worker next starts. On by default.
+        mode, owner or times of files the Bazarr+ user owns, and, on kernels
+        before Landlock ABI 4, nothing stops them calling Bazarr+'s own web API,
+        so keep authentication on. Where this host's kernel covers only part of
+        it, or none, providers still run and a notice appears here and on System
+        &gt; Status. Takes effect when a provider worker next starts. On by
+        default.
       </Message>
       {notice ? (
         <Alert
           color="yellow"
           variant="light"
-          title={partial ? "Sandbox with gaps" : "Running without the sandbox"}
+          title={
+            partial
+              ? "Sandbox with gaps"
+              : providers?.state === "blocked"
+                ? "Provider not started"
+                : "Running without the sandbox"
+          }
         >
           {notice}
         </Alert>

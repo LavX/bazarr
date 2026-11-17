@@ -157,6 +157,48 @@ it("saves the subtitle provider sandbox switch and shows the notice when provide
   );
 });
 
+// A provider whose ruleset could not be applied is not started, and the Hub says that, not "running without".
+it("titles a refused provider start as not started", async () => {
+  server.use(
+    http.get("/api/system/settings", () =>
+      HttpResponse.json({
+        general: {
+          theme: "auto",
+          enabled_providers: [],
+          provider_hub_sandbox: true,
+        },
+      }),
+    ),
+    http.get("/api/system/status", () =>
+      HttpResponse.json({
+        data: {
+          sandbox: {
+            providers: {
+              enabled: true,
+              state: "blocked",
+              notice:
+                "The sandbox could not be applied to embeddedsubtitles, so it was not started.",
+              unsandboxed: [],
+              blocked: ["embeddedsubtitles"],
+            },
+          },
+        },
+      }),
+    ),
+  );
+  const router = createMemoryRouter(
+    [{ path: "/subtitle-hub", element: <SettingsProvidersView /> }],
+    { initialEntries: ["/subtitle-hub"] },
+  );
+  rawRender(
+    <AllProviders>
+      <RouterProvider router={router} />
+    </AllProviders>,
+  );
+  expect(await screen.findByText("Provider not started")).toBeInTheDocument();
+  expect(screen.queryByText("Running without the sandbox")).toBeNull();
+});
+
 // The host's sandbox check runs once, in the background, after boot. A Subtitle Hub opened before it has
 // answered shows the notice as soon as it has, without a reload.
 it("shows the provider sandbox notice once the pending host check has answered", async () => {

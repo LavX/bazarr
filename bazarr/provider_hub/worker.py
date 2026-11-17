@@ -228,7 +228,12 @@ def _client_gone(client, budget: float) -> bool:
         if time.monotonic() >= deadline:
             return False
         time.sleep(0.02)
-    return client.group_gone(max(0.0, deadline - time.monotonic()))
+    if not client.group_gone(max(0.0, deadline - time.monotonic())):
+        return False
+    # A worker started through the launcher has descendants that left its process group, which only the
+    # launcher's own cleanup reaches. Its word that the cleanup finished is what lets the hold go.
+    state = getattr(client, "launcher_cleanup_state", None)
+    return state is None or state() == "confirmed"
 
 
 # How the wait for a leftover process paces itself. It starts at the cadence a quick exit is
@@ -243,10 +248,21 @@ def _wait_until_gone(client, release, sleep=time.sleep) -> None:
     """Keep the hold until the client's worker and everything it started are gone, then call ``release``.
 
     Each round is one check with no wait of its own, followed by a pause that grows from
-    ``LEFTOVER_POLL_START`` to ``LEFTOVER_POLL_CEILING``. ``sleep`` is a parameter for tests.
+    ``LEFTOVER_POLL_START`` to ``LEFTOVER_POLL_CEILING``. ``sleep`` is a parameter for tests. A
+    launcher that ended without confirming its cleanup ends the wait with the hold kept.
     """
     delay = LEFTOVER_POLL_START
     while not _client_gone(client, 0.0):
+        state = getattr(client, "launcher_cleanup_state", None)
+        if state is not None and state() == "unconfirmed":
+            # A launcher that is gone without having said its cleanup finished (it was killed, or it gave
+            # up): nothing can show that a detached descendant is not still running from the environment.
+            # The hold stays for the rest of this process, as where process groups cannot be checked.
+            logger.error(
+                "Provider Hub: a worker's launcher ended without confirming its cleanup; "
+                "its environment stays in place until the next restart"
+            )
+            return
         sleep(delay)
         delay = min(delay * 2, LEFTOVER_POLL_CEILING)
     release()
@@ -349,6 +365,17 @@ def provider_layout(command, cwd, env, provider_id) -> ProviderLayout | None:
         return None
 
 
+def _secret_files(config_dir: Path) -> list[Path]:
+    """The files in the configuration and database folders, so a link to one cannot put it in a granted tree."""
+    files: list[Path] = []
+    for folder in ("config", "db"):
+        try:
+            files.extend(entry for entry in (config_dir / folder).iterdir() if entry.is_file() or entry.is_symlink())
+        except OSError:
+            continue
+    return files
+
+
 def _is_provider_runner(command, env) -> bool:
     """Whether ``command`` starts the real provider runner for a bundle, whatever interpreter it uses."""
     try:
@@ -372,7 +399,7 @@ def provider_spec(layout: ProviderLayout, command, cwd, env):
     No TCP rules, no file-size or process-count limit and no metadata filter, so ``ffmpeg`` can
     write large temporary files and run its threads.
     """
-    from .provider_roots import backup_folders, media_root_folders, program_folders
+    from .provider_roots import backup_folders, binary_folders, listening_port, media_root_folders, program_folders
     from .runtime.environment import worker_environment
     from .sandbox.policy import (
         PROVIDER_EXTRA_READ_PATHS,
@@ -398,10 +425,14 @@ def provider_spec(layout: ProviderLayout, command, cwd, env):
             layout.runner,
             managed_binaries,
             *PROVIDER_EXTRA_READ_PATHS,
-            *provider_tree_grants([*program_folders(), *media_root_folders()], shields),
+            *provider_tree_grants([*program_folders(), *binary_folders(), *media_root_folders()], shields),
         ],
         read_write=[data, temp],
-        protected_paths=[layout.config_dir / "config", layout.config_dir / "db", *backups],
+        # The folders, and the files in them: a file that is a link into a granted tree is refused too.
+        protected_paths=[layout.config_dir / "config", layout.config_dir / "db", *backups, *_secret_files(layout.config_dir)],
+        # Bazarr+'s own API answers on this port. Where the kernel has network rules (ABI 4 and above)
+        # the worker cannot connect to it; every other connection stays open.
+        deny_connect_ports=[port for port in (listening_port(),) if port],
     )
     environment = worker_environment(
         "subtitle_provider",
@@ -494,6 +525,11 @@ class ProviderWorkerClient:
 
         self.last_used = time.monotonic()
         self.process = self._spawn(env)
+        if self._is_launcher(self.process):
+            # Every launcher this client started stays on the list until it has confirmed its cleanup:
+            # a respawn must not make the previous launcher's descendants forgotten.
+            with _GROUPS_LOCK:
+                self._launchers = [*getattr(self, "_launchers", ()), self.process]
         # Every group this client started stays on the list until it is seen
         # empty: a respawn must not make the previous worker's survivors
         # forgotten while they still run from the environment.
@@ -575,8 +611,15 @@ class ProviderWorkerClient:
 
         probe = probe_sandbox()
         if not probe.enforces(PROVIDER_MIN_ABI):
-            note_provider_unsandboxed(layout.key, probe.reason or "this host has no Landlock")
-            return None
+            if probe.absent:
+                # The kernel genuinely has no Landlock: nothing can be applied, and the provider runs without it.
+                note_provider_unsandboxed(layout.key, probe.reason or "this host has no Landlock")
+                return None
+            # The kernel may well enforce, but the host check failed or could not finish (a timeout, a file
+            # error, a canary that escaped). Nothing here says the ruleset would hold, so no worker starts.
+            cause = f"the host check could not confirm the ruleset: {probe.reason or 'no result'}"
+            self._blocked(cause)
+            raise WorkerError(f"the sandbox could not be confirmed, so the provider was not started: {probe.reason}")
 
         def start():
             spec = provider_spec(layout, self.command, self.cwd, self.env)
@@ -806,6 +849,37 @@ class ProviderWorkerClient:
             groups = [group for group in getattr(self, "_groups", ()) if self._group_alive(group)]
             self._groups = groups
             return groups
+
+    def launcher_cleanup_state(self) -> str:
+        """Whether every launcher this client started has confirmed that its tree is gone.
+
+        ``confirmed``: none left, or each exited by itself and said ``complete``. ``pending``: one is
+        still running. ``unconfirmed``: one is gone without that word (killed from outside, or it gave
+        up on survivors), which nothing can make up for. A launcher is forgotten once confirmed.
+        """
+        with _GROUPS_LOCK:
+            launchers = list(getattr(self, "_launchers", ()))
+        state = "confirmed"
+        kept = []
+        for launcher in launchers:
+            if not self._has_exited(launcher):
+                kept.append(launcher)
+                state = "pending" if state != "unconfirmed" else state
+                continue
+            if launcher.returncode is None:
+                launcher.poll()
+            try:
+                said_complete = launcher.returncode is not None and launcher.returncode >= 0 and (
+                    launcher.launcher_cleanup() == "complete"
+                )
+            except Exception:
+                said_complete = False
+            if not said_complete:
+                kept.append(launcher)
+                state = "unconfirmed"
+        with _GROUPS_LOCK:
+            self._launchers = kept
+        return state
 
     def group_gone(self, ceiling: float = 10.0) -> bool:
         """True once nothing is left in any process group this client has started.

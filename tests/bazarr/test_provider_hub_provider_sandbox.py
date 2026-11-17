@@ -69,6 +69,13 @@ class Fixture:
             return [{"result": _try(lambda: (os.chmod(config["path"], 0), "changed")[1])}]
         if op == "exit":
             os._exit(3)
+        if op == "connect":
+            import socket
+
+            def connect():
+                with socket.create_connection(("127.0.0.1", config["port"]), timeout=3):
+                    return "connected"
+            return [{"result": _try(connect)}]
         if op == "env":
             return [{"result": {key: os.environ.get(key) for key in config["keys"]}}]
         raise ValueError(op)
@@ -246,7 +253,7 @@ def test_a_stub_ffmpeg_can_write_a_large_temporary_file_and_change_its_mode(host
 
 # ------------------------------------------------------------------------------------- failing open
 def test_without_landlock_the_provider_still_starts_and_the_status_carries_a_notice(host, client, monkeypatch):
-    probe = SandboxProbe(abi=0, verified=False, reason="Landlock is not available in this kernel")
+    probe = SandboxProbe(abi=0, verified=False, absent=True, reason="Landlock is not available in this kernel")
     monkeypatch.setattr("provider_hub.sandbox.probe_sandbox", lambda *a, **k: probe)
 
     def refuse(*args, **kwargs):
@@ -648,7 +655,7 @@ def test_the_gaps_below_abi_3_are_named_and_a_full_abi_names_none():
 @pytest.mark.parametrize("abi,gap,state", [(1, "moving or linking", "partial"), (2, "truncating", "partial"), (3, None, "enforced")])
 def test_the_notice_names_what_is_not_covered_on_each_abi(abi, gap, state):
     probe = SandboxProbe(abi=abi, verified=abi >= 3, reads_verified=True, reason="kernel reports ABI %d" % abi)
-    status = provider_profile_status(probe)
+    status = provider_profile_status(probe, authentication_off=False)
 
     assert status["state"] == state
     if gap is None:
@@ -661,14 +668,68 @@ def test_the_notice_names_what_is_not_covered_on_each_abi(abi, gap, state):
     assert status["unsandboxed"] == []
 
 
-def test_a_kernel_without_landlock_or_a_canary_that_escaped_still_fails_open_with_a_notice():
-    for probe in (
-        SandboxProbe(abi=0, verified=False, reason="Landlock is not available"),
-        SandboxProbe(abi=2, verified=False, reads_verified=False, reason="canary escaped the sandbox: {}"),
-    ):
+def test_only_a_kernel_without_landlock_fails_open_and_a_failed_host_check_refuses_the_start():
+    absent = SandboxProbe(abi=0, verified=False, absent=True, reason="Landlock is not available")
+    status = provider_profile_status(absent)
+    assert status["state"] == "unsandboxed" and "Landlock is not available" in status["notice"]
+    # The kernel may well enforce, but the check did not confirm it (it escaped, timed out, hit a file error).
+    for reason in ("canary escaped the sandbox: {}", "canary timed out", "probe failed: disk full"):
+        probe = SandboxProbe(abi=2, verified=False, reads_verified=False, reason=reason)
         status = provider_profile_status(probe)
-        assert status["state"] == "unsandboxed"
-        assert probe.reason.split(":")[0] in status["notice"]
+        assert status["state"] == "blocked"
+        assert "not started" in status["notice"] and reason.split(":")[0] in status["notice"]
+
+
+@pytest.mark.parametrize("reason", ["canary timed out", "canary escaped the sandbox: {}", "probe failed: [Errno 28] No space left"])
+def test_a_host_check_that_failed_on_a_kernel_that_may_enforce_refuses_every_start(host, client, monkeypatch, reason):
+    probe = SandboxProbe(abi=10, verified=False, reads_verified=False, reason=reason)
+    monkeypatch.setattr("provider_hub.sandbox.probe_sandbox", lambda *a, **k: probe)
+
+    def refuse(*args, **kwargs):
+        raise AssertionError("no worker may start, sandboxed or not")
+
+    monkeypatch.setattr("provider_hub.sandbox.spawn_worker", refuse)
+    monkeypatch.setattr(worker_module.subprocess, "Popen", refuse)
+    worker = client()
+
+    with pytest.raises(worker_module.WorkerError, match="was not started"):
+        _ask(worker, op="read", path=str(host["media"] / "film.mkv"))
+    assert worker._sandbox_failed_open is False and worker.process is None
+    assert provider_profile_status(probe)["state"] == "blocked"
+    assert provider_profile_status(probe)["blocked"] == ["fixture"]
+
+
+def test_the_probe_falls_back_to_a_canary_without_the_filter_when_the_filter_cannot_be_applied(monkeypatch):
+    _enforcing_kernel()
+    real_start = spawn_module._start
+    calls = []
+
+    class Refused:
+        returncode = 78
+
+        @staticmethod
+        def communicate(timeout=None):
+            return b"", b"filter"
+
+        @staticmethod
+        def launcher_failure():
+            return spawn_module.LauncherFailure("sandbox", "could not apply sandbox: metadata filter")
+
+        @staticmethod
+        def stop(grace=0):
+            return None
+
+    def start(spec, **kwargs):
+        calls.append(spec.seccomp)
+        return Refused() if spec.seccomp else real_start(spec, **kwargs)
+
+    monkeypatch.setattr(spawn_module, "_start", start)
+
+    probe = spawn_module._run_probe(sys.executable)
+
+    assert calls == [True, False]
+    assert probe.reads_verified is True and probe.absent is False
+    assert probe.enforced is False and probe.enforces(PROVIDER_MIN_ABI) is True
 
 
 @pytest.mark.parametrize("abi", [1, 2])
@@ -745,3 +806,240 @@ def test_a_refused_start_is_its_own_state_and_clears_when_a_sandboxed_worker_ans
     assert "was not started" in status["notice"]
     spawn_module.clear_provider_notice("embeddedsubtitles")
     assert provider_profile_status(probe)["state"] == "enforced"
+
+
+# ----------------------------------------------------------------- Bazarr+'s own API and its port
+@pytest.mark.parametrize("abi", [1, 2, 3])
+def test_before_abi_4_the_notice_says_a_plugin_can_call_the_web_api_while_authentication_is_off(abi):
+    probe = SandboxProbe(abi=abi, verified=abi >= 3, reads_verified=True)
+
+    off = provider_profile_status(probe, authentication_off=True)
+    on = provider_profile_status(probe, authentication_off=False)
+
+    assert off["state"] == "partial"
+    assert "own web API" in off["notice"] and "authentication off" in off["notice"]
+    assert "turn authentication on" in off["notice"]
+    assert "own web API" not in (on["notice"] or "")
+    assert "network connections are not restricted" in " ".join(off["limitations"])
+
+
+def test_from_abi_4_the_port_is_refused_so_there_is_no_gap_and_the_limitation_says_so():
+    probe = SandboxProbe(abi=4, verified=True, reads_verified=True)
+
+    status = provider_profile_status(probe, authentication_off=True)
+
+    assert status["state"] == "enforced" and status["notice"] is None
+    assert "own port are refused" in " ".join(status["limitations"])
+
+
+def test_the_profile_asks_for_bazarrs_own_port_to_be_refused_and_nothing_else(host, monkeypatch):
+    monkeypatch.setattr("provider_hub.provider_roots.listening_port", lambda: 6767)
+    spec = worker_module.provider_spec(host["layout"], worker_command(sys.executable, RUNNER), host["bundle"], {})
+    launch = json.loads(spec.to_launch_json(enforce=True, min_abi=4))
+
+    assert launch["deny_connect_ports"] == [6767]
+    assert launch["connect_ports"] is None
+
+
+def test_a_provider_cannot_connect_to_bazarrs_port_where_the_kernel_has_network_rules(host, client, monkeypatch):
+    import socket
+
+    probe = _enforcing_kernel()
+    if probe.abi < 4:
+        pytest.skip("Landlock ABI %d has no network rules" % probe.abi)
+    own, other = socket.socket(), socket.socket()
+    try:
+        for listener in (own, other):
+            listener.bind(("127.0.0.1", 0))
+            listener.listen(4)
+        monkeypatch.setattr("provider_hub.provider_roots.listening_port", lambda: own.getsockname()[1])
+        worker = client()
+
+        refused = _ask(worker, op="connect", port=own.getsockname()[1])["result"]
+        allowed = _ask(worker, op="connect", port=other.getsockname()[1])["result"]
+    finally:
+        own.close()
+        other.close()
+
+    assert refused == "denied"
+    assert allowed == "connected"
+
+
+# ------------------------------------------------------------------- the environment hold and the launcher
+class _Launcher:
+    """A launcher that has exited, with what its status pipe said."""
+
+    def __init__(self, cleanup, returncode=0, running=False):
+        self.cleanup, self.returncode, self.running = cleanup, returncode, running
+
+    def poll(self):
+        return None if self.running else self.returncode
+
+    def launcher_cleanup(self):
+        return self.cleanup
+
+
+def _client_with(*launchers):
+    worker = ProviderWorkerClient.__new__(ProviderWorkerClient)
+    worker._launchers = list(launchers)
+    worker.process = launchers[-1] if launchers else None
+    worker._has_exited = lambda process: not process.running
+    worker.group_gone = lambda ceiling=10.0: True
+    return worker
+
+
+def test_the_hold_is_released_only_once_every_launcher_has_said_its_cleanup_finished():
+    done = _Launcher("complete")
+    assert _client_with(done).launcher_cleanup_state() == "confirmed"
+    assert worker_module._client_gone(_client_with(done), 0.0) is True
+    # A launcher that is still running, or an earlier one of a respawn that gave up on survivors, keeps it.
+    assert _client_with(_Launcher("complete", running=True)).launcher_cleanup_state() == "pending"
+    survivors = _client_with(_Launcher("survivors"), done)
+    assert survivors.launcher_cleanup_state() == "unconfirmed"
+    assert worker_module._client_gone(survivors, 0.0) is False
+    assert _client_with(_Launcher(None)).launcher_cleanup_state() == "unconfirmed"
+    # Killed from outside: it never said it finished, whatever its pipe holds.
+    assert _client_with(_Launcher("complete", returncode=-9)).launcher_cleanup_state() == "unconfirmed"
+
+
+def test_a_launcher_that_never_confirmed_keeps_the_environment_for_good_and_ends_the_wait():
+    worker = _client_with(_Launcher("survivors"))
+    released, pauses = [], []
+
+    worker_module._wait_until_gone(worker, lambda: released.append(1), sleep=pauses.append)
+
+    assert released == [] and pauses == []
+
+
+def test_a_launcher_that_confirms_later_releases_the_hold():
+    launcher = _Launcher("complete", running=True)
+    worker = _client_with(launcher)
+    released, pauses = [], []
+
+    def sleep(seconds):
+        pauses.append(seconds)
+        if len(pauses) == 3:
+            launcher.running = False
+
+    worker_module._wait_until_gone(worker, lambda: released.append(1), sleep=sleep)
+
+    assert released == [1] and len(pauses) == 3
+
+
+def test_a_sandboxed_worker_that_was_stopped_confirms_its_cleanup_and_releases_the_hold(host, client):
+    _enforcing_kernel()
+    worker = client()
+    _ask(worker, op="read", path=str(host["media"] / "film.mkv"))
+    assert worker._launchers
+
+    worker.stop()
+    released = []
+
+    assert worker_module.release_when_gone(worker, lambda: released.append(1), "a fixture", budget=10.0) is True
+    assert released == [1] and worker.launcher_cleanup_state() == "confirmed"
+
+
+# ------------------------------------------------------------------------------------ provider_roots
+def test_program_folders_are_the_existing_absolute_directories_on_path(tmp_path):
+    from provider_hub import provider_roots
+
+    here = tmp_path / "bin"
+    here.mkdir()
+    value = os.pathsep.join(["relative", str(here), str(tmp_path / "missing"), "/", str(here)])
+
+    assert provider_roots.program_folders(value) == [str(here)]
+
+
+def test_the_folder_of_a_linked_tool_is_granted_where_the_file_really_is(tmp_path, monkeypatch):
+    from provider_hub import provider_roots
+
+    real = tmp_path / "vendor" / "ffmpeg"
+    real.parent.mkdir()
+    real.write_text("#!/bin/sh\n", encoding="utf-8")
+    link = tmp_path / "bin" / "ffprobe"
+    link.parent.mkdir()
+    link.symlink_to(real)
+    monkeypatch.setattr(shutil_module(), "which", lambda name: str(link) if name == "ffprobe" else None)
+    monkeypatch.setattr("utilities.binaries.get_binary", lambda name: str(real) if name == "ffmpeg" else None)
+
+    assert provider_roots.binary_folders() == [str(real.parent)]
+
+
+def shutil_module():
+    import shutil
+
+    return shutil
+
+
+def test_the_backup_folder_the_port_and_the_login_state_come_from_the_settings(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from provider_hub import provider_roots
+
+    def settings(auth, port=6767, folder=str(tmp_path / "backups")):
+        return SimpleNamespace(auth=SimpleNamespace(type=auth), general=SimpleNamespace(port=port), backup=SimpleNamespace(folder=folder))
+
+    monkeypatch.setattr("app.config.settings", settings(None))
+    assert provider_roots.authentication_off() is True and provider_roots.listening_port() == 6767
+    assert provider_roots.backup_folders() == [tmp_path / "backups"]
+    monkeypatch.setattr("app.config.settings", settings("form", port=7000, folder=""))
+    assert provider_roots.authentication_off() is False and provider_roots.listening_port() == 7000
+    assert provider_roots.backup_folders() == []
+
+
+def test_the_media_roots_come_from_every_instance_through_its_path_mappings(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from provider_hub import provider_roots
+
+    shows, movies, sports = tmp_path / "tv", tmp_path / "films", tmp_path / "events"
+    mapped = tmp_path / "mapped"
+    for folder in (shows, movies, sports, mapped):
+        folder.mkdir()
+    rows = {
+        "TableShowsRootfolder": [(1, str(shows)), (2, "/remote/tv")],
+        "TableMoviesRootfolder": [(1, str(movies))],
+        "TableSportsLeaguesRootfolder": [(3, str(sports))],
+    }
+
+    class Column:
+        def __init__(self, table):
+            self.table = table
+
+    class Table:
+        def __init__(self, name):
+            self.arr_instance_id, self.path = Column(name), Column(name)
+
+    fake_tables = {name: Table(name) for name in rows}
+
+    class Database:
+        @staticmethod
+        def execute(statement):
+            return SimpleNamespace(all=lambda: rows[statement])
+
+    import app.database as app_database
+
+    for name, table in fake_tables.items():
+        monkeypatch.setattr(app_database, name, table, raising=False)
+    monkeypatch.setattr(app_database, "database", Database(), raising=False)
+    monkeypatch.setattr(app_database, "select", lambda *columns: columns[0].table, raising=False)
+    mappings = SimpleNamespace(
+        path_replace_instance=lambda path, instance, kind: str(mapped) if path == "/remote/tv" else path,
+        path_replace=lambda path: path,
+        path_replace_movie=lambda path: path,
+    )
+    monkeypatch.setattr("utilities.path_mappings.path_mappings", mappings)
+
+    found = provider_roots.media_root_folders()
+
+    assert set(found) == {str(shows), str(movies), str(sports), str(mapped)}
+
+
+def test_a_link_to_the_configuration_file_in_a_granted_folder_refuses_the_profile(host):
+    # config.yaml moved out and linked back: its target is in the media folder, which would be granted.
+    target = host["media"] / "config.yaml"
+    (host["config"] / "config" / "config.yaml").replace(target)
+    (host["config"] / "config" / "config.yaml").symlink_to(target)
+
+    with pytest.raises(policy_module.PolicyError, match="lies inside the granted tree"):
+        worker_module.provider_spec(host["layout"], worker_command(sys.executable, RUNNER), host["bundle"], {})

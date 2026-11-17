@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 import os
+import shutil
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -66,6 +67,51 @@ def program_folders(path_value: str | None = None) -> list[str]:
         if entry.startswith("/") and entry != "/" and os.path.isdir(entry):
             folders[os.path.normpath(entry)] = None
     return list(folders)
+
+
+def binary_folders() -> list[str]:
+    """The folders that hold the media tools the plugins run, by where the files really are.
+
+    ``ffmpeg``, ``ffprobe`` and ``mediainfo`` are found through ``PATH`` or, for a download, in the
+    folder Bazarr+ keeps them in; either can be a link to a file elsewhere, and the plugin
+    executes the path the host hands it. The folder of each file after links is granted.
+    """
+    folders: dict[str, None] = {}
+    for name in ("ffmpeg", "ffprobe", "mediainfo"):
+        candidates = []
+        try:
+            from utilities.binaries import get_binary
+
+            candidates.append(get_binary(name))
+        except Exception:
+            logger.debug("Provider Hub: could not look up %s", name, exc_info=True)
+        candidates.append(shutil.which(name))
+        for candidate in candidates:
+            if isinstance(candidate, str) and candidate and os.path.isfile(candidate):
+                folder = os.path.dirname(os.path.realpath(candidate))
+                if folder and folder != "/":
+                    folders[folder] = None
+    return list(folders)
+
+
+def listening_port() -> int | None:
+    """Bazarr+'s own port, which a provider worker must not be able to call."""
+    try:
+        from app.config import settings
+
+        return int(settings.general.port)
+    except Exception:
+        return None
+
+
+def authentication_off() -> bool:
+    """True while no login is set, which leaves Bazarr+'s own API open to anything that can reach its port."""
+    try:
+        from app.config import settings
+
+        return str(settings.auth.type or "").strip().lower() in ("", "none")
+    except Exception:
+        return False
 
 
 def backup_folders() -> list[Path]:

@@ -492,6 +492,9 @@ class SandboxPolicy:
     # None: TCP unrestricted (declared). A set: connect only to these ports and
     # bind nothing, where the kernel supports it (ABI 4 and above).
     connect_ports: frozenset[int] | None = None
+    # Ports a worker may not connect to while every other TCP connection stays open (ABI 4 and above).
+    # Ignored when ``connect_ports`` is a set.
+    deny_connect_ports: frozenset[int] = frozenset()
     # Highest Landlock ABI to use, for diagnostics and compatibility pinning.
     abi_cap: int | None = None
     # (device, inode) of each grant when the policy was built. A grant without
@@ -506,6 +509,7 @@ class SandboxPolicy:
         read_only: Iterable[str | os.PathLike] = (),
         read_write: Iterable[str | os.PathLike] = (),
         connect_ports: Iterable[int] | None = None,
+        deny_connect_ports: Iterable[int] = (),
         reserved_ports: Iterable[int] = (),
         protected_paths: Iterable[str | os.PathLike] = (),
         include_dns_tcp: bool = True,
@@ -548,6 +552,7 @@ class SandboxPolicy:
             devices=tuple(p for p, _i, _m in device_items),
             resolve_unix=tuple(p for p, _i, _m in unix_items),
             connect_ports=ports,
+            deny_connect_ports=frozenset(int(p) for p in deny_connect_ports if 1 <= int(p) <= 65535),
             abi_cap=abi_cap,
             identities={p: ident for p, ident, _m in every},
         )
@@ -621,6 +626,7 @@ class RuntimeSpec:
             "devices": [self.policy.grant(p) for p in self.policy.devices],
             "resolve_unix": [self.policy.grant(p) for p in self.policy.resolve_unix],
             "connect_ports": None if self.policy.connect_ports is None else sorted(self.policy.connect_ports),
+            "deny_connect_ports": sorted(self.policy.deny_connect_ports),
             "limits": self.limits.to_dict(),
             "term_grace": float(self.term_grace),
             "seccomp": bool(self.seccomp),
