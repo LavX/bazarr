@@ -17,6 +17,7 @@ const pageNames: Record<string, string> = {
   history: "History",
   blacklist: "Excluded subtitles",
   "subtitle-hub": "Subtitle Hub",
+  translation: "Translation",
   "distribution-hub": "Distribution Hub",
   settings: "Settings",
   system: "System",

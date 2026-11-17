@@ -127,6 +127,8 @@ def test_a_failed_test_reports_the_plugins_message_with_the_key_masked(app_servi
     workers.bind(FakePort({"ok": False, "message": f"rejected {KEY}"}))
     result = app_service.service.test_connection(app_service.connection_id)
     assert result["ok"] is False and KEY not in str(result)
+    # The plugin asked the back end: this is a failure of the back end, not a test that never ran.
+    assert result["outcome"] == "failed"
 
 
 def test_a_model_list_asks_the_worker_with_no_stored_secret(app_service):
@@ -200,8 +202,22 @@ def test_a_worker_busy_with_a_translation_is_not_charged_and_the_person_is_told(
     workers.bind(Busy({}))
     result = service.test_connection(app_service.connection_id)
     assert result["ok"] is False and "busy translating" in result["message"]
+    # Through the real probe: the busy worker never took the request, and the answer says so.
+    assert result["outcome"] == "not_ready"
     rows = service._store.session.query(TableTranslationUsage).all()
     assert [(row.state, row.actual_micros) for row in rows] == [("settled", 0)]
+
+
+def test_a_worker_that_would_not_start_took_nothing_and_the_answer_says_try_again_not_failed(app_service):
+    from subtitles.tools.translate.runtime import probe
+
+    class Unstarted(FakePort):
+        def call(self, plugin_id, op, params, secrets, *, timeout):
+            raise workers.NotSent("the worker would not start", busy=False)
+
+    workers.bind(Unstarted({}))
+    result = app_service.service.test_connection(app_service.connection_id)
+    assert result == {"ok": False, "message": probe.UNSTARTED_TEST, "latency_ms": None, "outcome": "not_ready"}
 
 
 def _pool(handle_factory):

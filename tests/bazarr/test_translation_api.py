@@ -61,7 +61,7 @@ def world(monkeypatch, schema_session):
 
     monkeypatch.setattr(settings.auth, "apikey", API_KEY)
     monkeypatch.setattr(runtime, "runtime_v2_enabled", lambda: True)
-    plugins = {PLUGIN: InstalledPlugin(PLUGIN, "AI Subtitle Translator", "2.2.0", True, _manifest())}
+    plugins = {PLUGIN: InstalledPlugin(PLUGIN, "AI Subtitle Translator", "2.2.0", True, _manifest(), "official")}
     store = TranslatorStore(schema_session, pointers=MemoryPointers(), plugin_active=lambda pid: pid in plugins)
     validations = []
     sources = []
@@ -145,6 +145,15 @@ def test_the_switch_really_off_answers_404_without_touching_the_database(world, 
 
 
 # ------------------------------------------------------------------- reading
+
+def test_an_engine_is_official_only_when_it_was_installed_from_the_official_source(world):
+    assert world.call("get", "state").json["instances"][0]["official"] is True
+    for source in ("community", None):
+        world.plugins[PLUGIN] = InstalledPlugin(PLUGIN, "AI Subtitle Translator", "2.2.0", True, _manifest(), source)
+        assert world.call("get", "state").json["instances"][0]["official"] is False
+    del world.plugins[PLUGIN]
+    assert world.call("get", "state").json["instances"][0]["official"] is False
+
 
 def test_state_lists_the_engine_with_its_schema_and_host_fields(world):
     state = world.call("get", "state").json

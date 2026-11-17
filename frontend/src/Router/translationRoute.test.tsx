@@ -1,27 +1,39 @@
 /* eslint-disable camelcase -- transport names. */
+import { FunctionComponent } from "react";
 import { http, HttpResponse } from "msw";
 import { expect, it } from "vitest";
 import { useSystemStatus } from "@/apis/hooks/system";
+import { groupRoutes } from "@/App/Navbar";
 import { AllProviders } from "@/providers";
 import { useRoutes } from "@/Router";
+import TranslationGate from "@/Router/TranslationGate";
 import type { CustomRouteObject } from "@/Router/type";
-import { rawRender, screen, waitFor } from "@/tests";
+import { customRender, rawRender, screen, waitFor } from "@/tests";
 import server from "@/tests/mocks/node";
 
-// Settings > Translation belongs to the v2 translation runtime. With the
-// switch off the route is not in the router at all, so its address is Not
-// Found, not a hidden page.
-function SettingsPaths() {
+// The Translation page belongs to the v2 translation runtime. With the switch
+// off it is not in the navigation and its address is Not Found. The route
+// object itself is always in the list, at the same place: the router keeps a
+// match by position, so a route that appears only once the status has answered
+// would make every later route draw its neighbour on a page opened by address.
+function Routes() {
   const top: CustomRouteObject[] = useRoutes()[0].children ?? [];
   const settings = top.find((route) => route.path === "settings");
-  const paths = (settings?.children ?? []).map((route) => route.path);
-  // The assertions wait for the status to arrive, so a flag that is only
-  // ignored after loading cannot pass on the first render.
+  const navigation = groupRoutes(top).flatMap((group) =>
+    group.items.map((item) => item.path),
+  );
   const { isFetched } = useSystemStatus();
   return (
     <>
       <span>{isFetched ? "status loaded" : "status loading"}</span>
-      <span data-testid="paths">{paths.join(",")}</span>
+      <span data-testid="top">{top.map((route) => route.path).join(",")}</span>
+      <span data-testid="navigation">{navigation.join(",")}</span>
+      <span data-testid="settings">
+        {(settings?.children ?? [])
+          .filter((route: CustomRouteObject) => !route.hidden)
+          .map((route) => route.path)
+          .join(",")}
+      </span>
     </>
   );
 }
@@ -41,40 +53,83 @@ function showStatus(translationRuntime: boolean | undefined) {
   );
 }
 
-function showPaths() {
+function showRoutes() {
   rawRender(
     <AllProviders>
-      <SettingsPaths />
+      <Routes />
     </AllProviders>,
   );
 }
 
-it("leaves the Translation route out while the switch is off, after the status has arrived", async () => {
+const list = (id: string) =>
+  (screen.getByTestId(id).textContent ?? "").split(",");
+
+const Page: FunctionComponent = () => (
+  <TranslationGate>
+    <span>the translation page</span>
+  </TranslationGate>
+);
+
+it("keeps Translation out of the navigation while the switch is off, after the status has arrived", async () => {
   showStatus(false);
-  showPaths();
+  showRoutes();
   expect(await screen.findByText("status loaded")).toBeInTheDocument();
-  const paths = screen.getByTestId("paths").textContent ?? "";
-  expect(paths).toContain("translator");
-  expect(paths.split(",")).not.toContain("translation");
+  expect(list("navigation")).not.toContain("translation");
+  // The old page stays in Settings; the new one was never listed there.
+  expect(list("settings")).toContain("translator");
+  expect(list("settings")).not.toContain("translation");
 });
 
-it("leaves it out on a status that predates the field, after the status has arrived", async () => {
+it("keeps it out on a status that predates the field, after the status has arrived", async () => {
   showStatus(undefined);
-  showPaths();
+  showRoutes();
   expect(await screen.findByText("status loaded")).toBeInTheDocument();
-  expect(screen.getByTestId("paths").textContent?.split(",")).not.toContain(
-    "translation",
-  );
+  expect(list("navigation")).not.toContain("translation");
 });
 
-it("adds the route, beside the old translator page, once the switch is on", async () => {
+it("shows it as a first-level entry after Subtitle Hub once the switch is on, with the old page still in Settings", async () => {
   showStatus(true);
-  showPaths();
+  showRoutes();
   expect(await screen.findByText("status loaded")).toBeInTheDocument();
-  await waitFor(() =>
-    expect(screen.getByTestId("paths").textContent?.split(",")).toContain(
-      "translation",
-    ),
+  await waitFor(() => expect(list("navigation")).toContain("translation"));
+  const navigation = list("navigation");
+  expect(navigation.indexOf("translation")).toBe(
+    navigation.indexOf("subtitle-hub") + 1,
   );
-  expect(screen.getByTestId("paths").textContent).toContain("translator");
+  expect(list("settings")).toContain("translator");
+  expect(list("settings")).not.toContain("translation");
+});
+
+it("holds every route at the same position whether the switch is on or off", async () => {
+  showStatus(true);
+  showRoutes();
+  const before = list("top");
+  expect(await screen.findByText("status loaded")).toBeInTheDocument();
+  await waitFor(() => expect(list("navigation")).toContain("translation"));
+  expect(list("top")).toEqual(before);
+});
+
+it("answers Not Found at the page's address while the switch is off, and mounts nothing of the page", async () => {
+  showStatus(false);
+  customRender(<Page />);
+  expect(await screen.findByText(/Page not found/)).toBeVisible();
+  expect(screen.queryByText("the translation page")).not.toBeInTheDocument();
+});
+
+it("shows neither the page nor Not Found before the status has answered", async () => {
+  let answer: (() => void) | undefined;
+  server.use(
+    http.get("/api/system/status", async () => {
+      await new Promise<void>((resolve) => {
+        answer = resolve;
+      });
+      return HttpResponse.json({ data: { translation_runtime_v2: true } });
+    }),
+  );
+  customRender(<Page />);
+  await waitFor(() => expect(answer).toBeDefined());
+  expect(screen.queryByText(/Page not found/)).not.toBeInTheDocument();
+  expect(screen.queryByText("the translation page")).not.toBeInTheDocument();
+  answer?.();
+  expect(await screen.findByText("the translation page")).toBeVisible();
 });

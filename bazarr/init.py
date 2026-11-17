@@ -8,7 +8,8 @@ import rarfile
 
 from dogpile.cache.region import register_backend as register_cache_backend
 
-from app.config import settings, configure_captcha_func, remove_settings_section, write_config
+from app.config import (settings, configure_captcha_func, log_startup_notices, remove_settings_section,
+                        write_config)
 from app.get_args import args
 from app.logger import configure_logging
 from utilities.binaries import get_binary, BinaryNotFound
@@ -55,6 +56,9 @@ configure_captcha_func()
 # configure logging
 configure_logging(settings.general.debug or args.debug)
 import logging  # noqa: E402
+
+# What reading the configuration changed in what was stored. It was found before there was a log to say it in.
+log_startup_notices()
 
 # restore backup if required. A restore that leaves the database unfit to run
 # on (pg_restore failing partway, or the restored configuration not going in)

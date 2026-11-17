@@ -339,6 +339,160 @@ def test_the_settings_save_cannot_flip_the_switch_or_repoint_the_engine(saveable
         settings.translator.runtime_v2, settings.translator.engine, settings.translator.fallback_engine = before
 
 
+def test_the_score_of_a_translated_subtitle_is_a_share_of_100_and_no_more(saveable):
+    from dynaconf.validator import ValidationError
+
+    from app.config import settings, validators
+
+    by_name = {validator.names[0]: validator for validator in validators if validator.names}
+    bounds = by_name["translator.default_score"].operations
+    assert (bounds["gte"], bounds["lte"]) == (0, 100)
+    score = settings.translator.default_score
+    try:
+        saveable.save_settings([("settings-translator-default_score", ["100"])])
+        assert settings.translator.default_score == 100
+        # Above the scale: refused, and what was saved stays.
+        with pytest.raises(ValidationError):
+            saveable.save_settings([("settings-translator-default_score", ["101"])])
+        assert settings.translator.default_score == 100
+        with pytest.raises(ValidationError):
+            saveable.save_settings([("settings-translator-default_score", ["-1"])])
+        assert settings.translator.default_score == 100
+    finally:
+        settings.translator.default_score = score
+
+
+def _stored_score(tmp_path, value):
+    """Settings read from a config file that holds this score, with the real validator for it."""
+    import yaml
+    from dynaconf import Dynaconf
+
+    from app.config import validators
+
+    path = tmp_path / f"config-{len(list(tmp_path.iterdir()))}.yaml"
+    path.write_text(yaml.safe_dump({"translator": {"default_score": value}}), encoding="utf-8")
+    stored = Dynaconf(settings_file=str(path), core_loaders=["YAML"], apply_default_on_none=True)
+    stored.validators.register(*[validator for validator in validators
+                                 if validator.names and validator.names[0] == "translator.default_score"])
+    return stored
+
+
+@pytest.fixture
+def notices(monkeypatch):
+    """What startup has to tell the person, emptied for the test and put back after it."""
+    from app import config
+
+    kept: list[str] = []
+    monkeypatch.setattr(config, "_startup_notices", kept)
+    return kept
+
+
+def test_a_stored_score_above_100_is_brought_down_to_100_and_noted_once(tmp_path, notices, caplog):
+    from dynaconf.validator import ValidationError
+
+    from app.config import clamp_translated_subtitle_score, log_startup_notices
+
+    # Left alone, the validator refuses it, and the startup loop answers a refusal with the default of 50.
+    with pytest.raises(ValidationError):
+        _stored_score(tmp_path, 150).validators.validate_all()
+
+    stored = _stored_score(tmp_path, 150)
+    assert clamp_translated_subtitle_score(stored) is True
+    stored.validators.validate_all()  # nothing is left for the loop to reset
+    assert stored.translator.default_score == 100
+    # Nothing is logged here: this runs before logging is set up, where a line would reach nobody.
+    assert caplog.records == []
+    assert len(notices) == 1 and "150" in notices[0] and "100" in notices[0]
+    # The next start finds 100: nothing to do, and nothing more to say.
+    assert clamp_translated_subtitle_score(stored) is False
+    assert len(notices) == 1
+
+    # Once logging works it is said as a warning, which the default level shows, and only once.
+    log_startup_notices()
+    said = [record for record in caplog.records if "score of a translated subtitle" in record.getMessage()]
+    assert [record.levelname for record in said] == ["WARNING"]
+    assert "was 150" in said[0].getMessage() and "now 100" in said[0].getMessage()
+    assert notices == []
+    caplog.clear()
+    log_startup_notices()
+    assert caplog.records == []
+
+
+@pytest.mark.parametrize("value", [0, 50, 65, 100])
+def test_a_stored_score_in_range_is_left_as_it_is(tmp_path, notices, value):
+    from app.config import clamp_translated_subtitle_score
+
+    stored = _stored_score(tmp_path, value)
+    assert clamp_translated_subtitle_score(stored) is False
+    stored.validators.validate_all()
+    assert stored.translator.default_score == value
+    assert notices == []
+
+
+def test_only_a_score_above_the_limit_is_brought_down_and_the_rest_is_left_to_the_validator(tmp_path, notices):
+    from dynaconf.validator import ValidationError
+
+    from app.config import clamp_translated_subtitle_score
+
+    # A score that is a number with a fraction, above the limit: the highest score, as a whole number.
+    high = _stored_score(tmp_path, 150.5)
+    assert clamp_translated_subtitle_score(high) is True and high.translator.default_score == 100
+    assert isinstance(high.translator.default_score, int)
+    high.validators.validate_all()
+    # Nothing that says "the highest": the validator judges these as it did before.
+    for odd in (-5, "150", True):
+        stored = _stored_score(tmp_path, odd)
+        assert clamp_translated_subtitle_score(stored) is False
+        assert stored.translator.default_score == odd
+    with pytest.raises(ValidationError):
+        _stored_score(tmp_path, -5).validators.validate_all()
+
+
+def test_a_real_start_with_a_stored_150_comes_up_with_100_and_says_so_where_it_is_seen(tmp_path):
+    """The whole start, in a process of its own, in the order a real one runs: the configuration is read
+    (and the stored value brought down before the validation loop can reset it), logging is configured, and
+    only then is the change said. The boot write puts the new value in the file, so it is said once."""
+    import os
+    import subprocess
+    from pathlib import Path
+
+    import yaml
+
+    root = Path(__file__).resolve().parents[2]
+    config_dir = tmp_path / "data"
+    (config_dir / "config").mkdir(parents=True)
+    config_file = config_dir / "config" / "config.yaml"
+    config_file.write_text(yaml.safe_dump({"translator": {"default_score": 150}}), encoding="utf-8")
+    # ``init`` is the module a start imports before anything else of the application. It waits five seconds
+    # for Plex on the way, which says nothing about this, so the waits are cut short.
+    start = ("import sys, time; sys.path[:0] = [sys.argv[1], sys.argv[2]]; "
+             "wait = time.sleep; time.sleep = lambda seconds: wait(min(seconds, 0.01)); "
+             "import init; from app.config import settings; print('score', settings.translator.default_score)")
+    environment = {**os.environ, "BAZARR_CONFIG_DIR": str(config_dir), "NO_CLI": "true",
+                   "PYTHONDONTWRITEBYTECODE": "1"}
+
+    def boot():
+        done = subprocess.run([sys.executable, "-c", start, str(root / "bazarr"), str(root / "custom_libs")],
+                              cwd=root / "bazarr", env=environment, capture_output=True, text=True, timeout=180)
+        assert done.returncode == 0, done.stderr[-2000:]
+        said = [line for line in done.stderr.splitlines() if "score of a translated subtitle" in line]
+        return done.stdout.strip().splitlines()[-1], said
+
+    score, said = boot()
+    assert score == "score 100"
+    assert yaml.safe_load(config_file.read_text(encoding="utf-8"))["translator"]["default_score"] == 100
+    # On the console, as a warning, with the old and the new value. Logged while the configuration was
+    # read, it would not be here at all: nothing shows a line from before logging is configured.
+    assert len(said) == 1
+    assert "WARNING" in said[0] and "was 150" in said[0] and "It is now 100." in said[0]
+    # And in the log file a person is asked to send.
+    log_file = config_dir / "log" / "bazarr.log"
+    assert log_file.read_text(encoding="utf-8").count("score of a translated subtitle was 150") == 1
+
+    # The next start reads the saved 100, keeps it, and has nothing to say.
+    assert boot() == ("score 100", [])
+
+
 def test_the_switch_and_pointers_are_written_to_the_config_file():
     import yaml
 

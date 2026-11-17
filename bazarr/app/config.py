@@ -181,6 +181,43 @@ def migrate_search_timeout_default(settings) -> bool:
     return True
 
 
+# What reading the configuration changed in what was stored, for the person to be told. This module is
+# imported before logging is set up, so a line logged here reaches no console and no log file: the changes
+# are kept here and ``log_startup_notices`` says them, once, when init has configured logging.
+_startup_notices: list[str] = []
+
+
+def log_startup_notices() -> None:
+    """Say what startup changed in the stored settings. Each notice is said once."""
+    while _startup_notices:
+        logging.warning("%s", _startup_notices.pop(0))
+
+
+# The score of a translated subtitle is a share of the full score, so 100 is the most it can be.
+TRANSLATED_SUBTITLE_SCORE_MAX = 100
+
+
+def clamp_translated_subtitle_score(settings) -> bool:
+    """Bring a stored ``translator.default_score`` above 100 down to 100.
+
+    A save above 100 is refused, but a config written before that rule can hold more. The validation loop
+    would put such a value back to the default of 50, which is not what a person who asked for 150 meant:
+    they keep the highest score there is. Only a number above the limit is touched; anything else the
+    validator does not accept (a negative number, text) is left for it to judge. The boot write saves the
+    new value, so this happens once. The change is noted for ``log_startup_notices``, because nothing logged
+    this early is seen. Returns True when the stored value was changed.
+    """
+    stored = settings.get('translator.default_score')
+    if isinstance(stored, bool) or not isinstance(stored, (int, float)):
+        return False
+    if not stored > TRANSLATED_SUBTITLE_SCORE_MAX:  # also false for a NaN
+        return False
+    settings['translator.default_score'] = TRANSLATED_SUBTITLE_SCORE_MAX
+    _startup_notices.append(f"The stored score of a translated subtitle was {stored}, above the highest score "
+                            f"there is. It is now {TRANSLATED_SUBTITLE_SCORE_MAX}.")
+    return True
+
+
 ONE_HUNDRED_YEARS_IN_MINUTES = 52560000
 ONE_HUNDRED_YEARS_IN_HOURS = 876000
 
@@ -436,7 +473,10 @@ validators = [
     Validator('translator.min_source_score', must_exist=True, default=90, is_type_of=int, gte=0, lte=100),
     Validator('translator.min_source_wait_minutes', must_exist=True, default=0, is_type_of=int, gte=0, lte=10080,
               condition=is_not_bool),
-    Validator('translator.default_score', must_exist=True, default=50, is_type_of=int, gte=0),
+    # A share of the full score, like min_source_score above: more than 100 is no score a subtitle can have.
+    # A value above it that is already stored is brought down to 100 at startup, before this is checked.
+    Validator('translator.default_score', must_exist=True, default=50, is_type_of=int, gte=0,
+              lte=TRANSLATED_SUBTITLE_SCORE_MAX),
     Validator('translator.gemini_keys', must_exist=True, default=[], is_type_of=list),
     Validator('translator.gemini_model', must_exist=True, default='gemini-3.6-flash', is_type_of=str, cast=str),
     Validator('translator.gemini_batch_size', must_exist=True, default=300, is_type_of=int, gte=1),
@@ -970,6 +1010,8 @@ if os.path.getsize(config_yaml_file) > 0:
                          "translator switched off.", stored_translator_type)
     migrate_upgrade_subtitle_toggles(settings, existing_config=True)
     migrate_search_timeout_default(settings)
+    # Before the validation loop below, which would reset a stored score above 100 to the default instead.
+    clamp_translated_subtitle_score(settings)
 
 failed_validator = True
 while failed_validator:

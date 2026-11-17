@@ -22,7 +22,10 @@ DESCRIPTION_LIMIT = 300
 
 
 def available_engines() -> list[dict[str, Any]]:
-    """The translator engines the catalog offers that have no installation, the official one first."""
+    """The translator engines the catalog offers that have no installation, the official one first.
+
+    That also covers an engine whose only row records a failed install: nothing is running, so it is offered again.
+    """
     from provider_hub.kinds import TRANSLATOR
     from provider_hub.service import installable_catalog_plugins
 

@@ -36,7 +36,7 @@ export function useGuardedSave(
       } else if (refusal) {
         setAsking([]);
         setFieldErrors(refusal.fieldErrors);
-        setMessage(refusal.message);
+        setMessage(refusal.message || "The request failed. Try again.");
         setStale(refusal.code === "stale_revision");
         if (refusal.code === "stale_revision") {
           onStale?.();
@@ -60,5 +60,11 @@ export function useGuardedSave(
     save: () => attempt([]),
     accept: () => attempt(asking),
     decline: () => setAsking([]),
+    /** Forget the last refusal, for a form that reloads what is saved. */
+    dismiss: () => {
+      setMessage("");
+      setStale(false);
+      setFieldErrors({});
+    },
   };
 }

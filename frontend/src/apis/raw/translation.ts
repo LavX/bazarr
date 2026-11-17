@@ -3,10 +3,15 @@ import type {
   TranslationConnection,
   TranslationConnectionBody,
   TranslationEngine,
+  TranslationHistoryPage,
+  TranslationLimitsBody,
   TranslationNotice,
   TranslationOptionsAnswer,
+  TranslationQueuePage,
   TranslationSaveBody,
   TranslationState,
+  TranslationSummary,
+  TranslationTestResult,
 } from "@/types/translation";
 import BaseApi from "./base";
 
@@ -78,6 +83,34 @@ class TranslationApi extends BaseApi {
     const response = await this.postRaw<TranslationOptionsAnswer>(
       `/engines/${instanceId}/options`,
       { backend_type: backendType, field, values },
+    );
+    return response.data;
+  }
+
+  async history(params: { start: number; length: number; status?: string }) {
+    return this.get<TranslationHistoryPage>("/history", params);
+  }
+
+  /** The jobs that have not started yet, in the order they will run. */
+  async queue() {
+    return this.get<TranslationQueuePage>("/queue");
+  }
+
+  /** Spend this month, the caps and the queue. */
+  async summary() {
+    return this.get<TranslationSummary>("/summary");
+  }
+
+  async saveLimits(body: TranslationLimitsBody) {
+    const response = await this.putRaw<TranslationSummary>("/limits", body);
+    return response.data;
+  }
+
+  /** One small request through the back end as it is saved. */
+  async testConnection(id: number) {
+    const response = await this.postRaw<TranslationTestResult>(
+      `/connections/${id}/test`,
+      {},
     );
     return response.data;
   }
