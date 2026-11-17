@@ -229,6 +229,27 @@ def _client_gone(client, budget: float) -> bool:
     return client.group_gone(max(0.0, deadline - time.monotonic()))
 
 
+# How the wait for a leftover process paces itself. It starts at the cadence a quick exit is
+# noticed at and doubles after every round that finds the survivor still running, up to a
+# ceiling, so a process that lives for hours is looked at every few seconds, not fifty times a
+# second. The hold is never given up: only the looking slows down.
+LEFTOVER_POLL_START = 0.05
+LEFTOVER_POLL_CEILING = 5.0
+
+
+def _wait_until_gone(client, release, sleep=time.sleep) -> None:
+    """Keep the hold until the client's worker and everything it started are gone, then call ``release``.
+
+    Each round is one check with no wait of its own, followed by a pause that grows from
+    ``LEFTOVER_POLL_START`` to ``LEFTOVER_POLL_CEILING``. ``sleep`` is a parameter for tests.
+    """
+    delay = LEFTOVER_POLL_START
+    while not _client_gone(client, 0.0):
+        sleep(delay)
+        delay = min(delay * 2, LEFTOVER_POLL_CEILING)
+    release()
+
+
 def release_when_gone(client, release, label: str, budget: float = 3.0) -> bool:
     """Call ``release`` once the client's worker and its process group are confirmed gone.
 
@@ -257,12 +278,9 @@ def release_when_gone(client, release, label: str, budget: float = 3.0) -> bool:
         return False
     logger.error("Provider Hub: a temporary worker for %s left processes running; its environment stays in place", label)
 
-    def wait_then_release() -> None:
-        while not _client_gone(client, 10.0):
-            time.sleep(0.05)
-        release()
-
-    threading.Thread(target=wait_then_release, name="hub-release-when-gone", daemon=True).start()
+    threading.Thread(
+        target=_wait_until_gone, args=(client, release), name="hub-release-when-gone", daemon=True
+    ).start()
     return False
 
 

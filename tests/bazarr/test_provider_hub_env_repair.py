@@ -1530,6 +1530,76 @@ def test_a_client_that_never_started_a_worker_releases_its_hold_even_without_pro
     assert released == [1]
 
 
+def test_the_wait_for_a_leftover_process_backs_off_and_still_releases_once_it_exits():
+    from provider_hub import worker as worker_module
+
+    rounds_alive = 12
+    state = {"checks": 0}
+
+    class Survivor:
+        process = object()
+
+        @staticmethod
+        def _has_exited(process):
+            return True
+
+        @staticmethod
+        def group_gone(ceiling=10.0):
+            state["checks"] += 1
+            return state["checks"] > rounds_alive
+
+    pauses = []
+    released = []
+
+    def sleep(seconds):
+        # The hold is never given up while the survivor lives.
+        assert released == []
+        pauses.append(seconds)
+
+    worker_module._wait_until_gone(Survivor(), lambda: released.append(1), sleep=sleep)
+
+    assert released == [1]
+    assert len(pauses) == rounds_alive
+    assert pauses[0] == worker_module.LEFTOVER_POLL_START
+    assert pauses == sorted(pauses)
+    assert pauses[1] > pauses[0]
+    assert max(pauses) == worker_module.LEFTOVER_POLL_CEILING
+    assert pauses[-1] == worker_module.LEFTOVER_POLL_CEILING
+    assert worker_module.LEFTOVER_POLL_CEILING >= 2.0
+
+
+def test_a_leftover_process_is_checked_without_a_wait_of_its_own_between_pauses():
+    from provider_hub import worker as worker_module
+
+    budgets = []
+    original = worker_module._client_gone
+
+    def spy(client, budget):
+        budgets.append(budget)
+        return original(client, budget)
+
+    class Survivor:
+        process = object()
+        left = 3
+
+        @staticmethod
+        def _has_exited(process):
+            return True
+
+        @classmethod
+        def group_gone(cls, ceiling=10.0):
+            # A budget of zero is one look; a longer one would poll on its own.
+            assert ceiling == 0.0
+            cls.left -= 1
+            return cls.left <= 0
+
+    from unittest import mock
+
+    with mock.patch.object(worker_module, "_client_gone", spy):
+        worker_module._wait_until_gone(Survivor(), lambda: None, sleep=lambda seconds: None)
+    assert budgets and set(budgets) == {0.0}
+
+
 def test_two_simultaneous_first_calls_share_one_worker_client_through_a_retirement(hub, hub_registry, monkeypatch):
     import sys
 
