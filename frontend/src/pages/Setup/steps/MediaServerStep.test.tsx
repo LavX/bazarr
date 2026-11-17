@@ -186,6 +186,17 @@ describe("MediaServerStep", () => {
     ).toBeInTheDocument();
   });
 
+  it("walks past the picker when a server is ticked and nothing is connected, since its own step answers for it", async () => {
+    const user = userEvent.setup();
+    withSelection(<MediaServerStep onNext={onNext} />);
+
+    await tick(user, /^Jellyfin$/);
+    await user.click(screen.getByRole("button", { name: /set up 1 server/i }));
+
+    expect(mutate).not.toHaveBeenCalled();
+    expect(onNext).toHaveBeenCalledWith(NOTHING_WRITTEN);
+  });
+
   it("takes two servers of one kind and names them apart", async () => {
     // media_server_instances has no uniqueness on name or kind, and Settings
     // already lists several per kind. Two rows both called "Emby" would be

@@ -65,6 +65,9 @@ const TranslationStep: FC<WizardStepProps> = ({ onNext, onBack }) => {
   const state = useTranslationState();
   const pointers = usePointersMutation();
   const [starting, setStarting] = useState(false);
+  // A start that has saved the back end and not finished (the engine would not turn on, or could not be
+  // selected) keeps the key form up, with the reason and the way to try again, as the page's first run does.
+  const [pinned, setPinned] = useState(false);
   // The shell holds Back, the skip and Set up later until a start has gone through: leaving in the
   // middle would drop the answer, and with it the reason a step failed.
   useReportStepBusy(starting || pointers.isPending);
@@ -89,7 +92,7 @@ const TranslationStep: FC<WizardStepProps> = ({ onNext, onBack }) => {
   const busy = starting || pointers.isPending;
   // Translation is already set up (an engine is selected, or a back end is saved): the step says so and
   // offers nothing that would add a second back end, as typing the key again after a Back would.
-  const setUp = data !== undefined && !isFirstRun(data);
+  const setUp = data !== undefined && !isFirstRun(data) && !pinned && !starting;
   const selected = data?.instances.find((item) => item.id === data.engine);
   const selectedStatus = selected ? engineStatus(selected) : null;
 
@@ -221,7 +224,7 @@ const TranslationStep: FC<WizardStepProps> = ({ onNext, onBack }) => {
               keyOnlyTypes(official).length > 0 ? (
                 <KeyStart
                   engine={official}
-                  onPin={() => undefined}
+                  onPin={setPinned}
                   onBusy={setStarting}
                   locked={pointers.isPending}
                   // Setup has no set-up form to open: the Translation page has it, and the key

@@ -379,4 +379,50 @@ describe("TranslationStep", () => {
     expect(await screen.findByText("Translation is set up")).toBeVisible();
     expect(screen.getAllByText("No back end is on").length).toBeGreaterThan(0);
   });
+
+  it("keeps the key form and the reason when a start saved the back end and could not select the engine", async () => {
+    // The back end exists after the first request, so the state says a back end is saved: the form still
+    // has to stay up with what went wrong and the way to try again.
+    let saved = false;
+    serve(firstRun());
+    server.use(
+      http.get("/api/translation/state", () =>
+        HttpResponse.json(
+          saved
+            ? firstRun({
+                instances: [aiEngine({ connections: [connection(3)] })],
+              })
+            : firstRun(),
+        ),
+      ),
+      http.post("/api/translation/engines/:id/connections", () => {
+        saved = true;
+        return HttpResponse.json(
+          { connection: connection(3) },
+          { status: 201 },
+        );
+      }),
+      http.put(
+        "/api/translation/pointers",
+        () => new HttpResponse(null, { status: 500 }),
+      ),
+    );
+    const user = userEvent.setup();
+    customRender(<TranslationStep onNext={onNext} />);
+
+    await user.type(await screen.findByLabelText("OpenRouter key"), SECRET);
+    await user.click(screen.getByRole("button", { name: "Start translating" }));
+
+    expect(
+      await screen.findByText(
+        /Your key is saved, but the engine could not be switched on/,
+      ),
+    ).toBeVisible();
+    expect(screen.queryByText("Translation is set up")).not.toBeInTheDocument();
+    // The key is stored; trying again only selects the engine.
+    expect(
+      screen.getByRole("button", { name: "Switch the engine on" }),
+    ).toBeVisible();
+    expect(onNext).not.toHaveBeenCalled();
+  });
 });
