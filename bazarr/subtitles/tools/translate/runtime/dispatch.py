@@ -45,7 +45,7 @@ from .failure import AttemptFailure
 from .history import HistoryStore
 from .host_calls import AttemptContext, stored_checkpoints
 from .jobs import (AWAITING_RETRY, DEADLINE_EXCEEDED, INACTIVITY_TIMEOUT, QUEUED, DeadlineAction, DeadlineWatch,
-                   TranslationJobs, line_digest)
+                   TranslationJobs, line_digest, retry_hold)
 from .output_checks import add_rtl_marks, check_line
 from .request import LanguageSpec, UnsupportedLanguage, normalize_request_languages
 from .store import CONNECTION, INSTANCE, Notice, TranslatorStore
@@ -365,6 +365,10 @@ class Dispatcher:
                 return None
             row = jobs.get(result.job_id)
         if row is not None and row.state == AWAITING_RETRY:
+            hold = retry_hold(row, spec.pinned_connection_id, self.clock())
+            if hold:
+                # The editor asks again with the pick it already had, and the engine asked to be left alone.
+                raise DispatchFailed(row.error_class or fail.INTERNAL, hold, retry_later=True, retry_at=row.retry_at)
             if not jobs.requeue(row.id):
                 return None
             row = jobs.get(row.id)

@@ -6,7 +6,7 @@ Runs on SQLite, and on PostgreSQL when BAZARR_PG_TEST_URL is set.
 import json
 import threading
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import pytest
 
@@ -431,9 +431,50 @@ def test_a_retry_of_the_same_pick_keeps_its_pick(env):
     with pytest.raises(DispatchFailed):
         env.dispatcher().run(make_spec(pinned_connection_id=second.id))
     env.monotonic.advance(60)
+    env.clock.advance(minutes=5)
     job_id = env.last_job().id
     env.dispatcher().run(make_spec(pinned_connection_id=second.id))
     assert env.last_job().id == job_id and env.served()[-1] == str(second.id)
+
+
+def test_the_editor_asking_again_with_the_same_pick_waits_out_the_time_stored_on_the_job(env):
+    """An engine with no back ends has no in-memory window, so the time on the job is all that holds it."""
+    from subtitles.tools.translate.pick import pin_value
+
+    env.ai_engine()
+    google = env.engine(SECOND_PLUGIN, select=False)
+    pin = pin_value(engine_id=google.id)
+    env.scripts[SECOND_PLUGIN] = {"*": [{"fail": {"code": "rate_limited", "message": "slow", "retry_after": 600.0}},
+                                       {}]}
+    with pytest.raises(DispatchFailed):
+        env.dispatcher().run(make_spec(pinned_connection_id=pin))
+    asked = len(env.requests())
+    row = env.last_job()
+    assert row.state == "awaiting_retry" and row.retry_at is not None
+    with pytest.raises(DispatchFailed) as caught:
+        env.dispatcher().run(make_spec(pinned_connection_id=pin))
+    assert "waits to be retried" in caught.value.message and caught.value.retry_later is True
+    assert caught.value.error_class == "rate_limited"
+    assert len(env.requests()) == asked, "the engine was not asked inside the time it requested"
+    assert env.last_job().id == row.id and env.last_job().state == "awaiting_retry"
+    # Once the time has come the same pick runs.
+    env.clock.advance(minutes=11)
+    env.monotonic.advance(700)
+    env.dispatcher().run(make_spec(pinned_connection_id=pin))
+    assert len(env.requests()) == asked + 1
+
+
+def test_the_editor_asking_again_after_a_cost_cap_is_not_held(env):
+    from subtitles.tools.translate.pick import pin_value
+
+    google = env.engine(SECOND_PLUGIN, select=False)
+    pin = pin_value(engine_id=google.id)
+    jobs = TranslationJobs(env.session, clock=env.clock)
+    row = jobs.request(SOURCE, TARGET, manual=True, pinned_connection_id=pin)
+    jobs.start(row.job_id, source_digest="d", engine_instance_id=google.id, settings_revision=1)
+    jobs.await_retry(row.job_id, "month_cap", "spent", retry_at=env.clock() + timedelta(days=20))
+    env.dispatcher().run(make_spec(pinned_connection_id=pin))
+    assert env.served() == ["-"]
 
 
 def test_a_pinned_connection_that_cannot_be_used_closes_the_job(env):

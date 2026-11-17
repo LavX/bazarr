@@ -78,6 +78,23 @@ def _write(session):
     return write_transaction(session)
 
 
+def retry_hold(row, pin, now) -> str | None:
+    """Why this pick has to wait, or None when it may go.
+
+    A job that waits to be retried with the same pick is held until its stored time: that time is on the job, so it
+    holds across a restart and for an engine, which has no in-memory window. Another pick is a different question,
+    and a cost cap is the person's to raise, so neither is held.
+    """
+    from . import failure as fail
+
+    if row is None or pin is None or row.state != AWAITING_RETRY or row.retry_at is None or row.retry_at <= now \
+            or row.pinned_connection_id != pin or row.error_class in (fail.MONTH_CAP, fail.JOB_CAP):
+        return None
+    when = (f"{row.retry_at:%H:%M}" if row.retry_at.date() == now.date() else f"{row.retry_at:%Y-%m-%d %H:%M}")
+    return (f"This translation waits to be retried at {when} with what you picked. Pick another back end or "
+            "engine, or try again then.")
+
+
 class TranslationJobError(ValueError):
     """A request about a job that cannot be honoured, with a reason a person can read."""
 

@@ -14,12 +14,12 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Callable
 
-from . import failure as fail
 from .history import HistoryStore
-from .jobs import AWAITING_RETRY, QUEUED, RUNNING, JobsQueuePort, Outcome, TranslationJobs, target_key
+from .jobs import (AWAITING_RETRY, QUEUED, RUNNING, JobsQueuePort, Outcome, TranslationJobs, retry_hold,
+                   target_key)
 
 logger = logging.getLogger(__name__)
 
@@ -55,18 +55,10 @@ def decide(source_key: str, to_lang: str, forced: bool = False, hi: bool = False
     jobs = TranslationJobs(session, clock=clock)
     target = target_key(to_lang, forced, hi)
     if pinned_connection_id is not None:
-        # A pick of what a job is waiting to retry with waits out that time. That time is on the job, so
-        # it holds across a restart and for an engine, which has no in-memory window. Another pick is a different
-        # question and goes through. A cost cap is the person's to raise, so it does not hold a pick.
-        waiting = jobs.active_for(source_key, target)
-        if waiting is not None and waiting.state == AWAITING_RETRY and waiting.retry_at is not None \
-                and waiting.retry_at > clock() and waiting.pinned_connection_id == pinned_connection_id \
-                and waiting.error_class not in (fail.MONTH_CAP, fail.JOB_CAP):
-            when = (f"{waiting.retry_at:%H:%M}" if waiting.retry_at.date() == clock().date()
-                    else f"{waiting.retry_at:%Y-%m-%d %H:%M}")
-            raise TranslationJobError(
-                f"This translation waits to be retried at {when} with what you picked. Pick another back end or "
-                "engine, or try again then.")
+        # A pick of what a job is waiting to retry with waits out that time (see ``retry_hold``).
+        hold = retry_hold(jobs.active_for(source_key, target), pinned_connection_id, clock())
+        if hold:
+            raise TranslationJobError(hold)
     result = jobs.request(source_key, target, manual=pinned_connection_id is not None,
                           pinned_connection_id=pinned_connection_id)
     if result.outcome == Outcome.REFUSED:
@@ -81,7 +73,7 @@ def decide(source_key: str, to_lang: str, forced: bool = False, hi: bool = False
     if result.outcome in (Outcome.CREATED, Outcome.REPLACED):
         return Decision(QUEUE, row.id)
     if pinned_connection_id is None and not owns_pin and row.pinned_connection_id is not None \
-            and row.state in (QUEUED, AWAITING_RETRY) and not _live(row):
+            and row.state in (QUEUED, AWAITING_RETRY) and not _live(row) and not _enqueueing(row, clock()):
         # A request with no pick finds a picked job that is not on the queue any more (its queue job was removed or
         # died before it ran) or that waits for its retry: the pick belongs to the request that made it, so this
         # job is queued again as an ordinary one.
@@ -99,6 +91,18 @@ def decide(source_key: str, to_lang: str, forced: bool = False, hi: bool = False
     if row.state == RUNNING:
         return Decision(FOLLOW, row.id)  # it runs, but no queue job of the queue's is known for it
     return Decision(QUEUE, row.id)
+
+
+# How long a picked record that has no queue job yet is left alone. The request that recorded the pick adds its queue
+# job right after, so a record this young is a request still enqueueing, not one that was abandoned; only a record
+# whose queue job is gone (its id is there but the queue has none) or that never got one for longer than this is taken
+# over by a request with no pick.
+ENQUEUE_GRACE = timedelta(seconds=60)
+
+
+def _enqueueing(row, now) -> bool:
+    """Whether this record's request is still adding its queue job."""
+    return row.state == QUEUED and row.queue_job_id is None and now - (row.updated_at or row.created_at) < ENQUEUE_GRACE
 
 
 def _live(row) -> bool:

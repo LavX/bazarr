@@ -350,6 +350,28 @@ def test_a_pick_of_what_a_job_waits_to_retry_with_waits_out_the_time_on_the_job(
                           clock=env.clock).action == enqueue.QUEUE
 
 
+def test_a_request_with_no_pick_leaves_a_pick_alone_while_its_request_is_still_enqueueing(env, queue_status):
+    """The request records the pick, then adds its queue job. In between the record has no queue job yet, which is
+    not the same as an abandoned one, and a request with no pick must not clear it."""
+    picked = env.connection(env.engine())
+    enqueue.decide(SOURCE, "fr", pinned_connection_id=picked.id, session=env.session, clock=env.clock)
+    assert _active(env).queue_job_id is None
+    during = enqueue.decide(SOURCE, "fr", session=env.session, clock=env.clock)
+    assert during.action == enqueue.QUEUE
+    assert _active(env).pinned_connection_id == picked.id, "the pick survived the request that came in between"
+    # The pick's own request then attaches its queue job and the job is still the picked one.
+    enqueue.attach_for(101, SOURCE, "fr", session=env.session, clock=env.clock)
+    assert (_active(env).pinned_connection_id, _active(env).queue_job_id) == (picked.id, 101)
+
+
+def test_a_picked_record_that_never_got_a_queue_job_is_taken_over_once_it_is_clearly_abandoned(env, queue_status):
+    picked = env.connection(env.engine())
+    enqueue.decide(SOURCE, "fr", pinned_connection_id=picked.id, session=env.session, clock=env.clock)
+    env.clock.advance(seconds=enqueue.ENQUEUE_GRACE.total_seconds() + 1)
+    enqueue.decide(SOURCE, "fr", session=env.session, clock=env.clock)
+    assert _active(env).pinned_connection_id is None
+
+
 def test_a_request_with_the_same_pick_keeps_it_and_a_different_one_replaces_it(env, queue_status):
     instance = env.engine()
     first, second = env.connection(instance), env.connection(instance, model="second")
