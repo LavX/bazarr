@@ -474,3 +474,84 @@ def test_startup_binds_the_workers_only_with_the_switch_on(tmp_path, switch, bou
                           cwd=root / "bazarr", env=environment, capture_output=True, text=True, timeout=180)
     assert done.returncode == 0, done.stderr[-2000:]
     assert done.stdout.strip().splitlines()[-1] == f"state {bound} {bound}"
+
+
+def test_the_first_start_after_an_upgrade_runs_its_startup_tasks_as_soon_as_the_migration_made_the_tables(
+        tmp_path, monkeypatch):
+    """init runs with no runtime tables, and says nothing about it. The call after the migrations does the work at
+    once: it does not wait for the remembered "tables missing" answer to run out."""
+    import importlib.util
+
+    import sqlalchemy as sa
+
+    import app.database as app_database
+    import secret_store.scrub as scrub
+    from subtitles.tools.translate.runtime import dispatch
+    import subtitles.tools.translate.runtime as runtime
+
+    engine = sa.create_engine(f"sqlite:///{tmp_path / 'upgrade.db'}")
+    monkeypatch.setattr(app_database, "engine", engine)
+    monkeypatch.setattr(runtime, "_tables_present", False)
+    monkeypatch.setattr(runtime, "_absent_until", 0.0)
+    monkeypatch.setattr(runtime, "_startup_done", False)
+    monkeypatch.setattr(runtime, "runtime_v2_flag", lambda: True)
+    calls = []
+    monkeypatch.setattr(scrub, "refresh_secret_values", lambda settings: calls.append("scrub"))
+    monkeypatch.setattr(dispatch, "recover_after_restart", lambda: calls.append("recover"))
+
+    # init: the tables are not there. Nothing runs, nothing is raised.
+    assert runtime.run_startup_tasks() is False and calls == []
+    assert runtime.runtime_v2_enabled() is False  # and that answer is now remembered for the next 30 seconds
+
+    # The migrations run.
+    path = Path(__file__).resolve().parents[2] / "migrations" / "versions" / "a7c2e9f4b183_translator_runtime_tables.py"
+    spec = importlib.util.spec_from_file_location("runtime_tables_revision", path)
+    revision = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(revision)
+    with engine.begin() as connection:
+        revision.create_translator_runtime_tables(connection)
+
+    # Right after them, inside the remembered window: the tasks run, once, and the runtime reads as enabled.
+    assert runtime.run_startup_tasks() is True
+    assert calls == ["scrub", "recover"]
+    assert runtime.runtime_v2_enabled() is True
+    assert runtime.run_startup_tasks() is True and calls == ["scrub", "recover"]
+    engine.dispose()
+
+
+def test_a_start_where_the_tables_exist_at_init_runs_its_startup_tasks_once(tmp_path, monkeypatch):
+    import importlib.util
+
+    import sqlalchemy as sa
+
+    import app.database as app_database
+    import secret_store.scrub as scrub
+    import subtitles.tools.translate.runtime as runtime
+    from subtitles.tools.translate.runtime import dispatch
+
+    engine = sa.create_engine(f"sqlite:///{tmp_path / 'ready.db'}")
+    path = Path(__file__).resolve().parents[2] / "migrations" / "versions" / "a7c2e9f4b183_translator_runtime_tables.py"
+    spec = importlib.util.spec_from_file_location("runtime_tables_revision", path)
+    revision = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(revision)
+    with engine.begin() as connection:
+        revision.create_translator_runtime_tables(connection)
+    monkeypatch.setattr(app_database, "engine", engine)
+    monkeypatch.setattr(runtime, "_tables_present", False)
+    monkeypatch.setattr(runtime, "_absent_until", 0.0)
+    monkeypatch.setattr(runtime, "_startup_done", False)
+    monkeypatch.setattr(runtime, "runtime_v2_flag", lambda: True)
+    calls = []
+    monkeypatch.setattr(scrub, "refresh_secret_values", lambda settings: calls.append("scrub"))
+    monkeypatch.setattr(dispatch, "recover_after_restart", lambda: calls.append("recover"))
+    assert runtime.run_startup_tasks() is True and runtime.run_startup_tasks() is True  # init, then main
+    assert calls == ["scrub", "recover"]
+    engine.dispose()
+
+
+def test_the_startup_tasks_do_nothing_with_the_switch_off(monkeypatch):
+    import subtitles.tools.translate.runtime as runtime
+
+    monkeypatch.setattr(runtime, "_startup_done", False)
+    monkeypatch.setattr(runtime, "runtime_v2_flag", lambda: False)
+    assert runtime.run_startup_tasks() is False

@@ -304,24 +304,16 @@ def init_binaries():
 
 init_db()
 try:
-    # The translator secrets live in the database, which is ready only now. Only the switched-on runtime has
-    # any, so a switched-off boot does not touch this.
+    # The translator secrets live in the database, which is ready only now, and the jobs queue is in memory, so a
+    # translation the last run was in the middle of lost its place: the runtime registers the secrets for log
+    # scrubbing and marks those jobs to be retried, with their checkpoints kept. Nothing happens with the switch
+    # off. On the first start after an upgrade the runtime's tables are not there yet: main.py runs the same call
+    # once the migrations are done.
     if getattr(settings.translator, "runtime_v2", False) is True:
-        from secret_store.scrub import refresh_secret_values
-        refresh_secret_values(settings)
-except Exception:  # pragma: no cover - scrubbing must not prevent startup
-    logging.exception("Unable to register the translator secrets for log scrubbing on startup")
-try:
-    # The jobs queue is in memory, so a translation the last run was in the middle of lost its place. The
-    # runtime marks those jobs to be retried, with their checkpoints kept. Nothing happens with the switch
-    # off, or before the runtime's tables exist.
-    if getattr(settings.translator, "runtime_v2", False) is True:
-        from subtitles.tools.translate.runtime import runtime_v2_enabled
-        if runtime_v2_enabled():
-            from subtitles.tools.translate.runtime.dispatch import recover_after_restart
-            recover_after_restart()
-except Exception:  # pragma: no cover - recovery must not prevent startup
-    logging.exception("Unable to recover interrupted translations on startup")
+        from subtitles.tools.translate.runtime import run_startup_tasks
+        run_startup_tasks()
+except Exception:  # pragma: no cover - must not prevent startup
+    logging.exception("Unable to register the translator secrets and recover interrupted translations on startup")
 try:
     # The dispatcher reaches translator plugins through the worker pool once it is bound to it. Nothing is
     # bound, and nothing here is imported, with the switch off. The binding reads no table, so it does not wait
