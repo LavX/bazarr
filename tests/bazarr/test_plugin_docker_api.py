@@ -106,6 +106,37 @@ def test_an_older_but_supported_daemon_is_spoken_to_at_its_own_version(docker):
     assert docker.client().ping() == "1.41"
 
 
+def test_a_much_newer_daemon_is_spoken_to_at_the_ceiling_and_still_works(docker):
+    docker.api_version = "1.99"
+    docker.min_api_version = "1.24"
+    client = docker.client()
+
+    assert client.ping() == "%d.%d" % docker_api.API_VERSION_CEILING
+    assert client.list_containers() == []
+
+    assert docker.calls("GET", "/containers/json")[0]["version"] == "1.44"
+
+
+def test_a_daemon_whose_minimum_is_above_the_ceiling_is_refused_with_the_reason(docker):
+    docker.api_version = "1.55"
+    docker.min_api_version = "1.50"
+    client = docker.client()
+    client.ping()
+
+    with pytest.raises(DockerUnavailable, match="needs API 1.50 or newer, and this Bazarr\\+ speaks up to 1.44"):
+        client.list_containers()
+
+
+def test_a_daemon_whose_minimum_is_at_or_below_the_ceiling_is_not_refused_for_its_version(docker):
+    docker.api_version = "1.55"
+    docker.min_api_version = "1.44"
+
+    assert docker.client().ping() == "1.44"
+    client = docker.client()
+    client.ping()
+    assert client.list_containers() == []
+
+
 def test_a_daemon_older_than_the_oldest_supported_version_is_refused(docker):
     docker.api_version = "1.30"
 

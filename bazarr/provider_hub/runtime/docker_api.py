@@ -30,6 +30,7 @@ import json
 import os
 import re
 import socket
+import threading
 import time
 import urllib.parse
 
@@ -40,10 +41,11 @@ from secret_store.scrub import scrub_text
 
 __all__ = [
     "ALLOWED_ROUTES",
-    "API_VERSION_MAX",
-    "API_VERSION_MIN",
+    "API_VERSION_CEILING",
+    "API_VERSION_FLOOR",
     "DEFAULT_SOCKET",
     "DockerApiError",
+    "DockerCancelled",
     "DockerClient",
     "DockerNotFound",
     "DockerRefused",
@@ -55,11 +57,13 @@ __all__ = [
 ]
 
 DEFAULT_SOCKET = "/var/run/docker.sock"
-# The newest API version this client speaks and the oldest it accepts (Docker 20.10). The version used
-# is the daemon's own, capped at the newest, so an older Docker still works and a newer one is not
-# asked for anything this client does not know.
-API_VERSION_MAX = (1, 44)
-API_VERSION_MIN = (1, 41)
+# The API versions this client speaks. The floor is the oldest it accepts (Docker 20.10). The ceiling is the
+# newest version whose routes and fields these calls were written against (Docker 25): the version used is the
+# daemon's own, capped at the ceiling. A newer daemon is therefore spoken to at the ceiling, which Docker keeps
+# supporting down to the daemon's own minimum. A daemon whose minimum is above the ceiling cannot be used and
+# is refused with that reason (see ``_too_old``).
+API_VERSION_CEILING = (1, 44)
+API_VERSION_FLOOR = (1, 41)
 
 MIB = 1024 * 1024
 # The most bytes one answer may hold. A pull's progress stream is read in lines and only counted.
@@ -117,6 +121,10 @@ class DockerNotFound(DockerApiError):
 
 class DockerUnavailable(DockerApiError):
     """The daemon could not be reached, or answered something that is not the Docker API."""
+
+
+class DockerCancelled(DockerApiError):
+    """The caller cancelled the call (a stop during a long pull)."""
 
 
 class DockerRefused(DockerApiError):
@@ -186,6 +194,21 @@ class _UnixConnection(http.client.HTTPConnection):
             sock.close()
             raise
         self.sock = sock
+
+
+_MIN_VERSION_RE = re.compile(r"[Mm]inimum supported API version is (?P<minimum>[0-9]{1,2}\.[0-9]{1,3})")
+
+
+def _too_old(message: str) -> str | None:
+    """The reason to show when the daemon says our API version is below its minimum, else None."""
+    found = _MIN_VERSION_RE.search(message)
+    if not found or "too old" not in message:
+        return None
+    needed = _version_tuple(found.group("minimum"))
+    if needed is not None and needed <= API_VERSION_CEILING:
+        return None
+    return "this Docker daemon needs API %s or newer, and this Bazarr+ speaks up to %d.%d" % (
+        found.group("minimum"), *API_VERSION_CEILING)
 
 
 class _TcpConnection(http.client.HTTPConnection):
@@ -313,6 +336,8 @@ class DockerClient:
         connection = self._connection(self.timeout if timeout is None else timeout)
         try:
             connection.request(method, target, body=payload, headers=headers)
+            # A response that will close detaches the socket from the connection; keep it for a cancel.
+            connection.cancel_socket = getattr(connection, "sock", None)
             return connection, connection.getresponse()
         except (OSError, http.client.HTTPException) as error:
             connection.close()
@@ -328,6 +353,9 @@ class DockerClient:
         except ValueError:
             message = raw.decode("utf-8", "replace")
         message = _clean(message) or f"HTTP {status}"
+        too_old = _too_old(message)
+        if too_old:
+            raise DockerUnavailable(too_old, status=status)
         if status == 404:
             raise DockerNotFound(message, status=status)
         raise DockerApiError(message, status=status)
@@ -375,12 +403,12 @@ class DockerClient:
                     f"the Docker daemon dropped the connection: {type(error).__name__}") from error
             if response.status != 200 or raw.strip() != b"OK":
                 raise DockerUnavailable("that address does not answer as a Docker daemon")
-            offered = _version_tuple(response.getheader("API-Version")) or API_VERSION_MIN
+            offered = _version_tuple(response.getheader("API-Version")) or API_VERSION_FLOOR
         finally:
             connection.close()
-        if offered < API_VERSION_MIN:
-            raise DockerUnavailable("this Docker daemon is older than API %d.%d" % API_VERSION_MIN)
-        self._version = min(offered, API_VERSION_MAX)
+        if offered < API_VERSION_FLOOR:
+            raise DockerUnavailable("this Docker daemon is older than API %d.%d" % API_VERSION_FLOOR)
+        self._version = min(offered, API_VERSION_CEILING)
         return self.api_version  # type: ignore[return-value]
 
     # ------------------------------------------------------------ containers
@@ -456,11 +484,13 @@ class DockerClient:
         return result
 
     def pull_image(self, repository: str, digest: str, *, deadline: float = 900.0,
-                   idle_timeout: float = 120.0) -> None:
+                   idle_timeout: float = 120.0, cancel: threading.Event | None = None) -> None:
         """Pull ``repository@digest``. Only a digest is accepted, never a tag.
 
         The daemon checks the content against the digest. The progress stream is read and dropped: only an error
         in it matters. ``deadline`` bounds the whole pull; ``idle_timeout`` the wait for the next progress line.
+        Setting ``cancel`` from another thread ends the pull within a fraction of a second (the connection is
+        shut down under the blocked read) and raises ``DockerCancelled``.
         """
         if not _DIGEST_RE.fullmatch(str(digest)):
             raise DockerRefused("an image is pulled by a sha256 digest, never by a tag")
@@ -469,6 +499,12 @@ class DockerClient:
             raise DockerRefused("the image name must carry neither a tag nor a digest")
         connection, response = self._send("POST", "/images/create", query={"fromImage": reference},
                                           timeout=idle_timeout)
+        finished = threading.Event()
+        watcher = None
+        if cancel is not None:
+            watcher = threading.Thread(target=self._watch_cancel, args=(cancel, finished, connection),
+                                       name="docker-pull-cancel", daemon=True)
+            watcher.start()
         try:
             if response.status != 200:
                 self._raise_for(response.status, self._read(response, MAX_BODY_BYTES))
@@ -490,9 +526,27 @@ class DockerClient:
                         detail = event.get("error") or (event.get("errorDetail") or {}).get("message")
                         raise DockerApiError(_clean(detail) or "the image pull failed")
             except (OSError, http.client.HTTPException) as error:
+                if cancel is not None and cancel.is_set():
+                    raise DockerCancelled("the image pull was cancelled") from error
                 raise DockerUnavailable(f"the image pull was interrupted: {type(error).__name__}") from error
+            if cancel is not None and cancel.is_set():
+                # A shut-down connection reads as the end of the stream, not as an error.
+                raise DockerCancelled("the image pull was cancelled")
         finally:
+            finished.set()
             connection.close()
+
+    @staticmethod
+    def _watch_cancel(cancel: threading.Event, finished: threading.Event, connection) -> None:
+        while not finished.is_set():
+            if cancel.wait(0.1):
+                sock = getattr(connection, "cancel_socket", None)
+                if sock is not None and not finished.is_set():
+                    try:
+                        sock.shutdown(socket.SHUT_RDWR)
+                    except OSError:
+                        pass
+                return
 
     # ------------------------------------------------------------ networks
 
