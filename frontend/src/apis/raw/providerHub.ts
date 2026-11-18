@@ -100,6 +100,12 @@ export interface ProviderHubInstallation {
   last_error?: string | null;
   /** True when the plugin's Python environment is missing or fails its check. */
   needs_repair?: boolean;
+  /** True when the official catalog revoked the active release. It does not start after a restart. */
+  revoked?: boolean;
+  /** Why the active release is revoked, and what to do. It stays when last_error is replaced. */
+  revoked_reason?: string | null;
+  /** Why the plugin is held back at boot, for a revoked release or one whose supplier is not running. */
+  blocked_reason?: string | null;
   runtime_status?: ProviderHubRuntimeStatus;
   installed_at?: string | null;
   activated_at?: string | null;

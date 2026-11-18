@@ -12,6 +12,7 @@ import {
   getJobStateMeta,
   getLatestCatalogEntry,
   getProviderStateMeta,
+  isAwaitingRestart,
   isUpdateAvailable,
   parseGitHubUrl,
   parseManifest,
@@ -205,6 +206,31 @@ describe("isUpdateAvailable / summarizeUpdates", () => {
       source_id: "s",
     },
   ];
+
+  it("still offers an update to a revoked running release that only waits for the restart that stops it", () => {
+    const revoked = {
+      provider_id: "a",
+      state: "active",
+      active_version: "1.0.0",
+      source_id: "s",
+      needs_restart: true,
+      revoked: true,
+    } as ProviderHubInstallation;
+    expect(isUpdateAvailable(revoked, catalog)).toBe(true);
+    // With an update already staged, or when the row is not revoked, the restart still comes first.
+    expect(
+      isUpdateAvailable({ ...revoked, staged_version: "2.0.0" }, catalog),
+    ).toBe(false);
+    expect(isUpdateAvailable({ ...revoked, revoked: false }, catalog)).toBe(
+      false,
+    );
+    // It is counted once, as an update on offer, and never as waiting for a restart.
+    const summary = summarizeUpdates([revoked], catalog);
+    expect(summary.available).toHaveLength(1);
+    expect(summary.pendingRestart).toHaveLength(0);
+    expect(isAwaitingRestart(revoked)).toBe(false);
+    expect(isAwaitingRestart({ ...revoked, state: "removed" })).toBe(true);
+  });
 
   it("reads a waiting restart from the one field the server sets, and from nothing else", () => {
     const staged = (extra: Record<string, unknown>) =>

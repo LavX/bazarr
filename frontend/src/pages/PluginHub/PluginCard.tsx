@@ -21,7 +21,13 @@ import {
   ReviewNotice,
   RuntimeLine,
 } from "./components/PluginState";
-import { isInstalled, permissionMark, PluginRow, SandboxFacts } from "./model";
+import {
+  isAwaitingRestart,
+  isInstalled,
+  permissionMark,
+  PluginRow,
+  SandboxFacts,
+} from "./model";
 import { PluginStatus, pluginStatus } from "./status";
 import pageStyles from "./PluginHub.module.scss";
 import styles from "@/components/hub/hub.module.scss";
@@ -82,7 +88,7 @@ const Action: FunctionComponent<PluginCardProps> = ({
   const occupied = working || (openJobs.get(row.id)?.size ?? 0) > 0;
   // A row that only records a failed install is not an installation: the install is offered again.
   const installation = isInstalled(row.installation) ? row.installation : null;
-  if (installation?.needs_restart) {
+  if (installation && isAwaitingRestart(installation)) {
     return (
       <Tooltip label="Restart Bazarr+ to finish this change">
         <span className={styles.hubCardPendingText}>Awaiting restart</span>
@@ -307,10 +313,10 @@ export const PluginCard: FunctionComponent<PluginCardProps> = (props) => {
       pills={
         <>
           {installation &&
-            (installation.needs_restart || !status ? (
+            (isAwaitingRestart(installation) || !status ? (
               <ProviderStatusBadge
                 state={installation.state}
-                pendingRestart={installation.needs_restart}
+                pendingRestart={isAwaitingRestart(installation)}
                 activeVersion={installation.active_version}
                 needsRepair={installation.needs_repair}
               />

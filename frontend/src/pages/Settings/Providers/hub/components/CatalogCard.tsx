@@ -19,6 +19,7 @@ import { HubCard } from "@/components/hub/HubCard";
 import { ProviderStatusBadge } from "@/components/hub/StatusBadge";
 import { TrustBadge } from "@/components/hub/TrustBadge";
 import {
+  isAwaitingRestart,
   parseManifest,
   usesAntiCaptcha,
   usesFlaresolverr,
@@ -87,7 +88,7 @@ function deriveCta(
 ): CtaState {
   if (!installed && !manifestValid) return "broken";
   if (!installed) return entry.blocked_reason ? "blocked" : "install";
-  if (installed.needs_restart) return "restart";
+  if (isAwaitingRestart(installed)) return "restart";
   if (installed.needs_repair) return "repair";
   if (
     installed.active_version &&
@@ -310,9 +311,15 @@ export const CatalogCard: FunctionComponent<CatalogCardProps> = ({
           {installed && (
             <ProviderStatusBadge
               state={installed.state}
-              pendingRestart={installed.needs_restart}
+              pendingRestart={isAwaitingRestart(installed)}
               activeVersion={installed.active_version}
               needsRepair={installed.needs_repair}
+              revoked={installed.revoked}
+              revokedReason={
+                installed.revoked_reason ??
+                installed.blocked_reason ??
+                installed.last_error
+              }
             />
           )}
           {isLocal ? (

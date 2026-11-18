@@ -9,9 +9,12 @@ import type {
 import { SUBTITLE_PROVIDER_KIND } from "@/apis/raw/plugins";
 import {
   getLatestCatalogEntry,
+  isAwaitingRestart,
   isUpdateAvailable,
   parseManifest,
 } from "@/components/hub/utils";
+
+export { isAwaitingRestart };
 
 /** The official source's id in Bazarr+'s own source records. */
 export const OFFICIAL_SOURCE_ID = "official";

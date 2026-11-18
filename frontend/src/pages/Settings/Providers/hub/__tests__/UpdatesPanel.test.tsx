@@ -194,3 +194,48 @@ describe("UpdatesPanel and the password confirmation", () => {
     expect(screen.queryByText("Confirm your password")).not.toBeInTheDocument();
   });
 });
+
+describe("UpdatesPanel and a revoked running provider", () => {
+  it("offers the update once and does not show the provider as staged", async () => {
+    const revoked = {
+      ...installed("someprovider"),
+      needs_restart: true,
+      revoked: true,
+    } as ProviderHubInstallation;
+
+    customRender(
+      <UpdatesPanel
+        providers={[revoked]}
+        catalog={catalogFor("someprovider")}
+      />,
+    );
+
+    expect(
+      await screen.findByRole("button", { name: /apply update/i }),
+    ).toBeEnabled();
+    expect(screen.queryByText("Pending restart")).not.toBeInTheDocument();
+    expect(screen.getAllByText("Some Provider")).toHaveLength(1);
+  });
+
+  it("keeps a revoked provider with an update already staged as waiting for the restart", async () => {
+    const staged = {
+      ...installed("someprovider"),
+      state: "staged",
+      staged_version: "1.0.0",
+      needs_restart: true,
+      revoked: true,
+    } as ProviderHubInstallation;
+
+    customRender(
+      <UpdatesPanel
+        providers={[staged]}
+        catalog={catalogFor("someprovider")}
+      />,
+    );
+
+    expect(await screen.findByText("Pending restart")).toBeVisible();
+    expect(
+      screen.queryByRole("button", { name: /apply update/i }),
+    ).not.toBeInTheDocument();
+  });
+});

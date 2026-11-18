@@ -123,6 +123,35 @@ describe("the status badge precedence", () => {
     ).toBe("Why.");
     expect(attentionCause(base)).toBeNull();
   });
+
+  it("says a revoked release needs attention, switched on or off", () => {
+    const revoked = {
+      ...base,
+      revoked: true,
+      last_error:
+        "Version 1.0.0 of Example was revoked by the official catalog.",
+    };
+    expect(attentionCause(revoked)).toBe(revoked.last_error);
+    expect(attentionCause({ ...revoked, last_error: null })).toMatch(
+      /revoked this version/,
+    );
+    // A later error replaces last_error, and the reason the server kept is still what the row says.
+    expect(
+      attentionCause({
+        ...revoked,
+        last_error: "No update manifest is available",
+        revoked_reason: "Reason kept.",
+      }),
+    ).toBe("Reason kept.");
+    expect(
+      attentionCause({
+        ...revoked,
+        last_error: "Other",
+        blocked_reason: "Held back.",
+      }),
+    ).toBe("Held back.");
+    expect(pluginStatus(rowFor(revoked), openJobs([]))?.key).toBe("attention");
+  });
 });
 
 describe("the runtime line", () => {

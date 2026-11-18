@@ -216,6 +216,8 @@ class PluginsInstallation(Resource):
             payload = {}
         if not isinstance(payload, dict):
             return 'a JSON object is required', 400
+        if "enabled" in payload and not isinstance(payload["enabled"], bool):
+            return 'enabled must be true or false', 400
         try:
             row = service.get_provider(plugin_id, redact=False)
             if row is not None and kind_of(row) not in known_kinds():

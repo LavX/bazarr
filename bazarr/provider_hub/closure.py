@@ -120,22 +120,35 @@ def resolve_closure(
 
     def upgrade(plugin_id: str, capability: str) -> dict[str, Any] | None:
         """A newer release of an installed plugin that provides ``capability``: from the source the
-        install is bound to, and above the installed version, so the hint names a real update."""
+        installed plugin is bound to, and above the installed version, so the hint names a real update."""
         held, row = installed[plugin_id]
-        if not row.get("source_bound") or row.get("source_id") != root.get("source"):
+        if not row.get("source_bound"):
             return None
+        # From the source the installed plugin is bound to, which is not always the installing plugin's.
+        pool = entries if row.get("source_id") == root.get("source") else _source_entries(state, row.get("source_id"))
         # Above the release that runs after the next restart, which may already be the staged one.
         running = _manifest_in(row, "next") or held
         return select_entry(
-            entries, plugin_id, usable=lambda entry: usable(entry) and provides(entry, capability),
+            pool, plugin_id, usable=lambda entry: usable(entry) and provides(entry, capability),
             above_version=running.version)
+
+    def _way_out(plugin_id: str, capability: str) -> str:
+        """The end of a refusal over a revoked supplier: update it when a release that can be installed
+        exists, and say there is none when it does not."""
+        if upgrade(plugin_id, capability) is not None:
+            return f". Update {plugin_id} first."
+        return f", and {plugin_id} has no usable release here."
 
     def satisfy(owner: PluginManifest, how: str, needed_id: str | None, capability: str) -> None:
         if how == "extends":
             held = installed.get(needed_id)
             if held is not None:
                 running = _manifest_in(held[1], "next") or held[0]
-                if not _supplies(held[1], capability):
+                if _revoked_without_update(held[1]):
+                    closure.unresolved.append(
+                        f"{owner.name} extends {needed_id}, whose installed release was revoked by the "
+                        f"official catalog{_way_out(needed_id, capability)}")
+                elif not _supplies(held[1], capability):
                     newer = upgrade(needed_id, capability)
                     closure.unresolved.append(
                         f"{owner.name} extends {needed_id}, which is installed but does not provide {capability}"
@@ -167,8 +180,13 @@ def resolve_closure(
             return
         switched_off = []
         dropping = []
+        revoked = []
         for plugin_id, (held, row) in sorted(installed.items()):
             if plugin_id == owner.plugin_id:
+                continue
+            if _revoked_without_update(row):
+                if _supplies(row, capability):
+                    revoked.append(plugin_id)
                 continue
             if not _supplies(row, capability):
                 # Provides it now, and the update staged for it drops it.
@@ -188,6 +206,11 @@ def resolve_closure(
             and provides(entry, capability)
         })
         if not providers:
+            if revoked and not switched_off:
+                closure.unresolved.append(
+                    f"{owner.name} needs {capability}, which only {', '.join(revoked)} provides, and its "
+                    f"installed release was revoked by the official catalog{_way_out(revoked[0], capability)}")
+                return
             if dropping and not switched_off:
                 closure.unresolved.append(
                     f"{owner.name} needs {capability}, which {', '.join(dropping)} provides now, but the "
@@ -269,6 +292,13 @@ def _manifest_in(row: dict[str, Any], phase: str) -> PluginManifest | None:
     return None
 
 
+def _revoked_without_update(row: dict[str, Any]) -> bool:
+    """Whether the release an installation runs was revoked by the catalog and nothing safe is staged to
+    replace it. Such a plugin supplies nothing: a revoked supplier must not satisfy a dependency. (A revoked
+    staged release is dropped when the list is applied, so a staged release here is one that is not revoked.)"""
+    return bool(row.get("revoked")) and not row.get("staged_version")
+
+
 def _supplies(row: dict[str, Any], capability: str) -> bool:
     """Whether an installation will provide ``capability`` once the pending restart has activated what is
     staged: judged on the release that runs after the restart, its staged one when it has one.
@@ -306,10 +336,10 @@ def dependents(
         return enabled[pid] if enabled is not None and pid in enabled else _enabled(row)
 
     def usable_alternative(pid: str, row: dict[str, Any]) -> bool:
-        # One that is held back, whose environment needs repair or whose kind this Bazarr+ does not define
-        # does not run, as the boot check sees it.
+        # One that is held back, revoked, whose environment needs repair or whose kind this Bazarr+ does not
+        # define does not run, as the boot check sees it.
         return (on(pid, row) and not row.get("needs_repair") and not row.get("blocked")
-                and _kind_defined(row))
+                and not _revoked_without_update(row) and _kind_defined(row))
 
     found = []
     for other_id, (_active, row) in sorted(installed.items()):
@@ -387,7 +417,7 @@ def broken_by(state: dict[str, Any], plugin_id: str, replacement: dict[str, Any]
 def _supplied_elsewhere(installed: dict[str, Any], capability: str, excluding: tuple[str, ...]) -> bool:
     for held_id, (_held, held_row) in installed.items():
         if (held_id in excluding or not _enabled(held_row) or held_row.get("needs_repair")
-                or held_row.get("blocked") or not _kind_defined(held_row)):
+                or held_row.get("blocked") or _revoked_without_update(held_row) or not _kind_defined(held_row)):
             continue
         supplier = _manifest_in(held_row, "next")
         if supplier is not None and capability in supplier.provides:
@@ -441,7 +471,8 @@ def unmet_needs(installations: dict[str, Any], enabled: dict[str, bool] | None =
     by any running supplier of it, not only the one recorded, and is unmet only when none runs. A plugin
     that is itself unmet is not running, so what relies on it is unmet too, and a plugin that is switched
     off supplies nothing (it is still judged, so switching it on cannot start it unmet). A plugin whose
-    environment is flagged as needing repair does not run either. ``enabled`` overrides, by id, whether a
+    environment is flagged as needing repair, or whose active release the catalog revoked, does not run
+    either. ``enabled`` overrides, by id, whether a
     plugin counts as switched on, for a change that has not been saved yet.
     """
     rows = {
@@ -457,9 +488,11 @@ def unmet_needs(installations: dict[str, Any], enabled: dict[str, bool] | None =
     def on(pid: str) -> bool:
         return enabled[pid] if enabled is not None and pid in enabled else _enabled(rows[pid])
 
+    # A release the catalog revoked does not run either.
     suppliers = {
         pid for pid in candidates
         if kind_of(rows[pid]) in registered and on(pid) and not rows[pid].get("needs_repair")
+        and not rows[pid].get("revoked")
     }
     blocked: dict[str, list[str]] = {}
     while True:

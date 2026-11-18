@@ -8,7 +8,11 @@ import {
   faTrash,
 } from "@fortawesome/free-solid-svg-icons";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
-import { isInstalled, PluginRow } from "@/pages/PluginHub/model";
+import {
+  isAwaitingRestart,
+  isInstalled,
+  PluginRow,
+} from "@/pages/PluginHub/model";
 import styles from "@/pages/PluginHub/PluginHub.module.scss";
 
 export interface PluginMenuProps {
@@ -85,7 +89,7 @@ export const PluginMenu: FunctionComponent<PluginMenuProps> = ({
     return null;
   }
   const isOn = installation.enabled !== false;
-  const waiting = installation.needs_restart
+  const waiting = isAwaitingRestart(installation)
     ? "Restart Bazarr+ to finish the change in progress."
     : busy
       ? "Something is being done to this plugin. Wait for it to finish."
