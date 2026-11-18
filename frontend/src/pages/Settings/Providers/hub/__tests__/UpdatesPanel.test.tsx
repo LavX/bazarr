@@ -45,7 +45,7 @@ function installed(providerId: string): ProviderHubInstallation {
     active_version: "0.9.0",
     staged_version: null,
     state: "active",
-    pending_restart: false,
+    needs_restart: false,
     trusted: true,
     source_id: "official",
     source_bound: true,

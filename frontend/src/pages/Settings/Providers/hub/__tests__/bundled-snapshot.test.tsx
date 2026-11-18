@@ -39,7 +39,7 @@ const installed = {
   name: "Some Provider",
   active_version: "1.0.0",
   state: "active",
-  pending_restart: false,
+  needs_restart: false,
   trusted: true,
   source_id: "official",
   source_bound: true,

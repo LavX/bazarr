@@ -85,7 +85,7 @@ export const PluginMenu: FunctionComponent<PluginMenuProps> = ({
     return null;
   }
   const isOn = installation.enabled !== false;
-  const waiting = installation.pending_restart
+  const waiting = installation.needs_restart
     ? "Restart Bazarr+ to finish the change in progress."
     : busy
       ? "Something is being done to this plugin. Wait for it to finish."

@@ -43,7 +43,7 @@ function install(overrides: Record<string, unknown> = {}) {
     name: "Catalog Example",
     state: "active",
     trusted: true,
-    pending_restart: false,
+    needs_restart: false,
     origin: "catalog",
     ...overrides,
   };
@@ -174,7 +174,7 @@ it("calls a provider built in only when the Hub has never heard of it", async ()
 it.each([
   [
     "waiting for a restart",
-    { pending_restart: true },
+    { needs_restart: true },
     /Catalog Example is waiting for a restart/,
   ],
   ["not trusted", { trusted: false }, /Catalog Example is not trusted/],
@@ -195,7 +195,7 @@ it.each([
 );
 
 it("gives each provider the reason that actually applies to it", async () => {
-  serve(["bsplayer", "catalog-example"], [install({ pending_restart: true })]);
+  serve(["bsplayer", "catalog-example"], [install({ needs_restart: true })]);
   const { user } = open();
   await enterDetail(user);
   const notice = await findReadinessNotice();

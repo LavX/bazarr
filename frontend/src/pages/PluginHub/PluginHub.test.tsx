@@ -524,7 +524,7 @@ describe("installing and updating from a card", () => {
     await waitFor(() =>
       expect(calls.map((call) => call.path)).toContain("apply"),
     );
-    expect(calls.at(-1)?.body).toEqual({
+    expect(calls.findLast((call) => call.path === "apply")?.body).toEqual({
       id: "ai_translator",
       consent: "sha256:quiet",
     });
@@ -675,5 +675,141 @@ describe("the Updates tab under a type filter", () => {
         }),
       ).toBeEnabled(),
     );
+  });
+});
+
+describe("updates waiting for a restart, and the restart prompt", () => {
+  const staged: PluginInstallation = {
+    ...installedTranslator,
+    state: "staged",
+    active_version: "1.0.0",
+    staged_version: "2.0.0",
+    needs_restart: true,
+  };
+
+  it("counts a staged update with the ones on offer, and keeps it on the Updates tab until the restart", async () => {
+    installed = [staged];
+    showPage();
+    const tab = await screen.findByRole("tab", { name: /Updates/ });
+    expect(await within(tab).findByLabelText("1 pending update")).toBeVisible();
+    await userEvent.click(tab);
+    expect(
+      await screen.findByRole("heading", { name: "Awaiting restart" }),
+    ).toBeVisible();
+    expect(screen.getAllByText("Awaiting restart").length).toBeGreaterThan(1);
+    // Nothing is offered on top of it, and the tab does not claim everything is current.
+    expect(
+      screen.queryByRole("button", { name: /^Update / }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByText("Everything is up to date"),
+    ).not.toBeInTheDocument();
+  });
+
+  it("raises the restart prompt from the field alone, and drops it when the field goes", async () => {
+    installed = [{ ...installedTranslator, needs_restart: true }];
+    showPage("?tab=installed");
+    const banner = await screen.findByRole("alert");
+    expect(banner).toHaveTextContent(
+      "1 plugin change is waiting for a restart.",
+    );
+    expect(
+      within(banner).getByRole("button", { name: "Restart Bazarr now" }),
+    ).toBeEnabled();
+    installed = [{ ...installedTranslator, needs_restart: false }];
+    await queryClient.invalidateQueries();
+    await waitFor(() =>
+      expect(screen.queryByRole("alert")).not.toBeInTheDocument(),
+    );
+  });
+
+  it("shows no restart prompt for a change the server does not say needs one, whatever else the row holds", async () => {
+    installed = [
+      {
+        ...installedTranslator,
+        state: "staged",
+        active_version: null,
+        staged_version: "2.0.0",
+        pending_restart: true,
+      } as unknown as PluginInstallation,
+    ];
+    showPage("?tab=installed");
+    await card("AI Subtitle Translator");
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(screen.queryByText("Awaiting restart")).not.toBeInTheDocument();
+  });
+});
+
+describe("the Activity tab's failure copy", () => {
+  it("says what went wrong and what to do next, never the raw error", async () => {
+    jobs = [
+      {
+        id: "9",
+        action: "install",
+        state: "failed",
+        target_kind: "provider",
+        target_id: "ai_translator",
+        target_name: "AI Subtitle Translator",
+        message: "Install failed",
+        error: "pip install failed: proxy tunnel returned 407",
+        created_at: "2026-11-16T12:00:00Z",
+      },
+    ];
+    const user = userEvent.setup();
+    showPage("?tab=activity");
+    await user.click(await screen.findByText("Install failed"));
+    expect(
+      await screen.findByText("Your proxy blocked the download."),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText("Check the proxy setting in Settings > General."),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/pip install failed/)).not.toBeInTheDocument();
+  });
+});
+
+describe("the two states an update can wait in", () => {
+  it("marks an update on offer that needs the person's consent, and none that does not", async () => {
+    installed = [installedTranslator];
+    showPage("?tab=updates");
+    expect(await screen.findByText("Needs your consent")).toBeVisible();
+    expect(
+      screen.getByText(/1 available, 1 that needs your consent/),
+    ).toBeVisible();
+    expect(screen.queryByText(/awaiting restart/)).not.toBeInTheDocument();
+  });
+
+  it("does not mark an update whose summary adds nothing", async () => {
+    server.use(
+      http.get("/api/plugins/updates/consent", () =>
+        HttpResponse.json(quietDelta),
+      ),
+    );
+    installed = [installedTranslator];
+    showPage("?tab=updates");
+    expect(
+      await screen.findByRole("button", {
+        name: "Update AI Subtitle Translator to 2.0.0",
+      }),
+    ).toBeVisible();
+    expect(screen.queryByText("Needs your consent")).not.toBeInTheDocument();
+    expect(screen.getByText(/^1 available\./)).toBeVisible();
+  });
+
+  it("keeps a staged update as awaiting restart, never as needing consent", async () => {
+    installed = [
+      {
+        ...installedTranslator,
+        state: "staged",
+        staged_version: "2.0.0",
+        needs_restart: true,
+      },
+    ];
+    showPage("?tab=updates");
+    expect(
+      await screen.findByRole("heading", { name: "Awaiting restart" }),
+    ).toBeVisible();
+    expect(screen.queryByText("Needs your consent")).not.toBeInTheDocument();
+    expect(screen.getByText(/0 available, 1 awaiting restart/)).toBeVisible();
   });
 });

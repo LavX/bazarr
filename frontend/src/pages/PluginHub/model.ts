@@ -339,3 +339,16 @@ export function matchesQuery(row: PluginRow, query: string): boolean {
     .toLowerCase()
     .includes(text);
 }
+
+/** An update that has been staged and waits for a restart to take over from the release that is running. */
+export function isWaitingUpdate(
+  installation: PluginInstallation | null,
+): boolean {
+  return Boolean(
+    installation &&
+    installation.needs_restart === true &&
+    installation.active_version &&
+    installation.staged_version &&
+    installation.state !== "removed",
+  );
+}

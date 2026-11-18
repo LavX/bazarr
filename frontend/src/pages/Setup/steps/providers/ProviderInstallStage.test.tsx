@@ -34,6 +34,7 @@ vi.mock("@/apis/hooks", async (importOriginal) => {
 const mockConfirmPassword = vi.fn();
 vi.mock("@/apis/raw", () => ({
   default: {
+    providerHub: { providers: vi.fn() },
     system: {
       status: vi.fn(),
       confirmPassword: (...args: unknown[]) => mockConfirmPassword(...args),
@@ -53,6 +54,7 @@ const mockedSettingsMutation = vi.mocked(useSettingsMutation);
 const mockedSystemSettings = vi.mocked(useSystemSettings);
 const mockedSystem = vi.mocked(useSystem);
 const mockedStatus = vi.mocked(api.system.status);
+const mockedProviders = vi.mocked(api.providerHub.providers);
 const mockedRedirect = vi.mocked(redirectToSetup);
 
 const mutateAsync = vi.fn();
@@ -261,6 +263,8 @@ describe("ProviderInstallStage", () => {
       isMutating: false,
     } as unknown as ReturnType<typeof useSystem>);
     mockedStatus.mockResolvedValue({} as never);
+    // The list is not readable unless a test says what the server reports: a restart is then assumed.
+    mockedProviders.mockRejectedValue(new Error("not answered"));
   });
 
   afterEach(() => {
@@ -512,6 +516,57 @@ describe("ProviderInstallStage", () => {
     expect(
       screen.getByText(/finishing provider installation/i),
     ).toBeInTheDocument();
+  });
+
+  it("restarts when the server says a staged provider needs one", async () => {
+    mockedProviders.mockResolvedValue([
+      {
+        provider_id: "opensubtitles",
+        state: "staged",
+        needs_restart: true,
+      },
+    ] as never);
+    const user = userEvent.setup();
+    customRender(
+      <ProviderInstallStage
+        hasInstalled={false}
+        onInstalledNeedsRestart={onInstalledNeedsRestart}
+        onUseInstalled={onUseInstalled}
+        onNext={onNext}
+      />,
+    );
+    await user.click(screen.getByRole("checkbox", { name: /opensubtitles/i }));
+    await user.click(
+      screen.getByRole("button", { name: /install & restart/i }),
+    );
+    await waitFor(() => expect(restart).toHaveBeenCalled());
+    expect(onUseInstalled).not.toHaveBeenCalled();
+  });
+
+  it("does not restart, and goes on to configure, when the server says nothing waits on a restart", async () => {
+    mockedProviders.mockResolvedValue([
+      {
+        provider_id: "opensubtitles",
+        state: "active",
+        needs_restart: false,
+      },
+    ] as never);
+    const user = userEvent.setup();
+    customRender(
+      <ProviderInstallStage
+        hasInstalled={false}
+        onInstalledNeedsRestart={onInstalledNeedsRestart}
+        onUseInstalled={onUseInstalled}
+        onNext={onNext}
+      />,
+    );
+    await user.click(screen.getByRole("checkbox", { name: /opensubtitles/i }));
+    await user.click(
+      screen.getByRole("button", { name: /install & restart/i }),
+    );
+    await waitFor(() => expect(onUseInstalled).toHaveBeenCalledTimes(1));
+    expect(restart).not.toHaveBeenCalled();
+    expect(onInstalledNeedsRestart).not.toHaveBeenCalled();
   });
 
   it("redirects to /setup once the post-restart health poll succeeds", async () => {

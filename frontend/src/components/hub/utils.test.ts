@@ -201,10 +201,35 @@ describe("isUpdateAvailable / summarizeUpdates", () => {
       provider_id: "c",
       state: "staged",
       active_version: "1.0.0",
-      pending_restart: true,
+      needs_restart: true,
       source_id: "s",
     },
   ];
+
+  it("reads a waiting restart from the one field the server sets, and from nothing else", () => {
+    const staged = (extra: Record<string, unknown>) =>
+      ({
+        provider_id: "x",
+        state: "staged",
+        active_version: "1.0.0",
+        ...extra,
+      }) as ProviderHubInstallation;
+    const summary = summarizeUpdates(
+      [
+        staged({ needs_restart: true }),
+        staged({ provider_id: "y", pending_restart: true }),
+        staged({
+          provider_id: "z",
+          needs_restart: false,
+          pending_restart: true,
+        }),
+      ],
+      undefined,
+    );
+    expect(summary.pendingRestart.map((item) => item.provider_id)).toEqual([
+      "x",
+    ]);
+  });
 
   it("offers an update only from the source the install is bound to", () => {
     const twoSources: ProviderHubCatalog = {

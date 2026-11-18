@@ -5,6 +5,7 @@ import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import { usePluginJobs } from "@/apis/hooks/plugins";
 import { ActivityRow } from "@/components/hub/ActivityRow";
 import { EmptyState } from "@/components/hub/EmptyState";
+import { explainFailure } from "./components/failure";
 import styles from "@/components/hub/hub.module.scss";
 
 /**
@@ -62,7 +63,11 @@ export const ActivityPanel: FunctionComponent<{ pluginIds: Set<string> }> = ({
       ) : (
         <Stack gap={4}>
           {shown.map((job, index) => (
-            <ActivityRow key={job.id ?? index} job={job} />
+            <ActivityRow
+              key={job.id ?? index}
+              job={job}
+              explain={explainFailure}
+            />
           ))}
         </Stack>
       )}
