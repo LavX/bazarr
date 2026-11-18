@@ -258,7 +258,7 @@ def _verified_signed_feed(root: Path, branch: str, commit: str, files: dict[str,
         logger.warning("The bundled signed catalog is not used, so the bundled catalog seeds providers only: "
                        "it was built from a different commit than the snapshot's files")
         return None
-    if not isinstance(document.get("providers"), list):
+    if not isinstance(document.get("providers"), list) or not document["providers"]:
         logger.warning("The bundled signed catalog is not used, so the bundled catalog seeds providers only: "
                        "it has no providers list")
         return None
@@ -269,8 +269,10 @@ def load_floor(root: str | os.PathLike[str] | None = None) -> Floor | None:
     """The snapshot, or None when there is no snapshot directory to read.
 
     A directory that is there but does not check out raises FloorError. The
-    result is cached for as long as floor.json is unchanged; catalog.json is
-    hashed once, when it is loaded, and every other file on each read."""
+    result is cached for as long as floor.json is unchanged and the trusted roots
+    are the same. catalog.json and the signed feed (its files hashed, its
+    signature verified in baked mode) are checked once, when the snapshot is
+    loaded; every bundle file is hashed on each read."""
     global _cache
     resolved = Path(root) if root is not None else floor_root()
     if resolved is None:

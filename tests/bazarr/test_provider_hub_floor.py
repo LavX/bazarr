@@ -1027,3 +1027,42 @@ def test_a_plugin_bundle_installs_from_the_snapshot(tmp_path, monkeypatch, keys)
     validated = validate_plugin_bundle(manifest)
 
     assert floor_module.bundle_file(validated, "service.py") == SERVICE_FILE
+
+
+def test_swapping_the_trusted_roots_between_loads_verifies_the_feed_again(tmp_path, monkeypatch, keys):
+    from test_provider_hub_signing import Keys
+    from provider_hub import floor as floor_module
+    from provider_hub import signing_roots
+    _signed_snapshot(tmp_path, monkeypatch, _signed_files(keys))
+    first = floor_module.load_floor()
+    assert first.signed_catalog() is not None
+    assert [item["manifest"]["id"] for item in _seeded()[0]["plugins"]] == [SERVICE_ID]
+
+    monkeypatch.setattr(signing_roots, "SIGNING_ROOTS", dict(Keys().roots))
+
+    second = floor_module.load_floor()
+    assert second is not first and second.signed_catalog() is None
+    _providers_only(_seeded()[0])
+
+    monkeypatch.setattr(signing_roots, "SIGNING_ROOTS", dict(keys.roots))
+    assert floor_module.load_floor().signed_catalog() is not None
+
+
+def test_a_signature_without_the_signed_catalog_seeds_providers_only(tmp_path, monkeypatch, keys, caplog):
+    _signed_snapshot(tmp_path, monkeypatch, _signed_files(keys), drop=(SIGNED_FILES[0],))
+
+    with caplog.at_level("WARNING"):
+        catalog, _commit = _seeded()
+
+    _providers_only(catalog)
+    assert "its signature is there but the catalog is not" in caplog.text
+
+
+def test_a_signed_catalog_with_no_providers_seeds_providers_only(tmp_path, monkeypatch, keys, caplog):
+    _signed_snapshot(tmp_path, monkeypatch, _signed_files(keys, providers=[]))
+
+    with caplog.at_level("WARNING"):
+        catalog, _commit = _seeded()
+
+    _providers_only(catalog)
+    assert "no providers list" in caplog.text
