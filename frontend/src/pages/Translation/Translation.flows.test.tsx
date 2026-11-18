@@ -2348,6 +2348,58 @@ describe("Translation page, an engine installed and waiting for a restart", () =
     ).toBeVisible();
   });
 
+  it("keeps the restart prompt for a removal that deleted its data, when no engine of the plugin is left", async () => {
+    // The engine rows go with the data at once, and the removed row keeps its release until the restart,
+    // so neither the engines nor the catalog's offers name the plugin any more.
+    state = { ...state, instances: [second], available_engines: [] };
+    waitingFor({
+      state: "removed",
+      active_version: "1.0.0",
+      needs_restart: true,
+    });
+    await showPage();
+    expect(
+      await screen.findByText("1 plugin change is waiting for a restart."),
+    ).toBeVisible();
+    expect(
+      screen.getByRole("button", { name: "Restart Bazarr now" }),
+    ).toBeEnabled();
+  });
+
+  it("keeps it on the first-run panel too, with no engine left at all", async () => {
+    state = {
+      enabled: true,
+      engine: null,
+      fallback_engine: null,
+      instances: [],
+      available_engines: [],
+    };
+    waitingFor({
+      state: "removed",
+      active_version: "1.0.0",
+      needs_restart: true,
+    });
+    customRender(<TranslationView />);
+    await screen.findByRole("heading", {
+      name: "Translate the subtitles you cannot find",
+    });
+    expect(
+      await screen.findByText("1 plugin change is waiting for a restart."),
+    ).toBeVisible();
+  });
+
+  it("does not count a plugin of another kind that waits on a restart", async () => {
+    waitingFor({
+      kind: "subtitle_provider",
+      state: "staged",
+      active_version: null,
+      needs_restart: true,
+    });
+    await showPage();
+    await screen.findByRole("tab", { name: "Engine" });
+    expect(screen.queryByText(/waiting for a restart/)).not.toBeInTheDocument();
+  });
+
   it("keeps the repair hint for a plugin the server does not say is waiting", async () => {
     state = {
       ...state,
