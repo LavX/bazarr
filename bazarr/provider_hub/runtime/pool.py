@@ -217,8 +217,8 @@ default builds a ``WorkerSession``. A managed container runtime (a daemon kind
 such as FlareSolverr) is meant to plug in there: it supplies its own start,
 health, stop and removal, reports ``process`` as None while it has no local
 process (the memory sampler then skips it, and its own memory cap applies), and
-reuses the pool's states, breaker, idle stop and cap unchanged. Nothing of that
-exists yet.
+reuses the pool's states, breaker, idle stop and cap unchanged. ``oci.py`` is that
+runtime.
 """
 
 from __future__ import annotations
