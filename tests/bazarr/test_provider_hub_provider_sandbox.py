@@ -40,6 +40,7 @@ from provider_hub.worker import ProviderLayout, ProviderWorkerClient, worker_com
 RUNNER = Path(worker_module._RUNNER_PATH)
 # The reader itself, which the autouse fixture replaces for the other tests.
 REAL_AUTHENTICATION_OFF = _provider_roots.authentication_off
+REAL_MEDIA_ROOT_FOLDERS = _provider_roots.media_root_folders
 
 PROVIDER_SOURCE = '''
 import os
@@ -1108,6 +1109,50 @@ def test_the_media_roots_come_from_every_instance_through_its_path_mappings(tmp_
     found = provider_roots.media_root_folders()
 
     assert set(found) == {str(shows), str(movies), str(sports), str(mapped)}
+
+
+def _fake_media_database(monkeypatch, execute):
+    from types import SimpleNamespace
+
+    import app.database as app_database
+
+    class Table:
+        arr_instance_id = path = None
+
+    for name in ("TableShowsRootfolder", "TableMoviesRootfolder", "TableSportsLeaguesRootfolder"):
+        monkeypatch.setattr(app_database, name, Table(), raising=False)
+    monkeypatch.setattr(app_database, "database", SimpleNamespace(execute=execute), raising=False)
+    monkeypatch.setattr(app_database, "select", lambda *columns: columns, raising=False)
+    monkeypatch.setattr(
+        "utilities.path_mappings.path_mappings",
+        SimpleNamespace(path_replace_instance=lambda p, *_: p, path_replace=lambda p: p, path_replace_movie=lambda p: p),
+    )
+
+
+def test_a_library_with_no_media_yet_still_gives_a_ruleset_without_media_grants(host, monkeypatch):
+    from types import SimpleNamespace
+
+    # A fresh install: the database answers and holds no series, movie or sports root folder.
+    _fake_media_database(monkeypatch, lambda _statement: SimpleNamespace(all=lambda: []))
+    monkeypatch.setattr("provider_hub.provider_roots.media_root_folders", REAL_MEDIA_ROOT_FOLDERS)
+
+    assert REAL_MEDIA_ROOT_FOLDERS() == []
+    spec = worker_module.provider_spec(host["layout"], worker_command(sys.executable, RUNNER), host["bundle"], {})
+
+    launch = json.loads(spec.to_launch_json(enforce=True, min_abi=4))
+    assert str(host["media"]) not in json.dumps(launch)
+    assert str(host["bundle"]) in json.dumps(launch)
+
+
+def test_a_database_that_cannot_be_read_refuses_the_ruleset(host, monkeypatch):
+    def unreadable(_statement):
+        raise RuntimeError("no such table: table_shows_rootfolder")
+
+    _fake_media_database(monkeypatch, unreadable)
+    monkeypatch.setattr("provider_hub.provider_roots.media_root_folders", REAL_MEDIA_ROOT_FOLDERS)
+
+    with pytest.raises(RuntimeError, match="no such table"):
+        worker_module.provider_spec(host["layout"], worker_command(sys.executable, RUNNER), host["bundle"], {})
 
 
 def test_a_link_to_the_configuration_file_in_a_granted_folder_refuses_the_profile(host):
