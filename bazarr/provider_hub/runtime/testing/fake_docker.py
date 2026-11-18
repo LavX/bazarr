@@ -20,6 +20,9 @@ Knobs a test sets on the instance:
 ``deny``              regexes of ``"METHOD /path"``: matching requests get 403, as a socket proxy would answer.
 ``fail``              a list of ``(regex, status, message)`` consumed once each, matched like ``deny``.
 ``image_volumes``     anonymous volume mounts an image declares: shown in a container's ``Mounts``.
+``create_returns``    a container id the ``create`` reply names instead of the new container's own.
+``no_swap_accounting`` the daemon cannot limit swap: ``create`` warns and the stored ``MemorySwap`` is -1, as
+                      Docker does on cgroup v1 without swap accounting.
 ``mutate``            ``callable(inspect_dict)`` applied to every container inspect, to fake a daemon that built
                       something other than what was asked.
 """
@@ -48,6 +51,7 @@ def digest_of(text: str) -> str:
 
 
 _LIVE_SOCKETS: set[str] = set()
+_LIVE_ADDRESSES: set[tuple[str, int]] = set()
 
 
 def forbid_real_sockets(monkeypatch) -> None:
@@ -58,6 +62,7 @@ def forbid_real_sockets(monkeypatch) -> None:
     from .. import docker_api
 
     original = docker_api._UnixConnection.connect
+    original_tcp = docker_api._TcpConnection.connect
 
     def connect(self):
         path = self._socket_path
@@ -65,10 +70,24 @@ def forbid_real_sockets(monkeypatch) -> None:
             raise AssertionError("a test tried to open a real Docker connection")
         return original(self)
 
+    def connect_tcp(self):
+        if (self.host, self.port) not in _LIVE_ADDRESSES:
+            raise AssertionError("a test tried to open a real Docker connection over tcp")
+        return original_tcp(self)
+
     monkeypatch.setattr(docker_api._UnixConnection, "connect", connect)
+    monkeypatch.setattr(docker_api._TcpConnection, "connect", connect_tcp)
 
 
-class _Server(socketserver.ThreadingMixIn, http.server.HTTPServer):
+class _Quiet:
+    def handle_error(self, request, client_address):
+        # A client that hangs up before the answer is written (a monitor poll racing a close) is normal here.
+        if isinstance(sys.exc_info()[1], (BrokenPipeError, ConnectionResetError)):
+            return
+        super().handle_error(request, client_address)
+
+
+class _Server(_Quiet, socketserver.ThreadingMixIn, http.server.HTTPServer):
     address_family = socket.AF_UNIX
     daemon_threads = True
     allow_reuse_address = False
@@ -78,11 +97,9 @@ class _Server(socketserver.ThreadingMixIn, http.server.HTTPServer):
         self.server_name = "fake-docker"
         self.server_port = 0
 
-    def handle_error(self, request, client_address):
-        # A client that hangs up before the answer is written (a monitor poll racing a close) is normal here.
-        if isinstance(sys.exc_info()[1], (BrokenPipeError, ConnectionResetError)):
-            return
-        super().handle_error(request, client_address)
+
+class _TcpServer(_Quiet, socketserver.ThreadingMixIn, http.server.HTTPServer):
+    daemon_threads = True
 
 
 class _Handler(http.server.BaseHTTPRequestHandler):
@@ -104,9 +121,13 @@ class _Handler(http.server.BaseHTTPRequestHandler):
 
 
 class FakeDocker:
-    def __init__(self, socket_path: str | None = None):
+    def __init__(self, socket_path: str | None = None, *, tcp: bool = False):
         self._dir = None
-        if socket_path is None:
+        self.tcp = tcp
+        self.address: tuple[str, int] | None = None
+        if tcp:
+            socket_path = socket_path or ""
+        elif socket_path is None:
             # A short path: a Unix socket path holds at most about a hundred characters.
             self._dir = tempfile.mkdtemp(prefix="fd")
             socket_path = os.path.join(self._dir, "d.sock")
@@ -128,6 +149,8 @@ class FakeDocker:
         self.fail: list[tuple[str, int, str]] = []
         self.image_volumes: list[dict[str, Any]] = []
         self.mutate: Callable[[dict[str, Any]], None] | None = None
+        self.create_returns: str | None = None
+        self.no_swap_accounting = False
         self._counter = 0
         self._server: _Server | None = None
         self._thread: threading.Thread | None = None
@@ -142,8 +165,13 @@ class FakeDocker:
         self.stop()
 
     def start(self):
-        self._server = _Server(self.socket_path, _Handler)
-        _LIVE_SOCKETS.add(self.socket_path)
+        if self.tcp:
+            self._server = _TcpServer(("127.0.0.1", 0), _Handler)
+            self.address = ("127.0.0.1", self._server.server_address[1])
+            _LIVE_ADDRESSES.add(self.address)
+        else:
+            self._server = _Server(self.socket_path, _Handler)
+            _LIVE_SOCKETS.add(self.socket_path)
         self._server.fake = self  # type: ignore[attr-defined]
         self._thread = threading.Thread(target=self._server.serve_forever, kwargs={"poll_interval": 0.05},
                                         daemon=True)
@@ -151,6 +179,7 @@ class FakeDocker:
 
     def stop(self):
         _LIVE_SOCKETS.discard(self.socket_path)
+        _LIVE_ADDRESSES.discard(self.address)
         if self._server is not None:
             self._server.shutdown()
             self._server.server_close()
@@ -163,6 +192,8 @@ class FakeDocker:
     def client(self, **kwargs):
         from ..docker_api import DockerClient, Endpoint
 
+        if self.tcp:
+            return DockerClient(Endpoint("tcp", host=self.address[0], port=self.address[1]), **kwargs)
         return DockerClient(Endpoint("unix", path=self.socket_path), **kwargs)
 
     # ------------------------------------------------------------ test helpers
@@ -296,6 +327,12 @@ class FakeDocker:
         self._counter += 1
         return hashlib.sha256(f"{seed}:{self._counter}".encode()).hexdigest()
 
+    def _network_id(self, name: str) -> str:
+        for record in self.networks.values():
+            if record["Name"] == name:
+                return record["Id"]
+        return name
+
     def _find_container(self, ident: str) -> dict[str, Any]:
         if ident in self.containers:
             return self.containers[ident]
@@ -367,11 +404,17 @@ class FakeDocker:
                        "Image": ref, "Hostname": cid[:12], "Healthcheck": body.get("Healthcheck")},
             "HostConfig": host, "Mounts": mounts,
             "NetworkSettings": {"Networks": {n: {"IPAddress": "172.30.0.%d" % (2 + len(self.containers)),
+                                                 "NetworkID": self._network_id(n),
                                                  "Aliases": list((e or {}).get("Aliases") or [])}
                                              for n, e in endpoints.items()}},
             "_polls": 0,
         }
-        return 201, {"Id": cid, "Warnings": list(self.warnings)}, {}
+        warnings = list(self.warnings)
+        if self.no_swap_accounting:
+            warnings.append("Your kernel does not support swap limit capabilities or the cgroup is not mounted. "
+                            "Memory limited without swap.")
+            host["MemorySwap"] = -1
+        return 201, {"Id": self.create_returns or cid, "Warnings": warnings}, {}
 
     def _public(self, record):
         view = json.loads(json.dumps({k: v for k, v in record.items() if not k.startswith("_")}))
@@ -445,7 +488,8 @@ class FakeDocker:
         if method == "POST" and action == "connect":
             container = self._find_container(body["Container"])
             aliases = (body.get("EndpointConfig") or {}).get("Aliases") or []
-            container["NetworkSettings"]["Networks"][record["Name"]] = {"IPAddress": "172.30.1.9", "Aliases": aliases}
+            container["NetworkSettings"]["Networks"][record["Name"]] = {
+                "IPAddress": "172.30.1.9", "NetworkID": record["Id"], "Aliases": aliases}
             return 200, None, {}
         if method == "POST" and action == "disconnect":
             container = self._find_container(body["Container"])

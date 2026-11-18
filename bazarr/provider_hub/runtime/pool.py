@@ -428,6 +428,8 @@ class WorkerRuntime(Protocol):
     process: Any
     exit_code: int | None
     recycle_needed: bool
+    # Optional, True when absent: whether an answered request proves the worker is healthy, and so clears the
+    # failure history. A runtime that answers locally sets it False; its failures then leave by age alone.
 
     @property
     def alive(self) -> bool: ...
@@ -3114,8 +3116,10 @@ class WorkerPool:
                     self._begin_stop(entry, slot.kill_reason[1])
                 elif over or not session.alive:
                     self._handle_death(entry, slot, self._death_reason(slot))
-                elif error is None or isinstance(error, RequestError):
-                    # The worker answered. A clean answer closes the breaker.
+                elif (error is None or isinstance(error, RequestError)) and getattr(
+                        session, "answers_prove_health", True):
+                    # The worker answered. A clean answer closes the breaker, unless the runtime says its
+                    # answers say nothing about the process (a managed container answers locally).
                     entry.failures.clear()
                     entry.backoff_until = entry.open_until = 0.0
             elif slot in entry.retiring and not session.alive:

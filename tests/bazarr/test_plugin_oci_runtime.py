@@ -6,6 +6,7 @@ daemon and no container is ever started: the fake only flips flags in a dict.
 """
 import os
 import stat
+import threading
 import time
 
 import pytest
@@ -15,7 +16,9 @@ from provider_hub.runtime.docker_api import DockerApiError, DockerClient, Endpoi
 from provider_hub.runtime.errors import RequestError, SessionClosed
 from provider_hub.runtime.frames import Codes
 from provider_hub.runtime.oci import (
+    CREATOR_LABEL,
     DAEMON_ALIAS,
+    ENABLE_ENV,
     MANAGED_LABEL,
     OWNER_LABEL,
     PLUGIN_LABEL,
@@ -220,13 +223,6 @@ def test_the_owner_id_is_made_once_and_kept_private(tmp_path):
     assert stat.S_IMODE(os.stat(path).st_mode) == 0o600
 
 
-def test_a_damaged_owner_file_is_replaced(tmp_path):
-    path = tmp_path / "oci-owner"
-    path.write_text("not an id")
-
-    assert oci_module.OWNER_ID_RE.match(load_owner_id(path))
-
-
 # ------------------------------------------------------------------ the host
 
 
@@ -283,10 +279,10 @@ def test_nothing_is_contacted_outside_a_container_or_without_an_endpoint(monkeyp
     made = []
     monkeypatch.setattr(oci_module, "DockerClient", lambda endpoint: made.append(endpoint))
 
-    outside = offer_status(environ={"DOCKER_HOST": "tcp://proxy:2375"}, in_container=False)
+    outside = offer_status(environ={ENABLE_ENV: "1", "DOCKER_HOST": "tcp://proxy:2375"}, in_container=False)
     oci_module.reset_offer_cache()
     monkeypatch.setattr("provider_hub.runtime.docker_api.os.path.exists", lambda path: False)
-    no_endpoint = offer_status(environ={}, in_container=True)
+    no_endpoint = offer_status(environ={ENABLE_ENV: "1"}, in_container=True)
 
     assert made == []
     assert not outside.available and not no_endpoint.available
@@ -294,7 +290,7 @@ def test_nothing_is_contacted_outside_a_container_or_without_an_endpoint(monkeyp
 
 
 def test_a_malformed_docker_host_is_a_reason_not_a_crash():
-    status = offer_status(environ={"DOCKER_HOST": "https://x:2376"}, in_container=True)
+    status = offer_status(environ={ENABLE_ENV: "1", "DOCKER_HOST": "https://x:2376"}, in_container=True)
 
     assert not status.available and "unix socket or a plain tcp" in status.reason
 
@@ -303,7 +299,7 @@ def test_the_offer_is_cached_and_a_failure_is_retried_sooner(docker, monkeypatch
     docker.containers[SELF_ID]["HostConfig"]["NetworkMode"] = "host"
     monkeypatch.setattr(oci_module, "own_container_id", lambda *a, **k: SELF_ID)
     now = [0.0]
-    kwargs = dict(environ={"DOCKER_HOST": "unix://" + docker.socket_path}, in_container=True,
+    kwargs = dict(environ={ENABLE_ENV: "1", "DOCKER_HOST": "unix://" + docker.socket_path}, in_container=True,
                   clock=lambda: now[0])
 
     assert not offer_status(**kwargs).available
@@ -482,7 +478,6 @@ def test_a_container_that_never_gets_healthy_times_out_and_is_removed(docker):
     (lambda view: view["NetworkSettings"]["Networks"].update(bridge={}), "another network"),
     (lambda view: view["Mounts"].append({"Type": "bind", "Source": "/", "Destination": "/host"}), "from the host"),
     (lambda view: view.update(Image="sha256:" + "9" * 64), "not the verified image"),
-    (lambda view: view["Config"]["Labels"].update({OWNER_LABEL: OTHER}), "labels"),
 ])
 def test_a_container_that_differs_from_what_was_asked_is_removed_before_it_starts(docker, mutation, text):
     docker.mutate = mutation
@@ -493,6 +488,18 @@ def test_a_container_that_differs_from_what_was_asked_is_removed_before_it_start
 
     assert not docker.calls("POST", "/start")
     assert not managed(docker) and not runtime.alive
+
+
+def test_a_container_whose_recorded_labels_are_not_ours_is_rejected_and_left_alone(docker):
+    docker.mutate = lambda view: view["Config"]["Labels"].update({OWNER_LABEL: OTHER}) if "Name" in view else None
+    runtime = make_runtime(docker)
+
+    with pytest.raises(OciError, match="labels"):
+        runtime.start()
+
+    # Its labels do not show it is ours, so it is not removed; that is reported, not guessed.
+    assert not docker.calls("POST", "/start") and no_removal(docker) and not runtime.alive
+    assert "does not own" in runtime.last_error
 
 
 def test_a_volume_the_image_declares_is_accepted_but_a_host_mount_is_not(docker):
@@ -519,15 +526,26 @@ def test_a_host_that_cannot_enforce_the_memory_or_process_cap_is_refused(docker)
     assert not managed(docker)
 
 
-def test_a_missing_swap_limit_is_only_a_warning(docker):
-    docker.warnings = ["Your kernel does not support swap limit capabilities or the cgroup is not mounted. "
-                       "Memory limited without swap."]
+def test_a_host_that_cannot_limit_swap_still_starts_with_its_memory_cap(docker):
+    docker.no_swap_accounting = True  # the daemon warns at create and stores MemorySwap as -1
     runtime = make_runtime(docker)
 
     runtime.start()
 
     assert runtime.alive
+    [record] = managed(docker)
+    assert record["HostConfig"]["MemorySwap"] == -1
+    assert record["HostConfig"]["Memory"] == 1536 * 1024 * 1024
     runtime.close(0)
+
+
+def test_an_unlimited_swap_without_the_daemons_warning_is_refused(docker):
+    docker.mutate = lambda view: view["HostConfig"].update(MemorySwap=-1)
+
+    with pytest.raises(OciError, match="memory cap differs"):
+        make_runtime(docker).start()
+
+    assert not managed(docker)
 
 
 def test_a_leftover_container_of_ours_is_replaced(docker):
@@ -569,7 +587,8 @@ def test_a_network_under_our_name_that_is_not_ours_is_refused(docker):
 
 def test_a_network_of_another_install_with_our_names_is_refused(docker):
     docker.networks["n"] = {"Id": "n", "Name": network_name(OWNER, "flaresolverr"),
-                            "Labels": {MANAGED_LABEL: "true", OWNER_LABEL: OTHER}, "Containers": {}}
+                            "Labels": {MANAGED_LABEL: "true", OWNER_LABEL: OTHER, PLUGIN_LABEL: "flaresolverr"},
+                            "Containers": {}}
 
     with pytest.raises(OciError, match="did not create"):
         make_runtime(docker).start()
@@ -578,7 +597,8 @@ def test_a_network_of_another_install_with_our_names_is_refused(docker):
 def test_a_stranger_on_the_private_network_stops_the_start(docker):
     runtime = make_runtime(docker)
     docker.networks["n"] = {"Id": "n", "Name": runtime.network,
-                            "Labels": {MANAGED_LABEL: "true", OWNER_LABEL: OWNER}, "Containers": {}}
+                            "Labels": {MANAGED_LABEL: "true", OWNER_LABEL: OWNER, PLUGIN_LABEL: "flaresolverr"},
+                            "Containers": {}}
     raw_create(docker, "someone-else", {"Image": f"{REPO}@{DIGEST}", "HostConfig": {
         "NetworkMode": runtime.network, "Memory": 1 << 28, "MemorySwap": 1 << 28, "PidsLimit": 64}})
 
@@ -591,7 +611,8 @@ def test_a_stranger_on_the_private_network_stops_the_start(docker):
 def test_bazarr_on_the_private_network_stops_the_start(docker):
     runtime = make_runtime(docker)
     docker.networks["n"] = {"Id": "n", "Name": runtime.network,
-                            "Labels": {MANAGED_LABEL: "true", OWNER_LABEL: OWNER}, "Containers": {}}
+                            "Labels": {MANAGED_LABEL: "true", OWNER_LABEL: OWNER, PLUGIN_LABEL: "flaresolverr"},
+                            "Containers": {}}
     docker.containers[SELF_ID]["NetworkSettings"]["Networks"][runtime.network] = {}
 
     with pytest.raises(OciError, match="Bazarr\\+ itself is attached"):
@@ -819,6 +840,10 @@ def test_the_labels_are_checked_again_on_what_the_daemon_returned():
                     {"Id": "b" * 12, "Labels": {}},
                     {"Id": "c" * 12, "Labels": {MANAGED_LABEL: "true", OWNER_LABEL: OWNER, PLUGIN_LABEL: "x"}}]
 
+        def inspect_container(self, ident):
+            item = [c for c in self.list_containers() if c["Id"] == ident][0]
+            return {"Id": ident, "Config": {"Labels": item["Labels"]}}
+
         def list_networks(self, **kwargs):
             return [{"Id": "n1", "Labels": {}}]
 
@@ -998,7 +1023,7 @@ def test_a_container_that_keeps_failing_to_start_opens_the_breaker(docker, make_
 
     assert pool.run("fs", "status").result["state"] == "running"
     assert len(docker.calls("POST", "/containers/create")) == starts + 1
-    assert pool.status()["workers"]["fs"]["failures"] == 0
+    assert pool.state("fs") is WorkerState.READY
 
 
 def test_a_host_without_docker_access_is_a_visible_start_failure_not_a_hang(docker, make_pool):
@@ -1040,3 +1065,433 @@ def test_a_real_client_is_never_opened_by_these_tests(docker, tmp_path):
         DockerClient(Endpoint("unix", path=str(not_ours))).ping()
     with pytest.raises(DockerApiError):
         docker.client().inspect_container("missing")
+
+
+# ------------------------------------------------------------------ ownership is verified before anything is removed
+
+
+def other_self(docker, ident="cd" * 32, labels=None):
+    docker.add_self(ident, networks=("bridge",))
+    docker.containers[ident]["Config"]["Labels"] = dict(labels or {})
+    return ident
+
+
+def no_removal(docker):
+    return not docker.calls("DELETE", "/containers/") and not docker.calls("POST", "/stop")
+
+
+@pytest.mark.parametrize("labels", [
+    {},
+    {MANAGED_LABEL: "true", OWNER_LABEL: OWNER, PLUGIN_LABEL: "flaresolverr", ROLE_LABEL: "daemon"},
+])
+def test_a_create_reply_that_names_bazarrs_own_container_never_gets_it_removed(docker, labels):
+    docker.containers[SELF_ID]["Config"]["Labels"] = dict(labels)
+    docker.create_returns = SELF_ID
+    runtime = make_runtime(docker)
+
+    with pytest.raises(OciError):
+        runtime.start()
+
+    assert no_removal(docker) and SELF_ID in docker.containers
+    assert not runtime.alive and "does not own" in runtime.last_error
+    runtime.close(0)
+    assert no_removal(docker)
+
+
+def test_a_create_reply_that_names_someone_elses_container_never_gets_it_removed(docker):
+    stranger = seed(docker, "stranger", labelled=False)
+    foreign_owner = seed(docker, "other-install", owner=OTHER)
+    for victim in (stranger, foreign_owner):
+        docker.create_returns = victim
+        runtime = make_runtime(docker)
+        # The reply's id is not the container that was built; clear the built one to start clean next round.
+        with pytest.raises(OciError):
+            runtime.start()
+        assert victim in docker.containers and not runtime.alive
+        runtime.close(0)
+        for record in [r for r in managed(docker) if r["Id"] not in (stranger, foreign_owner)]:
+            docker.containers.pop(record["Id"])
+    assert no_removal(docker)
+
+
+def test_a_container_relabelled_after_the_start_is_released_not_removed_on_close(docker):
+    runtime = make_runtime(docker)
+    runtime.start()
+    managed(docker)[0]["Config"]["Labels"][OWNER_LABEL] = OTHER
+
+    runtime.close(0)
+
+    assert not runtime.alive and managed(docker) and no_removal(docker)
+    assert "does not own" in runtime.last_error
+
+
+def test_a_leftover_container_is_stopped_and_removed_by_its_id_not_its_name(docker):
+    first = make_runtime(docker)
+    first.start()
+    first._stop.set()
+    old = first.container_id
+
+    second = make_runtime(docker)
+    second.start()
+    second.close(0)
+
+    deletes = [r["path"] for r in docker.calls("DELETE", "/containers/")]
+    assert f"/containers/{old}" in deletes
+    assert not any(container_name(OWNER, "flaresolverr") in path for path in deletes + [
+        r["path"] for r in docker.calls("POST", "/stop")])
+
+
+def test_a_leftover_container_with_our_labels_but_bazarrs_own_id_is_not_touched(docker):
+    docker.containers[SELF_ID]["Name"] = "/" + container_name(OWNER, "flaresolverr")
+    docker.containers[SELF_ID]["Config"]["Labels"] = {MANAGED_LABEL: "true", OWNER_LABEL: OWNER,
+                                                      PLUGIN_LABEL: "flaresolverr"}
+
+    with pytest.raises(OciError, match="did not create"):
+        make_runtime(docker).start()
+
+    assert no_removal(docker)
+
+
+# ------------------------------------------------------------------ the breaker sees crashes after a start
+
+
+def test_a_container_that_starts_and_runs_then_keeps_crashing_opens_the_breaker(docker, make_pool, clock):
+    pool = make_pool()
+    pool.register(pooled(docker))
+
+    for crash in range(3):
+        assert pool.run("fs", "status").result["state"] == "running"  # an answered request, healthy at start
+        managed(docker)[0]["State"].update(Running=False, Status="exited", ExitCode=1)
+        assert wait_until(lambda: not pool._entries["fs"].slot.session.alive)
+        assert wait_until(lambda: (pool.sweep() or pool.state("fs") in (WorkerState.STOPPED, WorkerState.BROKEN,
+                                                                         WorkerState.BACKOFF)))
+        assert wait_until(lambda: not managed(docker))
+        assert pool.status()["workers"]["fs"]["failures"] == crash + 1
+        clock.advance(9)
+
+    assert pool.state("fs") is WorkerState.BROKEN
+    with pytest.raises(PoolUnavailable) as refused:
+        pool.run("fs", "status")
+    assert refused.value.code == "circuit_open"
+
+
+def test_a_locally_answered_request_does_not_clear_the_failure_history(docker, make_pool):
+    pool = make_pool()
+    pool.register(pooled(docker))
+    pool.run("fs", "status")
+    entry = pool._entries["fs"]
+    entry.failures.append(pool._clock())
+
+    pool.run("fs", "status")
+
+    assert len(entry.failures) == 1
+    assert OciDaemonRuntime.answers_prove_health is False
+
+
+def test_failures_of_a_container_that_ran_long_between_crashes_leave_the_window_by_age(docker, make_pool, clock):
+    pool = make_pool(breaker_window=300.0)
+    pool.register(pooled(docker))
+    for _ in range(2):
+        pool.run("fs", "status")
+        managed(docker)[0]["State"].update(Running=False, Status="exited", ExitCode=1)
+        assert wait_until(lambda: not pool._entries["fs"].slot.session.alive)
+        assert wait_until(lambda: (pool.sweep() or pool.state("fs") in (WorkerState.STOPPED, WorkerState.BACKOFF)))
+        assert wait_until(lambda: not managed(docker))
+        clock.advance(400)
+
+    pool.run("fs", "status")
+    managed(docker)[0]["State"].update(Running=False, Status="exited", ExitCode=1)
+    assert wait_until(lambda: not pool._entries["fs"].slot.session.alive)
+    assert wait_until(lambda: (pool.sweep() or pool.state("fs") in (WorkerState.STOPPED, WorkerState.BACKOFF)))
+
+    # The two old failures aged out of the window when the third was recorded: one is left, the breaker is shut.
+    assert pool.status()["workers"]["fs"]["failures"] == 1
+    assert pool.state("fs") is not WorkerState.BROKEN
+
+
+# ------------------------------------------------------------------ two installs that share an owner id
+
+
+@pytest.fixture
+def second_install(docker):
+    """A second Bazarr+ container on the same daemon, using the same owner id."""
+    other = "cd" * 32
+    docker.add_self(other, networks=("bridge",))
+    return other
+
+
+def host_for(ident):
+    return lambda client: check_daemon_host(client, in_container=True, container_id=ident)
+
+
+def test_a_container_carries_the_creating_bazarrs_id(docker):
+    runtime = make_runtime(docker)
+    runtime.start()
+
+    assert managed(docker)[0]["Config"]["Labels"][CREATOR_LABEL] == SELF_ID
+    assert next(iter(docker.networks.values()))["Labels"][CREATOR_LABEL] == SELF_ID
+    runtime.close(0)
+
+
+def test_a_clone_sharing_the_owner_id_never_removes_the_other_installs_container(docker, second_install):
+    first = make_runtime(docker)
+    first.start()
+    clone = make_runtime(docker, host_check=host_for(second_install))
+
+    with pytest.raises(OciError, match="belongs to another running Bazarr\\+|network .* belongs to another"):
+        clone.start()
+
+    assert first.alive and len(managed(docker)) == 1 and no_removal(docker)
+    report = cleanup_orphans(docker.client(), OWNER, self_id=second_install)
+    assert report.containers == 0 and report.networks == 0 and len(managed(docker)) == 1
+    assert remove_plugin(docker.client(), OWNER, "flaresolverr", self_id=second_install).containers == 0
+    assert no_removal(docker) and len(docker.networks) == 1
+    first.close(0)
+
+
+def test_what_a_vanished_install_left_is_cleaned_up_by_the_clone(docker, second_install):
+    first = make_runtime(docker)
+    first.start()
+    first._stop.set()
+    docker.containers.pop(SELF_ID)  # the first Bazarr+ container is gone; its plugin container remains
+
+    report = cleanup_orphans(docker.client(), OWNER, self_id=second_install)
+
+    assert report.containers == 1 and report.networks == 1 and not managed(docker)
+
+
+def test_a_clone_takes_over_after_the_first_install_is_gone(docker, second_install):
+    first = make_runtime(docker)
+    first.start()
+    first._stop.set()
+    docker.containers.pop(SELF_ID)
+
+    clone = make_runtime(docker, host_check=host_for(second_install))
+    clone.start()
+
+    assert clone.alive and managed(docker)[0]["Config"]["Labels"][CREATOR_LABEL] == second_install
+    clone.close(0)
+
+
+# ------------------------------------------------------------------ the owner id file
+
+
+def test_only_a_missing_file_mints_an_owner_id_and_nothing_else_overwrites(tmp_path):
+    corrupt = tmp_path / "corrupt"
+    corrupt.write_text("garbage")
+    with pytest.raises(OciUnavailable, match="does not hold an install id"):
+        load_owner_id(corrupt)
+    assert corrupt.read_text() == "garbage"
+
+    binary = tmp_path / "binary"
+    binary.write_bytes(b"\xff\xfe\x00")
+    with pytest.raises(OciUnavailable, match="cannot be read"):
+        load_owner_id(binary)
+    assert binary.read_bytes() == b"\xff\xfe\x00"
+
+    (tmp_path / "folder").mkdir()
+    with pytest.raises(OciUnavailable, match="cannot be read"):
+        load_owner_id(tmp_path / "folder")
+
+    padded = tmp_path / "padded"
+    padded.write_text(OWNER + "\n\n")
+    assert load_owner_id(padded) == OWNER
+
+
+def test_an_unreadable_owner_file_is_left_alone(tmp_path):
+    if os.geteuid() == 0:
+        pytest.skip("root reads everything")
+    path = tmp_path / "locked"
+    path.write_text(OWNER)
+    path.chmod(0)
+    try:
+        with pytest.raises(OciUnavailable, match="cannot be read"):
+            load_owner_id(path)
+    finally:
+        path.chmod(0o600)
+    assert path.read_text() == OWNER
+
+
+def test_concurrent_first_use_agrees_and_leaves_no_temp_files(tmp_path):
+    path = tmp_path / "cfg" / "owner"
+    found = []
+
+    def first_use():
+        found.append(load_owner_id(path))
+
+    threads = [threading.Thread(target=first_use) for _ in range(16)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert len(set(found)) == 1 and len(found) == 16
+    assert os.listdir(path.parent) == ["owner"]
+    assert stat.S_IMODE(os.stat(path).st_mode) == 0o600
+
+
+def test_a_second_process_losing_the_race_reads_the_winners_id(tmp_path, monkeypatch):
+    path = tmp_path / "owner"
+    real_link = os.link
+
+    def racing_link(src, dst):
+        path.write_text(OTHER + "\n")  # another process got there between the read and the link
+        return real_link(src, dst)
+
+    monkeypatch.setattr(os, "link", racing_link)
+
+    assert load_owner_id(path) == OTHER
+    assert os.listdir(tmp_path) == ["owner"]
+
+
+# ------------------------------------------------------------------ the offer is off unless switched on
+
+
+def test_the_offer_is_off_by_default_and_nothing_is_contacted(docker, monkeypatch):
+    made = []
+    monkeypatch.setattr(oci_module, "own_container_id", lambda *a, **k: SELF_ID)
+    environ = {"DOCKER_HOST": "unix://" + docker.socket_path}
+
+    status = offer_status(environ=environ, in_container=True, client_factory=lambda ep: made.append(ep))
+
+    assert not status.available and ENABLE_ENV in status.reason
+    assert made == [] and docker.requests == []
+    assert offered_runtimes(environ=environ, in_container=True) == frozenset()
+
+
+@pytest.mark.parametrize("value, on", [("1", True), ("true", True), ("YES", True), (" on ", True),
+                                       ("0", False), ("", False), ("no", False), ("2", False)])
+def test_the_switch_reads_a_true_value(value, on):
+    assert oci_module.managed_containers_enabled({ENABLE_ENV: value}) is on
+
+
+def test_the_probe_is_read_only_and_short(docker, monkeypatch):
+    seen = {}
+    monkeypatch.setattr(oci_module, "own_container_id", lambda *a, **k: SELF_ID)
+    real = oci_module.DockerClient
+
+    def capture(endpoint, **kwargs):
+        seen.update(kwargs)
+        return real(endpoint, **kwargs)
+
+    monkeypatch.setattr(oci_module, "DockerClient", capture)
+
+    status = offer_status(environ={ENABLE_ENV: "1", "DOCKER_HOST": "unix://" + docker.socket_path}, in_container=True)
+
+    assert status.available and 2.0 <= seen["timeout"] <= 3.0
+    assert {r["method"] for r in docker.requests} == {"GET"}
+
+
+def test_the_probe_runs_outside_the_cache_lock(docker, monkeypatch):
+    release = threading.Event()
+    started = threading.Event()
+
+    class Slow:
+        api_version = None
+
+        def ping(self):
+            started.set()
+            release.wait(5)
+            raise DockerApiError("slow")
+
+    monkeypatch.setattr(oci_module, "own_container_id", lambda *a, **k: SELF_ID)
+    environ = {ENABLE_ENV: "1", "DOCKER_HOST": "unix://" + docker.socket_path}
+    slow = threading.Thread(target=lambda: offer_status(environ=environ, in_container=True,
+                                                        client_factory=lambda ep: Slow()))
+    slow.start()
+    assert started.wait(5)
+
+    began = time.monotonic()
+    waiting = offer_status(environ=environ, in_container=True)
+
+    assert time.monotonic() - began < 1.0
+    assert not waiting.available and "still checking" in waiting.reason
+    release.set()
+    slow.join(timeout=5)
+
+
+# ------------------------------------------------------------------ smaller checks
+
+
+def test_events_are_emitted_after_the_runtimes_lock_is_let_go(docker):
+    held = []
+
+    def handler(name, payload):
+        # Another thread can take the lock only if the emitting thread has let it go.
+        probe = []
+
+        def try_lock():
+            got = runtime._lock.acquire(timeout=1)
+            probe.append(got)
+            if got:
+                runtime._lock.release()
+
+        thread = threading.Thread(target=try_lock)
+        thread.start()
+        thread.join()
+        held.append(probe[0])
+
+    runtime = make_runtime(docker, on_event=handler)
+    runtime.start()
+    docker.unhealthy = True
+    assert wait_until(lambda: len(held) >= 2)
+
+    assert all(held)
+    runtime.close(0)
+
+
+def test_the_network_id_the_container_joined_must_be_the_label_checked_network(docker):
+    name = network_name(OWNER, "flaresolverr")
+    docker.mutate = lambda view: view["NetworkSettings"]["Networks"][name].update(NetworkID="f" * 64) \
+        if name in view["NetworkSettings"]["Networks"] else None
+
+    with pytest.raises(OciError, match="wrong id"):
+        make_runtime(docker).start()
+
+    assert not managed(docker)
+
+
+def test_a_network_or_member_of_another_plugin_is_not_this_plugins(docker):
+    runtime = make_runtime(docker)
+    docker.networks["n"] = {"Id": "n", "Name": runtime.network, "Containers": {},
+                            "Labels": {MANAGED_LABEL: "true", OWNER_LABEL: OWNER, PLUGIN_LABEL: "otherplugin"}}
+
+    with pytest.raises(OciError, match="did not create"):
+        runtime.start()
+
+    docker.networks["n"]["Labels"][PLUGIN_LABEL] = "flaresolverr"
+    seed(docker, "member", plugin="otherplugin", network=runtime.network)
+    with pytest.raises(OciError, match="did not create"):
+        make_runtime(docker).start()
+
+
+def test_removal_by_label_negotiates_the_api_version_before_any_other_request(docker):
+    seed(docker, "ours", network="net-ours")
+    seed_network(docker, "net-ours")
+    docker.requests.clear()
+
+    cleanup_orphans(docker.client(), OWNER, self_id=SELF_ID)
+    remove_plugin(docker.client(), OWNER, "flaresolverr", self_id=SELF_ID)
+
+    paths = [(r["path"], r["version"]) for r in docker.requests]
+    assert paths[0] == ("/_ping", None)
+    assert all(version == "1.44" for path, version in paths if path != "/_ping")
+
+
+def test_owner_ids_with_a_trailing_newline_are_refused():
+    with pytest.raises(ValueError):
+        OciDaemonRuntime(spec_for(), client=None, owner_id=OWNER + "\n")
+    with pytest.raises(ValueError):
+        cleanup_orphans(None, OWNER + "\n")
+
+
+@pytest.mark.parametrize("overrides", [
+    {"image": REPO + "\n"}, {"index_digest": DIGEST + "\n"}, {"plugin_id": "flaresolverr\n"},
+    {"env": {"A\n": "x"}}, {"user": "nobody\n"},
+])
+def test_a_spec_with_a_trailing_newline_anywhere_is_refused(overrides):
+    values = {"plugin_id": "flaresolverr", "image": REPO, "index_digest": DIGEST, "port": 8191}
+    values.update(overrides)
+
+    with pytest.raises(ValueError):
+        ContainerSpec(**values)

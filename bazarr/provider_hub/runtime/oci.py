@@ -25,6 +25,11 @@ What a managed container is:
 * Inspected after creation and before start: the daemon's own record of the container must match what was
   asked, or the container is removed and the start fails.
 
+Not wired in yet: ``cleanup_orphans`` must be called once at boot, after the install's owner id is loaded
+(``load_owner_id``) and before any plugin starts, by the code that starts the plugin runtimes, and
+``remove_plugin`` by the uninstall path. Until that is done the offer stays off: ``current_host`` adds
+``(oci, daemon)`` only when ``BAZARR_MANAGED_CONTAINERS`` is set to a true value (see ``offer_status``).
+
 The container is removed whenever the pool stops it (idle, drain, uninstall, failure): FlareSolverr keeps
 no state, so a start is always from the pinned image. ``cleanup_orphans`` removes what a crash left behind
 at boot, ``remove_plugin`` is the call an uninstall makes.
@@ -64,6 +69,7 @@ __all__ = [
     "DaemonEndpoint",
     "HealthSpec",
     "HostCheck",
+    "CREATOR_LABEL",
     "MANAGED_LABEL",
     "OWNER_LABEL",
     "OciDaemonRuntime",
@@ -93,13 +99,16 @@ MANAGED_LABEL = "bazarr-plus.managed"
 OWNER_LABEL = "bazarr-plus.owner"
 PLUGIN_LABEL = "bazarr-plus.plugin"
 ROLE_LABEL = "bazarr-plus.role"
+# The id of the Bazarr+ container that created the object. Two installs that share an owner id (a copied config)
+# still tell their objects apart by it: what a different, still existing container made is never removed.
+CREATOR_LABEL = "bazarr-plus.creator"
 ROLE_DAEMON = "daemon"
 # The name a daemon answers to on its private network, besides its container name.
 DAEMON_ALIAS = "daemon"
 
-OWNER_ID_RE = re.compile(r"^[0-9a-f]{16}$")
-_ENV_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,127}$")
-_CONTAINER_ID_RE = re.compile(r"^[0-9a-f]{12,64}$")
+OWNER_ID_RE = re.compile(r"[0-9a-f]{16}\Z")
+_ENV_KEY_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,127}\Z")
+_CONTAINER_ID_RE = re.compile(r"[0-9a-f]{12,64}\Z")
 _MOUNTINFO_ID_RE = re.compile(r"/containers/([0-9a-f]{64})/")
 
 DEFAULT_MEMORY_BYTES = 1536 * MIB
@@ -137,24 +146,61 @@ def new_owner_id() -> str:
     return secrets.token_hex(8)
 
 
+_owner_lock = threading.Lock()
+
+
 def load_owner_id(path: str | os.PathLike) -> str:
-    """The install's owner id from ``path``, creating the file (mode 0600) on first use."""
+    """The install's owner id from ``path``, minted (mode 0600) only when the file is missing.
+
+    A file that cannot be read, or holds something other than an id, is never replaced: the id on it may be on
+    containers that are still running, so Bazarr+ refuses to start the runtime and says why. The first
+    creation is race-safe: the id goes to a uniquely named temp file that is linked into place (the link fails
+    if the file now exists), and whatever ended up at ``path`` is read back, so concurrent first uses agree.
+    """
     path = os.fspath(path)
+    with _owner_lock:
+        found = _read_owner_id(path)
+        if found is not None:
+            return found
+        value = new_owner_id()
+        try:
+            os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+            tmp = f"{path}.{os.getpid()}.{secrets.token_hex(6)}.tmp"
+            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            try:
+                with os.fdopen(fd, "w", encoding="ascii") as handle:
+                    handle.write(value + "\n")
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                try:
+                    os.link(tmp, path)
+                except FileExistsError:
+                    pass
+            finally:
+                try:
+                    os.unlink(tmp)
+                except OSError:
+                    pass
+        except OSError as error:
+            raise OciUnavailable("the install id file cannot be created: %s" % type(error).__name__) from error
+        found = _read_owner_id(path)
+        if found is None:
+            raise OciUnavailable("the install id file is missing after it was created")
+        return found
+
+
+def _read_owner_id(path: str) -> str | None:
+    """The id in ``path``; None when the file does not exist. Anything else wrong raises."""
     try:
         with open(path, encoding="ascii") as handle:
-            value = handle.read().strip()
-        if OWNER_ID_RE.match(value):
-            return value
-    except OSError:
-        pass
-    value = new_owner_id()
-    folder = os.path.dirname(path) or "."
-    os.makedirs(folder, exist_ok=True)
-    tmp = f"{path}.{os.getpid()}.tmp"
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w", encoding="ascii") as handle:
-        handle.write(value + "\n")
-    os.replace(tmp, path)
+            value = handle.read(256).strip()
+    except FileNotFoundError:
+        return None
+    except (OSError, UnicodeDecodeError) as error:
+        raise OciUnavailable("the install id file cannot be read (%s), so it is left alone"
+                             % type(error).__name__) from error
+    if not OWNER_ID_RE.fullmatch(value):
+        raise OciUnavailable("the install id file does not hold an install id, so it is left alone")
     return value
 
 
@@ -167,8 +213,11 @@ def network_name(owner_id: str, plugin_id: str) -> str:
     return f"bazarr-plus-{owner_id[:8]}-{plugin_id}-net"
 
 
-def _labels(owner_id: str, plugin_id: str, role: str) -> dict[str, str]:
-    return {MANAGED_LABEL: "true", OWNER_LABEL: owner_id, PLUGIN_LABEL: plugin_id, ROLE_LABEL: role}
+def _labels(owner_id: str, plugin_id: str, role: str, creator: str | None = None) -> dict[str, str]:
+    labels = {MANAGED_LABEL: "true", OWNER_LABEL: owner_id, PLUGIN_LABEL: plugin_id, ROLE_LABEL: role}
+    if creator:
+        labels[CREATOR_LABEL] = creator
+    return labels
 
 
 # --------------------------------------------------------------------------- the spec
@@ -223,12 +272,12 @@ class ContainerSpec:
     stop_timeout: int = DEFAULT_STOP_TIMEOUT
 
     def __post_init__(self):
-        if not PLUGIN_ID_RE.match(str(self.plugin_id)):
+        if not PLUGIN_ID_RE.fullmatch(str(self.plugin_id)):
             raise ValueError("plugin_id is not a plugin id")
         if not isinstance(self.image, str) or "@" in self.image or ":" in self.image.rsplit("/", 1)[-1] \
-                or not OCI_IMAGE_RE.match(self.image):
+                or not OCI_IMAGE_RE.fullmatch(self.image):
             raise ValueError("image must be a name without a tag or a digest")
-        if not isinstance(self.index_digest, str) or not OCI_INDEX_DIGEST_RE.match(self.index_digest):
+        if not isinstance(self.index_digest, str) or not OCI_INDEX_DIGEST_RE.fullmatch(self.index_digest):
             raise ValueError("index_digest must be a sha256 digest")
         if isinstance(self.port, bool) or not isinstance(self.port, int) or not 1 <= self.port <= 65535:
             raise ValueError("port must be a TCP port")
@@ -239,14 +288,14 @@ class ContainerSpec:
         if not 0 <= self.shm_bytes <= self.memory_bytes:
             raise ValueError("shm_bytes is out of range")
         for key, value in dict(self.env).items():
-            if not isinstance(key, str) or not _ENV_KEY_RE.match(key) or not isinstance(value, str) \
+            if not isinstance(key, str) or not _ENV_KEY_RE.fullmatch(key) or not isinstance(value, str) \
                     or "\x00" in value:
                 raise ValueError("env must map names to text values")
         for path, size in self.tmpfs:
             if (not isinstance(path, str) or not path.startswith("/") or path == "/" or ".." in path.split("/")
                     or "," in path or "\x00" in path or not 1 * MIB <= size <= self.memory_bytes):
                 raise ValueError("tmpfs entries must be an absolute path and a size")
-        if self.user is not None and not re.match(r"^[A-Za-z0-9_.-]{1,64}(?::[A-Za-z0-9_.-]{1,64})?$", self.user):
+        if self.user is not None and not re.fullmatch(r"[A-Za-z0-9_.-]{1,64}(?::[A-Za-z0-9_.-]{1,64})?", self.user):
             raise ValueError("user is not a user or a user:group")
         if not 1 <= self.start_timeout <= 900 or not 0 <= self.stop_timeout <= 120:
             raise ValueError("timeouts are out of range")
@@ -292,7 +341,7 @@ def flaresolverr_spec(plugin_id: str, image: str, index_digest: str, **overrides
 
 
 def container_config(spec: ContainerSpec, *, owner_id: str, role: str = ROLE_DAEMON,
-                     network: str | None = None) -> dict[str, Any]:
+                     network: str | None = None, creator: str | None = None) -> dict[str, Any]:
     """The body of ``POST /containers/create`` for ``spec``. Every limit is stated; nothing is left to a default."""
     network = network or network_name(owner_id, spec.plugin_id)
     memory = int(spec.memory_bytes)
@@ -317,7 +366,7 @@ def container_config(spec: ContainerSpec, *, owner_id: str, role: str = ROLE_DAE
     body: dict[str, Any] = {
         "Image": spec.reference,
         "Env": [f"{key}={value}" for key, value in sorted(dict(spec.env).items())],
-        "Labels": _labels(owner_id, spec.plugin_id, role),
+        "Labels": _labels(owner_id, spec.plugin_id, role, creator),
         "StopTimeout": int(spec.stop_timeout),
         "HostConfig": host,
         "NetworkingConfig": {"EndpointsConfig": {network: {"Aliases": [DAEMON_ALIAS]}}},
@@ -368,7 +417,7 @@ def own_container_id(mountinfo: str | None = None, hostname: str | None = None) 
             hostname = socket.gethostname()
         except OSError:
             hostname = ""
-    return hostname if _CONTAINER_ID_RE.match(hostname or "") else None
+    return hostname if _CONTAINER_ID_RE.fullmatch(hostname or "") else None
 
 
 def check_daemon_host(client: DockerClient | None, *, in_container: bool, container_id: str | None) -> HostCheck:
@@ -391,7 +440,7 @@ def check_daemon_host(client: DockerClient | None, *, in_container: bool, contai
     except DockerApiError as error:
         return HostCheck(False, "the Docker daemon cannot be used: " + error.message[:120], api_version=version)
     full_id = str(info.get("Id") or "")
-    if not full_id.startswith(container_id[:12]) or not _CONTAINER_ID_RE.match(full_id):
+    if not full_id.startswith(container_id[:12]) or not _CONTAINER_ID_RE.fullmatch(full_id):
         return HostCheck(False, "the Docker daemon answered for another container", api_version=version)
     mode = str((info.get("HostConfig") or {}).get("NetworkMode") or "")
     if mode == "host":
@@ -404,13 +453,39 @@ def check_daemon_host(client: DockerClient | None, *, in_container: bool, contai
                      networks=networks, api_version=version)
 
 
+# The switch for offering managed containers. Off unless set to a true value: nothing installs an oci plugin
+# yet, and the boot cleanup that must go with it is not called yet, so no host offers the runtime by itself.
+ENABLE_ENV = "BAZARR_MANAGED_CONTAINERS"
+PROBE_TIMEOUT = 3.0
+
 _offer_lock = threading.Lock()
-_offer_cache: dict[str, Any] = {"at": 0.0, "check": None, "ttl": 0.0}
+_offer_cache: dict[str, Any] = {"at": 0.0, "check": None, "ttl": 0.0, "probing": False}
 
 
 def reset_offer_cache() -> None:
     with _offer_lock:
-        _offer_cache.update(at=0.0, check=None, ttl=0.0)
+        _offer_cache.update(at=0.0, check=None, ttl=0.0, probing=False)
+
+
+def managed_containers_enabled(environ: Mapping[str, str] | None = None) -> bool:
+    value = (os.environ if environ is None else environ).get(ENABLE_ENV, "")
+    return value.strip().lower() in ("1", "true", "yes", "on")
+
+
+def _probe(environ: Mapping[str, str], in_container: bool,
+           client_factory: Callable[[Any], DockerClient] | None) -> HostCheck:
+    if not managed_containers_enabled(environ):
+        return HostCheck(False, "managed containers are switched off (%s)" % ENABLE_ENV)
+    client = None
+    if in_container:
+        try:
+            endpoint = endpoint_from_env(environ)
+        except DockerRefused as error:
+            return HostCheck(False, error.message)
+        if endpoint is not None:
+            client = (client_factory or (lambda ep: DockerClient(ep, timeout=PROBE_TIMEOUT)))(endpoint)
+    return check_daemon_host(client, in_container=in_container,
+                             container_id=own_container_id() if client is not None else None)
 
 
 def offer_status(*, environ: Mapping[str, str] | None = None, in_container: bool | None = None,
@@ -418,34 +493,32 @@ def offer_status(*, environ: Mapping[str, str] | None = None, in_container: bool
                  clock: Callable[[], float] = time.monotonic) -> HostCheck:
     """``check_daemon_host`` for this process, cached for a minute (30 seconds after a failure).
 
-    Nothing is contacted when Bazarr+ is not in a container or no Docker endpoint is configured.
+    Off unless ``ENABLE_ENV`` is set. Nothing is contacted when the switch is off, Bazarr+ is not in a container
+    or no Docker endpoint is configured. The probe is read-only (a ping and an inspect of Bazarr+'s own
+    container) with a short timeout, and runs outside the cache lock: a caller that arrives while another
+    probes gets the last answer, or "still checking" the first time, and never waits for the daemon.
     """
     with _offer_lock:
         cached = _offer_cache["check"]
         if cached is not None and clock() - _offer_cache["at"] < _offer_cache["ttl"]:
             return cached
+        if _offer_cache["probing"]:
+            return cached or HostCheck(False, "still checking the Docker daemon")
+        _offer_cache["probing"] = True
+    try:
         if in_container is None:
             from ..compatibility import running_in_container
 
             in_container = running_in_container()
-        environ = os.environ if environ is None else environ
-        client = None
-        if in_container:
-            try:
-                endpoint = endpoint_from_env(environ)
-            except DockerRefused as error:
-                result = HostCheck(False, error.message)
-            else:
-                if endpoint is not None:
-                    client = (client_factory or DockerClient)(endpoint)
-                result = None
-        else:
-            result = None
-        if result is None:
-            result = check_daemon_host(client, in_container=in_container,
-                                       container_id=own_container_id() if client is not None else None)
-        _offer_cache.update(at=clock(), check=result, ttl=_OFFER_TTL if result.available else _OFFER_FAIL_TTL)
-        return result
+        result = _probe(os.environ if environ is None else environ, in_container, client_factory)
+    except BaseException:
+        with _offer_lock:
+            _offer_cache["probing"] = False
+        raise
+    with _offer_lock:
+        _offer_cache.update(at=clock(), check=result, ttl=_OFFER_TTL if result.available else _OFFER_FAIL_TTL,
+                            probing=False)
+    return result
 
 
 def offered_runtimes(**kwargs) -> frozenset[tuple[str, str]]:
@@ -494,6 +567,52 @@ class _DoneHandle:
         return self._result
 
 
+def _creator_elsewhere(client, labels: Mapping[str, str] | None, self_id: str | None) -> bool:
+    """Whether ``labels`` name a creator that is not this Bazarr+ and still exists on the daemon.
+
+    Such an object belongs to another running install that shares this owner id (a copied config). A creator
+    that is gone (its container was recreated) leaves its objects to whoever runs now. A daemon that cannot say
+    counts as "still exists": the safe answer is to leave the object alone.
+    """
+    creator = (labels or {}).get(CREATOR_LABEL)
+    if not creator or creator == self_id:
+        return False
+    try:
+        client.inspect_container(creator)
+    except DockerNotFound:
+        return False
+    except DockerApiError:
+        return True
+    return True
+
+
+def _ownership(client, ident: str, owner_id: str, plugin_id: str | None, self_id: str | None) -> tuple[str, str | None]:
+    """Who owns the container ``ident``: ``("ours", full id)``, ``("gone", None)`` or ``("foreign", full id)``.
+
+    Every stop and removal goes through this first, and acts on the full id it returns, never on a name. A
+    container is ours only when the daemon's own record carries our managed, owner and plugin labels, it is not
+    Bazarr+'s own container, and no other running Bazarr+ created it. Raises ``DockerApiError`` when the daemon
+    cannot answer.
+    """
+    try:
+        info = client.inspect_container(ident)
+    except DockerNotFound:
+        return "gone", None
+    full = str(info.get("Id") or "")
+    labels = (info.get("Config") or {}).get("Labels") or {}
+    if not full or full == self_id or (self_id and len(self_id) < 64 and full.startswith(self_id)):
+        return "foreign", full or None
+    if not _ours(labels, owner_id, plugin_id) or _creator_elsewhere(client, labels, self_id):
+        return "foreign", full
+    return "ours", full
+
+
+def _negotiate(client) -> None:
+    """Make the client ping, so its requests carry the daemon's API version, before anything else is sent."""
+    if getattr(client, "api_version", "set") is None:
+        client.ping()
+
+
 class OciDaemonRuntime:
     """One managed container, as the pool's ``WorkerRuntime``.
 
@@ -504,16 +623,26 @@ class OciDaemonRuntime:
     ``alive`` never calls Docker (the pool reads it under its lock): a monitor thread polls the container
     and ``alive`` reports what it saw. After ``close`` it stays true until the container is confirmed
     removed, so the pool keeps the slot and retries.
+
+    Crash-loop rule: a locally answered operation proves nothing about the container, so
+    ``answers_prove_health`` is False and the pool does not clear its failure history when one is answered.
+    Every death the monitor reports, however long the container ran before it, is a failure in the pool's
+    window (five in five minutes open the breaker), and failures leave the window by age alone. A container
+    that runs for a long time between crashes never opens the breaker, one that keeps dying does.
+
+    Nothing is stopped or removed before the daemon's own record of it shows the labels this install put on
+    it (``_ownership``); a container that fails the check is left alone and reported in ``last_error``.
     """
 
     process = None
     recycle_needed = False
+    answers_prove_health = False
 
     def __init__(self, spec: ContainerSpec, *, client: DockerClient, owner_id: str,
                  host_check: Callable[[DockerClient], HostCheck] | None = None,
                  poll_interval: float = 5.0, ready_interval: float = 0.5, clock=time.monotonic,
                  sleep=time.sleep, on_event: Callable[[str, dict], None] | None = None):
-        if not OWNER_ID_RE.match(str(owner_id)):
+        if not OWNER_ID_RE.fullmatch(str(owner_id)):
             raise ValueError("owner_id must be an install id")
         self.spec = spec
         self.owner_id = owner_id
@@ -536,6 +665,7 @@ class OciDaemonRuntime:
         self._container_id: str | None = None
         self._network_id: str | None = None
         self._image_id: str | None = None
+        self._swap_unlimited = False
         self._healthy = False
         self._health: str | None = None
         self._failures = 0
@@ -581,7 +711,8 @@ class OciDaemonRuntime:
         with self._lock:
             self._ready = True
             self._healthy = True
-            self._record_state(info)
+            event = self._record_state(info)
+        self._emit(event)
         self._monitor = threading.Thread(target=self._watch, name="oci-monitor-" + self.spec.plugin_id, daemon=True)
         self._monitor.start()
         return {"container": (self._container_id or "")[:12], "network": self.names[1]}
@@ -662,8 +793,9 @@ class OciDaemonRuntime:
         client = self._client
         try:
             check = self._host_check(client)
-            if not check.available:
+            if not check.available or not check.container_id:
                 raise OciUnavailable(check.reason or "managed containers are not available here")
+            _negotiate(client)
             self._self_id = check.container_id
             self._ensure_network()
             self._audit_network()
@@ -678,19 +810,21 @@ class OciDaemonRuntime:
 
     def _ensure_network(self) -> None:
         client, name = self._client, self.names[1]
-        labels = _labels(self.owner_id, self.spec.plugin_id, ROLE_DAEMON)
+        labels = _labels(self.owner_id, self.spec.plugin_id, ROLE_DAEMON, self._self_id)
+        wanted = {key: labels[key] for key in (MANAGED_LABEL, OWNER_LABEL, PLUGIN_LABEL, CREATOR_LABEL)}
         for _attempt in range(2):
             found = [net for net in client.list_networks(name=name) if net.get("Name") == name]
             if found:
                 net = found[0]
                 have = net.get("Labels") or {}
-                if have.get(MANAGED_LABEL) != "true" or have.get(OWNER_LABEL) != self.owner_id:
+                if not _ours(have, self.owner_id, self.spec.plugin_id):
                     raise OciError("a network named %s exists that Bazarr+ did not create" % name)
+                if _creator_elsewhere(client, have, self._self_id):
+                    raise OciError("the network %s belongs to another running Bazarr+ that shares this install id" % name)
                 self._network_id = str(net.get("Id"))
                 return
             try:
-                self._network_id = client.create_network(name, labels={
-                    key: labels[key] for key in (MANAGED_LABEL, OWNER_LABEL, PLUGIN_LABEL)})
+                self._network_id = client.create_network(name, labels=wanted)
                 return
             except DockerApiError as error:
                 if error.status != 409:
@@ -699,13 +833,13 @@ class OciDaemonRuntime:
 
     def _audit_network(self) -> None:
         """Nothing but this plugin's own managed containers may share the private network, and Bazarr+ may not."""
-        members = self._client.list_containers(network=self.names[1], include_stopped=True)
+        members = self._client.list_containers(network=self._network_id, include_stopped=True)
         for member in members:
             labels = member.get("Labels") or {}
             identity = str(member.get("Id") or "")
             if identity == self._self_id:
                 raise OciError("Bazarr+ itself is attached to the plugin's private network")
-            if labels.get(MANAGED_LABEL) != "true" or labels.get(OWNER_LABEL) != self.owner_id:
+            if not _ours(labels, self.owner_id, self.spec.plugin_id):
                 raise OciError("a container that Bazarr+ did not create is attached to the plugin's private network")
 
     def _ensure_image(self) -> None:
@@ -728,28 +862,31 @@ class OciDaemonRuntime:
     def _remove_stale(self) -> None:
         """A container left under our name by an earlier run is removed, if it is ours; a stranger's is never touched."""
         name = self.names[0]
-        try:
-            info = self._client.inspect_container(name)
-        except DockerNotFound:
+        verdict, full = _ownership(self._client, name, self.owner_id, self.spec.plugin_id, self._self_id)
+        if verdict == "gone":
             return
-        labels = (info.get("Config") or {}).get("Labels") or {}
-        if labels.get(MANAGED_LABEL) != "true" or labels.get(OWNER_LABEL) != self.owner_id:
+        if verdict == "foreign":
             raise OciError("a container named %s exists that Bazarr+ did not create" % name)
-        self._client.stop_container(name, 0)
-        self._client.remove_container(name, force=True)
+        self._client.stop_container(full, 0)
+        self._client.remove_container(full, force=True)
 
     def _create(self) -> None:
-        body = container_config(self.spec, owner_id=self.owner_id)
+        body = container_config(self.spec, owner_id=self.owner_id, creator=self._self_id)
         identity, warnings = self._client.create_container(self.names[0], body)
         self._container_id = identity
         for warning in warnings:
             text = warning.lower()
             if "not support memory limit" in text or "pids limit" in text:
                 raise OciError("the Docker host cannot enforce the container's limits: " + warning[:120])
+            if "not support swap limit" in text:
+                # cgroup v1 without swap accounting: the memory cap holds, and the daemon stores the swap
+                # limit as -1. That one value is accepted, and only on the word of this warning.
+                self._swap_unlimited = True
 
     def _audit_container(self) -> None:
         info = self._client.inspect_container(self._container_id)
-        problem = _audit(info, self.spec, self.owner_id, self.names[1], self._image_id)
+        problem = _audit(info, self.spec, self.owner_id, self.names[1], self._network_id, self._image_id,
+                         self._self_id, self._swap_unlimited)
         if problem:
             raise OciError("the container Docker built does not match what was asked: " + problem)
 
@@ -782,7 +919,8 @@ class OciDaemonRuntime:
 
     # -------------------------------------------------------------- watch and end
 
-    def _record_state(self, info: Mapping[str, Any]) -> None:
+    def _record_state(self, info: Mapping[str, Any]) -> tuple[str, dict] | None:
+        """Take in an inspect. Caller holds the lock. Returns the event to emit once the lock is let go."""
         state = info.get("State") or {}
         health = (state.get("Health") or {}).get("Status")
         running = bool(state.get("Running"))
@@ -798,10 +936,16 @@ class OciDaemonRuntime:
         else:
             self.last_error = None
         if changed and self._on_event is not None:
-            try:
-                self._on_event("container", {"running": running, "health": health})
-            except Exception as error:
-                logger.debug("a container event handler failed (%s)", type(error).__name__)
+            return "container", {"running": running, "health": health}
+        return None
+
+    def _emit(self, event: tuple[str, dict] | None) -> None:
+        if event is None or self._on_event is None:
+            return
+        try:
+            self._on_event(*event)
+        except Exception as error:
+            logger.debug("a container event handler failed (%s)", type(error).__name__)
 
     def _watch(self) -> None:
         container = self._container_id
@@ -825,23 +969,40 @@ class OciDaemonRuntime:
                 self._failures = 0
                 if self._closing:
                     return
-                self._record_state(info)
+                event = self._record_state(info)
+            self._emit(event)
 
     def _remove(self, container: str, grace: float) -> bool:
-        """Stop and remove ``container``. True only when the daemon no longer knows it."""
+        """Stop and remove ``container`` if it is ours. True only when it is certainly gone or was never ours.
+
+        The daemon's record is checked first. A container that is not ours (wrong or missing labels, Bazarr+'s own
+        id, another running install's) is left alone: it is reported in ``last_error`` and counts as released,
+        because there is nothing of ours to wait for. Everything after the check uses the id the daemon returned.
+        """
         client = self._client
         try:
-            client.stop_container(container, int(max(0, grace)))
+            verdict, full = _ownership(client, container, self.owner_id, self.spec.plugin_id, self._self_id)
+        except DockerApiError as error:
+            logger.warning("%s: checking the container failed: %s", self.spec.plugin_id, error.message[:120])
+            return False
+        if verdict == "gone":
+            return True
+        if verdict == "foreign":
+            self.last_error = "refused to remove a container that Bazarr+ does not own"
+            logger.warning("%s: %s", self.spec.plugin_id, self.last_error)
+            return True
+        try:
+            client.stop_container(full, int(max(0, grace)))
         except DockerNotFound:
             pass
         except DockerApiError as error:
             # The forced removal below stops it too; a failed stop is only worth a line in the log.
             logger.debug("%s: stopping the container failed: %s", self.spec.plugin_id, error.message[:120])
         try:
-            client.remove_container(container, force=True)
+            client.remove_container(full, force=True)
             for _attempt in range(5):
                 try:
-                    client.inspect_container(container)
+                    client.inspect_container(full)
                 except DockerNotFound:
                     return True
                 self._sleep(0.2)
@@ -874,14 +1035,19 @@ def _exit_text(prefix: str, state: Mapping[str, Any]) -> str:
     return text
 
 
-def _audit(info: Mapping[str, Any], spec: ContainerSpec, owner_id: str, network: str, image_id: str | None) -> str | None:
-    """The first way the daemon's record of a container differs from what was asked, or None."""
+def _audit(info: Mapping[str, Any], spec: ContainerSpec, owner_id: str, network: str, network_id: str | None,
+           image_id: str | None, creator: str | None, swap_unlimited: bool = False) -> str | None:
+    """The first way the daemon's record of a container differs from what was asked, or None.
+
+    ``swap_unlimited`` is set only when create warned that the host cannot limit swap: then, and only then, a
+    swap limit of -1 is what was asked for.
+    """
     host = info.get("HostConfig") or {}
     config = info.get("Config") or {}
     labels = config.get("Labels") or {}
     if image_id and info.get("Image") != image_id:
         return "it is not the verified image"
-    for key, value in _labels(owner_id, spec.plugin_id, ROLE_DAEMON).items():
+    for key, value in _labels(owner_id, spec.plugin_id, ROLE_DAEMON, creator).items():
         if labels.get(key) != value:
             return "its labels are wrong"
     if host.get("Privileged"):
@@ -898,14 +1064,17 @@ def _audit(info: Mapping[str, Any], spec: ContainerSpec, owner_id: str, network:
         return "it shares a namespace (IpcMode)"
     if str(host.get("NetworkMode") or "") != network:
         return "it is on the wrong network"
-    attached = set((info.get("NetworkSettings") or {}).get("Networks") or ())
-    if attached - {network}:
+    attached = (info.get("NetworkSettings") or {}).get("Networks") or {}
+    if set(attached) - {network}:
         return "it is on another network"
+    if network_id and (attached.get(network) or {}).get("NetworkID") != network_id:
+        return "it is on a network with the wrong id"
     if "ALL" not in [str(item).upper() for item in host.get("CapDrop") or ()]:
         return "it keeps capabilities"
     if not any("no-new-privileges" in str(item) for item in host.get("SecurityOpt") or ()):
         return "it may gain privileges"
-    if host.get("Memory") != spec.memory_bytes or host.get("MemorySwap") != spec.memory_bytes:
+    expected_swap = -1 if swap_unlimited else spec.memory_bytes
+    if host.get("Memory") != spec.memory_bytes or host.get("MemorySwap") != expected_swap:
         return "its memory cap differs"
     if host.get("PidsLimit") != spec.pids_limit:
         return "its process cap differs"
@@ -938,7 +1107,7 @@ def _ours(labels: Mapping[str, str] | None, owner_id: str, plugin_id: str | None
 
 def _remove_managed(client: DockerClient, owner_id: str, plugin_id: str | None, self_id: str | None,
                     stop_timeout: int) -> CleanupReport:
-    if not OWNER_ID_RE.match(str(owner_id)):
+    if not OWNER_ID_RE.fullmatch(str(owner_id)):
         raise ValueError("owner_id must be an install id")
     wanted = {MANAGED_LABEL: "true", OWNER_LABEL: owner_id}
     if plugin_id is not None:
@@ -946,25 +1115,36 @@ def _remove_managed(client: DockerClient, owner_id: str, plugin_id: str | None, 
     containers = networks = 0
     errors: list[str] = []
     try:
+        # The API version is settled first: nothing here is sent as an unversioned path.
+        _negotiate(client)
         for item in client.list_containers(labels=wanted, include_stopped=True):
             identity = str(item.get("Id") or "")
-            # The labels are read again on what the daemon returned; the filter alone is not trusted.
-            if not identity or identity == self_id or not _ours(item.get("Labels"), owner_id, plugin_id):
+            if not identity:
+                continue
+            # The filter alone is not trusted: the daemon's own record of each container is read again, and
+            # the removal acts on the id it returns.
+            try:
+                verdict, full = _ownership(client, identity, owner_id, plugin_id, self_id)
+            except DockerApiError as error:
+                errors.append("checking a container failed: " + error.message[:100])
+                continue
+            if verdict != "ours":
                 continue
             try:
-                client.stop_container(identity, stop_timeout)
+                client.stop_container(full, stop_timeout)
             except DockerNotFound:
                 pass
             except DockerApiError as error:
                 errors.append("stopping a container failed: " + error.message[:100])
             try:
-                client.remove_container(identity, force=True)
+                client.remove_container(full, force=True)
                 containers += 1
             except DockerApiError as error:
                 errors.append("removing a container failed: " + error.message[:100])
         for net in client.list_networks(labels=wanted):
             identity = str(net.get("Id") or "")
-            if not identity or not _ours(net.get("Labels"), owner_id, plugin_id):
+            if (not identity or not _ours(net.get("Labels"), owner_id, plugin_id)
+                    or _creator_elsewhere(client, net.get("Labels"), self_id)):
                 continue
             try:
                 client.remove_network(identity)
@@ -983,6 +1163,8 @@ def cleanup_orphans(client: DockerClient, owner_id: str, *, self_id: str | None 
 
     The pool is empty at boot, so anything carrying this install's labels is an orphan. Containers of
     another install on the same host carry another owner id and are skipped, and so is Bazarr+'s own.
+    Pass ``self_id``, the id of the Bazarr+ container (``HostCheck.container_id``): an object that a different,
+    still running Bazarr+ created under a shared owner id (a copied config) is left alone.
     """
     return _remove_managed(client, owner_id, None, self_id, stop_timeout)
 
@@ -990,7 +1172,7 @@ def cleanup_orphans(client: DockerClient, owner_id: str, *, self_id: str | None 
 def remove_plugin(client: DockerClient, owner_id: str, plugin_id: str, *, self_id: str | None = None,
                   stop_timeout: int = 5) -> CleanupReport:
     """On uninstall: remove the plugin's containers, then its private network."""
-    if not PLUGIN_ID_RE.match(str(plugin_id)):
+    if not PLUGIN_ID_RE.fullmatch(str(plugin_id)):
         raise ValueError("plugin_id is not a plugin id")
     return _remove_managed(client, owner_id, plugin_id, self_id, stop_timeout)
 
