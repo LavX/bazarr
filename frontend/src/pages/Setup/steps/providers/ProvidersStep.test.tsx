@@ -130,7 +130,7 @@ describe("ProvidersStep", () => {
         provider_id: "subtitlecat",
         name: "SubtitleCat",
         state: "staged",
-        pending_restart: true,
+        needs_restart: true,
         active_version: null,
         staged_version: "1.0.0",
         manifest: { id: "subtitlecat", name: "SubtitleCat" },

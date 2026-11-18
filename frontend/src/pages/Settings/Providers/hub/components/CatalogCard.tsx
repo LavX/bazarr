@@ -61,12 +61,12 @@ type CtaState =
   | "blocked";
 
 function isPendingRemoval(installed: ProviderHubInstallation | null) {
-  return installed?.pending_restart === true && installed.state === "removed";
+  return installed?.needs_restart === true && installed.state === "removed";
 }
 
 function isPendingInstall(installed: ProviderHubInstallation | null) {
   return (
-    installed?.pending_restart === true &&
+    installed?.needs_restart === true &&
     installed.state === "staged" &&
     !installed.active_version
   );
@@ -74,7 +74,7 @@ function isPendingInstall(installed: ProviderHubInstallation | null) {
 
 function isPendingUpdate(installed: ProviderHubInstallation | null) {
   return (
-    installed?.pending_restart === true &&
+    installed?.needs_restart === true &&
     installed.state === "staged" &&
     Boolean(installed.active_version)
   );
@@ -87,7 +87,7 @@ function deriveCta(
 ): CtaState {
   if (!installed && !manifestValid) return "broken";
   if (!installed) return entry.blocked_reason ? "blocked" : "install";
-  if (installed.pending_restart) return "restart";
+  if (installed.needs_restart) return "restart";
   if (installed.needs_repair) return "repair";
   if (
     installed.active_version &&
@@ -119,7 +119,7 @@ export const CatalogCard: FunctionComponent<CatalogCardProps> = ({
   const pendingInstall = isPendingInstall(installed);
   const pendingUpdate = isPendingUpdate(installed);
   const canShowActions = installed !== null && !pendingRemoval;
-  const canTest = installed?.state === "active" && !installed.pending_restart;
+  const canTest = installed?.state === "active" && !installed.needs_restart;
   const removeLabel = pendingInstall
     ? "Cancel staged install"
     : pendingUpdate
@@ -310,7 +310,7 @@ export const CatalogCard: FunctionComponent<CatalogCardProps> = ({
           {installed && (
             <ProviderStatusBadge
               state={installed.state}
-              pendingRestart={installed.pending_restart}
+              pendingRestart={installed.needs_restart}
               activeVersion={installed.active_version}
               needsRepair={installed.needs_repair}
             />

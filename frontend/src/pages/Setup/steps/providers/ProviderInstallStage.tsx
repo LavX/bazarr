@@ -20,6 +20,7 @@ import {
   faMagnifyingGlass,
 } from "@fortawesome/free-solid-svg-icons";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
+import { useQueryClient } from "@tanstack/react-query";
 import { AxiosError } from "axios";
 import {
   useProviderHubCatalog,
@@ -29,6 +30,7 @@ import {
   useSystem,
   useSystemSettings,
 } from "@/apis/hooks";
+import { QueryKeys } from "@/apis/queries/keys";
 import api from "@/apis/raw";
 import type {
   ProviderHubCatalogEntry,
@@ -197,6 +199,29 @@ const ProviderInstallStage: FC<ProviderInstallStageProps> = ({
   const settingsMutation = useSettingsMutation(false, { inlineErrors: true });
   const { data: systemSettings } = useSystemSettings();
   const runGated = useGatedAction();
+  const client = useQueryClient();
+
+  // Whether what a run staged waits on a restart, from the one field the server sets on each entry. When
+  // the list cannot be read the answer is yes, as it was before the field: a restart that was not needed
+  // costs a minute, a missing one leaves providers that never load.
+  const stagedNeedRestart = useCallback(
+    async (ids: string[]) => {
+      try {
+        const list = await client.fetchQuery({
+          queryKey: [QueryKeys.ProviderHub],
+          queryFn: () => api.providerHub.providers(),
+          staleTime: 0,
+        });
+        return list.some(
+          (item) =>
+            ids.includes(item.provider_id) && item.needs_restart === true,
+        );
+      } catch {
+        return true;
+      }
+    },
+    [client],
+  );
 
   const [selected, setSelected] = useState<string[]>([]);
   const [query, setQuery] = useState("");
@@ -542,6 +567,15 @@ const ProviderInstallStage: FC<ProviderInstallStageProps> = ({
           await enableProviders(toEnable);
         }
 
+        // Asked while the step still counts as busy, so Back and the skip stay held until the answer is in.
+        const restartNeeded = merged.some((outcome) => outcome.staged)
+          ? await stagedNeedRestart(
+              merged
+                .filter((outcome) => outcome.staged)
+                .map((outcome) => outcome.providerId),
+            )
+          : false;
+
         setOutcomes(merged);
         setInstalling(false);
         setInstallSource(null);
@@ -549,6 +583,14 @@ const ProviderInstallStage: FC<ProviderInstallStageProps> = ({
         // Nothing staged means nothing new to load, so a restart would only cost
         // the user a minute and tell them nothing. Leave the failures on screen.
         if (merged.every((outcome) => !outcome.staged)) {
+          return;
+        }
+        if (!restartNeeded) {
+          // The server says nothing here waits on a restart: the providers are already in place. A clean
+          // run goes on to configure them, and a partial one keeps its outcomes on screen to retry.
+          if (merged.every((outcome) => outcome.staged)) {
+            onUseInstalled();
+          }
           return;
         }
         if (merged.every((outcome) => outcome.staged)) {
@@ -560,7 +602,14 @@ const ProviderInstallStage: FC<ProviderInstallStageProps> = ({
         setCountdown(PARTIAL_RESTART_SECONDS);
       }, "install the selected providers");
     },
-    [beginRestart, enableProviders, install, runGated],
+    [
+      beginRestart,
+      enableProviders,
+      install,
+      onUseInstalled,
+      runGated,
+      stagedNeedRestart,
+    ],
   );
 
   useEffect(() => {

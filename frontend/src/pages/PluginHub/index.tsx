@@ -39,6 +39,7 @@ import { useSystemStatus } from "@/apis/hooks/system";
 import { QueryKeys } from "@/apis/queries/keys";
 import api from "@/apis/raw";
 import { withInlineErrors } from "@/apis/raw/inlineWrites";
+import { RestartBanner } from "@/components/hub/RestartBanner";
 import { SearchBar } from "@/components/hub/SearchBar";
 import { useGatedAction } from "@/components/modals/PasswordConfirmModal";
 import {
@@ -56,6 +57,7 @@ import {
   inFilter,
   installationKind,
   installedRows,
+  isWaitingUpdate,
   marketplaceRows,
   matchesQuery,
   OFFICIAL_PLUGIN_ID,
@@ -222,6 +224,25 @@ const PluginHubView: FunctionComponent = () => {
   const updates = useMemo(
     () => allUpdates.filter((row) => inFilter(row.kind, filter)),
     [allUpdates, filter],
+  );
+  // An update that is staged and waits for a restart is no longer on offer, but it is not done either, so
+  // it stays on the tab and in its count until the restart has put it in place.
+  const allWaiting = useMemo(
+    () =>
+      installedRows(catalog.data, installed, "all").filter((row) =>
+        isWaitingUpdate(row.installation),
+      ),
+    [catalog.data, installed],
+  );
+  const waiting = useMemo(
+    () => allWaiting.filter((row) => inFilter(row.kind, filter)),
+    [allWaiting, filter],
+  );
+  const updateCount = allUpdates.length + allWaiting.length;
+  // Every change the server says needs a restart, whatever the plugin's type or the filter in use.
+  const restartCount = useMemo(
+    () => installed.filter((item) => item.needs_restart === true).length,
+    [installed],
   );
   const pluginIds = useMemo(() => {
     const ids = new Set<string>();
@@ -430,6 +451,7 @@ const PluginHubView: FunctionComponent = () => {
           </div>
         </Alert>
       )}
+      <RestartBanner count={restartCount} />
       <SourceBand source={officialSource} />
       <Tabs
         value={tab}
@@ -453,10 +475,10 @@ const PluginHubView: FunctionComponent = () => {
             value="updates"
             leftSection={<FontAwesomeIcon icon={faRotate} />}
             rightSection={
-              allUpdates.length > 0 ? (
+              updateCount > 0 ? (
                 <span
-                  aria-label={`${allUpdates.length} pending update${
-                    allUpdates.length === 1 ? "" : "s"
+                  aria-label={`${updateCount} pending update${
+                    updateCount === 1 ? "" : "s"
                   }`}
                   style={{
                     display: "inline-flex",
@@ -472,7 +494,7 @@ const PluginHubView: FunctionComponent = () => {
                     color: "var(--bz-bg-elevated, #fff)",
                   }}
                 >
-                  {allUpdates.length}
+                  {updateCount}
                 </span>
               ) : null
             }
@@ -535,8 +557,13 @@ const PluginHubView: FunctionComponent = () => {
         <Tabs.Panel value="updates">
           <UpdatesPanel
             rows={updates}
+            waiting={waiting}
             filter={filter}
-            elsewhere={allUpdates.length - updates.length}
+            elsewhere={
+              allUpdates.length -
+              updates.length +
+              (allWaiting.length - waiting.length)
+            }
             checking={checkUpdates.isPending}
             onCheck={() => checkUpdates.mutate()}
             {...actions}

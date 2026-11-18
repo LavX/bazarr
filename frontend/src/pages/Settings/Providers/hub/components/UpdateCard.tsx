@@ -32,7 +32,7 @@ export const UpdateCard: FunctionComponent<UpdateCardProps> = ({
   onApply,
   isApplying,
 }) => {
-  const targetVersion = provider.pending_restart
+  const targetVersion = provider.needs_restart
     ? stagedTargetLabel(provider)
     : `v${latest?.version ?? "latest"}`;
   const trusted = Boolean(latest?.trusted ?? provider.trusted);
@@ -98,7 +98,7 @@ export const UpdateCard: FunctionComponent<UpdateCardProps> = ({
           <TrustBadge trusted={trusted} />
         </Group>
         <div className={styles.hubCardAction}>
-          {provider.pending_restart ? (
+          {provider.needs_restart ? (
             <span className={styles.hubCardPendingText}>Pending restart</span>
           ) : (
             <Button

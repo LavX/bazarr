@@ -141,12 +141,14 @@ export const InstalledPanel: FunctionComponent<
 
 export const UpdatesPanel: FunctionComponent<
   Omit<PanelProps, "searching"> & {
+    /** Updates that are staged and wait for a restart. */
+    waiting: PluginRow[];
     onCheck: () => void;
     checking: boolean;
     /** Updates there are for plugins of the other types, which the filter hides. */
     elsewhere: number;
   }
-> = ({ rows, filter, onCheck, checking, elsewhere, ...actions }) => (
+> = ({ rows, waiting, filter, onCheck, checking, elsewhere, ...actions }) => (
   <Stack gap="md">
     <Header
       eyebrow="Updates"
@@ -163,9 +165,17 @@ export const UpdatesPanel: FunctionComponent<
         </Button>
       }
     />
-    {rows.length > 0 ? (
-      <Grid rows={rows} {...actions} />
-    ) : (
+    {rows.length > 0 && <Grid rows={rows} {...actions} />}
+    {waiting.length > 0 && (
+      <Stack gap="sm">
+        <h3 className={styles.panelTitle}>Waiting for a restart</h3>
+        <p className={styles.panelDescription}>
+          These updates are staged. They take over when Bazarr+ restarts.
+        </p>
+        <Grid rows={waiting} {...actions} />
+      </Stack>
+    )}
+    {rows.length === 0 && waiting.length === 0 && (
       <EmptyState
         icon={faListCheck}
         title={

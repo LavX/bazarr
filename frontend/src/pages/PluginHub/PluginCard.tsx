@@ -80,7 +80,7 @@ const Action: FunctionComponent<PluginCardProps> = ({
   const occupied = working || (openJobs.get(row.id)?.size ?? 0) > 0;
   // A row that only records a failed install is not an installation: the install is offered again.
   const installation = isInstalled(row.installation) ? row.installation : null;
-  if (installation?.pending_restart) {
+  if (installation?.needs_restart) {
     return (
       <Tooltip label="Restart Bazarr+ to finish this change">
         <span className={styles.hubCardPendingText}>Pending restart</span>
@@ -305,10 +305,10 @@ export const PluginCard: FunctionComponent<PluginCardProps> = (props) => {
       pills={
         <>
           {installation &&
-            (installation.pending_restart || !status ? (
+            (installation.needs_restart || !status ? (
               <ProviderStatusBadge
                 state={installation.state}
-                pendingRestart={installation.pending_restart}
+                pendingRestart={installation.needs_restart}
                 activeVersion={installation.active_version}
                 needsRepair={installation.needs_repair}
               />
