@@ -2052,6 +2052,17 @@ def _secret_descriptor(stored_value: Any) -> dict[str, Any]:
     return descriptor
 
 
+def _capability_report(installation: dict[str, Any]) -> list[dict[str, Any]]:
+    """Which host capabilities the plugin declares and whether each is ready, for its card. Never raises."""
+    try:
+        from .capabilities import binding_report
+
+        return binding_report(installation)
+    except Exception:
+        logging.getLogger(__name__).exception("Unable to report the capabilities of %s", installation.get("provider_id"))
+        return []
+
+
 def _redact_installation(installation: dict[str, Any]) -> dict[str, Any]:
     redacted = dict(installation)
     provider_id = redacted.get("provider_id")
@@ -2059,6 +2070,9 @@ def _redact_installation(installation: dict[str, Any]) -> dict[str, Any]:
         # enabled_providers in config.yaml is the source of truth; the stored
         # field on the hub row is a stale shadow we don't trust on read.
         redacted["enabled"] = get_kind(kind_of(redacted)).is_enabled(redacted)
+    needs = _capability_report(redacted)
+    if needs:
+        redacted["capabilities"] = needs
     config = redacted.get("config")
     if not isinstance(config, dict):
         return redacted

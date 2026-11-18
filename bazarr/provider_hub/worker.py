@@ -34,6 +34,11 @@ _MAX_RESPONSE_LINE_BYTES = 48 * 1024 * 1024
 # Read granularity for the bounded readline loop, so the cap is enforced before a
 # whole oversized line accumulates.
 _READ_CHUNK_CHARS = 1024 * 1024
+# What a worker may send the host as a call in the middle of a request. Calls carry a captcha
+# site address and key, so the cap is far below the reply cap; a request that makes more than the
+# call limit is a runaway and is ended.
+_MAX_HOST_CALL_LINE_BYTES = 2 * 1024 * 1024
+_MAX_HOST_CALLS_PER_REQUEST = 16
 # Queued by the reader thread when a response line exceeds the cap, so the
 # consumer kills the worker at the transport layer instead of assembling it.
 _OVERSIZE_RESPONSE = object()
@@ -490,7 +495,11 @@ class ProviderWorkerClient:
         env: dict[str, str] | None = None,
         provider_id: str | None = None,
         before_start=None,
+        host_calls: dict[str, Any] | None = None,
     ):
+        # The calls this worker may make to the host while it serves a request: capability id to
+        # a function (payload, timeout) -> dict. Anything else a worker asks for is refused.
+        self._host_calls = dict(host_calls or {})
         # Called before every start of the worker process, the first one and each
         # respawn: whatever it raises keeps the process from starting.
         self._before_start = before_start
@@ -1136,6 +1145,94 @@ class ProviderWorkerClient:
             return
         self._kill_tree(process, 5.0)
 
+    def _read_reply(self, request_id: str, timeout: float) -> str:
+        """Read the line that answers the request, serving the worker's host calls on the way.
+
+        A worker that needs something only the host has (a captcha solved with the user's key)
+        sends a call frame on stdout before its reply and waits for the answer on stdin. This
+        carries no socket and no address, so it works the same inside the sandbox, which keeps
+        a worker off Bazarr+'s own port. The whole exchange stays inside the request's deadline.
+        """
+        deadline = time.monotonic() + max(0.0, float(timeout))
+        served = 0
+        while True:
+            line = self._read_line_with_deadline(max(0.0, deadline - time.monotonic()))
+            call = self._host_call_of(line, request_id)
+            if call is None:
+                return line
+            served += 1
+            if served > _MAX_HOST_CALLS_PER_REQUEST:
+                self._kill_worker()
+                raise WorkerError("worker made too many host calls in one request")
+            answer = self._answer_host_call(call, deadline)
+            reply = {"abi": WORKER_ABI_VERSION, "id": request_id, "call_reply": answer}
+            try:
+                self.process.stdin.write(json.dumps(reply, separators=(",", ":")) + "\n")
+                self.process.stdin.flush()
+            except (OSError, ValueError, AttributeError) as error:
+                raise WorkerError("worker closed while the host answered its call") from error
+
+    @staticmethod
+    def _host_call_of(line: str, request_id: str) -> dict | None:
+        """The call a line carries, or None when it is the reply (or anything else) for the caller to judge."""
+        # A reply can be tens of megabytes: look at its start before parsing anything.
+        if not line or '"call"' not in line[:200]:
+            return None
+        if len(line) > _MAX_HOST_CALL_LINE_BYTES:
+            return None
+        try:
+            frame = json.loads(line)
+        except ValueError:
+            return None
+        if (not isinstance(frame, dict) or frame.get("abi") != WORKER_ABI_VERSION or frame.get("id") != request_id
+                or not isinstance(frame.get("call"), dict)):
+            return None
+        call = frame["call"]
+        return call if isinstance(call.get("id"), str) and isinstance(call.get("capability"), str) else None
+
+    def _answer_host_call(self, call: dict, deadline: float) -> dict:
+        """Run one call and shape the outcome. Never raises, and says nothing the plugin may not see."""
+        call_id, capability = call["id"], call["capability"]
+
+        def failure(code: str, message: str) -> dict:
+            return {"id": call_id, "ok": False, "error": {"code": code, "message": message}}
+
+        handler = self._host_calls.get(capability)
+        if handler is None:
+            return failure("denied", "This plugin may not use that host capability.")
+        payload = call.get("payload")
+        if not isinstance(payload, dict):
+            return failure("invalid", "A call carries an object.")
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return failure("timeout", "The request ran out of time.")
+        outcome: dict[str, Any] = {}
+
+        def run():
+            try:
+                outcome["payload"] = handler(payload, remaining)
+            except BaseException as error:  # reported to the plugin, never raised
+                outcome["error"] = error
+
+        # On a thread of its own so a vendor that never answers cannot hold the request past its
+        # deadline; the reply is then a timeout and the read after it ends the worker.
+        thread = threading.Thread(target=run, name="provider-host-call", daemon=True)
+        thread.start()
+        thread.join(remaining)
+        if thread.is_alive():
+            return failure("timeout", "The request ran out of time.")
+        error = outcome.get("error")
+        if error is not None:
+            code, message = getattr(error, "code", None), getattr(error, "message", None)
+            if isinstance(code, str) and isinstance(message, str):
+                return failure(code, scrub_text(message))
+            logger.warning("A host call from %s failed", self.provider_id or "a worker", exc_info=error)
+            return failure("failed", "The host could not do that.")
+        result = outcome.get("payload")
+        if not isinstance(result, dict):
+            return failure("failed", "The host could not do that.")
+        return {"id": call_id, "ok": True, "payload": result}
+
     def select_archive_member(
         self, payload: dict[str, Any] | None = None, timeout: float | None = None
     ) -> WorkerResult:
@@ -1260,7 +1357,7 @@ class ProviderWorkerClient:
                     if attempt == 0 and self._opened_after_apply_failure():
                         continue
                     raise
-                line = self._read_line_with_deadline(timeout)
+                line = self._read_reply(request_id, timeout)
                 if not line and attempt == 0 and self._opened_after_apply_failure():
                     continue
                 break

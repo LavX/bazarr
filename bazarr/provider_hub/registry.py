@@ -237,15 +237,26 @@ class HubProxyProvider(Provider):
             if not (bundle_path and manifest_json):
                 raise WorkerError("Provider Hub worker is not configured")
             runner = Path(__file__).with_name("worker_runner.py")
+            from types import SimpleNamespace
+
+            from .capabilities import host_call_handlers
+
+            # What the plugin may ask the host for while it serves a request. The grant follows the
+            # host's own trust record of the installation, never the manifest's word for itself.
+            host_calls = host_call_handlers(SimpleNamespace(
+                manifest=getattr(getattr(self.__class__, "manifest", None), "raw", None),
+                trusted=getattr(self.__class__, "installation_trusted", False)))
             self.worker_client = ProviderWorkerClient(
                 worker_command(python_path, runner),
                 cwd=bundle_path,
                 env={
                     "BAZARR_PROVIDER_HUB_BUNDLE": str(bundle_path),
                     "BAZARR_PROVIDER_HUB_MANIFEST": manifest_json,
+                    "BAZARR_HOST_CALLS": json.dumps(sorted(host_calls)),
                 },
                 provider_id=self.provider_name,
                 before_start=self._verify_bundle_before_start,
+                host_calls=host_calls,
             )
             return self.worker_client
 
@@ -422,6 +433,7 @@ def _make_provider_class(manifest, worker_client=None, installation=None):
     if worker_client is not None:
         attrs["worker_client"] = worker_client
     if installation is not None:
+        attrs["installation_trusted"] = getattr(installation, "trusted", False) is True
         if installation.active_path:
             bundle = validated_bundle_path(provider_hub_dir(), installation.active_path)
             if bundle is None:
