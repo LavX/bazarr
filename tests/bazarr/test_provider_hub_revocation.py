@@ -728,6 +728,8 @@ def test_a_refresh_marks_a_running_revoked_release_and_asks_for_a_restart_but_st
         assert "It will not start" not in row["revoked_reason"] and len(row["revoked_reason"]) <= LIMIT
         # The restart cue the Hub already reads.
         assert row["pending_restart"] is True and row["revoked_restart"] is True
+    # needs_restart is derived from that cue by the kind's attach policy: a restart-attached kind reports it.
+    assert service.get_provider("runningsub")["needs_restart"] is True
     # Nothing was taken from what runs: not the running set, and not the settings overlay.
     assert {item.provider_id for item in running_installations(kind=None)} == {"runningsub", PLUGIN}
     assert blocked_installations(kind=None) == []
@@ -741,6 +743,7 @@ def test_a_refresh_marks_a_running_revoked_release_and_asks_for_a_restart_but_st
         assert row["blocked"] is True and row["pending_restart"] is False and "revoked_restart" not in row
         assert "It will not start. Update it or remove it." in row["blocked_reason"]
         assert row["last_error"] == row["blocked_reason"] == row["revoked_reason"]
+    assert service.get_provider("runningsub")["needs_restart"] is False
     assert running_installations(kind=None) == []
 
 

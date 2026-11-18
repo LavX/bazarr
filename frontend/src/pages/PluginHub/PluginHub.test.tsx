@@ -723,6 +723,48 @@ describe("updates waiting for a restart, and the restart prompt", () => {
     );
   });
 
+  it("lets a revoked running release be updated or removed before the restart that stops it", async () => {
+    installed = [
+      {
+        ...installedTranslator,
+        needs_restart: true,
+        revoked: true,
+        revoked_reason:
+          "Version 1.0.0 was revoked. Restart Bazarr+ to stop it.",
+      },
+    ];
+    showPage("?tab=updates");
+    // The restart prompt stays, and so do the way out of it: the update and the removal.
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "waiting for a restart",
+    );
+    expect(
+      await screen.findByRole("button", {
+        name: "Update AI Subtitle Translator to 2.0.0",
+      }),
+    ).toBeEnabled();
+    expect(screen.queryByText("Awaiting restart")).not.toBeInTheDocument();
+    expect(screen.getByText(/Restart Bazarr\+ to stop it/)).toBeVisible();
+    await userEvent.click(
+      screen.getByRole("button", {
+        name: "AI Subtitle Translator actions",
+      }),
+    );
+    expect(
+      screen.queryByText("Restart Bazarr+ to finish the change in progress."),
+    ).not.toBeInTheDocument();
+  });
+
+  it("still waits for the restart when the release is revoked and an update is already staged", async () => {
+    installed = [{ ...staged, revoked: true, revoked_reason: "Revoked." }];
+    showPage("?tab=installed");
+    await card("AI Subtitle Translator");
+    expect(screen.getAllByText("Awaiting restart").length).toBeGreaterThan(0);
+    expect(
+      screen.queryByRole("button", { name: /^Update / }),
+    ).not.toBeInTheDocument();
+  });
+
   it("shows no restart prompt for a change the server does not say needs one, whatever else the row holds", async () => {
     installed = [
       {

@@ -249,12 +249,30 @@ export function getLatestCatalogEntry(
   );
 }
 
+/**
+ * Whether a restart has to happen before anything else can be done with this plugin. The server's
+ * `needs_restart` says a change waits for one. A revoked release that nothing is staged to replace only
+ * needs the restart to stop it, so the person can still update or remove it first.
+ */
+export function isAwaitingRestart(
+  installation: ProviderHubInstallation,
+): boolean {
+  if (!installation.needs_restart) {
+    return false;
+  }
+  return !(
+    installation.revoked === true &&
+    !installation.staged_version &&
+    installation.state !== "removed"
+  );
+}
+
 export function isUpdateAvailable(
   provider: ProviderHubInstallation,
   catalog: ProviderHubCatalog | undefined | null,
 ): boolean {
   if (!provider.active_version) return false;
-  if (provider.needs_restart) return false;
+  if (isAwaitingRestart(provider)) return false;
   const latest = getLatestCatalogEntry(
     catalog,
     provider.provider_id,
