@@ -342,6 +342,52 @@ describe("what the cards say about this host", () => {
   });
 });
 
+describe("what an installed plugin asks the host for", () => {
+  it("lists each capability as ready or not, with the reason, on the Installed tab", async () => {
+    installed = [
+      installation(
+        "ai_translator",
+        "translator",
+        { requires: ["flaresolverr.v1", "host.captcha.v1"] },
+        {
+          name: "AI Subtitle Translator",
+          capabilities: [
+            {
+              capability: "flaresolverr.v1",
+              source: "none",
+              ready: false,
+              reason: "No FlareSolverr address is set.",
+            },
+            {
+              capability: "host.captcha.v1",
+              source: "host",
+              ready: true,
+              reason: "",
+            },
+          ],
+        },
+      ),
+    ];
+    showPage("?tab=installed");
+    const list = await screen.findByRole("list", { name: "Host capabilities" });
+    const [solver, captcha] = within(list).getAllByRole("listitem");
+    expect(within(solver).getByText("Not ready")).toBeVisible();
+    expect(
+      within(solver).getByText("No FlareSolverr address is set."),
+    ).toBeVisible();
+    expect(within(captcha).getByText("Ready")).toBeVisible();
+  });
+
+  it("shows no capability list for a plugin that needs nothing", async () => {
+    installed = [installedTranslator];
+    showPage("?tab=installed");
+    await card("AI Subtitle Translator");
+    expect(
+      screen.queryByRole("list", { name: "Host capabilities" }),
+    ).not.toBeInTheDocument();
+  });
+});
+
 describe("the official source's standing", () => {
   it("says when the catalog was checked and how it is signed", async () => {
     showPage();

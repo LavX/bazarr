@@ -4,7 +4,8 @@
 One address per capability, kept in the ``endpoints`` settings section under
 ``<capability, dots as underscores>_url``. FlareSolverr is the first one: a
 plugin that can solve its Cloudflare challenges through FlareSolverr reads its
-own ``flaresolverr_url``, and when that is empty the host fills it from here.
+own ``flaresolverr_url``, and when that is empty the host fills it from here
+(``capabilities.deliver``).
 
 Nothing in this module adopts an address by itself. A FlareSolverr container
 that answers on its usual sibling name is reported as a hint, and the setting
@@ -116,37 +117,21 @@ def may_receive_flaresolverr(installation) -> bool:
 
     FlareSolverr fetches any URL it is asked for, so its address is a LAN
     browser. It goes only to a trusted installation or to one whose manifest
-    declares ``"flaresolverr": true``, never to an untrusted plugin that merely
-    has a field of the right name. The manifest flag is the plugin's own
-    declaration, not a check that anyone trusts it: it only keeps the address
-    away from plugins that never asked for it.
+    declares it (``"requires": ["flaresolverr.v1"]``, or the older flag
+    ``"flaresolverr": true``), never to an untrusted plugin that merely has a
+    field of the right name. The declaration is the plugin's own, not a check
+    that anyone trusts it: it only keeps the address away from plugins that
+    never asked for it.
     """
-    if getattr(installation, "trusted", False) is True:
+    trusted = installation.get("trusted") if isinstance(installation, dict) else getattr(installation, "trusted", False)
+    if trusted is True:
         return True
-    manifest = getattr(installation, "manifest", None)
-    return isinstance(manifest, dict) and manifest.get("flaresolverr") is True
-
-
-def fill_flaresolverr_url(config: dict, properties: dict, installation, settings) -> None:
-    """Give an empty ``flaresolverr_url`` of an eligible plugin the global address.
-
-    Runs after the stored config, the schema defaults and the plugin's own
-    settings section are merged, so a value the user set for the provider is
-    never replaced. With no address to give, the field is set to an empty
-    string so that a pool holding an older address drops it. A plugin whose
-    schema has no such field is left as it is.
-    """
-    if FLARESOLVERR_PROVIDER_FIELD not in properties:
-        return
-    if config.get(FLARESOLVERR_PROVIDER_FIELD) not in (None, "", [], {}):
-        return
-    if not may_receive_flaresolverr(installation):
-        return
-    # Assigned even when there is no address. A persistent pool merges the new
-    # config over the one it holds, so a key that is simply absent would keep
-    # the address filled in before the setting was cleared. An explicit empty
-    # string is what replaces it.
-    config[FLARESOLVERR_PROVIDER_FIELD] = resolve_flaresolverr_url(settings)
+    manifest = installation.get("manifest") if isinstance(installation, dict) else getattr(installation, "manifest", None)
+    if not isinstance(manifest, dict):
+        return False
+    requires = manifest.get("requires")
+    return manifest.get("flaresolverr") is True or (
+        isinstance(requires, (list, tuple)) and FLARESOLVERR_CAPABILITY in requires)
 
 
 def _probe_flaresolverr(url: str) -> bool:

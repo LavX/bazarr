@@ -1,6 +1,7 @@
 # coding=utf-8
 from __future__ import annotations
 
+import collections
 import errno
 import json
 import logging
@@ -34,9 +35,71 @@ _MAX_RESPONSE_LINE_BYTES = 48 * 1024 * 1024
 # Read granularity for the bounded readline loop, so the cap is enforced before a
 # whole oversized line accumulates.
 _READ_CHUNK_CHARS = 1024 * 1024
+# What a worker may send the host as a call in the middle of a request. A call carries a captcha site
+# address and key, so every part of it is bounded far below the reply cap. A call outside the bounds,
+# and a request that makes more calls than the limit, is a protocol violation and ends the worker.
+_MAX_HOST_CALL_LINE_BYTES = 128 * 1024
+_MAX_HOST_CALL_ID_CHARS = 64
+_MAX_HOST_CALL_CAPABILITY_CHARS = 128
+_MAX_HOST_CALL_PAYLOAD_BYTES = 64 * 1024
+_MAX_HOST_CALLS_PER_REQUEST = 16
+# What the host sends back. Bounded so that answers cannot fill a pipe the worker does not read, and
+# writing one is bounded in time as well: a worker that does not read within this long is ended.
+_MAX_HOST_REPLY_PAYLOAD_BYTES = 32 * 1024
+_HOST_REPLY_WRITE_SECONDS = 10.0
+# What the stdout reader may hold ahead of the request thread, by bytes and by pieces. Past either it
+# stops reading, so the pipe fills and the worker's own writes wait: a worker cannot grow the host's
+# memory by writing while nothing is consuming (during a host call, or between requests). A reply is
+# consumed as it arrives, so this never slows one down.
+_STDOUT_QUEUE_MAX_BYTES = 8 * 1024 * 1024
+_STDOUT_QUEUE_MAX_CHUNKS = 64
 # Queued by the reader thread when a response line exceeds the cap, so the
 # consumer kills the worker at the transport layer instead of assembling it.
 _OVERSIZE_RESPONSE = object()
+
+
+class _BoundedChunks:
+    """The reader's queue of worker output: ``put`` waits while it holds too much, ``get`` is Queue's.
+
+    Markers (the end of output, an oversized line) are never held back. A waiting ``put`` gives up when
+    ``alive`` says the process is gone, so a killed worker never leaves a reader thread stuck.
+    """
+
+    def __init__(self, max_bytes: int = _STDOUT_QUEUE_MAX_BYTES, max_chunks: int = _STDOUT_QUEUE_MAX_CHUNKS):
+        self._items: collections.deque = collections.deque()
+        self._bytes = 0
+        self._max_bytes = max_bytes
+        self._max_chunks = max_chunks
+        self._cond = threading.Condition()
+
+    @property
+    def queued_bytes(self) -> int:
+        with self._cond:
+            return self._bytes
+
+    def put(self, item, alive=lambda: True) -> None:
+        size = len(item) if isinstance(item, str) else 0
+        with self._cond:
+            while size and self._items and (
+                    len(self._items) >= self._max_chunks or self._bytes + size > self._max_bytes):
+                if not alive():
+                    return
+                self._cond.wait(0.2)
+            self._items.append(item)
+            self._bytes += size
+            self._cond.notify_all()
+
+    def get(self, timeout: float | None = None):
+        with self._cond:
+            if not self._items:
+                self._cond.wait(timeout)
+            if not self._items:
+                raise queue.Empty
+            item = self._items.popleft()
+            if isinstance(item, str):
+                self._bytes -= len(item)
+            self._cond.notify_all()
+            return item
 
 
 def _json_default(obj):
@@ -490,7 +553,11 @@ class ProviderWorkerClient:
         env: dict[str, str] | None = None,
         provider_id: str | None = None,
         before_start=None,
+        host_calls: dict[str, Any] | None = None,
     ):
+        # The calls this worker may make to the host while it serves a request: capability id to
+        # a function (payload, seconds_left, cancelled_event) -> dict. Anything else a worker asks for is refused.
+        self._host_calls = dict(host_calls or {})
         # Called before every start of the worker process, the first one and each
         # respawn: whatever it raises keeps the process from starting.
         self._before_start = before_start
@@ -516,7 +583,7 @@ class ProviderWorkerClient:
         # Set by stop(): a retired client admits no gated request, so a waiter
         # cannot respawn its worker with the configuration that was replaced.
         self._closed = False
-        self._stdout_queue: queue.Queue[Any] | None = None
+        self._stdout_queue: _BoundedChunks | None = None
         self._stdout_thread: threading.Thread | None = None
         self._stderr_thread: threading.Thread | None = None
         # Set when the sandbox ruleset could not be applied to this client's worker: it starts
@@ -558,7 +625,7 @@ class ProviderWorkerClient:
         # forgotten while they still run from the environment.
         with _GROUPS_LOCK:
             self._groups = [*self._live_groups(), self.process.pid]
-        self._stdout_queue = queue.Queue()
+        self._stdout_queue = _BoundedChunks()
         self._stdout_thread = threading.Thread(
             target=self._enqueue_stdout,
             args=(self.process, self._stdout_queue),
@@ -742,7 +809,7 @@ class ProviderWorkerClient:
         return None
 
     @staticmethod
-    def _enqueue_stdout(process: subprocess.Popen, stdout_queue: queue.Queue[Any]) -> None:
+    def _enqueue_stdout(process: subprocess.Popen, stdout_queue: _BoundedChunks) -> None:
         stdout = process.stdout
         if stdout is None:
             stdout_queue.put(None)
@@ -761,7 +828,12 @@ class ProviderWorkerClient:
                 if line_len > _MAX_RESPONSE_LINE_BYTES:
                     stdout_queue.put(_OVERSIZE_RESPONSE)
                     break
-                stdout_queue.put(chunk)
+                if isinstance(stdout_queue, _BoundedChunks):
+                    # Checked without reaping: collecting the exit status here would free the group id
+                    # before the code that ends the worker's descendants has signalled it.
+                    stdout_queue.put(chunk, alive=lambda: not ProviderWorkerClient._has_exited(process))
+                else:
+                    stdout_queue.put(chunk)
                 if chunk.endswith("\n"):
                     line_len = 0
         finally:
@@ -1136,6 +1208,145 @@ class ProviderWorkerClient:
             return
         self._kill_tree(process, 5.0)
 
+    def revoke_host_calls(self) -> None:
+        """Take back every host capability this worker was given, for the calls that follow."""
+        self._host_calls = {}
+
+    def _read_reply(self, request_id: str, timeout: float) -> str:
+        """Read the line that answers the request, serving the worker's host calls on the way.
+
+        A worker that needs something only the host has (a captcha solved with the user's key)
+        sends a call frame on stdout before its reply and waits for the answer on stdin. This
+        carries no socket and no address, so it works the same inside the sandbox, which keeps
+        a worker off Bazarr+'s own port. The whole exchange stays inside the request's deadline.
+        """
+        deadline = time.monotonic() + max(0.0, float(timeout))
+        served = 0
+        while True:
+            line = self._read_line_with_deadline(max(0.0, deadline - time.monotonic()))
+            call = self._host_call_of(line, request_id)
+            if call is None:
+                return line
+            served += 1
+            if served > _MAX_HOST_CALLS_PER_REQUEST:
+                self._kill_worker()
+                raise WorkerError("worker made too many host calls in one request")
+            answer = self._answer_host_call(call, deadline)
+            reply = {"abi": WORKER_ABI_VERSION, "id": request_id, "call_reply": answer}
+            self._send_reply(json.dumps(reply, separators=(",", ":")) + "\n", deadline)
+
+    def _violation(self, why: str):
+        self._kill_worker()
+        raise WorkerError(f"worker sent a malformed host call: {why}")
+
+    def _host_call_of(self, line: str, request_id: str) -> dict | None:
+        """The call a line carries, or None when it is the reply (or anything else) for the caller to judge.
+
+        A call frame starts with exactly the head the runner writes, so a reply of any size is told apart
+        by its first bytes and never parsed here. A frame outside the bounds ends the worker.
+        """
+        if not line.startswith(f'{{"abi":"{WORKER_ABI_VERSION}","id":{json.dumps(request_id)},"call":'):
+            return None
+        if len(line) > _MAX_HOST_CALL_LINE_BYTES:
+            self._violation("the frame is too large")
+        try:
+            frame = json.loads(line)
+        except ValueError:
+            self._violation("the frame is not JSON")
+        call = frame.get("call") if isinstance(frame, dict) else None
+        if not isinstance(call, dict):
+            self._violation("the call is not an object")
+        call_id, capability, payload = call.get("id"), call.get("capability"), call.get("payload", {})
+        if not isinstance(call_id, str) or not 0 < len(call_id) <= _MAX_HOST_CALL_ID_CHARS:
+            self._violation("the call id is missing or too long")
+        if not isinstance(capability, str) or not 0 < len(capability) <= _MAX_HOST_CALL_CAPABILITY_CHARS:
+            self._violation("the capability is missing or too long")
+        if not isinstance(payload, dict):
+            self._violation("the payload is not an object")
+        if len(json.dumps(payload, separators=(",", ":"))) > _MAX_HOST_CALL_PAYLOAD_BYTES:
+            self._violation("the payload is too large")
+        return {"id": call_id, "capability": capability, "payload": payload}
+
+    def _send_reply(self, text: str, deadline: float) -> None:
+        """Write the answer to a host call, without ever waiting on a worker that does not read.
+
+        The write runs on a thread of its own and is waited for only briefly. A worker that has stopped
+        reading fills the pipe and the write blocks, so past the wait the worker is ended, which also
+        ends the write. The request's lock is therefore never held for longer than that wait.
+        """
+        process = self.process
+        failures: list[BaseException] = []
+
+        def write():
+            try:
+                process.stdin.write(text)
+                process.stdin.flush()
+            except BaseException as error:  # reported by the caller
+                failures.append(error)
+
+        thread = threading.Thread(target=write, name="provider-host-reply", daemon=True)
+        thread.start()
+        thread.join(max(0.0, min(_HOST_REPLY_WRITE_SECONDS, deadline - time.monotonic())))
+        if thread.is_alive():
+            self._kill_worker()
+            thread.join(5.0)
+            raise WorkerError("worker did not read the host's answer to its call")
+        if failures:
+            raise WorkerError("worker closed while the host answered its call") from failures[0]
+
+    def _answer_host_call(self, call: dict, deadline: float) -> dict:
+        """Run one call and shape the outcome. Never raises, and says nothing the plugin may not see."""
+        call_id, capability = call["id"], call["capability"]
+
+        def failure(code: str, message: str) -> dict:
+            return {"id": call_id, "ok": False, "error": {"code": code, "message": message}}
+
+        handler = self._host_calls.get(capability)
+        if handler is None:
+            return failure("denied", "This plugin may not use that host capability.")
+        payload = call.get("payload")
+        if not isinstance(payload, dict):
+            return failure("invalid", "A call carries an object.")
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return failure("timeout", "The request ran out of time.")
+        outcome: dict[str, Any] = {}
+        # Set when the request's time runs out, so a handler stops what it is doing and starts nothing new.
+        cancelled = threading.Event()
+
+        def run():
+            try:
+                outcome["payload"] = handler(payload, remaining, cancelled)
+            except BaseException as error:  # reported to the plugin, never raised
+                outcome["error"] = error
+
+        # On a thread of its own so a vendor that never answers cannot hold the request past its
+        # deadline; the reply is then a timeout and the read after it ends the worker.
+        thread = threading.Thread(target=run, name="provider-host-call", daemon=True)
+        thread.start()
+        thread.join(remaining)
+        if thread.is_alive() or time.monotonic() >= deadline:
+            # Whatever the handler produces from here on is dropped: the request has ended.
+            cancelled.set()
+            return failure("timeout", "The request ran out of time.")
+        error = outcome.get("error")
+        if error is not None:
+            code, message = getattr(error, "code", None), getattr(error, "message", None)
+            if isinstance(code, str) and isinstance(message, str):
+                return failure(code, scrub_text(message))
+            logger.warning("A host call from %s failed", self.provider_id or "a worker", exc_info=error)
+            return failure("failed", "The host could not do that.")
+        result = outcome.get("payload")
+        if not isinstance(result, dict):
+            return failure("failed", "The host could not do that.")
+        try:
+            too_large = len(json.dumps(result, separators=(",", ":"))) > _MAX_HOST_REPLY_PAYLOAD_BYTES
+        except (TypeError, ValueError):
+            too_large = True
+        if too_large:
+            return failure("failed", "The host could not do that.")
+        return {"id": call_id, "ok": True, "payload": result}
+
     def select_archive_member(
         self, payload: dict[str, Any] | None = None, timeout: float | None = None
     ) -> WorkerResult:
@@ -1260,7 +1471,7 @@ class ProviderWorkerClient:
                     if attempt == 0 and self._opened_after_apply_failure():
                         continue
                     raise
-                line = self._read_line_with_deadline(timeout)
+                line = self._read_reply(request_id, timeout)
                 if not line and attempt == 0 and self._opened_after_apply_failure():
                     continue
                 break

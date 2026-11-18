@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import logging
 
+from types import MappingProxyType
 from typing import Any, Sequence
 
 from . import ATTACH_ON_RESTART, SUBTITLE_PROVIDER, Kind, kind_of, register_kind
@@ -178,7 +179,7 @@ def apply_settings_overlay(provider_configs: dict[str, dict[str, Any]], settings
     """
     from provider_hub import service as hub_service
     from provider_hub import state as hub_state
-    from provider_hub.endpoints import fill_flaresolverr_url
+    from provider_hub.capabilities import deliver
     from provider_hub.manifest import reserved_settings_sections
 
     try:
@@ -225,7 +226,7 @@ def apply_settings_overlay(provider_configs: dict[str, dict[str, Any]], settings
                     config[key] = value
             # Last, so only an address still empty after the stored config, the
             # schema defaults and the plugin's own section are merged is filled.
-            fill_flaresolverr_url(config, properties, installation, settings)
+            deliver(config, properties, installation, settings)
             provider_configs[installation.provider_id] = config
     except Exception:
         logger.exception("Unable to load Provider Hub settings config")
@@ -289,6 +290,8 @@ def reset_own_settings_section(provider_id: str) -> bool:
 class SubtitleProviderKind(Kind):
     name = SUBTITLE_PROVIDER
     kind_apis = frozenset({SUBTITLE_PROVIDER_KIND_API})
+    # FlareSolverr's address arrives in the provider's own ``flaresolverr_url`` field.
+    capability_delivery = MappingProxyType({"flaresolverr.v1": ("flaresolverr_url", "url")})
     attach_policy = ATTACH_ON_RESTART
     noun = "provider"
     keeps_data = True

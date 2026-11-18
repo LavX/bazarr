@@ -14,7 +14,10 @@ import importlib
 import json
 import os
 import sys
+import threading
 import traceback
+import types
+import uuid
 
 ABI = "bazarr.provider-worker.v1"
 
@@ -53,7 +56,83 @@ def _error_payload(error):
     return payload
 
 
+class HostCallError(RuntimeError):
+    """The host refused or failed a call a plugin made through ``bazarr_host``."""
+
+    def __init__(self, message, code="failed"):
+        super().__init__(message)
+        self.code = code
+
+
+# The id of the request being served and a lock for the one stdin and stdout pair,
+# so threads of a plugin never interleave their frames.
+_current = {"request_id": None}
+_call_lock = threading.Lock()
+
+
+def _granted():
+    try:
+        value = json.loads(os.environ.get("BAZARR_HOST_CALLS") or "[]")
+    except ValueError:
+        return ()
+    return tuple(item for item in value if isinstance(item, str)) if isinstance(value, list) else ()
+
+
+def _host_call(capability, payload=None):
+    """Ask the host to do something on this plugin's behalf and return its answer.
+
+    The call travels over the pipes this worker already has: a frame on stdout while a
+    request is being served, the reply on stdin. There is no socket and no address, so
+    nothing here needs the network. The host decides whether this plugin may use the
+    capability, and a refusal arrives as a HostCallError.
+    """
+    if _current["request_id"] is None:
+        raise HostCallError("a host call is only possible while a request is being served", "unavailable")
+    call_id = uuid.uuid4().hex
+    frame = {
+        "abi": ABI,
+        "id": _current["request_id"],
+        "call": {"id": call_id, "capability": str(capability), "payload": payload or {}},
+    }
+    with _call_lock:
+        sys.stdout.write(json.dumps(frame, separators=(",", ":")) + "\n")
+        sys.stdout.flush()
+        line = sys.stdin.readline()
+    if not line:
+        raise HostCallError("the host closed the channel", "unavailable")
+    try:
+        reply = json.loads(line)
+    except ValueError:
+        raise HostCallError("the host sent a malformed reply", "failed") from None
+    answer = reply.get("call_reply") if isinstance(reply, dict) else None
+    if (not isinstance(answer, dict) or reply.get("abi") != ABI or reply.get("id") != _current["request_id"]
+            or answer.get("id") != call_id):
+        raise HostCallError("the host sent an unexpected reply", "failed")
+    if answer.get("ok") is True and isinstance(answer.get("payload"), dict):
+        return answer["payload"]
+    error = answer.get("error") if isinstance(answer.get("error"), dict) else {}
+    raise HostCallError(str(error.get("message") or "the host call failed"), str(error.get("code") or "failed"))
+
+
+def _install_host_module():
+    """The ``bazarr_host`` module a plugin imports to reach what the host provides."""
+    module = types.ModuleType("bazarr_host")
+    module.HostCallError = HostCallError
+    module.granted = _granted
+    module.call = _host_call
+
+    def solve_recaptcha(site_key, site_url, invisible=False):
+        """A reCAPTCHA response token from the captcha service the user set up in Bazarr+."""
+        answer = _host_call("host.captcha.v1", {
+            "type": "recaptcha", "site_key": site_key, "site_url": site_url, "invisible": bool(invisible)})
+        return answer.get("response")
+
+    module.solve_recaptcha = solve_recaptcha
+    sys.modules["bazarr_host"] = module
+
+
 def _load_provider():
+    _install_host_module()
     bundle_path = os.environ["BAZARR_PROVIDER_HUB_BUNDLE"]
     manifest = json.loads(os.environ["BAZARR_PROVIDER_HUB_MANIFEST"])
     sys.path.insert(0, bundle_path)
@@ -192,6 +271,7 @@ def main():
         request = None
         try:
             request = json.loads(line)
+            _current["request_id"] = request.get("id")
             response = {
                 "abi": ABI,
                 "id": request.get("id"),
@@ -209,6 +289,7 @@ def main():
                 "ok": False,
                 "error": _error_payload(error),
             }
+        _current["request_id"] = None
         sys.stdout.write(json.dumps(response, separators=(",", ":")) + "\n")
         sys.stdout.flush()
         if response.get("ok") and isinstance(request, dict) and request.get("op") == "shutdown":

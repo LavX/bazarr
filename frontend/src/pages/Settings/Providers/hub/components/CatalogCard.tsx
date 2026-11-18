@@ -14,6 +14,7 @@ import type {
   ProviderHubCatalogEntry,
   ProviderHubInstallation,
 } from "@/apis/raw/providerHub";
+import { CapabilityStatus } from "@/components/hub/CapabilityStatus";
 import { HubCard } from "@/components/hub/HubCard";
 import { ProviderStatusBadge } from "@/components/hub/StatusBadge";
 import { TrustBadge } from "@/components/hub/TrustBadge";
@@ -279,7 +280,12 @@ export const CatalogCard: FunctionComponent<CatalogCardProps> = ({
       }
       description={description}
       note={installed?.trust_note}
-      extra={<TranslationQuotaLine status={installed?.runtime_status} />}
+      extra={
+        <>
+          <TranslationQuotaLine status={installed?.runtime_status} />
+          <CapabilityStatus capabilities={installed?.capabilities} />
+        </>
+      }
       chips={
         <>
           <Badge size="xs" variant="outline" color="gray">

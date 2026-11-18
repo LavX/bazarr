@@ -20,6 +20,14 @@ from subliminal.exceptions import ConfigurationError
 logger = logging.getLogger(__name__)
 
 
+class CaptchaCancelled(BaseException):
+    """The caller's time ran out or it gave up, so no further paid step is taken.
+
+    A BaseException on purpose: the retry loops below catch Exception, and a cancelled solve must
+    not be retried.
+    """
+
+
 class PitcherRegistry(object):
     pitchers = []
     pitchers_by_key = {}
@@ -63,8 +71,16 @@ class Pitcher(object):
     solve_time = None
     success = False
 
-    def __init__(self, website_name, website_url, website_key, tries=3, client_key=None, *args, **kwargs):
+    # Optional limits a caller that has a deadline sets: a time.monotonic() value and an Event.
+    # Past either, no new task is created and a wait ends. Providers that set neither are unchanged.
+    deadline = None
+    cancel = None
+
+    def __init__(self, website_name, website_url, website_key, tries=3, client_key=None, deadline=None,
+                 cancel=None, *args, **kwargs):
         self.tries = tries
+        self.deadline = deadline
+        self.cancel = cancel
         self.client_key = client_key or os.environ.get("ANTICAPTCHA_ACCOUNT_KEY")
         if not self.client_key:
             raise Exception("AntiCaptcha key not given, exiting")
@@ -80,6 +96,31 @@ class Pitcher(object):
 
     def get_job(self):
         raise NotImplementedError
+
+    def _remaining(self):
+        """Seconds left before the deadline, or None when there is none."""
+        if self.deadline is None:
+            return None
+        return max(0.0, self.deadline - time.monotonic())
+
+    def _check_live(self):
+        if (self.cancel is not None and self.cancel.is_set()) or self._remaining() == 0.0:
+            raise CaptchaCancelled()
+
+    def _sleep(self, seconds):
+        """Sleep, but no longer than the deadline, and wake early when cancelled."""
+        remaining = self._remaining()
+        wait = seconds if remaining is None else min(seconds, remaining)
+        if self.cancel is not None:
+            self.cancel.wait(wait)
+        else:
+            time.sleep(wait)
+        self._check_live()
+
+    def _capped(self, seconds):
+        """``seconds``, cut to what is left before the deadline."""
+        remaining = self._remaining()
+        return seconds if remaining is None else max(1, min(seconds, remaining))
 
     def _throw(self):
         self.client = self.get_client()
@@ -114,7 +155,10 @@ class AntiCaptchaProxyLessPitcher(Pitcher):
         self.is_invisible = is_invisible
 
     def get_client(self):
-        return AnticaptchaClient(self.client_key, self.language_pool, self.host, self.use_ssl)
+        client = AnticaptchaClient(self.client_key, self.language_pool, self.host, self.use_ssl)
+        # Each request to the vendor ends by the deadline too, not only the waits between them.
+        client.response_timeout = self._capped(getattr(client, "response_timeout", 5))
+        return client
 
     def get_job(self):
         task = NoCaptchaTaskProxylessTask(website_url=self.website_url, website_key=self.website_key,
@@ -124,8 +168,11 @@ class AntiCaptchaProxyLessPitcher(Pitcher):
     def _throw(self):
         for i in range(self.tries):
             try:
+                self._check_live()
                 super(AntiCaptchaProxyLessPitcher, self)._throw()
-                self.job.join()
+                remaining = self._remaining()
+                self.job.join(maximum_time=None if remaining is None else max(1, int(remaining)),
+                              on_check=lambda _elapsed, _status: self._check_live())
                 ret = self.job.get_solution_response()
                 if ret:
                     self.success = True
@@ -141,7 +188,7 @@ class AntiCaptchaProxyLessPitcher(Pitcher):
 
                 elif e.error_code == 'ERROR_NO_SLOT_AVAILABLE':
                     logger.info("%s: No captcha solving slot available, retrying", self.website_name)
-                    time.sleep(5.0)
+                    self._sleep(5.0)
                     continue
 
                 elif e.error_code == 'ERROR_KEY_DOES_NOT_EXIST':
@@ -152,7 +199,7 @@ class AntiCaptchaProxyLessPitcher(Pitcher):
                     # timeout
                     if i < self.tries:
                         logger.info("%s: Captcha solving timed out, retrying", self.website_name)
-                        time.sleep(1.0)
+                        self._sleep(1.0)
                         continue
                     else:
                         logger.error("%s: Captcha solving timed out three times; bailing out", self.website_name)
@@ -203,7 +250,10 @@ class DBCProxyLessPitcher(Pitcher):
 
     def __init__(self, website_name, website_url, website_key,
                  timeout=DEFAULT_TOKEN_TIMEOUT, tries=3, *args, **kwargs):
-        super(DBCProxyLessPitcher, self).__init__(website_name, website_url, website_key, tries=tries)
+        # The account the caller built is the one used; only without one does the environment apply.
+        super(DBCProxyLessPitcher, self).__init__(
+            website_name, website_url, website_key, tries=tries,
+            **{name: kwargs[name] for name in ("client_key", "deadline", "cancel") if name in kwargs})
 
         self.username, self.password = self.client_key.split(":", 1)
         self.timeout = timeout
@@ -226,8 +276,9 @@ class DBCProxyLessPitcher(Pitcher):
         payload = json.dumps(self.payload_dict)
         for i in range(self.tries):
             try:
+                self._check_live()
                 #balance = self.client.get_balance()
-                data = self.client.decode(timeout=self.timeout, type=4, token_params=payload)
+                data = self.client.decode(timeout=self._capped(self.timeout), type=4, token_params=payload)
                 if data and data["is_correct"] and data["text"]:
                     self.success = True
                     return data["text"]
@@ -304,7 +355,8 @@ class CaptchaAIProxyLessPitcher(Pitcher):
         self.client = self.get_client()
         for i in range(self.tries):
             try:
-                resp = self.client.post("%s/in.php" % self.host, data=self.in_params, timeout=30)
+                self._check_live()
+                resp = self.client.post("%s/in.php" % self.host, data=self.in_params, timeout=self._capped(30))
                 resp.raise_for_status()
                 payload = resp.json()
                 if payload.get("status") != 1:
@@ -314,7 +366,7 @@ class CaptchaAIProxyLessPitcher(Pitcher):
                         return
                     elif request == "ERROR_NO_SLOT_AVAILABLE":
                         logger.info("%s: No captcha solving slot available, retrying", self.website_name)
-                        time.sleep(5.0)
+                        self._sleep(5.0)
                         continue
                     elif request in ("ERROR_KEY_DOES_NOT_EXIST", "ERROR_WRONG_USER_KEY"):
                         logger.error("%s: Bad CaptchaAI API key", self.website_name)
@@ -322,20 +374,20 @@ class CaptchaAIProxyLessPitcher(Pitcher):
                     logger.error("%s: CaptchaAI returned an error: %s", self.website_name, request)
                     if i >= self.tries - 1:
                         return
-                    time.sleep(5.0)
+                    self._sleep(5.0)
                     continue
 
                 job_id = payload.get("request")
                 # The key travels in this URL's query string, so the log
                 # redaction in app/logger.py must keep covering bare "key=".
                 poll_failed = False
-                deadline = time.time() + self.timeout
+                deadline = time.time() + self._capped(self.timeout)
                 while time.time() < deadline:
-                    time.sleep(5.0)
+                    self._sleep(5.0)
                     res = self.client.get(
                         "%s/res.php" % self.host,
                         params={"key": self.client_key, "action": "get", "id": job_id, "json": 1},
-                        timeout=30,
+                        timeout=self._capped(30),
                     )
                     res.raise_for_status()
                     res_payload = res.json()
@@ -356,7 +408,7 @@ class CaptchaAIProxyLessPitcher(Pitcher):
                                  exc_info=True)
                     return
                 logger.info("%s: Captcha solving failed, retrying", self.website_name)
-                time.sleep(5.0)
+                self._sleep(5.0)
 
 
 @registry.register
