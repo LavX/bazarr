@@ -745,7 +745,7 @@ def _plugin_entry(plugin_id, files):
 
 
 def _sign_into_tree(catalog, keys, source_commit, *, sign_bytes=None, key_file=None, expires_in=89, signed_ago=1,
-                    channel='main', directory='main', message='sign main'):
+                    channel='main', directory='main', providers=None, message='sign main'):
     """Commit a signed feed for ``source_commit`` on top of whatever the tree holds, under signed/<directory>.
     Returns the sha."""
     now = datetime.now(timezone.utc).replace(microsecond=0)
@@ -754,7 +754,8 @@ def _sign_into_tree(catalog, keys, source_commit, *, sign_bytes=None, key_file=N
         'not_before': _stamp(now - timedelta(days=signed_ago)),
         'expires': _stamp(now + timedelta(days=expires_in)),
         'source_commit': source_commit,
-        'providers': [_entry(pid, files) for pid, files in catalog.bundles.items()],
+        'providers': ([_entry(pid, files) for pid, files in catalog.bundles.items()]
+                      if providers is None else providers),
         'plugins': [_plugin_entry(pid, files) for pid, files in catalog.plugins.items()],
     }
     raw = json.dumps(body, sort_keys=True).encode()
@@ -834,6 +835,84 @@ def test_the_image_stage_command_builds_a_signed_snapshot_in_isolated_mode(catal
     assert run.returncode == 0, run.stderr.decode()
     assert 'signed feed baked' in run.stdout.decode()
     assert 'signed/main/catalog.json' in _tree(dest)
+
+
+def _run_stage_command(script, *arguments):
+    import sys
+    return subprocess.run([sys.executable, '-I', str(script), *arguments],
+                          stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+
+
+def test_the_script_runs_from_a_shallow_path_with_and_without_a_signed_lock(catalog, keys, signing_dir, tmp_path):
+    """The image keeps the script at /opt/catalog_floor.py, where it has two parents at most."""
+    shallow = tmp_path / 'shallow'
+    shallow.mkdir()
+    script = shallow / 'catalog_floor.py'
+    shutil.copy(SCRIPT, script)
+    unsigned_commit = catalog.publish('no signed feed yet')
+    unsigned_lock = tmp_path / 'unsigned.lock.json'
+    unsigned_lock.write_text(floor.dump_lock(_lock_for(catalog, unsigned_commit)))
+
+    plain = _run_stage_command(script, 'build', '--lock', str(unsigned_lock), '--repo-url', str(catalog.path),
+                               '--dest', str(tmp_path / 'plain-out'))
+
+    assert plain.returncode == 0, plain.stderr.decode()
+    assert 'no signed feed pinned' in plain.stdout.decode()
+
+    _source, head = _signed_catalog(catalog, keys)
+    signed_lock = tmp_path / 'signed.lock.json'
+    signed_lock.write_text(floor.dump_lock(_signed_lock(catalog, head, signing_dir)))
+
+    signed = _run_stage_command(script, 'build', '--lock', str(signed_lock), '--repo-url', str(catalog.path),
+                                '--signing-dir', str(signing_dir), '--dest', str(tmp_path / 'signed-out'))
+
+    assert signed.returncode == 0, signed.stderr.decode()
+    assert 'signed feed baked' in signed.stdout.decode()
+
+
+def test_the_script_does_not_work_out_a_verifier_path_at_import(tmp_path):
+    """A script two directories deep, as in the image, loads, and only a signed lock without --signing-dir asks."""
+    namespace = {'__name__': '_shallow_catalog_floor', '__file__': '/opt/catalog_floor.py'}
+    with open(SCRIPT, encoding='utf-8') as handle:
+        exec(compile(handle.read(), '/opt/catalog_floor.py', 'exec'), namespace)
+
+    with pytest.raises(namespace['FloorError'], match='--signing-dir'):
+        namespace['_default_signing_dir']()
+
+
+def test_unsigned_mode_is_not_reachable_by_dropping_pins_from_the_lock(catalog, keys, signing_dir, tmp_path, capsys):
+    _source, head = _signed_catalog(catalog, keys)
+    good = _signed_lock(catalog, head, signing_dir)
+    for kept in (['keys/catalog-signing-keys.json'], []):
+        dropped = json.loads(json.dumps(good))
+        dropped['opaque_files'] = {path: digest for path, digest in good['opaque_files'].items() if path in kept}
+
+        code, dest = _build(catalog, dropped, tmp_path, name=f'dropped-{len(kept)}', signing_dir=signing_dir)
+
+        assert code == 1 and not dest.exists()
+        assert 'signed/main/catalog.json' in capsys.readouterr().err
+        clone = floor.fetch_branch(str(catalog.path), 'main', _fresh_dir(catalog))
+        with pytest.raises(floor.FloorError, match='must pin all of'):
+            floor.make_lock(clone, head, 'main', opaque_paths=kept, signing_dir=str(signing_dir))
+
+
+def test_a_commit_before_the_first_signed_feed_still_builds_on_a_branch_that_has_one_later(
+        catalog, keys, signing_dir, tmp_path):
+    before = catalog.publish('before any signing')
+    _signed_catalog(catalog, keys)
+
+    code, dest = _build(catalog, _lock_for(catalog, before), tmp_path, signing_dir=signing_dir)
+
+    assert code == 0 and not any(path.startswith('signed/') for path in _tree(dest))
+
+
+def test_a_signed_body_without_providers_is_refused_as_the_reader_refuses_it(catalog, keys, signing_dir):
+    catalog.plugins['gamma'] = {'service.py': b'print("gamma")\n'}
+    source = catalog.publish('source')
+    head = _sign_into_tree(catalog, keys, source, providers=[])
+
+    with pytest.raises(floor.FloorError, match='the signed catalog has no providers list'):
+        _signed_lock(catalog, head, signing_dir)
 
 
 def test_a_lock_without_signed_files_still_builds_and_says_none_is_baked(catalog, tmp_path, capsys):
@@ -924,7 +1003,7 @@ def test_the_build_refuses_when_no_root_is_baked(catalog, keys, tmp_path, capsys
 def test_a_lock_that_misses_the_key_file_is_refused(catalog, keys, signing_dir, tmp_path):
     _source, head = _signed_catalog(catalog, keys)
 
-    with pytest.raises(floor.FloorError, match='part of the signed feed.*keys/catalog-signing-keys.json'):
+    with pytest.raises(floor.FloorError, match='must pin all of.*missing keys/catalog-signing-keys.json'):
         _signed_lock(catalog, head, signing_dir, paths=SIGNED_PATHS[:2])
 
 

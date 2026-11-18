@@ -6,7 +6,9 @@ The image ships a snapshot of the official catalog (its catalog.json and every
 provider bundle file it names), on disk and read-only, for the runtime reader in
 bazarr/provider_hub/floor.py to use. This script only
 makes the snapshot reproducible and checked. It uses the standard library and
-git only, so the Docker stage that runs it needs nothing else.
+git. Only a lock that pins the signed feed also needs the application's
+verifier (signing.py and signing_roots.py) and the cryptography package it
+imports, which the Docker stage provides.
 
 The pin is one lock file, docker/catalog-pin.lock.json: the catalog repository,
 the branch, one commit and the sha256 of every file taken from that commit.
@@ -113,8 +115,6 @@ SIGNED_CHANNELS = ('main', 'beta')
 SIGNED_CATALOG_PATH = 'signed/{channel}/catalog.json'
 SIGNED_ENVELOPE_PATH = 'signed/{channel}/catalog.json.sig'
 KEY_FILE_PATH = 'keys/catalog-signing-keys.json'
-# The verifier and the roots it trusts, in the application tree.
-DEFAULT_SIGNING_DIR = Path(__file__).resolve().parents[2] / 'bazarr' / 'provider_hub'
 
 FILE_MODE = 0o444
 DIR_MODE = 0o555
@@ -390,7 +390,7 @@ def _read_declared_tree(repo, commit, signed_body=None):
     data = {CATALOG_FILE: catalog_bytes}
     documents = [(CATALOG_FILE, declared_bundles(catalog_bytes))]
     if signed_body is not None:
-        documents.append(('the signed catalog', declared_bundles(signed_body, 'the signed catalog', False)))
+        documents.append(('the signed catalog', declared_bundles(signed_body, 'the signed catalog')))
     for name, bundles in documents:
         for label, bundle_pin, mapping in bundles:
             contents = {}
@@ -440,13 +440,24 @@ def signed_paths(branch):
     )
 
 
+def _default_signing_dir():
+    """The verifier's directory in the application tree, when this script sits in a checkout.
+
+    Worked out only when a signed lock needs it and --signing-dir was not given, so a script copied
+    somewhere shallow (the image stage keeps it at /opt) never fails before it has read its arguments."""
+    here = Path(__file__).resolve()
+    if len(here.parents) < 3:
+        raise FloorError('the signature verifier directory is not known: pass --signing-dir')
+    return here.parents[2] / 'bazarr' / 'provider_hub'
+
+
 def _load_signing(signing_dir):
     """The host's verifier and the roots it trusts, loaded from their files.
 
     The build must verify with the very code and keys the application ships, so
     it loads signing.py and signing_roots.py from ``signing_dir`` (the
     application tree by default) instead of keeping a copy."""
-    directory = Path(signing_dir) if signing_dir else DEFAULT_SIGNING_DIR
+    directory = Path(signing_dir) if signing_dir else _default_signing_dir()
     loaded = {}
     for name in ('signing', 'signing_roots'):
         path = directory / f'{name}.py'
@@ -471,21 +482,26 @@ def signed_feed(repo, head, branch, opaque, signing_dir=None):
     """Verify the signed feed pinned as opaque files, or return None when the
     lock pins none.
 
-    ``opaque`` maps the lock's opaque paths to their bytes at ``head``. A lock
-    that pins the signed body or its signature must pin all three files, so a
-    half-pinned feed cannot slip through as an unsigned build; a key file pinned
-    alone is only an opaque file. The check is the host's baked
-    check, and anything but OK fails. The signed body must name a source commit
-    that is ``head`` or one of its ancestors."""
+    ``opaque`` maps the lock's opaque paths to their bytes at ``head``. When the
+    tree at ``head`` holds the signed body, or the lock pins the body or its
+    signature, all three files must be pinned: unsigned mode cannot be reached
+    by dropping pins from a lock. A commit with no signed body and a lock that
+    pins none of them is the unsigned build; a key file pinned alone is only an
+    opaque file. The check is the host's baked check, and anything but OK
+    fails. The signed body must name a source commit that is ``head`` or one of
+    its ancestors."""
     paths = signed_paths(branch)
     if paths is None:
         return None
     body_path, envelope_path, key_path = paths
-    if body_path not in opaque and envelope_path not in opaque:
+    in_tree = body_path in _tree_entries(repo, head)
+    if not in_tree and body_path not in opaque and envelope_path not in opaque:
         return None
     missing = [path for path in paths if path not in opaque]
     if missing:
-        raise FloorError(f'the lock pins part of the signed feed, and is missing {", ".join(missing)}')
+        reason = (f'{head[:12]} carries {body_path}' if in_tree
+                  else 'the lock pins part of the signed feed')
+        raise FloorError(f'{reason}, so the lock must pin all of {", ".join(paths)} (missing {", ".join(missing)})')
     signing, roots = _load_signing(signing_dir)
     result = signing.verify_catalog(
         opaque[body_path], opaque[envelope_path], opaque[key_path],
