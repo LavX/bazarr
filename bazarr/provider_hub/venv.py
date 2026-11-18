@@ -17,6 +17,7 @@ from collections import Counter
 from collections.abc import Iterator
 from pathlib import Path
 
+from .bundled_wheels import BundledWheelsError, verified_wheels_dir
 from .manifest import ValidatedManifest
 
 
@@ -592,7 +593,14 @@ class PluginEnvironment:
     def _fresh_path(self, manifest: ValidatedManifest) -> Path:
         return self.root / SHARED_ENV_DIR / f"{self._fingerprint(manifest)}-{uuid.uuid4().hex[:8]}"
 
-    def install(self, manifest: ValidatedManifest, timeout: float | None = None, *, rebuild: bool = False) -> Path:
+    def install(
+        self,
+        manifest: ValidatedManifest,
+        timeout: float | None = None,
+        *,
+        rebuild: bool = False,
+        bundle_path: str | os.PathLike[str] | None = None,
+    ) -> Path:
         """Return the venv for this dependency set, building it only when needed.
 
         An environment is immutable once built: nothing is ever installed into a
@@ -612,7 +620,22 @@ class PluginEnvironment:
         subprocesses): the startup auto-install passes its remaining budget so
         one stuck pip/venv step can't block boot indefinitely. ``None`` (manual
         installs) leaves it unbounded.
+
+        ``bundle_path`` is the staged bundle. When it carries wheels of its own
+        (``wheels/``), a build installs exactly those, offline and against the
+        hashes the lock declares, and never reaches an index; wheels that
+        disagree with the lock refuse the install, even when an environment could
+        be reused. A bundle without wheels, or no ``bundle_path``, installs from
+        the index as always.
         """
+        wheels_dir = None
+        if bundle_path is not None:
+            try:
+                wheels_dir = verified_wheels_dir(manifest, bundle_path)
+            except BundledWheelsError as error:
+                raise PluginEnvironmentError(
+                    f"Provider Hub will not install {manifest.provider_id}: its bundled wheels do not match its lock: {error}"
+                ) from error
         deadline = None if timeout is None else time.monotonic() + max(0.0, timeout)
         lock = _fingerprint_lock(self._fingerprint(manifest))
         if deadline is None:
@@ -622,11 +645,13 @@ class PluginEnvironment:
                 f"Provider Hub install for {manifest.provider_id} timed out waiting for another install of the same dependencies"
             )
         try:
-            return self._install_locked(manifest, deadline, rebuild)
+            return self._install_locked(manifest, deadline, rebuild, wheels_dir)
         finally:
             lock.release()
 
-    def _install_locked(self, manifest: ValidatedManifest, deadline: float | None, rebuild: bool) -> Path:
+    def _install_locked(
+        self, manifest: ValidatedManifest, deadline: float | None, rebuild: bool, wheels_dir: Path | None = None
+    ) -> Path:
         canonical = self.path_for(manifest)
         # Read the record, look at the canonical directory and pin in one step
         # under the lock a cleanup holds while it decides, so the environment
@@ -643,19 +668,24 @@ class PluginEnvironment:
                 _pin(reusable)
             canonical_free = not os.path.lexists(canonical)
         if rebuild:
-            return self._build(manifest, deadline, self._fresh_path(manifest))
+            return self._build(manifest, deadline, self._fresh_path(manifest), wheels_dir)
         if reusable is None:
-            return self._build(manifest, deadline, canonical if canonical_free else self._fresh_path(manifest))
+            return self._build(manifest, deadline, canonical if canonical_free else self._fresh_path(manifest), wheels_dir)
         if python_executable(reusable).exists() and _passes_pip_check(reusable, deadline, manifest.provider_id):
             return reusable
-        return self._build(manifest, deadline, self._fresh_path(manifest))
+        return self._build(manifest, deadline, self._fresh_path(manifest), wheels_dir)
 
     @staticmethod
     def _is_complete(env_path: Path) -> bool:
         return python_executable(env_path).exists() and (env_path / COMPLETE_MARKER).is_file()
 
-    def _build(self, manifest: ValidatedManifest, deadline: float | None, env_path: Path) -> Path:
-        """Build ``env_path``. ``deadline`` is the install's absolute ``time.monotonic()`` budget."""
+    def _build(
+        self, manifest: ValidatedManifest, deadline: float | None, env_path: Path, wheels_dir: Path | None = None
+    ) -> Path:
+        """Build ``env_path``. ``deadline`` is the install's absolute ``time.monotonic()`` budget.
+
+        With ``wheels_dir`` the packages come from those wheels alone.
+        """
 
         def _remaining() -> float | None:
             if deadline is None:
@@ -712,16 +742,38 @@ class PluginEnvironment:
                     "--disable-pip-version-check",
                     "--no-warn-script-location",
                     "--require-hashes",
-                    "--prefer-binary",
-                    "-r",
-                    str(requirements_path),
                 ]
-
                 env = {
                     "PATH": os.environ.get("PATH", ""),
                     "PYTHONNOUSERSITE": "1",
                 }
-                subprocess.run(cmd, check=True, env=env, cwd=str(env_path), timeout=_remaining())
+                if wheels_dir is None:
+                    cmd += ["--prefer-binary", "-r", str(requirements_path)]
+                    subprocess.run(cmd, check=True, env=env, cwd=str(env_path), timeout=_remaining())
+                else:
+                    # The bundle's own wheels and nothing else: no index, no pip configuration that could add
+                    # one, and no source builds.
+                    cmd += [
+                        "--no-index",
+                        "--find-links",
+                        str(wheels_dir),
+                        "--only-binary",
+                        ":all:",
+                        "-r",
+                        str(requirements_path),
+                    ]
+                    env["PIP_CONFIG_FILE"] = os.devnull
+                    try:
+                        subprocess.run(
+                            cmd, check=True, env=env, cwd=str(env_path), timeout=_remaining(),
+                            capture_output=True, text=True,
+                        )
+                    except subprocess.CalledProcessError as error:
+                        tail = " ".join((error.stderr or "").strip().splitlines()[-3:])
+                        raise PluginEnvironmentError(
+                            f"Provider Hub could not install {manifest.provider_id} from the wheels in its bundle "
+                            f"(pip exited with {error.returncode}){': ' + tail if tail else ''}"
+                        ) from error
 
             subprocess.run(
                 [str(python_exe), "-m", "pip", "check"],

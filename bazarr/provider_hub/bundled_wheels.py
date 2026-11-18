@@ -1,0 +1,117 @@
+# coding=utf-8
+"""Wheels a plugin bundle carries for its own dependencies.
+
+A bundle may hold the wheels of its locked dependency closure under ``wheels/``. When it does, its
+environment is built from exactly those files and never from an index: the bundle's signature already
+vouches for them, and a host with no route to PyPI (a seeded image, an offline box) can still install.
+
+The lock in ``dependencies.requirements`` stays the authority. Before anything is installed, each wheel is
+matched to a locked requirement by name and version, and its digest must be one the lock lists. A wheel the
+lock does not name, a locked dependency with no wheel, a file that is not a wheel and a file on disk that the
+manifest does not declare each refuse the install, with the reason. pip then runs with ``--require-hashes``,
+so it checks the same digests a second time.
+
+A bundle without a ``wheels/`` directory is not affected: its dependencies come from the index as before.
+"""
+from __future__ import annotations
+
+import hashlib
+import re
+
+from pathlib import Path, PurePosixPath
+from typing import Any
+
+WHEELS_DIR = "wheels"
+
+# {name}-{version}(-{build})?-{python}-{abi}-{platform}.whl. Name and version never contain a dash in a
+# wheel filename (a dash in either is written as an underscore), so the first two fields are unambiguous.
+_WHEEL_RE = re.compile(r"^(?P<name>[^-]+)-(?P<version>[^-]+)(?:-\d[^-]*)?-[^-]+-[^-]+-[^-]+\.whl$")
+
+
+class BundledWheelsError(ValueError):
+    """The wheels in a bundle do not match its lock."""
+
+
+def normalized_name(name: str) -> str:
+    return re.sub(r"[-_.]+", "-", name).lower()
+
+
+def _same_version(locked: str, found: str) -> bool:
+    locked, found = locked.replace("_", "-").lower(), found.replace("_", "-").lower()
+    if locked == found:
+        return True
+    try:
+        from packaging.version import InvalidVersion, Version
+    except ImportError:
+        return False
+    try:
+        return Version(locked) == Version(found)
+    except InvalidVersion:
+        return False
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def declared_wheels(manifest: Any) -> dict[str, str]:
+    """The bundle files under ``wheels/`` the manifest declares, as ``{path: sha256}``."""
+    prefix = WHEELS_DIR + "/"
+    return {path: digest for path, digest in (getattr(manifest, "files", None) or {}).items() if path.startswith(prefix)}
+
+
+def verified_wheels_dir(manifest: Any, bundle_path: str | Path) -> Path | None:
+    """The directory of the bundle's baked wheels, checked against the lock, or None when it has none.
+
+    Raises ``BundledWheelsError`` when the wheels and the lock disagree.
+    """
+    declared = declared_wheels(manifest)
+    if not declared:
+        return None
+    provider_id = getattr(manifest, "provider_id", "the plugin")
+    requirements = tuple(getattr(manifest, "dependency_requirements", ()) or ())
+    if not requirements:
+        raise BundledWheelsError(f"{provider_id} carries wheels but its lock names no dependency")
+    root = Path(bundle_path).resolve()
+    wheels_dir = root / WHEELS_DIR
+    if wheels_dir.is_symlink() or not wheels_dir.is_dir():
+        raise BundledWheelsError(f"{provider_id} declares wheels but its bundle has no {WHEELS_DIR} directory")
+
+    by_name = {normalized_name(requirement.name): requirement for requirement in requirements}
+    covered: set[str] = set()
+    for path, declared_digest in sorted(declared.items()):
+        parts = PurePosixPath(path).parts
+        match = _WHEEL_RE.match(parts[-1]) if len(parts) == 2 else None
+        if match is None:
+            raise BundledWheelsError(f"{path} is not a wheel file placed directly in {WHEELS_DIR}/")
+        key = normalized_name(match.group("name"))
+        requirement = by_name.get(key)
+        if requirement is None:
+            raise BundledWheelsError(f"{path} is not in the lock: {match.group('name')} is not a locked dependency")
+        if not _same_version(requirement.version, match.group("version")):
+            raise BundledWheelsError(
+                f"{path} is version {match.group('version')} but the lock pins {requirement.name} {requirement.version}"
+            )
+        if "sha256:" + declared_digest not in requirement.hashes:
+            raise BundledWheelsError(f"{path} has a digest the lock does not list for {requirement.name} {requirement.version}")
+        wheel = root / path
+        if wheel.is_symlink() or not wheel.is_file():
+            raise BundledWheelsError(f"{path} is missing from the bundle")
+        if _sha256_file(wheel) != declared_digest:
+            raise BundledWheelsError(f"{path} does not match its declared digest")
+        covered.add(key)
+
+    for key, requirement in sorted(by_name.items()):
+        if key not in covered:
+            raise BundledWheelsError(
+                f"the lock names {requirement.name} {requirement.version} but the bundle carries no wheel for it"
+            )
+    on_disk = {entry.relative_to(root).as_posix() for entry in wheels_dir.rglob("*") if entry.is_file() or entry.is_symlink()}
+    extra = sorted(on_disk - set(declared))
+    if extra:
+        raise BundledWheelsError(f"{extra[0]} sits among the bundle's wheels but the manifest does not declare it")
+    return wheels_dir
