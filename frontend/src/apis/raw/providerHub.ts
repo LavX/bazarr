@@ -71,6 +71,16 @@ export interface ProviderHubRuntimeStatus {
   reported_at: string;
 }
 
+/** One host capability a plugin declares, and whether the host can supply it right now. */
+export interface ProviderHubCapability {
+  capability: string;
+  /** Where the answer comes from: a setting, the environment, the host itself, or nowhere. */
+  source: "setting" | "env" | "host" | "none";
+  ready: boolean;
+  /** Why it is not ready, in a sentence. Empty when it is. */
+  reason: string;
+}
+
 export interface ProviderHubInstallation {
   provider_id: string;
   name?: string;
@@ -103,6 +113,8 @@ export interface ProviderHubInstallation {
   source_bound?: boolean;
   /** Why the install lost its trust or its source, and the way back. */
   trust_note?: string | null;
+  /** Absent for a plugin that declares no capability the host supplies. */
+  capabilities?: ProviderHubCapability[];
 }
 
 /**

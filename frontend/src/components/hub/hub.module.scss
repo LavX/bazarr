@@ -88,6 +88,32 @@ $tones: (
   background: var(--bz-text-tertiary);
 }
 
+/* What a plugin asks the host for, one line each: name, a Ready or Not ready pill, and why when it is not. */
+.capabilities {
+  display: grid;
+  gap: 4px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.capabilityRow {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.capabilityName {
+  color: var(--bz-text-secondary);
+}
+
+.capabilityReason {
+  color: var(--bz-text-tertiary);
+}
+
 /* Banner alert - 3px left accent + 10% tinted bg, 12px radius */
 .banner {
   display: flex;

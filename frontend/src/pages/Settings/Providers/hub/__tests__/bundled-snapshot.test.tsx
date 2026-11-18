@@ -123,6 +123,46 @@ describe("CatalogCard and a bundled entry", () => {
   });
 });
 
+describe("CatalogCard and the capabilities of an installed provider", () => {
+  const noop = () => undefined;
+
+  it("says which capability is not ready and why", () => {
+    customRender(
+      <CatalogCard
+        entry={entry({})}
+        installed={{
+          ...installed,
+          capabilities: [
+            {
+              capability: "host.captcha.v1",
+              source: "none",
+              ready: false,
+              reason: "No captcha service is set up.",
+            },
+          ],
+        }}
+        onInstall={noop}
+        isInstalling={false}
+      />,
+    );
+    expect(screen.getByText("Captcha solver")).toBeVisible();
+    expect(screen.getByText("Not ready")).toBeVisible();
+    expect(screen.getByText("No captcha service is set up.")).toBeVisible();
+  });
+
+  it("shows nothing about capabilities when the provider declares none", () => {
+    customRender(
+      <CatalogCard
+        entry={entry({})}
+        installed={installed}
+        onInstall={noop}
+        isInstalling={false}
+      />,
+    );
+    expect(screen.queryByText("Not ready")).toBeNull();
+  });
+});
+
 describe("SourcesDrawer and a bundled catalog", () => {
   const source = {
     id: "official",

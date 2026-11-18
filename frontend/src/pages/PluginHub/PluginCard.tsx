@@ -9,6 +9,7 @@ import {
   faShieldHalved,
 } from "@fortawesome/free-solid-svg-icons";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
+import { CapabilityStatus } from "@/components/hub/CapabilityStatus";
 import { HubCard } from "@/components/hub/HubCard";
 import { ProviderStatusBadge } from "@/components/hub/StatusBadge";
 import { TrustBadge } from "@/components/hub/TrustBadge";
@@ -218,6 +219,9 @@ export const PluginCard: FunctionComponent<PluginCardProps> = (props) => {
       extra={
         <>
           {installed && <RuntimeLine runtime={installed.runtime} />}
+          {installed && (
+            <CapabilityStatus capabilities={installed.capabilities} />
+          )}
           {status?.cause && (
             <FailureNote cause={status.cause} onLog={() => props.onLog(row)} />
           )}
