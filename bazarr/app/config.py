@@ -2195,9 +2195,10 @@ def _refuse_provider_switch_with_dependencies(settings_items):
         return
     try:
         from provider_hub import closure
-        from provider_hub.service import dependents_refusal_text, switch_on_refusal
+        from provider_hub.service import dependents_refusal_text, revoked_switch_on_refusal, switch_on_refusal
         from provider_hub.state import load_state
-        installations = load_state().get('installations') or {}
+        hub_state = load_state()
+        installations = hub_state.get('installations') or {}
     except Exception:
         return
     new = {str(item) for item in submitted}
@@ -2221,8 +2222,13 @@ def _refuse_provider_switch_with_dependencies(settings_items):
                  if stays_on(name)]
         if names:
             raise ValidationError(dependents_refusal_text(provider_id, names, 'switched off'))
-    # Switching on: what the plugin needs has to be running, as it is judged at boot.
+    # Switching on: a plugin the catalog revoked cannot be, and what the plugin needs has to be running, as it is
+    # judged at boot.
     if added:
+        for provider_id in sorted(added):
+            revoked = revoked_switch_on_refusal(provider_id, hub_state)
+            if revoked:
+                raise ValidationError(revoked)
         unmet = closure.unmet_needs(installations, override)
         for provider_id in sorted(added):
             if provider_id in unmet:

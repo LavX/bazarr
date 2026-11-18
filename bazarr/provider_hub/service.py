@@ -30,7 +30,7 @@ from secret_store.scrub import mask_credential_refusal, scrub_job_secrets, scrub
 from .manifest import ManifestValidationError, manifest_provider_id, validate_manifest
 from .kinds import SUBTITLE_PROVIDER, catalog_kind_of, get_kind, kind_for_api, kind_of, known_kinds
 from .kinds import subtitle_provider as provider_kind
-from . import catalog_feed, closure, consent, dev_source, floor
+from . import catalog_feed, closure, consent, dev_source, floor, revocation
 from .bundle import verify_bundle_tree
 from .compatibility import (
     CATALOG_LIST_PLUGINS, CATALOG_LIST_PROVIDERS, HostFacts, current_host, entry_compatibility, refusal_text,
@@ -774,6 +774,15 @@ def _fetch_official_catalog(
                 catalog_feed.Status.MALFORMED,
                 "The signed catalog names a commit that is not on the official catalog's main or beta.",
                 key_file_version=feed.result.key_file_version)
+    try:
+        revocation.parse(feed.catalog.get(revocation.FIELD_NAME))
+    except revocation.RevocationFormatError as error:
+        # The list is signed with the rest, but a host that cannot read an entry cannot tell what it revokes:
+        # the catalog is refused whole and the last good one, list included, stays in force.
+        raise catalog_feed.FeedRefused(
+            catalog_feed.Status.MALFORMED,
+            f"The signed catalog's revocation list could not be read ({error}).",
+            key_file_version=feed.result.key_file_version) from error
     if served is not None:
         served.pointer = _pointer_record(pointer, source)
     return feed.catalog, head, feed
@@ -1188,7 +1197,7 @@ def list_catalog(auto_refresh: bool = False) -> dict[str, Any]:
             entry = {**entry, "source_name": source.get("name") or entry.get("source"),
                      "development_source": dev_source.is_dev_source(entry.get("source"), source)}
             refusal = (_install_refusal(state, entry.get("source"), entry.get("provider_id"),
-                                        catalog_kind_of(entry))
+                                        catalog_kind_of(entry), entry.get("version"))
                        or _host_refusal(entry, host)
                        or _closure_refusal(state, entry, host))
             if refusal:
@@ -1219,6 +1228,8 @@ def _latest_official_catalog_manifest(state: dict[str, Any], provider_id: str) -
     def usable(entry: dict[str, Any]) -> bool:
         # Entries stored before the plugins list existed carry no catalog_list and came from providers.
         if entry.get("catalog_list", CATALOG_LIST_PROVIDERS) != CATALOG_LIST_PROVIDERS:
+            return False
+        if _revocation_refusal(state, entry.get("provider_id"), entry.get("version")):
             return False
         return bool(entry.get("trusted", False)) and _host_refusal(entry, host) is None
 
@@ -1527,6 +1538,10 @@ def _note_catalog_signature(
     source["catalog_key_file_version"] = feed.result.key_file_version
     source["catalog_expires_at"] = catalog_feed._iso(feed.result.expires)
     source["catalog_signed_commit"] = feed.source_commit
+    # The list of the catalog just verified replaces the last one, so an entry the new catalog drops is
+    # lifted and one it adds holds from now on. An unsigned catalog (the branch above) never touches it.
+    source[revocation.RECORD_KEY] = revocation.to_record(
+        feed.channel, feed.result.signed_version, revocation.parse(feed.catalog.get(revocation.FIELD_NAME)))
     if feed.may_advance_state:
         accepted[feed.channel] = catalog_feed.record_accepted(state, feed, catalog_feed.current_time())
         catalog_feed.clear_refusal(state, feed.channel)
@@ -1628,12 +1643,15 @@ def refresh_catalog(source_ids: set[str] | None = None, checkpoint=None) -> dict
                           and (not catalog_feed.signed_feed_enabled() or (
                               source.get("catalog_signature")
                               and not source.get("signed_feed_retry")
+                              and (source.get("catalog_signature") != catalog_feed.SIGNATURE_VERIFIED
+                                   or isinstance(source.get(revocation.RECORD_KEY), dict))
                               and source.get("catalog_channel") == catalog_feed.CHANNEL_MAIN
                               and catalog_feed.supply_refusal(state, source) is None))):
                         # A source refreshed before the signature check existed, on another channel, or
                         # whose cached catalog no longer meets what this host requires of one (a counter,
                         # a key file version it lacks the record of) is fetched once more. So is one whose
                         # legacy catalog stood in for a signed file that could not be read.
+                        # So is a verified one that kept no revocation list, which an earlier release did not.
                         try:
                             url_ref = _parse_github_file_url(source["url"])[2]
                         except CatalogSourceError:
@@ -1850,6 +1868,7 @@ def refresh_catalog(source_ids: set[str] | None = None, checkpoint=None) -> dict
                         del entries[key]
             if source_ids is None or OFFICIAL_CATALOG_SOURCE_ID in source_ids:
                 _recheck_installed_trust(state, ancestry)
+                _hold_revoked_installations(state)
             if _fallback_setting_on():
                 _store_transport(state)
             ok_sources = sources_count - len(failed_sources)
@@ -2193,6 +2212,19 @@ def switch_on_refusal(name: str, needs: list[str]) -> str:
     return f"{name} needs {', '.join(needs)}, which is not running, so it cannot be switched on."
 
 
+def revoked_switch_on_refusal(provider_id: str, state: dict[str, Any] | None = None) -> str | None:
+    """Why a plugin cannot be switched on: the official catalog revoked the release it would run, or None."""
+    state = state if state is not None else load_state()
+    row = (state.get("installations") or {}).get(provider_id)
+    if not isinstance(row, dict) or not row.get("active_version") or row.get("state") == "removed":
+        return None
+    found = revocation.lookup(_revocations(state), provider_id, row.get("active_version"))
+    if found is None:
+        return None
+    return refusal_text(revocation.refusal(
+        found, str(row.get("name") or provider_id), row.get("active_version"), "switched on"))
+
+
 def update_provider(provider_id: str, enabled: bool | None = None, config: dict[str, Any] | None = None) -> dict[str, Any] | None:
     if config is not None:
         if not isinstance(config, dict):
@@ -2202,6 +2234,9 @@ def update_provider(provider_id: str, enabled: bool | None = None, config: dict[
         if refusal:
             raise ValueError(refusal)
     if enabled is True:
+        revoked = revoked_switch_on_refusal(provider_id)
+        if revoked:
+            raise ValueError(revoked)
         # What a plugin relies on has to be running before it is switched on, as at the next boot.
         rows = load_state().get("installations") or {}
         needs = closure.unmet_needs(rows).get(provider_id)
@@ -3299,9 +3334,34 @@ def _source_may_carry_new_kinds(state: dict[str, Any], source_id: str | None) ->
     return isinstance(source, dict) and dev_source.is_dev_source(source_id, source)
 
 
+def _revocations(state: dict[str, Any]) -> tuple[revocation.Revocation, ...]:
+    """The revocation list of the last official catalog this host verified. Nothing verified means none."""
+    official = (state.get("catalog_sources") or {}).get(OFFICIAL_CATALOG_SOURCE_ID)
+    return revocation.from_source(official)
+
+
+def _revocation_refusal(
+    state: dict[str, Any], provider_id: Any, version: Any = None, name: Any = None, action: str = "installed",
+) -> str | None:
+    """Why the official catalog's revocation list keeps ``version`` of ``provider_id`` from being ``action``, or None.
+
+    Without a version only a revocation of every release of the plugin counts. The list is the one a
+    verified catalog carried, whichever source the plugin comes from: an id the official catalog revokes
+    is revoked here.
+    """
+    found = revocation.lookup(_revocations(state), provider_id, version)
+    if found is None:
+        return None
+    return refusal_text(revocation.refusal(found, str(name or provider_id), version, action))
+
+
 def _install_refusal(
     state: dict[str, Any], source_id: str | None, provider_id: Any, kind: str = SUBTITLE_PROVIDER,
+    version: Any = None,
 ) -> str | None:
+    revoked = _revocation_refusal(state, provider_id, version)
+    if revoked:
+        return revoked
     if kind != SUBTITLE_PROVIDER and not _source_may_carry_new_kinds(state, source_id):
         return NEW_KIND_OFFICIAL_ONLY_REASON
     if source_id != OFFICIAL_CATALOG_SOURCE_ID and str(provider_id) in _reserved_provider_ids(state):
@@ -3322,7 +3382,8 @@ def _entry_usable(state: dict[str, Any], host: HostFacts):
     can run it and its kind accepts its manifest. The rule a dependency is chosen by, as the plugin is."""
 
     def usable(entry: dict[str, Any]) -> bool:
-        if _install_refusal(state, entry.get("source"), entry.get("provider_id"), catalog_kind_of(entry)):
+        if _install_refusal(state, entry.get("source"), entry.get("provider_id"), catalog_kind_of(entry),
+                            entry.get("version")):
             return False
         if _host_refusal(entry, host) is not None:
             return False
@@ -3440,6 +3501,42 @@ def _abandon_staged_catalog_list(installation: dict[str, Any]) -> None:
         installation["catalog_list"] = previous_list
     else:
         installation.pop("catalog_list", None)
+
+
+def _abandon_staged_release(installation: dict[str, Any], message: str) -> None:
+    """Drop a staged release that will not activate and record why. The active release, if any, stays."""
+    installation["last_error"] = message
+    _abandon_staged_catalog_list(installation)
+    installation["staged_version"] = None
+    installation["staged_path"] = None
+    installation["staged_python_path"] = None
+    installation["staged_manifest"] = None
+    installation.pop("staged_supplied_by", None)
+    installation["pending_restart"] = False
+    installation["state"] = "active" if installation.get("active_version") else "failed"
+
+
+def _drop_revoked_staged(installations: dict[str, Any], revocations: tuple[revocation.Revocation, ...]) -> bool:
+    """Drop each staged release the revocation list names, so it never activates. Returns whether any row changed."""
+    changed = False
+    for plugin_id, row in installations.items():
+        if not isinstance(row, dict) or row.get("state") != "staged" or not row.get("staged_version"):
+            continue
+        found = revocation.lookup(revocations, plugin_id, row.get("staged_version"))
+        if found is not None:
+            text = revocation.refusal(found, str(row.get("name") or plugin_id), row["staged_version"], "installed")
+            _abandon_staged_release(row, refusal_text(text))
+            changed = True
+    return changed
+
+
+def _hold_revoked_installations(state: dict[str, Any]) -> None:
+    """After a refresh: hold back each installed release the list now revokes, release one it no longer does,
+    and drop a staged release it names. Nothing else about the installations is judged here."""
+    installations = state.setdefault("installations", {})
+    revocations = _revocations(state)
+    _apply_unmet_needs(installations, revocations, revocations_only=True)
+    _drop_revoked_staged(installations, revocations)
 
 
 def _staged_installation(
@@ -3602,6 +3699,12 @@ def _stage_validated(
     staged = []
     env_path = None
     state = load_state()
+    # Every route that installs or updates ends here, a local package included, so a revoked release is
+    # refused whichever way it was asked for.
+    revoked = _revocation_refusal(
+        state, validated.provider_id, validated.version, validated.raw.get("name"), "installed")
+    if revoked:
+        raise ProviderHubInstallError(revoked)
     existing = (state.get("installations") or {}).get(validated.provider_id)
     if isinstance(existing, dict) and kind_of(existing) != validated.kind:
         # An installation's kind never changes: the id already belongs to a
@@ -3828,7 +3931,7 @@ def stage_install(
     # The entry's own kind validates it: a translator is not a subtitle provider.
     kind = _kind_for_manifest(manifest)
     validated = kind.validate_manifest(manifest, source_trusted)
-    refusal = (_install_refusal(state, source_id, validated.provider_id, kind.name)
+    refusal = (_install_refusal(state, source_id, validated.provider_id, kind.name, validated.version)
                or _host_refusal({"manifest": manifest}, current_host()))
     if refusal:
         raise ProviderHubInstallError(refusal)
@@ -3919,7 +4022,7 @@ def _requested_entry(
             f"{source_id} does not list {provider_id} {version}; refresh the catalog and try again"
         )
     key, entry = found
-    refusal = (_install_refusal(state, source_id, provider_id, catalog_kind_of(entry))
+    refusal = (_install_refusal(state, source_id, provider_id, catalog_kind_of(entry), version)
                or _host_refusal(entry, current_host())
                or _closure_refusal(state, entry))
     if refusal:
@@ -4225,22 +4328,64 @@ def stage_install_local(package: bytes | str | Path, checkpoint=None) -> dict[st
         shutil.rmtree(work_dir, ignore_errors=True)
 
 
-def _apply_unmet_needs(installations: dict[str, Any]) -> bool:
-    """Hold back each plugin whose active release relies on one that is not running, and release the others.
+def _revoked_reasons(installations: dict[str, Any], revocations: tuple[revocation.Revocation, ...]) -> dict[str, str]:
+    """For each installation whose active release the revocation list names, what it shows."""
+    reasons = {}
+    for plugin_id, row in installations.items():
+        if not isinstance(row, dict) or not row.get("active_version") or row.get("state") == "removed":
+            continue
+        found = revocation.lookup(revocations, plugin_id, row.get("active_version"))
+        if found is not None:
+            reasons[str(plugin_id)] = refusal_text(
+                revocation.held_back(found, str(row.get("name") or plugin_id), row.get("active_version")))
+    return reasons
 
-    A held-back plugin carries the reason and, while it is switched on, shows it as its error. A switched-off
-    one shows no error for not running, and loses the one an earlier pass wrote. An error that is not the
-    reason is never touched. Returns whether any row changed.
+
+def _apply_unmet_needs(
+    installations: dict[str, Any], revocations: tuple[revocation.Revocation, ...] = (),
+    *, revocations_only: bool = False,
+) -> bool:
+    """Hold back each plugin that must not run, and release the others.
+
+    A plugin is held back when the official catalog revoked its active release, or when that release relies on
+    a plugin that is not running. A held-back plugin carries the reason. A revoked one always shows it as its
+    error, switched on or off, because it cannot be switched on again; one held back for what it relies on shows
+    it only while it is switched on, and loses it once it is off. An error that is not the reason is never
+    touched. A revoked plugin supplies nothing, so what relies on it is held back too. ``revocations_only``
+    leaves every other plugin as it is, for a pass that has learnt only the revocation list. Returns whether
+    any row changed.
     """
     changed = False
+    revoked = _revoked_reasons(installations, revocations)
+    lifted: set[str] = set()
+    for plugin_id, row in installations.items():
+        if not isinstance(row, dict):
+            continue
+        if str(plugin_id) in revoked:
+            if not row.get("revoked"):
+                row["revoked"] = True
+                changed = True
+                logging.getLogger(__name__).warning("Provider Hub: %s", revoked[str(plugin_id)])
+        elif row.get("revoked"):
+            row.pop("revoked", None)
+            lifted.add(str(plugin_id))
+            changed = True
     unmet = closure.unmet_needs(installations)
     for plugin_id, row in installations.items():
         if not isinstance(row, dict):
             continue
-        if plugin_id in unmet:
+        if revocations_only and str(plugin_id) not in revoked and str(plugin_id) not in lifted:
+            continue
+        if plugin_id in revoked:
+            reason, always = revoked[plugin_id], True
+        elif plugin_id in unmet:
             reason = (f"It needs {', '.join(unmet[plugin_id])}, which is not running, so it was not started. "
                       "Once that is running again, restart Bazarr+.")
-            on = closure.is_on(row)
+            always = False
+        else:
+            reason, always = None, False
+        if reason is not None:
+            on = always or closure.is_on(row)
             previous = row.get("blocked_reason")
             if not row.get("blocked") or previous != reason:
                 row.update(blocked=True, blocked_reason=reason)
@@ -4270,7 +4415,8 @@ def enforce_activation_needs() -> bool:
 
     A supplier whose environment is missing or damaged does not run, and that is only known once the
     environments have been reconciled, which is after activation. Returns whether any row changed."""
-    return bool(mutate_state(lambda state: _apply_unmet_needs(state.setdefault("installations", {}))))
+    return bool(mutate_state(
+        lambda state: _apply_unmet_needs(state.setdefault("installations", {}), _revocations(state))))
 
 
 def _enforce_kept_data_ownership() -> None:
@@ -4315,6 +4461,7 @@ def activate_staged_installations() -> list[str]:
                                             exc_info=True)
     state = load_state()
     installations = state.get("installations") or {}
+    revocations = _revocations(state)
     activated = []
     changed = False
     for provider_id, installation in list(installations.items()):
@@ -4350,6 +4497,11 @@ def activate_staged_installations() -> list[str]:
             to_version=target_version,
         ) as job:
             try:
+                found = revocation.lookup(revocations, provider_id, target_version)
+                if found is not None:
+                    # Revoked since it was staged: it does not become the active release.
+                    raise ProviderHubInstallError(
+                        revocation.refusal(found, str(target_name), target_version, "installed"))
                 trusted = bool(installation.get("trusted", False))
                 # The kind validates its own manifests: a translator is not a subtitle provider.
                 kind = get_kind(kind_of(installation))
@@ -4371,18 +4523,7 @@ def activate_staged_installations() -> list[str]:
                 verify_bundle_tree(manifest, staged_bundle_path)
                 kind.smoke_test(manifest, staged_bundle_path, staged_interpreter)
             except Exception as error:
-                installation["last_error"] = refusal_text(error)
-                _abandon_staged_catalog_list(installation)
-                installation["staged_version"] = None
-                installation["staged_path"] = None
-                installation["staged_python_path"] = None
-                installation["staged_manifest"] = None
-                installation.pop("staged_supplied_by", None)
-                installation["pending_restart"] = False
-                if installation.get("active_version"):
-                    installation["state"] = "active"
-                else:
-                    installation["state"] = "failed"
+                _abandon_staged_release(installation, refusal_text(error))
                 changed = True
                 job.data["state"] = "failed"
                 job.update(
@@ -4424,7 +4565,7 @@ def activate_staged_installations() -> list[str]:
             job.update(message=msg)
     # What actually activated is known now. A plugin whose active release relies on one that is not running
     # does not start, and says why.
-    changed = _apply_unmet_needs(installations) or changed
+    changed = _apply_unmet_needs(installations, revocations) or changed
     if changed:
         updated_installations = state.get("installations") or {}
 
@@ -4884,6 +5025,9 @@ def _latest_catalog_manifest(
     def usable(entry: dict[str, Any]) -> bool:
         if not _offerable_as_update(entry, installed_kind):
             return False
+        # A revoked release is never offered; the newest one that is not revoked still is.
+        if _revocation_refusal(state, provider_id, entry.get("version")):
+            return False
         manifest = entry["manifest"]
         try:
             get_kind(catalog_kind_of(entry)).validate_manifest(manifest, bool(entry.get("trusted", False)))
@@ -4965,7 +5109,8 @@ def _refused_update_reason(
         return (
             entry.get("origin") != ORIGIN_BUNDLED
             and _offerable_as_update(entry, installed_kind)
-            and (_host_refusal(entry, host) is not None or _closure_refusal(state, entry, host) is not None
+            and (_revocation_refusal(state, provider_id, entry.get("version")) is not None
+                 or _host_refusal(entry, host) is not None or _closure_refusal(state, entry, host) is not None
                  or bool(closure.broken_by(state, provider_id, entry["manifest"])))
         )
 
@@ -4975,7 +5120,8 @@ def _refused_update_reason(
     if not entry:
         return None
     broken = closure.broken_by(state, provider_id, entry["manifest"])
-    return (_host_refusal(entry, host) or _closure_refusal(state, entry, host)
+    return (_revocation_refusal(state, provider_id, entry.get("version"), action="updated to")
+            or _host_refusal(entry, host) or _closure_refusal(state, entry, host)
             or (closure.breaks_text(provider_id, entry["manifest"].get("version"), broken) if broken else None))
 
 

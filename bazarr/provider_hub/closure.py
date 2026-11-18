@@ -441,7 +441,8 @@ def unmet_needs(installations: dict[str, Any], enabled: dict[str, bool] | None =
     by any running supplier of it, not only the one recorded, and is unmet only when none runs. A plugin
     that is itself unmet is not running, so what relies on it is unmet too, and a plugin that is switched
     off supplies nothing (it is still judged, so switching it on cannot start it unmet). A plugin whose
-    environment is flagged as needing repair does not run either. ``enabled`` overrides, by id, whether a
+    environment is flagged as needing repair, or whose active release the catalog revoked, does not run
+    either. ``enabled`` overrides, by id, whether a
     plugin counts as switched on, for a change that has not been saved yet.
     """
     rows = {
@@ -457,9 +458,11 @@ def unmet_needs(installations: dict[str, Any], enabled: dict[str, bool] | None =
     def on(pid: str) -> bool:
         return enabled[pid] if enabled is not None and pid in enabled else _enabled(rows[pid])
 
+    # A release the catalog revoked does not run either.
     suppliers = {
         pid for pid in candidates
         if kind_of(rows[pid]) in registered and on(pid) and not rows[pid].get("needs_repair")
+        and not rows[pid].get("revoked")
     }
     blocked: dict[str, list[str]] = {}
     while True:
