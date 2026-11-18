@@ -5,9 +5,9 @@ The official catalog publishes, beside its legacy ``catalog.json``, one signed f
 channel (``signed/<channel>/catalog.json``) with a detached signature and a root-signed key
 file. This module is the host's only caller of ``signing.verify_catalog``. The bytes the raw
 repository serves go through ``verify_fetched`` before anything parses them, and it hands back a
-verified catalog or a typed refusal. The Pages mirror and the image's own snapshot have no transport
-or baked signed files yet; whatever adds them calls the same function and adds its origin (the snapshot
-is checked in baked mode, which never latches a channel or raises a counter).
+verified catalog or a typed refusal. The Pages mirror has no transport yet; whatever adds it calls the
+same function and adds its origin. The image's own snapshot is checked by ``verify_baked``, in baked mode,
+which never latches a channel or raises a counter.
 
 What a refresh keeps per channel lives in the state document under ``catalog_feeds``: the
 highest ``signed_version`` and ``key_file_version`` it accepted. The same two numbers are
@@ -428,6 +428,22 @@ def verify_fetched(
             "The signed catalog does not name the commit it was built from (malformed source_commit).",
             key_file_version=authenticated)
     return VerifiedFeed(catalog=catalog, channel=channel, source_commit=source_commit, result=result)
+
+
+def verify_baked(
+    catalog: bytes, envelope: bytes | None, key_file: bytes | None, *, channel: str,
+    roots: Mapping[str, bytes] | None = None,
+) -> signing.VerificationResult:
+    """Check the signed catalog baked into the image: signature, key chain, revocations and channel.
+
+    Expiry and the replay counter are not evaluated and the result never advances state, so a snapshot
+    can seed a fresh install and still never latch a channel or raise a stored number.
+    """
+    return signing.verify_catalog(
+        catalog, envelope, key_file,
+        roots=trusted_roots() if roots is None else roots,
+        channel=channel, now=current_time(), baked=True,
+    )
 
 
 # --- what the signed state means for installs ------------------------------------------------

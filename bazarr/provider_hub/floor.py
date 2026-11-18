@@ -16,6 +16,16 @@ snapshot. It does three things:
   source that has a resolved commit is never seeded, and the first successful
   refresh replaces every seeded entry.
 
+When the snapshot also carries the signed feed of its channel (the signed
+catalog, its detached signature and the root-signed key file), the reader
+verifies it in baked mode with the root this release ships: signature, key
+chain, revocations and channel, but not the expiry window or the replay
+counter. Only a feed that passes is seeded with its ``plugins`` list. A feed
+that is missing a piece, does not verify or names another commit seeds the
+providers of ``catalog.json`` only, with the reason logged. Seeding from the
+snapshot never latches a channel and never raises a stored counter: those move
+only on a catalog that was fetched.
+
 The reader never writes. It opens files read-only without following links,
 and it checks every byte it hands out against the sha256 recorded in
 ``floor.json`` first. The snapshot is trusted as the release's own catalog
@@ -36,6 +46,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from . import catalog_feed
 from .bundle import BundleValidationError
 from .state import (
     OFFICIAL_CATALOG_REPO,
@@ -135,10 +146,16 @@ class Floor:
     commit: str
     files: dict[str, str]
     catalog_bytes: bytes
+    # The signed catalog's bytes, set only when the snapshot's signed feed passed the baked check.
+    signed_bytes: bytes | None = None
 
     def catalog(self) -> dict[str, Any]:
         """The catalog document, parsed afresh so a caller may edit its copy."""
         return json.loads(self.catalog_bytes)
+
+    def signed_catalog(self) -> dict[str, Any] | None:
+        """The verified signed catalog, parsed afresh, or None when the snapshot has none that verified."""
+        return json.loads(self.signed_bytes) if self.signed_bytes is not None else None
 
     def read(self, path: str) -> bytes:
         """The bytes of one snapshot file, checked against floor.json first."""
@@ -185,15 +202,77 @@ _cache: tuple[tuple[Any, ...], Floor] | None = None
 
 def _meta_signature(root: Path) -> tuple[Any, ...]:
     info = (root / META_FILE).lstat()
-    return (str(root), info.st_ino, info.st_size, info.st_mtime_ns)
+    # The signed feed is judged against the roots this process trusts, so a different set is a different result.
+    roots = tuple(sorted(catalog_feed.trusted_roots().items()))
+    return (str(root), info.st_ino, info.st_size, info.st_mtime_ns, roots)
+
+
+def _checked_read(root: Path, files: dict[str, str], path: str) -> bytes | None:
+    """One listed snapshot file, checked against floor.json, or None when floor.json does not list it."""
+    expected = files.get(path)
+    if expected is None:
+        return None
+    data = _read_regular_file(root, path)
+    if hashlib.sha256(data).hexdigest() != expected:
+        raise FloorIntegrityError(f"snapshot file {path} does not match floor.json")
+    return data
+
+
+def _verified_signed_feed(root: Path, branch: str, commit: str, files: dict[str, str]) -> bytes | None:
+    """The signed catalog's bytes when the snapshot carries a signed feed that verifies, else None.
+
+    The check is the baked one: signature, key chain, revocations and channel against the roots this
+    release ships. Anything short of that, and a feed built from another commit than the snapshot's
+    files, leaves the snapshot seeding providers only. The reason is logged."""
+    channel = catalog_feed.feed_channel(branch)
+    if channel is None:
+        return None
+    body_path = catalog_feed.SIGNED_CATALOG_PATH.format(channel=channel)
+    envelope_path = catalog_feed.SIGNED_ENVELOPE_PATH.format(channel=channel)
+    if body_path not in files and envelope_path not in files:
+        logger.info("The bundled provider catalog carries no signed feed, so it seeds providers only")
+        return None
+    try:
+        body = _checked_read(root, files, body_path)
+        envelope = _checked_read(root, files, envelope_path)
+        key_file = _checked_read(root, files, catalog_feed.KEY_FILE_PATH)
+    except FloorError as error:
+        logger.warning("The bundled signed catalog is not used, so the bundled catalog seeds providers only: %s", error)
+        return None
+    if body is None:
+        logger.warning("The bundled signed catalog is not used, so the bundled catalog seeds providers only: "
+                       "its signature is there but the catalog is not")
+        return None
+    result = catalog_feed.verify_baked(body, envelope, key_file, channel=channel)
+    if not result.ok:
+        logger.warning(
+            "The bundled signed catalog is not used, so the bundled catalog seeds providers only: %s (%s)",
+            result.status.value, result.detail)
+        return None
+    try:
+        document = json.loads(body)
+    except ValueError:
+        document = None
+    source_commit = document.get("source_commit") if isinstance(document, dict) else None
+    if source_commit != commit:
+        logger.warning("The bundled signed catalog is not used, so the bundled catalog seeds providers only: "
+                       "it was built from a different commit than the snapshot's files")
+        return None
+    if not isinstance(document.get("providers"), list) or not document["providers"]:
+        logger.warning("The bundled signed catalog is not used, so the bundled catalog seeds providers only: "
+                       "it has no providers list")
+        return None
+    return body
 
 
 def load_floor(root: str | os.PathLike[str] | None = None) -> Floor | None:
     """The snapshot, or None when there is no snapshot directory to read.
 
     A directory that is there but does not check out raises FloorError. The
-    result is cached for as long as floor.json is unchanged; catalog.json is
-    hashed once, when it is loaded, and every other file on each read."""
+    result is cached for as long as floor.json is unchanged and the trusted roots
+    are the same. catalog.json and the signed feed (its files hashed, its
+    signature verified in baked mode) are checked once, when the snapshot is
+    loaded; every bundle file is hashed on each read."""
     global _cache
     resolved = Path(root) if root is not None else floor_root()
     if resolved is None:
@@ -222,7 +301,8 @@ def load_floor(root: str | os.PathLike[str] | None = None) -> Floor | None:
     providers = document.get("providers") if isinstance(document, dict) else None
     if not isinstance(providers, list) or not providers:
         raise FloorError("catalog.json has no providers list")
-    floor = Floor(resolved, repo, branch, commit, files, catalog_bytes)
+    signed_bytes = _verified_signed_feed(resolved, branch, commit, files)
+    floor = Floor(resolved, repo, branch, commit, files, catalog_bytes, signed_bytes)
     with _cache_lock:
         _cache = (signature, floor)
     return floor
@@ -243,8 +323,13 @@ def seed_candidate(source: dict[str, Any], entries: dict[str, Any]) -> tuple[dic
     Only an official source that has never refreshed successfully qualifies: no
     resolved commit, no successful check, no dev_ref, and nothing stored for it
     that did not come from a snapshot. A catalog that was ever fetched is
-    therefore never replaced by the older one baked into the image. The
-    plugins list is not seeded: the snapshot carries the providers feed only.
+    therefore never replaced by the older one baked into the image.
+
+    The seed is the snapshot's signed catalog, providers and plugins, when it
+    verified (see the module note), and otherwise the providers of
+    ``catalog.json`` with any plugins list stripped: an unsigned list is never
+    seeded. The commit is the snapshot's, which is the commit the signed
+    catalog was built from.
     """
     if source.get("id") != OFFICIAL_CATALOG_SOURCE_ID or source.get("dev_ref"):
         return None
@@ -257,6 +342,10 @@ def seed_candidate(source: dict[str, Any], entries: dict[str, Any]) -> tuple[dic
     floor = _usable_floor()
     if floor is None:
         return None
+    signed = floor.signed_catalog()
+    if signed is not None:
+        keys = ("schema_version", "name", "providers", "plugins")
+        return {key: signed[key] for key in keys if key in signed}, floor.commit
     document = floor.catalog()
     return {key: value for key, value in document.items() if key != "plugins"}, floor.commit
 
