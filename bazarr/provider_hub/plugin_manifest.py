@@ -41,13 +41,13 @@ ENDPOINT_RE = re.compile(
 # The image a managed container runs, named without a tag or a digest: an optional registry host
 # (with a dot or a port, or localhost) and a lowercase repository path, as Docker reads them.
 OCI_IMAGE_RE = re.compile(
-    r"^(?:(?:localhost|(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?"
+    r"(?:(?:localhost|(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?"
     r"|[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?=:))(?::[0-9]{1,5})?/)?"
-    r"[a-z0-9]+(?:(?:[._]|__|-+)[a-z0-9]+)*(?:/[a-z0-9]+(?:(?:[._]|__|-+)[a-z0-9]+)*)*$"
+    r"[a-z0-9]+(?:(?:[._]|__|-+)[a-z0-9]+)*(?:/[a-z0-9]+(?:(?:[._]|__|-+)[a-z0-9]+)*)*\Z"
 )
 # The digest of the multi-arch image index (the manifest list a registry serves for the image name),
 # not of one platform's manifest: the same pin then holds on every architecture. Only sha256.
-OCI_INDEX_DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+OCI_INDEX_DIGEST_RE = re.compile(r"sha256:[0-9a-f]{64}\Z")
 OCI_IMAGE_MAX_CHARS = 255
 SEMVER_RE = re.compile(
     r"^v?(?P<major>0|[1-9][0-9]*)\.(?P<minor>0|[1-9][0-9]*)\.(?P<patch>0|[1-9][0-9]*)"
@@ -239,13 +239,13 @@ def _oci_pin(value: Any, artifact: str) -> tuple[str | None, str | None]:
     if ":" in last:
         raise ManifestValidationError(
             "runtime.image must not name a tag: a tag can move, so pin the image with runtime.index_digest")
-    if len(image) > OCI_IMAGE_MAX_CHARS or not OCI_IMAGE_RE.match(image):
+    if len(image) > OCI_IMAGE_MAX_CHARS or not OCI_IMAGE_RE.fullmatch(image):
         raise ManifestValidationError("runtime.image must be an image name such as ghcr.io/owner/name")
     digest = value.get("index_digest")
     if not isinstance(digest, str) or not digest:
         raise ManifestValidationError(
             "runtime.index_digest is required for an oci runtime: the sha256 digest of the multi-arch image index")
-    if not OCI_INDEX_DIGEST_RE.match(digest):
+    if not OCI_INDEX_DIGEST_RE.fullmatch(digest):
         raise ManifestValidationError(
             "runtime.index_digest must be a sha256 digest written as sha256:<64 lowercase hex digits>")
     return image, digest

@@ -366,6 +366,8 @@ def test_an_oci_image_may_be_written_with_or_without_a_registry(image):
     ({"index_digest": "sha512:" + "ab" * 64}, "must be a sha256 digest"),
     ({"index_digest": "ab" * 32}, "must be a sha256 digest"),
     ({"index_digest": ["sha256:" + "ab" * 32]}, "runtime.index_digest is required"),
+    ({"index_digest": "sha256:" + "ab" * 32 + "\n"}, "must be a sha256 digest"),
+    ({"image": "ghcr.io/example/daemon\n"}, "must be an image name"),
 ])
 def test_an_oci_runtime_with_a_missing_malformed_or_tag_only_pin_is_refused_with_the_reason(fields, message):
     from provider_hub.manifest import ManifestValidationError

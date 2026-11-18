@@ -71,10 +71,13 @@ REQUEST_TIMEOUT = 30.0
 
 # A container, network or image identifier or name as Docker accepts it, with no character that
 # could add a path segment or a query.
-_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
-_IMAGE_RE = re.compile(r"^[a-z0-9][a-z0-9._:/-]{0,254}(?:@sha256:[0-9a-f]{64})?$")
-_DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
-_API_VERSION_RE = re.compile(r"^(?P<major>[0-9]{1,2})\.(?P<minor>[0-9]{1,3})$")
+_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}\Z")
+_DIGEST_RE = re.compile(r"sha256:[0-9a-f]{64}\Z")
+_API_VERSION_RE = re.compile(r"(?P<major>[0-9]{1,2})\.(?P<minor>[0-9]{1,3})\Z")
+# The longest image name a manifest may carry (255) plus "@sha256:" and a digest, so a reference the manifest
+# accepts is a reference this client can ask about.
+MAX_IMAGE_REF_CHARS = 255 + len("@sha256:") + 64
+_IMAGE_SEGMENT_RE = re.compile(r"[a-z0-9][a-z0-9._:-]*\Z")
 
 _ID = r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}"
 # (method, path after the version prefix). The pull route is the one streaming answer.
@@ -87,7 +90,7 @@ ALLOWED_ROUTES: tuple[tuple[str, "re.Pattern[str]"], ...] = tuple(
         ("POST", rf"^/containers/{_ID}/start$"),
         ("POST", rf"^/containers/{_ID}/stop$"),
         ("DELETE", rf"^/containers/{_ID}$"),
-        ("GET", r"^/images/[a-z0-9][a-z0-9._:/@-]{0,254}/json$"),
+        ("GET", r"^/images/(?!.*(?:\.\.|//))[a-z0-9][a-z0-9._:/@-]{0,%d}/json$" % (MAX_IMAGE_REF_CHARS - 1)),
         ("POST", r"^/images/create$"),
         ("GET", r"^/networks$"),
         ("POST", r"^/networks/create$"),
@@ -185,12 +188,16 @@ class _UnixConnection(http.client.HTTPConnection):
         self.sock = sock
 
 
+class _TcpConnection(http.client.HTTPConnection):
+    """A plain TCP connection. A class of its own so a test can refuse every real address."""
+
+
 def _clean(text: Any) -> str:
     return scrub_text(str(text)).replace("\n", " ").strip()[:MAX_MESSAGE_CHARS]
 
 
 def _version_tuple(value: str | None) -> tuple[int, int] | None:
-    match = _API_VERSION_RE.match(value or "")
+    match = _API_VERSION_RE.fullmatch(value or "")
     return (int(match.group("major")), int(match.group("minor"))) if match else None
 
 
@@ -225,9 +232,20 @@ def check_create_body(body: Mapping[str, Any]) -> None:
     if body.get("ExposedPorts"):
         raise DockerRefused("a managed container publishes no ports")
     for option in host.get("SecurityOpt") or ():
-        text = str(option).lower()
-        if "unconfined" in text or text.startswith("systempaths"):
+        text = str(option).lower().replace(":", "=", 1)
+        if "unconfined" in text or text.startswith(("systempaths", "seccomp=", "apparmor=", "label=disable")):
             raise DockerRefused("a managed container keeps the default security profiles")
+        if text.startswith("no-new-privileges") and text.split("=", 1)[-1] not in ("", "true", "no-new-privileges"):
+            raise DockerRefused("a managed container never allows new privileges")
+    for key in ("MaskedPaths", "ReadonlyPaths"):
+        if key in host and not host[key]:
+            raise DockerRefused(f"HostConfig.{key} must keep the daemon's protected paths")
+    ipc = str(host.get("IpcMode") or "")
+    if ipc not in ("", "private", "none"):
+        raise DockerRefused("HostConfig.IpcMode must be private or none")
+    endpoints = ((body.get("NetworkingConfig") or {}).get("EndpointsConfig")) or {}
+    if not isinstance(endpoints, dict) or set(endpoints) - {network}:
+        raise DockerRefused("a managed container joins only its one private network")
     for mount in host.get("Mounts") or ():
         if not isinstance(mount, dict) or mount.get("Type") != "tmpfs":
             raise DockerRefused("a managed container mounts nothing from the host")
@@ -238,7 +256,8 @@ def check_create_body(body: Mapping[str, Any]) -> None:
             raise DockerRefused(f"{key} is not allowed on a managed container")
     if not host.get("Memory") or host.get("Memory") != host.get("MemorySwap"):
         raise DockerRefused("a managed container needs a memory limit and no swap beyond it")
-    if not host.get("PidsLimit") or int(host.get("PidsLimit")) <= 0:
+    pids = host.get("PidsLimit")
+    if isinstance(pids, bool) or not isinstance(pids, int) or pids <= 0:
         raise DockerRefused("a managed container needs a process limit")
 
 
@@ -261,7 +280,7 @@ class DockerClient:
             return self._factory(timeout)
         if self.endpoint.kind == "unix":
             return _UnixConnection(self.endpoint.path, timeout)
-        return http.client.HTTPConnection(self.endpoint.host, self.endpoint.port, timeout=timeout)
+        return _TcpConnection(self.endpoint.host, self.endpoint.port, timeout=timeout)
 
     @property
     def api_version(self) -> str | None:
@@ -275,7 +294,7 @@ class DockerClient:
     @staticmethod
     def _check_route(method: str, path: str) -> None:
         for allowed, pattern in ALLOWED_ROUTES:
-            if allowed == method and pattern.match(path):
+            if allowed == method and pattern.fullmatch(path):
                 return
         raise DockerRefused(f"{method} {path} is not a Docker route this client uses")
 
@@ -347,7 +366,7 @@ class DockerClient:
         Only ``/_ping`` is used: its ``API-Version`` header names the daemon's newest version, and a socket
         proxy answers it without any permission.
         """
-        connection, response = self._send("GET", "/_ping", timeout=CONNECT_TIMEOUT)
+        connection, response = self._send("GET", "/_ping", timeout=min(self.timeout, CONNECT_TIMEOUT))
         try:
             try:
                 raw = self._read(response, 1024)
@@ -368,13 +387,18 @@ class DockerClient:
 
     @staticmethod
     def _name(value: str, what: str = "name") -> str:
-        if not isinstance(value, str) or not _NAME_RE.match(value):
+        if not isinstance(value, str) or not _NAME_RE.fullmatch(value):
             raise DockerRefused(f"{what} {str(value)[:40]!r} is not a valid Docker name or id")
         return value
 
     @staticmethod
     def _image(value: str) -> str:
-        if not isinstance(value, str) or not _IMAGE_RE.match(value):
+        if not isinstance(value, str) or len(value) > MAX_IMAGE_REF_CHARS:
+            raise DockerRefused("that is not a valid image reference")
+        name, _, digest = value.partition("@")
+        segments = name.split("/")
+        if (digest and not _DIGEST_RE.fullmatch(digest)) or not all(_IMAGE_SEGMENT_RE.fullmatch(part)
+                                                                    for part in segments) or ".." in name:
             raise DockerRefused("that is not a valid image reference")
         return value
 
@@ -438,7 +462,7 @@ class DockerClient:
         The daemon checks the content against the digest. The progress stream is read and dropped: only an error
         in it matters. ``deadline`` bounds the whole pull; ``idle_timeout`` the wait for the next progress line.
         """
-        if not _DIGEST_RE.match(str(digest)):
+        if not _DIGEST_RE.fullmatch(str(digest)):
             raise DockerRefused("an image is pulled by a sha256 digest, never by a tag")
         reference = f"{self._image(repository)}@{digest}"
         if "@" in repository or ":" in repository.rsplit("/", 1)[-1]:

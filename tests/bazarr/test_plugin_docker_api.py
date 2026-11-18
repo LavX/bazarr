@@ -51,7 +51,7 @@ def valid_body(**host_overrides):
     ("/run/docker.sock", Endpoint("unix", path="/run/docker.sock")),
     ("unix:///run/user/1000/docker.sock", Endpoint("unix", path="/run/user/1000/docker.sock")),
     ("tcp://socket-proxy:2375", Endpoint("tcp", host="socket-proxy", port=2375)),
-    ("http://10.0.0.5:2375/", Endpoint("tcp", host="10.0.0.5", port=2375)),
+    ("http://192.0.2.5:2375/", Endpoint("tcp", host="192.0.2.5", port=2375)),
 ])
 def test_endpoints_are_read_from_docker_host_style_values(value, expected):
     assert parse_endpoint(value) == expected
@@ -151,7 +151,7 @@ def test_only_the_allowed_routes_can_be_sent(docker):
     assert [r["path"] for r in docker.requests] == ["/_ping"]
 
 
-@pytest.mark.parametrize("name", ["../x", "a/b", "a b", "a?x=1", "", "-x", "x" * 129, "a\nb", None, "a%2Fb"])
+@pytest.mark.parametrize("name", ["../x", "a/b", "a b", "a?x=1", "", "-x", "x" * 129, "a\nb", "abc\n", None, "a%2Fb"])
 def test_a_name_that_could_add_a_path_segment_is_refused_before_anything_is_sent(docker, name):
     client = docker.client()
 
@@ -178,9 +178,22 @@ def test_a_trailing_segment_does_not_slip_through_a_route(docker):
 def test_the_image_reference_must_be_a_plain_reference(docker):
     client = docker.client()
 
-    for bad in ("Image With Space", "../etc/passwd", "a@sha256:xyz", "x;y", "", "A/B"):
+    for bad in ("Image With Space", "../etc/passwd", "a@sha256:xyz", "x;y", "", "A/B", "a/../b", "a//b", "/a", "a/",
+                "a/b/", "a/./../b", "abc\n", f"abc@{DIGEST}\n", "a" * 400):
         with pytest.raises(DockerRefused):
             client.inspect_image(bad)
+
+    assert docker.requests == []
+
+
+def test_an_image_reference_up_to_the_manifest_maximum_is_accepted(docker):
+    client = docker.client()
+    longest = "a" * 255 + "@" + DIGEST
+
+    with pytest.raises(DockerNotFound):
+        client.inspect_image(longest)
+
+    assert len(docker.requests) == 1
 
 
 # ------------------------------------------------------------------ the create body
@@ -259,7 +272,7 @@ def test_a_pull_is_by_digest_only_and_reads_the_progress_to_the_end(docker):
 
 
 @pytest.mark.parametrize("repository, digest", [
-    (REPO, "latest"), (REPO, "sha256:abc"), (REPO + ":latest", DIGEST), (f"{REPO}@{DIGEST}", DIGEST),
+    (REPO, "latest"), (REPO, "sha256:abc"), (REPO, DIGEST + "\n"), (REPO + ":latest", DIGEST), (f"{REPO}@{DIGEST}", DIGEST),
     ("UPPER/case", DIGEST),
 ])
 def test_a_pull_by_tag_or_with_a_loose_digest_is_refused_without_a_request(docker, repository, digest):
@@ -384,3 +397,64 @@ def test_a_created_network_is_a_plain_bridge_with_outbound_access_and_labels(doc
     assert body["Driver"] == "bridge" and body["Internal"] is False
     assert body["EnableIPv6"] is False and body["Attachable"] is False
     assert body["Labels"] == {"bazarr-plus.managed": "true"}
+
+
+# ------------------------------------------------------------------ the stricter body rules
+
+
+@pytest.mark.parametrize("overrides, text", [
+    ({"MaskedPaths": []}, "MaskedPaths"),
+    ({"ReadonlyPaths": []}, "ReadonlyPaths"),
+    ({"SecurityOpt": ["label=disable"]}, "security"),
+    ({"SecurityOpt": ["label:disable"]}, "security"),
+    ({"SecurityOpt": ["seccomp=/profiles/mine.json"]}, "security"),
+    ({"SecurityOpt": ["seccomp:{}"]}, "security"),
+    ({"SecurityOpt": ["apparmor=custom"]}, "security"),
+    ({"SecurityOpt": ["no-new-privileges:false"]}, "new privileges"),
+    ({"SecurityOpt": ["no-new-privileges=false"]}, "new privileges"),
+    ({"IpcMode": "shareable"}, "private or none"),
+    ({"PidsLimit": "512"}, "process limit"),
+    ({"PidsLimit": 5.5}, "process limit"),
+    ({"PidsLimit": True}, "process limit"),
+    ({"PidsLimit": None}, "process limit"),
+])
+def test_the_stricter_body_rules(overrides, text):
+    with pytest.raises(DockerRefused, match=text):
+        check_create_body(valid_body(**overrides))
+
+
+def test_conforming_security_options_and_ipc_modes_pass():
+    check_create_body(valid_body(SecurityOpt=["no-new-privileges:true"], IpcMode="private"))
+    check_create_body(valid_body(SecurityOpt=["no-new-privileges"], IpcMode="none"))
+    check_create_body(valid_body(MaskedPaths=["/proc/kcore"], ReadonlyPaths=["/proc/sys"]))
+
+
+def test_a_second_network_in_the_endpoints_is_refused():
+    body = valid_body()
+    body["NetworkingConfig"] = {"EndpointsConfig": {"bazarr-plus-net": {}, "other": {}}}
+    with pytest.raises(DockerRefused, match="only its one private network"):
+        check_create_body(body)
+
+    body["NetworkingConfig"] = {"EndpointsConfig": {"bazarr-plus-net": {"Aliases": ["daemon"]}}}
+    check_create_body(body)
+
+
+# ------------------------------------------------------------------ tcp
+
+
+def test_the_client_speaks_to_a_tcp_daemon_on_loopback(monkeypatch):
+    forbid_real_sockets(monkeypatch)
+    with FakeDocker(tcp=True) as fake:
+        client = fake.client()
+
+        assert client.ping() == "1.44"
+        assert client.list_containers() == []
+        assert client.endpoint.kind == "tcp" and client.endpoint.host == "127.0.0.1"
+
+
+def test_the_guard_refuses_a_tcp_address_that_is_not_a_fake(monkeypatch):
+    forbid_real_sockets(monkeypatch)
+    client = DockerClient(Endpoint("tcp", host="192.0.2.5", port=2375))
+
+    with pytest.raises(AssertionError, match="real Docker connection over tcp"):
+        client.ping()
