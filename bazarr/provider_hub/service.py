@@ -3715,7 +3715,8 @@ def _failed_installation(
         installation["staged_path"] = None
         installation["staged_python_path"] = None
         installation["staged_manifest"] = None
-        installation["pending_restart"] = False
+        # The restart a refresh asked for, to stop a revoked release, is still to come after a failed update.
+        installation["pending_restart"] = bool(installation.get("revoked_restart"))
         return installation
 
     return {
@@ -4813,6 +4814,10 @@ def _repair_environment(provider_id: str, checkpoint=None) -> dict[str, Any]:
     row = (load_state().get("installations") or {}).get(provider_id)
     if not isinstance(row, dict) or not row.get("active_version"):
         raise ProviderHubInstallError(f"{provider_id} has no active version to repair")
+    if row.get("revoked"):
+        # The check after a rebuild starts the plugin, and a revoked release is not run for that or anything else.
+        raise ProviderHubInstallError(
+            row.get("revoked_reason") or f"{provider_id} was revoked by the official catalog, so it is not repaired")
     active_path = row.get("active_path")
     manifest_data = row.get("manifest")
     if not active_path or not isinstance(manifest_data, dict):

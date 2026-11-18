@@ -183,6 +183,7 @@ def reconcile_environments(
     * A second installation with the same dependency set is pointed at the
       recorded environment, but only once the probe passes there. When it fails,
       the installation keeps the environment it had.
+    * An installation whose release is revoked, or held back, is not probed and keeps the environment it has.
     * An active installation whose interpreter is gone is marked ``needs_repair``
       and gets the error text installation errors use.
     * An active installation already flagged is looked at again, switched on or off, and its flag goes when
@@ -278,6 +279,11 @@ def reconcile_environments(
                     adopted_by.setdefault(fingerprint, []).append(provider_id)
                 continue
             if path_key(recorded) == str(env_dir) or staged or not row.get("active_path"):
+                continue
+            if row.get("revoked") or row.get("blocked"):
+                # A release the catalog revoked, or one held back, is not run: the probe imports the plugin in a
+                # worker, so it would run the code this boot exists to stop. It keeps the environment it has.
+                logger.info("Provider Hub: %s is revoked or held back, so its environment is not probed", provider_id)
                 continue
             shared_python = python_executable(recorded)
             bundle = validated_bundle_path(root, row["active_path"])

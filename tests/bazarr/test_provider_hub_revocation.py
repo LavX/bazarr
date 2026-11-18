@@ -1452,3 +1452,130 @@ def test_a_cut_reason_is_not_followed_by_a_second_stop():
         assert len(text) <= LIMIT
     assert _texts(entry)["held"].endswith("... It will not start. Update it or remove it.")
     assert _texts(entry)["install"].endswith("... So it cannot be installed.")
+
+
+# --- the boot does not run a revoked release, and a failed update keeps the restart cue --------------------------
+
+
+def _shared_env(root, name):
+    import sys
+
+    env = root / "shared_envs" / name
+    (env / "bin").mkdir(parents=True)
+    (env / "bin" / "python").write_text("", encoding="utf-8")
+    (env / "pyvenv.cfg").write_text(
+        f"home = /usr/bin\nversion = {sys.version_info.major}.{sys.version_info.minor}.0\n", encoding="utf-8")
+    return env
+
+
+def _boot_row(root, env, plugin_id, **fields):
+    manifest = _plugin(plugin_id)
+    bundle = root / "bundles" / plugin_id / "1.0.0" / "c"
+    bundle.mkdir(parents=True, exist_ok=True)
+    (bundle / "service.py").write_bytes(b"class Service: pass\n")
+    row = _row(manifest, active_path=str(bundle), python_path=str(env / "bin" / "python"), **fields)
+    return row[plugin_id]
+
+
+@pytest.mark.parametrize("flags", [{"revoked": True}, {"blocked": True}, {"revoked": True, "blocked": True}])
+def test_the_boot_does_not_probe_a_revoked_or_held_back_release_or_repoint_its_environment(
+        tmp_path, monkeypatch, service_kind, flags):
+    from provider_hub import service
+    from provider_hub.state import load_state, save_state
+
+    root = tmp_path / "provider_hub"
+    root.mkdir()
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(root / "state.json"))
+    first, second = _shared_env(root, "first"), _shared_env(root, "second")
+    probed = []
+    monkeypatch.setattr(service_kind, "smoke_test", lambda validated, bundle, python, timeout=None:
+                        probed.append((validated.provider_id, python)), raising=False)
+
+    def save(**second_fields):
+        state = load_state()
+        state["installations"] = {
+            "first": _boot_row(root, first, "first"), "second": _boot_row(root, second, "second", **second_fields)}
+        save_state(state)
+
+    # With nothing wrong the duplicate environment is probed and the plugin is pointed at the shared one.
+    save()
+    assert service.reconcile_plugin_environments()["repointed"] == ["second"]
+    assert probed == [("second", first / "bin" / "python")]
+    probed.clear()
+
+    # A revoked or held-back release is not run: nothing is probed and it keeps the environment it has.
+    save(**flags)
+    summary = service.reconcile_plugin_environments()
+
+    assert probed == [] and summary["repointed"] == [] and summary["kept"] == []
+    assert load_state()["installations"]["second"]["python_path"] == str(second / "bin" / "python")
+
+
+def test_a_revoked_release_is_not_repaired(tmp_path, monkeypatch, service_kind):
+    from provider_hub import service
+
+    installed = _plugin(version="1.0.0")
+    _stored_world(tmp_path, monkeypatch, [installed], installations=_row(
+        installed, needs_repair=True, revoked=True, revoked_reason="Revoked. Remove it."))
+    monkeypatch.setattr(service, "PluginEnvironment", lambda root: pytest.fail("nothing is rebuilt for it"))
+
+    with pytest.raises(service.ProviderHubInstallError, match="Revoked"):
+        service.repair_installation_environment(PLUGIN)
+
+
+@pytest.fixture(params=["download", "dependencies", "smoke test"])
+def failing_update(request, tmp_path, monkeypatch, service_kind):
+    """The staging of an update with one step failing."""
+
+    def fail(*args, **kwargs):
+        raise RuntimeError(f"the {request.param} failed")
+
+    class Environment:
+        def __init__(self, root):
+            pass
+
+        def install(self, validated, timeout=None, **kwargs):
+            if request.param == "dependencies":
+                fail()
+            (tmp_path / "env" / "bin").mkdir(parents=True, exist_ok=True)
+            (tmp_path / "env" / "bin" / "python").write_text("", encoding="utf-8")
+            return tmp_path / "env"
+
+    monkeypatch.setattr("provider_hub.consent.sandbox_status", lambda: {})
+    monkeypatch.setattr("provider_hub.service._fetch_bundle",
+                        fail if request.param == "download" else (lambda manifest, deadline=None: tmp_path / "bundle"))
+    monkeypatch.setattr("provider_hub.service.PluginEnvironment", Environment)
+    monkeypatch.setattr("provider_hub.service.python_executable", lambda env_path: tmp_path / "python")
+    monkeypatch.setattr(service_kind, "smoke_test", fail if request.param == "smoke test" else
+                        (lambda *args, **kwargs: None), raising=False)
+    return request.param
+
+
+def test_a_failed_update_of_a_revoked_running_release_keeps_the_restart_cue(
+        tmp_path, monkeypatch, failing_update):
+    from provider_hub import service
+
+    installed = _plugin(version="1.0.0")
+    _stored_world(tmp_path, monkeypatch, [installed, _plugin(version="1.1.0")], installations=_row(
+        installed, revoked=True, revoked_reason="Revoked. Restart Bazarr+ to stop it.",
+        pending_restart=True, revoked_restart=True),
+        revocations=_list({"id": PLUGIN, "version": "1.0.0"}))
+
+    service.apply_update(PLUGIN)
+
+    row = _rows()[PLUGIN]
+    assert f"the {failing_update} failed" in row["last_error"]
+    assert row["active_version"] == "1.0.0" and not row.get("staged_version")
+    # The restart that stops the revoked release has not happened, so it is still asked for.
+    assert row["pending_restart"] is True and row["revoked_restart"] is True and row["revoked"] is True
+
+
+def test_a_failed_update_of_a_release_nothing_revoked_still_clears_the_cue(tmp_path, monkeypatch, failing_update):
+    from provider_hub import service
+
+    installed = _plugin(version="1.0.0")
+    _stored_world(tmp_path, monkeypatch, [installed, _plugin(version="1.1.0")], installations=_row(installed))
+
+    service.apply_update(PLUGIN)
+
+    assert _rows()[PLUGIN]["pending_restart"] is False
