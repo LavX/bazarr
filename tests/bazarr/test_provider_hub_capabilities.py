@@ -412,6 +412,15 @@ class CaptchaProvider:
             sys.stdout.write(json.dumps(frame, separators=(",", ":")) + "\\n")
             sys.stdout.flush()
             time.sleep(60)
+        if mode == "leave":
+            # Return a result, leave a child that floods the shared stdout, and let the worker exit.
+            import os, subprocess, sys, threading
+            code = ("import sys, time\\ntime.sleep(1.5)\\n"
+                    "for _ in range(24):\\n    sys.stdout.write('x' * 1048576 + '\\\\n'); sys.stdout.flush()\\n"
+                    "time.sleep(120)")
+            child = subprocess.Popen([sys.executable, "-c", code])
+            threading.Timer(0.8, os._exit, [0]).start()
+            return [{"child": child.pid}]
         if mode == "noise":
             # A valid call, then output as fast as the pipe takes it while the host is busy answering.
             import __main__, json, sys
@@ -647,6 +656,35 @@ class TestOutputDuringACall:
         big = "y" * (20 * 1024 * 1024)
         result = client.request("search", {"config": {"mode": "bulk", "size": len(big)}}, timeout=30)
         assert len(result.payload["candidates"][0]["blob"]) == len(big)
+
+
+class TestAWorkerThatLeavesAChildBehind:
+    def test_the_child_is_cleaned_up_though_the_reader_was_waiting_on_a_full_queue(self, worker):
+        import os
+
+        client = worker({})
+        result = _search(client, {"mode": "leave"}, timeout=30)
+        child = result.payload["candidates"][0]["child"]
+        # The worker exits and its child fills the pipe, so the reader waits with the queue full.
+        deadline = time.monotonic() + 15
+        while time.monotonic() < deadline and client._stdout_queue.queued_bytes < 4 * 1024 * 1024:
+            time.sleep(0.1)
+        time.sleep(1.0)  # several of the reader's liveness checks pass
+        os.kill(child, 0)  # still there: nothing reaped the worker and cleaned up behind its back
+        client.stop()
+        deadline = time.monotonic() + 15
+        while time.monotonic() < deadline:
+            try:
+                os.kill(child, 0)
+            except ProcessLookupError:
+                return
+            try:
+                if os.waitpid(child, os.WNOHANG) != (0, 0):
+                    return
+            except ChildProcessError:
+                pass
+            time.sleep(0.1)
+        pytest.fail("the worker's child was left running")
 
 
 class TestBoundedChunks:

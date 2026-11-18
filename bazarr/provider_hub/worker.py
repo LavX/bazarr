@@ -829,7 +829,9 @@ class ProviderWorkerClient:
                     stdout_queue.put(_OVERSIZE_RESPONSE)
                     break
                 if isinstance(stdout_queue, _BoundedChunks):
-                    stdout_queue.put(chunk, alive=lambda: process.poll() is None)
+                    # Checked without reaping: collecting the exit status here would free the group id
+                    # before the code that ends the worker's descendants has signalled it.
+                    stdout_queue.put(chunk, alive=lambda: not ProviderWorkerClient._has_exited(process))
                 else:
                     stdout_queue.put(chunk)
                 if chunk.endswith("\n"):
