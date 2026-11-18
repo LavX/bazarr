@@ -68,6 +68,12 @@ export function openJobs(
 export function attentionCause(
   installation: PluginInstallation,
 ): string | null {
+  if (installation.revoked) {
+    return (
+      installation.last_error ??
+      "The official catalog revoked this version, so it will not start. Update it or remove it."
+    );
+  }
   if (installation.needs_repair) {
     return (
       installation.last_error ??

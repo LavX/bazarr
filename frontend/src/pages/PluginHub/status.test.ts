@@ -123,6 +123,20 @@ describe("the status badge precedence", () => {
     ).toBe("Why.");
     expect(attentionCause(base)).toBeNull();
   });
+
+  it("says a revoked release needs attention, switched on or off", () => {
+    const revoked = {
+      ...base,
+      revoked: true,
+      last_error:
+        "Version 1.0.0 of Example was revoked by the official catalog.",
+    };
+    expect(attentionCause(revoked)).toBe(revoked.last_error);
+    expect(attentionCause({ ...revoked, last_error: null })).toMatch(
+      /revoked this version/,
+    );
+    expect(pluginStatus(rowFor(revoked), openJobs([]))?.key).toBe("attention");
+  });
 });
 
 describe("the runtime line", () => {
