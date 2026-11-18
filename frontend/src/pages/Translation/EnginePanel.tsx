@@ -16,7 +16,6 @@ import type {
   TranslationNotice,
   TranslationState,
 } from "@/types/translation";
-import InstallConsent from "./InstallConsent";
 import {
   backendLabel,
   engineName,
@@ -25,6 +24,7 @@ import {
   orderedEngines,
   working,
 } from "./model";
+import { useEngineInstall } from "./useEngineInstall";
 import styles from "./Translation.module.scss";
 
 const NONE = "none";
@@ -158,8 +158,7 @@ const EnginePanel: FunctionComponent<EnginePanelProps> = ({
 }) => {
   const group = useId();
   const pointers = usePointerChoices();
-  const [installing, setInstalling] =
-    useState<TranslationAvailableEngine | null>(null);
+  const install = useEngineInstall(state);
   const engines = orderedEngines(state.instances);
   const available = [...(state.available_engines ?? [])].sort(
     (a, b) => Number(b.official ?? false) - Number(a.official ?? false),
@@ -212,8 +211,8 @@ const EnginePanel: FunctionComponent<EnginePanelProps> = ({
             {engine.plugin?.update_version && (
               <Link
                 className={styles.chip}
-                to="/subtitle-hub?tab=updates"
-                title={`Version ${engine.plugin.update_version} is available. Updates are installed in the Subtitle Hub.`}
+                to="/plugin-hub?tab=updates"
+                title={`Version ${engine.plugin.update_version} is available. Updates are installed in the Plugin Hub.`}
               >
                 <FontAwesomeIcon icon={faArrowUp} />
                 Update available
@@ -269,7 +268,7 @@ const EnginePanel: FunctionComponent<EnginePanelProps> = ({
               size="compact-sm"
               variant="light"
               aria-label={`Install ${engine.name}`}
-              onClick={() => setInstalling(engine)}
+              onClick={() => install.begin(engine)}
             >
               Install
             </Button>
@@ -355,11 +354,7 @@ const EnginePanel: FunctionComponent<EnginePanelProps> = ({
         allowDeselect={false}
         onChange={(next) => pointers.choose({ fallback_engine: toId(next) })}
       />
-      <InstallConsent
-        key={installing?.plugin_id ?? "none"}
-        engine={installing}
-        onClose={() => setInstalling(null)}
-      />
+      {install.dialog}
     </section>
   );
 };

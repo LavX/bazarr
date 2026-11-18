@@ -10,6 +10,7 @@ import {
   second,
   SECRET,
 } from "@/pages/Translation/fixtures";
+import { plainSummary } from "@/components/plugin-consent/fixtures";
 import { customRender, screen, waitFor, within } from "@/tests";
 import server from "@/tests/mocks/node";
 import type {
@@ -210,13 +211,28 @@ describe("TranslationStep", () => {
     expect(onBack).toHaveBeenCalledTimes(1);
   });
 
-  it("shows the install actions disabled, each with the reason, when nothing is installed", async () => {
+  it("opens the consent dialog from the install actions, and sends nothing before it is agreed to", async () => {
     serve(
       firstRun({
         instances: [],
         available_engines: [OFFICIAL_OFFER, GOOGLE_OFFER],
       }),
     );
+    server.use(
+      http.get("/api/plugins/catalog/consent", ({ request }) => {
+        record(
+          "get",
+          "consent",
+          Object.fromEntries(new URL(request.url).searchParams),
+        );
+        return HttpResponse.json(plainSummary);
+      }),
+      http.post("/api/plugins/installations", async ({ request }) => {
+        record("post", "install", await request.json());
+        return HttpResponse.json({ job_id: null }, { status: 202 });
+      }),
+    );
+    const user = userEvent.setup();
     customRender(<TranslationStep onNext={onNext} />);
 
     const official = await screen.findByRole("button", {
@@ -225,19 +241,78 @@ describe("TranslationStep", () => {
     const google = screen.getByRole("button", {
       name: "Install Google Translate",
     });
-    // Shown and not pressable, never hidden.
-    expect(official).toBeDisabled();
-    expect(google).toBeDisabled();
-    // The reason is on the page and tied to its button.
-    for (const button of [official, google]) {
-      expect(button).toHaveAccessibleDescription(
-        /not available yet\. Install it in the Subtitle Hub/,
-      );
-    }
+    // Both can be pressed, and neither carries a reason to wait.
+    expect(official).toBeEnabled();
+    expect(google).toBeEnabled();
+    expect(google).not.toHaveAccessibleDescription();
     // Nothing that sends or saves is offered while there is no engine.
     expect(
       screen.queryByRole("button", { name: "Start translating" }),
     ).not.toBeInTheDocument();
+
+    await user.click(google);
+    const ask = await screen.findByRole("dialog", {
+      name: "Install Google Translate?",
+    });
+    await within(ask).findByText("Where it comes from");
+    expect(calls).toEqual([
+      {
+        method: "get",
+        path: "consent",
+        body: { source: "official", id: "google_translate", version: "1.0.0" },
+      },
+    ]);
+    await user.click(within(ask).getByRole("button", { name: "Install" }));
+    await waitFor(() =>
+      expect(calls.filter((call) => call.path === "install")).toEqual([
+        {
+          method: "post",
+          path: "install",
+          body: {
+            source: "official",
+            id: "google_translate",
+            version: "1.0.0",
+            consent: plainSummary.digest,
+          },
+        },
+      ]),
+    );
+  });
+
+  it("shows the server's refusal in the dialog and installs nothing when the set changed", async () => {
+    serve(
+      firstRun({
+        instances: [],
+        available_engines: [OFFICIAL_OFFER, GOOGLE_OFFER],
+      }),
+    );
+    server.use(
+      http.get("/api/plugins/catalog/consent", () =>
+        HttpResponse.json(plainSummary),
+      ),
+      http.post("/api/plugins/installations", () =>
+        HttpResponse.text(
+          "What this install would add has changed since it was shown to you. Review it again before you agree.",
+          { status: 409 },
+        ),
+      ),
+    );
+    const user = userEvent.setup();
+    customRender(<TranslationStep onNext={onNext} />);
+
+    await user.click(
+      await screen.findByRole("button", { name: "Install Google Translate" }),
+    );
+    const ask = await screen.findByRole("dialog", {
+      name: "Install Google Translate?",
+    });
+    const agree = await within(ask).findByRole("button", { name: "Install" });
+    await waitFor(() => expect(agree).toBeEnabled());
+    await user.click(agree);
+    expect(
+      await within(ask).findByText(/has changed since it was shown to you/),
+    ).toBeVisible();
+    expect(onNext).not.toHaveBeenCalled();
   });
 
   it("says Google Translate is not in the catalog while the catalog has no entry for it", async () => {

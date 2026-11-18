@@ -165,7 +165,7 @@ export function engineStatus(engine: TranslationEngine): Status {
     return {
       tone: "danger",
       label: "Plugin not running",
-      next: "Its plugin is not installed or not running. Repair or reinstall it in the Subtitle Hub.",
+      next: "Its plugin is not installed or not running. Repair or reinstall it in the Plugin Hub.",
     };
   }
   // An engine that is off takes no job whatever else is true of it, so this comes before what it lacks.

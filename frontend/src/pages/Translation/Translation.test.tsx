@@ -3,6 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { http, HttpResponse } from "msw";
 import { beforeEach, describe, expect, it } from "vitest";
 import queryClient from "@/apis/queries";
+import { plainSummary } from "@/components/plugin-consent/fixtures";
 import { act, customRender, screen, waitFor, within } from "@/tests";
 import server from "@/tests/mocks/node";
 import type {
@@ -207,7 +208,7 @@ describe("Translation page", () => {
     };
     await showPage();
     const chip = screen.getByRole("link", { name: "Update available" });
-    expect(chip).toHaveAttribute("href", "/subtitle-hub?tab=updates");
+    expect(chip).toHaveAttribute("href", "/plugin-hub?tab=updates");
     expect(
       screen.queryByRole("button", { name: /^Update/ }),
     ).not.toBeInTheDocument();
@@ -1840,9 +1841,21 @@ describe("Translation page, first run", () => {
 
   it("installs a free engine in place, after saying what leaves the machine", async () => {
     server.use(
-      http.post("/api/provider-hub/installations", async ({ request }) => {
+      http.get("/api/plugins/catalog/consent", ({ request }) => {
+        record(
+          "get",
+          "consent",
+          Object.fromEntries(new URL(request.url).searchParams),
+        );
+        return HttpResponse.json({
+          ...plainSummary,
+          destinations: ["https://translate.googleapis.com"],
+          permissions: [{ name: "network", mark: "enforced" }],
+        });
+      }),
+      http.post("/api/plugins/installations", async ({ request }) => {
         record("post", "install", await request.json());
-        return HttpResponse.json({ job_id: null });
+        return HttpResponse.json({ job_id: null }, { status: 202 });
       }),
     );
     const user = userEvent.setup();
@@ -1854,19 +1867,28 @@ describe("Translation page, first run", () => {
       name: "Install Google Translate?",
     });
     expect(
-      within(ask).getByText("https://translate.googleapis.com"),
-    ).toBeVisible();
-    expect(calls).toHaveLength(0);
-    await user.click(within(ask).getByRole("button", { name: "Install" }));
+      await within(ask).findByText("https://translate.googleapis.com"),
+    ).toBeInTheDocument();
+    // Only the read of what the install adds has gone out.
+    expect(calls.map((call) => call.path)).toEqual(["consent"]);
+    expect(calls[0].body).toEqual({
+      source: "official",
+      id: "google_translate",
+      version: "1.0.0",
+    });
+    const agree = within(ask).getByRole("button", { name: "Install" });
+    await waitFor(() => expect(agree).toBeEnabled());
+    await user.click(agree);
     await waitFor(() =>
-      expect(calls).toEqual([
+      expect(calls.filter((call) => call.path === "install")).toEqual([
         {
           method: "post",
           path: "install",
           body: {
             source: "official",
-            provider_id: "google_translate",
+            id: "google_translate",
             version: "1.0.0",
+            consent: plainSummary.digest,
           },
         },
       ]),

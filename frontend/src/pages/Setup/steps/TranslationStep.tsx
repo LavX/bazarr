@@ -17,6 +17,8 @@ import {
   orderedEngines,
 } from "@/pages/Translation/model";
 import { KeyStart } from "@/pages/Translation/QuickStart";
+import { useEngineInstall } from "@/pages/Translation/useEngineInstall";
+import type { TranslationAvailableEngine } from "@/types/translation";
 import { NOTHING_WRITTEN, type WizardStepProps } from "./types";
 import styles from "@/pages/Translation/Translation.module.scss";
 
@@ -24,29 +26,35 @@ import styles from "@/pages/Translation/Translation.module.scss";
 const GOOGLE_PLUGIN_ID = "google_translate";
 
 /**
- * Why an install button on this step cannot be pressed yet. Installing a plugin asks for consent to
- * what leaves the machine, and that dialog belongs to the Subtitle Hub, so setup shows the button
- * and the reason, never hides it.
+ * An install action. With an offer from the catalog it opens the consent dialog, the one the Plugin
+ * Hub shows. Without one it is shown and cannot be pressed, with the reason read out beside it, never
+ * hidden.
  */
-const INSTALL_HELD =
-  "Installing a plugin from setup is not available yet. Install it in the Subtitle Hub, then come back to this step.";
-
-/** An install action that is shown and cannot be pressed, with the reason read out beside it. */
-const HeldInstall: FC<{ name: string; reason: string }> = ({
-  name,
-  reason,
-}) => {
+const InstallAction: FC<{
+  name: string;
+  offer: TranslationAvailableEngine | null;
+  reason: string;
+  onInstall: (engine: TranslationAvailableEngine) => void;
+  locked: boolean;
+}> = ({ name, offer, reason, onInstall, locked }) => {
   const id = `install-held-${name.replace(/\W+/g, "-").toLowerCase()}`;
   return (
     <div className={styles.startForm}>
       <div>
-        <Button variant="default" disabled aria-describedby={id}>
+        <Button
+          variant="default"
+          disabled={offer === null || locked}
+          aria-describedby={offer === null ? id : undefined}
+          onClick={() => offer && onInstall(offer)}
+        >
           Install {name}
         </Button>
       </div>
-      <p className={styles.startOptionText} id={id}>
-        {reason}
-      </p>
+      {offer === null && (
+        <p className={styles.startOptionText} id={id}>
+          {reason}
+        </p>
+      )}
     </div>
   );
 };
@@ -58,19 +66,23 @@ const HeldInstall: FC<{ name: string; reason: string }> = ({
  * stored, switched on and selected exactly as it would be there. The step it replaces is untouched
  * and still runs while the new translator is off.
  *
- * Skipping is the shell's control. Installing a plugin is not done here: the button is shown with its
- * reason, and an engine that is already installed works in full.
+ * Skipping is the shell's control. Installing an engine opens the same consent dialog as the Plugin
+ * Hub: it shows what the install adds and sends its digest. An engine the catalog does not list gets
+ * its button disabled, with the reason beside it.
  */
 const TranslationStep: FC<WizardStepProps> = ({ onNext, onBack }) => {
   const state = useTranslationState();
   const pointers = usePointersMutation();
+  const install = useEngineInstall(state.data);
   const [starting, setStarting] = useState(false);
   // A start that has saved the back end and not finished (the engine would not turn on, or could not be
   // selected) keeps the key form up, with the reason and the way to try again, as the page's first run does.
   const [pinned, setPinned] = useState(false);
   // The shell holds Back, the skip and Set up later until a start has gone through: leaving in the
   // middle would drop the answer, and with it the reason a step failed.
-  useReportStepBusy(starting || pointers.isPending);
+  useReportStepBusy(
+    starting || pointers.isPending || install.installing !== null,
+  );
 
   const data = state.data;
   const engines = data ? orderedEngines(data.instances) : [];
@@ -249,13 +261,12 @@ const TranslationStep: FC<WizardStepProps> = ({ onNext, onBack }) => {
                 {engineStatus(official).next}
               </p>
             ) : (
-              <HeldInstall
+              <InstallAction
                 name={officialOffer?.name ?? "AI Subtitle Translator"}
-                reason={
-                  officialOffer
-                    ? INSTALL_HELD
-                    : "It is not installed, and the plugin catalog does not list it right now. Refresh the catalog in the Subtitle Hub, then come back."
-                }
+                offer={officialOffer}
+                reason="It is not installed, and the plugin catalog does not list it right now. Refresh the catalog in the Plugin Hub, then come back."
+                onInstall={install.begin}
+                locked={busy}
               />
             )}
           </section>
@@ -272,13 +283,12 @@ const TranslationStep: FC<WizardStepProps> = ({ onNext, onBack }) => {
                   {googleOffer?.description ||
                     "Free, with no key, and plainer translations than the AI engine."}
                 </p>
-                <HeldInstall
+                <InstallAction
                   name={googleOffer?.name ?? "Google Translate"}
-                  reason={
-                    googleOffer
-                      ? INSTALL_HELD
-                      : "It is not in the plugin catalog yet. When it is, you can install it from the Subtitle Hub."
-                  }
+                  offer={googleOffer}
+                  reason="It is not in the plugin catalog yet. When it is, you can install it from here."
+                  onInstall={install.begin}
+                  locked={busy}
                 />
               </>
             )}
@@ -291,6 +301,7 @@ const TranslationStep: FC<WizardStepProps> = ({ onNext, onBack }) => {
           ))}
         </div>
       )}
+      {install.dialog}
     </StepLayout>
   );
 };
