@@ -2,6 +2,7 @@
 import userEvent from "@testing-library/user-event";
 import { http, HttpResponse } from "msw";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { plainSummary } from "@/components/plugin-consent/fixtures";
 import {
   connection,
   engine,
@@ -10,7 +11,6 @@ import {
   second,
   SECRET,
 } from "@/pages/Translation/fixtures";
-import { plainSummary } from "@/components/plugin-consent/fixtures";
 import { customRender, screen, waitFor, within } from "@/tests";
 import server from "@/tests/mocks/node";
 import type {
@@ -313,6 +313,91 @@ describe("TranslationStep", () => {
       await within(ask).findByText(/has changed since it was shown to you/),
     ).toBeVisible();
     expect(onNext).not.toHaveBeenCalled();
+  });
+
+  it("holds the step, its Back included, while the consent dialog is open, and lets go once it is closed", async () => {
+    serve(
+      firstRun({
+        instances: [],
+        available_engines: [OFFICIAL_OFFER, GOOGLE_OFFER],
+      }),
+    );
+    server.use(
+      http.get("/api/plugins/catalog/consent", () =>
+        HttpResponse.json(plainSummary),
+      ),
+      http.post("/api/plugins/installations", () =>
+        HttpResponse.text("What this install would add has changed.", {
+          status: 409,
+        }),
+      ),
+    );
+    const user = userEvent.setup();
+    customRender(<TranslationStep onNext={onNext} onBack={onBack} />);
+
+    await user.click(
+      await screen.findByRole("button", { name: "Install Google Translate" }),
+    );
+    const ask = await screen.findByRole("dialog", {
+      name: "Install Google Translate?",
+    });
+    const back = screen.getByRole("button", { name: "Back", hidden: true });
+    expect(back).toBeDisabled();
+    // A refusal is in the dialog, and the step stays held while it is there to be read.
+    const agree = await within(ask).findByRole("button", { name: "Install" });
+    await waitFor(() => expect(agree).toBeEnabled());
+    await user.click(agree);
+    expect(await within(ask).findByText(/has changed/)).toBeInTheDocument();
+    expect(back).toBeDisabled();
+    await user.click(within(ask).getByRole("button", { name: "Cancel" }));
+    await waitFor(() => expect(back).toBeEnabled());
+  });
+
+  it("says an engine that was installed is waiting for a restart, with the restart prompt, not that its plugin is broken", async () => {
+    serve(
+      firstRun({
+        instances: [
+          aiEngine({
+            plugin: {
+              name: "AI Subtitle Translator",
+              version: "2.2.0",
+              active: false,
+            },
+          }),
+        ],
+        available_engines: [{ ...GOOGLE_OFFER }],
+      }),
+    );
+    server.use(
+      http.get("/api/plugins/installations", () =>
+        HttpResponse.json({
+          data: [
+            {
+              provider_id: "ai_translator",
+              kind: "translator",
+              state: "staged",
+              needs_restart: true,
+            },
+            {
+              provider_id: "google_translate",
+              kind: "translator",
+              state: "staged",
+              needs_restart: true,
+            },
+          ],
+        }),
+      ),
+    );
+    customRender(<TranslationStep onNext={onNext} />);
+
+    expect(
+      await screen.findByText("2 plugin changes are waiting for a restart."),
+    ).toBeVisible();
+    expect(screen.getAllByText("Pending restart").length).toBeGreaterThan(1);
+    expect(screen.queryByText("Plugin not running")).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Install Google Translate" }),
+    ).not.toBeInTheDocument();
   });
 
   it("says Google Translate is not in the catalog while the catalog has no entry for it", async () => {

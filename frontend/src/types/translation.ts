@@ -37,6 +37,8 @@ export interface TranslationConnection {
 
 export interface TranslationEngine {
   id: number;
+  /** Set by the page, not the server: the plugin is installed and waits for a restart to start. */
+  awaiting_restart?: boolean;
   plugin_id: string;
   name: string;
   official: boolean;
@@ -80,6 +82,8 @@ export interface TranslationAvailableEngine {
   free?: boolean;
   /** The addresses the engine sends subtitle text to, shown before installing. */
   destinations?: string[];
+  /** Set by the page, not the server: it is installed and waits for a restart to start. */
+  awaiting_restart?: boolean;
 }
 
 /**

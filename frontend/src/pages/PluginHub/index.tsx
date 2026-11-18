@@ -33,6 +33,7 @@ import {
   usePluginRemove,
   usePluginRepair,
   usePluginSetEnabled,
+  usePluginUpdatesNeedingConsent,
 } from "@/apis/hooks/plugins";
 import { useAppTitle } from "@/apis/hooks/site";
 import { useSystemStatus } from "@/apis/hooks/system";
@@ -239,6 +240,12 @@ const PluginHubView: FunctionComponent = () => {
     [allWaiting, filter],
   );
   const updateCount = allUpdates.length + allWaiting.length;
+  // An available update is held for the person's agreement when what it adds needs consent. Only what the
+  // server says is shown; the step after staging that asks again for an address the plugin works out for
+  // itself is not reported yet, so it has no state here.
+  const needsConsent = usePluginUpdatesNeedingConsent(
+    useMemo(() => allUpdates.map((row) => row.id), [allUpdates]),
+  );
   // Every change the server says needs a restart, whatever the plugin's type or the filter in use.
   const restartCount = useMemo(
     () => installed.filter((item) => item.needs_restart === true).length,
@@ -386,6 +393,7 @@ const PluginHubView: FunctionComponent = () => {
     onInstall: install,
     onUpdate: update,
     updating: flow.updating,
+    needsConsent,
     openJobs: open,
     working,
     dismissing: dismissReview.isPending
@@ -559,6 +567,7 @@ const PluginHubView: FunctionComponent = () => {
             rows={updates}
             waiting={waiting}
             filter={filter}
+            held={updates.filter((row) => needsConsent.has(row.id)).length}
             elsewhere={
               allUpdates.length -
               updates.length +

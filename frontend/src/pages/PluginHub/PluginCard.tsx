@@ -43,6 +43,8 @@ export interface PluginCardProps {
   elsewhere: boolean;
   /** The review notice of this plugin is being dismissed. */
   dismissing: boolean;
+  /** Its update is held until the person agrees to what it adds. */
+  needsConsent: boolean;
   onToggle: (row: PluginRow) => void;
   onRepair: (row: PluginRow) => void;
   onLog: (row: PluginRow) => void;
@@ -83,7 +85,7 @@ const Action: FunctionComponent<PluginCardProps> = ({
   if (installation?.needs_restart) {
     return (
       <Tooltip label="Restart Bazarr+ to finish this change">
-        <span className={styles.hubCardPendingText}>Pending restart</span>
+        <span className={styles.hubCardPendingText}>Awaiting restart</span>
       </Tooltip>
     );
   }
@@ -315,6 +317,12 @@ export const PluginCard: FunctionComponent<PluginCardProps> = (props) => {
             ) : (
               <PluginStatusBadge status={status} />
             ))}
+          {props.needsConsent && (
+            <span className={`${styles.pill} ${styles["tone-warning"]}`}>
+              <span className={styles.pillDot} aria-hidden="true" />
+              Needs your consent
+            </span>
+          )}
           <TrustBadge trusted={row.trusted} />
         </>
       }

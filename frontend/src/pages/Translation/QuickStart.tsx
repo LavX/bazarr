@@ -306,11 +306,11 @@ const QuickStart: FunctionComponent<QuickStartProps> = ({
               </div>
             </div>
           )
-        ) : officialOffer ? (
+        ) : officialOffer && !officialOffer.awaiting_restart ? (
           <div className={styles.startForm}>
             <div>
               <Button
-                disabled={busy}
+                disabled={busy || install.busy}
                 onClick={() => install.begin(officialOffer)}
               >
                 Install {officialOffer.name}
@@ -325,6 +325,12 @@ const QuickStart: FunctionComponent<QuickStartProps> = ({
               label={engineStatus(official).label}
             />{" "}
             {engineStatus(official).next}
+          </p>
+        ) : officialOffer ? (
+          // Installed, and waiting for the restart that starts it.
+          <p className={styles.startOptionText}>
+            <StatusBadge tone="warning" label="Pending restart" /> It is
+            installed. Restart Bazarr+ to start it.
           </p>
         ) : (
           <p className={styles.startOptionText}>
@@ -397,13 +403,17 @@ const QuickStart: FunctionComponent<QuickStartProps> = ({
                   "Free, with no key. Plainer translations than the AI engine."}
               </p>
             </div>
-            <Button
-              variant="default"
-              disabled={busy}
-              onClick={() => install.begin(engine)}
-            >
-              Install {engine.name}
-            </Button>
+            {engine.awaiting_restart ? (
+              <StatusBadge tone="warning" label="Pending restart" />
+            ) : (
+              <Button
+                variant="default"
+                disabled={busy || install.busy}
+                onClick={() => install.begin(engine)}
+              >
+                Install {engine.name}
+              </Button>
+            )}
           </div>
         </section>
       ))}

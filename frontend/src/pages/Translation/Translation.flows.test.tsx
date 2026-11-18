@@ -3,11 +3,11 @@ import userEvent from "@testing-library/user-event";
 import { http, HttpResponse } from "msw";
 import { beforeEach, describe, expect, it } from "vitest";
 import queryClient from "@/apis/queries";
+import { plainSummary } from "@/components/plugin-consent/fixtures";
 import {
   forgetPasswordConfirmation,
   markPasswordConfirmed,
 } from "@/modules/passwordConfirm";
-import { plainSummary } from "@/components/plugin-consent/fixtures";
 import { customRender, screen, waitFor, within } from "@/tests";
 import server from "@/tests/mocks/node";
 import type {
@@ -2215,6 +2215,70 @@ describe("Translation page, installing an engine in place", () => {
         within(ask).getByRole("button", { name: "Install" }),
       ).toBeEnabled(),
     );
+  });
+});
+
+describe("Translation page, an engine installed and waiting for a restart", () => {
+  it("shows the restart prompt and a pending status, not a plugin that is broken", async () => {
+    state = {
+      ...state,
+      instances: [
+        second,
+        engine({
+          plugin: {
+            name: "AI Subtitle Translator",
+            version: "2.2.0",
+            active: false,
+          },
+        }),
+      ],
+    };
+    server.use(
+      http.get("/api/plugins/installations", () =>
+        HttpResponse.json({
+          data: [
+            {
+              provider_id: "ai_translator",
+              kind: "translator",
+              state: "staged",
+              needs_restart: true,
+            },
+          ],
+        }),
+      ),
+    );
+    await showPage();
+    expect(
+      await screen.findByText("1 plugin change is waiting for a restart."),
+    ).toBeVisible();
+    expect(screen.getAllByText("Pending restart").length).toBeGreaterThan(0);
+    expect(screen.queryByText("Plugin not running")).not.toBeInTheDocument();
+  });
+
+  it("keeps the repair hint for a plugin the server does not say is waiting", async () => {
+    state = {
+      ...state,
+      instances: [
+        second,
+        engine({
+          plugin: {
+            name: "AI Subtitle Translator",
+            version: "2.2.0",
+            active: false,
+          },
+        }),
+      ],
+    };
+    server.use(
+      http.get("/api/plugins/installations", () =>
+        HttpResponse.json({ data: [] }),
+      ),
+    );
+    await showPage();
+    expect(
+      (await screen.findAllByText("Plugin not running")).length,
+    ).toBeGreaterThan(0);
+    expect(screen.queryByText(/waiting for a restart/)).not.toBeInTheDocument();
   });
 });
 

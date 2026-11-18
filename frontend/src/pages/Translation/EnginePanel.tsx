@@ -264,14 +264,19 @@ const EnginePanel: FunctionComponent<EnginePanelProps> = ({
             Install it to use it.
           </p>
           <div className={styles.engineMeta}>
-            <Button
-              size="compact-sm"
-              variant="light"
-              aria-label={`Install ${engine.name}`}
-              onClick={() => install.begin(engine)}
-            >
-              Install
-            </Button>
+            {engine.awaiting_restart ? (
+              <StatusBadge tone="warning" label="Pending restart" />
+            ) : (
+              <Button
+                size="compact-sm"
+                variant="light"
+                disabled={install.busy}
+                aria-label={`Install ${engine.name}`}
+                onClick={() => install.begin(engine)}
+              >
+                Install
+              </Button>
+            )}
             <span className={styles.version}>v{engine.version}</span>
           </div>
         </div>

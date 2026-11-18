@@ -13,6 +13,7 @@ import {
   useTranslationState,
   useTranslationSummary,
 } from "@/apis/hooks/translation";
+import { RestartBanner } from "@/components/hub/RestartBanner";
 import type {
   TranslationCapability,
   TranslationState,
@@ -24,6 +25,7 @@ import EngineSetup from "./EngineSetup";
 import { isFirstRun, orderedEngines } from "./model";
 import QuickStart from "./QuickStart";
 import StatusBand from "./StatusBand";
+import { useRestartAware } from "./useEngineInstall";
 import styles from "./Translation.module.scss";
 
 type TabKey = "engine" | "defaults" | "activity";
@@ -93,7 +95,14 @@ const EngineTab: FunctionComponent<{
 /** Translation: the engine, its back ends, the defaults and what has been translated. */
 const TranslationView: FunctionComponent = () => {
   useDocumentTitle(`Translation - ${useAppTitle()}`);
-  const { data, isLoading, error, refetch, isFetching } = useTranslationState();
+  const {
+    data: loaded,
+    isLoading,
+    error,
+    refetch,
+    isFetching,
+  } = useTranslationState();
+  const { state: data, waiting } = useRestartAware(loaded);
   // The server says what it can do beyond the settings. Nothing is asked of, or shown for, a route it
   // does not list.
   const can = (capability: TranslationCapability) =>
@@ -175,6 +184,7 @@ const TranslationView: FunctionComponent = () => {
   return (
     <Container fluid px="md" className={styles.page}>
       {refreshFailed}
+      <RestartBanner count={waiting} />
       <StatusBand state={data} summary={summary.data} />
       <Tabs
         value={tab}

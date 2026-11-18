@@ -524,7 +524,7 @@ describe("installing and updating from a card", () => {
     await waitFor(() =>
       expect(calls.map((call) => call.path)).toContain("apply"),
     );
-    expect(calls.at(-1)?.body).toEqual({
+    expect(calls.findLast((call) => call.path === "apply")?.body).toEqual({
       id: "ai_translator",
       consent: "sha256:quiet",
     });
@@ -694,9 +694,9 @@ describe("updates waiting for a restart, and the restart prompt", () => {
     expect(await within(tab).findByLabelText("1 pending update")).toBeVisible();
     await userEvent.click(tab);
     expect(
-      await screen.findByRole("heading", { name: "Waiting for a restart" }),
+      await screen.findByRole("heading", { name: "Awaiting restart" }),
     ).toBeVisible();
-    expect(screen.getByText("Pending restart")).toBeVisible();
+    expect(screen.getAllByText("Awaiting restart").length).toBeGreaterThan(1);
     // Nothing is offered on top of it, and the tab does not claim everything is current.
     expect(
       screen.queryByRole("button", { name: /^Update / }),
@@ -736,7 +736,7 @@ describe("updates waiting for a restart, and the restart prompt", () => {
     showPage("?tab=installed");
     await card("AI Subtitle Translator");
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
-    expect(screen.queryByText("Pending restart")).not.toBeInTheDocument();
+    expect(screen.queryByText("Awaiting restart")).not.toBeInTheDocument();
   });
 });
 
@@ -765,5 +765,51 @@ describe("the Activity tab's failure copy", () => {
       screen.getByText("Check the proxy setting in Settings > General."),
     ).toBeInTheDocument();
     expect(screen.queryByText(/pip install failed/)).not.toBeInTheDocument();
+  });
+});
+
+describe("the two states an update can wait in", () => {
+  it("marks an update on offer that needs the person's consent, and none that does not", async () => {
+    installed = [installedTranslator];
+    showPage("?tab=updates");
+    expect(await screen.findByText("Needs your consent")).toBeVisible();
+    expect(
+      screen.getByText(/1 available, 1 that needs your consent/),
+    ).toBeVisible();
+    expect(screen.queryByText(/awaiting restart/)).not.toBeInTheDocument();
+  });
+
+  it("does not mark an update whose summary adds nothing", async () => {
+    server.use(
+      http.get("/api/plugins/updates/consent", () =>
+        HttpResponse.json(quietDelta),
+      ),
+    );
+    installed = [installedTranslator];
+    showPage("?tab=updates");
+    expect(
+      await screen.findByRole("button", {
+        name: "Update AI Subtitle Translator to 2.0.0",
+      }),
+    ).toBeVisible();
+    expect(screen.queryByText("Needs your consent")).not.toBeInTheDocument();
+    expect(screen.getByText(/^1 available\./)).toBeVisible();
+  });
+
+  it("keeps a staged update as awaiting restart, never as needing consent", async () => {
+    installed = [
+      {
+        ...installedTranslator,
+        state: "staged",
+        staged_version: "2.0.0",
+        needs_restart: true,
+      },
+    ];
+    showPage("?tab=updates");
+    expect(
+      await screen.findByRole("heading", { name: "Awaiting restart" }),
+    ).toBeVisible();
+    expect(screen.queryByText("Needs your consent")).not.toBeInTheDocument();
+    expect(screen.getByText(/0 available, 1 awaiting restart/)).toBeVisible();
   });
 });

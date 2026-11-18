@@ -161,6 +161,13 @@ export function backendHold(
 
 /** Whether an engine can take a job, and when it cannot, the reason and the next step. */
 export function engineStatus(engine: TranslationEngine): Status {
+  if (!canRun(engine) && engine.awaiting_restart) {
+    return {
+      tone: "warning",
+      label: "Pending restart",
+      next: "It is installed. Restart Bazarr+ to start it.",
+    };
+  }
   if (!canRun(engine)) {
     return {
       tone: "danger",

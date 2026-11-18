@@ -4,6 +4,7 @@ import {
   usePointersMutation,
   useTranslationState,
 } from "@/apis/hooks/translation";
+import { RestartBanner } from "@/components/hub/RestartBanner";
 import { StatusBadge } from "@/components/hub/StatusBadge";
 import StepLayout from "@/pages/Setup/StepLayout";
 import { useReportStepBusy } from "@/pages/Setup/useStepBusy";
@@ -17,7 +18,10 @@ import {
   orderedEngines,
 } from "@/pages/Translation/model";
 import { KeyStart } from "@/pages/Translation/QuickStart";
-import { useEngineInstall } from "@/pages/Translation/useEngineInstall";
+import {
+  useEngineInstall,
+  useRestartAware,
+} from "@/pages/Translation/useEngineInstall";
 import type { TranslationAvailableEngine } from "@/types/translation";
 import { NOTHING_WRITTEN, type WizardStepProps } from "./types";
 import styles from "@/pages/Translation/Translation.module.scss";
@@ -37,6 +41,14 @@ const InstallAction: FC<{
   onInstall: (engine: TranslationAvailableEngine) => void;
   locked: boolean;
 }> = ({ name, offer, reason, onInstall, locked }) => {
+  if (offer?.awaiting_restart) {
+    return (
+      <p className={styles.startOptionText}>
+        <StatusBadge tone="warning" label="Pending restart" /> {name} is
+        installed. Restart Bazarr+ to start it.
+      </p>
+    );
+  }
   const id = `install-held-${name.replace(/\W+/g, "-").toLowerCase()}`;
   return (
     <div className={styles.startForm}>
@@ -71,7 +83,9 @@ const InstallAction: FC<{
  * its button disabled, with the reason beside it.
  */
 const TranslationStep: FC<WizardStepProps> = ({ onNext, onBack }) => {
-  const state = useTranslationState();
+  const loaded = useTranslationState();
+  const aware = useRestartAware(loaded.data);
+  const state = { ...loaded, data: aware.state };
   const pointers = usePointersMutation();
   const install = useEngineInstall(state.data);
   const [starting, setStarting] = useState(false);
@@ -80,9 +94,7 @@ const TranslationStep: FC<WizardStepProps> = ({ onNext, onBack }) => {
   const [pinned, setPinned] = useState(false);
   // The shell holds Back, the skip and Set up later until a start has gone through: leaving in the
   // middle would drop the answer, and with it the reason a step failed.
-  useReportStepBusy(
-    starting || pointers.isPending || install.installing !== null,
-  );
+  useReportStepBusy(starting || pointers.isPending || install.busy);
 
   const data = state.data;
   const engines = data ? orderedEngines(data.instances) : [];
@@ -101,7 +113,7 @@ const TranslationStep: FC<WizardStepProps> = ({ onNext, onBack }) => {
     (item) =>
       !item.official && !item.legacy && item.plugin_id !== GOOGLE_PLUGIN_ID,
   );
-  const busy = starting || pointers.isPending;
+  const busy = starting || pointers.isPending || install.busy;
   // Translation is already set up (an engine is selected, or a back end is saved): the step says so and
   // offers nothing that would add a second back end, as typing the key again after a Back would.
   const saved = data !== undefined && !isFirstRun(data);
@@ -147,6 +159,7 @@ const TranslationStep: FC<WizardStepProps> = ({ onNext, onBack }) => {
     <StepLayout
       title="Subtitle translation"
       layout="stacked"
+      aside={<RestartBanner count={aware.waiting} />}
       description="When no subtitle exists in your language, Bazarr+ can translate one from another language. Pick what does the translating. You can change all of it later on the Translation page."
       actions={
         <Stack gap="sm">
