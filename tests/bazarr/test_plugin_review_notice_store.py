@@ -74,7 +74,7 @@ def test_kept_data_goes_back_only_to_the_same_plugin_from_the_same_source_and_ki
     kind = _Kind()
     monkeypatch.setattr(service, "get_kind", lambda name: kind)
     _removal(service, kind, "engine", True)
-    assert load_state()["kept_data"]["engine"] == {"source_id": "official", "kind": "translator", "config": None}
+    assert load_state()["kept_data"]["engine"] == {"source_id": "official", "origin": None, "kind": "translator", "config": None}
 
     assert service.claim_kept_data("engine", "official", "translator") is True
     # Handed over: nothing discarded, the owner stays on record until a removal rewrites it.
