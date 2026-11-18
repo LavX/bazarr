@@ -6,6 +6,7 @@ import logging
 import json
 import sys
 import threading
+import weakref
 import time
 
 from pathlib import Path
@@ -84,6 +85,22 @@ def _global_worker_timeout():
 _PROXY_LOCK = threading.Lock()
 # Signalled each time an admitted operation ends, for the drain that waits on them.
 _PROXY_OPERATIONS_ENDED = threading.Condition(_PROXY_LOCK)
+
+
+# The workers that hold a host capability, by provider id, so a withdrawn trust can take it back at once.
+_HOST_CALL_CLIENTS: dict[str, "weakref.WeakSet"] = {}
+
+
+def revoke_untrusted_host_calls() -> None:
+    """Take the host capabilities back from every running worker whose plugin is no longer trusted."""
+    from .capabilities import live_trust
+
+    with _PROXY_LOCK:
+        held = {provider_id: list(clients) for provider_id, clients in _HOST_CALL_CLIENTS.items()}
+    for provider_id, clients in held.items():
+        if clients and not live_trust(provider_id):
+            for client in clients:
+                client.revoke_host_calls()
 
 
 class HubProxyProvider(Provider):
@@ -239,13 +256,14 @@ class HubProxyProvider(Provider):
             runner = Path(__file__).with_name("worker_runner.py")
             from types import SimpleNamespace
 
-            from .capabilities import host_call_handlers
+            from .capabilities import host_call_handlers, live_trust
 
             # What the plugin may ask the host for while it serves a request. The grant follows the
             # host's own trust record of the installation, never the manifest's word for itself.
             host_calls = host_call_handlers(SimpleNamespace(
+                provider_id=self.provider_name,
                 manifest=getattr(getattr(self.__class__, "manifest", None), "raw", None),
-                trusted=getattr(self.__class__, "installation_trusted", False)))
+                trusted=live_trust(self.provider_name)))
             self.worker_client = ProviderWorkerClient(
                 worker_command(python_path, runner),
                 cwd=bundle_path,
@@ -258,6 +276,8 @@ class HubProxyProvider(Provider):
                 before_start=self._verify_bundle_before_start,
                 host_calls=host_calls,
             )
+            if host_calls:
+                _HOST_CALL_CLIENTS.setdefault(self.provider_name, weakref.WeakSet()).add(self.worker_client)
             return self.worker_client
 
     def _verify_bundle_before_start(self) -> None:
@@ -433,7 +453,6 @@ def _make_provider_class(manifest, worker_client=None, installation=None):
     if worker_client is not None:
         attrs["worker_client"] = worker_client
     if installation is not None:
-        attrs["installation_trusted"] = getattr(installation, "trusted", False) is True
         if installation.active_path:
             bundle = validated_bundle_path(provider_hub_dir(), installation.active_path)
             if bundle is None:

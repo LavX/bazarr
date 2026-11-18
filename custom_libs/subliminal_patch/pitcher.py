@@ -155,7 +155,10 @@ class AntiCaptchaProxyLessPitcher(Pitcher):
         self.is_invisible = is_invisible
 
     def get_client(self):
-        return AnticaptchaClient(self.client_key, self.language_pool, self.host, self.use_ssl)
+        client = AnticaptchaClient(self.client_key, self.language_pool, self.host, self.use_ssl)
+        # Each request to the vendor ends by the deadline too, not only the waits between them.
+        client.response_timeout = self._capped(getattr(client, "response_timeout", 5))
+        return client
 
     def get_job(self):
         task = NoCaptchaTaskProxylessTask(website_url=self.website_url, website_key=self.website_key,

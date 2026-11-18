@@ -335,9 +335,9 @@ class TestASolveEndsWithItsRequest:
             captcha.solve_call(dict(RECAPTCHA), 0.4, cancelled, settings=settings)
         assert raised.value.code == "timeout" and time.monotonic() - started < 5
         assert cancelled.is_set()
-        # Not retried: one paid task, and both slots are free again.
+        # Not retried: one paid task. The solver thread ends once it sees the cancel, and gives its slot back.
         assert vendors["tasks"] == 1
-        slots = [captcha._slots.acquire(blocking=False) for _ in range(captcha.MAX_CONCURRENT_SOLVES)]
+        slots = [captcha._slots.acquire(timeout=5) for _ in range(captcha.MAX_CONCURRENT_SOLVES)]
         try:
             assert all(slots)
         finally:
@@ -723,6 +723,116 @@ class TestBoundedChunks:
         assert done.wait(2)
 
 
+class TestLiveVendorCallsAreCapped:
+    def test_timeouts_never_mean_more_than_the_cap_of_live_solves(self, monkeypatch):
+        from subliminal_patch import pitcher
+
+        release = threading.Event()
+        live = {"now": 0, "peak": 0}
+        guard = threading.Lock()
+
+        class Blocking:
+            """Blocked in a vendor call that cancelling cannot interrupt."""
+
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def throw(self):
+                with guard:
+                    live["now"] += 1
+                    live["peak"] = max(live["peak"], live["now"])
+                try:
+                    release.wait(30)
+                finally:
+                    with guard:
+                        live["now"] -= 1
+                return None
+
+        monkeypatch.setattr(pitcher.pitchers, "get_pitcher", lambda name=None, with_proxy=False: Blocking)
+        monkeypatch.setattr(captcha, "START_WAIT_SECONDS", 0.1)
+        settings = _settings("anti-captcha", anticaptcha={"anti_captcha_key": "k"})
+        codes = []
+        try:
+            for _ in range(4):
+                with pytest.raises(captcha.CaptchaCallError) as raised:
+                    captcha.solve_call(dict(RECAPTCHA), 0.3, settings=settings)
+                codes.append(raised.value.code)
+            # Two solves are still blocked, so the next two requests were refused rather than started.
+            assert codes == ["timeout", "timeout", "busy", "busy"]
+            assert live["peak"] == captcha.MAX_CONCURRENT_SOLVES == 2
+        finally:
+            release.set()
+        # Once the vendor calls really end, the slots come back.
+        slots = [captcha._slots.acquire(timeout=5) for _ in range(captcha.MAX_CONCURRENT_SOLVES)]
+        try:
+            assert all(slots) and live["now"] == 0
+        finally:
+            for taken in slots:
+                if taken:
+                    captcha._slots.release()
+
+
+class TestTrustWithdrawnMidSession:
+    def _handler(self, monkeypatch, state):
+        monkeypatch.setattr(capabilities, "live_trust", lambda provider_id: state["trusted"])
+        installation = SimpleNamespace(provider_id="demo", manifest={"anti_captcha": True}, trusted=True)
+        return capabilities.host_call_handlers(installation)["host.captcha.v1"]
+
+    def test_a_demotion_stops_the_next_paid_call(self, monkeypatch, fake_vendor):
+        monkeypatch.setattr(captcha, "vendor_credentials", lambda settings=None: ("AntiCaptchaProxyLess", "k"))
+        state = {"trusted": True}
+        handler = self._handler(monkeypatch, state)
+        cancelled = threading.Event()
+        assert handler(dict(RECAPTCHA), 30, cancelled) == {"response": "token-123"}
+        state["trusted"] = False
+        with pytest.raises(captcha.CaptchaCallError) as raised:
+            handler(dict(RECAPTCHA), 30, cancelled)
+        assert raised.value.code == "denied"
+        assert len(fake_vendor.calls) == 1
+
+    def test_a_demotion_during_the_wait_for_a_slot_still_stops_the_call(self, monkeypatch, fake_vendor):
+        monkeypatch.setattr(captcha, "vendor_credentials", lambda settings=None: ("AntiCaptchaProxyLess", "k"))
+        flips = iter([True, False])
+        with pytest.raises(captcha.CaptchaCallError) as raised:
+            captcha.solve_call(dict(RECAPTCHA), 30, allowed=lambda: next(flips))
+        assert raised.value.code == "denied" and fake_vendor.calls == []
+
+    def test_an_unreadable_record_is_not_trust(self, monkeypatch):
+        from provider_hub import state
+
+        def boom(*args, **kwargs):
+            raise RuntimeError("database unavailable")
+
+        monkeypatch.setattr(state, "load_state", boom)
+        assert capabilities.live_trust("demo") is False
+
+    def test_a_stored_untrusted_row_is_not_trust(self, monkeypatch):
+        from provider_hub import state
+
+        rows = {"installations": {"demo": {"trusted": False}, "ok": {"trusted": True}}}
+        monkeypatch.setattr(state, "load_state", lambda *a, **k: rows)
+        assert capabilities.live_trust("demo") is False
+        assert capabilities.live_trust("ok") is True
+        assert capabilities.live_trust("gone") is False
+
+    def test_a_running_worker_loses_its_grant_when_the_refresh_demotes_it(self, monkeypatch, worker):
+        import provider_hub.registry as registry
+
+        client = worker({"host.captcha.v1": lambda payload, timeout, cancelled: {"response": "t"}})
+        registry._HOST_CALL_CLIENTS["demo"] = __import__("weakref").WeakSet([client])
+        try:
+            monkeypatch.setattr(capabilities, "live_trust", lambda provider_id: True)
+            registry.revoke_untrusted_host_calls()
+            assert client._host_calls  # still trusted: kept
+            monkeypatch.setattr(capabilities, "live_trust", lambda provider_id: False)
+            registry.revoke_untrusted_host_calls()
+            assert client._host_calls == {}
+            result = _search(client, {"mode": "raw", "capability": "host.captcha.v1"})
+            assert result.payload["candidates"][0]["code"] == "denied"
+        finally:
+            registry._HOST_CALL_CLIENTS.pop("demo", None)
+
+
 class TestSpawnGrant:
     def _proxy(self, monkeypatch, trusted, manifest):
         import provider_hub.registry as registry
@@ -734,12 +844,12 @@ class TestSpawnGrant:
                 captured.update(kwargs)
 
         monkeypatch.setattr(registry, "ProviderWorkerClient", FakeClient)
+        monkeypatch.setattr(capabilities, "live_trust", lambda provider_id: trusted)
         provider_class = type("DemoHubProvider", (registry.HubProxyProvider,), {
             "provider_name": "demo",
             "bundle_path": "/tmp/bundle",
             "manifest_json": json.dumps(manifest),
             "manifest": SimpleNamespace(raw=manifest),
-            "installation_trusted": trusted,
         })
         provider_class()._worker()
         return captured

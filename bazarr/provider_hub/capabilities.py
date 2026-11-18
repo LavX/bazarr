@@ -155,15 +155,41 @@ def deliver(config: dict, properties: dict, installation, settings) -> None:
         config[key] = endpoints.resolve_flaresolverr_url(settings) if capability == FLARESOLVERR else ""
 
 
+def live_trust(provider_id) -> bool:
+    """Whether the installation is trusted right now, read from the stored record.
+
+    A catalog refresh can withdraw trust from an installation that is running, so this is asked at the
+    time of use and never remembered. An unreadable record, or none, is not trust.
+    """
+    try:
+        from . import state
+
+        row = (state.load_state().get("installations") or {}).get(str(provider_id))
+    except Exception:
+        logger.exception("Could not read the trust of %s", provider_id)
+        return False
+    return isinstance(row, dict) and row.get("trusted") is True
+
+
 def host_call_handlers(installation) -> dict[str, Callable[[dict, float, threading.Event], dict]]:
     """The functions that answer a worker's calls, for the ``call`` capabilities it may use.
 
-    Looked up when a worker is built. The solver re-reads the settings on every call, so a
-    key the user changes applies to the next call without a new worker.
+    Built when a worker is made, for a plugin that declares the capability and is trusted then. Each call
+    asks again, against the stored record, and is refused once the plugin has lost its trust; the solver
+    re-reads the settings as well, so a key the user changes applies to the next call.
     """
     handlers: dict[str, Callable[[dict, float, threading.Event], dict]] = {}
     if _eligible(HOST_CAPTCHA, installation):
         from . import captcha
 
-        handlers[HOST_CAPTCHA] = captcha.solve_call
+        provider_id = installation.get("provider_id") if isinstance(installation, dict) else getattr(
+            installation, "provider_id", None)
+
+        def trusted_now() -> bool:
+            return live_trust(provider_id)
+
+        def solve(payload, timeout, cancelled):
+            return captcha.solve_call(payload, timeout, cancelled, allowed=trusted_now)
+
+        handlers[HOST_CAPTCHA] = solve
     return handlers

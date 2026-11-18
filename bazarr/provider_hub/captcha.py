@@ -119,18 +119,28 @@ def _take_slot(deadline: float, cancelled: threading.Event) -> None:
             return
 
 
-def solve_call(payload, timeout: float, cancelled: threading.Event | None = None, settings=None) -> dict:
+def solve_call(payload, timeout: float, cancelled: threading.Event | None = None, settings=None,
+               allowed=None) -> dict:
     """Answer one worker call: the reCAPTCHA response token for a site, as ``{"response": token}``.
 
     ``timeout`` is what is left of the request, and ``cancelled`` is set when the request ends. The solve
     gets both: past the deadline, or once cancelled, it creates no new task (so nothing more is charged),
-    its waits end, and a token that arrives late is dropped. The solve slot is given back as soon as the
-    call ends, whether or not the vendor has answered.
+    its waits end, and a token that arrives late is dropped. ``allowed``, when given, is asked before every
+    paid step and must still say yes: a plugin whose trust was withdrawn mid-session gets nothing.
+
+    A solve slot belongs to the solver thread and is given back only when that thread ends. A request that
+    times out while the vendor is still answering therefore just returns, and the number of live vendor
+    calls never goes above MAX_CONCURRENT_SOLVES however many requests time out.
 
     Raises CaptchaCallError, which the worker client reports to the plugin; anything else is reported as a
     plain failure.
     """
+    def check_allowed():
+        if allowed is not None and not allowed():
+            raise CaptchaCallError("denied", "This plugin may not use the captcha service.")
+
     site_key, site_url, invisible = _checked_request(payload)
+    check_allowed()
     pitcher_name, key = vendor_credentials(settings)
     if pitcher_name is None:
         raise CaptchaCallError("unavailable", "No captcha service is set up in Bazarr+.")
@@ -138,30 +148,37 @@ def solve_call(payload, timeout: float, cancelled: threading.Event | None = None
     deadline = time.monotonic() + max(0.0, float(timeout))
     _take_slot(deadline, cancelled)
     outcome: dict = {}
+
+    def run():
+        # The slot is this thread's: it is given back when the vendor call really ends.
+        try:
+            from subliminal_patch.pitcher import pitchers
+
+            check_allowed()
+            pitcher = pitchers.get_pitcher(pitcher_name)(
+                "provider-hub", site_url, site_key, client_key=key, is_invisible=invisible,
+                deadline=deadline, cancel=cancelled)
+            outcome["token"] = pitcher.throw()
+        except BaseException as error:  # reported below, never raised on this thread
+            outcome["error"] = error
+        finally:
+            _slots.release()
+
+    thread = threading.Thread(target=run, name="provider-captcha-solve", daemon=True)
     try:
-        def run():
-            try:
-                from subliminal_patch.pitcher import pitchers
-
-                pitcher = pitchers.get_pitcher(pitcher_name)(
-                    "provider-hub", site_url, site_key, client_key=key, is_invisible=invisible,
-                    deadline=deadline, cancel=cancelled)
-                outcome["token"] = pitcher.throw()
-            except BaseException as error:  # reported below, never raised on this thread
-                outcome["error"] = error
-
-        thread = threading.Thread(target=run, name="provider-captcha-solve", daemon=True)
         thread.start()
-        thread.join(max(0.0, deadline - time.monotonic()))
-        ended = thread.is_alive() or cancelled.is_set() or time.monotonic() >= deadline
-        if ended:
-            # Stops the solve from taking another paid step; a result it still produces is not read.
-            cancelled.set()
-            raise CaptchaCallError("timeout", "The captcha service did not answer in time.")
-    finally:
+    except BaseException:
         _slots.release()
+        raise
+    thread.join(max(0.0, deadline - time.monotonic()))
+    if thread.is_alive() or cancelled.is_set() or time.monotonic() >= deadline:
+        # Stops the solve from taking another paid step; a result it still produces is not read.
+        cancelled.set()
+        raise CaptchaCallError("timeout", "The captcha service did not answer in time.")
     error = outcome.get("error")
     if error is not None:
+        if isinstance(error, CaptchaCallError):
+            raise error
         if type(error).__name__ == "CaptchaCancelled":
             raise CaptchaCallError("timeout", "The captcha service did not answer in time.")
         # The vendor's own message can name the account, so it is logged here, where the log masks

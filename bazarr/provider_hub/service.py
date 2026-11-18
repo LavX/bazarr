@@ -1866,6 +1866,12 @@ def refresh_catalog(source_ids: set[str] | None = None, checkpoint=None) -> dict
         # The fetches above run inside this mutation, so a lost race must not
         # run it again: it fails with a conflict and the refresh is retried.
         result = mutate_state(refresh, retry_on_conflict=False)
+        try:
+            from .registry import revoke_untrusted_host_calls
+
+            revoke_untrusted_host_calls()
+        except Exception:
+            logging.getLogger(__name__).exception("Provider Hub: could not revoke host capabilities after the refresh")
         if result["accepted_feeds"]:
             catalog_feed.write_counter_file(result["accepted_feeds"])
         sources_count = result["sources"]

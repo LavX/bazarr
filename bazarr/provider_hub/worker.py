@@ -1208,6 +1208,10 @@ class ProviderWorkerClient:
             return
         self._kill_tree(process, 5.0)
 
+    def revoke_host_calls(self) -> None:
+        """Take back every host capability this worker was given, for the calls that follow."""
+        self._host_calls = {}
+
     def _read_reply(self, request_id: str, timeout: float) -> str:
         """Read the line that answers the request, serving the worker's host calls on the way.
 
