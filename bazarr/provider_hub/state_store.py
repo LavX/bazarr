@@ -13,6 +13,12 @@ revision is still the one the mutator read. Zero rows updated means another
 writer got there first: the mutate is run once more from a fresh read, and
 raises ``StateConflictError`` if that loses as well.
 
+The releases of the installations (the active and staged versions of each plugin
+with their bundle, environment and bindings) live in tables of their own,
+``provider_hub_releases`` and ``provider_hub_release_bindings``, written in the
+same transaction as the document row. See ``releases`` for how an installation
+row is split into the document and its releases and put back together.
+
 The read and the mutator run outside the write transaction. A mutator may
 reach the network, and on SQLite an open write transaction would hold the
 database lock against every other writer for that long.
@@ -30,6 +36,8 @@ from pathlib import Path
 from typing import Any, Callable
 
 import sqlalchemy as sa
+
+from . import releases
 
 logger = logging.getLogger(__name__)
 
@@ -175,7 +183,7 @@ def _mask_local(text: str) -> str:
     return text
 
 
-def register_document_secrets(document: str) -> None:
+def register_document_secrets(document: str, parsed: Any = None) -> None:
     """Make the credential values in a state document known to the log scrubbing, before it is bound.
 
     The statements here bind the whole document, and a document imported from
@@ -196,9 +204,13 @@ def register_document_secrets(document: str) -> None:
 
     A value shorter than six characters is masked only as a whole token in a
     context, as everywhere else.
+
+    ``parsed`` is the same document as a dict, with the releases put back into
+    its rows. The stored text has the manifests moved out to the release
+    tables, and the secret fields of an installation come from its manifest.
     """
     try:
-        data = json.loads(document)
+        data = parsed if parsed is not None else json.loads(document)
         if not isinstance(data, dict):
             return
         local: set[str] = set()
@@ -505,25 +517,27 @@ def _describe(error: BaseException) -> str:
 
 
 def _create_table(bind) -> None:
-    """Create the table if it is missing, tolerating another process creating it first.
+    """Create the tables if they are missing, tolerating another process creating them first.
 
     ``checkfirst`` is a separate existence check, so two starts at once can both
     see no table and one of them fails with a duplicate-table error. That one
-    is not a failure when the table is there now; any other error, or a table
+    is not a failure when the tables are there now; any other error, or a table
     that is still missing, is raised. The recheck can fail on its own (the
     database is down), and is sanitized like everything else.
     """
     failure = None
-    try:
-        _state_table.create(bind, checkfirst=True)
-    except Exception as error:
-        if not _is_driver_error(error):
-            raise
-        failure = _describe(error)
+    for create in (lambda: _state_table.create(bind, checkfirst=True), lambda: releases.create_tables(bind)):
+        try:
+            create()
+        except Exception as error:
+            if not _is_driver_error(error):
+                raise
+            failure = failure or _describe(error)
     if failure is None:
         return
-    if _sanitized(lambda: sa.inspect(bind).has_table(TABLE_NAME)):
-        logger.debug("The Plugin Hub state table was created by another process")
+    wanted = {TABLE_NAME, releases.RELEASES_TABLE, releases.BINDINGS_TABLE}
+    if wanted <= _sanitized(lambda: set(sa.inspect(bind).get_table_names())):
+        logger.debug("The Plugin Hub state tables were created by another process")
         return
     raise StateStoreError(failure)
 
@@ -571,6 +585,81 @@ def read_document(bind=None) -> tuple[int, str]:
     return int(row[0]), row[1]
 
 
+def read_state(bind=None) -> tuple[int, str, list[dict[str, Any]]]:
+    """The stored revision, the document text and the active and staged releases, as one consistent read.
+
+    The document and the release tables are written in one transaction and every
+    such write bumps the revision, so a revision that is the same before and
+    after the release read means nothing was committed in between.
+    """
+    bind = bind if bind is not None else engine()
+    ensure_ready(bind)
+
+    def fetch():
+        with bind.connect() as connection:
+            for _attempt in range(4):
+                first = connection.execute(
+                    sa.select(_state_table.c.revision, _state_table.c.document)
+                    .where(_state_table.c.id == ROW_ID)).first()
+                if first is None:
+                    return None
+                rows = releases.read_rows(connection, states=releases.SLOT_STATES)
+                again = connection.execute(
+                    sa.select(_state_table.c.revision).where(_state_table.c.id == ROW_ID)).first()
+                if again is not None and again[0] == first[0]:
+                    return first[0], first[1], rows
+            return first[0], first[1], rows
+
+    found = _sanitized(fetch)
+    if found is None:
+        raise RuntimeError("the Plugin Hub state row is missing")
+    return int(found[0]), found[1], found[2]
+
+
+def read_release_rows(bind=None, *, plugin_id: str | None = None) -> list[dict[str, Any]]:
+    """Every stored release with its bindings, the active and staged ones with their manifests.
+
+    The ones a write needs to settle slots against: it also needs the draining,
+    retired and failed ones, which come without a manifest.
+    """
+    bind = bind if bind is not None else engine()
+    ensure_ready(bind)
+
+    def fetch():
+        with bind.connect() as connection:
+            return releases.read_rows(connection, plugin_id=plugin_id)
+
+    return _sanitized(fetch)
+
+
+def list_releases(plugin_id: str | None = None, *, states: tuple[str, ...] | None = None,
+                  bind=None) -> list[releases.Release]:
+    """The releases of one plugin, or of all, as typed records with their manifests. Oldest first."""
+    bind = bind if bind is not None else engine()
+    ensure_ready(bind)
+
+    def fetch():
+        with bind.connect() as connection:
+            return releases.read_rows(connection, states=states, plugin_id=plugin_id,
+                                      manifests=releases.RELEASE_STATES)
+
+    return [releases.release_of(row) for row in _sanitized(fetch)]
+
+
+class StepExtra:
+    """What a document step hands back beside the new text: the release changes to store with it.
+
+    ``composed`` is the same document as the dict the callers see (releases put
+    back into the rows), which the credential scrub registration reads.
+    """
+
+    __slots__ = ("plan", "composed")
+
+    def __init__(self, plan: "releases.Plan", composed: Any) -> None:
+        self.plan = plan
+        self.composed = composed
+
+
 def _commit_document(connection, read_revision: int, document: str) -> None:
     register_document_secrets(document)
     result = connection.execute(
@@ -582,18 +671,19 @@ def _commit_document(connection, read_revision: int, document: str) -> None:
         raise _StaleRevision()
 
 
-def update_document(step: Callable[[str], tuple[str, Any]], bind=None, *,
+def update_document(step: Callable[[str], tuple], bind=None, *,
                     around: Callable[[], Any] | None = None,
                     after_commit: Callable[[Any], None] | None = None,
                     retry_on_conflict: bool = True) -> Any:
     """Read the document, let ``step`` compute the next one, store it.
 
-    ``step`` gets the stored text and returns ``(new_text, result)``; the
-    result is handed back. A failure anywhere leaves the stored row exactly as
-    it was. A lost revision race reruns ``step`` once from a fresh read, so
-    ``step`` must be a pure function of the text it is given; a step that
-    cannot be passes ``retry_on_conflict=False`` and the race raises
-    ``StateConflictError`` instead.
+    ``step`` gets the stored text and returns ``(new_text, result)``, or
+    ``(new_text, result, StepExtra)`` when the write also changes release rows;
+    the result is handed back. A failure anywhere leaves the stored row and the
+    release tables exactly as they were. A lost revision race reruns ``step``
+    once from a fresh read, so ``step`` must be a pure function of the text it is
+    given; a step that cannot be passes ``retry_on_conflict=False`` and the race
+    raises ``StateConflictError`` instead.
 
     ``around`` is a context manager factory entered just before the commit and
     left after ``after_commit`` ran, whose value ``after_commit`` receives. The
@@ -603,11 +693,20 @@ def update_document(step: Callable[[str], tuple[str, Any]], bind=None, *,
     bind = bind if bind is not None else engine()
     for attempt in ((1, 2) if retry_on_conflict else (1,)):
         revision, text = read_document(bind)
-        new_text, result = step(text)
+        outcome = step(text)
+        new_text, result = outcome[0], outcome[1]
+        extra = outcome[2] if len(outcome) > 2 else None
+
+        if extra is not None:
+            # The stored text has the manifests moved out, and a credential field is found through its manifest.
+            register_document_secrets(new_text, extra.composed)
+
         def commit():
             with (around() if around is not None else nullcontext()) as held:
                 with write_transaction(bind) as connection:
                     _commit_document(connection, revision, new_text)
+                    if extra is not None:
+                        releases.apply_plan(connection, extra.plan)
                 if after_commit is not None:
                     after_commit(held)
 
@@ -618,3 +717,50 @@ def update_document(step: Callable[[str], tuple[str, Any]], bind=None, *,
             continue
         return result
     raise StateConflictError("the Plugin Hub state kept changing under a write; nothing was saved")
+
+
+def change_releases(change: Callable[[Any], Any], bind=None) -> Any:
+    """Run ``change(connection)`` on the release tables in a write transaction that also bumps the revision.
+
+    For a release moving between states with no change to the document (a
+    drained release retiring): the bump makes a concurrent document write
+    recompute its release changes from the new tables instead of overwriting
+    them. Returns what ``change`` returns. A lost revision race runs it once more.
+    """
+    bind = bind if bind is not None else engine()
+    ensure_ready(bind)
+    for _attempt in (1, 2):
+        revision, text = read_document(bind)
+        outcome = []
+
+        def commit():
+            with write_transaction(bind) as connection:
+                _commit_document(connection, revision, text)
+                outcome[:] = [change(connection)]
+
+        try:
+            _sanitized(commit)
+        except _StaleRevision:
+            continue
+        return outcome[0]
+    raise StateConflictError("the Plugin Hub state kept changing under a write; nothing was saved")
+
+
+def transition_release(release_id: int, target: str, *, error: str | None = None, bind=None) -> bool:
+    """Move one release to another state, if the model allows it. Returns whether anything changed."""
+    return change_releases(lambda connection: releases.set_state(connection, release_id, target, error=error), bind)
+
+
+def retire_draining(bind=None) -> int:
+    """End the draining state of every release: nothing in a fresh process is still serving a call.
+
+    The boot runs this, since a release left draining by the last run has no
+    worker. Returns how many moved to retired.
+    """
+    def retire(connection):
+        moved = 0
+        for row in releases.read_rows(connection, states=(releases.DRAINING,), manifests=()):
+            moved += bool(releases.set_state(connection, row["id"], releases.RETIRED))
+        return moved
+
+    return change_releases(retire, bind)

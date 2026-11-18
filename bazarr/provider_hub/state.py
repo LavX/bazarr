@@ -14,6 +14,7 @@ from pathlib import Path
 from collections.abc import Callable
 from typing import Any
 
+from . import releases
 from .kinds import SUBTITLE_PROVIDER, kind_of
 
 
@@ -477,6 +478,44 @@ def _enclosing(target: str) -> dict[str, Any] | None:
     return None
 
 
+def _clear_marks(data: dict[str, Any]) -> None:
+    """Drop the transient marks a mutator leaves on installation rows for the release tables.
+
+    The database split consumes them; the file backend has no release tables, so
+    they are dropped here and never reach a file.
+    """
+    installations = data.get("installations")
+    if isinstance(installations, dict):
+        for installation in installations.values():
+            if isinstance(installation, dict):
+                installation.pop(releases.DRAIN_PREVIOUS, None)
+
+
+def _database_step(compute: Callable[[], dict[str, Any]], mutate: Callable[[dict[str, Any]], Any] | None,
+                   written: list[dict[str, Any]], *, whole: bool = False) -> tuple[str, Any, Any]:
+    """The step of one database write: the dict the callers see, changed by ``mutate``, stored as document and releases.
+
+    ``compute`` builds that dict from the stored text (it may raise); the stored
+    releases are put into it first, so the mutator sees every row whole. What
+    is stored is the document with the release fields taken out of the rows, and
+    the release rows that go with it; ``written`` gets the whole dict for the
+    state.json copy. ``whole`` says ``compute`` already returns the whole dict
+    (a caller saving the state it holds), which is not overlaid with what is stored.
+    """
+    from . import state_store
+    data = compute()
+    rows = state_store.read_release_rows()
+    if not whole:
+        releases.compose(data, [row for row in rows if row["state"] in releases.SLOT_STATES])
+    result = None
+    if mutate is not None:
+        with _editing("database", data):
+            result = mutate(data)
+    stored, plan = releases.split(data, rows)
+    written.append(data)
+    return json.dumps(stored, sort_keys=True), result, state_store.StepExtra(plan, data)
+
+
 def _commit_to_database(step: Callable[[str], tuple[str, Any]], written: list[dict[str, Any]],
                         retry_on_conflict: bool) -> Any:
     """Store the document ``step`` computes, then refresh the state.json copy.
@@ -551,12 +590,8 @@ def mutate_state(
         if _DATABASE_HELD:
             raise StateNotReadyError("the Provider Hub state is read-only until the database is open")
 
-        def step(text: str) -> tuple[str, Any]:
-            data = _document_for_mutation(text, recover_corrupt)
-            with _editing(target, data):
-                result = mutator(data)
-            written.append(data)
-            return json.dumps(data, sort_keys=True), result
+        def step(text: str) -> tuple[str, Any, Any]:
+            return _database_step(lambda: _document_for_mutation(text, recover_corrupt), mutator, written)
 
         written: list[dict[str, Any]] = []
         return _commit_to_database(step, written, retry_on_conflict)
@@ -607,14 +642,18 @@ def mutate_state_checked(
         if _DATABASE_HELD:
             raise StateNotReadyError("the Provider Hub state is read-only until the database is open")
 
-        def step(text: str) -> tuple[str, Any]:
-            data = _stored_document(text)
-            validate(data)
-            data = _normalized_state(data)
-            with _editing("database", data):
-                result = mutator(data)
-            written.append(data)
-            return json.dumps(data, sort_keys=True), result
+        def step(text: str) -> tuple[str, Any, Any]:
+            def compute() -> dict[str, Any]:
+                return _normalized_state(_stored_document(text))
+
+            # The check runs on the document as stored, as before: the releases are
+            # put back into it first, so a check that reads a row sees it whole.
+            from . import state_store
+            checked = _stored_document(text)
+            releases.compose(checked, [row for row in state_store.read_release_rows()
+                                       if row["state"] in releases.SLOT_STATES])
+            validate(checked)
+            return _database_step(compute, mutator, written)
 
         written: list[dict[str, Any]] = []
         return _commit_to_database(step, written, retry_on_conflict)
@@ -668,7 +707,8 @@ def read_state_document(path: str | os.PathLike[str] | None = None) -> dict[str,
                 raise FileNotFoundError(str(current))
             return _stored_document(current.read_text(encoding="utf-8"))
         from . import state_store
-        return _stored_document(state_store.read_document()[1])
+        _revision, text, rows = state_store.read_state()
+        return releases.compose(_stored_document(text), rows)
     current = Path(path) if path is not None else state_file()
     data = _read_document(current)
     if data is None:
@@ -681,7 +721,8 @@ def load_state(path: str | os.PathLike[str] | None = None) -> dict[str, Any]:
         if _DATABASE_HELD:
             return _snapshot_state(strict=False)
         from . import state_store
-        return _parse_document(state_store.read_document()[1], strict=False)
+        _revision, text, rows = state_store.read_state()
+        return releases.compose(_parse_document(text, strict=False), rows)
     current = Path(path) if path is not None else state_file()
     if not current.exists():
         return default_state()
@@ -706,7 +747,8 @@ def load_state_strict(path: str | os.PathLike[str] | None = None) -> dict[str, A
         if _DATABASE_HELD:
             return _snapshot_state(strict=True)
         from . import state_store
-        return _normalized_state(_stored_document(state_store.read_document()[1]))
+        _revision, text, rows = state_store.read_state()
+        return releases.compose(_normalized_state(_stored_document(text)), rows)
     current = Path(path) if path is not None else state_file()
     data = _read_document(current)
     return default_state() if data is None else _normalized_state(data)
@@ -777,9 +819,12 @@ def save_state(data: dict[str, Any], path: str | os.PathLike[str] | None = None)
         if not _uses_file(path):
             if _DATABASE_HELD:
                 raise StateNotReadyError("the Provider Hub state is read-only until the database is open")
-            document = json.dumps(data, sort_keys=True)
-            _commit_to_database(lambda _stored: (document, None), [data], True)
+            def step(_stored: str) -> tuple[str, Any, Any]:
+                return _database_step(lambda: data, None, [], whole=True)
+
+            _commit_to_database(step, [data], True)
             return
+        _clear_marks(data)
         write_state_file(data, Path(path) if path is not None else state_file())
         _bump_version()
 

@@ -956,6 +956,49 @@ class TableProviderHubState(Base):
     updated_at = mapped_column(DateTime, nullable=False, default=datetime.now)
 
 
+class TableProviderHubRelease(Base):
+    """One release of a Plugin Hub plugin: a version of its code with the bundle, environment and manifest it runs from.
+
+    An installation (in the state document) has at most one ``active`` and one ``staged`` release, which the
+    partial unique index enforces, and keeps the release it replaced (``retired``) and the last one that did not
+    activate (``failed``). ``plugin_id`` names an installation in the state document, which is not a table, so it
+    is not a foreign key. Timestamps are the ISO 8601 text the Hub writes everywhere else.
+    """
+    __tablename__ = 'provider_hub_releases'
+    __table_args__ = (
+        CheckConstraint("state IN ('staged', 'active', 'draining', 'retired', 'failed')",
+                        name='ck_provider_hub_releases_state'),
+        Index('ix_provider_hub_releases_plugin_id', 'plugin_id'),
+        Index('ux_provider_hub_releases_slot', 'plugin_id', 'state', unique=True,
+              sqlite_where=text("state IN ('staged', 'active')"),
+              postgresql_where=text("state IN ('staged', 'active')")),
+    )
+
+    id = mapped_column(Integer, primary_key=True, autoincrement=True)
+    plugin_id = mapped_column(Text, nullable=False)
+    version = mapped_column(Text, nullable=False)
+    state = mapped_column(Text, nullable=False)
+    bundle_path = mapped_column(Text)
+    python_path = mapped_column(Text)
+    bundle_digest = mapped_column(Text)
+    env_key = mapped_column(Text)
+    manifest = mapped_column(Text)
+    error = mapped_column(Text)
+    created_at = mapped_column(Text, nullable=False)
+    activated_at = mapped_column(Text)
+    retired_at = mapped_column(Text)
+
+
+class TableProviderHubReleaseBinding(Base):
+    """Which plugin supplies a capability a release needs, recorded with the release."""
+    __tablename__ = 'provider_hub_release_bindings'
+
+    release_id = mapped_column(Integer, ForeignKey('provider_hub_releases.id', ondelete='CASCADE'),
+                               primary_key=True)
+    capability = mapped_column(Text, primary_key=True)
+    supplier_id = mapped_column(Text, nullable=False)
+
+
 class TableTranslatorEngineInstance(Base):
     """One configured translator plugin: its settings, an on/off state and a revision.
 
