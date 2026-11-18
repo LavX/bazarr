@@ -2255,6 +2255,99 @@ describe("Translation page, an engine installed and waiting for a restart", () =
     expect(screen.queryByText("Plugin not running")).not.toBeInTheDocument();
   });
 
+  const waitingFor = (row: Record<string, unknown>) =>
+    server.use(
+      http.get("/api/plugins/installations", () =>
+        HttpResponse.json({
+          data: [{ provider_id: "ai_translator", kind: "translator", ...row }],
+        }),
+      ),
+    );
+  const installedEngine = (active: boolean) => {
+    state = {
+      ...state,
+      instances: [
+        second,
+        engine({
+          plugin: {
+            name: "AI Subtitle Translator",
+            version: "2.2.0",
+            active,
+          },
+        }),
+      ],
+    };
+  };
+
+  it.each([
+    [
+      "an install it will start",
+      false,
+      { state: "staged", active_version: null, needs_restart: true },
+      "It is installed. Restart Bazarr+ to start it.",
+    ],
+    [
+      "an update it will apply",
+      false,
+      { state: "staged", active_version: "1.0.0", needs_restart: true },
+      "An update is staged. Restart Bazarr+ to apply it.",
+    ],
+    [
+      "a removal it will finish, for a plugin that is not running",
+      false,
+      { state: "removed", active_version: "1.0.0", needs_restart: true },
+      "It is being removed. Restart Bazarr+ to finish the removal.",
+    ],
+    [
+      "a removal it will finish, for a plugin still running",
+      true,
+      { state: "removed", active_version: "1.0.0", needs_restart: true },
+      "It is being removed. Restart Bazarr+ to finish the removal.",
+    ],
+  ])("words the restart by %s", async (_name, active, row, line) => {
+    installedEngine(active);
+    waitingFor(row);
+    await showPage();
+    expect((await screen.findAllByText(line)).length).toBeGreaterThan(0);
+    for (const other of [
+      "It is installed. Restart Bazarr+ to start it.",
+      "An update is staged. Restart Bazarr+ to apply it.",
+      "It is being removed. Restart Bazarr+ to finish the removal.",
+    ].filter((text) => text !== line)) {
+      expect(screen.queryByText(other)).not.toBeInTheDocument();
+    }
+  });
+
+  it("shows the restart prompt on the first-run panel too, where no engine is selected yet", async () => {
+    state = {
+      enabled: true,
+      engine: null,
+      fallback_engine: null,
+      instances: [
+        engine({
+          configured: false,
+          connections: [],
+          plugin: {
+            name: "AI Subtitle Translator",
+            version: "2.2.0",
+            active: false,
+          },
+        }),
+      ],
+    };
+    waitingFor({ state: "staged", active_version: null, needs_restart: true });
+    customRender(<TranslationView />);
+    await screen.findByRole("heading", {
+      name: "Translate the subtitles you cannot find",
+    });
+    expect(
+      await screen.findByText("1 plugin change is waiting for a restart."),
+    ).toBeVisible();
+    expect(
+      screen.getByText("It is installed. Restart Bazarr+ to start it."),
+    ).toBeVisible();
+  });
+
   it("keeps the repair hint for a plugin the server does not say is waiting", async () => {
     state = {
       ...state,

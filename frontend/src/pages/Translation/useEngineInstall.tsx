@@ -7,6 +7,7 @@ import {
 } from "@/components/plugin-consent";
 import { OFFICIAL_PLUGIN_ID } from "@/pages/PluginHub/model";
 import type {
+  RestartChange,
   TranslationAvailableEngine,
   TranslationState,
 } from "@/types/translation";
@@ -72,29 +73,36 @@ export function useRestartAware(state: TranslationState | undefined): {
   waiting: number;
 } {
   const installations = usePluginInstallations();
-  const ids = useMemo(
-    () =>
-      new Set(
-        (installations.data ?? [])
-          .filter((item) => item.needs_restart === true)
-          .map((item) => item.provider_id),
-      ),
-    [installations.data],
-  );
+  // What the restart will do to each plugin that waits on one, read from the installation: a removal is
+  // staged as a removed row, an update as a staged release beside an active one, an install as a staged
+  // release with nothing active.
+  const ids = useMemo(() => {
+    const changes = new Map<string, RestartChange>();
+    for (const item of installations.data ?? []) {
+      if (item.needs_restart !== true) {
+        continue;
+      }
+      changes.set(
+        item.provider_id,
+        item.state === "removed"
+          ? "removal"
+          : item.active_version
+            ? "update"
+            : "install",
+      );
+    }
+    return changes;
+  }, [installations.data]);
   return useMemo(() => {
     if (!state || ids.size === 0) {
       return { state, waiting: 0 };
     }
-    const instances = state.instances.map((engine) =>
-      ids.has(engine.plugin_id)
-        ? { ...engine, awaiting_restart: true }
-        : engine,
-    );
-    const available = state.available_engines?.map((engine) =>
-      ids.has(engine.plugin_id)
-        ? { ...engine, awaiting_restart: true }
-        : engine,
-    );
+    const mark = <T extends { plugin_id: string }>(engine: T): T => {
+      const change = ids.get(engine.plugin_id);
+      return change ? { ...engine, awaiting_restart: change } : engine;
+    };
+    const instances = state.instances.map(mark);
+    const available = state.available_engines?.map(mark);
     const names = new Set([
       ...instances
         .filter((item) => item.awaiting_restart)

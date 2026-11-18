@@ -16,6 +16,7 @@ import {
   isFirstRun,
   keyOnlyTypes,
   orderedEngines,
+  RESTART_LINES,
 } from "@/pages/Translation/model";
 import { KeyStart } from "@/pages/Translation/QuickStart";
 import {
@@ -44,8 +45,8 @@ const InstallAction: FC<{
   if (offer?.awaiting_restart) {
     return (
       <p className={styles.startOptionText}>
-        <StatusBadge tone="warning" label="Pending restart" /> {name} is
-        installed. Restart Bazarr+ to start it.
+        <StatusBadge tone="warning" label="Pending restart" />{" "}
+        {RESTART_LINES[offer.awaiting_restart]}
       </p>
     );
   }

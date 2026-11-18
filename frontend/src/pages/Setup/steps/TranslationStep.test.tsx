@@ -400,6 +400,39 @@ describe("TranslationStep", () => {
     ).not.toBeInTheDocument();
   });
 
+  it.each([
+    [{ state: "staged", active_version: null }, "It is installed. Restart"],
+    [
+      { state: "staged", active_version: "1.0.0" },
+      "An update is staged. Restart",
+    ],
+    [
+      { state: "removed", active_version: "1.0.0" },
+      "It is being removed. Restart",
+    ],
+  ])(
+    "words the restart by what it will do to an offered engine: %j",
+    async (row, line) => {
+      serve(firstRun({ instances: [], available_engines: [GOOGLE_OFFER] }));
+      server.use(
+        http.get("/api/plugins/installations", () =>
+          HttpResponse.json({
+            data: [
+              {
+                provider_id: "google_translate",
+                kind: "translator",
+                needs_restart: true,
+                ...row,
+              },
+            ],
+          }),
+        ),
+      );
+      customRender(<TranslationStep onNext={onNext} />);
+      expect(await screen.findByText(new RegExp(line))).toBeVisible();
+    },
+  );
+
   it("says Google Translate is not in the catalog while the catalog has no entry for it", async () => {
     serve(firstRun({ available_engines: [OFFICIAL_OFFER] }));
     customRender(<TranslationStep onNext={onNext} />);

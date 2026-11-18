@@ -22,6 +22,7 @@ import {
   engineStatus,
   keyOnlyTypes,
   orderedEngines,
+  RESTART_LINES,
 } from "./model";
 import { useEngineInstall } from "./useEngineInstall";
 import { useGuardedSave } from "./useGuardedSave";
@@ -329,8 +330,8 @@ const QuickStart: FunctionComponent<QuickStartProps> = ({
         ) : officialOffer ? (
           // Installed, and waiting for the restart that starts it.
           <p className={styles.startOptionText}>
-            <StatusBadge tone="warning" label="Pending restart" /> It is
-            installed. Restart Bazarr+ to start it.
+            <StatusBadge tone="warning" label="Pending restart" />{" "}
+            {RESTART_LINES[officialOffer.awaiting_restart!]}
           </p>
         ) : (
           <p className={styles.startOptionText}>

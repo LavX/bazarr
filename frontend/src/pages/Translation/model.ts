@@ -6,6 +6,7 @@ import {
   PluginField,
 } from "@/components/plugin-settings";
 import type {
+  RestartChange,
   TranslationBackendType,
   TranslationConnection,
   TranslationEngine,
@@ -159,13 +160,24 @@ export function backendHold(
   return backendTypes(engine)[item.backend_type] ? "review" : "gone";
 }
 
+/** What a restart will do, in words, by the change that waits for it. */
+export const RESTART_LINES: Record<RestartChange, string> = {
+  install: "It is installed. Restart Bazarr+ to start it.",
+  update: "An update is staged. Restart Bazarr+ to apply it.",
+  removal: "It is being removed. Restart Bazarr+ to finish the removal.",
+};
+
 /** Whether an engine can take a job, and when it cannot, the reason and the next step. */
 export function engineStatus(engine: TranslationEngine): Status {
-  if (!canRun(engine) && engine.awaiting_restart) {
+  // A removal waits on the restart whether or not the plugin still runs until then.
+  if (
+    engine.awaiting_restart === "removal" ||
+    (!canRun(engine) && engine.awaiting_restart)
+  ) {
     return {
       tone: "warning",
       label: "Pending restart",
-      next: "It is installed. Restart Bazarr+ to start it.",
+      next: RESTART_LINES[engine.awaiting_restart!],
     };
   }
   if (!canRun(engine)) {

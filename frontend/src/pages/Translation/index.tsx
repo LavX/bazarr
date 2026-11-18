@@ -164,6 +164,7 @@ const TranslationView: FunctionComponent = () => {
     return (
       <Container fluid px="md" className={styles.page}>
         {refreshFailed}
+        <RestartBanner count={waiting} />
         <QuickStart
           state={data}
           onByHand={(engineId) => {
