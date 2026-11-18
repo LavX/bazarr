@@ -271,6 +271,8 @@ declare namespace System {
     message: string;
     /** The FlareSolverr version, when it answered and reported one. */
     version: string | null;
+    /** Which address was tested: the typed one, or the one in use when the field was empty. */
+    source: "typed" | "setting" | "env" | "none";
   }
 
   interface ProviderSearchOutcome {

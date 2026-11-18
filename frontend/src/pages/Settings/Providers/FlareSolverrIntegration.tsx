@@ -20,6 +20,21 @@ export const flaresolverrSettingKey = "settings-endpoints-flaresolverr_v1_url";
 export const flaresolverrHelp =
   "Used by every provider that supports FlareSolverr and has no URL of its own. There is no per-provider opt-out; give a provider its own URL to override it.";
 
+const errorColor = "var(--mantine-color-error)";
+
+// The server says which address it tested; an empty field means the one in use.
+function testOutcome(result: System.FlareSolverrTestResult) {
+  const tested =
+    result.source === "env"
+      ? "Tested the address from the FLARESOLVERR_URL environment variable. "
+      : result.source === "setting"
+        ? "Tested the saved address. "
+        : "";
+  return result.ok
+    ? `${tested}${result.message}`
+    : `Test failed. ${tested}${result.message}`;
+}
+
 const FlareSolverrIntegration: FunctionComponent = () => {
   const { setValue } = useFormActions();
   const value = useSettingValue<string>(flaresolverrSettingKey);
@@ -38,6 +53,8 @@ const FlareSolverrIntegration: FunctionComponent = () => {
   useEffect(() => {
     resetTest();
   }, [typed, resetTest]);
+  // An empty field tests the address in use, so there must be one.
+  const canTest = typed !== "" || Boolean(current?.url);
   const fromEnvironment = current?.source === "env" && typed === "";
   const checked =
     detect.isSuccess && current !== undefined && !current.detecting;
@@ -61,6 +78,7 @@ const FlareSolverrIntegration: FunctionComponent = () => {
           type="button"
           variant="default"
           mih={44}
+          disabled={!canTest}
           loading={test.isPending}
           onClick={() => test.mutate(typed)}
         >
@@ -70,13 +88,11 @@ const FlareSolverrIntegration: FunctionComponent = () => {
         <MantineText
           size="sm"
           role="status"
-          c={test.data && !test.data.ok ? "red" : undefined}
+          c={test.data && !test.data.ok ? errorColor : undefined}
         >
+          {!canTest && "Type an address, or set FLARESOLVERR_URL, to test."}
           {test.isPending && "Testing the address."}
-          {test.data &&
-            (test.data.ok
-              ? test.data.message
-              : `Test failed. ${test.data.message}`)}
+          {test.data && testOutcome(test.data)}
           {test.isError && "The test could not be completed."}
         </MantineText>
       </Group>

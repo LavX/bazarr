@@ -282,6 +282,7 @@ describe("FlareSolverrIntegration", () => {
         code: "ok",
         message: "FlareSolverr 3.3.21 answered.",
         version: "3.3.21",
+        source: "typed",
         ...overrides,
       },
     });
@@ -438,6 +439,133 @@ describe("FlareSolverrIntegration", () => {
         expect(
           screen.queryByText("FlareSolverr 3.3.21 answered."),
         ).not.toBeInTheDocument(),
+      );
+    });
+
+    it("tests the environment address when the field is empty, and says so", async () => {
+      let sent: string | null = null;
+      server.use(
+        http.get("/api/providers/flaresolverr", () =>
+          HttpResponse.json(status({ url: "http://env:8191", source: "env" })),
+        ),
+        http.post("/api/providers/flaresolverr/test", async ({ request }) => {
+          sent = (await request.formData()).get("url") as string;
+          return HttpResponse.json(result({ source: "env" }));
+        }),
+      );
+      customRender(
+        <Harness>
+          <FlareSolverrIntegration />
+        </Harness>,
+      );
+      const user = userEvent.setup();
+      const button = screen.getByRole("button", { name: "Test" });
+      await waitFor(() => expect(button).toBeEnabled());
+      await user.click(button);
+
+      expect(
+        await screen.findByText(
+          "Tested the address from the FLARESOLVERR_URL environment variable. FlareSolverr 3.3.21 answered.",
+        ),
+      ).toBeInTheDocument();
+      expect(sent).toBe("");
+    });
+
+    it("says it tested the saved address when the field is empty", async () => {
+      server.use(
+        http.get("/api/providers/flaresolverr", () =>
+          HttpResponse.json(
+            status({ url: "http://saved:8191", source: "setting" }),
+          ),
+        ),
+        http.post("/api/providers/flaresolverr/test", () =>
+          HttpResponse.json(
+            result({
+              ok: false,
+              code: "timeout",
+              message: "The address did not answer in time.",
+              version: null,
+              source: "setting",
+            }),
+          ),
+        ),
+      );
+      customRender(
+        <Harness>
+          <FlareSolverrIntegration />
+        </Harness>,
+      );
+      const user = userEvent.setup();
+      const button = screen.getByRole("button", { name: "Test" });
+      await waitFor(() => expect(button).toBeEnabled());
+      await user.click(button);
+
+      expect(
+        await screen.findByText(
+          "Test failed. Tested the saved address. The address did not answer in time.",
+        ),
+      ).toBeInTheDocument();
+    });
+
+    it("is disabled with a hint when there is nothing to test", async () => {
+      server.use(quietStatus());
+      customRender(
+        <Harness>
+          <FlareSolverrIntegration />
+        </Harness>,
+      );
+
+      const button = screen.getByRole("button", { name: "Test" });
+      expect(button).toBeDisabled();
+      expect(
+        await screen.findByText(
+          "Type an address, or set FLARESOLVERR_URL, to test.",
+        ),
+      ).toHaveAttribute("role", "status");
+
+      await userEvent
+        .setup()
+        .type(
+          screen.getByLabelText("FlareSolverr address"),
+          "http://solver.lan:8191",
+        );
+      await waitFor(() => expect(button).toBeEnabled());
+      expect(
+        screen.queryByText(
+          "Type an address, or set FLARESOLVERR_URL, to test.",
+        ),
+      ).not.toBeInTheDocument();
+    });
+
+    it("shows a failure in the error colour token", async () => {
+      server.use(
+        quietStatus(),
+        http.post("/api/providers/flaresolverr/test", () =>
+          HttpResponse.json(
+            result({
+              ok: false,
+              code: "tls",
+              message: "The secure connection failed.",
+              version: null,
+            }),
+          ),
+        ),
+      );
+      customRender(
+        <Harness>
+          <FlareSolverrIntegration />
+        </Harness>,
+      );
+      const user = userEvent.setup();
+      await user.type(
+        screen.getByLabelText("FlareSolverr address"),
+        "https://solver.lan:8191",
+      );
+      await user.click(screen.getByRole("button", { name: "Test" }));
+
+      const region = await screen.findByText(/Test failed\. The secure/);
+      expect(region.getAttribute("style") ?? "").toContain(
+        "var(--mantine-color-error)",
       );
     });
 

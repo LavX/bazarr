@@ -29,6 +29,9 @@ class FakeFlareSolverr:
         self.v1 = (200, SESSIONS)
         self.root_delay = 0.0
         self.root_raw = None
+        # Seconds between the bytes of an answer that is sent one byte at a time.
+        self.root_drip = 0.0
+        self.v1_drip = 0.0
         self.requests = []
         outer = self
 
@@ -46,8 +49,24 @@ class FakeFlareSolverr:
                 self.end_headers()
                 self.wfile.write(body)
 
+            def _drip(self, payload, pause):
+                body = json.dumps(payload).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                try:
+                    for index in range(len(body)):
+                        self.wfile.write(body[index:index + 1])
+                        self.wfile.flush()
+                        time.sleep(pause)
+                except OSError:
+                    pass
+
             def do_GET(self):
                 outer.requests.append(("GET", self.path, None))
+                if outer.root_drip:
+                    return self._drip(outer.root[1], outer.root_drip)
                 if outer.root_delay:
                     time.sleep(outer.root_delay)
                 status, payload = outer.root
@@ -58,9 +77,16 @@ class FakeFlareSolverr:
                 length = int(self.headers.get("Content-Length") or 0)
                 outer.requests.append(("POST", self.path, json.loads(self.rfile.read(length) or b"null")))
                 status, payload = outer.v1
+                if outer.v1_drip:
+                    return self._drip(payload, outer.v1_drip)
                 self._send(status, payload)
 
-        self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        class QuietServer(ThreadingHTTPServer):
+            def handle_error(self, request, client_address):
+                # Clients that give up mid-answer, or speak TLS to it, are the point of some tests.
+                pass
+
+        self.server = QuietServer(("127.0.0.1", 0), Handler)
         self.server.daemon_threads = True
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
@@ -86,6 +112,34 @@ def _closed_port():
     with socket.socket() as probe:
         probe.bind(("127.0.0.1", 0))
         return probe.getsockname()[1]
+
+
+def _resolve_host(monkeypatch, host, ips, port):
+    """Make one host name resolve to the given addresses and leave every other lookup alone."""
+    real = socket.getaddrinfo
+
+    def lookup(name, *args, **kwargs):
+        if name == host:
+            return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (ip, port)) for ip in ips]
+        return real(name, *args, **kwargs)
+
+    monkeypatch.setattr(socket, "getaddrinfo", lookup)
+
+
+def _spy_fetch_index(monkeypatch, failures=None):
+    """Record the address of every root request; ``failures`` maps an address to an exception to raise."""
+    seen = []
+    original = endpoints._fetch_index
+
+    def spy(session, url, timeout, headers=None, verify=True, deadline=None):
+        seen.append((url, (headers or {}).get("Host"), timeout))
+        for ip, error in (failures or {}).items():
+            if ip in url:
+                raise error
+        return original(session, url, timeout, headers=headers, verify=verify, deadline=deadline)
+
+    monkeypatch.setattr(endpoints, "_fetch_index", spy)
+    return seen
 
 
 class TestAnswers:
@@ -220,30 +274,107 @@ class TestFailures:
 
     def test_the_next_address_is_tried_when_the_first_refuses(self, fake, monkeypatch):
         port = fake.server.server_address[1]
-        monkeypatch.setattr(socket, "getaddrinfo", lambda host, p, *a, **k: [
-            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.2", port)),
-            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", port)),
-        ])
+        _resolve_host(monkeypatch, "solver.lan", ["127.0.0.2", "127.0.0.1"], port)
+        seen = _spy_fetch_index(monkeypatch)
 
         result = endpoints.check_flaresolverr_address(f"http://solver.lan:{port}")
 
         assert result["code"] == "ok"
+        # Both candidates, in the order the name resolved to them.
+        assert [url for url, _, _ in seen] == [f"http://127.0.0.2:{port}", f"http://127.0.0.1:{port}"]
+
+    def test_a_connect_timeout_moves_on_to_the_next_address(self, fake, monkeypatch):
+        import requests
+
+        port = fake.server.server_address[1]
+        _resolve_host(monkeypatch, "solver.lan", ["127.0.0.2", "127.0.0.1"], port)
+        seen = _spy_fetch_index(monkeypatch, {"127.0.0.2": requests.exceptions.ConnectTimeout("slow")})
+
+        result = endpoints.check_flaresolverr_address(f"http://solver.lan:{port}")
+
+        assert result["code"] == "ok"
+        assert [url for url, _, _ in seen] == [f"http://127.0.0.2:{port}", f"http://127.0.0.1:{port}"]
+
+    def test_connect_timeouts_on_every_address_report_a_timeout(self, fake, monkeypatch):
+        import requests
+
+        port = fake.server.server_address[1]
+        _resolve_host(monkeypatch, "solver.lan", ["127.0.0.2", "127.0.0.1"], port)
+        seen = _spy_fetch_index(monkeypatch, {"127.0.0.": requests.exceptions.ConnectTimeout("slow")})
+
+        result = endpoints.check_flaresolverr_address(f"http://solver.lan:{port}")
+
+        assert result["code"] == "timeout"
+        assert len(seen) == 2
+
+    def test_a_read_timeout_does_not_move_on(self, fake, monkeypatch):
+        import requests
+
+        port = fake.server.server_address[1]
+        _resolve_host(monkeypatch, "solver.lan", ["127.0.0.2", "127.0.0.1"], port)
+        seen = _spy_fetch_index(monkeypatch, {"127.0.0.2": requests.exceptions.ReadTimeout("stalled")})
+
+        result = endpoints.check_flaresolverr_address(f"http://solver.lan:{port}")
+
+        assert result["code"] == "timeout"
+        assert len(seen) == 1
+
+    def test_each_request_timeout_is_capped_by_the_time_left(self, fake, monkeypatch):
+        monkeypatch.setattr(endpoints, "ADDRESS_TEST_DEADLINE_SECONDS", 2.0)
+        seen = _spy_fetch_index(monkeypatch)
+
+        assert endpoints.check_flaresolverr_address(fake.address)["code"] == "ok"
+
+        connect, read = seen[0][2]
+        assert connect == read
+        assert 0 < connect <= 2.0
 
     def test_the_request_goes_to_the_checked_address_with_the_typed_host(self, fake, monkeypatch):
         port = fake.server.server_address[1]
-        monkeypatch.setattr(socket, "getaddrinfo", lambda host, p, *a, **k: [
-            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", port))])
-        seen = []
-        original = endpoints._fetch_index
-
-        def spy(session, url, timeout, headers=None, verify=True):
-            seen.append((url, (headers or {}).get("Host")))
-            return original(session, url, timeout, headers=headers, verify=verify)
-
-        monkeypatch.setattr(endpoints, "_fetch_index", spy)
+        _resolve_host(monkeypatch, "solver.lan", ["127.0.0.1"], port)
+        seen = _spy_fetch_index(monkeypatch)
 
         assert endpoints.check_flaresolverr_address(f"http://solver.lan:{port}")["code"] == "ok"
-        assert seen == [(f"http://127.0.0.1:{port}", f"solver.lan:{port}")]
+        assert [(url, host) for url, host, _ in seen] == [(f"http://127.0.0.1:{port}", f"solver.lan:{port}")]
+
+    def test_an_unexpected_failure_ends_in_a_sentence(self, monkeypatch):
+        # Resolvable, but the host name cannot go into an http header.
+        host = "\u4f8b\u3048.test"
+        _resolve_host(monkeypatch, host, ["127.0.0.1"], 8191)
+
+        result = endpoints.check_flaresolverr_address(f"http://{host}:8191")
+
+        assert (result["ok"], result["code"]) == (False, "unreachable")
+        assert result["message"] == "The test could not be completed."
+
+
+class TestDeadline:
+    DEADLINE = 1.5
+    MARGIN = 1.5
+
+    @pytest.fixture(autouse=True)
+    def _short_deadline(self, monkeypatch):
+        monkeypatch.setattr(endpoints, "ADDRESS_TEST_DEADLINE_SECONDS", self.DEADLINE)
+
+    def _assert_times_out(self, address):
+        started = time.monotonic()
+        result = endpoints.check_flaresolverr_address(address)
+        elapsed = time.monotonic() - started
+
+        assert (result["ok"], result["code"]) == (False, "timeout")
+        assert elapsed < self.DEADLINE + self.MARGIN, elapsed
+
+    def test_a_root_answer_dripped_one_byte_at_a_time(self, fake):
+        # Each byte arrives well inside the socket read timeout, so only the
+        # deadline can end this.
+        fake.root_drip = 0.5
+
+        self._assert_times_out(fake.address)
+
+    def test_a_v1_answer_dripped_one_byte_at_a_time(self, fake):
+        fake.v1_drip = 0.5
+
+        self._assert_times_out(fake.address)
 
 
 class TestInvalidAddress:
@@ -312,7 +443,7 @@ class TestResultContract:
             assert result["message"].endswith(".")
             assert EM_DASH not in result["message"]
 
-    def test_nothing_about_the_address_is_logged(self, fake, caplog):
+    def test_this_module_never_logs_the_address(self, fake, caplog):
         caplog.set_level(logging.DEBUG)
         port = _closed_port()
 
@@ -320,7 +451,7 @@ class TestResultContract:
         endpoints.check_flaresolverr_address("http://user:hunter2@solver.lan:8191")
         endpoints.check_flaresolverr_address(fake.address.replace("http://", "https://"))
 
-        # urllib3 logs its own connection lines; what this code logs is checked.
+        # urllib3 logs its own connection lines and may name the host; what this module logs is checked.
         ours = "\n".join(record.getMessage() for record in caplog.records if record.name.startswith("provider_hub"))
         assert ours
         assert str(port) not in ours
@@ -335,6 +466,11 @@ class TestResultContract:
 
 
 class TestApiRoute:
+    @pytest.fixture(autouse=True)
+    def _no_environment_address(self, monkeypatch):
+        monkeypatch.delenv(endpoints.FLARESOLVERR_ENV, raising=False)
+        monkeypatch.setattr(endpoints, "flaresolverr_url_source", lambda settings=None: ("", "none"))
+
     @staticmethod
     def _client():
         from flask import Flask
@@ -396,3 +532,36 @@ class TestApiRoute:
 
         assert response.status_code == 200, response.data
         assert response.get_json()["data"]["code"] == "invalid_address"
+
+    def test_an_empty_field_tests_the_environment_address_and_says_so(self, fake, monkeypatch):
+        monkeypatch.setattr(endpoints, "flaresolverr_url_source", lambda settings=None: (fake.address, "env"))
+
+        data = self._client().post("/providers/flaresolverr/test", data={"url": "  "},
+                                   headers=self._headers()).get_json()["data"]
+
+        assert (data["code"], data["source"]) == ("ok", "env")
+        assert [path for _, path, _ in fake.requests] == ["/", "/v1"]
+
+    def test_an_empty_field_tests_the_saved_address_and_says_so(self, fake, monkeypatch):
+        monkeypatch.setattr(endpoints, "flaresolverr_url_source", lambda settings=None: (fake.address, "setting"))
+
+        data = self._client().post("/providers/flaresolverr/test", json={},
+                                   headers=self._headers()).get_json()["data"]
+
+        assert (data["code"], data["source"]) == ("ok", "setting")
+
+    def test_a_typed_address_wins_over_the_one_in_use(self, fake, monkeypatch):
+        monkeypatch.setattr(endpoints, "flaresolverr_url_source",
+                            lambda settings=None: ("http://elsewhere.invalid:1", "env"))
+
+        data = self._client().post("/providers/flaresolverr/test", json={"url": fake.address},
+                                   headers=self._headers()).get_json()["data"]
+
+        assert (data["code"], data["source"]) == ("ok", "typed")
+
+    def test_nothing_typed_and_nothing_in_use_has_nothing_to_test(self):
+        data = self._client().post("/providers/flaresolverr/test", json={"url": ""},
+                                   headers=self._headers()).get_json()["data"]
+
+        assert (data["code"], data["source"]) == ("invalid_address", "none")
+        assert data["message"] == "Type an address to test."
