@@ -19,6 +19,11 @@ import styles from "@/components/hub/hub.module.scss";
 
 interface ActivityRowProps {
   job: ProviderHubJob;
+  /**
+   * Says what went wrong with a failed job, and what to do next, in sentences for a person. Given, the
+   * job's raw error is not shown in the detail; left out, it is shown as the server wrote it.
+   */
+  explain?: (error: string) => { cause: string; next: string } | null;
 }
 
 function jobTargetSummary(job: ProviderHubJob): string | null {
@@ -43,7 +48,10 @@ function versionBadgeText(job: ProviderHubJob): string | null {
   return null;
 }
 
-export const ActivityRow: FunctionComponent<ActivityRowProps> = ({ job }) => {
+export const ActivityRow: FunctionComponent<ActivityRowProps> = ({
+  job,
+  explain,
+}) => {
   const [open, setOpen] = useState(false);
   const meta = getJobStateMeta(job.state);
   const isFailed = job.state === "failed";
@@ -53,6 +61,7 @@ export const ActivityRow: FunctionComponent<ActivityRowProps> = ({ job }) => {
   const target = jobTargetSummary(job);
   const versionText = versionBadgeText(job);
   const duration = formatDuration(job.duration_ms);
+  const failure = job.error && explain ? explain(job.error) : null;
 
   return (
     <div>
@@ -170,11 +179,28 @@ export const ActivityRow: FunctionComponent<ActivityRowProps> = ({ job }) => {
               <span className={styles.activityDetailValue}>{job.message}</span>
             </div>
           )}
-          {job.error && (
-            <div className={styles.activityDetailRow}>
-              <span className={styles.activityDetailLabel}>Error</span>
-              <pre className={styles.activityDetailError}>{job.error}</pre>
-            </div>
+          {failure ? (
+            <>
+              <div className={styles.activityDetailRow}>
+                <span className={styles.activityDetailLabel}>Cause</span>
+                <span className={styles.activityDetailValue}>
+                  {failure.cause}
+                </span>
+              </div>
+              <div className={styles.activityDetailRow}>
+                <span className={styles.activityDetailLabel}>Next step</span>
+                <span className={styles.activityDetailValue}>
+                  {failure.next}
+                </span>
+              </div>
+            </>
+          ) : (
+            job.error && (
+              <div className={styles.activityDetailRow}>
+                <span className={styles.activityDetailLabel}>Error</span>
+                <pre className={styles.activityDetailError}>{job.error}</pre>
+              </div>
+            )
           )}
           {(job.message || job.error) && (
             <CopyButton value={job.error ?? job.message ?? ""}>

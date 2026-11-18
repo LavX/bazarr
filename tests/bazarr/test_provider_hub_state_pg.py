@@ -380,3 +380,28 @@ def test_a_nested_mutate_on_the_same_path_still_coalesces(monkeypatch, tmp_path)
 
     mutate_state(outer, path=target)
     assert [job["id"] for job in load_state(target)["jobs"]] == ["outer", "inner"]
+
+
+def test_a_restart_is_reported_from_the_kind_alone(hub_store, hub_engine, service_kind):
+    """The one field every restart prompt reads: set while a change waits on a kind that attaches on restart, never
+    for a kind that attaches live, and read back the same through a second connection."""
+    from plugin_platform_helpers import SERVICE_KIND
+    from provider_hub import service
+    from provider_hub.state import mutate_state
+
+    def store(state):
+        state["installations"].update(
+            provider={**_installation("provider"), "pending_restart": True},
+            settled={**_installation("settled")},
+            service={**_installation("service"), "kind": SERVICE_KIND, "pending_restart": True},
+        )
+
+    mutate_state(store)
+    reported = {item["provider_id"]: item["needs_restart"] for item in service.list_installations()}
+    assert reported == {"provider": True, "settled": False, "service": False}
+    assert service.get_provider("provider")["needs_restart"] is True
+    assert service.get_provider("service")["needs_restart"] is False
+    # What is stored is still the plain fact; the field is worked out when it is served.
+    stored = raw_row(hub_engine)[1]
+    document = json.loads(stored) if isinstance(stored, str) else stored
+    assert "needs_restart" not in document["installations"]["provider"]

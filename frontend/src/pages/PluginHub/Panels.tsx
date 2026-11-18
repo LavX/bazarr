@@ -29,6 +29,8 @@ export interface CardActions extends Pick<
   working: string | null;
   /** The plugin whose review notice is being dismissed. */
   dismissing: string | null;
+  /** The plugins with an update held until the person agrees to what it adds. */
+  needsConsent: ReadonlySet<string>;
 }
 
 const Grid: FunctionComponent<{ rows: PluginRow[] } & CardActions> = ({
@@ -36,6 +38,7 @@ const Grid: FunctionComponent<{ rows: PluginRow[] } & CardActions> = ({
   updating,
   working,
   dismissing,
+  needsConsent,
   ...actions
 }) => (
   <div className={styles.cardGrid}>
@@ -49,6 +52,7 @@ const Grid: FunctionComponent<{ rows: PluginRow[] } & CardActions> = ({
         working={working === row.id}
         elsewhere={working !== null && working !== row.id}
         dismissing={dismissing === row.id}
+        needsConsent={row.update !== null && needsConsent.has(row.id)}
       />
     ))}
   </div>
@@ -141,12 +145,25 @@ export const InstalledPanel: FunctionComponent<
 
 export const UpdatesPanel: FunctionComponent<
   Omit<PanelProps, "searching"> & {
+    /** Updates that are staged and wait for a restart. */
+    waiting: PluginRow[];
+    /** How many of the updates on offer are held until the person agrees to what they add. */
+    held: number;
     onCheck: () => void;
     checking: boolean;
     /** Updates there are for plugins of the other types, which the filter hides. */
     elsewhere: number;
   }
-> = ({ rows, filter, onCheck, checking, elsewhere, ...actions }) => (
+> = ({
+  rows,
+  waiting,
+  held,
+  filter,
+  onCheck,
+  checking,
+  elsewhere,
+  ...actions
+}) => (
   <Stack gap="md">
     <Header
       eyebrow="Updates"
@@ -163,9 +180,24 @@ export const UpdatesPanel: FunctionComponent<
         </Button>
       }
     />
-    {rows.length > 0 ? (
-      <Grid rows={rows} {...actions} />
-    ) : (
+    {(rows.length > 0 || waiting.length > 0) && (
+      <p className={styles.panelDescription} role="status">
+        {rows.length} available
+        {held > 0 && `, ${held} that need${held === 1 ? "s" : ""} your consent`}
+        {waiting.length > 0 && `, ${waiting.length} awaiting restart`}.
+      </p>
+    )}
+    {rows.length > 0 && <Grid rows={rows} {...actions} />}
+    {waiting.length > 0 && (
+      <Stack gap="sm">
+        <h3 className={styles.panelTitle}>Awaiting restart</h3>
+        <p className={styles.panelDescription}>
+          These updates are staged. They take over when Bazarr+ restarts.
+        </p>
+        <Grid rows={waiting} {...actions} />
+      </Stack>
+    )}
+    {rows.length === 0 && waiting.length === 0 && (
       <EmptyState
         icon={faListCheck}
         title={

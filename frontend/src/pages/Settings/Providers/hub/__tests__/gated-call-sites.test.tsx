@@ -153,7 +153,7 @@ describe("MarketplacePanel and the password confirmation", () => {
             active_version: "1.0.0",
             state: "active",
             // eslint-disable-next-line camelcase
-            pending_restart: false,
+            needs_restart: false,
             // eslint-disable-next-line camelcase
             source_id: "official",
             // eslint-disable-next-line camelcase

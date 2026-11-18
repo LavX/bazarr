@@ -28,7 +28,8 @@ from secret_store.registry import SECRET_DESCRIPTOR_KEY as SECRET_DESCRIPTORS_KE
 from secret_store.scrub import mask_credential_refusal, scrub_job_secrets, scrub_text
 
 from .manifest import ManifestValidationError, manifest_provider_id, validate_manifest
-from .kinds import SUBTITLE_PROVIDER, catalog_kind_of, get_kind, kind_for_api, kind_of, known_kinds
+from .kinds import (ATTACH_ON_RESTART, SUBTITLE_PROVIDER, UnknownKindError, catalog_kind_of, get_kind, kind_for_api,
+                    kind_of, known_kinds)
 from .kinds import subtitle_provider as provider_kind
 from . import catalog_feed, closure, consent, dev_source, floor
 from .bundle import verify_bundle_tree
@@ -2069,6 +2070,20 @@ def _capability_report(installation: dict[str, Any]) -> list[dict[str, Any]]:
         return []
 
 
+def needs_restart(installation: dict[str, Any]) -> bool:
+    """Whether the change waiting on this installation takes effect only once Bazarr+ restarts.
+
+    A change is waiting while ``pending_restart`` is set; it needs a restart when its kind attaches on restart. A
+    kind that attaches live never reports one. This is the one field every restart prompt in the interface reads,
+    so a kind that starts attaching live changes no screen."""
+    if not installation.get("pending_restart"):
+        return False
+    try:
+        return get_kind(kind_of(installation)).attach_policy == ATTACH_ON_RESTART
+    except UnknownKindError:
+        return True
+
+
 def _redact_installation(installation: dict[str, Any]) -> dict[str, Any]:
     redacted = dict(installation)
     provider_id = redacted.get("provider_id")
@@ -2076,6 +2091,7 @@ def _redact_installation(installation: dict[str, Any]) -> dict[str, Any]:
         # enabled_providers in config.yaml is the source of truth; the stored
         # field on the hub row is a stale shadow we don't trust on read.
         redacted["enabled"] = get_kind(kind_of(redacted)).is_enabled(redacted)
+        redacted["needs_restart"] = needs_restart(redacted)
     needs = _capability_report(redacted)
     if needs:
         redacted["capabilities"] = needs

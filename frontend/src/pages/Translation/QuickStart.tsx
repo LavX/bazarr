@@ -13,21 +13,18 @@ import {
   useStartEngine,
 } from "@/apis/hooks/translation";
 import { StatusBadge } from "@/components/hub/StatusBadge";
-import type {
-  TranslationAvailableEngine,
-  TranslationEngine,
-  TranslationState,
-} from "@/types/translation";
+import type { TranslationEngine, TranslationState } from "@/types/translation";
 import ConsentModal from "./ConsentModal";
 import { LEGACY_NOTE, LegacyMark, OfficialMark } from "./EnginePanel";
-import InstallConsent from "./InstallConsent";
 import {
   canRun,
   engineName,
   engineStatus,
   keyOnlyTypes,
   orderedEngines,
+  RESTART_LINES,
 } from "./model";
+import { useEngineInstall } from "./useEngineInstall";
 import { useGuardedSave } from "./useGuardedSave";
 import styles from "./Translation.module.scss";
 
@@ -256,8 +253,7 @@ const QuickStart: FunctionComponent<QuickStartProps> = ({
   // be chosen, so an answer that comes back late cannot replace a newer choice.
   const [starting, setStarting] = useState(false);
   const busy = starting || pointers.isPending;
-  const [installing, setInstalling] =
-    useState<TranslationAvailableEngine | null>(null);
+  const install = useEngineInstall(state);
   const engines = orderedEngines(state.instances);
   const official = engines.find((item) => item.official) ?? null;
   // A server that does not list what can be installed has said nothing about the catalog, which is
@@ -311,12 +307,12 @@ const QuickStart: FunctionComponent<QuickStartProps> = ({
               </div>
             </div>
           )
-        ) : officialOffer ? (
+        ) : officialOffer && !officialOffer.awaiting_restart ? (
           <div className={styles.startForm}>
             <div>
               <Button
-                disabled={busy}
-                onClick={() => setInstalling(officialOffer)}
+                disabled={busy || install.busy}
+                onClick={() => install.begin(officialOffer)}
               >
                 Install {officialOffer.name}
               </Button>
@@ -331,11 +327,17 @@ const QuickStart: FunctionComponent<QuickStartProps> = ({
             />{" "}
             {engineStatus(official).next}
           </p>
+        ) : officialOffer ? (
+          // Installed, and waiting for the restart that starts it.
+          <p className={styles.startOptionText}>
+            <StatusBadge tone="warning" label="Pending restart" />{" "}
+            {RESTART_LINES[officialOffer.awaiting_restart!]}
+          </p>
         ) : (
           <p className={styles.startOptionText}>
             {catalogKnown
-              ? "It is not installed, and the plugin catalog does not list it right now. Refresh the catalog in the Subtitle Hub, then come back."
-              : "It is not installed. Install it in the Subtitle Hub, then come back."}
+              ? "It is not installed, and the plugin catalog does not list it right now. Refresh the catalog in the Plugin Hub, then come back."
+              : "It is not installed. Install it in the Plugin Hub, then come back."}
           </p>
         )}
       </section>
@@ -402,13 +404,17 @@ const QuickStart: FunctionComponent<QuickStartProps> = ({
                   "Free, with no key. Plainer translations than the AI engine."}
               </p>
             </div>
-            <Button
-              variant="default"
-              disabled={busy}
-              onClick={() => setInstalling(engine)}
-            >
-              Install {engine.name}
-            </Button>
+            {engine.awaiting_restart ? (
+              <StatusBadge tone="warning" label="Pending restart" />
+            ) : (
+              <Button
+                variant="default"
+                disabled={busy || install.busy}
+                onClick={() => install.begin(engine)}
+              >
+                Install {engine.name}
+              </Button>
+            )}
           </div>
         </section>
       ))}
@@ -427,7 +433,7 @@ const QuickStart: FunctionComponent<QuickStartProps> = ({
           <section className={styles.startOption}>
             <h3 className={styles.startOptionHead}>Other engines</h3>
             <p className={styles.startOptionText}>
-              An engine you install in the Subtitle Hub shows up here, ready to
+              An engine you install in the Plugin Hub shows up here, ready to
               pick.
             </p>
           </section>
@@ -453,11 +459,7 @@ const QuickStart: FunctionComponent<QuickStartProps> = ({
         </Anchor>
       </p>
 
-      <InstallConsent
-        key={installing?.plugin_id ?? "none"}
-        engine={installing}
-        onClose={() => setInstalling(null)}
-      />
+      {install.dialog}
     </div>
   );
 };

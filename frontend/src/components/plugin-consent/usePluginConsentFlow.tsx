@@ -22,6 +22,12 @@ export interface PluginConsentFlow {
   dialog: ReactElement;
   /** The plugin whose install or update is going ahead without the dialog, if one is. */
   updating: string | null;
+  /**
+   * Whether the flow is in the middle of something a page must not be left during: a request going
+   * ahead, or the dialog open, from the first press until it is confirmed, cancelled or refused and
+   * closed. A refusal lives in the dialog, so leaving the page earlier would lose it.
+   */
+  busy: boolean;
 }
 
 /**
@@ -145,5 +151,10 @@ export function usePluginConsentFlow({
       onDone={onDone}
     />
   );
-  return { begin, dialog, updating };
+  return {
+    begin,
+    dialog,
+    updating,
+    busy: updating !== null || target !== null,
+  };
 }

@@ -514,7 +514,7 @@ export default function Discover() {
       install &&
       install.trusted &&
       install.state === "active" &&
-      !install.pending_restart,
+      !install.needs_restart,
     );
   });
   // Why each enabled provider is not searchable, from what the Hub actually
@@ -537,7 +537,7 @@ export default function Discover() {
           one: "is not a catalog provider",
           many: "are not catalog providers",
         };
-      if (install.pending_restart)
+      if (install.needs_restart)
         return {
           label,
           one: "is waiting for a restart",

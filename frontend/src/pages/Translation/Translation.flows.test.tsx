@@ -3,6 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { http, HttpResponse } from "msw";
 import { beforeEach, describe, expect, it } from "vitest";
 import queryClient from "@/apis/queries";
+import { plainSummary } from "@/components/plugin-consent/fixtures";
 import {
   forgetPasswordConfirmation,
   markPasswordConfirmed,
@@ -33,6 +34,30 @@ let calls: Array<{ method: string; path: string; body: unknown }>;
 function record(method: string, path: string, body: unknown) {
   calls.push({ method, path, body });
 }
+
+/** What the server says installing an engine adds: nothing beyond the engine itself. */
+const consentHandler = () =>
+  http.get("/api/plugins/catalog/consent", ({ request }) => {
+    const id = new URL(request.url).searchParams.get("id") ?? "";
+    return HttpResponse.json({
+      ...plainSummary,
+      plugin: { ...plainSummary.plugin, id },
+    });
+  });
+
+/** Agrees to what the dialog shows, once it has finished loading it. */
+const agree = async (
+  user: ReturnType<typeof userEvent.setup>,
+  ask: HTMLElement,
+) => {
+  const button = await within(ask).findByRole("button", { name: "Install" });
+  await waitFor(() => expect(button).toBeEnabled());
+  await user.click(button);
+  return button;
+};
+
+const FAILED_INSTALL =
+  "The install did not finish. Check the Activity tab of the Plugin Hub for the reason.";
 
 /** A response the test lets through when it chooses to. */
 function gate() {
@@ -618,8 +643,9 @@ describe("Translation page, switches, tabs and install", () => {
       ],
     };
     server.use(
+      consentHandler(),
       http.post(
-        "/api/provider-hub/installations",
+        "/api/plugins/installations",
         () => new HttpResponse(null, { status: 500 }),
       ),
     );
@@ -629,13 +655,9 @@ describe("Translation page, switches, tabs and install", () => {
     const first = await screen.findByRole("dialog", {
       name: "Install Lingarr?",
     });
-    await user.click(within(first).getByRole("button", { name: "Install" }));
-    // The server gave no reason: the page's own sentence, whole, and nothing from the transport.
-    expect(
-      await within(first).findByText(
-        "The install did not finish. Check the Subtitle Hub activity for the reason.",
-      ),
-    ).toBeVisible();
+    await agree(user, first);
+    // The server gave no reason: the dialog's own sentence, whole, and nothing from the transport.
+    expect(await within(first).findByText(FAILED_INSTALL)).toBeVisible();
     expect(within(first).queryByText(/status code/)).not.toBeInTheDocument();
     await user.click(within(first).getByRole("button", { name: "Cancel" }));
     await waitFor(() =>
@@ -960,7 +982,7 @@ describe("Translation page, first run with what is really installed", () => {
     });
     expect(
       screen.getByText(
-        "It is not installed. Install it in the Subtitle Hub, then come back.",
+        "It is not installed. Install it in the Plugin Hub, then come back.",
       ),
     ).toBeVisible();
     expect(screen.queryByText(/plugin catalog/)).not.toBeInTheDocument();
@@ -1686,7 +1708,7 @@ describe("Translation page, first run with the official engine installed but not
     expect(screen.getByText("Plugin not running")).toBeVisible();
     expect(
       screen.getByText(
-        /Its plugin is not installed or not running\. Repair or reinstall it in the Subtitle Hub\./,
+        /Its plugin is not installed or not running\. Repair or reinstall it in the Plugin Hub\./,
       ),
     ).toBeVisible();
     expect(screen.queryByText(/^It is not installed/)).not.toBeInTheDocument();
@@ -2040,19 +2062,20 @@ describe("Translation page, installing an engine in place", () => {
 
   beforeEach(() => {
     state = { ...state, available_engines: [offer] };
+    server.use(consentHandler());
   });
 
   it("asks for the password before the install goes out, where a login is set up", async () => {
     withLogin();
     server.use(
-      http.post("/api/provider-hub/installations", async ({ request }) => {
+      http.post("/api/plugins/installations", async ({ request }) => {
         record("post", "install", await request.json());
         return HttpResponse.json({ job_id: null });
       }),
     );
     const user = userEvent.setup();
     const ask = await askToInstall(user);
-    await user.click(within(ask).getByRole("button", { name: "Install" }));
+    await agree(user, ask);
     // The server would refuse an install without a confirmed password: the page asks first.
     expect(
       await screen.findByText("Confirm your password"),
@@ -2065,8 +2088,9 @@ describe("Translation page, installing an engine in place", () => {
     );
     expect(calls[1].body).toEqual({
       source: "official",
-      provider_id: "other_engine",
+      id: "other_engine",
       version: "2.0.0",
+      consent: plainSummary.digest,
     });
     await waitFor(() =>
       expect(
@@ -2081,7 +2105,7 @@ describe("Translation page, installing an engine in place", () => {
     markPasswordConfirmed();
     let attempt = 0;
     server.use(
-      http.post("/api/provider-hub/installations", async ({ request }) => {
+      http.post("/api/plugins/installations", async ({ request }) => {
         record("post", "install", await request.json());
         attempt += 1;
         return attempt === 1
@@ -2094,7 +2118,7 @@ describe("Translation page, installing an engine in place", () => {
     );
     const user = userEvent.setup();
     const ask = await askToInstall(user);
-    await user.click(within(ask).getByRole("button", { name: "Install" }));
+    await agree(user, ask);
     await waitFor(() => expect(calls).toHaveLength(1));
     // Refused for want of a confirmation: the prompt comes up, with no failure shown for it.
     expect(
@@ -2123,7 +2147,7 @@ describe("Translation page, installing an engine in place", () => {
     withLogin();
     const user = userEvent.setup();
     const ask = await askToInstall(user);
-    await user.click(within(ask).getByRole("button", { name: "Install" }));
+    await agree(user, ask);
     const prompt = await screen.findByRole("dialog", {
       name: "Confirm your password",
     });
@@ -2140,28 +2164,20 @@ describe("Translation page, installing an engine in place", () => {
     ).toBeEnabled();
   });
 
-  it("stays busy until the new state is loaded, so a second install cannot start", async () => {
+  it("stays busy until the install has finished, so a second install cannot start", async () => {
     const held = gate();
-    let holding = false;
     server.use(
-      http.post("/api/provider-hub/installations", async ({ request }) => {
+      http.post("/api/plugins/installations", async ({ request }) => {
         record("post", "install", await request.json());
-        holding = true;
-        return HttpResponse.json({ job_id: null });
-      }),
-      http.get("/api/translation/state", async () => {
-        if (holding) {
-          await held.opened;
-        }
-        return HttpResponse.json(state);
+        await held.opened;
+        return HttpResponse.json({ job_id: null }, { status: 202 });
       }),
     );
     const user = userEvent.setup();
     const ask = await askToInstall(user);
-    const install = within(ask).getByRole("button", { name: "Install" });
-    await user.click(install);
+    const install = await agree(user, ask);
     await waitFor(() => expect(calls).toHaveLength(1));
-    // The job is done and the state is still on its way: nothing can be pressed.
+    // The request is still open: nothing can be pressed.
     expect(install).toBeDisabled();
     expect(within(ask).getByRole("button", { name: "Cancel" })).toBeDisabled();
     await user.click(install);
@@ -2181,7 +2197,7 @@ describe("Translation page, installing an engine in place", () => {
 
   it("shows the server's own sentence when the refusal is plain text", async () => {
     server.use(
-      http.post("/api/provider-hub/installations", () =>
+      http.post("/api/plugins/installations", () =>
         HttpResponse.text("This plugin is blocked on this machine.", {
           status: 400,
         }),
@@ -2189,13 +2205,225 @@ describe("Translation page, installing an engine in place", () => {
     );
     const user = userEvent.setup();
     const ask = await askToInstall(user);
-    await user.click(within(ask).getByRole("button", { name: "Install" }));
+    await agree(user, ask);
     expect(
-      await within(ask).findByText(
-        "The install did not finish: This plugin is blocked on this machine.",
-      ),
+      await within(ask).findByText("This plugin is blocked on this machine."),
     ).toBeVisible();
-    expect(within(ask).getByRole("button", { name: "Install" })).toBeEnabled();
+    // What the dialog showed is read again after a refusal, and it can be agreed to once it is back.
+    await waitFor(() =>
+      expect(
+        within(ask).getByRole("button", { name: "Install" }),
+      ).toBeEnabled(),
+    );
+  });
+});
+
+describe("Translation page, an engine installed and waiting for a restart", () => {
+  it("shows the restart prompt and a pending status, not a plugin that is broken", async () => {
+    state = {
+      ...state,
+      instances: [
+        second,
+        engine({
+          plugin: {
+            name: "AI Subtitle Translator",
+            version: "2.2.0",
+            active: false,
+          },
+        }),
+      ],
+    };
+    server.use(
+      http.get("/api/plugins/installations", () =>
+        HttpResponse.json({
+          data: [
+            {
+              provider_id: "ai_translator",
+              kind: "translator",
+              state: "staged",
+              needs_restart: true,
+            },
+          ],
+        }),
+      ),
+    );
+    await showPage();
+    expect(
+      await screen.findByText("1 plugin change is waiting for a restart."),
+    ).toBeVisible();
+    expect(screen.getAllByText("Pending restart").length).toBeGreaterThan(0);
+    expect(screen.queryByText("Plugin not running")).not.toBeInTheDocument();
+  });
+
+  const waitingFor = (row: Record<string, unknown>) =>
+    server.use(
+      http.get("/api/plugins/installations", () =>
+        HttpResponse.json({
+          data: [{ provider_id: "ai_translator", kind: "translator", ...row }],
+        }),
+      ),
+    );
+  const installedEngine = (active: boolean) => {
+    state = {
+      ...state,
+      instances: [
+        second,
+        engine({
+          plugin: {
+            name: "AI Subtitle Translator",
+            version: "2.2.0",
+            active,
+          },
+        }),
+      ],
+    };
+  };
+
+  it.each([
+    [
+      "an install it will start",
+      false,
+      { state: "staged", active_version: null, needs_restart: true },
+      "It is installed. Restart Bazarr+ to start it.",
+    ],
+    [
+      "an update it will apply",
+      false,
+      { state: "staged", active_version: "1.0.0", needs_restart: true },
+      "An update is staged. Restart Bazarr+ to apply it.",
+    ],
+    [
+      "a removal it will finish, for a plugin that is not running",
+      false,
+      { state: "removed", active_version: "1.0.0", needs_restart: true },
+      "It is being removed. Restart Bazarr+ to finish the removal.",
+    ],
+    [
+      "a removal it will finish, for a plugin still running",
+      true,
+      { state: "removed", active_version: "1.0.0", needs_restart: true },
+      "It is being removed. Restart Bazarr+ to finish the removal.",
+    ],
+  ])("words the restart by %s", async (_name, active, row, line) => {
+    installedEngine(active);
+    waitingFor(row);
+    await showPage();
+    expect((await screen.findAllByText(line)).length).toBeGreaterThan(0);
+    for (const other of [
+      "It is installed. Restart Bazarr+ to start it.",
+      "An update is staged. Restart Bazarr+ to apply it.",
+      "It is being removed. Restart Bazarr+ to finish the removal.",
+    ].filter((text) => text !== line)) {
+      expect(screen.queryByText(other)).not.toBeInTheDocument();
+    }
+  });
+
+  it("shows the restart prompt on the first-run panel too, where no engine is selected yet", async () => {
+    state = {
+      enabled: true,
+      engine: null,
+      fallback_engine: null,
+      instances: [
+        engine({
+          configured: false,
+          connections: [],
+          plugin: {
+            name: "AI Subtitle Translator",
+            version: "2.2.0",
+            active: false,
+          },
+        }),
+      ],
+    };
+    waitingFor({ state: "staged", active_version: null, needs_restart: true });
+    customRender(<TranslationView />);
+    await screen.findByRole("heading", {
+      name: "Translate the subtitles you cannot find",
+    });
+    expect(
+      await screen.findByText("1 plugin change is waiting for a restart."),
+    ).toBeVisible();
+    expect(
+      screen.getByText("It is installed. Restart Bazarr+ to start it."),
+    ).toBeVisible();
+  });
+
+  it("keeps the restart prompt for a removal that deleted its data, when no engine of the plugin is left", async () => {
+    // The engine rows go with the data at once, and the removed row keeps its release until the restart,
+    // so neither the engines nor the catalog's offers name the plugin any more.
+    state = { ...state, instances: [second], available_engines: [] };
+    waitingFor({
+      state: "removed",
+      active_version: "1.0.0",
+      needs_restart: true,
+    });
+    await showPage();
+    expect(
+      await screen.findByText("1 plugin change is waiting for a restart."),
+    ).toBeVisible();
+    expect(
+      screen.getByRole("button", { name: "Restart Bazarr now" }),
+    ).toBeEnabled();
+  });
+
+  it("keeps it on the first-run panel too, with no engine left at all", async () => {
+    state = {
+      enabled: true,
+      engine: null,
+      fallback_engine: null,
+      instances: [],
+      available_engines: [],
+    };
+    waitingFor({
+      state: "removed",
+      active_version: "1.0.0",
+      needs_restart: true,
+    });
+    customRender(<TranslationView />);
+    await screen.findByRole("heading", {
+      name: "Translate the subtitles you cannot find",
+    });
+    expect(
+      await screen.findByText("1 plugin change is waiting for a restart."),
+    ).toBeVisible();
+  });
+
+  it("does not count a plugin of another kind that waits on a restart", async () => {
+    waitingFor({
+      kind: "subtitle_provider",
+      state: "staged",
+      active_version: null,
+      needs_restart: true,
+    });
+    await showPage();
+    await screen.findByRole("tab", { name: "Engine" });
+    expect(screen.queryByText(/waiting for a restart/)).not.toBeInTheDocument();
+  });
+
+  it("keeps the repair hint for a plugin the server does not say is waiting", async () => {
+    state = {
+      ...state,
+      instances: [
+        second,
+        engine({
+          plugin: {
+            name: "AI Subtitle Translator",
+            version: "2.2.0",
+            active: false,
+          },
+        }),
+      ],
+    };
+    server.use(
+      http.get("/api/plugins/installations", () =>
+        HttpResponse.json({ data: [] }),
+      ),
+    );
+    await showPage();
+    expect(
+      (await screen.findAllByText("Plugin not running")).length,
+    ).toBeGreaterThan(0);
+    expect(screen.queryByText(/waiting for a restart/)).not.toBeInTheDocument();
   });
 });
 
@@ -2322,6 +2550,7 @@ describe("Translation page, an install whose answer is not a sentence", () => {
   };
   const askToInstall = async (user: ReturnType<typeof userEvent.setup>) => {
     state = { ...state, available_engines: [offer] };
+    server.use(consentHandler());
     await showPage();
     await user.click(
       screen.getByRole("button", { name: "Install Other Engine" }),
@@ -2331,7 +2560,7 @@ describe("Translation page, an install whose answer is not a sentence", () => {
 
   it("does not show an error page from a proxy as if the server had said it", async () => {
     server.use(
-      http.post("/api/provider-hub/installations", () =>
+      http.post("/api/plugins/installations", () =>
         HttpResponse.text(
           "<html><head><title>502 Bad Gateway</title></head><body><h1>502 Bad Gateway</h1></body></html>",
           { status: 502 },
@@ -2340,81 +2569,51 @@ describe("Translation page, an install whose answer is not a sentence", () => {
     );
     const user = userEvent.setup();
     const ask = await askToInstall(user);
-    await user.click(within(ask).getByRole("button", { name: "Install" }));
-    expect(
-      await within(ask).findByText(
-        "The install did not finish. Check the Subtitle Hub activity for the reason.",
-      ),
-    ).toBeVisible();
+    await agree(user, ask);
+    expect(await within(ask).findByText(FAILED_INSTALL)).toBeVisible();
     expect(within(ask).queryByText(/Bad Gateway/)).not.toBeInTheDocument();
     expect(within(ask).queryByText(/</)).not.toBeInTheDocument();
   });
 
   it("does not show a text body too long to be a sentence", async () => {
     server.use(
-      http.post("/api/provider-hub/installations", () =>
+      http.post("/api/plugins/installations", () =>
         HttpResponse.text("Traceback line. ".repeat(40), { status: 500 }),
       ),
     );
     const user = userEvent.setup();
     const ask = await askToInstall(user);
-    await user.click(within(ask).getByRole("button", { name: "Install" }));
-    expect(
-      await within(ask).findByText(
-        "The install did not finish. Check the Subtitle Hub activity for the reason.",
-      ),
-    ).toBeVisible();
+    await agree(user, ask);
+    expect(await within(ask).findByText(FAILED_INSTALL)).toBeVisible();
     expect(within(ask).queryByText(/Traceback/)).not.toBeInTheDocument();
   });
 
-  it("says the engine is installed when only the page could not be refreshed, and refreshes without installing again", async () => {
+  it("lists the engine once the install has finished, after one install", async () => {
     let installedOnServer = false;
-    let reloadFails = true;
     server.use(
-      http.post("/api/provider-hub/installations", async ({ request }) => {
+      http.post("/api/plugins/installations", async ({ request }) => {
         record("post", "install", await request.json());
         installedOnServer = true;
-        return HttpResponse.json({ job_id: null });
+        return HttpResponse.json({ job_id: null }, { status: 202 });
       }),
       http.get("/api/translation/state", () =>
-        installedOnServer && reloadFails
-          ? new HttpResponse(null, { status: 500 })
-          : HttpResponse.json(
-              installedOnServer
-                ? {
-                    ...state,
-                    available_engines: [],
-                    instances: [
-                      ...state.instances,
-                      { ...second, id: 9, name: "Other Engine" },
-                    ],
-                  }
-                : state,
-            ),
+        HttpResponse.json(
+          installedOnServer
+            ? {
+                ...state,
+                available_engines: [],
+                instances: [
+                  ...state.instances,
+                  { ...second, id: 9, name: "Other Engine" },
+                ],
+              }
+            : state,
+        ),
       ),
     );
     const user = userEvent.setup();
     const ask = await askToInstall(user);
-    await user.click(within(ask).getByRole("button", { name: "Install" }));
-    // Installed, and the page could not be loaded: the question stays, and says exactly that.
-    expect(
-      await within(ask).findByText(
-        "Other Engine is installed, but the page could not be refreshed, so it does not show it yet.",
-      ),
-    ).toBeVisible();
-    expect(
-      within(ask).queryByText(/The install did not finish/),
-    ).not.toBeInTheDocument();
-    expect(
-      screen.getByRole("dialog", { name: "Install Other Engine?" }),
-    ).toBeVisible();
-    expect(
-      within(ask).queryByRole("button", { name: "Install" }),
-    ).not.toBeInTheDocument();
-    reloadFails = false;
-    await user.click(
-      within(ask).getByRole("button", { name: "Refresh the page" }),
-    );
+    await agree(user, ask);
     await waitFor(() =>
       expect(
         screen.queryByRole("dialog", { name: "Install Other Engine?" }),

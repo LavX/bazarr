@@ -87,7 +87,11 @@ export interface ProviderHubInstallation {
   active_version?: string | null;
   staged_version?: string | null;
   state: string;
-  pending_restart?: boolean;
+  /**
+   * True while a change waits on a restart to take effect. The server works it out from the plugin's
+   * kind, so a kind that attaches live never sets it. Every restart prompt reads this and nothing else.
+   */
+  needs_restart?: boolean;
   trusted?: boolean;
   active_path?: string | null;
   staged_path?: string | null;

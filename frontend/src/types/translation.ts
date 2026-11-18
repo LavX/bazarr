@@ -37,6 +37,8 @@ export interface TranslationConnection {
 
 export interface TranslationEngine {
   id: number;
+  /** Set by the page, not the server: what the restart it waits for will do to its plugin. */
+  awaiting_restart?: RestartChange;
   plugin_id: string;
   name: string;
   official: boolean;
@@ -67,6 +69,9 @@ export interface TranslationEngine {
   connections: TranslationConnection[];
 }
 
+/** What the restart a plugin waits for will do: start an install, apply a staged update, or finish a removal. */
+export type RestartChange = "install" | "update" | "removal";
+
 /** An engine the catalog offers that is not installed. Installing it goes through the plugin install job. */
 export interface TranslationAvailableEngine {
   plugin_id: string;
@@ -80,6 +85,8 @@ export interface TranslationAvailableEngine {
   free?: boolean;
   /** The addresses the engine sends subtitle text to, shown before installing. */
   destinations?: string[];
+  /** Set by the page, not the server: what the restart it waits for will do to it. */
+  awaiting_restart?: RestartChange;
 }
 
 /**

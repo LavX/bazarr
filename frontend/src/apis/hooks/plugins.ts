@@ -1,6 +1,7 @@
 import {
   QueryClient,
   useMutation,
+  useQueries,
   useQuery,
   useQueryClient,
 } from "@tanstack/react-query";
@@ -134,6 +135,32 @@ export function usePluginUpdateConsent(id: string | null) {
     retry: false,
     refetchOnWindowFocus: false,
   });
+}
+
+/**
+ * Which of these plugins have an update that is held for the person's agreement: the server's own
+ * summary of what the update adds says it needs consent. Read once per plugin and read again after any
+ * install or update, because it is kept outside the keys a dialog reads under. A plugin whose summary
+ * could not be read is left out, never guessed at.
+ */
+export function usePluginUpdatesNeedingConsent(ids: string[]): Set<string> {
+  const results = useQueries({
+    queries: ids.map((id) => ({
+      queryKey: [...pluginsKey, "update-needs-consent", id],
+      queryFn: () => withInlineErrors(() => api.plugins.updateConsent(id)),
+      select: (delta: { needs_consent: boolean }) => delta.needs_consent,
+      staleTime: 60_000,
+      retry: false,
+      refetchOnWindowFocus: false,
+    })),
+  });
+  const needing = new Set<string>();
+  ids.forEach((id, index) => {
+    if (results[index]?.data === true) {
+      needing.add(id);
+    }
+  });
+  return needing;
 }
 
 export function usePluginRefreshCatalog() {

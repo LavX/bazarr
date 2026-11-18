@@ -254,7 +254,7 @@ export function isUpdateAvailable(
   catalog: ProviderHubCatalog | undefined | null,
 ): boolean {
   if (!provider.active_version) return false;
-  if (provider.pending_restart) return false;
+  if (provider.needs_restart) return false;
   const latest = getLatestCatalogEntry(
     catalog,
     provider.provider_id,
@@ -280,7 +280,7 @@ export function summarizeUpdates(
     available: list.filter(
       (p) => p.origin !== "local" && isUpdateAvailable(p, catalog),
     ),
-    pendingRestart: list.filter((p) => p.pending_restart === true),
+    pendingRestart: list.filter((p) => p.needs_restart === true),
   };
 }
 
