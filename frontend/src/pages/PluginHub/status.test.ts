@@ -135,6 +135,21 @@ describe("the status badge precedence", () => {
     expect(attentionCause({ ...revoked, last_error: null })).toMatch(
       /revoked this version/,
     );
+    // A later error replaces last_error, and the reason the server kept is still what the row says.
+    expect(
+      attentionCause({
+        ...revoked,
+        last_error: "No update manifest is available",
+        revoked_reason: "Reason kept.",
+      }),
+    ).toBe("Reason kept.");
+    expect(
+      attentionCause({
+        ...revoked,
+        last_error: "Other",
+        blocked_reason: "Held back.",
+      }),
+    ).toBe("Held back.");
     expect(pluginStatus(rowFor(revoked), openJobs([]))?.key).toBe("attention");
   });
 });

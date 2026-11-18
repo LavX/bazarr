@@ -69,9 +69,12 @@ export function attentionCause(
   installation: PluginInstallation,
 ): string | null {
   if (installation.revoked) {
+    // Other errors replace last_error (a failed update, a switch-off), and the reason stays on the row.
     return (
+      installation.revoked_reason ??
+      installation.blocked_reason ??
       installation.last_error ??
-      "The official catalog revoked this version, so it will not start. Update it or remove it."
+      "The official catalog revoked this version. Restart Bazarr+ to stop it, then update or remove it."
     );
   }
   if (installation.needs_repair) {
