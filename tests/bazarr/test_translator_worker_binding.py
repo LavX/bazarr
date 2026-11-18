@@ -1016,6 +1016,119 @@ def test_a_start_clears_the_folders_of_plugins_that_are_not_installed(hub):
     assert hub.definitions().sweep_orphans() == []
 
 
+def test_a_start_leaves_the_folders_of_a_removed_plugin_whose_data_was_kept(hub, monkeypatch):
+    for plugin in ("kept_one", "ghost"):
+        (hub.root / "run" / plugin / "data").mkdir(parents=True)
+        (hub.root / "run" / plugin / "data" / "state.db").write_text("data")
+    definitions = hub.definitions()
+    monkeypatch.setattr(worker_binding, "_definitions", definitions)
+    monkeypatch.setattr(worker_binding, "_port", SimpleNamespace(retire=lambda plugin_id: None))
+
+    worker_binding.plugin_kept("kept_one")
+
+    assert (hub.root / "run" / "kept_one" / worker_binding.KEPT_MARKER).exists()
+    assert definitions.sweep_orphans() == ["ghost"]
+    assert (hub.root / "run" / "kept_one" / "data" / "state.db").read_text() == "data"
+    # Removing it again with the data deleted takes the marker and the folder with it.
+    definitions.plugin_removed("kept_one")
+    assert not (hub.root / "run" / "kept_one").exists()
+
+
+def test_a_later_removal_that_deletes_the_data_wins_over_an_earlier_keep_even_when_it_waits_for_a_restart(
+        hub, monkeypatch):
+    """Keep, reinstall, then remove again with the data deleted: the removal of a plugin that is running is staged
+    until the next start, and the sweep after that start must take the folder, not honour the old mark."""
+    folder = hub.root / "run" / PLUGIN
+    (folder / "data").mkdir(parents=True)
+    (folder / "data" / "state.db").write_text("data")
+    definitions = hub.definitions()
+    monkeypatch.setattr(worker_binding, "_definitions", definitions)
+    monkeypatch.setattr(worker_binding, "_port", SimpleNamespace(retire=lambda plugin_id: None, idle=lambda p: True))
+
+    worker_binding.plugin_kept(PLUGIN)
+    assert (folder / worker_binding.KEPT_MARKER).exists()
+    # Still installed in this process, as a staged removal is: nothing is cleared yet, but the mark is gone.
+    worker_binding.plugin_removed(PLUGIN)
+    assert folder.exists() and not (folder / worker_binding.KEPT_MARKER).exists()
+    hub.installed.pop(PLUGIN)  # the next start: the staged removal was applied
+    assert worker_binding.sweep_removed_plugins() == [PLUGIN]
+    assert not folder.exists()
+
+
+def test_installing_a_plugin_again_ends_what_an_earlier_keep_said_about_its_folders(hub, monkeypatch):
+    folder = hub.root / "run" / PLUGIN
+    (folder / "data").mkdir(parents=True)
+    monkeypatch.setattr(worker_binding, "_definitions", hub.definitions())
+    monkeypatch.setattr(worker_binding, "_port", SimpleNamespace(retire=lambda plugin_id: None))
+    worker_binding.plugin_kept(PLUGIN)
+    assert (folder / worker_binding.KEPT_MARKER).exists()
+
+    worker_binding.plugin_installed(PLUGIN)
+
+    assert not (folder / worker_binding.KEPT_MARKER).exists() and (folder / "data").is_dir()
+
+
+def test_the_mark_is_written_and_cleared_while_no_binding_is_in_place(hub, monkeypatch):
+    """A pool that did not start must not turn a kept folder into a leftover for the next start's sweep."""
+    folder = hub.root / "run" / PLUGIN
+    (folder / "data").mkdir(parents=True)
+    monkeypatch.setattr(worker_binding, "_definitions", None)
+    monkeypatch.setattr(worker_binding, "_port", None)
+    monkeypatch.setattr(worker_binding, "_hub_dir", lambda: hub.root)
+
+    worker_binding.plugin_kept(PLUGIN)
+    assert (folder / worker_binding.KEPT_MARKER).exists()
+    worker_binding.plugin_removed(PLUGIN)
+    assert not (folder / worker_binding.KEPT_MARKER).exists()
+
+
+def test_discarding_kept_folders_removes_them_with_their_mark(hub, monkeypatch):
+    folder = hub.root / "run" / PLUGIN
+    (folder / "data").mkdir(parents=True)
+    monkeypatch.setattr(worker_binding, "_definitions", None)
+    monkeypatch.setattr(worker_binding, "_port", None)
+    monkeypatch.setattr(worker_binding, "_hub_dir", lambda: hub.root)
+    worker_binding.plugin_kept(PLUGIN)
+    assert (folder / worker_binding.KEPT_MARKER).exists()
+
+    worker_binding.discard_folders(PLUGIN)
+
+    assert not folder.exists()
+    worker_binding.discard_folders("not a plugin id")  # nothing to do, and no error
+
+
+def test_discarding_kept_folders_raises_when_they_cannot_be_removed_and_not_when_they_are_gone(hub, monkeypatch):
+    import shutil
+
+    folder = hub.root / "run" / PLUGIN
+    (folder / "data").mkdir(parents=True)
+    monkeypatch.setattr(worker_binding, "_definitions", None)
+    monkeypatch.setattr(worker_binding, "_hub_dir", lambda: hub.root)
+
+    def refused(path, *args, **kwargs):
+        raise PermissionError("not allowed")
+
+    monkeypatch.setattr(shutil, "rmtree", refused)
+    with pytest.raises(PermissionError):
+        worker_binding.discard_folders(PLUGIN)
+    assert folder.exists()
+
+    monkeypatch.undo()
+    monkeypatch.setattr(worker_binding, "_definitions", None)
+    monkeypatch.setattr(worker_binding, "_hub_dir", lambda: hub.root)
+    worker_binding.discard_folders(PLUGIN)
+    worker_binding.discard_folders(PLUGIN)  # already gone: nothing to do
+    assert not folder.exists()
+
+
+def test_keeping_the_data_of_a_plugin_that_never_ran_marks_nothing(hub, monkeypatch):
+    definitions = hub.definitions()
+    monkeypatch.setattr(worker_binding, "_definitions", definitions)
+    monkeypatch.setattr(worker_binding, "_port", SimpleNamespace(retire=lambda plugin_id: None))
+    worker_binding.plugin_kept("never_ran")
+    assert not (hub.root / "run" / "never_ran").exists()
+
+
 # ------------------------------------------------------------------ the sweep only removes what is not installed at all
 def _write_inventory(path, rows):
     import json

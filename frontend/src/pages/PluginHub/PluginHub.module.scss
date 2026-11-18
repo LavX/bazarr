@@ -89,3 +89,90 @@
   max-width: 100%;
   overflow-x: auto;
 }
+
+/* The runtime line and the notes on a card: words and an icon, never colour alone. */
+.runtime {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--bz-text-tertiary);
+}
+
+.failure {
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--bz-text-secondary);
+}
+
+.reviewBody {
+  display: grid;
+  gap: 8px;
+  font-size: 13px;
+
+  p,
+  ul {
+    margin: 0;
+  }
+
+  ul {
+    padding-left: 18px;
+  }
+}
+
+.code {
+  font-family: var(--bz-font-mono, monospace);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.menuEntry {
+  display: grid;
+  gap: 2px;
+}
+
+.menuReason {
+  max-width: 240px;
+  font-size: 11px;
+  line-height: 1.35;
+  white-space: normal;
+  color: var(--bz-text-tertiary);
+}
+
+.dialogHeading {
+  outline: none;
+}
+
+.effects {
+  margin: 0;
+  padding-left: 18px;
+  font-size: 13px;
+}
+
+.log {
+  margin: 0;
+  max-height: 320px;
+  overflow: auto;
+  padding: 12px;
+  border: 1px solid var(--bz-border-card);
+  border-radius: var(--bz-radius-md);
+  background: var(--bz-surface-card);
+  font-family: var(--bz-font-mono, monospace);
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.quiet {
+  margin: 0;
+  font-size: 13px;
+  color: var(--bz-text-tertiary);
+}
+
+/* An item that cannot be used, kept in the keyboard order so that its reason can be read. */
+.menuDisabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}

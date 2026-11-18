@@ -49,6 +49,24 @@ class TranslatorKind(Kind):
     kind_apis = frozenset({TRANSLATOR_KIND_API})
     attach_policy = ATTACH_ON_RESTART
     noun = "translator"
+    keeps_data = True
+
+    def kept_data_reclaimed(self, plugin_id: str) -> None:
+        try:
+            from subtitles.tools.translate.runtime import worker_binding
+
+            worker_binding.plugin_installed(plugin_id)
+        except Exception:
+            logger.warning("Could not clear the kept mark of translator %s", plugin_id, exc_info=True)
+
+    def discard_kept_data(self, plugin_id: str) -> None:
+        """Delete what an earlier removal kept, for a plugin that is about to be installed under the same id by
+        another owner. Unlike cleanup after a removal this does not swallow failures: if anything of the old data
+        survives, the install is refused, so the new package never finds the old one's keys or folders."""
+        _store().delete_plugin_data(plugin_id)
+        from subtitles.tools.translate.runtime import worker_binding
+
+        worker_binding.discard_folders(plugin_id)
 
     def on_installed(self, plugin_id: str, missing_required: Sequence[str] = ()) -> bool:
         try:
@@ -56,6 +74,13 @@ class TranslatorKind(Kind):
         except Exception:
             logger.exception("Could not create the engine instance for translator %s", plugin_id)
             return False
+        try:
+            from subtitles.tools.translate.runtime import worker_binding
+
+            # Data kept when the plugin was removed is in use again, so the mark that kept it goes.
+            worker_binding.plugin_installed(plugin_id)
+        except Exception:
+            logger.warning("Could not clear the kept mark of translator %s", plugin_id, exc_info=True)
         return True
 
     def on_removed(self, plugin_id: str) -> bool:
@@ -70,7 +95,17 @@ class TranslatorKind(Kind):
         _retire_worker(plugin_id)
         return True
 
-    def after_removed(self, plugin_id: str) -> None:
+    def after_removed(self, plugin_id: str, keep_data: bool = False) -> None:
+        if keep_data:
+            # The engine instances, their connections and secrets stay, and so do the plugin's folders, marked so
+            # that no sweep takes them for leftovers. Installing the plugin again picks them up.
+            try:
+                from subtitles.tools.translate.runtime import worker_binding
+
+                worker_binding.plugin_kept(plugin_id)
+            except Exception:
+                logger.warning("Could not mark the folders of translator %s as kept", plugin_id, exc_info=True)
+            return
         try:
             _store().delete_plugin_data(plugin_id)
         except Exception:

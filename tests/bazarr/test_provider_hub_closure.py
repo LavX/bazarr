@@ -1110,3 +1110,389 @@ def test_an_alternative_of_a_kind_this_bazarr_does_not_define_is_not_counted(tmp
     with pytest.raises(ValueError, match="first cannot be switched off while user depends on it"):
         service.update_provider("first", enabled=False)
     assert broken_by(load_state(), "first", dropped) == [("user", "translit.v1")]
+
+
+# --- data kept by a removal, and who may take it over ----------------------------------------------------
+
+
+@pytest.fixture
+def keeping_kind(service_kind):
+    """The test kind with something to keep, recording what is discarded, reclaimed and kept."""
+    service_kind.keeps_data = True
+    service_kind.discarded, service_kind.reclaimed = [], []
+    service_kind.discard_kept_data = service_kind.discarded.append
+    service_kind.kept_data_reclaimed = service_kind.reclaimed.append
+    return service_kind
+
+
+@pytest.fixture
+def staging(tmp_path, monkeypatch):
+    """Staging a plugin without a download or an environment."""
+    from provider_hub import service
+
+    class FakeEnvironment:
+        def __init__(self, root):
+            pass
+
+        def install(self, validated, timeout=None):
+            (tmp_path / "env" / "bin").mkdir(parents=True, exist_ok=True)
+            (tmp_path / "env" / "bin" / "python").write_text("", encoding="utf-8")
+            return tmp_path / "env"
+
+    monkeypatch.setattr(service, "_fetch_bundle", lambda manifest, deadline=None: tmp_path / "bundle")
+    monkeypatch.setattr(service, "PluginEnvironment", FakeEnvironment)
+    monkeypatch.setattr(service, "python_executable", lambda env_path: tmp_path / "python")
+    return service
+
+
+def _removed_with_data_kept(service, tmp_path, monkeypatch, source="official", **row):
+    plugin = _manifest("keeper")
+    _world(tmp_path, monkeypatch, [plugin], _installed(plugin, source_id=source, source_bound=True, **row))
+    assert service.remove_installation("keeper", keep_data=True) is True
+    return plugin
+
+
+def test_reinstalling_before_the_restart_from_another_source_does_not_take_the_kept_data(
+        tmp_path, monkeypatch, keeping_kind, staging):
+    from provider_hub.state import load_state
+
+    plugin = _removed_with_data_kept(staging, tmp_path, monkeypatch, source="elsewhere",
+                                     config={"base_url": "https://x.test", "api_key": "enc:abc"})
+    # The removal keeps its active release until the restart, so the install below reads as an update.
+    assert load_state()["installations"]["keeper"]["state"] == "removed"
+    assert load_state()["kept_data"]["keeper"]["source_id"] == "elsewhere"
+    assert load_state()["installations"]["keeper"]["config"]["api_key"] == "enc:abc"
+
+    staging.stage_install(plugin, source_id="official", catalog_list="plugins")
+
+    assert keeping_kind.discarded == ["keeper"] and keeping_kind.reclaimed == []
+    assert "keeper" not in load_state()["kept_data"]
+    # Its saved settings and keys are not the new package's: nothing was copied from the old row.
+    row = load_state()["installations"]["keeper"]
+    assert row["config"] == {} and row["source_id"] == "official"
+    # The kind made the plugin ready, as it does for any fresh install.
+    assert ("installed", "keeper") in keeping_kind.calls
+
+
+def test_reinstalling_before_the_restart_from_the_same_source_takes_it_back(
+        tmp_path, monkeypatch, keeping_kind, staging):
+    from provider_hub.state import load_state
+
+    plugin = _removed_with_data_kept(staging, tmp_path, monkeypatch, config={"base_url": "https://x.test"})
+    assert load_state()["installations"]["keeper"]["state"] == "removed"
+
+    staging.stage_install(plugin, source_id="official", catalog_list="plugins")
+
+    assert keeping_kind.discarded == [] and keeping_kind.reclaimed == ["keeper"]
+    assert load_state()["installations"]["keeper"]["config"] == {"base_url": "https://x.test"}
+
+
+def test_a_failed_or_stopped_install_hands_back_the_kept_data_it_had_taken_and_does_not_delete_it(
+        tmp_path, monkeypatch, keeping_kind, staging):
+    from provider_hub.state import load_state
+
+    parent = _manifest("parent", provides=[PARENT_CAPABILITY])
+    addon = _manifest("addon", extends={"id": "parent", "capability": PARENT_CAPABILITY})
+    _world(tmp_path, monkeypatch, [parent, addon], _installed(
+        parent, source_id="official", source_bound=True, config={"api_key": "enc:abc"}))
+    assert staging.remove_installation("parent", keep_data=True) is True
+    # Gone at the restart, as a removal is: the data is what is left.
+    from provider_hub.state import mutate_state
+
+    mutate_state(lambda state: state["installations"].pop("parent"))
+    keeping_kind.calls.clear()
+
+    # The add-on's install stages its parent first, taking over what was kept, and then fails.
+    before = load_state()["kept_data"]["parent"]
+    members = staging._stage_closure_members(_closure("addon"), "official")
+    assert list(members) == ["parent"] and keeping_kind.reclaimed == ["parent"]
+    assert load_state()["installations"]["parent"]["config"] == {"api_key": "enc:abc"}
+    staging._discard_staged_members(members, "addon")
+
+    assert ("after_removed", "parent") in keeping_kind.calls
+    assert keeping_kind.kept is True
+    # The record is not rewritten by the rollback, and its owner stays the source it was kept for.
+    assert load_state()["kept_data"]["parent"] == before
+
+
+def test_a_failed_install_of_a_plugin_that_took_nothing_still_deletes_what_it_made(
+        tmp_path, monkeypatch, keeping_kind, staging):
+    parent = _manifest("parent", provides=[PARENT_CAPABILITY])
+    addon = _manifest("addon", extends={"id": "parent", "capability": PARENT_CAPABILITY})
+    _world(tmp_path, monkeypatch, [parent, addon])
+
+    members = staging._stage_closure_members(_closure("addon"), "official")
+    staging._discard_staged_members(members, "addon")
+
+    assert ("after_removed", "parent") in keeping_kind.calls and keeping_kind.kept is False
+
+
+# --- job rows a dead process left open -----------------------------------------------------------------
+
+
+def _jobs(tmp_path, monkeypatch, rows):
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(write_state(tmp_path / "state.json", jobs=rows)))
+
+
+def _row(job_id, state="running", session=None, updated="2026-11-18T10:00:00Z"):
+    from provider_hub import service
+
+    return {"id": job_id, "action": "install", "state": state, "target_kind": "provider", "target_id": "x",
+            "session": session or service._PROCESS_SESSION, "created_at": updated, "updated_at": updated}
+
+
+def test_a_job_row_an_earlier_run_left_open_is_closed_as_failed_and_a_live_one_is_not(tmp_path, monkeypatch):
+    from datetime import datetime, timezone
+
+    from provider_hub import service
+
+    now = datetime(2026, 11, 18, 10, 30, tzinfo=timezone.utc)
+    _jobs(tmp_path, monkeypatch, [_row("dead", session="another-run"), _row("legacy", session=""),
+                                  _row("live"), _row("done", state="completed", session="another-run")])
+    # A row from a build that did not name its run has no session at all.
+    from provider_hub.state import mutate_state
+
+    mutate_state(lambda state: state["jobs"][1].pop("session"))
+
+    assert service.close_stale_jobs(now) == 2
+
+    by_id = {job["id"]: job for job in service.load_state()["jobs"]}
+    assert [by_id[name]["state"] for name in ("dead", "legacy", "live", "done")] == [
+        "failed", "failed", "running", "completed"]
+    assert by_id["dead"]["error"] == service.JOB_STOPPED_MESSAGE
+    assert service.close_stale_jobs(now) == 0
+
+
+def test_a_job_of_this_run_that_has_not_reported_within_its_limit_is_given_up_on(tmp_path, monkeypatch):
+    from datetime import datetime, timedelta, timezone
+
+    from provider_hub import service
+
+    start = datetime(2026, 11, 18, 10, 0, tzinfo=timezone.utc)
+    _jobs(tmp_path, monkeypatch, [_row("slow")])
+    limit = timedelta(seconds=service.JOB_TIME_LIMIT_SECONDS)
+
+    assert service.close_stale_jobs(start + limit - timedelta(minutes=1)) == 0
+    assert service.close_stale_jobs(start + limit + timedelta(minutes=1)) == 1
+    assert service.load_state()["jobs"][0]["error"] == service.JOB_TIMED_OUT_MESSAGE
+
+
+def test_listing_jobs_and_activating_at_boot_close_the_rows_too(tmp_path, monkeypatch):
+    from provider_hub import service
+
+    _jobs(tmp_path, monkeypatch, [_row("dead", session="another-run")])
+    assert [job["state"] for job in service.list_jobs()] == ["failed"]
+    _jobs(tmp_path, monkeypatch, [_row("dead", session="another-run")])
+    service.activate_staged_installations()
+    assert [job["state"] for job in service.load_state()["jobs"]] == ["failed"]
+
+
+def test_a_job_row_records_which_run_wrote_it(tmp_path, monkeypatch):
+    from provider_hub import service
+
+    _jobs(tmp_path, monkeypatch, [])
+    with service.record_job("repair", target_kind="provider", target_id="x"):
+        assert service.load_state()["jobs"][0]["session"] == service._PROCESS_SESSION
+
+
+def test_a_failed_dependency_install_after_a_removal_that_kept_data_leaves_all_of_it_untouched(
+        tmp_path, monkeypatch, keeping_kind, staging):
+    """The dependency fails before it ever takes the kept data over (its download fails), and the rollback of the
+    failed row must not delete what was kept: not the data, not the record, not the saved settings in it."""
+    from provider_hub.state import load_state, mutate_state
+
+    parent = _manifest("parent", provides=[PARENT_CAPABILITY])
+    addon = _manifest("addon", extends={"id": "parent", "capability": PARENT_CAPABILITY})
+    _world(tmp_path, monkeypatch, [parent, addon], _installed(
+        parent, source_id="official", source_bound=True, config={"api_key": "enc:abc"}))
+    assert staging.remove_installation("parent", keep_data=True) is True
+    mutate_state(lambda state: state["installations"].pop("parent"))  # the restart
+    recorded = load_state()["kept_data"]["parent"]
+    assert recorded["config"] == {"api_key": "enc:abc"}
+    keeping_kind.calls.clear()
+    monkeypatch.setattr(staging, "_fetch_bundle", lambda manifest, deadline=None: (_ for _ in ()).throw(
+        staging.ProviderHubInstallError("the download failed")))
+
+    with pytest.raises(staging.ProviderHubInstallError, match="download failed"):
+        staging._stage_closure_members(_closure("addon"), "official")
+
+    # What the failed row staged is gone, and the kind was told to keep, never to delete.
+    assert "parent" not in load_state()["installations"]
+    assert keeping_kind.kept is True and keeping_kind.discarded == []
+    assert load_state()["kept_data"]["parent"] == recorded
+
+
+def test_a_rollback_of_a_subtitle_provider_never_writes_a_record_or_clears_its_settings(
+        tmp_path, monkeypatch, keeping_kind, staging):
+    from provider_hub.kinds import SUBTITLE_PROVIDER
+    from provider_hub.state import load_state, mutate_state
+
+    parent = _manifest("parent")
+    _world(tmp_path, monkeypatch, [parent], _installed(parent))
+    mutate_state(lambda state: state["installations"]["parent"].update(kind=SUBTITLE_PROVIDER))
+    monkeypatch.setattr(staging, "kind_of", lambda row: SUBTITLE_PROVIDER)
+    monkeypatch.setattr(staging, "get_kind", lambda name: keeping_kind)
+
+    assert staging.remove_installation("parent", rollback=True) is True
+
+    assert keeping_kind.kept is True and "parent" not in load_state().get("kept_data", {})
+
+
+@pytest.mark.parametrize("path", ["the install itself fails", "a dependency fails to download",
+                                  "the install fails after the dependency took the data over"])
+def test_kept_settings_and_secrets_survive_every_way_an_install_can_fail(
+        tmp_path, monkeypatch, keeping_kind, staging, path):
+    """After a removal that kept the data, and the restart that finished it, nothing a failed install does may
+    change what was kept: the record, its owner, the saved settings and the keys in them."""
+    from provider_hub.state import load_state, mutate_state
+
+    parent = _manifest("parent", provides=[PARENT_CAPABILITY])
+    addon = _manifest("addon", extends={"id": "parent", "capability": PARENT_CAPABILITY})
+    secrets = {"base_url": "https://x.test", "api_key": "enc:abc"}  # pragma: allowlist secret
+    _world(tmp_path, monkeypatch, [parent, addon], _installed(
+        parent, source_id="official", source_bound=True, config=dict(secrets)))
+    assert staging.remove_installation("parent", keep_data=True) is True
+    mutate_state(lambda state: state["installations"].pop("parent"))  # the restart
+    recorded = load_state()["kept_data"]["parent"]
+    assert recorded["config"] == secrets
+    keeping_kind.calls.clear()
+
+    def download_fails(manifest, deadline=None):
+        raise staging.ProviderHubInstallError("the download failed")
+
+    if path == "the install itself fails":
+        monkeypatch.setattr(staging, "_fetch_bundle", download_fails)
+        with pytest.raises(staging.ProviderHubInstallError):
+            staging.stage_install(parent, source_id="official", catalog_list="plugins")
+    elif path == "a dependency fails to download":
+        monkeypatch.setattr(staging, "_fetch_bundle", download_fails)
+        with pytest.raises(staging.ProviderHubInstallError):
+            staging._stage_closure_members(_closure("addon"), "official")
+    else:
+        members = staging._stage_closure_members(_closure("addon"), "official")
+        assert keeping_kind.reclaimed == ["parent"]
+        staging._discard_staged_members(members, "addon")
+
+    assert load_state()["kept_data"]["parent"] == recorded
+    assert keeping_kind.discarded == []
+    # Nothing was told to delete the data.
+    assert getattr(keeping_kind, "kept", True) is True
+
+
+# --- a refused install leaves nothing to activate, and the required fields are judged after the handover ----------
+
+
+def _refusing(keeping_kind):
+    def cannot_clear(plugin_id):
+        raise RuntimeError("the old data could not be cleared")
+
+    keeping_kind.discard_kept_data = cannot_clear
+
+
+def test_an_install_refused_over_data_kept_for_another_source_leaves_no_staged_row(
+        tmp_path, monkeypatch, keeping_kind, staging):
+    from provider_hub.state import load_state, mutate_state
+
+    plugin = _manifest("keeper")
+    _world(tmp_path, monkeypatch, [plugin], _installed(plugin, source_id="elsewhere", source_bound=True,
+                                                         config={"api_key": "enc:abc"}))
+    assert staging.remove_installation("keeper", keep_data=True) is True
+    mutate_state(lambda state: state["installations"].pop("keeper"))  # the restart
+    recorded = load_state()["kept_data"]["keeper"]
+    _refusing(keeping_kind)
+
+    with pytest.raises(staging.ProviderHubInstallError, match="nothing was installed"):
+        staging.stage_install(plugin, source_id="official", catalog_list="plugins")
+
+    # No row was left staged for the next restart to activate, and the kept data and its owner are as they were.
+    assert "keeper" not in load_state()["installations"]
+    assert load_state()["kept_data"]["keeper"] == recorded
+    assert staging.activate_staged_installations() == []
+
+
+def test_an_install_refused_before_the_restart_puts_the_removed_row_back(tmp_path, monkeypatch, keeping_kind, staging):
+    from provider_hub.state import load_state
+
+    plugin = _removed_with_data_kept(staging, tmp_path, monkeypatch, source="elsewhere",
+                                     config={"api_key": "enc:abc"})
+    removed = load_state()["installations"]["keeper"]
+    _refusing(keeping_kind)
+
+    with pytest.raises(staging.ProviderHubInstallError):
+        staging.stage_install(plugin, source_id="official", catalog_list="plugins")
+
+    assert load_state()["installations"]["keeper"] == removed
+    assert load_state()["installations"]["keeper"]["state"] == "removed"
+
+
+def test_activation_does_not_start_a_staged_install_whose_kept_data_belongs_to_another_owner(
+        tmp_path, monkeypatch, keeping_kind, staging):
+    """The safety net: a row that got past the refusal is judged again before it starts."""
+    from provider_hub.state import load_state, mutate_state
+
+    plugin = _manifest("keeper")
+    _world(tmp_path, monkeypatch, [plugin], {})
+    staging.stage_install(plugin, source_id="official", catalog_list="plugins")
+    mutate_state(lambda state: state.setdefault("kept_data", {}).update(
+        keeper={"source_id": "elsewhere", "origin": None, "kind": plugin["kind"], "config": None}))
+    _refusing(keeping_kind)
+
+    assert staging.activate_staged_installations() == []
+
+    row = load_state()["installations"]["keeper"]
+    assert row["state"] == "failed" and row["pending_restart"] is False and row["active_version"] is None
+    assert "could not be cleared" in row["last_error"]
+
+
+def test_activation_clears_data_kept_for_another_owner_and_then_starts_the_install(
+        tmp_path, monkeypatch, keeping_kind, staging):
+    from provider_hub.state import load_state, mutate_state
+
+    plugin = _manifest("keeper")
+    _world(tmp_path, monkeypatch, [plugin], {})
+    staging.stage_install(plugin, source_id="official", catalog_list="plugins")
+    mutate_state(lambda state: state.setdefault("kept_data", {}).update(
+        keeper={"source_id": "elsewhere", "origin": None, "kind": plugin["kind"], "config": None}))
+    keeping_kind.calls.clear()
+
+    staging._enforce_kept_data_ownership()
+
+    row = load_state()["installations"]["keeper"]
+    assert row["state"] == "staged" and row["pending_restart"] is True
+    assert keeping_kind.discarded == ["keeper"] and "keeper" not in load_state()["kept_data"]
+
+
+def test_activation_leaves_the_data_kept_for_the_same_owner_alone(tmp_path, monkeypatch, keeping_kind, staging):
+    from provider_hub.state import load_state, mutate_state
+
+    plugin = _manifest("keeper")
+    _world(tmp_path, monkeypatch, [plugin], {})
+    staging.stage_install(plugin, source_id="official", catalog_list="plugins")
+    mutate_state(lambda state: state.setdefault("kept_data", {}).update(
+        keeper={"source_id": "official", "origin": None, "kind": plugin["kind"], "config": None}))
+
+    staging._enforce_kept_data_ownership()
+
+    assert load_state()["installations"]["keeper"]["state"] == "staged"
+    assert keeping_kind.discarded == [] and "keeper" in load_state()["kept_data"]
+
+
+def test_required_settings_are_judged_after_the_kept_ones_come_back(tmp_path, monkeypatch, keeping_kind, staging):
+    seen = []
+    monkeypatch.setattr(staging, "missing_required_fields",
+                        lambda installation: [] if (installation.get("config") or {}).get("api_key") else ["api_key"])
+    keeping_kind.on_installed = lambda plugin_id, missing_required=(): seen.append(list(missing_required)) or True
+    from provider_hub.state import load_state, mutate_state
+
+    plugin = _manifest("keeper")
+    _world(tmp_path, monkeypatch, [plugin], _installed(plugin, source_id="official", source_bound=True,
+                                                         config={"api_key": "enc:abc"}))
+    assert staging.remove_installation("keeper", keep_data=True) is True
+    mutate_state(lambda state: state["installations"].pop("keeper"))  # the restart
+
+    installation = staging.stage_install(plugin, source_id="official", catalog_list="plugins")
+
+    # The restored key is on the row, so nothing is missing, and the answer carries the restored settings.
+    assert seen == [[]]
+    assert load_state()["installations"]["keeper"]["config"] == {"api_key": "enc:abc"}
+    assert installation["config"]["api_key"] != ""

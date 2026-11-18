@@ -517,6 +517,58 @@ def test_releasing_a_plugin_resets_pointers_and_deletes_nothing_until_asked(stor
     assert store.list_instances("google_translate") == []
 
 
+@pytest.mark.parametrize("keep", [True, False])
+def test_removing_a_translator_keeps_or_deletes_what_it_stored_as_asked(store, pointers, monkeypatch, keep):
+    """The kind hook that runs once a removal is saved: the answer decides whether the engine instance, its
+    connections and its secrets survive, and a reinstall finds them when they did."""
+    from provider_hub.kinds.translator import TranslatorKind
+    from subtitles.tools.translate.runtime import worker_binding
+
+    marked, cleared = [], []
+    monkeypatch.setattr("provider_hub.kinds.translator._store", lambda: store)
+    monkeypatch.setattr(worker_binding, "plugin_kept", marked.append)
+    monkeypatch.setattr(worker_binding, "plugin_removed", cleared.append)
+    instance = _ai_engine(store)
+    store.set_secret((CONNECTION, store.list_connections(instance.id)[0].id), "api_key", KEY,
+                     destinations=frozenset({"https://openrouter.ai"}))
+    kind = TranslatorKind()
+    assert kind.on_removed(OFFICIAL_ENGINE_PLUGIN_ID) is True
+
+    kind.after_removed(OFFICIAL_ENGINE_PLUGIN_ID, keep_data=keep)
+
+    if keep:
+        assert (marked, cleared) == ([OFFICIAL_ENGINE_PLUGIN_ID], [])
+        assert [row.id for row in store.list_instances(OFFICIAL_ENGINE_PLUGIN_ID)] == [instance.id]
+        assert len(store.list_connections(instance.id)) == 1
+        # Installing the plugin again picks the same instance up instead of making a blank one.
+        assert kind.on_installed(OFFICIAL_ENGINE_PLUGIN_ID) is True
+        assert [row.id for row in store.list_instances(OFFICIAL_ENGINE_PLUGIN_ID)] == [instance.id]
+    else:
+        assert (marked, cleared) == ([], [OFFICIAL_ENGINE_PLUGIN_ID])
+        assert store.list_instances(OFFICIAL_ENGINE_PLUGIN_ID) == []
+        assert store.list_connections(instance.id) == []
+
+
+def test_deleting_a_plugins_data_takes_the_connections_it_serves_on_other_engines_and_only_those(store, pointers):
+    """A connection of another engine whose type and settings the removed plugin declares is the plugin's own. It
+    goes with the data, its keys with it, and the engine closes the gap. What the plugin does not serve stays."""
+    engine = _ai_engine(store, with_connection=False)
+    own = store.add_connection(engine.id, "openrouter", model="a", plugin_id=OFFICIAL_ENGINE_PLUGIN_ID)
+    served = store.add_connection(engine.id, "cli", model="b", plugin_id="cli_backend")
+    last = store.add_connection(engine.id, "lmstudio", model="c", plugin_id=OFFICIAL_ENGINE_PLUGIN_ID)
+    store.set_secret((CONNECTION, served.id), "token", KEY, destinations=frozenset({"https://cli.test"}))
+    backend_own = store.create_instance("cli_backend", name="CLI")
+    store.add_connection(backend_own.id, "cli", plugin_id="cli_backend")
+
+    store.delete_plugin_data("cli_backend")
+
+    assert store.list_instances("cli_backend") == []
+    remaining = store.list_connections(engine.id)
+    assert [(row.id, row.position) for row in remaining] == [(own.id, 0), (last.id, 1)]
+    assert store._secret_rows((CONNECTION, served.id)) == []
+    assert [row.id for row in store.list_instances(OFFICIAL_ENGINE_PLUGIN_ID)] == [engine.id]
+
+
 def test_disabling_a_plugin_releases_the_pointers_but_keeps_its_instances(store, pointers):
     google = store.create_instance("google_translate")
     store.set_engine(google.id)
@@ -893,3 +945,24 @@ def test_schemas_come_from_the_manifest_envelope():
     assert effective_destinations(schema_for_backend(manifest, "openai_compatible"), {}) == {
         "https://api.openai.com/v1"}
     assert effective_destinations(schema_for_backend(manifest, "unknown"), {}) == set()
+
+
+def test_clearing_data_for_a_new_owner_does_not_swallow_a_failure(store, monkeypatch):
+    """After a removal the cleanup is best effort. At the boundary where another package takes the id it is not:
+    if the old instance or its folders survive, the install must be refused."""
+    from provider_hub.kinds.translator import TranslatorKind
+    from subtitles.tools.translate.runtime import worker_binding
+
+    monkeypatch.setattr("provider_hub.kinds.translator._store", lambda: store)
+    monkeypatch.setattr(worker_binding, "discard_folders", lambda plugin_id: None)
+    store.create_instance("google_translate")
+
+    def broken(plugin_id):
+        raise RuntimeError("the database refused")
+
+    monkeypatch.setattr(store, "delete_plugin_data", broken)
+    with pytest.raises(RuntimeError, match="database refused"):
+        TranslatorKind().discard_kept_data("google_translate")
+    # The same failure after a removal is still logged and not raised.
+    monkeypatch.setattr(worker_binding, "plugin_removed", lambda plugin_id: None)
+    TranslatorKind().after_removed("google_translate", keep_data=False)

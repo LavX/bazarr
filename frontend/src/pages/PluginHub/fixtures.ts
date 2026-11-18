@@ -179,6 +179,13 @@ export const installedTranslator = installation(
   { name: "AI Subtitle Translator" },
 );
 
+/** The translator as the server lists it while the back end below is installed and switched on. */
+export const translatorWithBackend: PluginInstallation = {
+  ...installedTranslator,
+  dependents: ["opencode_backend"],
+  enabled_dependents: ["opencode_backend"],
+};
+
 export const installedBackend = installation(
   "opencode_backend",
   "translator_backend",

@@ -1,4 +1,9 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import {
+  QueryClient,
+  useMutation,
+  useQuery,
+  useQueryClient,
+} from "@tanstack/react-query";
 import { QueryKeys } from "@/apis/queries/keys";
 import api from "@/apis/raw";
 import { inlineWhen, withInlineErrors } from "@/apis/raw/inlineWrites";
@@ -30,6 +35,18 @@ function useRefreshAfterChange() {
   };
 }
 
+/**
+ * Waits for a job the way every plugin action does, after the list of jobs has been read again, so the
+ * cards say what the job is doing from its first moment and not only once it is over.
+ */
+function waitForPluginJob(
+  client: QueryClient,
+  jobId: Parameters<typeof waitForJob>[1],
+) {
+  void client.invalidateQueries({ queryKey: [...pluginsKey, QueryKeys.Jobs] });
+  return waitForJob(client, jobId);
+}
+
 /** The catalog, all of it, or one kind of it. */
 export function usePluginCatalog(kind?: string) {
   return useQuery({
@@ -58,10 +75,29 @@ export function usePluginInstallation(id: string | null) {
   });
 }
 
+/** A job that has not finished. */
+export const jobIsOpen = (job: { state?: string }) =>
+  job.state === "pending" || job.state === "running";
+
 export function usePluginJobs() {
   return useQuery({
     queryKey: [...pluginsKey, QueryKeys.Jobs],
     queryFn: () => api.plugins.jobs(),
+    // Cards say "Installing" or "Rebuilding" while a job runs, so the list is read again until it ends.
+    // A slow read while nothing is open finds a job somebody else started.
+    refetchInterval: (query) =>
+      query.state.data?.some(jobIsOpen) ? 3_000 : 15_000,
+  });
+}
+
+/** The recent output of one plugin. Asked only while a person has the log open. */
+export function usePluginLog(id: string | null) {
+  return useQuery({
+    queryKey: [...pluginsKey, "log", id],
+    queryFn: () => api.plugins.log(id!),
+    enabled: id !== null,
+    gcTime: 0,
+    refetchInterval: 5_000,
   });
 }
 
@@ -137,7 +173,7 @@ export function usePluginInstall({
       inlineErrors,
       async (request: PluginInstallRequest) => {
         const { job_id: jobId } = await api.plugins.install(request);
-        await waitForJob(client, jobId);
+        await waitForPluginJob(client, jobId);
       },
     ),
     onSettled: refresh,
@@ -155,10 +191,61 @@ export function usePluginApplyUpdate({
       inlineErrors,
       async (request: PluginUpdateApplyRequest) => {
         const { job_id: jobId } = await api.plugins.applyUpdate(request);
-        await waitForJob(client, jobId);
+        await waitForPluginJob(client, jobId);
       },
     ),
     // A failed update is recorded on the installation, so the lists are read again either way.
+    onSettled: refresh,
+  });
+}
+
+/** Turn a plugin on or off. A refusal (a plugin that needs it is on) is reported by the caller. */
+export function usePluginSetEnabled() {
+  const refresh = useRefreshAfterChange();
+  return useMutation({
+    mutationKey: [...pluginsKey, QueryKeys.Actions, "set-enabled"],
+    mutationFn: ({ id, enabled }: { id: string; enabled: boolean }) =>
+      withInlineErrors(() => api.plugins.setEnabled(id, enabled)),
+    onSettled: refresh,
+  });
+}
+
+/** Rebuild the plugin's environment. Resolves when the job has finished and rejects with its reason. */
+export function usePluginRepair() {
+  const client = useQueryClient();
+  const refresh = useRefreshAfterChange();
+  return useMutation({
+    mutationKey: [...pluginsKey, QueryKeys.Actions, "repair"],
+    mutationFn: async (id: string) => {
+      const { job_id: jobId } = await withInlineErrors(() =>
+        api.plugins.repair(id),
+      );
+      await waitForPluginJob(client, jobId);
+    },
+    onSettled: refresh,
+  });
+}
+
+export function usePluginRemove() {
+  const client = useQueryClient();
+  const refresh = useRefreshAfterChange();
+  return useMutation({
+    mutationKey: [...pluginsKey, QueryKeys.Actions, "remove"],
+    mutationFn: async ({ id, keepData }: { id: string; keepData: boolean }) => {
+      const { job_id: jobId } = await withInlineErrors(() =>
+        api.plugins.remove(id, keepData),
+      );
+      await waitForPluginJob(client, jobId);
+    },
+    onSettled: refresh,
+  });
+}
+
+export function usePluginDismissReview() {
+  const refresh = useRefreshAfterChange();
+  return useMutation({
+    mutationKey: [...pluginsKey, QueryKeys.Actions, "dismiss-review"],
+    mutationFn: (id: string) => api.plugins.dismissReview(id),
     onSettled: refresh,
   });
 }

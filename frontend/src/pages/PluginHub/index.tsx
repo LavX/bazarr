@@ -1,4 +1,10 @@
-import { FunctionComponent, useCallback, useMemo, useState } from "react";
+import {
+  FunctionComponent,
+  useCallback,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { useSearchParams } from "react-router";
 import {
   Alert,
@@ -9,6 +15,7 @@ import {
   Tabs,
 } from "@mantine/core";
 import { useDocumentTitle } from "@mantine/hooks";
+import { showNotification } from "@mantine/notifications";
 import {
   faListCheck,
   faPlug,
@@ -20,7 +27,12 @@ import { useQuery } from "@tanstack/react-query";
 import {
   usePluginCatalog,
   usePluginCheckUpdates,
+  usePluginDismissReview,
   usePluginInstallations,
+  usePluginJobs,
+  usePluginRemove,
+  usePluginRepair,
+  usePluginSetEnabled,
 } from "@/apis/hooks/plugins";
 import { useAppTitle } from "@/apis/hooks/site";
 import { useSystemStatus } from "@/apis/hooks/system";
@@ -28,10 +40,16 @@ import { QueryKeys } from "@/apis/queries/keys";
 import api from "@/apis/raw";
 import { withInlineErrors } from "@/apis/raw/inlineWrites";
 import { SearchBar } from "@/components/hub/SearchBar";
+import { useGatedAction } from "@/components/modals/PasswordConfirmModal";
 import {
   PluginCostCaps,
   usePluginConsentFlow,
 } from "@/components/plugin-consent";
+import { needsPassword, reasonOf } from "@/components/plugin-consent/refusal";
+import { notification } from "@/modules/notification";
+import { explainFailure } from "./components/failure";
+import { LogDialog } from "./components/LogDialog";
+import { RemoveDialog } from "./components/RemoveDialog";
 import { ActivityPanel } from "./ActivityPanel";
 import {
   entryKind,
@@ -48,6 +66,7 @@ import {
 } from "./model";
 import { InstalledPanel, MarketplacePanel, UpdatesPanel } from "./Panels";
 import { SourceBand } from "./SourceBand";
+import { openJobs } from "./status";
 import styles from "./PluginHub.module.scss";
 
 type TabKey = "marketplace" | "installed" | "updates" | "activity";
@@ -134,6 +153,37 @@ const PluginHubView: FunctionComponent = () => {
     },
   });
 
+  const jobs = usePluginJobs();
+  const open = useMemo(() => openJobs(jobs.data), [jobs.data]);
+  const setEnabled = usePluginSetEnabled();
+  const repair = usePluginRepair();
+  const remove = usePluginRemove();
+  const dismissReview = usePluginDismissReview();
+  const runGated = useGatedAction();
+  const [working, setWorking] = useState<string | null>(null);
+  const [logOf, setLogOf] = useState<PluginRow | null>(null);
+  const [removing, setRemoving] = useState<PluginRow | null>(null);
+  const [removeProblem, setRemoveProblem] = useState("");
+  // Focus goes back to the card's actions button when a dialog opened from its menu is closed. The menu
+  // item that was used is gone by then, so the button that stays is the one remembered.
+  const lastTrigger = useRef<HTMLElement | null>(null);
+  const rememberTrigger = (row: PluginRow) => {
+    lastTrigger.current = document.querySelector<HTMLElement>(
+      `[data-plugin-actions="${CSS.escape(row.id)}"]`,
+    );
+  };
+  const restoreFocus = () => {
+    const trigger = lastTrigger.current;
+    if (trigger && document.body.contains(trigger)) {
+      trigger.focus();
+      return;
+    }
+    // The card is gone (it was removed), so focus goes to the tab in use, where the next keypress starts.
+    document
+      .querySelector<HTMLElement>('[role="tab"][aria-selected="true"]')
+      ?.focus();
+  };
+
   const setParam = useCallback(
     (key: "tab" | "type", value: string, fallback: string) => {
       const updated = new URLSearchParams(params);
@@ -204,11 +254,127 @@ const PluginHubView: FunctionComponent = () => {
   };
   const update = (row: PluginRow) =>
     void flow.begin({ action: "update", pluginId: row.id, name: row.name });
+  /** One request that starts code, behind the password question, asked again once if the server still wanted it. */
+  const gated = async (send: () => Promise<unknown>, label: string) => {
+    try {
+      return await runGated(async () => void (await send()), label);
+    } catch (error) {
+      if (!needsPassword(error)) {
+        throw error;
+      }
+      return runGated(async () => void (await send()), label);
+    }
+  };
+  /**
+   * Runs one action for one plugin and says in words what happened. An action behind the password question
+   * that was not confirmed returns false: nothing was sent, so nothing is said.
+   */
+  const perform = async (
+    row: PluginRow,
+    run: () => Promise<unknown>,
+    done: string,
+    failed: string,
+    // A refusal from the server is already a sentence for a person. Only a failed job is put in the fixed words.
+    explain = false,
+  ) => {
+    if (working !== null) {
+      return false;
+    }
+    setWorking(row.id);
+    try {
+      if ((await run()) === false) {
+        return false;
+      }
+      showNotification(notification.info(done, row.name));
+      return true;
+    } catch (error) {
+      const reason = reasonOf(error);
+      const copy = explain ? explainFailure(reason) : null;
+      showNotification(
+        notification.error(
+          failed,
+          copy
+            ? `${copy.cause} ${copy.next}`
+            : reason || `${row.name} did not change.`,
+        ),
+      );
+      return false;
+    } finally {
+      setWorking(null);
+    }
+  };
+  const toggle = (row: PluginRow) => {
+    const turnOn = row.installation?.enabled === false;
+    void perform(
+      row,
+      () => setEnabled.mutateAsync({ id: row.id, enabled: turnOn }),
+      turnOn ? "Turned on" : "Turned off",
+      turnOn ? "Could not turn it on" : "Could not turn it off",
+    );
+  };
+  const doRepair = (row: PluginRow) =>
+    void perform(
+      row,
+      () => gated(() => repair.mutateAsync(row.id), `repair ${row.name}`),
+      "Repaired",
+      "The repair did not finish",
+      true,
+    );
+  const askRemove = (row: PluginRow) => {
+    rememberTrigger(row);
+    setRemoveProblem("");
+    setRemoving(row);
+  };
+  const confirmRemove = async (keepData: boolean) => {
+    if (!removing || working !== null) {
+      return;
+    }
+    setWorking(removing.id);
+    setRemoveProblem("");
+    try {
+      // Removing a plugin can delete its settings and keys, so the server asks for the password first, as it
+      // does for a repair. A prompt that is closed leaves the dialog as it was and says nothing.
+      const confirmed = await gated(
+        () => remove.mutateAsync({ id: removing.id, keepData }),
+        `remove ${removing.name}`,
+      );
+      if (confirmed === false) {
+        return;
+      }
+      showNotification(
+        notification.info(
+          keepData ? "Removed, its data is kept" : "Removed with its data",
+          removing.name,
+        ),
+      );
+      setRemoving(null);
+    } catch (error) {
+      setRemoveProblem(
+        reasonOf(error) || `${removing.name} could not be removed.`,
+      );
+    } finally {
+      setWorking(null);
+    }
+  };
+  const showLog = (row: PluginRow) => {
+    rememberTrigger(row);
+    setLogOf(row);
+  };
   const actions = {
     sandbox,
     onInstall: install,
     onUpdate: update,
     updating: flow.updating,
+    openJobs: open,
+    working,
+    dismissing: dismissReview.isPending
+      ? (dismissReview.variables ?? null)
+      : null,
+    onToggle: toggle,
+    onRepair: doRepair,
+    onLog: showLog,
+    onRemove: askRemove,
+    onDismissReview: (row: PluginRow) => dismissReview.mutate(row.id),
   };
 
   if (catalog.isLoading && !catalog.data) {
@@ -381,6 +547,19 @@ const PluginHubView: FunctionComponent = () => {
         </Tabs.Panel>
       </Tabs>
       {flow.dialog}
+      <RemoveDialog
+        row={removing}
+        busy={working !== null && working === removing?.id}
+        problem={removeProblem}
+        onConfirm={(keepData) => void confirmRemove(keepData)}
+        onClose={() => setRemoving(null)}
+        onClosed={restoreFocus}
+      />
+      <LogDialog
+        row={logOf}
+        onClose={() => setLogOf(null)}
+        onClosed={restoreFocus}
+      />
     </Container>
   );
 };

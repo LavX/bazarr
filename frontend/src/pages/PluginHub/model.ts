@@ -171,8 +171,10 @@ export interface PluginRow {
   facts: ManifestFacts;
   entry: PluginCatalogEntry | null;
   installation: PluginInstallation | null;
-  /** The names of the installed plugins that need this one. */
+  /** The names of the installed plugins the server says depend on this one, which is what a removal refuses over. */
   dependents: string[];
+  /** The same, counting only those that are switched on, which is what switching it off refuses over. */
+  enabledDependents: string[];
   /** The version the bound source offers, when it is newer than the one installed. */
   update: string | null;
 }
@@ -193,30 +195,20 @@ export function isInstalled(
   );
 }
 
-/** An installed plugin that extends this one, or requires a capability it provides. */
-export function dependentsOf(
-  id: string,
-  provides: string[],
+/**
+ * The names of the plugins whose ids the server lists as dependents. The page decides nothing about who
+ * depends on whom: the server's own check, the one that refuses a removal, is the only source.
+ */
+export function namesOf(
+  ids: string[] | undefined,
   installations: PluginInstallation[],
 ): string[] {
-  const names: string[] = [];
-  for (const other of installations) {
-    if (
-      other.provider_id === id ||
-      other.state === "removed" ||
-      !isInstalled(other)
-    ) {
-      continue;
-    }
-    const facts = manifestFacts(other);
-    const needs =
-      facts.extendsId === id ||
-      facts.requires.some((capability) => provides.includes(capability));
-    if (needs) {
-      names.push(other.name ?? other.provider_id);
-    }
-  }
-  return names.sort();
+  return (ids ?? [])
+    .map((id) => {
+      const other = installations.find((item) => item.provider_id === id);
+      return other?.name ?? id;
+    })
+    .sort();
 }
 
 function rowOf(
@@ -272,7 +264,8 @@ function rowOf(
     facts,
     entry,
     installation,
-    dependents: dependentsOf(id, facts.provides, installations),
+    dependents: namesOf(installation?.dependents, installations),
+    enabledDependents: namesOf(installation?.enabled_dependents, installations),
     update: offered?.version ?? null,
   };
 }

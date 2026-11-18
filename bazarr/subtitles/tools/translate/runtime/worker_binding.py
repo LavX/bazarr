@@ -42,6 +42,8 @@ from . import workers
 logger = logging.getLogger(__name__)
 
 KIND = "translator"
+# A file in a plugin's folder that says its data was kept on purpose when the plugin was removed.
+KEPT_MARKER = ".kept"
 DEFAULT_PORTS = frozenset({80, 443})
 _DEFAULT_PORT_OF = {"http": 80, "https": 443}
 _PLUGIN_ID = re.compile(r"\A[a-z0-9][a-z0-9_.-]{0,63}\Z")
@@ -260,7 +262,7 @@ class TranslatorWorkers:
         for child in children:
             if child.is_symlink() or not child.is_dir() or not _PLUGIN_ID.match(child.name):
                 continue
-            if child.name in known:
+            if child.name in known or (child / KEPT_MARKER).exists():
                 continue
             shutil.rmtree(child, ignore_errors=True)
             removed.append(child.name)
@@ -418,11 +420,54 @@ def plugin_changed(plugin_id: str) -> None:
         port.retire(plugin_id)
 
 
+def _set_kept(plugin_id: str, kept: bool) -> None:
+    """Mark the plugin's writable folders as kept on purpose, or take the mark off. Works whether or not a binding
+    is in place, since the mark is read by a later start, which may be bound when this process was not. A plugin
+    with no folder has nothing to mark."""
+    with _lock:
+        definitions = _definitions
+    folder = (definitions._hub_dir() if definitions is not None else _hub_dir()) / "run" / plugin_id
+    if not _PLUGIN_ID.match(plugin_id) or folder.is_symlink():
+        return
+    marker = folder / KEPT_MARKER
+    try:
+        if kept:
+            if folder.is_dir():
+                marker.touch()
+        else:
+            marker.unlink(missing_ok=True)
+    except OSError:
+        logger.warning("Could not %s the mark on the folders of translator %s", "set" if kept else "clear", plugin_id,
+                       exc_info=True)
+
+
+def discard_folders(plugin_id: str) -> None:
+    """Delete the plugin's writable folders now, mark and all. For data that was kept and is not wanted any more, with
+    no worker of the plugin running because it is not installed. Works whether or not a binding is in place. A folder
+    that cannot be deleted raises, since the caller must not go on as if it were gone."""
+    with _lock:
+        definitions = _definitions
+    folder = (definitions._hub_dir() if definitions is not None else _hub_dir()) / "run" / plugin_id
+    if _PLUGIN_ID.match(plugin_id) and not folder.is_symlink():
+        try:
+            shutil.rmtree(folder)
+        except FileNotFoundError:
+            pass
+
+
+def plugin_installed(plugin_id: str) -> None:
+    """The plugin was installed, which ends whatever an earlier removal said about its folders: they are in use
+    again, and a removal made later decides afresh."""
+    _set_kept(plugin_id, False)
+
+
 def plugin_removed(plugin_id: str) -> None:
-    """The plugin was removed: its worker is retired once its jobs are done, and its writable folders are cleared once
-    nothing of it is running and the Plugin Hub no longer has it (a removal of an active plugin waits for a restart).
-    Until then it is looked at every few seconds, and a start finds whatever is left. Nothing happens while no binding
-    is in place."""
+    """The plugin was removed and its data is not kept: any earlier mark that kept it is taken off at once, its worker
+    is retired once its jobs are done, and its writable folders are cleared once nothing of it is running and the
+    Plugin Hub no longer has it (a removal of an active plugin waits for a restart, and the sweep after that start
+    clears them). Until then it is looked at every few seconds, and a start finds whatever is left. Nothing else
+    happens while no binding is in place."""
+    _set_kept(plugin_id, False)
     with _lock:
         port = _port
     if port is None:
@@ -431,6 +476,18 @@ def plugin_removed(plugin_id: str) -> None:
     with _lock:
         _pending_removal.add(plugin_id)
     _sweep_removed()
+
+
+def plugin_kept(plugin_id: str) -> None:
+    """The plugin was removed and its data is kept: its folders are marked so that no sweep clears them, and its
+    worker is retired once its jobs are done."""
+    with _lock:
+        port = _port
+        # A removal asked for earlier is overtaken by this answer.
+        _pending_removal.discard(plugin_id)
+    _set_kept(plugin_id, True)
+    if port is not None:
+        port.retire(plugin_id)
 
 
 def _sweep_removed(from_timer: bool = False) -> None:

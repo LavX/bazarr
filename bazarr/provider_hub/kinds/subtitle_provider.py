@@ -231,11 +231,79 @@ def apply_settings_overlay(provider_configs: dict[str, dict[str, Any]], settings
         logger.exception("Unable to load Provider Hub settings config")
 
 
+def own_settings_section_fields(provider_id: str) -> dict[str, Any]:
+    """The fields of the plugin's own settings section in the configuration, with the value each has by default.
+
+    Empty when the section is not the plugin's alone: a built-in provider module of that id is still there and
+    reads the same section, so a plugin's removal must not clear what it needs. Also empty for an id that has no
+    section at all, which is every plugin that keeps its settings only on its own installation row.
+    """
+    from app.config import validators
+    from provider_hub.migration import MIGRATED_BUILT_IN_PROVIDER_IDS
+    from provider_hub.registry import _REGISTERED_PROVIDER_HUB_IDS
+    from subliminal_patch.extensions import provider_registry
+
+    # Only the sections of the providers that moved to the catalog are a provider's. Any other id could name a
+    # section of the application itself, which is nobody's to clear.
+    if provider_id not in MIGRATED_BUILT_IN_PROVIDER_IDS:
+        return {}
+    if provider_id in set(provider_registry.names()) - _REGISTERED_PROVIDER_HUB_IDS:
+        return {}
+    fields: dict[str, Any] = {}
+    for validator in validators:
+        for name in getattr(validator, "names", ()) or ():
+            section, _, field = str(name).partition(".")
+            if section != provider_id or not field or "." in field:
+                continue
+            default = getattr(validator, "default", None)
+            if default is None or isinstance(default, (str, int, float, bool, list, dict)):
+                fields[str(name)] = default
+    return fields
+
+
+def reset_own_settings_section(provider_id: str) -> bool:
+    """Put the plugin's own settings section back to its defaults, credentials included, and save it. False when
+    it could not be saved, with the live values put back as they were. Nothing shared is touched."""
+    fields = own_settings_section_fields(provider_id)
+    if not fields:
+        return True
+    from app.config import settings, write_config
+    from discover.metadata import CONFIG_LOCK
+
+    with CONFIG_LOCK:
+        previous = {name: settings.get(name) for name in fields}
+        try:
+            for name, default in fields.items():
+                settings[name] = default
+            saved = write_config()
+        except Exception:
+            logger.exception("Could not clear the settings of %s", provider_id)
+            saved = False
+        if saved is not True:
+            for name, value in previous.items():
+                settings[name] = value
+            return False
+        return True
+
+
 class SubtitleProviderKind(Kind):
     name = SUBTITLE_PROVIDER
     kind_apis = frozenset({SUBTITLE_PROVIDER_KIND_API})
     attach_policy = ATTACH_ON_RESTART
     noun = "provider"
+    keeps_data = True
+
+    def after_removed(self, plugin_id: str, keep_data: bool = False) -> None:
+        # A provider keeps nothing but its settings: its own section of the configuration, and the settings on its
+        # installation row, which the removal has already cleared when the data is not kept.
+        if keep_data:
+            return
+        if not reset_own_settings_section(plugin_id):
+            logger.warning("The settings of %s could not be cleared", plugin_id)
+
+    def discard_kept_data(self, plugin_id: str) -> None:
+        if not reset_own_settings_section(plugin_id):
+            raise RuntimeError(f"the settings of {plugin_id} could not be cleared")
 
     def on_installed(self, plugin_id: str, missing_required: Sequence[str] = ()) -> bool:
         # A first install opts the provider into enabled_providers, so the new

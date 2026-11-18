@@ -10,14 +10,22 @@ import {
 } from "@fortawesome/free-solid-svg-icons";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import { HubCard } from "@/components/hub/HubCard";
-import { ProviderStatusBadge, StatusBadge } from "@/components/hub/StatusBadge";
+import { ProviderStatusBadge } from "@/components/hub/StatusBadge";
 import { TrustBadge } from "@/components/hub/TrustBadge";
 import { kindLabel, permissionLabel } from "@/components/plugin-consent/format";
+import { PluginMenu } from "./components/PluginMenu";
+import {
+  FailureNote,
+  PluginStatusBadge,
+  ReviewNotice,
+  RuntimeLine,
+} from "./components/PluginState";
 import { isInstalled, permissionMark, PluginRow, SandboxFacts } from "./model";
+import { PluginStatus, pluginStatus } from "./status";
 import pageStyles from "./PluginHub.module.scss";
 import styles from "@/components/hub/hub.module.scss";
 
-interface PluginCardProps {
+export interface PluginCardProps {
   row: PluginRow;
   sandbox: (SandboxFacts & { label?: string; pending?: boolean }) | undefined;
   onInstall: (row: PluginRow) => void;
@@ -26,6 +34,19 @@ interface PluginCardProps {
   updating: boolean;
   /** Another plugin's install or update is going ahead, so this one waits its turn. */
   blocked?: boolean;
+  /** What the open jobs are doing, by plugin id. */
+  openJobs: Map<string, Set<string>>;
+  /** A request for this plugin (turn on or off, repair, remove) is on its way. */
+  working: boolean;
+  /** A request for another plugin is on its way. */
+  elsewhere: boolean;
+  /** The review notice of this plugin is being dismissed. */
+  dismissing: boolean;
+  onToggle: (row: PluginRow) => void;
+  onRepair: (row: PluginRow) => void;
+  onLog: (row: PluginRow) => void;
+  onRemove: (row: PluginRow) => void;
+  onDismissReview: (row: PluginRow) => void;
 }
 
 /** The mark of the one plugin Bazarr+ ships itself, shown only when its source is the official one. */
@@ -49,8 +70,13 @@ const Action: FunctionComponent<PluginCardProps> = ({
   onUpdate,
   updating,
   blocked = false,
+  working,
+  elsewhere,
+  openJobs,
 }) => {
   const { entry } = row;
+  // Something is already being done to this plugin, so an update does not start on top of it.
+  const occupied = working || (openJobs.get(row.id)?.size ?? 0) > 0;
   // A row that only records a failed install is not an installation: the install is offered again.
   const installation = isInstalled(row.installation) ? row.installation : null;
   if (installation?.pending_restart) {
@@ -67,11 +93,13 @@ const Action: FunctionComponent<PluginCardProps> = ({
         variant="light"
         color="yellow"
         loading={updating}
-        disabled={blocked}
+        disabled={blocked || occupied || elsewhere}
         title={
-          blocked
+          blocked || elsewhere
             ? "Another plugin is being changed. Wait for it to finish."
-            : undefined
+            : occupied
+              ? "Something is being done to this plugin. Wait for it to finish."
+              : undefined
         }
         onClick={() => onUpdate(row)}
         leftSection={<FontAwesomeIcon icon={faArrowUp} />}
@@ -149,6 +177,9 @@ export const PluginCard: FunctionComponent<PluginCardProps> = (props) => {
           : "Not sandboxed on this host"))
       : null;
   const needs = facts.requires;
+  const status: PluginStatus | null = pluginStatus(row, props.openJobs);
+  const installed = isInstalled(installation) ? installation : null;
+  const busy = props.working || (props.openJobs.get(row.id)?.size ?? 0) > 0;
   return (
     <HubCard
       name={
@@ -162,6 +193,20 @@ export const PluginCard: FunctionComponent<PluginCardProps> = (props) => {
           v{row.version} from {row.sourceName}
         </>
       }
+      menu={
+        installed ? (
+          <PluginMenu
+            row={row}
+            enabledDependents={row.enabledDependents}
+            busy={busy}
+            elsewhere={props.elsewhere}
+            onToggle={props.onToggle}
+            onRepair={props.onRepair}
+            onLog={props.onLog}
+            onRemove={props.onRemove}
+          />
+        ) : undefined
+      }
       description={facts.description || undefined}
       note={
         installation?.trust_note ??
@@ -172,6 +217,19 @@ export const PluginCard: FunctionComponent<PluginCardProps> = (props) => {
       }
       extra={
         <>
+          {installed && <RuntimeLine runtime={installed.runtime} />}
+          {status?.cause && (
+            <FailureNote cause={status.cause} onLog={() => props.onLog(row)} />
+          )}
+          {installed?.review_pending && (
+            <ReviewNotice
+              name={row.name}
+              installation={installed}
+              sandbox={sandbox}
+              dismissing={props.dismissing}
+              onDismiss={() => props.onDismissReview(row)}
+            />
+          )}
           {(needs.length > 0 ||
             facts.extendsId ||
             row.dependents.length > 0) && (
@@ -243,16 +301,15 @@ export const PluginCard: FunctionComponent<PluginCardProps> = (props) => {
       pills={
         <>
           {installation &&
-            (installation.enabled === false &&
-            installation.state === "active" ? (
-              <StatusBadge tone="neutral" label="Off" />
-            ) : (
+            (installation.pending_restart || !status ? (
               <ProviderStatusBadge
                 state={installation.state}
                 pendingRestart={installation.pending_restart}
                 activeVersion={installation.active_version}
                 needsRepair={installation.needs_repair}
               />
+            ) : (
+              <PluginStatusBadge status={status} />
             ))}
           <TrustBadge trusted={row.trusted} />
         </>

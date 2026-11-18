@@ -40,6 +40,8 @@ import threading
 import uuid
 from typing import Any, Callable, Mapping, Protocol
 
+from secret_store.scrub import scrub_text
+
 logger = logging.getLogger(__name__)
 
 TRANSLATE_OP = "translate"
@@ -99,6 +101,9 @@ class UnboundWorkers:
 
     def call(self, plugin_id, op, params, secrets, *, timeout):
         raise NotSent("no translator worker is bound for this plugin")
+
+    def runtime(self, plugin_id):
+        return None
 
 
 class PoolWorkers:
@@ -315,6 +320,57 @@ class PoolWorkers:
     def abandon(self, plugin_id):
         self.retire(plugin_id)
 
+    def runtime(self, plugin_id: str) -> dict | None:
+        """How the plugin's long-lived worker is doing, for a card. None when it never had one."""
+        worker = self._worker_status(plugin_id)
+        return None if worker is None else runtime_summary(worker)
+
+    def stderr_tail(self, plugin_id: str) -> list[str]:
+        """The recent stderr lines of the plugin's long-lived worker, scrubbed by its session."""
+        worker = self._worker_status(plugin_id)
+        return [str(line) for line in (worker or {}).get("recent_stderr") or []]
+
+    def _worker_status(self, plugin_id: str) -> dict | None:
+        try:
+            return self._pool.status()["workers"].get(self._key_for(plugin_id))
+        except Exception:
+            logger.warning("Could not read the state of the worker of translator %s", plugin_id, exc_info=True)
+            return None
+
+
+_PHASE_OF_STATE = {
+    "starting": "starting",
+    "backoff": "backing_off",
+    "broken": "broken",
+    "draining": "stopping",
+    "stopping": "stopping",
+    "stopped": "stopped",
+}
+
+
+def runtime_summary(worker: Mapping[str, Any]) -> dict:
+    """What a pool entry says about a worker, in the words a card uses.
+
+    ``phase`` is one of starting, healthy (running a request now), idle (up and waiting), backing_off (the
+    last start or run failed and requests wait out a delay), broken, stopping and stopped. The stderr tail is
+    not part of it: it is read on its own, for the log.
+    """
+    state = str(worker.get("state") or "stopped")
+    in_flight = int(worker.get("in_flight") or 0)
+    if state in ("ready", "busy"):
+        phase = "healthy" if in_flight > 0 or state == "busy" else "idle"
+    else:
+        phase = _PHASE_OF_STATE.get(state, "stopped")
+    return {
+        "phase": phase,
+        "in_flight": in_flight,
+        "retry_after": worker.get("retry_after"),
+        "last_error": scrub_text(str(worker["last_error"])) if worker.get("last_error") else None,
+        "starts": int(worker.get("starts") or 0),
+        "crashes": int(worker.get("crashes") or 0),
+        "memory_bytes": int(worker.get("memory_bytes") or 0),
+    }
+
 
 _port: WorkerPort = UnboundWorkers()
 _port_lock = threading.Lock()
@@ -339,3 +395,15 @@ def is_bound(port: WorkerPort | None = None) -> bool:
 def bound_port() -> WorkerPort:
     with _port_lock:
         return _port
+
+
+def runtime_of(plugin_id: str) -> dict | None:
+    """The state of the plugin's worker under the bound port, or None while nothing is bound or it never ran."""
+    reader = getattr(bound_port(), "runtime", None)
+    return reader(plugin_id) if callable(reader) else None
+
+
+def stderr_tail_of(plugin_id: str) -> list[str]:
+    """The recent stderr lines of the plugin's worker under the bound port, or none while nothing is bound."""
+    reader = getattr(bound_port(), "stderr_tail", None)
+    return reader(plugin_id) if callable(reader) else []

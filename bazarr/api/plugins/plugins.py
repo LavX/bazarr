@@ -39,6 +39,24 @@ def _kind_filter():
     return kind
 
 
+def _with_runtime(installation, state=None):
+    """The installation with how its worker is doing now, when it has one, and which installed plugins depend on
+    it. The dependents come from the same check that refuses a removal or a switch-off, so the page shows exactly
+    what the server would refuse over: ``dependents`` for a removal and ``enabled_dependents`` for a switch-off."""
+    from subtitles.tools.translate.runtime import workers
+
+    if not isinstance(installation, dict) or not installation.get("provider_id"):
+        return installation
+    plugin_id = installation["provider_id"]
+    state = state if state is not None else service.load_state()
+    decorated = {**installation,
+                 "dependents": service.installed_dependents(plugin_id, state=state),
+                 "enabled_dependents": service.installed_dependents(plugin_id, enabled_only=True, state=state)}
+    # Subtitle providers run in the provider workers, not the translator pool, so there is nothing to ask for them.
+    runtime = None if kind_of(installation) == "subtitle_provider" else workers.runtime_of(plugin_id)
+    return decorated if runtime is None else {**decorated, "runtime": runtime}
+
+
 def _installation(plugin_id):
     """The installation to serve; None when it is absent or of a kind this host does not define."""
     row = service.get_provider(plugin_id, redact=False)
@@ -100,7 +118,8 @@ class PluginsInstallations(Resource):
             kind = _kind_filter()
         except UnknownKindError as error:
             return str(error), 400
-        return {"data": service.list_installations(kind=kind)}
+        state = service.load_state()
+        return {"data": [_with_runtime(item, state) for item in service.list_installations(kind=kind)]}
 
     @authenticate
     @require_password_confirmation
@@ -183,7 +202,7 @@ class PluginsInstallation(Resource):
         installation = _installation(plugin_id)
         if not installation:
             return 'Plugin not found', 404
-        return installation
+        return _with_runtime(installation)
 
     @authenticate
     @api_ns_plugins.response(200, 'Success')
@@ -215,18 +234,25 @@ class PluginsInstallation(Resource):
         return installation
 
     @authenticate
+    @require_password_confirmation
+    @api_ns_plugins.param('keep_data', 'true (the default) keeps its saved settings and data folder, false deletes them')
     @api_ns_plugins.response(202, 'Uninstall queued as a job')
-    @api_ns_plugins.response(400, 'Another plugin depends on it')
+    @api_ns_plugins.response(400, 'Another plugin depends on it, or keep_data is not true or false')
     @api_ns_plugins.response(401, 'Not Authenticated')
+    @api_ns_plugins.response(403, 'Password confirmation required')
     @api_ns_plugins.response(404, 'Plugin not found')
     def delete(self, plugin_id):
         installation = _installation(plugin_id)
         if not installation:
             return 'Plugin not found', 404
+        keep = request.args.get("keep_data", "true").strip().lower()
+        if keep not in ("true", "false"):
+            return 'keep_data must be true or false', 400
         refusal = service.dependent_refusal(plugin_id, "removed")
         if refusal:
             return refusal, 400
-        return {"job_id": hub_jobs.queue_uninstall(plugin_id, installation.get("name"))}, 202
+        return {"job_id": hub_jobs.queue_uninstall(
+            plugin_id, installation.get("name"), keep_data=keep == "true")}, 202
 
 
 @api_ns_plugins.route('plugins/installations/<string:plugin_id>/repair')
@@ -242,6 +268,41 @@ class PluginsInstallationRepair(Resource):
         if not installation:
             return 'Plugin not found', 404
         return {"job_id": hub_jobs.queue_repair(plugin_id, installation.get("name"))}, 202
+
+
+@api_ns_plugins.route('plugins/installations/<string:plugin_id>/log')
+class PluginsInstallationLog(Resource):
+    @authenticate
+    @api_ns_plugins.response(200, 'Success')
+    @api_ns_plugins.response(401, 'Not Authenticated')
+    @api_ns_plugins.response(404, 'Plugin not found')
+    def get(self, plugin_id):
+        """The plugin's recent output: the stderr lines of its worker, and the last error Bazarr+ recorded."""
+        from provider_hub.compatibility import refusal_text
+        from secret_store.scrub import scrub_text
+        from subtitles.tools.translate.runtime import workers
+
+        installation = _installation(plugin_id)
+        if not installation:
+            return 'Plugin not found', 404
+        # The worker's session scrubs what it keeps. The text is scrubbed again here, since this is the one
+        # place the lines leave the host.
+        lines = [scrub_text(line) for line in workers.stderr_tail_of(plugin_id)]
+        last_error = installation.get("last_error")
+        return {"lines": lines, "last_error": refusal_text(last_error) if last_error else None}
+
+
+@api_ns_plugins.route('plugins/installations/<string:plugin_id>/review/dismiss')
+class PluginsInstallationReviewDismiss(Resource):
+    @authenticate
+    @api_ns_plugins.response(200, 'Success')
+    @api_ns_plugins.response(401, 'Not Authenticated')
+    @api_ns_plugins.response(404, 'Plugin not found')
+    def post(self, plugin_id):
+        if not _installation(plugin_id):
+            return 'Plugin not found', 404
+        service.dismiss_review_notice(plugin_id)
+        return {"review_pending": False}
 
 
 @api_ns_plugins.route('plugins/updates/check')

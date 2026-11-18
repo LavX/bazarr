@@ -29,6 +29,7 @@ import {
   officialSource,
   opencodeBackend,
   subdl,
+  translatorWithBackend,
 } from "./fixtures";
 import PluginHubView from ".";
 
@@ -139,7 +140,7 @@ describe("the tabs", () => {
   });
 
   it("lists what is installed on the Installed tab, with who needs what", async () => {
-    installed = [installedTranslator, installedBackend];
+    installed = [translatorWithBackend, installedBackend];
     showPage("?tab=installed");
     expect(await card("AI Subtitle Translator")).toBeVisible();
     // The back end extends the translator, so the translator says it is needed.
@@ -147,7 +148,9 @@ describe("the tabs", () => {
       screen.getAllByRole("list", { name: "Dependencies" })[0],
     );
     expect(dependencies.getByText(/Opencode back end/)).toBeVisible();
-    expect(screen.getAllByText("Active")).toHaveLength(2);
+    // The translator has a newer release listed, so its status says that, and the back end is active.
+    expect(screen.getByText("Update available")).toBeVisible();
+    expect(screen.getByText("Active")).toBeVisible();
     // Installed cards offer no install.
     expect(
       screen.queryByRole("button", { name: /^Install / }),

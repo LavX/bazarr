@@ -401,3 +401,208 @@ def test_the_subtitle_hub_install_route_still_checks_the_closure_of_an_answer_th
     assert len(checked) == 2
     assert accepted.status_code == 202 and refused.status_code == 400
     assert [func for func, _kwargs in queued] == ["install_provider"]
+
+
+class _FakePool:
+    def __init__(self, workers):
+        self._workers = workers
+
+    def status(self):
+        return {"workers": self._workers}
+
+
+def _bound_port(workers_status):
+    from subtitles.tools.translate.runtime import workers
+
+    return workers.PoolWorkers(_FakePool(workers_status), lambda plugin_id: None)
+
+
+def test_an_installation_says_how_its_worker_is_doing_once_one_is_bound(client):
+    from subtitles.tools.translate.runtime import workers
+
+    workers.bind(_bound_port({"exampleservice": {
+        "state": "backoff", "in_flight": 0, "retry_after": 12.5, "last_error": "the worker did not start",
+        "starts": 3, "crashes": 2, "memory_bytes": 0, "recent_stderr": ["never in the listing"]}}))
+    try:
+        listed = {item["provider_id"]: item for item in _get(client, "/api/plugins/installations").json["data"]}
+        single = _get(client, "/api/plugins/installations/exampleservice").json
+    finally:
+        workers.unbind()
+
+    runtime = listed["exampleservice"]["runtime"]
+    assert runtime == single["runtime"]
+    assert runtime["phase"] == "backing_off" and runtime["retry_after"] == 12.5
+    assert runtime["last_error"] == "the worker did not start"
+    # The log is read on its own, and a plugin with no worker has no runtime at all.
+    assert "recent_stderr" not in runtime
+    assert "runtime" not in listed["providerhub"]
+
+
+def test_no_runtime_is_reported_while_no_worker_is_bound(client):
+    listed = _get(client, "/api/plugins/installations").json["data"]
+    assert all("runtime" not in item for item in listed)
+
+
+def test_the_log_lists_the_workers_recent_lines_with_secrets_masked(client):
+    from subtitles.tools.translate.runtime import workers
+
+    secret = "sk-" + "a1b2c3d4" * 4  # pragma: allowlist secret
+    workers.bind(_bound_port({"exampleservice": {
+        "state": "ready", "recent_stderr": ["started", f"Authorization: Bearer {secret}", "done"]}}))
+    try:
+        response = _get(client, "/api/plugins/installations/exampleservice/log")
+    finally:
+        workers.unbind()
+
+    assert response.status_code == 200
+    lines = response.json["lines"]
+    assert lines[0] == "started" and lines[2] == "done"
+    assert secret not in " ".join(lines)
+    assert response.json["last_error"] is None
+
+
+def test_the_log_of_a_plugin_with_no_worker_is_empty_and_an_unknown_plugin_is_not_found(client):
+    empty = _get(client, "/api/plugins/installations/exampleservice/log")
+    assert empty.status_code == 200 and empty.json["lines"] == []
+    assert _get(client, "/api/plugins/installations/nothing/log").status_code == 404
+
+
+def test_dismissing_a_review_notice_is_kept_on_the_installation(client, tmp_path):
+    write_state(tmp_path / "state.json", installations={
+        "exampleservice": {"provider_id": "exampleservice", "kind": SERVICE_KIND, "name": "Service",
+                           "active_version": "1.0.0", "state": "active", "pending_restart": False,
+                           "review_pending": True, "manifest": {"id": "exampleservice"}}})
+    path = "/api/plugins/installations/exampleservice"
+    assert _get(client, path).json["review_pending"] is True
+
+    response = client.post(f"{path}/review/dismiss", headers={"X-API-KEY": API_KEY})
+
+    assert response.status_code == 200 and response.json == {"review_pending": False}
+    assert _get(client, path).json["review_pending"] is False
+    missing = client.post("/api/plugins/installations/nothing/review/dismiss", headers={"X-API-KEY": API_KEY})
+    assert missing.status_code == 404
+
+
+@pytest.mark.parametrize("query, kept", [("", True), ("?keep_data=true", True), ("?keep_data=false", False),
+                                          ("?keep_data=FALSE", False)])
+def test_removing_a_plugin_keeps_its_data_unless_it_is_asked_to_delete_it(client, monkeypatch, query, kept):
+    from provider_hub import jobs
+
+    queued = []
+    monkeypatch.setattr(jobs, "queue_uninstall", lambda plugin_id, name=None, keep_data=False: queued.append(
+        (plugin_id, keep_data)) or "job-1")
+
+    response = client.delete(f"/api/plugins/installations/exampleservice{query}", headers={"X-API-KEY": API_KEY})
+
+    assert response.status_code == 202 and response.json == {"job_id": "job-1"}
+    assert queued == [("exampleservice", kept)]
+
+
+def test_removing_a_plugin_refuses_an_answer_that_is_neither_keep_nor_delete(client, monkeypatch):
+    from provider_hub import jobs
+
+    monkeypatch.setattr(jobs, "queue_uninstall", lambda *a, **k: pytest.fail("nothing is queued"))
+    response = client.delete("/api/plugins/installations/exampleservice?keep_data=maybe",
+                            headers={"X-API-KEY": API_KEY})
+    assert response.status_code == 400
+
+
+@pytest.mark.parametrize("query", ["", "?keep_data=false"])
+def test_removing_a_plugin_needs_the_password_confirmation_whichever_answer_is_given_about_its_data(
+        client, monkeypatch, query):
+    from app.config import settings
+    from provider_hub import jobs
+
+    queued = []
+    monkeypatch.setattr(jobs, "queue_uninstall", lambda *a, **k: queued.append((a, k)) or "job-1")
+    monkeypatch.setattr(settings.auth, "type", "form")
+    path = f"/api/plugins/installations/exampleservice{query}"
+
+    keyed = client.delete(path, headers={"X-API-KEY": API_KEY})
+    assert keyed.status_code == 403 and keyed.get_json()["code"] == "confirm_password"
+    assert queued == []
+
+    _prime(client)
+    confirmed = client.delete(path, headers={"X-API-KEY": API_KEY})
+    assert confirmed.status_code == 202 and len(queued) == 1
+
+
+def test_a_removal_of_a_plugin_another_one_needs_is_refused_whatever_is_said_about_its_data(
+        client, monkeypatch, tmp_path):
+    from provider_hub import jobs
+
+    monkeypatch.setattr(jobs, "queue_uninstall", lambda *a, **k: pytest.fail("nothing is queued"))
+
+    def row(plugin_id, **manifest):
+        return {"provider_id": plugin_id, "kind": SERVICE_KIND, "name": plugin_id, "active_version": "1.0.0",
+                "state": "active", "pending_restart": False, "manifest": service_manifest(plugin_id, **manifest)}
+
+    write_state(tmp_path / "state.json", installations={
+        "exampleservice": row("exampleservice", provides=["example.v1"]),
+        "dependent": row("dependent", extends={"id": "exampleservice", "capability": "example.v1"})})
+    for query in ("", "?keep_data=false"):
+        response = client.delete(f"/api/plugins/installations/exampleservice{query}", headers={"X-API-KEY": API_KEY})
+        assert response.status_code == 400 and "dependent" in response.get_data(as_text=True)
+
+
+def test_the_choice_about_a_plugins_data_travels_through_the_job_queue_to_the_removal(monkeypatch):
+    from provider_hub import jobs, service
+
+    enqueued = []
+    monkeypatch.setattr(jobs, "_enqueue", lambda label, func, kwargs: enqueued.append((func, kwargs)) or "job-1")
+    jobs.queue_uninstall("exampleservice", "Service", keep_data=False)
+    jobs.queue_uninstall("exampleservice", "Service")
+    assert enqueued[0] == ("uninstall_provider", {"provider_id": "exampleservice", "name": "Service",
+                                                  "keep_data": False})
+    # Not saying anything keeps, as the Subtitle Hub's own route always has.
+    assert "keep_data" not in enqueued[1][1]
+
+    seen = []
+    monkeypatch.setattr(jobs.jobs_queue, "update_job_progress", lambda **kwargs: None)
+    monkeypatch.setattr(service, "remove_installation", lambda provider_id, **kwargs: seen.append(kwargs) or True)
+    jobs.uninstall_provider("exampleservice", "Service", keep_data=False, job_id=None)
+    jobs.uninstall_provider("exampleservice", "Service", job_id=None)
+    assert seen == [{"keep_data": False}, {"keep_data": True}]
+
+
+def _service_row(plugin_id, enabled=True, **manifest):
+    return {"provider_id": plugin_id, "kind": SERVICE_KIND, "name": plugin_id.title(), "active_version": "1.0.0",
+            "state": "active", "pending_restart": False, "enabled": enabled,
+            "manifest": service_manifest(plugin_id, **manifest)}
+
+
+def test_the_listing_names_the_dependents_the_removal_and_the_switch_off_would_refuse_over(
+        client, monkeypatch, tmp_path):
+    from provider_hub import jobs, service
+
+    monkeypatch.setattr(jobs, "queue_uninstall", lambda *a, **k: "job-1")
+    need = {"extends": {"id": "exampleservice", "capability": "example.v1"}}
+    write_state(tmp_path / "state.json", installations={
+        "exampleservice": _service_row("exampleservice", provides=["example.v1"]),
+        "dependent": _service_row("dependent", **need),
+        "sleeper": _service_row("sleeper", enabled=False, **need)})
+
+    listed = {item["provider_id"]: item for item in _get(client, "/api/plugins/installations").json["data"]}
+    item = listed["exampleservice"]
+
+    assert item["dependents"] == service.installed_dependents("exampleservice") == ["dependent", "sleeper"]
+    assert item["enabled_dependents"] == service.installed_dependents("exampleservice", enabled_only=True)
+    assert listed["dependent"]["dependents"] == [] and listed["dependent"]["enabled_dependents"] == []
+    refusal = client.delete("/api/plugins/installations/exampleservice", headers={"X-API-KEY": API_KEY})
+    assert refusal.status_code == 400
+    assert all(name in refusal.get_data(as_text=True) for name in item["dependents"])
+
+
+def test_a_capability_another_enabled_plugin_also_provides_leaves_nobody_depending_on_either(
+        client, monkeypatch, tmp_path):
+    from provider_hub import jobs
+
+    monkeypatch.setattr(jobs, "queue_uninstall", lambda *a, **k: "job-1")
+    write_state(tmp_path / "state.json", installations={
+        "supplier_a": _service_row("supplier_a", provides=["shared.v1"]),
+        "supplier_b": _service_row("supplier_b", provides=["shared.v1"]),
+        "user": _service_row("user", requires=["shared.v1"])})
+    listed = {item["provider_id"]: item for item in _get(client, "/api/plugins/installations").json["data"]}
+    assert listed["supplier_a"]["dependents"] == [] and listed["supplier_b"]["dependents"] == []
+    assert client.delete("/api/plugins/installations/supplier_a?keep_data=false",
+                         headers={"X-API-KEY": API_KEY}).status_code == 202
