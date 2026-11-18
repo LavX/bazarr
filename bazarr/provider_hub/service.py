@@ -3647,8 +3647,13 @@ def _stage_validated(
             mutate_state(record_failed_install)
             raise ProviderHubInstallError(str(install_error)) from install_error
 
+        before_staging: dict[str, Any] = {}
+
         def record_staged_install(state: dict[str, Any]) -> dict[str, Any]:
             installations = state.setdefault("installations", {})
+            # What the row was before this write, to put back if the install is refused after it.
+            before_staging.clear()
+            before_staging["row"] = copy.deepcopy(installations.get(validated.provider_id))
             current = installations.get(validated.provider_id, existing)
             if is_fresh and isinstance(current, dict) and current.get("state") == "removed":
                 # The row of a plugin removed in this run still carries its saved settings and keys. They go to the
@@ -3690,9 +3695,18 @@ def _stage_validated(
             # Refused in the write: another plugin's need would no longer be met. Nothing was recorded.
             _discard_stopped_install(staged, existing)
             raise
-        missing_required = missing_required_fields(installation) if is_fresh else []
         if is_fresh:
-            claim_kept_data(validated.provider_id, source_id, validated.kind, origin)
+            try:
+                claim_kept_data(validated.provider_id, source_id, validated.kind, origin)
+            except ProviderHubInstallError:
+                # Refused, so nothing of this install may be left to activate at the next restart.
+                _undo_staging(validated.provider_id, before_staging.get("row"))
+                _discard_stopped_install(staged, existing)
+                raise
+            # The saved settings may have come back with the kept data, so the row is read again before the
+            # required fields are judged.
+            installation = dict((load_state().get("installations") or {}).get(validated.provider_id) or installation)
+        missing_required = missing_required_fields(installation) if is_fresh else []
         if is_fresh and not get_kind(validated.kind).on_installed(
                 validated.provider_id, missing_required=missing_required):
             # First install: opt the provider into Bazarr's enabled_providers so
@@ -3718,6 +3732,19 @@ def _stage_validated(
                 )
         job.update(message=message)
         return _redact_installation(installation)
+
+
+def _undo_staging(provider_id: str, previous: Any) -> None:
+    """Put the installation row back as it was before an install staged over it, or take the new row out when
+    there was none."""
+    def restore(state: dict[str, Any]) -> None:
+        installations = state.setdefault("installations", {})
+        if isinstance(previous, dict):
+            installations[provider_id] = previous
+        else:
+            installations.pop(provider_id, None)
+
+    mutate_state(restore)
 
 
 def _discard_stopped_install(paths, existing) -> None:
@@ -4216,11 +4243,46 @@ def enforce_activation_needs() -> bool:
     return bool(mutate_state(lambda state: _apply_unmet_needs(state.setdefault("installations", {}))))
 
 
+def _enforce_kept_data_ownership() -> None:
+    """Before anything activates: a staged plugin whose id has data kept for another owner does not start until
+    that data is cleared. Staging refuses such an install, so this only catches what got past it. A plugin that
+    cannot be cleared is marked failed and stays inactive."""
+    state = load_state()
+    kept = state.get("kept_data") or {}
+    for provider_id, row in list((state.get("installations") or {}).items()):
+        entry = kept.get(provider_id)
+        # Only a first install: an update of a plugin that is running has no kept data to take over.
+        if (not isinstance(row, dict) or not isinstance(entry, dict) or row.get("state") != "staged"
+                or not row.get("pending_restart") or row.get("active_version")):
+            continue
+        origin = row.get("origin") or "catalog"
+        if (entry.get("source_id") == row.get("source_id") and entry.get("kind") == kind_of(row)
+                and (entry.get("origin") or origin) == origin):
+            continue
+        try:
+            claim_kept_data(provider_id, row.get("source_id"), kind_of(row), origin)
+        except Exception as error:
+            logging.getLogger(__name__).warning("Not activating %s: %s", provider_id, error)
+            reason = refusal_text(error)
+
+            def refuse(state: dict[str, Any], provider_id=provider_id, reason=reason) -> None:
+                current = (state.get("installations") or {}).get(provider_id)
+                if isinstance(current, dict):
+                    current.update(state="failed", pending_restart=False, last_error=reason)
+
+            mutate_state(refuse)
+
+
 def activate_staged_installations() -> list[str]:
     try:
         close_stale_jobs()
     except Exception:
         logging.getLogger(__name__).warning("Could not close the job rows an earlier run left open", exc_info=True)
+    try:
+        _enforce_kept_data_ownership()
+    except Exception:
+        logging.getLogger(__name__).warning("Could not check who owns the data kept for staged plugins",
+                                            exc_info=True)
     state = load_state()
     installations = state.get("installations") or {}
     activated = []
@@ -4687,7 +4749,7 @@ def claim_kept_data(provider_id: str, source_id: str | None, kind: str, origin: 
         logging.getLogger(__name__).warning("Could not discard the kept data of %s", provider_id, exc_info=True)
         raise ProviderHubInstallError(
             f"{provider_id} was removed earlier with its data kept, and that data belongs to another source. "
-            "It could not be cleared, so nothing was installed. Remove the plugin with its data deleted first."
+            "It could not be cleared, so nothing was installed."
         ) from error
 
     def forget(state: dict[str, Any]) -> None:

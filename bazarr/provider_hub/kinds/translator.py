@@ -60,16 +60,13 @@ class TranslatorKind(Kind):
             logger.warning("Could not clear the kept mark of translator %s", plugin_id, exc_info=True)
 
     def discard_kept_data(self, plugin_id: str) -> None:
-        try:
-            _store().delete_plugin_data(plugin_id)
-        except Exception:
-            logger.exception("Could not discard the kept engine instances of translator %s", plugin_id)
-        try:
-            from subtitles.tools.translate.runtime import worker_binding
+        """Delete what an earlier removal kept, for a plugin that is about to be installed under the same id by
+        another owner. Unlike cleanup after a removal this does not swallow failures: if anything of the old data
+        survives, the install is refused, so the new package never finds the old one's keys or folders."""
+        _store().delete_plugin_data(plugin_id)
+        from subtitles.tools.translate.runtime import worker_binding
 
-            worker_binding.discard_folders(plugin_id)
-        except Exception:
-            logger.warning("Could not discard the kept folders of translator %s", plugin_id, exc_info=True)
+        worker_binding.discard_folders(plugin_id)
 
     def on_installed(self, plugin_id: str, missing_required: Sequence[str] = ()) -> bool:
         try:

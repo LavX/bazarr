@@ -443,12 +443,16 @@ def _set_kept(plugin_id: str, kept: bool) -> None:
 
 def discard_folders(plugin_id: str) -> None:
     """Delete the plugin's writable folders now, mark and all. For data that was kept and is not wanted any more, with
-    no worker of the plugin running because it is not installed. Works whether or not a binding is in place."""
+    no worker of the plugin running because it is not installed. Works whether or not a binding is in place. A folder
+    that cannot be deleted raises, since the caller must not go on as if it were gone."""
     with _lock:
         definitions = _definitions
     folder = (definitions._hub_dir() if definitions is not None else _hub_dir()) / "run" / plugin_id
     if _PLUGIN_ID.match(plugin_id) and not folder.is_symlink():
-        shutil.rmtree(folder, ignore_errors=True)
+        try:
+            shutil.rmtree(folder)
+        except FileNotFoundError:
+            pass
 
 
 def plugin_installed(plugin_id: str) -> None:

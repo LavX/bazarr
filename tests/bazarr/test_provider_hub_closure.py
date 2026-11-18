@@ -1377,3 +1377,122 @@ def test_kept_settings_and_secrets_survive_every_way_an_install_can_fail(
     assert keeping_kind.discarded == []
     # Nothing was told to delete the data.
     assert getattr(keeping_kind, "kept", True) is True
+
+
+# --- a refused install leaves nothing to activate, and the required fields are judged after the handover ----------
+
+
+def _refusing(keeping_kind):
+    def cannot_clear(plugin_id):
+        raise RuntimeError("the old data could not be cleared")
+
+    keeping_kind.discard_kept_data = cannot_clear
+
+
+def test_an_install_refused_over_data_kept_for_another_source_leaves_no_staged_row(
+        tmp_path, monkeypatch, keeping_kind, staging):
+    from provider_hub.state import load_state, mutate_state
+
+    plugin = _manifest("keeper")
+    _world(tmp_path, monkeypatch, [plugin], _installed(plugin, source_id="elsewhere", source_bound=True,
+                                                         config={"api_key": "enc:abc"}))
+    assert staging.remove_installation("keeper", keep_data=True) is True
+    mutate_state(lambda state: state["installations"].pop("keeper"))  # the restart
+    recorded = load_state()["kept_data"]["keeper"]
+    _refusing(keeping_kind)
+
+    with pytest.raises(staging.ProviderHubInstallError, match="nothing was installed"):
+        staging.stage_install(plugin, source_id="official", catalog_list="plugins")
+
+    # No row was left staged for the next restart to activate, and the kept data and its owner are as they were.
+    assert "keeper" not in load_state()["installations"]
+    assert load_state()["kept_data"]["keeper"] == recorded
+    assert staging.activate_staged_installations() == []
+
+
+def test_an_install_refused_before_the_restart_puts_the_removed_row_back(tmp_path, monkeypatch, keeping_kind, staging):
+    from provider_hub.state import load_state
+
+    plugin = _removed_with_data_kept(staging, tmp_path, monkeypatch, source="elsewhere",
+                                     config={"api_key": "enc:abc"})
+    removed = load_state()["installations"]["keeper"]
+    _refusing(keeping_kind)
+
+    with pytest.raises(staging.ProviderHubInstallError):
+        staging.stage_install(plugin, source_id="official", catalog_list="plugins")
+
+    assert load_state()["installations"]["keeper"] == removed
+    assert load_state()["installations"]["keeper"]["state"] == "removed"
+
+
+def test_activation_does_not_start_a_staged_install_whose_kept_data_belongs_to_another_owner(
+        tmp_path, monkeypatch, keeping_kind, staging):
+    """The safety net: a row that got past the refusal is judged again before it starts."""
+    from provider_hub.state import load_state, mutate_state
+
+    plugin = _manifest("keeper")
+    _world(tmp_path, monkeypatch, [plugin], {})
+    staging.stage_install(plugin, source_id="official", catalog_list="plugins")
+    mutate_state(lambda state: state.setdefault("kept_data", {}).update(
+        keeper={"source_id": "elsewhere", "origin": None, "kind": plugin["kind"], "config": None}))
+    _refusing(keeping_kind)
+
+    assert staging.activate_staged_installations() == []
+
+    row = load_state()["installations"]["keeper"]
+    assert row["state"] == "failed" and row["pending_restart"] is False and row["active_version"] is None
+    assert "could not be cleared" in row["last_error"]
+
+
+def test_activation_clears_data_kept_for_another_owner_and_then_starts_the_install(
+        tmp_path, monkeypatch, keeping_kind, staging):
+    from provider_hub.state import load_state, mutate_state
+
+    plugin = _manifest("keeper")
+    _world(tmp_path, monkeypatch, [plugin], {})
+    staging.stage_install(plugin, source_id="official", catalog_list="plugins")
+    mutate_state(lambda state: state.setdefault("kept_data", {}).update(
+        keeper={"source_id": "elsewhere", "origin": None, "kind": plugin["kind"], "config": None}))
+    keeping_kind.calls.clear()
+
+    staging._enforce_kept_data_ownership()
+
+    row = load_state()["installations"]["keeper"]
+    assert row["state"] == "staged" and row["pending_restart"] is True
+    assert keeping_kind.discarded == ["keeper"] and "keeper" not in load_state()["kept_data"]
+
+
+def test_activation_leaves_the_data_kept_for_the_same_owner_alone(tmp_path, monkeypatch, keeping_kind, staging):
+    from provider_hub.state import load_state, mutate_state
+
+    plugin = _manifest("keeper")
+    _world(tmp_path, monkeypatch, [plugin], {})
+    staging.stage_install(plugin, source_id="official", catalog_list="plugins")
+    mutate_state(lambda state: state.setdefault("kept_data", {}).update(
+        keeper={"source_id": "official", "origin": None, "kind": plugin["kind"], "config": None}))
+
+    staging._enforce_kept_data_ownership()
+
+    assert load_state()["installations"]["keeper"]["state"] == "staged"
+    assert keeping_kind.discarded == [] and "keeper" in load_state()["kept_data"]
+
+
+def test_required_settings_are_judged_after_the_kept_ones_come_back(tmp_path, monkeypatch, keeping_kind, staging):
+    seen = []
+    monkeypatch.setattr(staging, "missing_required_fields",
+                        lambda installation: [] if (installation.get("config") or {}).get("api_key") else ["api_key"])
+    keeping_kind.on_installed = lambda plugin_id, missing_required=(): seen.append(list(missing_required)) or True
+    from provider_hub.state import load_state, mutate_state
+
+    plugin = _manifest("keeper")
+    _world(tmp_path, monkeypatch, [plugin], _installed(plugin, source_id="official", source_bound=True,
+                                                         config={"api_key": "enc:abc"}))
+    assert staging.remove_installation("keeper", keep_data=True) is True
+    mutate_state(lambda state: state["installations"].pop("keeper"))  # the restart
+
+    installation = staging.stage_install(plugin, source_id="official", catalog_list="plugins")
+
+    # The restored key is on the row, so nothing is missing, and the answer carries the restored settings.
+    assert seen == [[]]
+    assert load_state()["installations"]["keeper"]["config"] == {"api_key": "enc:abc"}
+    assert installation["config"]["api_key"] != ""

@@ -945,3 +945,24 @@ def test_schemas_come_from_the_manifest_envelope():
     assert effective_destinations(schema_for_backend(manifest, "openai_compatible"), {}) == {
         "https://api.openai.com/v1"}
     assert effective_destinations(schema_for_backend(manifest, "unknown"), {}) == set()
+
+
+def test_clearing_data_for_a_new_owner_does_not_swallow_a_failure(store, monkeypatch):
+    """After a removal the cleanup is best effort. At the boundary where another package takes the id it is not:
+    if the old instance or its folders survive, the install must be refused."""
+    from provider_hub.kinds.translator import TranslatorKind
+    from subtitles.tools.translate.runtime import worker_binding
+
+    monkeypatch.setattr("provider_hub.kinds.translator._store", lambda: store)
+    monkeypatch.setattr(worker_binding, "discard_folders", lambda plugin_id: None)
+    store.create_instance("google_translate")
+
+    def broken(plugin_id):
+        raise RuntimeError("the database refused")
+
+    monkeypatch.setattr(store, "delete_plugin_data", broken)
+    with pytest.raises(RuntimeError, match="database refused"):
+        TranslatorKind().discard_kept_data("google_translate")
+    # The same failure after a removal is still logged and not raised.
+    monkeypatch.setattr(worker_binding, "plugin_removed", lambda plugin_id: None)
+    TranslatorKind().after_removed("google_translate", keep_data=False)

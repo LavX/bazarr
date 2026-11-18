@@ -1097,6 +1097,30 @@ def test_discarding_kept_folders_removes_them_with_their_mark(hub, monkeypatch):
     worker_binding.discard_folders("not a plugin id")  # nothing to do, and no error
 
 
+def test_discarding_kept_folders_raises_when_they_cannot_be_removed_and_not_when_they_are_gone(hub, monkeypatch):
+    import shutil
+
+    folder = hub.root / "run" / PLUGIN
+    (folder / "data").mkdir(parents=True)
+    monkeypatch.setattr(worker_binding, "_definitions", None)
+    monkeypatch.setattr(worker_binding, "_hub_dir", lambda: hub.root)
+
+    def refused(path, *args, **kwargs):
+        raise PermissionError("not allowed")
+
+    monkeypatch.setattr(shutil, "rmtree", refused)
+    with pytest.raises(PermissionError):
+        worker_binding.discard_folders(PLUGIN)
+    assert folder.exists()
+
+    monkeypatch.undo()
+    monkeypatch.setattr(worker_binding, "_definitions", None)
+    monkeypatch.setattr(worker_binding, "_hub_dir", lambda: hub.root)
+    worker_binding.discard_folders(PLUGIN)
+    worker_binding.discard_folders(PLUGIN)  # already gone: nothing to do
+    assert not folder.exists()
+
+
 def test_keeping_the_data_of_a_plugin_that_never_ran_marks_nothing(hub, monkeypatch):
     definitions = hub.definitions()
     monkeypatch.setattr(worker_binding, "_definitions", definitions)
