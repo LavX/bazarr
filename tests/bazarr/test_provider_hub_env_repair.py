@@ -17,6 +17,20 @@ from test_provider_hub import _manifest
 pytestmark = pytest.mark.usefixtures("own_process_candidates")
 
 
+@pytest.fixture(autouse=True)
+def _workers_start_without_the_sandbox(monkeypatch):
+    """These tests are about environments and process groups, not confinement.
+
+    A worker that runs from a hub environment is sandboxed by default, and the sandbox now builds its
+    ruleset from the media root folders in the database and refuses the start when it cannot. Nothing
+    here has such a database, so the setting is switched off, as a user may do. The sandbox package is
+    also imported before a test replaces ``subprocess.Popen``: its worker class subclasses it.
+    """
+    import provider_hub.sandbox as sandbox
+
+    monkeypatch.setattr(sandbox, "provider_profile_enabled", lambda: False)
+
+
 @pytest.fixture
 def hub(tmp_path, monkeypatch):
     root = tmp_path / "provider_hub"
