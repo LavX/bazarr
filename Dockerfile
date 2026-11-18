@@ -70,6 +70,11 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 # the script, so a rebuild with an unchanged lock reuses the layer and the
 # bytes stay identical. Other stages that need the same catalog commit read the
 # same lock.
+#
+# When the lock pins the catalog's signed feed, the script verifies it with the
+# application's own verifier and root (signing.py and signing_roots.py, copied
+# here, with the cryptography package it needs) and fails the build on any
+# result but a valid signature. A lock without the signed feed builds as before.
 FROM python:3.14-slim-trixie AS catalog-floor
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -77,11 +82,17 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
     && rm -rf /var/lib/apt/lists/*
 
+# The same requirement as requirements.txt, held equal by a test.
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install "cryptography>=50.0.2"
+
 COPY scripts/release/catalog_floor.py /opt/catalog_floor.py
+COPY bazarr/provider_hub/signing.py bazarr/provider_hub/signing_roots.py /opt/provider_hub/
 COPY docker/catalog-pin.lock.json /opt/catalog-pin.lock.json
 
 RUN python -I /opt/catalog_floor.py build \
         --lock /opt/catalog-pin.lock.json \
+        --signing-dir /opt/provider_hub \
         --dest /catalog_floor \
         --expect-root-owner
 
