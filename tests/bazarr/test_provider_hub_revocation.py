@@ -1272,7 +1272,7 @@ def test_a_refresh_leaves_the_pending_removal_of_a_revoked_plugin_alone(tmp_path
 
 
 def test_a_whole_plugin_entry_says_remove_and_never_update(tmp_path, monkeypatch, service_kind):
-    from provider_hub import closure, revocation, service
+    from provider_hub import revocation, service
 
     whole = revocation.parse([{"id": PLUGIN}])[0]
     one = revocation.parse([{"id": PLUGIN, "version": "1.0.0"}])[0]
