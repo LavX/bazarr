@@ -32,6 +32,9 @@ class FakeFlareSolverr:
         # Seconds between the bytes of an answer that is sent one byte at a time.
         self.root_drip = 0.0
         self.v1_drip = 0.0
+        # The same, for the status line and the headers.
+        self.root_header_drip = 0.0
+        self.v1_header_drip = 0.0
         self.requests = []
         outer = self
 
@@ -63,8 +66,20 @@ class FakeFlareSolverr:
                 except OSError:
                     pass
 
+            def _drip_headers(self, pause):
+                raw = b"HTTP/1.0 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\n\r\n{}"
+                try:
+                    for index in range(len(raw)):
+                        self.wfile.write(raw[index:index + 1])
+                        self.wfile.flush()
+                        time.sleep(pause)
+                except OSError:
+                    pass
+
             def do_GET(self):
                 outer.requests.append(("GET", self.path, None))
+                if outer.root_header_drip:
+                    return self._drip_headers(outer.root_header_drip)
                 if outer.root_drip:
                     return self._drip(outer.root[1], outer.root_drip)
                 if outer.root_delay:
@@ -77,6 +92,8 @@ class FakeFlareSolverr:
                 length = int(self.headers.get("Content-Length") or 0)
                 outer.requests.append(("POST", self.path, json.loads(self.rfile.read(length) or b"null")))
                 status, payload = outer.v1
+                if outer.v1_header_drip:
+                    return self._drip_headers(outer.v1_header_drip)
                 if outer.v1_drip:
                     return self._drip(payload, outer.v1_drip)
                 self._send(status, payload)
@@ -375,6 +392,59 @@ class TestDeadline:
         fake.v1_drip = 0.5
 
         self._assert_times_out(fake.address)
+
+    @staticmethod
+    def _workers():
+        return [thread for thread in threading.enumerate() if thread.name == "flaresolverr-address-test"]
+
+    def _assert_worker_ends(self, within=3.0):
+        stop = time.monotonic() + within
+        while self._workers() and time.monotonic() < stop:
+            time.sleep(0.05)
+        assert not self._workers(), "the worker outlived the answer"
+
+    @pytest.mark.parametrize("which", ["root_header_drip", "v1_header_drip"])
+    def test_headers_dripped_one_byte_at_a_time(self, fake, which):
+        # Every byte restarts the socket read timeout and getresponse() has not
+        # returned yet, so neither the timeout nor the body check can end this.
+        setattr(fake, which, 0.5)
+        started = time.monotonic()
+
+        result = endpoints.check_flaresolverr_address(fake.address)
+        elapsed = time.monotonic() - started
+
+        assert (result["ok"], result["code"]) == (False, "timeout")
+        assert elapsed < self.DEADLINE + endpoints.ADDRESS_TEST_ANSWER_MARGIN_SECONDS + 1.0, elapsed
+        # The worker's connection was cut from this side, so it ends soon after
+        # instead of reading the rest of a forty second answer.
+        self._assert_worker_ends()
+
+    def test_the_route_answers_timeout_for_dripped_headers(self, fake):
+        from flask import Flask
+        from flask_restx import Api
+
+        from api.providers import flaresolverr as api_module
+        from app.config import settings
+
+        fake.root_header_drip = 0.5
+        app = Flask(__name__)
+        Api(app).add_namespace(api_module.api_ns_providers_flaresolverr, path="/")
+        started = time.monotonic()
+
+        response = app.test_client().post("/providers/flaresolverr/test", json={"url": fake.address},
+                                          headers={"X-API-KEY": settings.auth.apikey})
+        elapsed = time.monotonic() - started
+
+        assert response.status_code == 200, response.data
+        assert response.get_json()["data"]["code"] == "timeout"
+        assert elapsed < self.DEADLINE + endpoints.ADDRESS_TEST_ANSWER_MARGIN_SECONDS + 1.0, elapsed
+        self._assert_worker_ends()
+
+    def test_a_finished_test_leaves_no_worker_and_no_sockets(self, fake):
+        result = endpoints.check_flaresolverr_address(fake.address)
+
+        assert result["code"] == "ok"
+        assert self._workers() == []
 
 
 class TestInvalidAddress:

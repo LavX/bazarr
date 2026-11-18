@@ -363,6 +363,9 @@ ADDRESS_TEST_REQUEST_TIMEOUT_SECONDS = 4.0
 # The whole Test across every address the host name resolves to. The name lookup
 # itself is not covered by it, as with the other connection tests.
 ADDRESS_TEST_DEADLINE_SECONDS = 10.0
+# How long past the deadline the caller waits for the worker before it answers
+# "timeout" on its own and cuts the worker's sockets.
+ADDRESS_TEST_ANSWER_MARGIN_SECONDS = 0.5
 # The /v1 answer to sessions.list carries a session name per open session.
 ADDRESS_TEST_V1_MAX_BYTES = 65536
 ADDRESS_TEST_MAX_LENGTH = 2048
@@ -398,7 +401,91 @@ def _flaresolverr_root_path(path: str) -> str:
     return path
 
 
-def _attempt_flaresolverr(base, ip, hostname, pin, deadline, version_of) -> tuple[dict, bool]:
+class _SocketTracker:
+    """The sockets one Test opened, so the waiting side can cut them.
+
+    A far end that drips its status line or headers one byte at a time never
+    trips a socket read timeout, because every byte restarts it, and neither the
+    request timeout nor the body deadline can see inside ``getresponse``. Cutting
+    the connection from outside makes the blocked read fail at once. Each socket
+    is held through a ``dup``: sharing the one connection, it survives the TLS
+    wrapper detaching the original, and shutting it down shuts the connection.
+    """
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._sockets: list = []
+        self._cut = False
+
+    def add(self, sock) -> None:
+        import socket
+
+        with self._lock:
+            if not self._cut:
+                self._sockets.append(sock.dup())
+                return
+        # Opened after the Test was given up on: never let it connect on.
+        try:
+            sock.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+
+    def _drain(self, shutdown: bool) -> None:
+        import socket
+
+        with self._lock:
+            sockets, self._sockets = self._sockets, []
+            self._cut = self._cut or shutdown
+        for sock in sockets:
+            try:
+                if shutdown:
+                    sock.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+            sock.close()
+
+    def cut(self) -> None:
+        """Shut every connection down, and any opened from now on."""
+        self._drain(shutdown=True)
+
+    def release(self) -> None:
+        """The Test is over: drop the duplicates and leave the connections alone."""
+        self._drain(shutdown=False)
+
+
+def _tracking_adapter(tracker: _SocketTracker):
+    """A ``requests`` adapter whose connections report their sockets to ``tracker``."""
+    from requests.adapters import HTTPAdapter
+    from urllib3.connection import HTTPConnection, HTTPSConnection
+    from urllib3.connectionpool import HTTPConnectionPool, HTTPSConnectionPool
+
+    class Connection(HTTPConnection):
+        def _new_conn(self):
+            sock = super()._new_conn()
+            tracker.add(sock)
+            return sock
+
+    class SecureConnection(HTTPSConnection):
+        def _new_conn(self):
+            sock = super()._new_conn()
+            tracker.add(sock)
+            return sock
+
+    class Pool(HTTPConnectionPool):
+        ConnectionCls = Connection
+
+    class SecurePool(HTTPSConnectionPool):
+        ConnectionCls = SecureConnection
+
+    class Adapter(HTTPAdapter):
+        def init_poolmanager(self, *args, **kwargs):
+            super().init_poolmanager(*args, **kwargs)
+            self.poolmanager.pool_classes_by_scheme = {"http": Pool, "https": SecurePool}
+
+    return Adapter(max_retries=0)
+
+
+def _attempt_flaresolverr(base, ip, hostname, pin, deadline, version_of, tracker) -> tuple[dict, bool]:
     """Probe the root, then the /v1 endpoint, through one resolved address.
 
     Returns the result and whether the next address is worth trying: only when
@@ -422,6 +509,9 @@ def _attempt_flaresolverr(base, ip, hostname, pin, deadline, version_of) -> tupl
             # Direct, like the sibling probe: a proxy set for the environment
             # must not decide whether the address answers.
             session.trust_env = False
+            adapter = _tracking_adapter(tracker)
+            session.mount("http://", adapter)
+            session.mount("https://", adapter)
             timeout = remaining()
             if timeout is None:
                 return _address_result("timeout"), False
@@ -486,9 +576,17 @@ def check_flaresolverr_address(address) -> dict:
     private host. Library debug logs (urllib3) may name the host, as they do for
     any saved service address.
 
-    One deadline bounds every request, the body reads included. The name lookup
-    is outside it: ``getaddrinfo`` has no timeout, as with the other connection
-    tests.
+    What is bounded, exactly. The answer comes back within
+    ``ADDRESS_TEST_DEADLINE_SECONDS`` plus ``ADDRESS_TEST_ANSWER_MARGIN_SECONDS``
+    (``timeout`` if the check has not finished), whatever the far end does: a
+    refused or silent connect, an answer held back, or one dripped byte by byte
+    in the status line, the headers or the body. Inside, each request carries a
+    connect and read timeout capped by the time left, and body reads check the
+    clock. The check runs in a daemon worker thread, and when the caller gives up
+    the worker's sockets are shut down from this side, so the read it is blocked
+    in fails and the thread ends within moments, not when the far end tires.
+    Not bounded: the name lookup, which runs first and has no timeout
+    (``getaddrinfo``), as with the other connection tests.
     """
     import socket
 
@@ -520,20 +618,44 @@ def check_flaresolverr_address(address) -> dict:
     pin = base.scheme != "https"
     candidates = resolved_ips if pin else resolved_ips[:1]
     deadline = time.monotonic() + ADDRESS_TEST_DEADLINE_SECONDS
-    result = _address_result("unreachable")
-    timed_out = False
-    for ip in candidates:
-        if time.monotonic() >= deadline:
-            return _address_result("timeout")
-        result, try_next = _attempt_flaresolverr(base, ip, hostname, pin, deadline, version_of)
-        timed_out = timed_out or result["code"] == "timeout"
-        # A dual-stack name can answer on one family only: try the next address
-        # only when this one could not be connected to at all.
-        if not try_next:
-            return result
-    # Every address failed to connect: one that timed out is the better report
-    # than one that was refused.
-    return _address_result("timeout") if timed_out else result
+    tracker = _SocketTracker()
+
+    def check() -> dict:
+        result = _address_result("unreachable")
+        timed_out = False
+        for ip in candidates:
+            if time.monotonic() >= deadline:
+                return _address_result("timeout")
+            result, try_next = _attempt_flaresolverr(base, ip, hostname, pin, deadline, version_of, tracker)
+            timed_out = timed_out or result["code"] == "timeout"
+            # A dual-stack name can answer on one family only: try the next
+            # address only when this one could not be connected to at all.
+            if not try_next:
+                return result
+        # Every address failed to connect: one that timed out is the better
+        # report than one that was refused.
+        return _address_result("timeout") if timed_out else result
+
+    outcome: dict = {}
+
+    def work() -> None:
+        try:
+            outcome["result"] = check()
+        except Exception as error:
+            logger.debug("FlareSolverr address test: failed (%s)", type(error).__name__)
+            outcome["result"] = _address_result("unreachable", "failed")
+        finally:
+            tracker.release()
+
+    worker = threading.Thread(target=work, name="flaresolverr-address-test", daemon=True)
+    worker.start()
+    worker.join(max(0.0, deadline - time.monotonic()) + ADDRESS_TEST_ANSWER_MARGIN_SECONDS)
+    if worker.is_alive():
+        # Blocked somewhere a timeout cannot reach. Answer now, and cut its
+        # connections so the thread does not outlive the answer for long.
+        tracker.cut()
+        return _address_result("timeout")
+    return outcome["result"]
 
 
 def run_flaresolverr_test(typed, settings=None) -> dict:

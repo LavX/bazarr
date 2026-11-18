@@ -516,12 +516,12 @@ describe("FlareSolverrIntegration", () => {
       );
 
       const button = screen.getByRole("button", { name: "Test" });
-      expect(button).toBeDisabled();
       expect(
         await screen.findByText(
           "Type an address, or set FLARESOLVERR_URL, to test.",
         ),
       ).toHaveAttribute("role", "status");
+      expect(button).toBeDisabled();
 
       await userEvent
         .setup()
@@ -534,6 +534,116 @@ describe("FlareSolverrIntegration", () => {
         screen.queryByText(
           "Type an address, or set FLARESOLVERR_URL, to test.",
         ),
+      ).not.toBeInTheDocument();
+    });
+
+    it("stays enabled while the status is still loading", async () => {
+      let release: () => void = () => undefined;
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      server.use(
+        http.get("/api/providers/flaresolverr", async () => {
+          await gate;
+          return HttpResponse.json(status());
+        }),
+      );
+      customRender(
+        <Harness>
+          <FlareSolverrIntegration />
+        </Harness>,
+      );
+
+      expect(screen.getByRole("button", { name: "Test" })).toBeEnabled();
+      expect(
+        screen.queryByText(
+          "Type an address, or set FLARESOLVERR_URL, to test.",
+        ),
+      ).not.toBeInTheDocument();
+      release();
+      expect(
+        await screen.findByText(
+          "Type an address, or set FLARESOLVERR_URL, to test.",
+        ),
+      ).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "Test" })).toBeDisabled();
+    });
+
+    it("stays enabled when the status could not be read", async () => {
+      let reads = 0;
+      server.use(
+        http.get("/api/providers/flaresolverr", () => {
+          reads += 1;
+          return HttpResponse.json({}, { status: 500 });
+        }),
+      );
+      customRender(
+        <Harness>
+          <FlareSolverrIntegration />
+        </Harness>,
+      );
+
+      await waitFor(() => expect(reads).toBeGreaterThan(0));
+      await waitFor(() =>
+        expect(screen.getByRole("button", { name: "Test" })).toBeEnabled(),
+      );
+      expect(
+        screen.queryByText(
+          "Type an address, or set FLARESOLVERR_URL, to test.",
+        ),
+      ).not.toBeInTheDocument();
+    });
+
+    it("drops the result when a save changes the address in use", async () => {
+      let saved = false;
+      server.use(
+        http.get("/api/providers/flaresolverr", () =>
+          HttpResponse.json(
+            saved
+              ? status()
+              : status({ url: "http://env:8191", source: "env" }),
+          ),
+        ),
+        http.post("/api/providers/flaresolverr/test", () =>
+          HttpResponse.json(result({ source: "env" })),
+        ),
+        http.post("/api/system/settings", () => {
+          saved = true;
+          return new HttpResponse(null, { status: 204 });
+        }),
+      );
+      const ClearButton: FunctionComponent = () => {
+        const save = useSettingsMutation();
+        return (
+          <button
+            type="button"
+            onClick={() => save.mutate({ [flaresolverrSettingKey]: "" })}
+          >
+            Save now
+          </button>
+        );
+      };
+      customRender(
+        <Harness>
+          <FlareSolverrIntegration />
+          <ClearButton />
+        </Harness>,
+      );
+      const user = userEvent.setup();
+      const button = screen.getByRole("button", { name: "Test" });
+      await waitFor(() => expect(button).toBeEnabled());
+      await user.click(button);
+      await screen.findByText(/FlareSolverr 3\.3\.21 answered\./);
+
+      await user.click(screen.getByRole("button", { name: "Save now" }));
+
+      expect(
+        await screen.findByText(
+          "Type an address, or set FLARESOLVERR_URL, to test.",
+        ),
+      ).toBeInTheDocument();
+      expect(
+        screen.queryByText(/FlareSolverr 3\.3\.21 answered\./),
       ).not.toBeInTheDocument();
     });
 

@@ -49,12 +49,18 @@ const FlareSolverrIntegration: FunctionComponent = () => {
   const typed = (value ?? "").trim();
   // A result belongs to the address it was asked about. Once the field
   // changes, it no longer says anything about what is typed.
+  // An empty field tests the address in use, so a change of that address (a
+  // save, say) outdates the result as much as typing does.
+  const effectiveUrl = current?.url;
+  const effectiveSource = current?.source;
   const resetTest = test.reset;
   useEffect(() => {
     resetTest();
-  }, [typed, resetTest]);
-  // An empty field tests the address in use, so there must be one.
-  const canTest = typed !== "" || Boolean(current?.url);
+  }, [typed, effectiveUrl, effectiveSource, resetTest]);
+  // An empty field tests the address in use. Only a loaded status that confirms
+  // there is none rules the Test out; while it loads, or if it failed, the
+  // server decides.
+  const nothingToTest = typed === "" && status.isSuccess && !current?.url;
   const fromEnvironment = current?.source === "env" && typed === "";
   const checked =
     detect.isSuccess && current !== undefined && !current.detecting;
@@ -78,7 +84,7 @@ const FlareSolverrIntegration: FunctionComponent = () => {
           type="button"
           variant="default"
           mih={44}
-          disabled={!canTest}
+          disabled={nothingToTest}
           loading={test.isPending}
           onClick={() => test.mutate(typed)}
         >
@@ -90,7 +96,8 @@ const FlareSolverrIntegration: FunctionComponent = () => {
           role="status"
           c={test.data && !test.data.ok ? errorColor : undefined}
         >
-          {!canTest && "Type an address, or set FLARESOLVERR_URL, to test."}
+          {nothingToTest &&
+            "Type an address, or set FLARESOLVERR_URL, to test."}
           {test.isPending && "Testing the address."}
           {test.data && testOutcome(test.data)}
           {test.isError && "The test could not be completed."}
