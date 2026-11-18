@@ -50,14 +50,14 @@ def _sha(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def _bundle(tmp_path: Path, with_wheels=True):
+def _bundle(tmp_path: Path, with_wheels=True, requires_one=("fixturetwo>=1",)):
     """A bundle tree with two locked dependencies, and the manifest describing it."""
     root = tmp_path / "bundle"
     root.mkdir()
     (root / "plugin.py").write_text("x = 1\n", encoding="utf-8")
     files = {"plugin.py": _sha(root / "plugin.py")}
     requirements = []
-    for name, requires in (("fixtureone", ["fixturetwo>=1"]), ("fixturetwo", [])):
+    for name, requires in (("fixtureone", list(requires_one)), ("fixturetwo", [])):
         wheel = _make_wheel(root / "wheels" if with_wheels else tmp_path / "unused", name, "1.0", requires)
         requirements.append(DependencyRequirement(name=name, version="1.0", hashes=("sha256:" + _sha(wheel),)))
         if with_wheels:
@@ -113,7 +113,7 @@ def test_a_bundle_with_wheels_installs_offline_from_them(hub, tmp_path, monkeypa
     env = PluginEnvironment(hub).install(manifest, bundle_path=bundle)
 
     install = next(cmd for cmd in commands if cmd[1:4] == ["-m", "pip", "install"])
-    assert "--no-index" in install and "--require-hashes" in install and "--only-binary" in install
+    assert {"--no-index", "--no-deps", "--require-hashes", "--only-binary"} <= set(install)
     assert install[install.index("--find-links") + 1] == str(bundle.resolve() / "wheels")
     assert "--index-url" not in install and "--extra-index-url" not in install
     requirements = (env / "requirements.txt").read_text(encoding="utf-8")
@@ -250,3 +250,31 @@ def test_a_pip_failure_on_the_bundled_wheels_says_so_and_never_falls_back_to_the
     assert "from the wheels in its bundle" in str(failed.value)
     assert "No matching distribution found for fixtureone" in str(failed.value)
     assert sum(1 for cmd in commands if cmd[1:4] == ["-m", "pip", "install"]) == 1
+
+
+@pytest.mark.parametrize("requires, reason", [
+    (["evil @ https://example.invalid/evil-1.0-py3-none-any.whl"], "from a URL"),
+    (["nothere>=1"], "needs nothere, which the bundle carries no wheel for"),
+    (["fixturetwo>=2"], "but the bundle carries 1.0"),
+    (["not a requirement ("], "is not a valid requirement"),
+])
+def test_a_wheel_that_asks_for_something_outside_the_bundle_refuses_the_install(hub, tmp_path, monkeypatch, requires, reason):
+    bundle, manifest = _bundle(tmp_path, requires_one=requires)
+    monkeypatch.setattr(venvmod.subprocess, "run", lambda *a, **k: pytest.fail("pip must not run"))
+
+    with pytest.raises(PluginEnvironmentError, match="do not match its lock") as refused:
+        PluginEnvironment(hub).install(manifest, bundle_path=bundle)
+
+    assert reason in str(refused.value)
+    assert not (hub / "shared_envs").exists()
+
+
+def test_requirements_that_do_not_apply_here_do_not_need_a_wheel(tmp_path):
+    bundle, manifest = _bundle(tmp_path, requires_one=[
+        "fixturetwo>=1",
+        'oldpython>=1; python_version < "3"',
+        'unix_only>=1; sys_platform == "plan9"',
+        'fixturetwo[extra]>=1; extra == "all"',
+    ])
+
+    assert verified_wheels_dir(manifest, bundle) == bundle.resolve() / "wheels"

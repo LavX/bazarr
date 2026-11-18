@@ -11,12 +11,18 @@ lock does not name, a locked dependency with no wheel, a file that is not a whee
 manifest does not declare each refuse the install, with the reason. pip then runs with ``--require-hashes``,
 so it checks the same digests a second time.
 
+pip is told not to resolve anything (``--no-deps``): the lock is the whole closure. So that nothing a wheel asks
+for goes unchecked, every ``Requires-Dist`` of every bundled wheel that applies to this interpreter must be met by
+another bundled wheel. A requirement that names a URL, or a package the bundle does not carry, refuses the install.
+
 A bundle without a ``wheels/`` directory is not affected: its dependencies come from the index as before.
 """
 from __future__ import annotations
 
+import email.parser
 import hashlib
 import re
+import zipfile
 
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -48,6 +54,74 @@ def _same_version(locked: str, found: str) -> bool:
         return Version(locked) == Version(found)
     except InvalidVersion:
         return False
+
+
+_METADATA_MAX_BYTES = 4 * 1024 * 1024
+
+
+def _packaging():
+    """``(Requirement, Version, InvalidRequirement)`` from packaging, or from the copy pip vendors."""
+    try:
+        from packaging.requirements import InvalidRequirement, Requirement
+        from packaging.version import Version
+    except ImportError:
+        try:
+            from pip._vendor.packaging.requirements import InvalidRequirement, Requirement
+            from pip._vendor.packaging.version import Version
+        except ImportError as error:
+            raise BundledWheelsError(
+                "the requirements of the bundled wheels cannot be checked: neither packaging nor pip is available"
+            ) from error
+    return Requirement, Version, InvalidRequirement
+
+
+def _requires_dist(wheel: Path) -> list[str]:
+    """The ``Requires-Dist`` lines of a wheel's metadata."""
+    try:
+        with zipfile.ZipFile(wheel) as archive:
+            names = [name for name in archive.namelist() if name.count("/") == 1 and name.endswith(".dist-info/METADATA")]
+            if len(names) != 1:
+                raise BundledWheelsError(f"{wheel.name} has no single dist-info/METADATA")
+            if archive.getinfo(names[0]).file_size > _METADATA_MAX_BYTES:
+                raise BundledWheelsError(f"{wheel.name} has oversized metadata")
+            raw = archive.read(names[0])
+    except (zipfile.BadZipFile, OSError) as error:
+        raise BundledWheelsError(f"{wheel.name} is not a readable wheel: {error}") from error
+    message = email.parser.BytesParser().parsebytes(raw, headersonly=True)
+    return [str(value) for value in message.get_all("Requires-Dist") or []]
+
+
+def _check_requirements(wheel_versions: dict[str, tuple[str, str]], root: Path) -> None:
+    """Every requirement of every bundled wheel that applies here is met by another bundled wheel.
+
+    ``wheel_versions`` maps a normalized name to ``(version, wheel path)``. Markers are judged for this
+    interpreter, which is the one the environment is built with, and with no extra requested.
+    """
+    Requirement, Version, InvalidRequirement = _packaging()
+    for key, (_version, path) in sorted(wheel_versions.items()):
+        for line in _requires_dist(root / path):
+            try:
+                requirement = Requirement(line)
+            except InvalidRequirement as error:
+                raise BundledWheelsError(f"{path} asks for {line!r}, which is not a valid requirement") from error
+            if requirement.url:
+                raise BundledWheelsError(f"{path} asks for {requirement.name} from a URL ({requirement.url}), which is not allowed")
+            try:
+                applies = requirement.marker is None or requirement.marker.evaluate({"extra": ""})
+            except Exception as error:
+                raise BundledWheelsError(f"{path} has a marker that cannot be judged here: {line!r}") from error
+            if not applies:
+                continue
+            found = wheel_versions.get(normalized_name(requirement.name))
+            if found is None:
+                raise BundledWheelsError(f"{path} needs {requirement.name}, which the bundle carries no wheel for")
+            try:
+                satisfied = requirement.specifier.contains(Version(found[0]), prereleases=True)
+            except Exception:
+                satisfied = False
+            if not satisfied:
+                raise BundledWheelsError(
+                    f"{path} needs {requirement.name}{requirement.specifier}, but the bundle carries {found[0]}")
 
 
 def _sha256_file(path: Path) -> str:
@@ -83,6 +157,7 @@ def verified_wheels_dir(manifest: Any, bundle_path: str | Path) -> Path | None:
 
     by_name = {normalized_name(requirement.name): requirement for requirement in requirements}
     covered: set[str] = set()
+    wheel_versions: dict[str, tuple[str, str]] = {}
     for path, declared_digest in sorted(declared.items()):
         parts = PurePosixPath(path).parts
         match = _WHEEL_RE.match(parts[-1]) if len(parts) == 2 else None
@@ -104,6 +179,7 @@ def verified_wheels_dir(manifest: Any, bundle_path: str | Path) -> Path | None:
         if _sha256_file(wheel) != declared_digest:
             raise BundledWheelsError(f"{path} does not match its declared digest")
         covered.add(key)
+        wheel_versions.setdefault(key, (match.group("version").replace("_", "-"), path))
 
     for key, requirement in sorted(by_name.items()):
         if key not in covered:
@@ -114,4 +190,5 @@ def verified_wheels_dir(manifest: Any, bundle_path: str | Path) -> Path | None:
     extra = sorted(on_disk - set(declared))
     if extra:
         raise BundledWheelsError(f"{extra[0]} sits among the bundle's wheels but the manifest does not declare it")
+    _check_requirements(wheel_versions, root)
     return wheels_dir

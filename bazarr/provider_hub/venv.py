@@ -752,9 +752,11 @@ class PluginEnvironment:
                     subprocess.run(cmd, check=True, env=env, cwd=str(env_path), timeout=_remaining())
                 else:
                     # The bundle's own wheels and nothing else: no index, no pip configuration that could add
-                    # one, and no source builds.
+                    # one, no source builds and no resolution. The lock is the whole closure, and the wheels'
+                    # own requirements were checked against it before this point.
                     cmd += [
                         "--no-index",
+                        "--no-deps",
                         "--find-links",
                         str(wheels_dir),
                         "--only-binary",
