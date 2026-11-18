@@ -135,7 +135,11 @@ def resolve_closure(
             held = installed.get(needed_id)
             if held is not None:
                 running = _manifest_in(held[1], "next") or held[0]
-                if not _supplies(held[1], capability):
+                if _revoked_without_update(held[1]):
+                    closure.unresolved.append(
+                        f"{owner.name} extends {needed_id}, whose installed release was revoked by the "
+                        f"official catalog. Update {needed_id} first.")
+                elif not _supplies(held[1], capability):
                     newer = upgrade(needed_id, capability)
                     closure.unresolved.append(
                         f"{owner.name} extends {needed_id}, which is installed but does not provide {capability}"
@@ -167,8 +171,13 @@ def resolve_closure(
             return
         switched_off = []
         dropping = []
+        revoked = []
         for plugin_id, (held, row) in sorted(installed.items()):
             if plugin_id == owner.plugin_id:
+                continue
+            if _revoked_without_update(row):
+                if _supplies(row, capability):
+                    revoked.append(plugin_id)
                 continue
             if not _supplies(row, capability):
                 # Provides it now, and the update staged for it drops it.
@@ -188,6 +197,11 @@ def resolve_closure(
             and provides(entry, capability)
         })
         if not providers:
+            if revoked and not switched_off:
+                closure.unresolved.append(
+                    f"{owner.name} needs {capability}, which only {', '.join(revoked)} provides, and its "
+                    "installed release was revoked by the official catalog. Update it first.")
+                return
             if dropping and not switched_off:
                 closure.unresolved.append(
                     f"{owner.name} needs {capability}, which {', '.join(dropping)} provides now, but the "
@@ -267,6 +281,13 @@ def _manifest_in(row: dict[str, Any], phase: str) -> PluginManifest | None:
     if row.get("active_version"):
         return _parse(row.get("manifest"))
     return None
+
+
+def _revoked_without_update(row: dict[str, Any]) -> bool:
+    """Whether the release an installation runs was revoked by the catalog and nothing safe is staged to
+    replace it. Such a plugin supplies nothing: a revoked supplier must not satisfy a dependency. (A revoked
+    staged release is dropped when the list is applied, so a staged release here is one that is not revoked.)"""
+    return bool(row.get("revoked")) and not row.get("staged_version")
 
 
 def _supplies(row: dict[str, Any], capability: str) -> bool:

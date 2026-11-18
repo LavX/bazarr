@@ -131,6 +131,10 @@ class ProviderHubProvider(Resource):
             if installation is not None and kind_of(installation) != SUBTITLE_PROVIDER:
                 return 'Provider not found', 404
             payload = request.json or {}
+            if not isinstance(payload, dict):
+                return 'a JSON object is required', 400
+            if "enabled" in payload and not isinstance(payload["enabled"], bool):
+                return 'enabled must be true or false', 400
             provider = service.update_provider(
                 provider_id,
                 enabled=payload.get("enabled") if "enabled" in payload else None,
