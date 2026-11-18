@@ -34,11 +34,18 @@ _MAX_RESPONSE_LINE_BYTES = 48 * 1024 * 1024
 # Read granularity for the bounded readline loop, so the cap is enforced before a
 # whole oversized line accumulates.
 _READ_CHUNK_CHARS = 1024 * 1024
-# What a worker may send the host as a call in the middle of a request. Calls carry a captcha
-# site address and key, so the cap is far below the reply cap; a request that makes more than the
-# call limit is a runaway and is ended.
-_MAX_HOST_CALL_LINE_BYTES = 2 * 1024 * 1024
+# What a worker may send the host as a call in the middle of a request. A call carries a captcha site
+# address and key, so every part of it is bounded far below the reply cap. A call outside the bounds,
+# and a request that makes more calls than the limit, is a protocol violation and ends the worker.
+_MAX_HOST_CALL_LINE_BYTES = 128 * 1024
+_MAX_HOST_CALL_ID_CHARS = 64
+_MAX_HOST_CALL_CAPABILITY_CHARS = 128
+_MAX_HOST_CALL_PAYLOAD_BYTES = 64 * 1024
 _MAX_HOST_CALLS_PER_REQUEST = 16
+# What the host sends back. Bounded so that answers cannot fill a pipe the worker does not read, and
+# writing one is bounded in time as well: a worker that does not read within this long is ended.
+_MAX_HOST_REPLY_PAYLOAD_BYTES = 32 * 1024
+_HOST_REPLY_WRITE_SECONDS = 10.0
 # Queued by the reader thread when a response line exceeds the cap, so the
 # consumer kills the worker at the transport layer instead of assembling it.
 _OVERSIZE_RESPONSE = object()
@@ -498,7 +505,7 @@ class ProviderWorkerClient:
         host_calls: dict[str, Any] | None = None,
     ):
         # The calls this worker may make to the host while it serves a request: capability id to
-        # a function (payload, timeout) -> dict. Anything else a worker asks for is refused.
+        # a function (payload, seconds_left, cancelled_event) -> dict. Anything else a worker asks for is refused.
         self._host_calls = dict(host_calls or {})
         # Called before every start of the worker process, the first one and each
         # respawn: whatever it raises keeps the process from starting.
@@ -1166,29 +1173,66 @@ class ProviderWorkerClient:
                 raise WorkerError("worker made too many host calls in one request")
             answer = self._answer_host_call(call, deadline)
             reply = {"abi": WORKER_ABI_VERSION, "id": request_id, "call_reply": answer}
-            try:
-                self.process.stdin.write(json.dumps(reply, separators=(",", ":")) + "\n")
-                self.process.stdin.flush()
-            except (OSError, ValueError, AttributeError) as error:
-                raise WorkerError("worker closed while the host answered its call") from error
+            self._send_reply(json.dumps(reply, separators=(",", ":")) + "\n", deadline)
 
-    @staticmethod
-    def _host_call_of(line: str, request_id: str) -> dict | None:
-        """The call a line carries, or None when it is the reply (or anything else) for the caller to judge."""
-        # A reply can be tens of megabytes: look at its start before parsing anything.
-        if not line or '"call"' not in line[:200]:
+    def _violation(self, why: str):
+        self._kill_worker()
+        raise WorkerError(f"worker sent a malformed host call: {why}")
+
+    def _host_call_of(self, line: str, request_id: str) -> dict | None:
+        """The call a line carries, or None when it is the reply (or anything else) for the caller to judge.
+
+        A call frame starts with exactly the head the runner writes, so a reply of any size is told apart
+        by its first bytes and never parsed here. A frame outside the bounds ends the worker.
+        """
+        if not line.startswith(f'{{"abi":"{WORKER_ABI_VERSION}","id":{json.dumps(request_id)},"call":'):
             return None
         if len(line) > _MAX_HOST_CALL_LINE_BYTES:
-            return None
+            self._violation("the frame is too large")
         try:
             frame = json.loads(line)
         except ValueError:
-            return None
-        if (not isinstance(frame, dict) or frame.get("abi") != WORKER_ABI_VERSION or frame.get("id") != request_id
-                or not isinstance(frame.get("call"), dict)):
-            return None
-        call = frame["call"]
-        return call if isinstance(call.get("id"), str) and isinstance(call.get("capability"), str) else None
+            self._violation("the frame is not JSON")
+        call = frame.get("call") if isinstance(frame, dict) else None
+        if not isinstance(call, dict):
+            self._violation("the call is not an object")
+        call_id, capability, payload = call.get("id"), call.get("capability"), call.get("payload", {})
+        if not isinstance(call_id, str) or not 0 < len(call_id) <= _MAX_HOST_CALL_ID_CHARS:
+            self._violation("the call id is missing or too long")
+        if not isinstance(capability, str) or not 0 < len(capability) <= _MAX_HOST_CALL_CAPABILITY_CHARS:
+            self._violation("the capability is missing or too long")
+        if not isinstance(payload, dict):
+            self._violation("the payload is not an object")
+        if len(json.dumps(payload, separators=(",", ":"))) > _MAX_HOST_CALL_PAYLOAD_BYTES:
+            self._violation("the payload is too large")
+        return {"id": call_id, "capability": capability, "payload": payload}
+
+    def _send_reply(self, text: str, deadline: float) -> None:
+        """Write the answer to a host call, without ever waiting on a worker that does not read.
+
+        The write runs on a thread of its own and is waited for only briefly. A worker that has stopped
+        reading fills the pipe and the write blocks, so past the wait the worker is ended, which also
+        ends the write. The request's lock is therefore never held for longer than that wait.
+        """
+        process = self.process
+        failures: list[BaseException] = []
+
+        def write():
+            try:
+                process.stdin.write(text)
+                process.stdin.flush()
+            except BaseException as error:  # reported by the caller
+                failures.append(error)
+
+        thread = threading.Thread(target=write, name="provider-host-reply", daemon=True)
+        thread.start()
+        thread.join(max(0.0, min(_HOST_REPLY_WRITE_SECONDS, deadline - time.monotonic())))
+        if thread.is_alive():
+            self._kill_worker()
+            thread.join(5.0)
+            raise WorkerError("worker did not read the host's answer to its call")
+        if failures:
+            raise WorkerError("worker closed while the host answered its call") from failures[0]
 
     def _answer_host_call(self, call: dict, deadline: float) -> dict:
         """Run one call and shape the outcome. Never raises, and says nothing the plugin may not see."""
@@ -1207,10 +1251,12 @@ class ProviderWorkerClient:
         if remaining <= 0:
             return failure("timeout", "The request ran out of time.")
         outcome: dict[str, Any] = {}
+        # Set when the request's time runs out, so a handler stops what it is doing and starts nothing new.
+        cancelled = threading.Event()
 
         def run():
             try:
-                outcome["payload"] = handler(payload, remaining)
+                outcome["payload"] = handler(payload, remaining, cancelled)
             except BaseException as error:  # reported to the plugin, never raised
                 outcome["error"] = error
 
@@ -1219,7 +1265,9 @@ class ProviderWorkerClient:
         thread = threading.Thread(target=run, name="provider-host-call", daemon=True)
         thread.start()
         thread.join(remaining)
-        if thread.is_alive():
+        if thread.is_alive() or time.monotonic() >= deadline:
+            # Whatever the handler produces from here on is dropped: the request has ended.
+            cancelled.set()
             return failure("timeout", "The request ran out of time.")
         error = outcome.get("error")
         if error is not None:
@@ -1230,6 +1278,12 @@ class ProviderWorkerClient:
             return failure("failed", "The host could not do that.")
         result = outcome.get("payload")
         if not isinstance(result, dict):
+            return failure("failed", "The host could not do that.")
+        try:
+            too_large = len(json.dumps(result, separators=(",", ":"))) > _MAX_HOST_REPLY_PAYLOAD_BYTES
+        except (TypeError, ValueError):
+            too_large = True
+        if too_large:
             return failure("failed", "The host could not do that.")
         return {"id": call_id, "ok": True, "payload": result}
 

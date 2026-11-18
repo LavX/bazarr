@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import logging
 import re
+import threading
 from dataclasses import dataclass
 from typing import Any, Callable, Mapping
 
@@ -154,13 +155,13 @@ def deliver(config: dict, properties: dict, installation, settings) -> None:
         config[key] = endpoints.resolve_flaresolverr_url(settings) if capability == FLARESOLVERR else ""
 
 
-def host_call_handlers(installation) -> dict[str, Callable[[dict, float], dict]]:
+def host_call_handlers(installation) -> dict[str, Callable[[dict, float, threading.Event], dict]]:
     """The functions that answer a worker's calls, for the ``call`` capabilities it may use.
 
     Looked up when a worker is built. The solver re-reads the settings on every call, so a
     key the user changes applies to the next call without a new worker.
     """
-    handlers: dict[str, Callable[[dict, float], dict]] = {}
+    handlers: dict[str, Callable[[dict, float, threading.Event], dict]] = {}
     if _eligible(HOST_CAPTCHA, installation):
         from . import captcha
 

@@ -178,7 +178,7 @@ class TestSolver:
 
     def test_a_solve_returns_the_token_alone(self, fake_vendor):
         settings = _settings("anti-captcha", anticaptcha={"anti_captcha_key": "the-key"})
-        assert captcha.solve_call(dict(RECAPTCHA), 30, settings) == {"response": "token-123"}
+        assert captcha.solve_call(dict(RECAPTCHA), 30, settings=settings) == {"response": "token-123"}
         assert fake_vendor.calls == [("https://example.test/login", "SITEKEY", "the-key", True)]
         assert fake_vendor.seen == ["AntiCaptchaProxyLess"]
 
@@ -194,27 +194,27 @@ class TestSolver:
     def test_a_malformed_request_is_refused_before_any_vendor_is_asked(self, fake_vendor, payload, code):
         settings = _settings("anti-captcha", anticaptcha={"anti_captcha_key": "k"})
         with pytest.raises(captcha.CaptchaCallError) as raised:
-            captcha.solve_call(payload, 30, settings)
+            captcha.solve_call(payload, 30, settings=settings)
         assert raised.value.code == code
         assert fake_vendor.calls == []
 
     def test_without_a_service_set_up_the_answer_is_unavailable(self, fake_vendor):
         with pytest.raises(captcha.CaptchaCallError) as raised:
-            captcha.solve_call(dict(RECAPTCHA), 30, _settings(None))
+            captcha.solve_call(dict(RECAPTCHA), 30, settings=_settings(None))
         assert raised.value.code == "unavailable"
 
     def test_a_vendor_failure_never_carries_the_vendor_text(self, fake_vendor):
         fake_vendor.result = RuntimeError("bad key=SECRET-ACCOUNT-KEY for account 42")
         settings = _settings("anti-captcha", anticaptcha={"anti_captcha_key": "SECRET-ACCOUNT-KEY"})
         with pytest.raises(captcha.CaptchaCallError) as raised:
-            captcha.solve_call(dict(RECAPTCHA), 30, settings)
+            captcha.solve_call(dict(RECAPTCHA), 30, settings=settings)
         assert "SECRET" not in raised.value.message and raised.value.code == "failed"
 
     def test_no_token_is_a_failure(self, fake_vendor):
         fake_vendor.result = None
         settings = _settings("anti-captcha", anticaptcha={"anti_captcha_key": "k"})
         with pytest.raises(captcha.CaptchaCallError) as raised:
-            captcha.solve_call(dict(RECAPTCHA), 30, settings)
+            captcha.solve_call(dict(RECAPTCHA), 30, settings=settings)
         assert raised.value.code == "failed"
 
     def test_solves_are_limited_across_plugins(self, monkeypatch, fake_vendor):
@@ -223,11 +223,160 @@ class TestSolver:
         try:
             settings = _settings("anti-captcha", anticaptcha={"anti_captcha_key": "k"})
             with pytest.raises(captcha.CaptchaCallError) as raised:
-                captcha.solve_call(dict(RECAPTCHA), 30, settings)
+                captcha.solve_call(dict(RECAPTCHA), 30, settings=settings)
             assert raised.value.code == "busy" and fake_vendor.calls == []
         finally:
             for _ in taken:
                 captcha._slots.release()
+
+
+class StubJob:
+    solution = "tok-anti"
+
+    def __init__(self, behaviour):
+        self.behaviour = behaviour
+
+    def join(self, maximum_time=None, on_check=None, backoff=False):
+        StubJob.maximum_time = maximum_time
+        while self.behaviour == "hang":
+            time.sleep(0.02)
+            on_check(0, "processing")
+
+    def get_solution_response(self):
+        return StubJob.solution
+
+
+@pytest.fixture
+def vendors(monkeypatch):
+    """Every vendor library replaced by a stub that records the credentials it was given."""
+    from subliminal_patch import pitcher
+
+    seen = {"anti": [], "dbc": [], "captchaai": [], "tasks": 0, "behaviour": "ok"}
+
+    class StubAnti:
+        def __init__(self, key, language_pool, host, use_ssl):
+            seen["anti"].append(key)
+
+        def createTask(self, task):
+            seen["tasks"] += 1
+            return StubJob(seen["behaviour"])
+
+    class StubDBC:
+        def __init__(self, username, password):
+            seen["dbc"].append((username, password))
+
+        def decode(self, timeout=None, **kwargs):
+            seen["dbc_timeout"] = timeout
+            return {"is_correct": True, "text": "tok-dbc"}
+
+    class Response:
+        def __init__(self, body):
+            self.body = body
+
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return self.body
+
+    class StubSession:
+        def post(self, url, data=None, timeout=None):
+            seen["captchaai"].append(data["key"])
+            return Response({"status": 1, "request": "job-1"})
+
+        def get(self, url, params=None, timeout=None):
+            seen["captchaai"].append(params["key"])
+            return Response({"status": 1, "request": "tok-ai"})
+
+    monkeypatch.setattr(pitcher, "AnticaptchaClient", StubAnti)
+    monkeypatch.setattr(pitcher, "NoCaptchaTaskProxylessTask", lambda **kwargs: object())
+    monkeypatch.setattr(pitcher, "DBCClient", StubDBC)
+    monkeypatch.setattr(pitcher.requests, "Session", StubSession)
+    # No real waiting between CaptchaAI polls; the live and cancelled checks stay.
+    monkeypatch.setattr(pitcher.Pitcher, "_sleep", lambda self, seconds: self._check_live())
+    # What the old environment path would have used: never the right answer.
+    monkeypatch.setenv("ANTICAPTCHA_ACCOUNT_KEY", "ENV-KEY:ENV-PASS")
+    monkeypatch.setenv("ANTICAPTCHA_CLASS", "AntiCaptchaProxyLess")
+    return seen
+
+
+class TestEveryVendorUsesTheHostCredentials:
+    def test_anti_captcha(self, vendors):
+        settings = _settings("anti-captcha", anticaptcha={"anti_captcha_key": "host-anti-key"})
+        assert captcha.solve_call(dict(RECAPTCHA), 30, settings=settings) == {"response": "tok-anti"}
+        assert vendors["anti"] == ["host-anti-key"]
+
+    def test_death_by_captcha_takes_the_account_the_host_built_not_the_environment(self, vendors):
+        settings = _settings("death-by-captcha", deathbycaptcha={"username": "zed", "password": "abc"})
+        assert captcha.solve_call(dict(RECAPTCHA), 30, settings=settings) == {"response": "tok-dbc"}
+        assert vendors["dbc"] == [("zed", "abc")]
+
+    def test_captchaai(self, vendors):
+        settings = _settings("captchaai", captchaai={"captchaai_key": "host-ai-key"})
+        assert captcha.solve_call(dict(RECAPTCHA), 30, settings=settings) == {"response": "tok-ai"}
+        assert set(vendors["captchaai"]) == {"host-ai-key"}
+
+    def test_the_built_in_providers_still_fall_back_to_the_environment(self, vendors):
+        from subliminal_patch.pitcher import pitchers
+
+        pitchers.get_pitcher("DeathByCaptchaProxyLess")("site", "https://example.test/", "key")
+        assert vendors["dbc"] == []
+        instance = pitchers.get_pitcher("DeathByCaptchaProxyLess")("site", "https://example.test/", "key")
+        assert (instance.username, instance.password) == ("ENV-KEY", "ENV-PASS")
+
+
+class TestASolveEndsWithItsRequest:
+    def test_a_solve_that_runs_past_the_deadline_is_cancelled_and_gives_its_slot_back(self, vendors):
+        vendors["behaviour"] = "hang"
+        settings = _settings("anti-captcha", anticaptcha={"anti_captcha_key": "k"})
+        cancelled = threading.Event()
+        started = time.monotonic()
+        with pytest.raises(captcha.CaptchaCallError) as raised:
+            captcha.solve_call(dict(RECAPTCHA), 0.4, cancelled, settings=settings)
+        assert raised.value.code == "timeout" and time.monotonic() - started < 5
+        assert cancelled.is_set()
+        # Not retried: one paid task, and both slots are free again.
+        assert vendors["tasks"] == 1
+        slots = [captcha._slots.acquire(blocking=False) for _ in range(captcha.MAX_CONCURRENT_SOLVES)]
+        try:
+            assert all(slots)
+        finally:
+            for taken in slots:
+                if taken:
+                    captcha._slots.release()
+
+    def test_a_solve_for_a_request_that_has_already_ended_creates_no_task(self, vendors):
+        settings = _settings("anti-captcha", anticaptcha={"anti_captcha_key": "k"})
+        cancelled = threading.Event()
+        cancelled.set()
+        with pytest.raises(captcha.CaptchaCallError):
+            captcha.solve_call(dict(RECAPTCHA), 30, cancelled, settings=settings)
+        assert vendors["tasks"] == 0
+
+    def test_a_token_that_arrives_after_the_deadline_is_not_delivered(self, monkeypatch):
+        from subliminal_patch import pitcher
+
+        class Slow:
+            def __init__(self, *args, deadline=None, cancel=None, **kwargs):
+                pass
+
+            def throw(self):
+                time.sleep(0.5)
+                return "late-token"
+
+        monkeypatch.setattr(pitcher.pitchers, "get_pitcher", lambda name=None, with_proxy=False: Slow)
+        settings = _settings("anti-captcha", anticaptcha={"anti_captcha_key": "k"})
+        with pytest.raises(captcha.CaptchaCallError) as raised:
+            captcha.solve_call(dict(RECAPTCHA), 0.2, settings=settings)
+        assert raised.value.code == "timeout"
+
+    def test_the_vendor_wait_is_cut_to_what_is_left_of_the_request(self, vendors):
+        settings = _settings("death-by-captcha", deathbycaptcha={"username": "u", "password": "p"})
+        captcha.solve_call(dict(RECAPTCHA), 20, settings=settings)
+        assert vendors["dbc_timeout"] <= 20
+        settings = _settings("anti-captcha", anticaptcha={"anti_captcha_key": "k"})
+        captcha.solve_call(dict(RECAPTCHA), 20, settings=settings)
+        assert StubJob.maximum_time is not None and StubJob.maximum_time <= 20
 
 
 PROVIDER = '''
@@ -252,6 +401,24 @@ class CaptchaProvider:
             for _ in range(40):
                 bazarr_host.call("host.captcha.v1", {})
             return []
+        if mode == "frame":
+            # A raw call frame the way a hostile worker would write it.
+            import __main__, json, sys
+            call = {"id": config.get("id", "c1"), "capability": config.get("capability", "host.captcha.v1"),
+                    "payload": config.get("payload", {})}
+            frame = {"abi": "bazarr.provider-worker.v1", "id": __main__._current["request_id"], "call": call}
+            sys.stdout.write(json.dumps(frame, separators=(",", ":")) + "\\n")
+            sys.stdout.flush()
+            time.sleep(60)
+        if mode == "flood":
+            # Valid calls, never reading an answer.
+            import __main__, json, sys
+            for number in range(16):
+                call = {"id": "c%02d" % number, "capability": "host.captcha.v1", "payload": {}}
+                frame = {"abi": "bazarr.provider-worker.v1", "id": __main__._current["request_id"], "call": call}
+                sys.stdout.write(json.dumps(frame, separators=(",", ":")) + "\\n")
+            sys.stdout.flush()
+            time.sleep(60)
         if mode == "then-search":
             bazarr_host.solve_recaptcha("SITEKEY", "https://example.test/")
             time.sleep(60)
@@ -301,7 +468,7 @@ class TestHostCallsOverThePipes:
     def test_a_solve_reaches_the_handler_and_the_token_comes_back(self, worker):
         seen = []
 
-        def handler(payload, timeout):
+        def handler(payload, timeout, cancelled):
             seen.append((payload, timeout))
             return {"response": "tok"}
 
@@ -312,11 +479,11 @@ class TestHostCallsOverThePipes:
         assert 0 < seen[0][1] <= 20
 
     def test_the_worker_is_told_what_it_may_call(self, worker):
-        client = worker({"host.captcha.v1": lambda payload, timeout: {}})
+        client = worker({"host.captcha.v1": lambda payload, timeout, cancelled: {}})
         assert _search(client, {"mode": "granted"}).payload["candidates"] == [{"granted": ["host.captcha.v1"]}]
 
     def test_a_capability_that_was_not_granted_is_denied(self, worker):
-        result = _search(worker({"host.captcha.v1": lambda payload, timeout: {}}),
+        result = _search(worker({"host.captcha.v1": lambda payload, timeout, cancelled: {}}),
                          {"mode": "raw", "capability": "host.other.v1"})
         assert result.payload["candidates"][0]["code"] == "denied"
 
@@ -325,7 +492,7 @@ class TestHostCallsOverThePipes:
         assert result.payload["candidates"][0]["code"] == "denied"
 
     def test_a_refusal_reaches_the_plugin_with_its_code_and_a_safe_message(self, worker):
-        def handler(payload, timeout):
+        def handler(payload, timeout, cancelled):
             raise captcha.CaptchaCallError("unavailable", "No captcha service is set up in Bazarr+.")
 
         result = _search(worker({"host.captcha.v1": handler}), {"mode": "raw", "capability": "host.captcha.v1"})
@@ -333,7 +500,7 @@ class TestHostCallsOverThePipes:
             {"code": "unavailable", "message": "No captcha service is set up in Bazarr+."}]
 
     def test_an_unexpected_error_is_a_plain_failure_with_no_detail(self, worker):
-        def handler(payload, timeout):
+        def handler(payload, timeout, cancelled):
             raise RuntimeError("secret detail")
 
         result = _search(worker({"host.captcha.v1": handler}), {"mode": "raw", "capability": "host.captcha.v1"})
@@ -341,14 +508,14 @@ class TestHostCallsOverThePipes:
         assert candidate["code"] == "failed" and "secret" not in candidate["message"]
 
     def test_a_runaway_worker_is_ended_after_the_call_limit(self, worker):
-        client = worker({"host.captcha.v1": lambda payload, timeout: {"response": "t"}})
+        client = worker({"host.captcha.v1": lambda payload, timeout, cancelled: {"response": "t"}})
         with pytest.raises(WorkerError, match="too many host calls"):
             _search(client, {"mode": "many"})
 
     def test_a_handler_that_never_answers_cannot_hold_the_request_past_its_deadline(self, worker):
         release = threading.Event()
 
-        def handler(payload, timeout):
+        def handler(payload, timeout, cancelled):
             release.wait(30)
             return {"response": "late"}
 
@@ -362,9 +529,65 @@ class TestHostCallsOverThePipes:
         assert time.monotonic() - started < 12
 
     def test_the_worker_is_still_usable_after_a_call(self, worker):
-        client = worker({"host.captcha.v1": lambda payload, timeout: {"response": "t"}})
+        client = worker({"host.captcha.v1": lambda payload, timeout, cancelled: {"response": "t"}})
         assert _search(client, {"mode": "solve"}).payload["candidates"] == [{"token": "t"}]
         assert _search(client, {"mode": "solve"}).payload["candidates"] == [{"token": "t"}]
+
+
+class TestCallFrameBounds:
+    @pytest.mark.parametrize("config", [
+        {"id": "x" * (2 * 1024 * 1024)},
+        {"id": "x" * 65},
+        {"id": ""},
+        {"capability": "c" * 129},
+        {"capability": ""},
+        {"payload": {"k": "v" * (70 * 1024)}},
+        {"payload": "not an object"},
+    ])
+    def test_an_out_of_bounds_call_ends_the_worker_at_once(self, worker, config):
+        answered = []
+        client = worker({"host.captcha.v1": lambda payload, timeout, cancelled: answered.append(1) or {}})
+        started = time.monotonic()
+        with pytest.raises(WorkerError, match="malformed host call"):
+            _search(client, {"mode": "frame", **config}, timeout=30)
+        assert time.monotonic() - started < 10
+        assert answered == []
+        assert client._lock.acquire(timeout=1)
+        client._lock.release()
+
+
+class TestAnswerWrite:
+    def test_a_worker_that_stops_reading_is_ended_and_the_lock_is_given_back(self, worker, monkeypatch):
+        from provider_hub import worker as worker_module
+
+        monkeypatch.setattr(worker_module, "_HOST_REPLY_WRITE_SECONDS", 1.0)
+        big = {"response": "t" * (30 * 1024)}
+        client = worker({"host.captcha.v1": lambda payload, timeout, cancelled: big})
+        started = time.monotonic()
+        with pytest.raises(WorkerError, match="did not read"):
+            _search(client, {"mode": "flood"}, timeout=60)
+        assert time.monotonic() - started < 15
+        assert client._lock.acquire(timeout=1)
+        client._lock.release()
+
+    def test_an_answer_too_large_to_send_becomes_a_plain_failure(self, worker):
+        huge = {"response": "t" * (64 * 1024)}
+        result = _search(worker({"host.captcha.v1": lambda payload, timeout, cancelled: huge}),
+                         {"mode": "raw", "capability": "host.captcha.v1"})
+        assert result.payload["candidates"][0]["code"] == "failed"
+
+    def test_the_handler_is_told_when_the_request_ends(self, worker):
+        seen = {}
+
+        def handler(payload, timeout, cancelled):
+            seen["cancelled"] = cancelled
+            cancelled.wait(20)
+            return {"response": "late"}
+
+        client = worker({"host.captcha.v1": handler})
+        with pytest.raises(WorkerError):
+            _search(client, {"mode": "solve"}, timeout=1.5)
+        assert seen["cancelled"].wait(5)
 
 
 class TestSpawnGrant:
