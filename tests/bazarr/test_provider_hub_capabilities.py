@@ -397,6 +397,8 @@ class CaptchaProvider:
             except bazarr_host.HostCallError as error:
                 return [{"code": error.code, "message": str(error)}]
             return [{"code": "none"}]
+        if mode == "bulk":
+            return [{"blob": "y" * config["size"]}]
         if mode == "many":
             for _ in range(40):
                 bazarr_host.call("host.captcha.v1", {})
@@ -409,6 +411,18 @@ class CaptchaProvider:
             frame = {"abi": "bazarr.provider-worker.v1", "id": __main__._current["request_id"], "call": call}
             sys.stdout.write(json.dumps(frame, separators=(",", ":")) + "\\n")
             sys.stdout.flush()
+            time.sleep(60)
+        if mode == "noise":
+            # A valid call, then output as fast as the pipe takes it while the host is busy answering.
+            import __main__, json, sys
+            call = {"id": "c1", "capability": "host.captcha.v1", "payload": {}}
+            frame = {"abi": "bazarr.provider-worker.v1", "id": __main__._current["request_id"], "call": call}
+            sys.stdout.write(json.dumps(frame, separators=(",", ":")) + "\\n")
+            sys.stdout.flush()
+            line = "x" * (1024 * 1024) + "\\n"
+            for _ in range(400):
+                sys.stdout.write(line)
+                sys.stdout.flush()
             time.sleep(60)
         if mode == "flood":
             # Valid calls, never reading an answer.
@@ -588,6 +602,87 @@ class TestAnswerWrite:
         with pytest.raises(WorkerError):
             _search(client, {"mode": "solve"}, timeout=1.5)
         assert seen["cancelled"].wait(5)
+
+
+class TestOutputDuringACall:
+    def test_a_worker_flooding_output_while_a_call_is_pending_is_held_to_the_bound(self, worker):
+        from provider_hub import worker as worker_module
+
+        release = threading.Event()
+        entered = threading.Event()
+
+        def handler(payload, timeout, cancelled):
+            entered.set()
+            release.wait(30)
+            return {"response": "t"}
+
+        client = worker({"host.captcha.v1": handler})
+        errors = []
+
+        def request():
+            try:
+                _search(client, {"mode": "noise"}, timeout=40)
+            except WorkerError as error:
+                errors.append(error)
+
+        thread = threading.Thread(target=request, daemon=True)
+        thread.start()
+        try:
+            assert entered.wait(15)
+            # Give the worker time to write far more than the bound (400 MB offered) if it could.
+            peak = 0
+            for _ in range(15):
+                time.sleep(0.2)
+                peak = max(peak, client._stdout_queue.queued_bytes)
+            # The bound is 8 MiB held plus the chunk being read; unbounded, this run reaches 400 MiB.
+            assert worker_module._STDOUT_QUEUE_MAX_BYTES <= 8 * 1024 * 1024
+            assert 0 < peak <= 16 * 1024 * 1024
+        finally:
+            release.set()
+            client.stop()
+            thread.join(20)
+
+    def test_a_reply_larger_than_the_bound_still_arrives_whole(self, worker):
+        client = worker({})
+        big = "y" * (20 * 1024 * 1024)
+        result = client.request("search", {"config": {"mode": "bulk", "size": len(big)}}, timeout=30)
+        assert len(result.payload["candidates"][0]["blob"]) == len(big)
+
+
+class TestBoundedChunks:
+    def test_put_waits_past_the_bound_and_goes_on_once_the_consumer_reads(self):
+        from provider_hub.worker import _BoundedChunks
+
+        chunks = _BoundedChunks(max_bytes=10, max_chunks=3)
+        chunks.put("aaaaaa")
+        released = threading.Event()
+
+        def producer():
+            chunks.put("bbbbbb")
+            released.set()
+
+        threading.Thread(target=producer, daemon=True).start()
+        assert not released.wait(0.5)
+        assert chunks.get(1) == "aaaaaa"
+        assert released.wait(2)
+        assert chunks.queued_bytes == 6
+
+    def test_markers_are_never_held_back(self):
+        from provider_hub.worker import _BoundedChunks
+
+        chunks = _BoundedChunks(max_bytes=1, max_chunks=1)
+        chunks.put("aa")
+        chunks.put(None)
+        assert chunks.get(1) == "aa" and chunks.get(1) is None
+
+    def test_a_waiting_put_gives_up_when_the_process_is_gone(self):
+        from provider_hub.worker import _BoundedChunks
+
+        chunks = _BoundedChunks(max_bytes=1, max_chunks=1)
+        chunks.put("a")
+        done = threading.Event()
+        threading.Thread(target=lambda: (chunks.put("b", alive=lambda: False), done.set()), daemon=True).start()
+        assert done.wait(2)
 
 
 class TestSpawnGrant:

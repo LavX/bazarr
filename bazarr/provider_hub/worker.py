@@ -1,6 +1,7 @@
 # coding=utf-8
 from __future__ import annotations
 
+import collections
 import errno
 import json
 import logging
@@ -46,9 +47,59 @@ _MAX_HOST_CALLS_PER_REQUEST = 16
 # writing one is bounded in time as well: a worker that does not read within this long is ended.
 _MAX_HOST_REPLY_PAYLOAD_BYTES = 32 * 1024
 _HOST_REPLY_WRITE_SECONDS = 10.0
+# What the stdout reader may hold ahead of the request thread, by bytes and by pieces. Past either it
+# stops reading, so the pipe fills and the worker's own writes wait: a worker cannot grow the host's
+# memory by writing while nothing is consuming (during a host call, or between requests). A reply is
+# consumed as it arrives, so this never slows one down.
+_STDOUT_QUEUE_MAX_BYTES = 8 * 1024 * 1024
+_STDOUT_QUEUE_MAX_CHUNKS = 64
 # Queued by the reader thread when a response line exceeds the cap, so the
 # consumer kills the worker at the transport layer instead of assembling it.
 _OVERSIZE_RESPONSE = object()
+
+
+class _BoundedChunks:
+    """The reader's queue of worker output: ``put`` waits while it holds too much, ``get`` is Queue's.
+
+    Markers (the end of output, an oversized line) are never held back. A waiting ``put`` gives up when
+    ``alive`` says the process is gone, so a killed worker never leaves a reader thread stuck.
+    """
+
+    def __init__(self, max_bytes: int = _STDOUT_QUEUE_MAX_BYTES, max_chunks: int = _STDOUT_QUEUE_MAX_CHUNKS):
+        self._items: collections.deque = collections.deque()
+        self._bytes = 0
+        self._max_bytes = max_bytes
+        self._max_chunks = max_chunks
+        self._cond = threading.Condition()
+
+    @property
+    def queued_bytes(self) -> int:
+        with self._cond:
+            return self._bytes
+
+    def put(self, item, alive=lambda: True) -> None:
+        size = len(item) if isinstance(item, str) else 0
+        with self._cond:
+            while size and self._items and (
+                    len(self._items) >= self._max_chunks or self._bytes + size > self._max_bytes):
+                if not alive():
+                    return
+                self._cond.wait(0.2)
+            self._items.append(item)
+            self._bytes += size
+            self._cond.notify_all()
+
+    def get(self, timeout: float | None = None):
+        with self._cond:
+            if not self._items:
+                self._cond.wait(timeout)
+            if not self._items:
+                raise queue.Empty
+            item = self._items.popleft()
+            if isinstance(item, str):
+                self._bytes -= len(item)
+            self._cond.notify_all()
+            return item
 
 
 def _json_default(obj):
@@ -532,7 +583,7 @@ class ProviderWorkerClient:
         # Set by stop(): a retired client admits no gated request, so a waiter
         # cannot respawn its worker with the configuration that was replaced.
         self._closed = False
-        self._stdout_queue: queue.Queue[Any] | None = None
+        self._stdout_queue: _BoundedChunks | None = None
         self._stdout_thread: threading.Thread | None = None
         self._stderr_thread: threading.Thread | None = None
         # Set when the sandbox ruleset could not be applied to this client's worker: it starts
@@ -574,7 +625,7 @@ class ProviderWorkerClient:
         # forgotten while they still run from the environment.
         with _GROUPS_LOCK:
             self._groups = [*self._live_groups(), self.process.pid]
-        self._stdout_queue = queue.Queue()
+        self._stdout_queue = _BoundedChunks()
         self._stdout_thread = threading.Thread(
             target=self._enqueue_stdout,
             args=(self.process, self._stdout_queue),
@@ -758,7 +809,7 @@ class ProviderWorkerClient:
         return None
 
     @staticmethod
-    def _enqueue_stdout(process: subprocess.Popen, stdout_queue: queue.Queue[Any]) -> None:
+    def _enqueue_stdout(process: subprocess.Popen, stdout_queue: _BoundedChunks) -> None:
         stdout = process.stdout
         if stdout is None:
             stdout_queue.put(None)
@@ -777,7 +828,10 @@ class ProviderWorkerClient:
                 if line_len > _MAX_RESPONSE_LINE_BYTES:
                     stdout_queue.put(_OVERSIZE_RESPONSE)
                     break
-                stdout_queue.put(chunk)
+                if isinstance(stdout_queue, _BoundedChunks):
+                    stdout_queue.put(chunk, alive=lambda: process.poll() is None)
+                else:
+                    stdout_queue.put(chunk)
                 if chunk.endswith("\n"):
                     line_len = 0
         finally:
