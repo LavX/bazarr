@@ -322,7 +322,8 @@ def test_when_the_kernel_cannot_apply_a_ruleset_the_provider_starts_anyway_and_t
 def test_a_ruleset_that_fails_to_apply_for_any_other_reason_refuses_the_start_instead_of_opening(host, client, monkeypatch):
     # A grant that is not the object the policy recorded. A worker that damaged its own tree could cause
     # this, so the sandbox must not be dropped for it.
-    probe = SandboxProbe(abi=10, verified=True, reads_verified=True)
+    live = _enforcing_kernel()
+    probe = SandboxProbe(abi=live.abi, verified=True, reads_verified=True)
     monkeypatch.setattr("provider_hub.sandbox.probe_sandbox", lambda *a, **k: probe)
     real_spec = worker_module.provider_spec
 
