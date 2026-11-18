@@ -270,3 +270,91 @@ def test_a_removal_hands_the_choice_about_its_data_to_the_kind(tmp_path, monkeyp
     service.remove_installation("exampleservice", keep_data=keep)
     assert ("after_removed", "exampleservice") in service_kind.calls
     assert service_kind.kept is keep
+
+
+# --- a subtitle provider's own settings, and nothing shared --------------------------------------------------
+
+
+class _Section:
+    """The provider's section read fresh each time, since a dotted write replaces the box it holds."""
+
+    def __init__(self, config):
+        self._config = config
+
+    def read(self):
+        section = self._config.settings.opensubtitlescom
+        return section.username, section.password
+
+
+@pytest.fixture
+def provider_section(monkeypatch):
+    """The real settings with one provider's section filled in and saving stubbed, put back afterwards."""
+    from app import config
+    from subliminal_patch.extensions import provider_registry
+
+    before = _Section(config).read()
+    config.settings["opensubtitlescom.username"] = "someone"
+    config.settings["opensubtitlescom.password"] = "secret-value"  # pragma: allowlist secret
+    saved = []
+    monkeypatch.setattr(config, "write_config", lambda *a, **k: saved.append(1) or True)
+    monkeypatch.setattr(provider_registry, "names", lambda: [])
+    try:
+        yield config, _Section(config), saved
+    finally:
+        config.settings["opensubtitlescom.username"], config.settings["opensubtitlescom.password"] = before
+
+
+def test_deleting_a_providers_data_resets_its_own_settings_section(provider_section):
+    from provider_hub.kinds.subtitle_provider import SubtitleProviderKind
+
+    _config, section, saved = provider_section
+
+    SubtitleProviderKind().after_removed("opensubtitlescom", keep_data=False)
+
+    assert section.read() == ("", "") and saved == [1]
+
+
+def test_keeping_a_providers_data_leaves_its_settings_alone(provider_section):
+    from provider_hub.kinds.subtitle_provider import SubtitleProviderKind
+
+    _config, section, saved = provider_section
+
+    SubtitleProviderKind().after_removed("opensubtitlescom", keep_data=True)
+
+    assert section.read() == ("someone", "secret-value") and saved == []  # pragma: allowlist secret
+
+
+def test_a_section_a_built_in_provider_still_reads_is_never_cleared(provider_section, monkeypatch):
+    from provider_hub.kinds.subtitle_provider import SubtitleProviderKind
+    from subliminal_patch.extensions import provider_registry
+
+    _config, section, saved = provider_section
+    monkeypatch.setattr(provider_registry, "names", lambda: ["opensubtitlescom"])
+
+    SubtitleProviderKind().after_removed("opensubtitlescom", keep_data=False)
+
+    assert section.read()[0] == "someone" and saved == []
+
+
+@pytest.mark.parametrize("plugin_id", ["general", "translator", "auth", "unknownplugin", "exampleservice"])
+def test_only_a_providers_own_section_is_ever_cleared(provider_section, plugin_id):
+    from provider_hub.kinds.subtitle_provider import own_settings_section_fields
+
+    assert own_settings_section_fields(plugin_id) == {}
+
+
+def test_the_fields_cleared_are_all_in_the_providers_own_section(provider_section):
+    from provider_hub.kinds.subtitle_provider import own_settings_section_fields
+
+    fields = own_settings_section_fields("opensubtitlescom")
+    assert fields and all(name.startswith("opensubtitlescom.") for name in fields)
+
+
+def test_a_settings_save_that_fails_puts_the_values_back(provider_section, monkeypatch):
+    from provider_hub.kinds.subtitle_provider import reset_own_settings_section
+
+    config, section, _saved = provider_section
+    monkeypatch.setattr(config, "write_config", lambda *a, **k: False)
+
+    assert reset_own_settings_section("opensubtitlescom") is False
+    assert section.read() == ("someone", "secret-value")  # pragma: allowlist secret

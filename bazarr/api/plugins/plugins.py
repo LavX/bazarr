@@ -52,7 +52,8 @@ def _with_runtime(installation, state=None):
     decorated = {**installation,
                  "dependents": service.installed_dependents(plugin_id, state=state),
                  "enabled_dependents": service.installed_dependents(plugin_id, enabled_only=True, state=state)}
-    runtime = workers.runtime_of(plugin_id)
+    # Subtitle providers run in the provider workers, not the translator pool, so there is nothing to ask for them.
+    runtime = None if kind_of(installation) == "subtitle_provider" else workers.runtime_of(plugin_id)
     return decorated if runtime is None else {**decorated, "runtime": runtime}
 
 

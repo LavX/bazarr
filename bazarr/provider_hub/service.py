@@ -10,6 +10,7 @@ import logging
 import re
 import shutil
 import tempfile
+import threading
 import time
 import uuid
 import zipfile
@@ -92,6 +93,12 @@ ENABLED_PROVIDERS_NOT_SAVED = "the enabled providers list could not be saved to 
 
 SECRET_PLACEHOLDER = "********"
 _JOB_LOG_LIMIT = 200
+# A job that has not reported for this long is taken as dead. An install or a repair has time limits far below it.
+JOB_TIME_LIMIT_SECONDS = 2 * 60 * 60
+# Which run of Bazarr+ wrote a job row, so a row left open by a process that is gone can be told from a live one.
+_PROCESS_SESSION = uuid.uuid4().hex
+JOB_STOPPED_MESSAGE = "Bazarr+ stopped before this finished."
+JOB_TIMED_OUT_MESSAGE = "This did not finish in time and was given up on."
 PLUGIN_MANIFEST_UNREADABLE_REASON = "This plugin manifest could not be read, so it was not stored."
 PLUGIN_KIND_CONFLICT_REASON = (
     "Another plugin in this catalog claims this id with a different kind, so this claim was not stored."
@@ -212,6 +219,7 @@ def record_job(
         "started_at": None,
         "completed_at": None,
         "updated_at": now,
+        "session": _PROCESS_SESSION,
     }
     handle = _JobHandle(job)
     _persist_job(job)
@@ -3579,6 +3587,10 @@ def _stage_validated(
         existing.get("active_version") if isinstance(existing, dict) else None
     )
     is_update = bool(existing_version)
+    # A plugin removed in this run keeps its active release until the restart, so installing it again before then
+    # reads as an update. It is a fresh install for everything that follows a removal: whose data it may take, and
+    # what the kind makes ready.
+    is_fresh = not is_update or (isinstance(existing, dict) and existing.get("state") == "removed")
     action = "stage_update" if is_update else "install"
 
     with record_job(
@@ -3673,10 +3685,10 @@ def _stage_validated(
             # Refused in the write: another plugin's need would no longer be met. Nothing was recorded.
             _discard_stopped_install(staged, existing)
             raise
-        missing_required = [] if is_update else missing_required_fields(installation)
-        if not is_update:
+        missing_required = missing_required_fields(installation) if is_fresh else []
+        if is_fresh:
             claim_kept_data(validated.provider_id, source_id, validated.kind)
-        if not is_update and not get_kind(validated.kind).on_installed(
+        if is_fresh and not get_kind(validated.kind).on_installed(
                 validated.provider_id, missing_required=missing_required):
             # First install: opt the provider into Bazarr's enabled_providers so
             # the new plugin is search-eligible without a separate UI toggle.
@@ -3909,9 +3921,11 @@ class _StagedMembers(list):
 
     Removing a plugin switches it off, so a discard puts back the ones the person already had on."""
 
-    def __init__(self, ids=(), was_enabled=None):
+    def __init__(self, ids=(), was_enabled=None, handed_over=()):
         super().__init__(ids)
         self.was_enabled: dict[str, str] = dict(was_enabled or {})
+        # The ones that took over data an earlier removal kept, which a discard must give back, not delete.
+        self.handed_over: frozenset[str] = frozenset(handed_over)
 
     @staticmethod
     def snapshot_enabled(resolved) -> dict[str, str]:
@@ -3942,6 +3956,7 @@ def _stage_closure_members(resolved, source_id: str, checkpoint=None) -> list[st
                 if isinstance(row, dict) and (row.get("active_version") or row.get("staged_version"))}
 
     before = installed_ids()
+    forget_handed_over()
     # Only members this call has started to stage can have a row it wrote: a later member it never reached keeps
     # whatever row it had, a record of an earlier failure included.
     attempted: set[str] = set()
@@ -3953,7 +3968,7 @@ def _stage_closure_members(resolved, source_id: str, checkpoint=None) -> list[st
             [member.plugin_id for member in resolved.members
              if member.reason != "root" and member.plugin_id in attempted and member.plugin_id not in before
              and member.plugin_id in rows],
-            was_enabled)
+            was_enabled, handed_over_ids())
 
     current = None
     try:
@@ -3988,9 +4003,16 @@ def _discard_staged_members(plugin_ids: list[str], root_id: str | None = None) -
     """
     own = set(plugin_ids) | ({root_id} if root_id else set())
     was_enabled = getattr(plugin_ids, "was_enabled", {})
+    handed_over = getattr(plugin_ids, "handed_over", frozenset())
     for plugin_id in reversed(plugin_ids):
         try:
-            removed = remove_installation(plugin_id, ignoring_dependents=frozenset(own))
+            # What an earlier removal kept and this install took over is not the install's to delete: a failed or
+            # stopped install gives it back, still kept.
+            row = (load_state().get("installations") or {}).get(plugin_id)
+            removed = remove_installation(
+                plugin_id, ignoring_dependents=frozenset(own),
+                # A subtitle provider's settings may be older than this install, so a discard never clears them.
+                keep_data=plugin_id in handed_over or (isinstance(row, dict) and kind_of(row) == SUBTITLE_PROVIDER))
             if removed and plugin_id in was_enabled:
                 # The person had it on before this install, and removing it switched it off.
                 get_kind(was_enabled[plugin_id]).set_enabled({"provider_id": plugin_id}, True)
@@ -4198,6 +4220,10 @@ def enforce_activation_needs() -> bool:
 
 
 def activate_staged_installations() -> list[str]:
+    try:
+        close_stale_jobs()
+    except Exception:
+        logging.getLogger(__name__).warning("Could not close the job rows an earlier run left open", exc_info=True)
     state = load_state()
     installations = state.get("installations") or {}
     activated = []
@@ -4555,6 +4581,10 @@ def remove_installation(provider_id: str, *, ignoring_dependents: frozenset[str]
             item["staged_python_path"] = None
             item["staged_manifest"] = None
             item["last_error"] = None
+            if not keep_data:
+                # Its settings go with the choice to delete, now and not at the restart, so installing it again
+                # before then does not find them.
+                item["config"] = {}
             return "staged"
 
         try:
@@ -4587,12 +4617,15 @@ def _record_kept_data(provider_id: str, item: Any, kind_hooks: Any, keep_data: b
 
     The kept data belongs to a plugin id, a source and a kind. A later install of the same id from another source,
     or as another kind, is a different package, and ``claim_kept_data`` discards what was kept instead of handing
-    it over. A removal that deletes the data takes the record with it.
+    it over. The plugin's saved settings travel in the record, because the installation row that holds them goes at
+    the next restart. A removal that deletes the data takes the record with it.
     """
     if not keep_data and not (load_state().get("kept_data") or {}).get(provider_id):
         return
     row = item if isinstance(item, dict) else {}
-    entry = {"source_id": row.get("source_id"), "kind": kind_of(row) if row else None}
+    config = row.get("config")
+    entry = {"source_id": row.get("source_id"), "kind": kind_of(row) if row else None,
+             "config": copy.deepcopy(config) if keep_data and isinstance(config, dict) and config else None}
 
     def record(state: dict[str, Any]) -> None:
         kept = state.setdefault("kept_data", {})
@@ -4607,24 +4640,62 @@ def _record_kept_data(provider_id: str, item: Any, kind_hooks: Any, keep_data: b
         logging.getLogger(__name__).warning("Could not record the kept data of %s", provider_id, exc_info=True)
 
 
-def claim_kept_data(provider_id: str, source_id: str | None, kind: str) -> None:
-    """A first install is about to create what the plugin needs. Data kept by an earlier removal is handed over
-    only when it is the same plugin from the same source and of the same kind; otherwise it is discarded first,
-    so a different package under the same id never inherits settings and keys it was not given."""
-    taken: dict[str, Any] = {}
+_HANDED_OVER = threading.local()
 
-    def claim(state: dict[str, Any]) -> None:
-        entry = (state.get("kept_data") or {}).pop(provider_id, None)
-        if isinstance(entry, dict):
-            taken.update(entry)
 
-    mutate_state(claim)
-    if not taken or (taken.get("source_id") == source_id and taken.get("kind") == kind):
-        return
+def handed_over_ids() -> set[str]:
+    """The plugins whose kept data an install in this thread has taken over since ``forget_handed_over``."""
+    return set(getattr(_HANDED_OVER, "ids", ()))
+
+
+def forget_handed_over() -> None:
+    _HANDED_OVER.ids = set()
+
+
+def claim_kept_data(provider_id: str, source_id: str | None, kind: str) -> bool:
+    """A first install, or a reinstall of a plugin removed in this run, has staged its row. Data kept by an earlier
+    removal is handed over only when it is the same plugin from the same source and of the same kind, with its
+    saved settings put back; otherwise it is discarded, so a different package under the same id never inherits
+    settings and keys it was not given. Returns True when data was handed over.
+
+    The record stays until a removal rewrites it, and only the copy of the settings is dropped once they are put
+    back. An install that fails after this therefore leaves the data owned by the source it was kept for.
+    """
+    entry = (load_state().get("kept_data") or {}).get(provider_id)
+    if not isinstance(entry, dict):
+        return False
+    # A package with no source (an upload) is nobody's: it matches nothing, the one it was kept for included.
+    if source_id is not None and entry.get("source_id") == source_id and entry.get("kind") == kind:
+        config = entry.get("config")
+
+        def hand_over(state: dict[str, Any]) -> None:
+            row = (state.get("installations") or {}).get(provider_id)
+            if isinstance(config, dict) and config and isinstance(row, dict) and not row.get("config"):
+                row["config"] = copy.deepcopy(config)
+            kept = (state.get("kept_data") or {}).get(provider_id)
+            if isinstance(kept, dict):
+                kept["config"] = None
+
+        mutate_state(hand_over)
+        _HANDED_OVER.ids = handed_over_ids() | {provider_id}
+        get_kind(kind).kept_data_reclaimed(provider_id)
+        return True
     try:
-        get_kind(str(taken.get("kind"))).discard_kept_data(provider_id)
-    except Exception:
+        get_kind(str(entry.get("kind"))).discard_kept_data(provider_id)
+    except Exception as error:
+        # The data stays, with its record, and the install is refused: going on would hand it to a package it
+        # was not kept for.
         logging.getLogger(__name__).warning("Could not discard the kept data of %s", provider_id, exc_info=True)
+        raise ProviderHubInstallError(
+            f"{provider_id} was removed earlier with its data kept, and that data belongs to another source. "
+            "It could not be cleared, so nothing was installed. Remove the plugin with its data deleted first."
+        ) from error
+
+    def forget(state: dict[str, Any]) -> None:
+        (state.get("kept_data") or {}).pop(provider_id, None)
+
+    mutate_state(forget)
+    return False
 
 
 def check_updates(*, kind: str | None = None) -> dict[str, Any]:
@@ -4935,7 +5006,59 @@ def _record_failed_update(provider_id: str, provider: dict[str, Any], message: s
     return _redact_installation(provider)
 
 
+def _parse_time(value: Any) -> datetime | None:
+    try:
+        return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def close_stale_jobs(now: datetime | None = None) -> int:
+    """Mark as failed every job row that is still open although nothing can finish it.
+
+    A row is left ``pending`` or ``running`` when the process that wrote it stopped, and nothing closes it: the
+    page would show the plugin as busy for good. A row written by another run of Bazarr+ (or by a build that
+    did not say which) is dead, and a row of this run that has not reported within ``JOB_TIME_LIMIT_SECONDS``
+    is given up on. Returns how many were closed.
+    """
+    now = now or datetime.now(timezone.utc)
+    limit = JOB_TIME_LIMIT_SECONDS
+
+    def stale(job: Any) -> str | None:
+        if not isinstance(job, dict) or job.get("state") not in ("pending", "running"):
+            return None
+        if job.get("session") != _PROCESS_SESSION:
+            return JOB_STOPPED_MESSAGE
+        reported = _parse_time(job.get("updated_at") or job.get("created_at"))
+        if reported is not None:
+            if reported.tzinfo is None:
+                reported = reported.replace(tzinfo=timezone.utc)
+            if (now - reported).total_seconds() > limit:
+                return JOB_TIMED_OUT_MESSAGE
+        return None
+
+    if not any(stale(job) for job in load_state().get("jobs") or []):
+        return 0
+    closed: list[int] = []
+
+    def close(state: dict[str, Any]) -> None:
+        closed.clear()
+        for job in state.get("jobs") or []:
+            reason = stale(job)
+            if reason:
+                stamp = now.replace(microsecond=0).isoformat().replace("+00:00", "Z")
+                job.update(state="failed", error=reason, completed_at=stamp, updated_at=stamp)
+                closed.append(1)
+
+    mutate_state(close)
+    return len(closed)
+
+
 def list_jobs() -> list[dict[str, Any]]:
+    try:
+        close_stale_jobs()
+    except Exception:
+        logging.getLogger(__name__).warning("Could not close the job rows that were left open", exc_info=True)
     return list(load_state().get("jobs") or [])
 
 

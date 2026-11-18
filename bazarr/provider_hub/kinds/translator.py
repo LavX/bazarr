@@ -51,6 +51,14 @@ class TranslatorKind(Kind):
     noun = "translator"
     keeps_data = True
 
+    def kept_data_reclaimed(self, plugin_id: str) -> None:
+        try:
+            from subtitles.tools.translate.runtime import worker_binding
+
+            worker_binding.plugin_installed(plugin_id)
+        except Exception:
+            logger.warning("Could not clear the kept mark of translator %s", plugin_id, exc_info=True)
+
     def discard_kept_data(self, plugin_id: str) -> None:
         try:
             _store().delete_plugin_data(plugin_id)

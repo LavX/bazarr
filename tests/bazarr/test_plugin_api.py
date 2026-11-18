@@ -550,18 +550,19 @@ def test_the_choice_about_a_plugins_data_travels_through_the_job_queue_to_the_re
 
     enqueued = []
     monkeypatch.setattr(jobs, "_enqueue", lambda label, func, kwargs: enqueued.append((func, kwargs)) or "job-1")
-    jobs.queue_uninstall("exampleservice", "Service", keep_data=True)
+    jobs.queue_uninstall("exampleservice", "Service", keep_data=False)
     jobs.queue_uninstall("exampleservice", "Service")
     assert enqueued[0] == ("uninstall_provider", {"provider_id": "exampleservice", "name": "Service",
-                                                  "keep_data": True})
+                                                  "keep_data": False})
+    # Not saying anything keeps, as the Subtitle Hub's own route always has.
     assert "keep_data" not in enqueued[1][1]
 
     seen = []
     monkeypatch.setattr(jobs.jobs_queue, "update_job_progress", lambda **kwargs: None)
     monkeypatch.setattr(service, "remove_installation", lambda provider_id, **kwargs: seen.append(kwargs) or True)
-    jobs.uninstall_provider("exampleservice", "Service", keep_data=True, job_id=None)
+    jobs.uninstall_provider("exampleservice", "Service", keep_data=False, job_id=None)
     jobs.uninstall_provider("exampleservice", "Service", job_id=None)
-    assert seen == [{"keep_data": True}, {"keep_data": False}]
+    assert seen == [{"keep_data": False}, {"keep_data": True}]
 
 
 def _service_row(plugin_id, enabled=True, **manifest):
