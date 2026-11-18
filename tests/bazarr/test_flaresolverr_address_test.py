@@ -377,6 +377,13 @@ class TestApiRoute:
         assert settings.get("endpoints", {}).get(endpoints.FLARESOLVERR_SETTING_KEY) == before
         assert saved == []
 
+    def test_the_settings_page_sends_a_form_field(self, fake):
+        response = self._client().post("/providers/flaresolverr/test", data={"url": fake.address},
+                                       headers=self._headers())
+
+        assert response.status_code == 200, response.data
+        assert response.get_json()["data"]["code"] == "ok"
+
     @pytest.mark.parametrize("kwargs", [
         {"data": "not json", "content_type": "text/plain"},
         {"json": ["list"]},

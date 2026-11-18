@@ -1,4 +1,4 @@
-import { FunctionComponent } from "react";
+import { FunctionComponent, useEffect } from "react";
 import {
   Alert,
   Button,
@@ -9,6 +9,7 @@ import {
 import {
   useFlareSolverrDetect,
   useFlareSolverrStatus,
+  useFlareSolverrTest,
 } from "@/apis/hooks/providers";
 import { Text } from "@/pages/Settings/components";
 import { useFormActions } from "@/pages/Settings/utilities/FormValues";
@@ -24,12 +25,19 @@ const FlareSolverrIntegration: FunctionComponent = () => {
   const value = useSettingValue<string>(flaresolverrSettingKey);
   const status = useFlareSolverrStatus();
   const detect = useFlareSolverrDetect();
+  const test = useFlareSolverrTest();
 
   // One source: pressing Detect writes its answer into the status query, and a
   // settings save refetches it, so the newer of the two is always what shows.
   const current = status.data;
   const detected = current?.detected ?? null;
   const typed = (value ?? "").trim();
+  // A result belongs to the address it was asked about. Once the field
+  // changes, it no longer says anything about what is typed.
+  const resetTest = test.reset;
+  useEffect(() => {
+    resetTest();
+  }, [typed, resetTest]);
   const fromEnvironment = current?.source === "env" && typed === "";
   const checked =
     detect.isSuccess && current !== undefined && !current.detecting;
@@ -48,6 +56,30 @@ const FlareSolverrIntegration: FunctionComponent = () => {
         description={flaresolverrHelp}
         settingKey={flaresolverrSettingKey}
       />
+      <Group align="center" gap="sm">
+        <Button
+          type="button"
+          variant="default"
+          mih={44}
+          loading={test.isPending}
+          onClick={() => test.mutate(typed)}
+        >
+          Test
+        </Button>
+        {/* Always in the page, so a screen reader announces what lands in it. */}
+        <MantineText
+          size="sm"
+          role="status"
+          c={test.data && !test.data.ok ? "red" : undefined}
+        >
+          {test.isPending && "Testing the address."}
+          {test.data &&
+            (test.data.ok
+              ? test.data.message
+              : `Test failed. ${test.data.message}`)}
+          {test.isError && "The test could not be completed."}
+        </MantineText>
+      </Group>
       {fromEnvironment && (
         <MantineText size="sm">
           Currently taken from the FLARESOLVERR_URL environment variable (

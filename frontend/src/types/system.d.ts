@@ -257,6 +257,22 @@ declare namespace System {
     sibling_found: boolean;
   }
 
+  /** What the Test of a typed FlareSolverr address found. */
+  interface FlareSolverrTestResult {
+    ok: boolean;
+    code:
+      | "ok"
+      | "not_flaresolverr"
+      | "unreachable"
+      | "timeout"
+      | "tls"
+      | "invalid_address";
+    /** A short sentence for the person. */
+    message: string;
+    /** The FlareSolverr version, when it answered and reported one. */
+    version: string | null;
+  }
+
   interface ProviderSearchOutcome {
     name: string;
     status: "found" | "empty" | "failed" | "throttled" | "busy" | "excluded";

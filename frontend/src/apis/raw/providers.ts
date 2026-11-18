@@ -27,6 +27,14 @@ class ProviderApi extends BaseApi {
     return response.data.data;
   }
 
+  /** Test an address as typed, saved or not. Reports only: it never saves anything. */
+  async testFlaresolverr(url: string) {
+    const response = await this.post<
+      DataWrapper<System.FlareSolverrTestResult>
+    >("/flaresolverr/test", { url });
+    return response.data.data;
+  }
+
   async reset() {
     await this.post("", { action: "reset" });
   }

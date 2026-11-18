@@ -272,4 +272,197 @@ describe("FlareSolverrIntegration", () => {
       ).not.toBeInTheDocument(),
     );
   });
+
+  describe("Test", () => {
+    const result = (
+      overrides: Partial<System.FlareSolverrTestResult> = {},
+    ): { data: System.FlareSolverrTestResult } => ({
+      data: {
+        ok: true,
+        code: "ok",
+        message: "FlareSolverr 3.3.21 answered.",
+        version: "3.3.21",
+        ...overrides,
+      },
+    });
+
+    const quietStatus = () =>
+      http.get("/api/providers/flaresolverr", () =>
+        HttpResponse.json(status()),
+      );
+
+    it("tests the address as typed, without saving it", async () => {
+      let sent: string | null = null;
+      server.use(
+        quietStatus(),
+        http.post("/api/providers/flaresolverr/test", async ({ request }) => {
+          sent = (await request.formData()).get("url") as string;
+          return HttpResponse.json(result());
+        }),
+      );
+      customRender(
+        <Harness>
+          <FlareSolverrIntegration />
+        </Harness>,
+      );
+      const user = userEvent.setup();
+      await user.type(
+        screen.getByLabelText("FlareSolverr address"),
+        "http://solver.lan:8191/v1",
+      );
+      await user.click(screen.getByRole("button", { name: "Test" }));
+
+      expect(
+        await screen.findByText("FlareSolverr 3.3.21 answered."),
+      ).toBeInTheDocument();
+      expect(sent).toBe("http://solver.lan:8191/v1");
+      expect(screen.getByTestId("staged")).toHaveTextContent(
+        JSON.stringify({
+          [flaresolverrSettingKey]: "http://solver.lan:8191/v1",
+        }),
+      );
+    });
+
+    it("announces a failure in a status region", async () => {
+      server.use(
+        quietStatus(),
+        http.post("/api/providers/flaresolverr/test", () =>
+          HttpResponse.json(
+            result({
+              ok: false,
+              code: "unreachable",
+              message:
+                "Could not connect. Check the host name, the port and that FlareSolverr is running.",
+              version: null,
+            }),
+          ),
+        ),
+      );
+      customRender(
+        <Harness>
+          <FlareSolverrIntegration />
+        </Harness>,
+      );
+      const user = userEvent.setup();
+      await user.type(
+        screen.getByLabelText("FlareSolverr address"),
+        "http://solver.lan:8191",
+      );
+      await user.click(screen.getByRole("button", { name: "Test" }));
+
+      const region = await screen.findByText(/Test failed\. Could not connect/);
+      expect(region).toHaveAttribute("role", "status");
+    });
+
+    it("keeps the button busy while the test runs", async () => {
+      let release: () => void = () => undefined;
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      server.use(
+        quietStatus(),
+        http.post("/api/providers/flaresolverr/test", async () => {
+          await gate;
+          return HttpResponse.json(result());
+        }),
+      );
+      customRender(
+        <Harness>
+          <FlareSolverrIntegration />
+        </Harness>,
+      );
+      const user = userEvent.setup();
+      await user.type(
+        screen.getByLabelText("FlareSolverr address"),
+        "http://solver.lan:8191",
+      );
+      await user.click(screen.getByRole("button", { name: "Test" }));
+
+      await waitFor(() =>
+        expect(screen.getByRole("button", { name: "Test" })).toBeDisabled(),
+      );
+      expect(screen.getByText("Testing the address.")).toBeInTheDocument();
+      release();
+      expect(
+        await screen.findByText("FlareSolverr 3.3.21 answered."),
+      ).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "Test" })).toBeEnabled();
+    });
+
+    it("can be reached and pressed from the keyboard", async () => {
+      server.use(
+        quietStatus(),
+        http.post("/api/providers/flaresolverr/test", () =>
+          HttpResponse.json(result()),
+        ),
+      );
+      customRender(
+        <Harness>
+          <FlareSolverrIntegration />
+        </Harness>,
+      );
+      const user = userEvent.setup();
+      await user.type(
+        screen.getByLabelText("FlareSolverr address"),
+        "http://solver.lan:8191",
+      );
+      await user.tab();
+      expect(screen.getByRole("button", { name: "Test" })).toHaveFocus();
+      await user.keyboard("{Enter}");
+      expect(
+        await screen.findByText("FlareSolverr 3.3.21 answered."),
+      ).toBeInTheDocument();
+    });
+
+    it("drops the result once the address changes", async () => {
+      server.use(
+        quietStatus(),
+        http.post("/api/providers/flaresolverr/test", () =>
+          HttpResponse.json(result()),
+        ),
+      );
+      customRender(
+        <Harness>
+          <FlareSolverrIntegration />
+        </Harness>,
+      );
+      const user = userEvent.setup();
+      const field = screen.getByLabelText("FlareSolverr address");
+      await user.type(field, "http://solver.lan:8191");
+      await user.click(screen.getByRole("button", { name: "Test" }));
+      await screen.findByText("FlareSolverr 3.3.21 answered.");
+
+      await user.type(field, "0");
+
+      await waitFor(() =>
+        expect(
+          screen.queryByText("FlareSolverr 3.3.21 answered."),
+        ).not.toBeInTheDocument(),
+      );
+    });
+
+    it("says so when the test itself could not run", async () => {
+      server.use(
+        quietStatus(),
+        http.post("/api/providers/flaresolverr/test", () =>
+          HttpResponse.json({}, { status: 500 }),
+        ),
+      );
+      customRender(
+        <Harness>
+          <FlareSolverrIntegration />
+        </Harness>,
+      );
+      const user = userEvent.setup();
+      await user.type(
+        screen.getByLabelText("FlareSolverr address"),
+        "http://solver.lan:8191",
+      );
+      await user.click(screen.getByRole("button", { name: "Test" }));
+
+      expect(
+        await screen.findByText("The test could not be completed."),
+      ).toBeInTheDocument();
+    });
+  });
 });

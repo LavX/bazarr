@@ -44,8 +44,9 @@ class ProvidersFlareSolverrTest(Resource):
     def post(self):
         """Test a FlareSolverr address, typed or saved
 
-        Body: {"url": "<address>"}. Answers with ok, a code (ok, not_flaresolverr, unreachable,
+        Body: {"url": "<address>"}, as JSON or as a form field. Answers with ok, a code (ok, not_flaresolverr, unreachable,
         timeout, tls, invalid_address), a short message and the version when it answered. The address
         is checked as typed and is never saved."""
         body = request.get_json(silent=True)
-        return {'data': check_flaresolverr_address(body.get('url') if isinstance(body, dict) else None)}
+        url = body.get('url') if isinstance(body, dict) else request.form.get('url')
+        return {'data': check_flaresolverr_address(url)}
