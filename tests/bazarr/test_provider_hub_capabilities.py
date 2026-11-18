@@ -122,6 +122,16 @@ class TestBindings:
         assert with_need["capabilities"][0]["capability"] == "flaresolverr.v1"
         assert "capabilities" not in service._redact_installation({"provider_id": "demo", "manifest": {}})
 
+    def test_the_installations_payload_carries_both_the_capabilities_and_the_restart_field(self):
+        from provider_hub import service
+
+        row = {"provider_id": "demo", "manifest": {"flaresolverr": True}, "pending_restart": True}
+        served = service._redact_installation(row)
+        assert served["capabilities"][0]["capability"] == "flaresolverr.v1"
+        assert served["needs_restart"] is True
+        settled = service._redact_installation({**row, "pending_restart": False})
+        assert settled["needs_restart"] is False and settled["capabilities"]
+
 
 class FakePitcher:
     calls = []
