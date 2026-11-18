@@ -843,11 +843,11 @@ def _run_stage_command(script, *arguments):
                           stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
 
 
-def test_the_script_runs_from_a_shallow_path_with_and_without_a_signed_lock(catalog, keys, signing_dir, tmp_path):
-    """The image keeps the script at /opt/catalog_floor.py, where it has two parents at most."""
-    shallow = tmp_path / 'shallow'
-    shallow.mkdir()
-    script = shallow / 'catalog_floor.py'
+def test_the_script_runs_from_a_copy_outside_the_repository_with_and_without_a_signed_lock(catalog, keys, signing_dir, tmp_path):
+    """A copy beside nothing else, run as `python -I`: it cannot lean on the repository layout around it."""
+    outside = tmp_path / 'outside'
+    outside.mkdir()
+    script = outside / 'catalog_floor.py'
     shutil.copy(SCRIPT, script)
     unsigned_commit = catalog.publish('no signed feed yet')
     unsigned_lock = tmp_path / 'unsigned.lock.json'
@@ -872,6 +872,8 @@ def test_the_script_runs_from_a_shallow_path_with_and_without_a_signed_lock(cata
 
 def test_the_script_does_not_work_out_a_verifier_path_at_import(tmp_path):
     """A script two directories deep, as in the image, loads, and only a signed lock without --signing-dir asks."""
+    if os.path.realpath('/opt') != '/opt':
+        pytest.skip('/opt is a link to a deeper path here, so a script at /opt/catalog_floor.py is not shallow')
     namespace = {'__name__': '_shallow_catalog_floor', '__file__': '/opt/catalog_floor.py'}
     with open(SCRIPT, encoding='utf-8') as handle:
         exec(compile(handle.read(), '/opt/catalog_floor.py', 'exec'), namespace)

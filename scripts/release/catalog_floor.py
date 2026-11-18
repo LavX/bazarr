@@ -56,12 +56,16 @@ feed into the snapshot:
     catalog.json, and every file that either catalog.json or the signed body
     (providers and plugins) declares. source_commit must be the locked commit
     or an ancestor of it. The snapshot's floor.json names source_commit.
-  * a lock that pins the body or the signature but not all three files is
-    refused.
+  * once the locked commit carries signed/<branch>/catalog.json, the lock must
+    pin all three files. A lock that pins the body or the signature without
+    all three is refused too. Dropping pins cannot turn a signed build into an
+    unsigned one.
 
-A lock that pins neither the body nor the signature is a supported state: the snapshot is built from
-the locked commit as before, carries no signed feed, and the runtime reader
-seeds providers only. This is the state until the catalog's first signed run.
+The build is unsigned only when the locked commit carries no
+signed/<branch>/catalog.json (and the lock pins none of the three files): the
+snapshot is built from the locked commit as before, carries no signed feed, and
+the runtime reader seeds providers only. This is the state until the catalog's
+first signed run.
 
 Snapshot layout, under the destination directory, at the same relative paths
 the catalog repository uses:
@@ -248,13 +252,13 @@ def _bundle_sha256(files):
 # what the catalog declares
 # --------------------------------------------------------------------------
 
-def declared_bundles(catalog_bytes, name=CATALOG_FILE, require_providers=True):
+def declared_bundles(catalog_bytes, name=CATALOG_FILE):
     """Every bundle ``catalog_bytes`` declares, in its providers list and in its
     plugins list, as ``(id, bundle_sha256, {repo_path: (bundle_relative_path, pin)})``.
 
-    ``require_providers`` is true for catalog.json, which is nothing without
-    providers. The signed body is read the same way with it off. The plugins
-    list is read when the document has one."""
+    Both catalog.json and the signed body must have a non-empty providers list,
+    the same rule the runtime reader applies. The plugins list is read when the
+    document has one."""
     try:
         catalog = json.loads(catalog_bytes)
     except ValueError as error:
@@ -262,13 +266,13 @@ def declared_bundles(catalog_bytes, name=CATALOG_FILE, require_providers=True):
     if not isinstance(catalog, dict):
         raise FloorError(f'{name} is not a JSON object')
     providers = catalog.get('providers')
-    if require_providers and not (isinstance(providers, list) and providers):
+    if not (isinstance(providers, list) and providers):
         raise FloorError(f'{name} has no providers list')
 
     bundles = []
     for list_name in ('providers', 'plugins'):
         entries = catalog.get(list_name)
-        if entries is None and (list_name == 'plugins' or not require_providers):
+        if entries is None and list_name == 'plugins':
             continue
         if not isinstance(entries, list):
             raise FloorError(f'{name} has no {list_name} list')

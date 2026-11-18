@@ -74,7 +74,9 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 # When the lock pins the catalog's signed feed, the script verifies it with the
 # application's own verifier and root (signing.py and signing_roots.py, copied
 # here, with the cryptography package it needs) and fails the build on any
-# result but a valid signature. A lock without the signed feed builds as before.
+# result but a valid signature. The build is unsigned only when the locked
+# commit carries no signed/<branch>/catalog.json; once it does, the lock must
+# pin the signed files.
 FROM python:3.14-slim-trixie AS catalog-floor
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
