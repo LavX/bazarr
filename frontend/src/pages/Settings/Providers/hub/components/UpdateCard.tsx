@@ -12,6 +12,7 @@ import type {
   ProviderHubInstallation,
 } from "@/apis/raw/providerHub";
 import { TrustBadge } from "@/components/hub/TrustBadge";
+import { isAwaitingRestart } from "@/components/hub/utils";
 import styles from "@/components/hub/hub.module.scss";
 
 interface UpdateCardProps {
@@ -32,7 +33,7 @@ export const UpdateCard: FunctionComponent<UpdateCardProps> = ({
   onApply,
   isApplying,
 }) => {
-  const targetVersion = provider.needs_restart
+  const targetVersion = isAwaitingRestart(provider)
     ? stagedTargetLabel(provider)
     : `v${latest?.version ?? "latest"}`;
   const trusted = Boolean(latest?.trusted ?? provider.trusted);
@@ -98,7 +99,7 @@ export const UpdateCard: FunctionComponent<UpdateCardProps> = ({
           <TrustBadge trusted={trusted} />
         </Group>
         <div className={styles.hubCardAction}>
-          {provider.needs_restart ? (
+          {isAwaitingRestart(provider) ? (
             <span className={styles.hubCardPendingText}>Pending restart</span>
           ) : (
             <Button

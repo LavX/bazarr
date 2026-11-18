@@ -298,7 +298,8 @@ export function summarizeUpdates(
     available: list.filter(
       (p) => p.origin !== "local" && isUpdateAvailable(p, catalog),
     ),
-    pendingRestart: list.filter((p) => p.needs_restart === true),
+    // A revoked running plugin is on offer to update, not waiting: counting it here would count it twice.
+    pendingRestart: list.filter((p) => isAwaitingRestart(p)),
   };
 }
 

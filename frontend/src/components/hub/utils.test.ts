@@ -224,6 +224,10 @@ describe("isUpdateAvailable / summarizeUpdates", () => {
     expect(isUpdateAvailable({ ...revoked, revoked: false }, catalog)).toBe(
       false,
     );
+    // It is counted once, as an update on offer, and never as waiting for a restart.
+    const summary = summarizeUpdates([revoked], catalog);
+    expect(summary.available).toHaveLength(1);
+    expect(summary.pendingRestart).toHaveLength(0);
     expect(isAwaitingRestart(revoked)).toBe(false);
     expect(isAwaitingRestart({ ...revoked, state: "removed" })).toBe(true);
   });
