@@ -516,12 +516,16 @@ describe("FlareSolverrIntegration", () => {
       );
 
       const button = screen.getByRole("button", { name: "Test" });
-      expect(
-        await screen.findByText(
-          "Type an address, or set FLARESOLVERR_URL, to test.",
-        ),
-      ).toHaveAttribute("role", "status");
+      const hint = await screen.findByText(
+        "Type an address, or set FLARESOLVERR_URL, to test.",
+      );
+      // A plain hint: nothing announces it on page load, the status region is
+      // for results, and the button points at it.
+      for (const region of screen.getAllByRole("status")) {
+        expect(region).not.toContainElement(hint);
+      }
       expect(button).toBeDisabled();
+      expect(button).toHaveAttribute("aria-describedby", hint.id);
 
       await userEvent
         .setup()
@@ -645,6 +649,111 @@ describe("FlareSolverrIntegration", () => {
       expect(
         screen.queryByText(/FlareSolverr 3\.3\.21 answered\./),
       ).not.toBeInTheDocument();
+    });
+
+    it("keeps a typed test that started before the status loaded", async () => {
+      let releaseStatus: () => void = () => undefined;
+      let releaseTest: () => void = () => undefined;
+      const statusGate = new Promise<void>((resolve) => {
+        releaseStatus = resolve;
+      });
+      const testGate = new Promise<void>((resolve) => {
+        releaseTest = resolve;
+      });
+      let statusServed = false;
+      server.use(
+        http.get("/api/providers/flaresolverr", async () => {
+          await statusGate;
+          statusServed = true;
+          return HttpResponse.json(
+            status({ url: "http://env:8191", source: "env" }),
+          );
+        }),
+        http.post("/api/providers/flaresolverr/test", async () => {
+          await testGate;
+          return HttpResponse.json(result());
+        }),
+      );
+      customRender(
+        <Harness>
+          <FlareSolverrIntegration />
+        </Harness>,
+      );
+      const user = userEvent.setup();
+      await user.type(
+        screen.getByLabelText("FlareSolverr address"),
+        "http://solver.lan:8191",
+      );
+      await user.click(screen.getByRole("button", { name: "Test" }));
+      expect(screen.getByText("Testing the address.")).toBeInTheDocument();
+
+      releaseStatus();
+      await waitFor(() => expect(statusServed).toBe(true));
+      // Let the page take the answer in.
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      expect(screen.getByText("Testing the address.")).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "Test" })).toBeDisabled();
+
+      releaseTest();
+      expect(
+        await screen.findByText("FlareSolverr 3.3.21 answered."),
+      ).toBeInTheDocument();
+    });
+
+    it("keeps a typed result when the address in use changes", async () => {
+      let saved = false;
+      let statusReads = 0;
+      server.use(
+        http.get("/api/providers/flaresolverr", () => {
+          statusReads += 1;
+          return HttpResponse.json(
+            saved
+              ? status({ url: "http://saved:8191", source: "setting" })
+              : status({ url: "http://env:8191", source: "env" }),
+          );
+        }),
+        http.post("/api/providers/flaresolverr/test", () =>
+          HttpResponse.json(result()),
+        ),
+        http.post("/api/system/settings", () => {
+          saved = true;
+          return new HttpResponse(null, { status: 204 });
+        }),
+      );
+      const SaveButton: FunctionComponent = () => {
+        const save = useSettingsMutation();
+        return (
+          <button
+            type="button"
+            onClick={() => save.mutate({ "settings-general-unrelated": "x" })}
+          >
+            Save now
+          </button>
+        );
+      };
+      customRender(
+        <Harness>
+          <FlareSolverrIntegration />
+          <SaveButton />
+        </Harness>,
+      );
+      const user = userEvent.setup();
+      await waitFor(() => expect(statusReads).toBe(1));
+      await user.type(
+        screen.getByLabelText("FlareSolverr address"),
+        "http://solver.lan:8191",
+      );
+      await user.click(screen.getByRole("button", { name: "Test" }));
+      await screen.findByText("FlareSolverr 3.3.21 answered.");
+
+      await user.click(screen.getByRole("button", { name: "Save now" }));
+      // The status is read again and now names the saved address.
+      await waitFor(() => expect(statusReads).toBeGreaterThan(1));
+      await new Promise((resolve) => setTimeout(resolve, 100));
+
+      expect(
+        screen.getByText("FlareSolverr 3.3.21 answered."),
+      ).toBeInTheDocument();
     });
 
     it("shows a failure in the error colour token", async () => {

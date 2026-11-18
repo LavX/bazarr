@@ -442,7 +442,10 @@ class _SocketTracker:
                     sock.shutdown(socket.SHUT_RDWR)
             except OSError:
                 pass
-            sock.close()
+            try:
+                sock.close()
+            except OSError:
+                pass
 
     def cut(self) -> None:
         """Shut every connection down, and any opened from now on."""
@@ -583,10 +586,16 @@ def check_flaresolverr_address(address) -> dict:
     in the status line, the headers or the body. Inside, each request carries a
     connect and read timeout capped by the time left, and body reads check the
     clock. The check runs in a daemon worker thread, and when the caller gives up
-    the worker's sockets are shut down from this side, so the read it is blocked
-    in fails and the thread ends within moments, not when the far end tires.
-    Not bounded: the name lookup, which runs first and has no timeout
-    (``getaddrinfo``), as with the other connection tests.
+    the worker's connections are shut down from this side, so a read it is
+    blocked in fails at once, not when the far end tires.
+
+    What is not bounded. The name lookup runs first, on the caller's thread, and
+    has no timeout (``getaddrinfo``), as with the other connection tests. A
+    socket is registered once urllib3 has connected it, so a connection attempt
+    cannot be cut from this side: it ends at its own connect timeout, capped by
+    the time left. A worker cut while in one therefore ends when that attempt
+    returns, and the thread can outlive the answer by up to that connect
+    timeout. The answer itself never waits for it.
     """
     import socket
 
@@ -652,10 +661,11 @@ def check_flaresolverr_address(address) -> dict:
     worker.join(max(0.0, deadline - time.monotonic()) + ADDRESS_TEST_ANSWER_MARGIN_SECONDS)
     if worker.is_alive():
         # Blocked somewhere a timeout cannot reach. Answer now, and cut its
-        # connections so the thread does not outlive the answer for long.
+        # connections so a blocked read ends at once.
         tracker.cut()
         return _address_result("timeout")
-    return outcome["result"]
+    # A worker that ended without a result cannot happen; if it did, say so.
+    return outcome.get("result") or _address_result("unreachable", "failed")
 
 
 def run_flaresolverr_test(typed, settings=None) -> dict:

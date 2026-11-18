@@ -7,6 +7,7 @@ the address rules and the failure classes all run end to end without the network
 
 import json
 import logging
+import os
 import socket
 import threading
 import time
@@ -635,3 +636,114 @@ class TestApiRoute:
 
         assert (data["code"], data["source"]) == ("invalid_address", "none")
         assert data["message"] == "Type an address to test."
+
+
+class TestSocketTracker:
+    """The duplicates the tracker holds are always closed, and cutting shuts the connection."""
+
+    @pytest.fixture
+    def pair(self):
+        left, right = socket.socketpair()
+        right.settimeout(2)
+        yield left, right
+        left.close()
+        right.close()
+
+    def test_release_closes_the_duplicates_and_leaves_the_connection(self, pair):
+        left, right = pair
+        tracker = endpoints._SocketTracker()
+        tracker.add(left)
+        (held,) = tracker._sockets
+        assert held.fileno() != -1
+
+        tracker.release()
+
+        assert tracker._sockets == []
+        assert held.fileno() == -1
+        # The connection itself is still open and usable.
+        left.sendall(b"x")
+        assert right.recv(1) == b"x"
+
+    def test_cut_closes_the_duplicates_and_shuts_the_connection_down(self, pair):
+        left, right = pair
+        tracker = endpoints._SocketTracker()
+        tracker.add(left)
+        (held,) = tracker._sockets
+
+        tracker.cut()
+
+        assert tracker._sockets == []
+        assert held.fileno() == -1
+        assert right.recv(1) == b""
+
+    def test_a_socket_added_after_the_cut_is_shut_down_and_not_kept(self, pair):
+        left, right = pair
+        tracker = endpoints._SocketTracker()
+        tracker.cut()
+
+        tracker.add(left)
+
+        assert tracker._sockets == []
+        assert right.recv(1) == b""
+
+    def test_release_after_a_cut_stays_cut(self, pair):
+        left, right = pair
+        tracker = endpoints._SocketTracker()
+        tracker.cut()
+        tracker.release()
+
+        tracker.add(left)
+
+        assert tracker._sockets == []
+        assert right.recv(1) == b""
+
+    @pytest.fixture
+    def trackers(self, monkeypatch):
+        """Every tracker a Test creates, with every duplicate it ever held."""
+        made = []
+
+        class Recording(endpoints._SocketTracker):
+            def __init__(self):
+                super().__init__()
+                self.ever_held = []
+                made.append(self)
+
+            def add(self, sock):
+                super().add(sock)
+                self.ever_held = [*self.ever_held, *[held for held in self._sockets if held not in self.ever_held]]
+
+        monkeypatch.setattr(endpoints, "_SocketTracker", Recording)
+        return made
+
+    def test_a_finished_test_closes_every_duplicate(self, fake, trackers):
+        assert endpoints.check_flaresolverr_address(fake.address)["code"] == "ok"
+
+        (tracker,) = trackers
+        assert tracker.ever_held, "the Test opened a connection that was never tracked"
+        assert tracker._sockets == []
+        assert all(held.fileno() == -1 for held in tracker.ever_held)
+
+    @pytest.mark.skipif(not os.path.isdir("/proc/self/fd"), reason="counts descriptors through /proc")
+    def test_a_finished_test_leaves_no_descriptor_open(self, fake):
+        endpoints.check_flaresolverr_address(fake.address)  # warm up anything lazily opened
+        before = len(os.listdir("/proc/self/fd"))
+
+        for _ in range(3):
+            assert endpoints.check_flaresolverr_address(fake.address)["code"] == "ok"
+
+        # The fake server may hold a connection a moment longer; the Test must not add one each run.
+        assert len(os.listdir("/proc/self/fd")) <= before + 1
+
+    def test_a_cut_test_closes_every_duplicate(self, fake, trackers, monkeypatch):
+        monkeypatch.setattr(endpoints, "ADDRESS_TEST_DEADLINE_SECONDS", 1.0)
+        fake.root_header_drip = 0.5
+
+        assert endpoints.check_flaresolverr_address(fake.address)["code"] == "timeout"
+
+        (tracker,) = trackers
+        stop = time.monotonic() + 3
+        while any(t.name == "flaresolverr-address-test" for t in threading.enumerate()) and time.monotonic() < stop:
+            time.sleep(0.05)
+        assert tracker.ever_held, "the Test opened a connection that was never tracked"
+        assert tracker._sockets == []
+        assert all(held.fileno() == -1 for held in tracker.ever_held)
