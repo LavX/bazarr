@@ -2225,7 +2225,7 @@ def note_switched_providers(switched_on: set[str], switched_off: set[str]) -> No
             if not isinstance(row, dict) or not row.get("blocked") or not row.get("blocked_reason"):
                 continue
             if provider_id in switched_on:
-                row["last_error"] = row["blocked_reason"]
+                row["last_error"] = _held_error(state, str(provider_id), row)
             elif (provider_id in switched_off and row.get("last_error") == row["blocked_reason"]
                   and not row.get("revoked")):
                 # A revoked release keeps saying why, switched on or off.
@@ -2237,6 +2237,18 @@ def note_switched_providers(switched_on: set[str], switched_off: set[str]) -> No
 def switch_on_refusal(name: str, needs: list[str]) -> str:
     """Why a plugin cannot be switched on: what it needs is not running."""
     return f"{name} needs {', '.join(needs)}, which is not running, so it cannot be switched on."
+
+
+def _held_error(state: dict[str, Any], provider_id: str, row: dict[str, Any]) -> Any:
+    """The error a held-back plugin shows once it is switched on: why it is held, or, for a revoked release
+    whose safe update is staged, that the update takes over at the next restart."""
+    found = None
+    if row.get("revoked") and row.get("staged_version"):
+        found = revocation.lookup(_revocations(state), provider_id, row.get("active_version"))
+    if found is None:
+        return row.get("blocked_reason")
+    return _revocation_text(revocation.held_back, found, row.get("name") or provider_id,
+                            row.get("active_version"), revocation.STAGED)
 
 
 def revoked_switch_on_refusal(provider_id: str, state: dict[str, Any] | None = None) -> str | None:
@@ -2437,7 +2449,7 @@ def update_provider(provider_id: str, enabled: bool | None = None, config: dict[
             # A plugin held back at boot says why once it is switched on, and stops saying it once it is off.
             if enabled and provider.get("blocked") and provider.get("blocked_reason"):
                 remember("last_error")
-                provider["last_error"] = provider["blocked_reason"]
+                provider["last_error"] = _held_error(state, provider_id, provider)
             elif not enabled and provider.get("blocked") and not provider.get("revoked") and provider.get(
                     "last_error") == provider.get("blocked_reason"):
                 remember("last_error")
@@ -4439,7 +4451,8 @@ def _revoked_reasons(
         if row.get("staged_version"):
             state = revocation.STAGED
         else:
-            state = revocation.HELD if boot or _held_for_revocation(row) else revocation.RUNNING
+            # A row the boot held back for anything is not running, so it gets the held text.
+            state = revocation.HELD if boot or row.get("blocked") else revocation.RUNNING
         reasons[str(plugin_id)] = _revocation_text(
             revocation.held_back, found, row.get("name") or plugin_id, row.get("active_version"), state)
     return reasons
@@ -4472,7 +4485,7 @@ def _mark_revoked_installations(installations: dict[str, Any], revocations: tupl
                 row["last_error"] = reason
                 changed = True
             if (row.get("state") == "active" and not row.get("pending_restart") and not row.get("staged_version")
-                    and not _held_for_revocation(row)):
+                    and not row.get("blocked")):
                 row.update(pending_restart=True, revoked_restart=True)
                 changed = True
         elif row.get("revoked"):
@@ -4487,6 +4500,9 @@ def _mark_revoked_installations(installations: dict[str, Any], revocations: tupl
                 if row.get("state") == "active":
                     row.update(pending_restart=True, revoked_restart=True)
             elif row.pop("revoked_restart", None):
+                # Limitation: the marker only says a refresh raised the cue. A lift and a new revocation within
+                # one run, with no restart between, drop and raise it again, and a restart another change
+                # asked for on this row in the meantime is dropped with it.
                 row["pending_restart"] = False
             changed = True
     return changed
@@ -4520,7 +4536,8 @@ def _apply_unmet_needs(installations: dict[str, Any], revocations: tuple[revocat
             row.pop("revoked_reason", None)
             changed = True
         if row.pop("revoked_restart", None):
-            # The restart a refresh asked for is this one.
+            # The restart a refresh asked for is this one. (Limitation: see _mark_revoked_installations; a
+            # restart another change asked for on this row is cleared with it.)
             if row.get("state") == "active":
                 row["pending_restart"] = False
             changed = True

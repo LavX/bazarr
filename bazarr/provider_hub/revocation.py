@@ -380,7 +380,7 @@ def _compose(subject: str, entry: Revocation, tail: str, limit: int) -> str:
 
     The reason is the only part that is cut. It is cut with an ellipsis, and left out when what room is left
     would show too little of it, so the sentence and what to do next always come whole. A reason that ends
-    with its own ``!`` or ``?`` is not given a second stop.
+    with its own ``!`` or ``?``, or with the ellipsis of a cut, is not given a second stop.
     """
     base = f"{subject} was revoked by the official catalog"
     reason = (entry.reason or "").strip().rstrip(".").strip()
@@ -388,8 +388,9 @@ def _compose(subject: str, entry: Revocation, tail: str, limit: int) -> str:
     if not reason or room < _MIN_REASON:
         return f"{base}{tail}"
     shown = _cut(reason, room)
-    if shown[-1] in "!?":
-        # "wrong host!" then "It will not start." and "wrong host! So it cannot be installed."
+    if shown[-1] in "!?" or shown.endswith("..."):
+        # The reason already ends with a stop: "wrong host!" then "It will not start." and
+        # "wrong host! So it cannot be installed.", and a cut reason "wrong ho..." then "It will not start."
         tail = " So " + tail[5:] if tail.startswith(", so ") else tail[1:]
     return f"{base}: {shown}{tail}"
 

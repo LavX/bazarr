@@ -33,7 +33,10 @@ export const StatusBadge: FunctionComponent<StatusBadgeProps> = ({
   spin,
 }) => {
   const cls = clsx(styles.pill, styles[`tone-${tone}`]);
-  const ariaLabel = `${label} (${tone})`;
+  // The tooltip says more than the label does, so a screen reader gets it too.
+  const ariaLabel = tooltip
+    ? `${label} (${tone}). ${tooltip}`
+    : `${label} (${tone})`;
   const body = (
     <span className={cls} role="status" aria-label={ariaLabel}>
       {variant === "icon" && icon ? (
@@ -58,8 +61,32 @@ export const ProviderStatusBadge: FunctionComponent<{
   pendingRestart?: boolean;
   activeVersion?: string | null;
   needsRepair?: boolean;
-}> = ({ state, pendingRestart, activeVersion, needsRepair }) => {
+  /** The official catalog revoked the active release. Shown with its reason, whatever else is going on. */
+  revoked?: boolean;
+  revokedReason?: string | null;
+}> = ({
+  state,
+  pendingRestart,
+  activeVersion,
+  needsRepair,
+  revoked,
+  revokedReason,
+}) => {
   const meta: StatusMeta = getProviderStateMeta(state);
+  if (revoked && state !== "removed") {
+    return (
+      <StatusBadge
+        tone="danger"
+        label="Revoked"
+        icon={meta.icon}
+        variant="dot"
+        tooltip={
+          revokedReason ??
+          "The official catalog revoked this version. Update it or remove it."
+        }
+      />
+    );
+  }
   if (needsRepair && !pendingRestart) {
     return (
       <StatusBadge

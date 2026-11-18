@@ -120,14 +120,16 @@ def resolve_closure(
 
     def upgrade(plugin_id: str, capability: str) -> dict[str, Any] | None:
         """A newer release of an installed plugin that provides ``capability``: from the source the
-        install is bound to, and above the installed version, so the hint names a real update."""
+        installed plugin is bound to, and above the installed version, so the hint names a real update."""
         held, row = installed[plugin_id]
-        if not row.get("source_bound") or row.get("source_id") != root.get("source"):
+        if not row.get("source_bound"):
             return None
+        # From the source the installed plugin is bound to, which is not always the installing plugin's.
+        pool = entries if row.get("source_id") == root.get("source") else _source_entries(state, row.get("source_id"))
         # Above the release that runs after the next restart, which may already be the staged one.
         running = _manifest_in(row, "next") or held
         return select_entry(
-            entries, plugin_id, usable=lambda entry: usable(entry) and provides(entry, capability),
+            pool, plugin_id, usable=lambda entry: usable(entry) and provides(entry, capability),
             above_version=running.version)
 
     def _way_out(plugin_id: str, capability: str) -> str:
@@ -135,7 +137,7 @@ def resolve_closure(
         exists, and say there is none when it does not."""
         if upgrade(plugin_id, capability) is not None:
             return f". Update {plugin_id} first."
-        return f", and no release of {plugin_id} can be installed."
+        return f", and {plugin_id} has no usable release here."
 
     def satisfy(owner: PluginManifest, how: str, needed_id: str | None, capability: str) -> None:
         if how == "extends":

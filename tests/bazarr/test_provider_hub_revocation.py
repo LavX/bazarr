@@ -158,7 +158,7 @@ def test_every_text_fits_the_message_limit_and_always_ends_with_what_to_do_next(
              "staged": "Restart Bazarr+ to apply the staged update."}
     for name, text in _texts(entry, version="1.0.0").items():
         assert len(text) <= LIMIT, (name, len(text))
-        assert text.endswith(tails[name]), (name, text)
+        assert text.lower().endswith(tails[name].lower()), (name, text)
         assert "was revoked by the official catalog" in text
         assert NAME in text
 
@@ -356,7 +356,8 @@ def test_an_update_that_is_revoked_says_so_when_it_is_asked_for(tmp_path, monkey
     result = service.apply_update(PLUGIN)
 
     assert result["last_error"].startswith(f"{NAME} 1.1.0 was revoked by the official catalog")
-    assert result["last_error"].endswith("so it cannot be offered as an update.") and len(result["last_error"]) <= LIMIT
+    assert result["last_error"].lower().endswith("so it cannot be offered as an update.")
+    assert len(result["last_error"]) <= LIMIT
     assert _rows()[PLUGIN]["active_version"] == "1.0.0" and not _rows()[PLUGIN].get("staged_version")
 
 
@@ -370,7 +371,7 @@ def test_the_install_and_listing_texts_fit_the_limit_with_a_long_reason(tmp_path
     with pytest.raises(service.ProviderHubInstallError) as refused:
         service.resolve_catalog_install("official", PLUGIN, "1.0.0")
     for text in (listed, str(refused.value)):
-        assert len(text) <= LIMIT and text.endswith("so it cannot be installed.") and "..." in text
+        assert len(text) <= LIMIT and text.lower().endswith("so it cannot be installed.") and "..." in text
 
 
 # --- switching on ------------------------------------------------------------------------------------------
@@ -627,7 +628,7 @@ def test_a_revoked_dependency_does_not_satisfy_what_needs_it_unless_a_safe_updat
         assert resolve(owner).resolved
         refused = resolve(owner, **flagged)
         assert not refused.resolved and "revoked by the official catalog" in refused.refusal
-        assert "no release of parent can be installed" in refused.refusal
+        assert "parent has no usable release here" in refused.refusal
         staged = {"staged_version": "1.1.0", "state": "staged", "pending_restart": True,
                   "staged_manifest": _plugin("parent", "1.1.0", provides=[capability])}
         assert resolve(owner, **flagged, **staged).resolved
@@ -1291,7 +1292,7 @@ def test_a_whole_plugin_entry_says_remove_and_never_update(tmp_path, monkeypatch
         entry = next(e for e in _state()["catalog_entries"].values() if e["provider_id"] == owner["id"])
         refusal = service._closure_of(_state(), entry).refusal
         assert "revoked by the official catalog" in refusal and "Update" not in refusal
-        assert "no release of parent can be installed" in refusal
+        assert "parent has no usable release here" in refusal
         # A newer release the catalog lists does.
         newer = _plugin("parent", "1.1.0", provides=[capability])
         _stored_world(tmp_path, monkeypatch, [owner, newer], installations=_row(parent, **flagged))
@@ -1366,3 +1367,88 @@ def test_a_corrupt_mirror_is_read_and_reported_once_until_it_changes(tmp_path, m
     # A write replaces it, and the cache follows.
     revocation.write_mirror({"main": revocation.ChannelList(5, ())})
     assert revocation.read_mirror()["main"].signed_version == 5
+
+
+# --- last small fixes -----------------------------------------------------------------------------------------
+
+
+def test_switching_on_a_held_revoked_plugin_with_a_staged_update_shows_the_restart_text_not_the_stale_one(
+        tmp_path, monkeypatch, service_kind):
+    from provider_hub import service
+    from provider_hub.state import mutate_state
+
+    installed = _plugin(version="1.0.0")
+    _stored_world(tmp_path, monkeypatch, [installed], installations=_row(installed, enabled=False),
+                  revocations=_list({"id": PLUGIN, "version": "1.0.0", "reason": REASON}))
+    service.enforce_activation_needs()
+    assert "Update it or remove it." in _rows()[PLUGIN]["blocked_reason"]
+    # The update is staged after the boot held the release back.
+    mutate_state(lambda state: state["installations"][PLUGIN].update(
+        state="staged", pending_restart=True, staged_version="1.1.0", staged_manifest=_plugin(version="1.1.0")))
+
+    error = service.update_provider(PLUGIN, enabled=True)["last_error"]
+    assert error.endswith("Restart Bazarr+ to apply the staged update.") and "Update it or remove it" not in error
+
+    # The settings save reaches the same row through note_switched_providers.
+    service.update_provider(PLUGIN, enabled=False)
+    mutate_state(lambda state: state["installations"][PLUGIN].update(last_error=None))
+    service.note_switched_providers({PLUGIN}, set())
+    assert _rows()[PLUGIN]["last_error"].endswith("Restart Bazarr+ to apply the staged update.")
+
+
+def test_a_plugin_the_boot_held_for_what_it_needs_gets_the_held_text_when_a_refresh_revokes_it(
+        tmp_path, monkeypatch, service_kind):
+    from provider_hub import service
+
+    capability = "demo_parent.backend.v1"
+    user = _plugin("user", requires=[capability])
+    _stored_world(tmp_path, monkeypatch, [], installations=_row(user, supplied_by={capability: "parent"}),
+                  revocations=_list(version=100))
+    service.enforce_activation_needs()
+    assert _rows()["user"]["blocked_cause"] == "needs"
+    from provider_hub.state import mutate_state
+    mutate_state(lambda state: state["catalog_sources"]["official"].update(
+        catalog_revocations=_list({"id": "user"}, version=101)))
+
+    _refresh_part()
+
+    row = _rows()["user"]
+    assert row["revoked"] is True and "It will not start. Remove it." in row["revoked_reason"]
+    assert "Restart Bazarr+" not in row["revoked_reason"]
+    assert not row.get("pending_restart") and "revoked_restart" not in row
+
+
+def test_a_revoked_supplier_is_judged_against_the_source_it_is_bound_to(tmp_path, monkeypatch, service_kind):
+    from plugin_platform_helpers import provider_manifest_v2
+    from provider_hub import service
+    from provider_hub.state import mutate_state
+
+    capability = "demo_parent.backend.v1"
+    parent = provider_manifest_v2("parent", provides=[capability])
+    owner = provider_manifest_v2("user", requires=[capability])
+    flagged = {"revoked": True, "revoked_reason": "x", "source_id": "elsewhere", "trusted": False}
+    newer = {**_entry(provider_manifest_v2("parent", "1.1.0", provides=[capability])), "source": "elsewhere"}
+    community = {"id": "elsewhere", "name": "elsewhere", "type": "github", "enabled": True, "trusted": False,
+                 "url": "https://github.com/someone/catalog/blob/main/catalog.json"}
+    # The plugin being installed comes from the official source and its supplier is bound to another one.
+    _stored_world(tmp_path, monkeypatch, [owner], installations=_row(parent, **flagged))
+    mutate_state(lambda state: state["catalog_sources"].update(elsewhere=community))
+
+    entry = next(e for e in _state()["catalog_entries"].values() if e["provider_id"] == "user")
+    # The supplier's own source lists nothing newer: no usable release.
+    assert "parent has no usable release here" in service._closure_of(_state(), entry).refusal
+    # The supplier's own source lists a release that can be installed, so the person is sent to update it.
+    mutate_state(lambda state: state["catalog_entries"].update({"elsewhere:plugins:parent:1.1.0": newer}))
+    assert "Update parent first." in service._closure_of(_state(), entry).refusal
+
+
+def test_a_cut_reason_is_not_followed_by_a_second_stop():
+    from provider_hub import revocation
+
+    entry = revocation.parse([{"id": PLUGIN, "version": "1.0.0", "reason": LONG_REASON}])[0]
+
+    for name, text in _texts(entry).items():
+        assert "..." in text and "...." not in text and "..." + "." not in text, name
+        assert len(text) <= LIMIT
+    assert _texts(entry)["held"].endswith("... It will not start. Update it or remove it.")
+    assert _texts(entry)["install"].endswith("... So it cannot be installed.")
