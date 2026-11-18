@@ -39,9 +39,16 @@ def archive_runtime(process="worker"):
     return {"runtime": {"artifact": "archive", "process": process}, "platforms": list(NATIVE_PLATFORMS)}
 
 
-def oci_runtime():
+OCI_IMAGE = "ghcr.io/example/daemon"
+OCI_INDEX_DIGEST = "sha256:" + "ab" * 32
+
+
+def oci_runtime(image=OCI_IMAGE, index_digest=OCI_INDEX_DIGEST):
     """Manifest fields for an oci daemon runtime that passes validation."""
-    return {"runtime": {"artifact": "oci", "process": "daemon"}, "permissions": ["docker"]}
+    return {
+        "runtime": {"artifact": "oci", "process": "daemon", "image": image, "index_digest": index_digest},
+        "permissions": ["docker"],
+    }
 
 
 def provider_manifest_v1(provider_id="examplehub", version="1.0.0", **overrides):

@@ -38,6 +38,17 @@ ENDPOINT_RE = re.compile(
     r"(?P<host>(?=.{1,253}:)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63})"
     r":(?P<port>[1-9][0-9]{0,4})$"
 )
+# The image a managed container runs, named without a tag or a digest: an optional registry host
+# (with a dot or a port, or localhost) and a lowercase repository path, as Docker reads them.
+OCI_IMAGE_RE = re.compile(
+    r"^(?:(?:localhost|(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?"
+    r"|[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?=:))(?::[0-9]{1,5})?/)?"
+    r"[a-z0-9]+(?:(?:[._]|__|-+)[a-z0-9]+)*(?:/[a-z0-9]+(?:(?:[._]|__|-+)[a-z0-9]+)*)*$"
+)
+# The digest of the multi-arch image index (the manifest list a registry serves for the image name),
+# not of one platform's manifest: the same pin then holds on every architecture. Only sha256.
+OCI_INDEX_DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+OCI_IMAGE_MAX_CHARS = 255
 SEMVER_RE = re.compile(
     r"^v?(?P<major>0|[1-9][0-9]*)\.(?P<minor>0|[1-9][0-9]*)\.(?P<patch>0|[1-9][0-9]*)"
     r"(?:-(?P<prerelease>[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?"
@@ -126,6 +137,16 @@ class PluginManifest:
     backend_fields: tuple[tuple[str, tuple[dict[str, Any], ...]], ...] = ()
     # The validated login a back end declares (argv, flow and paths), or None when it declares none.
     login: dict[str, Any] | None = None
+    # For an oci runtime only: the image name (no tag) and the digest of its multi-arch index.
+    oci_image: str | None = None
+    oci_index_digest: str | None = None
+
+    @property
+    def oci_reference(self) -> str | None:
+        """The digest-pinned reference a daemon is asked to run, ``image@sha256:...``, or None."""
+        if self.oci_image is None or self.oci_index_digest is None:
+            return None
+        return f"{self.oci_image}@{self.oci_index_digest}"
 
     @property
     def kind_api_major(self) -> int:
@@ -197,6 +218,37 @@ def _runtime(value: Any) -> tuple[str, str]:
     if (artifact, process) not in RUNTIME_COMBINATIONS:
         raise ManifestValidationError(f"runtime {artifact} run as {process} is not a supported combination")
     return artifact, process
+
+
+def _oci_pin(value: Any, artifact: str) -> tuple[str | None, str | None]:
+    """The image and index digest of an oci runtime, validated; (None, None) for any other artifact.
+
+    An image is pinned by the digest of its multi-arch index, never by a tag: a tag can be moved to
+    other content after the catalog was signed. The image name carries neither, so the two parts
+    cannot disagree.
+    """
+    if artifact != OCI:
+        return None, None
+    # _runtime has already shown that the runtime is an object when the artifact is oci.
+    image = value.get("image")
+    if not isinstance(image, str) or not image:
+        raise ManifestValidationError("runtime.image must name the image an oci runtime starts")
+    if "@" in image:
+        raise ManifestValidationError("runtime.image must not carry a digest: put it in runtime.index_digest")
+    last = image.rsplit("/", 1)[-1]
+    if ":" in last:
+        raise ManifestValidationError(
+            "runtime.image must not name a tag: a tag can move, so pin the image with runtime.index_digest")
+    if len(image) > OCI_IMAGE_MAX_CHARS or not OCI_IMAGE_RE.match(image):
+        raise ManifestValidationError("runtime.image must be an image name such as ghcr.io/owner/name")
+    digest = value.get("index_digest")
+    if not isinstance(digest, str) or not digest:
+        raise ManifestValidationError(
+            "runtime.index_digest is required for an oci runtime: the sha256 digest of the multi-arch image index")
+    if not OCI_INDEX_DIGEST_RE.match(digest):
+        raise ManifestValidationError(
+            "runtime.index_digest must be a sha256 digest written as sha256:<64 lowercase hex digits>")
+    return image, digest
 
 
 def _check_runtime_needs(artifact: str, process: str, platforms: tuple[str, ...], permissions: tuple[str, ...]) -> None:
@@ -417,6 +469,7 @@ def parse_plugin_manifest(manifest: Any) -> PluginManifest:
     permissions = _permissions(manifest.get("permissions"))
     platforms = _platforms(manifest.get("platforms"))
     _check_runtime_needs(artifact, process, platforms, permissions)
+    oci_image, oci_index_digest = _oci_pin(manifest.get("runtime"), artifact)
     login = _login(manifest, permissions)
     return PluginManifest(
         raw=dict(manifest),
@@ -441,4 +494,6 @@ def parse_plugin_manifest(manifest: Any) -> PluginManifest:
         backend_endpoints=backend_endpoints,
         backend_fields=backend_fields,
         login=login,
+        oci_image=oci_image,
+        oci_index_digest=oci_index_digest,
     )

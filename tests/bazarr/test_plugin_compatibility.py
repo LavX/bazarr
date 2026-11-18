@@ -139,7 +139,7 @@ def test_a_catalog_entry_with_an_invalid_runtime_is_blocked_with_the_specific_re
     from provider_hub.compatibility import entry_compatibility
 
     runtimes = frozenset({("oci", "daemon")})
-    entry = {"manifest": service_manifest(runtime={"artifact": "oci", "process": "daemon"})}
+    entry = {"manifest": service_manifest(runtime=oci_runtime()["runtime"])}
 
     assert entry_compatibility(entry, _host(runtimes=runtimes)) == (
         False, "runtime oci run as daemon starts a managed container, so permissions must include docker")

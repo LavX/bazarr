@@ -110,7 +110,7 @@ def test_an_archive_runtime_must_name_the_platforms_it_is_built_for(process):
 def test_an_oci_runtime_must_declare_the_docker_permission():
     from provider_hub.manifest import ManifestValidationError
 
-    runtime = {"artifact": "oci", "process": "daemon"}
+    runtime = oci_runtime()["runtime"]
     assert _parse(service_manifest(runtime=runtime, permissions=["docker", "network"])).permissions == (
         "docker", "network")
     for permissions in ({}, {"permissions": ["network"]}):
@@ -310,3 +310,71 @@ def test_a_plugin_of_another_kind_validates_through_the_shared_bundle_checks():
     with pytest.raises(ManifestValidationError, match="source.commit must be an immutable commit SHA"):
         validate_plugin_bundle(service_manifest("exampleservice", source={
             "type": "github", "repo": "LavX/bazarr-provider-catalog", "ref": "main", "commit": "main"}))
+
+
+# An oci runtime is pinned by the digest of its multi-arch index, never by a tag.
+
+
+def _oci(**changes):
+    runtime = dict(oci_runtime()["runtime"])
+    for key, value in changes.items():
+        if value is None:
+            runtime.pop(key, None)
+        else:
+            runtime[key] = value
+    return service_manifest(runtime=runtime, permissions=["docker"])
+
+
+def test_an_oci_runtime_reads_its_image_and_index_digest_into_a_pinned_reference():
+    plugin = _parse(service_manifest(**oci_runtime()))
+
+    assert plugin.oci_image == "ghcr.io/example/daemon"
+    assert plugin.oci_index_digest == "sha256:" + "ab" * 32
+    assert plugin.oci_reference == "ghcr.io/example/daemon@sha256:" + "ab" * 32
+
+
+def test_other_runtimes_carry_no_image_pin():
+    plugin = _parse(service_manifest())
+
+    assert (plugin.oci_image, plugin.oci_index_digest, plugin.oci_reference) == (None, None, None)
+
+
+@pytest.mark.parametrize("image", [
+    "ghcr.io/example/daemon", "example/daemon", "daemon", "localhost:5000/team/daemon", "registry.example.com/a/b_c.d-e",
+])
+def test_an_oci_image_may_be_written_with_or_without_a_registry(image):
+    assert _parse(_oci(image=image)).oci_image == image
+
+
+@pytest.mark.parametrize("fields, message", [
+    ({"image": None}, "runtime.image must name the image"),
+    ({"image": ""}, "runtime.image must name the image"),
+    ({"image": 5}, "runtime.image must name the image"),
+    ({"image": "ghcr.io/example/daemon:latest"}, "must not name a tag"),
+    ({"image": "daemon:1.2.3"}, "must not name a tag"),
+    ({"image": "localhost:5000/daemon:latest"}, "must not name a tag"),
+    ({"image": "ghcr.io/example/daemon@sha256:" + "ab" * 32}, "must not carry a digest"),
+    ({"image": "Example/Daemon"}, "must be an image name"),
+    ({"image": "ghcr.io//daemon"}, "must be an image name"),
+    ({"image": "x " * 3}, "must be an image name"),
+    ({"image": "a/" * 200 + "b"}, "must be an image name"),
+    ({"index_digest": None}, "runtime.index_digest is required"),
+    ({"index_digest": ""}, "runtime.index_digest is required"),
+    ({"index_digest": "latest"}, "must be a sha256 digest"),
+    ({"index_digest": "sha256:" + "ab" * 31}, "must be a sha256 digest"),
+    ({"index_digest": "sha256:" + "AB" * 32}, "must be a sha256 digest"),
+    ({"index_digest": "sha512:" + "ab" * 64}, "must be a sha256 digest"),
+    ({"index_digest": "ab" * 32}, "must be a sha256 digest"),
+    ({"index_digest": ["sha256:" + "ab" * 32]}, "runtime.index_digest is required"),
+])
+def test_an_oci_runtime_with_a_missing_malformed_or_tag_only_pin_is_refused_with_the_reason(fields, message):
+    from provider_hub.manifest import ManifestValidationError
+
+    with pytest.raises(ManifestValidationError, match=message):
+        _parse(_oci(**fields))
+
+
+def test_an_image_pin_on_a_runtime_that_is_not_oci_is_ignored_like_any_unknown_key():
+    plugin = _parse(service_manifest(runtime={"artifact": "python", "process": "worker", "index_digest": "x"}))
+
+    assert plugin.oci_reference is None
