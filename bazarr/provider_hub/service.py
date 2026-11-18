@@ -10,7 +10,6 @@ import logging
 import re
 import shutil
 import tempfile
-import threading
 import time
 import uuid
 import zipfile
@@ -3651,6 +3650,12 @@ def _stage_validated(
         def record_staged_install(state: dict[str, Any]) -> dict[str, Any]:
             installations = state.setdefault("installations", {})
             current = installations.get(validated.provider_id, existing)
+            if is_fresh and isinstance(current, dict) and current.get("state") == "removed":
+                # The row of a plugin removed in this run still carries its saved settings and keys. They go to the
+                # same plugin from the same source and to nobody else, so a package from another source, or an
+                # upload over a catalog install, starts with none, before anything is copied from the row.
+                if current.get("source_id") != source_id:
+                    current = {**current, "config": {}}
             _refuse_a_release_that_breaks_dependents(state, validated.provider_id, validated.version, validated.raw)
             installation = _staged_installation(
                 validated,
@@ -3921,11 +3926,9 @@ class _StagedMembers(list):
 
     Removing a plugin switches it off, so a discard puts back the ones the person already had on."""
 
-    def __init__(self, ids=(), was_enabled=None, handed_over=()):
+    def __init__(self, ids=(), was_enabled=None):
         super().__init__(ids)
         self.was_enabled: dict[str, str] = dict(was_enabled or {})
-        # The ones that took over data an earlier removal kept, which a discard must give back, not delete.
-        self.handed_over: frozenset[str] = frozenset(handed_over)
 
     @staticmethod
     def snapshot_enabled(resolved) -> dict[str, str]:
@@ -3956,7 +3959,6 @@ def _stage_closure_members(resolved, source_id: str, checkpoint=None) -> list[st
                 if isinstance(row, dict) and (row.get("active_version") or row.get("staged_version"))}
 
     before = installed_ids()
-    forget_handed_over()
     # Only members this call has started to stage can have a row it wrote: a later member it never reached keeps
     # whatever row it had, a record of an earlier failure included.
     attempted: set[str] = set()
@@ -3968,7 +3970,7 @@ def _stage_closure_members(resolved, source_id: str, checkpoint=None) -> list[st
             [member.plugin_id for member in resolved.members
              if member.reason != "root" and member.plugin_id in attempted and member.plugin_id not in before
              and member.plugin_id in rows],
-            was_enabled, handed_over_ids())
+            was_enabled)
 
     current = None
     try:
@@ -4003,16 +4005,13 @@ def _discard_staged_members(plugin_ids: list[str], root_id: str | None = None) -
     """
     own = set(plugin_ids) | ({root_id} if root_id else set())
     was_enabled = getattr(plugin_ids, "was_enabled", {})
-    handed_over = getattr(plugin_ids, "handed_over", frozenset())
     for plugin_id in reversed(plugin_ids):
         try:
             # What an earlier removal kept and this install took over is not the install's to delete: a failed or
             # stopped install gives it back, still kept.
-            row = (load_state().get("installations") or {}).get(plugin_id)
-            removed = remove_installation(
-                plugin_id, ignoring_dependents=frozenset(own),
-                # A subtitle provider's settings may be older than this install, so a discard never clears them.
-                keep_data=plugin_id in handed_over or (isinstance(row, dict) and kind_of(row) == SUBTITLE_PROVIDER))
+            # A rollback: whatever an earlier removal kept of this plugin stays exactly as it was, whether or not this
+            # install got as far as taking it over.
+            removed = remove_installation(plugin_id, ignoring_dependents=frozenset(own), rollback=True)
             if removed and plugin_id in was_enabled:
                 # The person had it on before this install, and removing it switched it off.
                 get_kind(was_enabled[plugin_id]).set_enabled({"provider_id": plugin_id}, True)
@@ -4521,13 +4520,17 @@ def dependent_refusal(provider_id: str, action: str, *, enabled_only: bool = Fal
 
 
 def remove_installation(provider_id: str, *, ignoring_dependents: frozenset[str] = frozenset(),
-                        keep_data: bool = False) -> bool:
+                        keep_data: bool = False, rollback: bool = False) -> bool:
     """Stage the removal of an installation, or remove it at once when it was never active.
 
     A plugin another one depends on is refused. ``ignoring_dependents`` names plugins that do not count as
     dependents, which is how a failed install discards the plugins it staged for itself while any other
     plugin that has come to depend on them still protects them. ``keep_data`` is the person's choice to keep the
     plugin's saved settings and data folder, which the kind honours; the default deletes them.
+
+    ``rollback`` is for discarding what a failed or stopped install staged. It deletes only what that install made:
+    data an earlier removal kept (it has a record), and the settings of a subtitle provider, which may be older than
+    the install, are left exactly as they were, and no record is written or changed.
     """
     state = load_state()
     installations = state.setdefault("installations", {})
@@ -4541,6 +4544,9 @@ def remove_installation(provider_id: str, *, ignoring_dependents: frozenset[str]
         item.get("name") if isinstance(item, dict) else None
     ) or provider_id
     active_version = item.get("active_version") if isinstance(item, dict) else None
+    if rollback:
+        keep_data = (keep_data or bool((state.get("kept_data") or {}).get(provider_id))
+                     or (isinstance(item, dict) and kind_of(item) == SUBTITLE_PROVIDER))
 
     with record_job(
         "uninstall",
@@ -4600,7 +4606,8 @@ def remove_installation(provider_id: str, *, ignoring_dependents: frozenset[str]
             return False
         from . import runtime_status
         runtime_status.clear(provider_id)
-        _record_kept_data(provider_id, item, kind_hooks, keep_data)
+        if not rollback:
+            _record_kept_data(provider_id, item, kind_hooks, keep_data)
         try:
             kind_hooks.after_removed(provider_id, keep_data=keep_data)
         except Exception:
@@ -4640,18 +4647,6 @@ def _record_kept_data(provider_id: str, item: Any, kind_hooks: Any, keep_data: b
         logging.getLogger(__name__).warning("Could not record the kept data of %s", provider_id, exc_info=True)
 
 
-_HANDED_OVER = threading.local()
-
-
-def handed_over_ids() -> set[str]:
-    """The plugins whose kept data an install in this thread has taken over since ``forget_handed_over``."""
-    return set(getattr(_HANDED_OVER, "ids", ()))
-
-
-def forget_handed_over() -> None:
-    _HANDED_OVER.ids = set()
-
-
 def claim_kept_data(provider_id: str, source_id: str | None, kind: str) -> bool:
     """A first install, or a reinstall of a plugin removed in this run, has staged its row. Data kept by an earlier
     removal is handed over only when it is the same plugin from the same source and of the same kind, with its
@@ -4664,8 +4659,8 @@ def claim_kept_data(provider_id: str, source_id: str | None, kind: str) -> bool:
     entry = (load_state().get("kept_data") or {}).get(provider_id)
     if not isinstance(entry, dict):
         return False
-    # A package with no source (an upload) is nobody's: it matches nothing, the one it was kept for included.
-    if source_id is not None and entry.get("source_id") == source_id and entry.get("kind") == kind:
+    # An upload has no source, and takes back what an upload kept, and nothing a catalog source kept.
+    if entry.get("source_id") == source_id and entry.get("kind") == kind:
         config = entry.get("config")
 
         def hand_over(state: dict[str, Any]) -> None:
@@ -4677,7 +4672,6 @@ def claim_kept_data(provider_id: str, source_id: str | None, kind: str) -> bool:
                 kept["config"] = None
 
         mutate_state(hand_over)
-        _HANDED_OVER.ids = handed_over_ids() | {provider_id}
         get_kind(kind).kept_data_reclaimed(provider_id)
         return True
     try:

@@ -81,7 +81,7 @@ def test_kept_data_goes_back_only_to_the_same_plugin_from_the_same_source_and_ki
     assert kind.discarded == [] and kind.reclaimed == ["engine"]
     assert load_state()["kept_data"]["engine"]["source_id"] == "official"
 
-    # An upload has no source, and matches nothing, the plugin it was kept for included.
+    # Another source, an upload over a catalog install, and another kind each start clean.
     for source, kind_name in (("community", "translator"), (None, "translator"), ("official", "service")):
         _removal(service, kind, "engine", True)
         assert service.claim_kept_data("engine", source, kind_name) is False, (source, kind_name)
