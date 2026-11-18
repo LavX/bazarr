@@ -766,3 +766,264 @@ def test_an_offline_install_stages_a_bundle_from_the_floor(tmp_path, snapshot, h
     assert row["origin"] == "catalog"
     bundle = Path(row["staged_path"])
     assert (bundle / "provider.py").read_bytes() == PROVIDER_FILE
+
+
+# ---- the signed feed in the snapshot -------------------------------------
+
+SERVICE_ID = "floorsvc"
+SERVICE_FILE = b"class Service: pass\n"
+SIGNED_FILES = ("signed/main/catalog.json", "signed/main/catalog.json.sig", "keys/catalog-signing-keys.json")
+
+
+def _service_manifest():
+    from plugin_platform_helpers import service_manifest
+    manifest = service_manifest(SERVICE_ID, "1.0.0", file_payloads={"service.py": SERVICE_FILE})
+    manifest["source"] = {**manifest["source"], "commit": FLOOR_COMMIT, "path": f"plugins/{SERVICE_ID}"}
+    return manifest
+
+
+def _signed_files(keys, *, source_commit=FLOOR_COMMIT, channel="main", providers=None, plugins=None):
+    """The three signed files the lock pins, signed with the throwaway ``keys``."""
+    from datetime import datetime, timedelta, timezone
+
+    from test_provider_hub_signing import envelope_for, stamp
+
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    body = json.dumps({
+        "schema_version": 2, "name": "Official", "channel": channel, "signed_version": 100,
+        # An expired window on purpose: the baked check does not look at it.
+        "not_before": stamp(now - timedelta(days=200)), "expires": stamp(now - timedelta(days=100)),
+        "source_commit": source_commit,
+        "providers": [{"manifest": _manifest()}] if providers is None else providers,
+        "plugins": [{"manifest": _service_manifest()}] if plugins is None else plugins,
+    }, sort_keys=True).encode()
+    return {
+        SIGNED_FILES[0]: body,
+        SIGNED_FILES[1]: json.dumps(envelope_for(body, keys.ci)).encode(),
+        SIGNED_FILES[2]: json.dumps(keys.key_file()).encode(),
+    }
+
+
+@pytest.fixture
+def keys(monkeypatch):
+    """Throwaway keys, and a host that trusts only their root."""
+    from test_provider_hub_signing import Keys
+    from provider_hub import signing_roots, transport
+    made = Keys()
+    monkeypatch.setattr(signing_roots, "SIGNING_ROOTS", dict(made.roots))
+    transport.reset_state()
+    yield made
+    transport.reset_state()
+
+
+def _signed_snapshot(tmp_path, monkeypatch, signed, *, drop=(), commit=FLOOR_COMMIT):
+    extra = {path: data for path, data in signed.items() if path not in drop}
+    extra[f"plugins/{SERVICE_ID}/service.py"] = SERVICE_FILE
+    root = _write_snapshot(tmp_path / "catalog_floor", commit=commit, extra=extra)
+    monkeypatch.setenv("BAZARR_CATALOG_FLOOR", str(root))
+    return root
+
+
+def _tamper(data):
+    raw = bytearray(data)
+    raw[len(raw) // 2] ^= 0x01
+    return bytes(raw)
+
+
+def _seeded(source=None, entries=None):
+    from provider_hub import floor as floor_module
+    return floor_module.seed_candidate(source or {"id": "official"}, entries or {})
+
+
+def test_a_fixture_snapshot_with_a_valid_signed_feed_seeds_plugins(tmp_path, monkeypatch, keys):
+    _signed_snapshot(tmp_path, monkeypatch, _signed_files(keys))
+
+    catalog, commit = _seeded()
+
+    assert commit == FLOOR_COMMIT
+    assert [item["manifest"]["provider_id"] for item in catalog["providers"]] == ["examplehub"]
+    assert [item["manifest"]["id"] for item in catalog["plugins"]] == [SERVICE_ID]
+
+
+def test_a_signed_feed_seeds_through_a_refresh_and_never_latches_the_channel(
+        tmp_path, monkeypatch, hub, keys, service_kind):
+    from provider_hub import catalog_feed
+    from provider_hub.state import load_state
+    _signed_snapshot(tmp_path, monkeypatch, _signed_files(keys))
+    _unreachable(monkeypatch)
+
+    hub.refresh_catalog()
+
+    state = load_state()
+    source = _official(state)
+    assert source["trust_reason"] == "release floor" and source["catalog_status"] == "bundled"
+    assert source["floor_seed"]["commit"] == FLOOR_COMMIT
+    entries = {entry["provider_id"]: entry for entry in state["catalog_entries"].values()}
+    assert set(entries) == {"examplehub", SERVICE_ID}
+    assert entries[SERVICE_ID]["catalog_list"] == "plugins" and entries[SERVICE_ID]["origin"] == "bundled"
+    assert entries[SERVICE_ID]["resolved_commit"] == FLOOR_COMMIT
+    assert entries[SERVICE_ID]["manifest"]["source"]["commit"] == FLOOR_COMMIT
+    # A baked catalog is not a fetched one: nothing latched, no counter stored, no signature claimed.
+    assert state.get("catalog_feeds", {}) == {}
+    assert not catalog_feed.counter_file().exists()
+    assert catalog_feed.stored_record(state, "main") == catalog_feed.ChannelRecord()
+    assert source.get("catalog_signature") != catalog_feed.SIGNATURE_VERIFIED
+    assert source.get("signature_verified") in (None, False)
+    assert not source.get("resolved_commit") and source["last_checked_at"] is None
+
+
+def test_baked_seeding_never_raises_a_stored_counter(tmp_path, monkeypatch, hub, keys, service_kind):
+    from provider_hub import catalog_feed
+    from provider_hub.state import load_state
+    # The snapshot's signed_version is 100. A host that holds a higher counter keeps it, and one that
+    # holds none stays without one.
+    catalog_feed.write_counter_file({"main": catalog_feed.ChannelRecord(500, 1)})
+    _signed_snapshot(tmp_path, monkeypatch, _signed_files(keys))
+    _unreachable(monkeypatch)
+
+    hub.refresh_catalog()
+
+    assert catalog_feed.read_counter_file()["main"] == catalog_feed.ChannelRecord(500, 1)
+    assert load_state().get("catalog_feeds", {}) == {}
+
+
+def test_the_baked_check_is_the_one_that_never_advances_state(tmp_path, monkeypatch, keys):
+    from provider_hub import catalog_feed
+    signed = _signed_files(keys)
+
+    result = catalog_feed.verify_baked(
+        signed[SIGNED_FILES[0]], signed[SIGNED_FILES[1]], signed[SIGNED_FILES[2]], channel="main")
+
+    assert result.ok and result.baked and not result.may_advance_state
+
+
+def _providers_only(catalog):
+    assert [item["manifest"]["provider_id"] for item in catalog["providers"]] == ["examplehub"]
+    assert "plugins" not in catalog
+
+
+def test_a_tampered_signature_seeds_providers_only(tmp_path, monkeypatch, keys, caplog):
+    signed = _signed_files(keys)
+    signed[SIGNED_FILES[1]] = _tamper(signed[SIGNED_FILES[1]])
+    _signed_snapshot(tmp_path, monkeypatch, signed)
+
+    with caplog.at_level("WARNING"):
+        catalog, commit = _seeded()
+
+    _providers_only(catalog)
+    assert commit == FLOOR_COMMIT
+    assert "seeds providers only" in caplog.text
+
+
+def test_a_tampered_signed_catalog_seeds_providers_only(tmp_path, monkeypatch, keys):
+    signed = _signed_files(keys)
+    signed[SIGNED_FILES[0]] = _tamper(signed[SIGNED_FILES[0]])
+    _signed_snapshot(tmp_path, monkeypatch, signed)
+
+    _providers_only(_seeded()[0])
+
+
+def test_a_wrong_root_seeds_providers_only(tmp_path, monkeypatch, keys):
+    from test_provider_hub_signing import Keys
+    from provider_hub import signing_roots
+    _signed_snapshot(tmp_path, monkeypatch, _signed_files(keys))
+    monkeypatch.setattr(signing_roots, "SIGNING_ROOTS", dict(Keys().roots))
+
+    _providers_only(_seeded()[0])
+
+
+def test_a_build_with_no_root_seeds_providers_only(tmp_path, monkeypatch, keys):
+    from provider_hub import signing_roots
+    _signed_snapshot(tmp_path, monkeypatch, _signed_files(keys))
+    monkeypatch.setattr(signing_roots, "SIGNING_ROOTS", {})
+
+    _providers_only(_seeded()[0])
+
+
+def test_a_missing_key_file_seeds_providers_only(tmp_path, monkeypatch, keys, caplog):
+    _signed_snapshot(tmp_path, monkeypatch, _signed_files(keys), drop=(SIGNED_FILES[2],))
+
+    with caplog.at_level("WARNING"):
+        catalog, _commit = _seeded()
+
+    _providers_only(catalog)
+    assert "seeds providers only" in caplog.text
+
+
+def test_a_missing_signature_seeds_providers_only(tmp_path, monkeypatch, keys):
+    _signed_snapshot(tmp_path, monkeypatch, _signed_files(keys), drop=(SIGNED_FILES[1],))
+
+    _providers_only(_seeded()[0])
+
+
+def test_a_snapshot_with_no_signed_files_seeds_providers_only_and_says_so(tmp_path, monkeypatch, keys, caplog):
+    _signed_snapshot(tmp_path, monkeypatch, _signed_files(keys), drop=SIGNED_FILES)
+
+    with caplog.at_level("INFO"):
+        catalog, _commit = _seeded()
+
+    _providers_only(catalog)
+    assert "carries no signed feed" in caplog.text
+
+
+def test_a_signed_feed_for_another_channel_seeds_providers_only(tmp_path, monkeypatch, keys):
+    _signed_snapshot(tmp_path, monkeypatch, _signed_files(keys, channel="beta"))
+
+    _providers_only(_seeded()[0])
+
+
+def test_a_signed_feed_built_from_another_commit_seeds_providers_only(tmp_path, monkeypatch, keys, caplog):
+    _signed_snapshot(tmp_path, monkeypatch, _signed_files(keys, source_commit=LATER_COMMIT))
+
+    with caplog.at_level("WARNING"):
+        catalog, _commit = _seeded()
+
+    _providers_only(catalog)
+    assert "different commit" in caplog.text
+
+
+def test_a_signed_file_changed_after_the_build_seeds_providers_only(tmp_path, monkeypatch, keys, caplog):
+    root = _signed_snapshot(tmp_path, monkeypatch, _signed_files(keys))
+    _unlock(root)
+    path = root / SIGNED_FILES[0]
+    path.write_bytes(_tamper(path.read_bytes()))
+
+    with caplog.at_level("WARNING"):
+        catalog, _commit = _seeded()
+
+    _providers_only(catalog)
+    assert "does not match floor.json" in caplog.text
+
+
+def test_a_tampered_signature_seeds_providers_only_through_a_refresh(tmp_path, monkeypatch, hub, keys, service_kind):
+    from provider_hub.state import load_state
+    signed = _signed_files(keys)
+    signed[SIGNED_FILES[1]] = _tamper(signed[SIGNED_FILES[1]])
+    _signed_snapshot(tmp_path, monkeypatch, signed)
+    _unreachable(monkeypatch)
+
+    hub.refresh_catalog()
+
+    entries = list(load_state()["catalog_entries"].values())
+    assert [entry["provider_id"] for entry in entries] == ["examplehub"]
+    assert all(entry["catalog_list"] == "providers" for entry in entries)
+
+
+def test_the_signed_feed_never_leaks_an_unsigned_plugins_list(tmp_path, monkeypatch, keys):
+    # The legacy catalog.json in this snapshot carries a plugins list (see _catalog); it is never seeded.
+    _signed_snapshot(tmp_path, monkeypatch, _signed_files(keys), drop=SIGNED_FILES)
+    from provider_hub import floor as floor_module
+    assert "plugins" in floor_module.load_floor().catalog()
+
+    _providers_only(_seeded()[0])
+
+
+def test_a_plugin_bundle_installs_from_the_snapshot(tmp_path, monkeypatch, keys):
+    from provider_hub import floor as floor_module
+    from provider_hub.manifest import validate_plugin_bundle
+    _signed_snapshot(tmp_path, monkeypatch, _signed_files(keys))
+    manifest = _service_manifest()
+
+    validated = validate_plugin_bundle(manifest)
+
+    assert floor_module.bundle_file(validated, "service.py") == SERVICE_FILE
