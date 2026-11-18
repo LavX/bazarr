@@ -35,14 +35,26 @@ export interface PluginStatus {
   tooltip?: string;
 }
 
-const isOpen = (job: PluginJob) =>
-  job.state === "pending" || job.state === "running";
+/** The longest a job is taken as running without a word from it. The server closes such rows too. */
+export const JOB_TIME_LIMIT_MS = 2 * 60 * 60 * 1000;
+
+const isOpen = (job: PluginJob, now: number) => {
+  if (job.state !== "pending" && job.state !== "running") {
+    return false;
+  }
+  // A row nothing has reported on for that long belongs to something that is gone, and locks nobody.
+  const reported = Date.parse(job.updated_at ?? job.created_at ?? "");
+  return Number.isNaN(reported) || now - reported <= JOB_TIME_LIMIT_MS;
+};
 
 /** The open job of each plugin, by plugin id and what the job does. */
-export function openJobs(jobs: PluginJob[] | undefined) {
+export function openJobs(
+  jobs: PluginJob[] | undefined,
+  now: number = Date.now(),
+) {
   const byPlugin = new Map<string, Set<string>>();
   for (const job of jobs ?? []) {
-    if (!isOpen(job) || !job.target_id || !job.action) {
+    if (!isOpen(job, now) || !job.target_id || !job.action) {
       continue;
     }
     const actions = byPlugin.get(job.target_id) ?? new Set<string>();

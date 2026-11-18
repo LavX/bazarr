@@ -176,7 +176,12 @@ const PluginHubView: FunctionComponent = () => {
     const trigger = lastTrigger.current;
     if (trigger && document.body.contains(trigger)) {
       trigger.focus();
+      return;
     }
+    // The card is gone (it was removed), so focus goes to the tab in use, where the next keypress starts.
+    document
+      .querySelector<HTMLElement>('[role="tab"][aria-selected="true"]')
+      ?.focus();
   };
 
   const setParam = useCallback(

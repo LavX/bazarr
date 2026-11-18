@@ -70,8 +70,13 @@ const Action: FunctionComponent<PluginCardProps> = ({
   onUpdate,
   updating,
   blocked = false,
+  working,
+  elsewhere,
+  openJobs,
 }) => {
   const { entry } = row;
+  // Something is already being done to this plugin, so an update does not start on top of it.
+  const occupied = working || (openJobs.get(row.id)?.size ?? 0) > 0;
   // A row that only records a failed install is not an installation: the install is offered again.
   const installation = isInstalled(row.installation) ? row.installation : null;
   if (installation?.pending_restart) {
@@ -88,11 +93,13 @@ const Action: FunctionComponent<PluginCardProps> = ({
         variant="light"
         color="yellow"
         loading={updating}
-        disabled={blocked}
+        disabled={blocked || occupied || elsewhere}
         title={
-          blocked
+          blocked || elsewhere
             ? "Another plugin is being changed. Wait for it to finish."
-            : undefined
+            : occupied
+              ? "Something is being done to this plugin. Wait for it to finish."
+              : undefined
         }
         onClick={() => onUpdate(row)}
         leftSection={<FontAwesomeIcon icon={faArrowUp} />}

@@ -198,3 +198,34 @@ describe("who needs a plugin", () => {
     expect(rowFor(needed, [extender]).dependents).toEqual([]);
   });
 });
+
+describe("the jobs that lock a card", () => {
+  const now = Date.parse("2026-11-18T12:00:00Z");
+  const at = (updated_at: string | undefined, id = "a"): PluginJob => ({
+    ...job("repair"),
+    id,
+    updated_at,
+    created_at: updated_at,
+  });
+
+  it("counts a running job that reported recently, and one with no time at all", () => {
+    expect(openJobs([at("2026-11-18T11:30:00Z")], now).get("demo")).toEqual(
+      new Set(["repair"]),
+    );
+    expect(openJobs([at(undefined)], now).get("demo")).toEqual(
+      new Set(["repair"]),
+    );
+  });
+
+  it("does not let a job nothing has reported on for hours lock the plugin", () => {
+    expect(openJobs([at("2026-11-18T08:00:00Z")], now).get("demo")).toBe(
+      undefined,
+    );
+    expect(
+      pluginStatus(
+        { ...rowFor(base), update: null },
+        openJobs([at("2026-11-18T08:00:00Z")], now),
+      )?.key,
+    ).toBe("active");
+  });
+});

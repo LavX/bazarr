@@ -83,7 +83,7 @@ interface RemoveDialogProps {
 
 /**
  * The confirmation for a removal. It lists the plugins that need this one first and refuses to go on while
- * any does, says what the Translation page loses,. Focus starts on the heading, so nothing is one keypress from removing.
+ * any does, says what happens on the Translation page. Focus starts on the heading, so nothing is one keypress from removing.
  */
 export const RemoveDialog: FunctionComponent<RemoveDialogProps> = ({
   row,
@@ -160,7 +160,7 @@ export const RemoveDialog: FunctionComponent<RemoveDialogProps> = ({
             <Alert color="yellow" variant="light" role="note">
               <ul
                 className={styles.effects}
-                aria-label="What the Translation page loses"
+                aria-label="Effects on the Translation page"
               >
                 {effects.map((effect) => (
                   <li key={effect}>{effect}</li>

@@ -608,3 +608,79 @@ describe("one change at a time", () => {
     );
   });
 });
+
+const openRemoveFrom = async (name: string) => {
+  const user = await menuOf(name);
+  await user.click(await screen.findByRole("menuitem", { name: "Remove" }));
+  const dialog = await screen.findByRole("dialog", { name: `Remove ${name}?` });
+  return { user, dialog };
+};
+
+describe("an update and a removal while something else is going on", () => {
+  it("does not offer an update on top of a repair that is running, and says why", async () => {
+    installed = [installedTranslator];
+    server.use(
+      http.get("/api/plugins/catalog", () =>
+        HttpResponse.json(catalog([aiTranslator])),
+      ),
+    );
+    jobs = [
+      {
+        id: "9",
+        action: "repair",
+        state: "running",
+        target_kind: "provider",
+        target_id: "ai_translator",
+      },
+    ];
+    showPage();
+    const button = await screen.findByRole("button", {
+      name: "Update AI Subtitle Translator to 2.0.0",
+    });
+    expect(button).toBeDisabled();
+    expect(button).toHaveAttribute(
+      "title",
+      "Something is being done to this plugin. Wait for it to finish.",
+    );
+  });
+
+  it("puts focus on the tab in use when the card that opened the dialog is gone", async () => {
+    installed = [installedBackend];
+    server.use(
+      http.delete("/api/plugins/installations/:id", () => {
+        installed = [];
+        return HttpResponse.json({ job_id: null }, { status: 202 });
+      }),
+    );
+    showPage();
+    const { user, dialog } = await openRemoveFrom("Opencode back end");
+    await user.click(within(dialog).getByRole("button", { name: "Remove" }));
+    await waitFor(() =>
+      expect(screen.getByRole("tab", { name: "Installed" })).toHaveFocus(),
+    );
+  });
+
+  it("says those, not that, when more than one plugin needs it", async () => {
+    const [row] = installedRows(undefined, [installedBackend], "all");
+    const none = () => undefined;
+    customRender(
+      <PluginMenu
+        row={row}
+        enabledDependents={["Alpha", "Beta"]}
+        busy={false}
+        elsewhere={false}
+        onToggle={none}
+        onRepair={none}
+        onLog={none}
+        onRemove={none}
+      />,
+    );
+    await userEvent.click(
+      screen.getByRole("button", { name: "Opencode back end actions" }),
+    );
+    const item = await screen.findByRole("menuitem", { name: /Turn off/ });
+    expect(item).toHaveTextContent(
+      "Alpha, Beta need it. Turn those off first.",
+    );
+  });
+});

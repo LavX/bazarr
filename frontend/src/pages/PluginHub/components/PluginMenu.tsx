@@ -1,4 +1,4 @@
-import { FunctionComponent, ReactNode } from "react";
+import { FunctionComponent } from "react";
 import { ActionIcon, Menu } from "@mantine/core";
 import {
   faEllipsis,
@@ -43,11 +43,12 @@ const Item: FunctionComponent<{
   disabled?: boolean;
   color?: string;
   onClick: () => void;
-  children?: ReactNode;
 }> = ({ icon, label, reason, disabled = false, color, onClick }) => (
   // Not the native disabled state: that takes the item out of the arrow-key order, and with it the reason.
   <Menu.Item
     color={color}
+    // A refused click leaves the menu open, so the reason can still be read.
+    closeMenuOnClick={!disabled}
     // Set on the element itself: the menu item component does not pass the attribute through.
     ref={(node) => {
       if (disabled) {
@@ -93,7 +94,7 @@ export const PluginMenu: FunctionComponent<PluginMenuProps> = ({
         : null;
   const needed =
     isOn && enabledDependents.length > 0
-      ? `${enabledDependents.join(", ")} needs it. Turn that off first.`
+      ? `${enabledDependents.join(", ")} ${enabledDependents.length === 1 ? "needs" : "need"} it. Turn ${enabledDependents.length === 1 ? "that" : "those"} off first.`
       : null;
   return (
     <Menu position="bottom-end" withinPortal>
