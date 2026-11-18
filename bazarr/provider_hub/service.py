@@ -56,6 +56,7 @@ from .state import (
     spoofs_official_catalog_source,
 )
 from . import env_registry, transport
+from .bundled_wheels import declared_wheels
 from .venv import (
     _ENV_LOCK, PluginEnvironment, environment_fingerprint, hold_environment, pin_scope, python_executable,
     release_pins, validated_bundle_path, validated_interpreter,
@@ -3545,6 +3546,14 @@ def _refuse_a_release_that_breaks_dependents(
             raise ProviderHubInstallError(closure.breaks_text(provider_id, version, broken))
 
 
+def _bundled_wheels_argument(validated, bundle_path: Path) -> dict[str, Path]:
+    """The staged bundle, for an environment build that installs from the wheels the bundle carries.
+
+    A bundle without wheels builds from the index and needs nothing from its files.
+    """
+    return {"bundle_path": bundle_path} if declared_wheels(validated) else {}
+
+
 def _stage_validated(
     validated,
     source_trusted: bool,
@@ -3608,7 +3617,8 @@ def _stage_validated(
             staged.append(bundle_path)
             step("Installing the provider's dependencies")
             install_remaining = None if deadline is None else max(0.0, deadline - time.monotonic())
-            env_path = PluginEnvironment(provider_hub_dir()).install(validated, timeout=install_remaining)
+            env_path = PluginEnvironment(provider_hub_dir()).install(
+                validated, timeout=install_remaining, **_bundled_wheels_argument(validated, bundle_path))
             staged.append(env_path)
             staged_python_path = python_executable(env_path)
             step("Checking that the provider starts")
@@ -4452,8 +4462,8 @@ def _repair_environment(provider_id: str, checkpoint=None) -> dict[str, Any]:
 
     The old directory is left alone, because other plugins may share it. The new
     one is recorded and the installation pointed at it only after the worker
-    check passes there. Needs the network, so it is an explicit action and never
-    runs at boot.
+    check passes there. A bundle that carries its own wheels rebuilds from them;
+    any other needs the network. It is an explicit action and never runs at boot.
     """
     step = checkpoint or (lambda message: None)
     row = (load_state().get("installations") or {}).get(provider_id)
@@ -4485,7 +4495,8 @@ def _repair_environment(provider_id: str, checkpoint=None) -> dict[str, Any]:
                 env_registry.mark_needs_repair(provider_id)
                 raise
             step("Rebuilding the plugin's dependencies")
-            env_path = PluginEnvironment(provider_hub_dir()).install(validated, rebuild=True)
+            env_path = PluginEnvironment(provider_hub_dir()).install(
+                validated, rebuild=True, **_bundled_wheels_argument(validated, bundle_path))
             python_path = python_executable(env_path)
             step("Checking that the plugin starts")
             kind.smoke_test(validated, bundle_path, python_path)

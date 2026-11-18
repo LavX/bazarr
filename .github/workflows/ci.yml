@@ -418,6 +418,7 @@ jobs:
             tests/bazarr/test_provider_hub_worker_timeout.py \
             tests/bazarr/test_provider_hub_env_repair.py \
             tests/bazarr/test_provider_hub_shared_envs.py \
+            tests/bazarr/test_provider_hub_bundled_wheels.py \
             tests/bazarr/test_provider_hub_subs_id_parity.py \
             tests/bazarr/test_provider_hub_transport.py \
             tests/bazarr/test_provider_hub_kind_recovery.py \
