@@ -606,3 +606,21 @@ def test_a_capability_another_enabled_plugin_also_provides_leaves_nobody_dependi
     assert listed["supplier_a"]["dependents"] == [] and listed["supplier_b"]["dependents"] == []
     assert client.delete("/api/plugins/installations/supplier_a?keep_data=false",
                          headers={"X-API-KEY": API_KEY}).status_code == 202
+
+
+def test_a_staged_change_reports_whether_it_needs_a_restart(client):
+    """Both listings serve the same field: a staged provider waits for a restart, a staged plugin of a kind that
+    attaches live does not."""
+    from provider_hub.state import mutate_state
+
+    def stage(state):
+        state["installations"]["providerhub"]["pending_restart"] = True
+        state["installations"]["exampleservice"]["pending_restart"] = True
+
+    mutate_state(stage)
+    plugins = {item["provider_id"]: item for item in _get(client, "/api/plugins/installations").json["data"]}
+    assert plugins["providerhub"]["needs_restart"] is True
+    assert plugins["exampleservice"]["needs_restart"] is False
+    hub = {item["provider_id"]: item for item in _get(client, "/api/provider-hub/providers").json["data"]}
+    assert hub["providerhub"]["needs_restart"] is True
+    assert _get(client, "/api/plugins/installations/exampleservice").json["needs_restart"] is False
