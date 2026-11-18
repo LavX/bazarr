@@ -3654,7 +3654,7 @@ def _stage_validated(
                 # The row of a plugin removed in this run still carries its saved settings and keys. They go to the
                 # same plugin from the same source and to nobody else, so a package from another source, or an
                 # upload over a catalog install, starts with none, before anything is copied from the row.
-                if current.get("source_id") != source_id:
+                if current.get("source_id") != source_id or (current.get("origin") or origin) != origin:
                     current = {**current, "config": {}}
             _refuse_a_release_that_breaks_dependents(state, validated.provider_id, validated.version, validated.raw)
             installation = _staged_installation(
@@ -3692,7 +3692,7 @@ def _stage_validated(
             raise
         missing_required = missing_required_fields(installation) if is_fresh else []
         if is_fresh:
-            claim_kept_data(validated.provider_id, source_id, validated.kind)
+            claim_kept_data(validated.provider_id, source_id, validated.kind, origin)
         if is_fresh and not get_kind(validated.kind).on_installed(
                 validated.provider_id, missing_required=missing_required):
             # First install: opt the provider into Bazarr's enabled_providers so
@@ -4007,8 +4007,6 @@ def _discard_staged_members(plugin_ids: list[str], root_id: str | None = None) -
     was_enabled = getattr(plugin_ids, "was_enabled", {})
     for plugin_id in reversed(plugin_ids):
         try:
-            # What an earlier removal kept and this install took over is not the install's to delete: a failed or
-            # stopped install gives it back, still kept.
             # A rollback: whatever an earlier removal kept of this plugin stays exactly as it was, whether or not this
             # install got as far as taking it over.
             removed = remove_installation(plugin_id, ignoring_dependents=frozenset(own), rollback=True)
@@ -4577,6 +4575,11 @@ def remove_installation(provider_id: str, *, ignoring_dependents: frozenset[str]
             names = [name for name in closure.dependents(state, provider_id) if name not in ignoring_dependents]
             if names:
                 raise ProviderHubInstallError(closure.dependents_text(provider_id, names, "removed"))
+            kept = (state.get("kept_data") or {}).get(provider_id)
+            if rollback and isinstance(kept, dict) and not kept.get("config") and item.get("config"):
+                # An install that took the kept settings over put them on this row and cleared the record's copy.
+                # The row is going, so they go back to the record, as they were.
+                kept["config"] = copy.deepcopy(item["config"])
             if not item.get("active_version"):
                 del installations[provider_id]
                 return "removed_pending"
@@ -4631,7 +4634,7 @@ def _record_kept_data(provider_id: str, item: Any, kind_hooks: Any, keep_data: b
         return
     row = item if isinstance(item, dict) else {}
     config = row.get("config")
-    entry = {"source_id": row.get("source_id"), "kind": kind_of(row) if row else None,
+    entry = {"source_id": row.get("source_id"), "origin": row.get("origin"), "kind": kind_of(row) if row else None,
              "config": copy.deepcopy(config) if keep_data and isinstance(config, dict) and config else None}
 
     def record(state: dict[str, Any]) -> None:
@@ -4647,7 +4650,7 @@ def _record_kept_data(provider_id: str, item: Any, kind_hooks: Any, keep_data: b
         logging.getLogger(__name__).warning("Could not record the kept data of %s", provider_id, exc_info=True)
 
 
-def claim_kept_data(provider_id: str, source_id: str | None, kind: str) -> bool:
+def claim_kept_data(provider_id: str, source_id: str | None, kind: str, origin: str | None = None) -> bool:
     """A first install, or a reinstall of a plugin removed in this run, has staged its row. Data kept by an earlier
     removal is handed over only when it is the same plugin from the same source and of the same kind, with its
     saved settings put back; otherwise it is discarded, so a different package under the same id never inherits
@@ -4659,8 +4662,10 @@ def claim_kept_data(provider_id: str, source_id: str | None, kind: str) -> bool:
     entry = (load_state().get("kept_data") or {}).get(provider_id)
     if not isinstance(entry, dict):
         return False
-    # An upload has no source, and takes back what an upload kept, and nothing a catalog source kept.
-    if entry.get("source_id") == source_id and entry.get("kind") == kind:
+    # An upload takes back what an upload kept, and nothing a catalog source kept. A row that says nothing of its
+    # origin is judged by its source alone.
+    if (entry.get("source_id") == source_id and entry.get("kind") == kind
+            and (entry.get("origin") or origin) == origin):
         config = entry.get("config")
 
         def hand_over(state: dict[str, Any]) -> None:

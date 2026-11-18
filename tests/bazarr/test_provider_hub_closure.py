@@ -1193,7 +1193,8 @@ def test_a_failed_or_stopped_install_hands_back_the_kept_data_it_had_taken_and_d
 
     parent = _manifest("parent", provides=[PARENT_CAPABILITY])
     addon = _manifest("addon", extends={"id": "parent", "capability": PARENT_CAPABILITY})
-    _world(tmp_path, monkeypatch, [parent, addon], _installed(parent, source_id="official", source_bound=True))
+    _world(tmp_path, monkeypatch, [parent, addon], _installed(
+        parent, source_id="official", source_bound=True, config={"api_key": "enc:abc"}))
     assert staging.remove_installation("parent", keep_data=True) is True
     # Gone at the restart, as a removal is: the data is what is left.
     from provider_hub.state import mutate_state
@@ -1202,9 +1203,10 @@ def test_a_failed_or_stopped_install_hands_back_the_kept_data_it_had_taken_and_d
     keeping_kind.calls.clear()
 
     # The add-on's install stages its parent first, taking over what was kept, and then fails.
+    before = load_state()["kept_data"]["parent"]
     members = staging._stage_closure_members(_closure("addon"), "official")
     assert list(members) == ["parent"] and keeping_kind.reclaimed == ["parent"]
-    before = load_state()["kept_data"]["parent"]
+    assert load_state()["installations"]["parent"]["config"] == {"api_key": "enc:abc"}
     staging._discard_staged_members(members, "addon")
 
     assert ("after_removed", "parent") in keeping_kind.calls
@@ -1334,3 +1336,44 @@ def test_a_rollback_of_a_subtitle_provider_never_writes_a_record_or_clears_its_s
     assert staging.remove_installation("parent", rollback=True) is True
 
     assert keeping_kind.kept is True and "parent" not in load_state().get("kept_data", {})
+
+
+@pytest.mark.parametrize("path", ["the install itself fails", "a dependency fails to download",
+                                  "the install fails after the dependency took the data over"])
+def test_kept_settings_and_secrets_survive_every_way_an_install_can_fail(
+        tmp_path, monkeypatch, keeping_kind, staging, path):
+    """After a removal that kept the data, and the restart that finished it, nothing a failed install does may
+    change what was kept: the record, its owner, the saved settings and the keys in them."""
+    from provider_hub.state import load_state, mutate_state
+
+    parent = _manifest("parent", provides=[PARENT_CAPABILITY])
+    addon = _manifest("addon", extends={"id": "parent", "capability": PARENT_CAPABILITY})
+    secrets = {"base_url": "https://x.test", "api_key": "enc:abc"}  # pragma: allowlist secret
+    _world(tmp_path, monkeypatch, [parent, addon], _installed(
+        parent, source_id="official", source_bound=True, config=dict(secrets)))
+    assert staging.remove_installation("parent", keep_data=True) is True
+    mutate_state(lambda state: state["installations"].pop("parent"))  # the restart
+    recorded = load_state()["kept_data"]["parent"]
+    assert recorded["config"] == secrets
+    keeping_kind.calls.clear()
+
+    def download_fails(manifest, deadline=None):
+        raise staging.ProviderHubInstallError("the download failed")
+
+    if path == "the install itself fails":
+        monkeypatch.setattr(staging, "_fetch_bundle", download_fails)
+        with pytest.raises(staging.ProviderHubInstallError):
+            staging.stage_install(parent, source_id="official", catalog_list="plugins")
+    elif path == "a dependency fails to download":
+        monkeypatch.setattr(staging, "_fetch_bundle", download_fails)
+        with pytest.raises(staging.ProviderHubInstallError):
+            staging._stage_closure_members(_closure("addon"), "official")
+    else:
+        members = staging._stage_closure_members(_closure("addon"), "official")
+        assert keeping_kind.reclaimed == ["parent"]
+        staging._discard_staged_members(members, "addon")
+
+    assert load_state()["kept_data"]["parent"] == recorded
+    assert keeping_kind.discarded == []
+    # Nothing was told to delete the data.
+    assert getattr(keeping_kind, "kept", True) is True
