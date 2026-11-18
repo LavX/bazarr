@@ -22,7 +22,7 @@ from provider_hub.venv import PluginEnvironment, PluginEnvironmentError, python_
 pytestmark = pytest.mark.usefixtures("own_process_candidates")
 
 
-def _make_wheel(directory: Path, name: str, version: str, requires=()) -> Path:
+def _make_wheel(directory: Path, name: str, version: str, requires=(), tag="py3-none-any") -> Path:
     """A real, tiny pure-Python wheel."""
     directory.mkdir(parents=True, exist_ok=True)
     dist = f"{name}-{version}"
@@ -39,7 +39,7 @@ def _make_wheel(directory: Path, name: str, version: str, requires=()) -> Path:
         record.append(f"{path},sha256={digest},{len(data)}")
     record.append(f"{dist}.dist-info/RECORD,,")
     files[f"{dist}.dist-info/RECORD"] = "\n".join(record) + "\n"
-    wheel = directory / f"{name}-{version}-py3-none-any.whl"
+    wheel = directory / f"{name}-{version}-{tag}.whl"
     with zipfile.ZipFile(wheel, "w") as archive:
         for path, text in files.items():
             archive.writestr(path, text)
@@ -278,3 +278,52 @@ def test_requirements_that_do_not_apply_here_do_not_need_a_wheel(tmp_path):
     ])
 
     assert verified_wheels_dir(manifest, bundle) == bundle.resolve() / "wheels"
+
+
+def _closure(tmp_path, specs):
+    """A bundle holding one wheel per ``(name, requires, tag)`` spec, each locked at 1.0."""
+    root = tmp_path / "closure"
+    files, hashes = {}, {}
+    for name, requires, tag in specs:
+        wheel = _make_wheel(root / "wheels", name, "1.0", requires, tag)
+        files[f"wheels/{wheel.name}"] = _sha(wheel)
+        hashes.setdefault(name, []).append("sha256:" + _sha(wheel))
+    manifest = SimpleNamespace(
+        provider_id="closure", version="1.0.0", files=files,
+        dependency_requirements=tuple(DependencyRequirement(name, "1.0", tuple(found)) for name, found in hashes.items()))
+    return root, manifest
+
+
+def test_an_extra_asked_of_a_package_brings_its_dependencies_into_the_check(tmp_path):
+    specs = [
+        ("fixtureone", ["fixturetwo[socks]>=1"], "py3-none-any"),
+        ("fixturetwo", ['fixturesocks>=1; extra == "socks"', 'fixturenever>=1; extra == "other"'], "py3-none-any"),
+    ]
+    root, manifest = _closure(tmp_path, specs)
+    with pytest.raises(BundledWheelsError, match="needs fixturesocks, which the bundle carries no wheel for"):
+        verified_wheels_dir(manifest, root)
+
+    # With the socks dependency present the closure holds: the extra nobody asked for stays out of it.
+    root, manifest = _closure(tmp_path / "again", specs + [("fixturesocks", [], "py3-none-any")])
+    assert verified_wheels_dir(manifest, root) == root.resolve() / "wheels"
+
+
+def test_an_extra_is_carried_through_a_chain_of_packages(tmp_path):
+    root, manifest = _closure(tmp_path, [
+        ("fixtureone", ["fixturetwo[deep]>=1"], "py3-none-any"),
+        ("fixturetwo", ['fixturethree[deeper]>=1; extra == "deep"'], "py3-none-any"),
+        ("fixturethree", ['fixturemissing>=1; extra == "deeper"'], "py3-none-any"),
+    ])
+
+    with pytest.raises(BundledWheelsError, match="needs fixturemissing"):
+        verified_wheels_dir(manifest, root)
+
+
+def test_every_variant_of_a_package_is_checked_not_only_the_first(tmp_path):
+    root, manifest = _closure(tmp_path, [
+        ("fixtureone", [], "cp310-cp310-manylinux_2_28_x86_64"),
+        ("fixtureone", ["nothere>=1"], "cp311-cp311-manylinux_2_28_x86_64"),
+    ])
+
+    with pytest.raises(BundledWheelsError, match=r"fixtureone-1.0-cp311-cp311-manylinux_2_28_x86_64.whl needs nothere"):
+        verified_wheels_dir(manifest, root)

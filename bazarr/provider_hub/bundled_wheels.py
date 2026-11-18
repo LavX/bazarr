@@ -91,14 +91,18 @@ def _requires_dist(wheel: Path) -> list[str]:
     return [str(value) for value in message.get_all("Requires-Dist") or []]
 
 
-def _check_requirements(wheel_versions: dict[str, tuple[str, str]], root: Path) -> None:
-    """Every requirement of every bundled wheel that applies here is met by another bundled wheel.
+def _check_requirements(wheels: list[tuple[str, str, str]], root: Path) -> None:
+    """Every requirement of every bundled wheel that applies here is met by a bundled wheel.
 
-    ``wheel_versions`` maps a normalized name to ``(version, wheel path)``. Markers are judged for this
-    interpreter, which is the one the environment is built with, and with no extra requested.
+    ``wheels`` lists ``(normalized name, version, path)`` for every wheel file in the bundle, so each variant of
+    a package is checked, whichever one pip ends up choosing. Markers are judged for this interpreter, which is
+    the one the environment is built with. An extra asked of a package (``a`` needs ``b[socks]``) is carried
+    through: the package's wheels are checked again with that extra, and what it adds must be in the bundle too.
     """
     Requirement, Version, InvalidRequirement = _packaging()
-    for key, (_version, path) in sorted(wheel_versions.items()):
+    versions = {key: version for key, version, _path in wheels}
+    parsed: list[tuple[str, str, Any]] = []
+    for key, _version, path in wheels:
         for line in _requires_dist(root / path):
             try:
                 requirement = Requirement(line)
@@ -106,22 +110,42 @@ def _check_requirements(wheel_versions: dict[str, tuple[str, str]], root: Path) 
                 raise BundledWheelsError(f"{path} asks for {line!r}, which is not a valid requirement") from error
             if requirement.url:
                 raise BundledWheelsError(f"{path} asks for {requirement.name} from a URL ({requirement.url}), which is not allowed")
-            try:
-                applies = requirement.marker is None or requirement.marker.evaluate({"extra": ""})
-            except Exception as error:
-                raise BundledWheelsError(f"{path} has a marker that cannot be judged here: {line!r}") from error
-            if not applies:
-                continue
-            found = wheel_versions.get(normalized_name(requirement.name))
-            if found is None:
-                raise BundledWheelsError(f"{path} needs {requirement.name}, which the bundle carries no wheel for")
-            try:
-                satisfied = requirement.specifier.contains(Version(found[0]), prereleases=True)
-            except Exception:
-                satisfied = False
-            if not satisfied:
-                raise BundledWheelsError(
-                    f"{path} needs {requirement.name}{requirement.specifier}, but the bundle carries {found[0]}")
+            parsed.append((key, path, requirement))
+
+    # The extras requested of each package, grown until nothing new is asked. The locked requirements name none.
+    requested: dict[str, set[str]] = {key: set() for key in versions}
+    applying: set[tuple[str, str, int]] = set()
+    changed = True
+    while changed:
+        changed = False
+        for index, (key, path, requirement) in enumerate(parsed):
+            for extra in {""} | requested[key]:
+                try:
+                    applies = requirement.marker is None or requirement.marker.evaluate({"extra": extra})
+                except Exception as error:
+                    raise BundledWheelsError(f"{path} has a marker that cannot be judged here: {requirement}") from error
+                if not applies:
+                    continue
+                applying.add((key, path, index))
+                target = normalized_name(requirement.name)
+                if target not in versions:
+                    continue
+                wanted = {normalized_name(item) for item in requirement.extras} - requested[target]
+                if wanted:
+                    requested[target] |= wanted
+                    changed = True
+
+    for _key, path, index in sorted(applying, key=lambda item: (item[1], item[2])):
+        requirement = parsed[index][2]
+        found = versions.get(normalized_name(requirement.name))
+        if found is None:
+            raise BundledWheelsError(f"{path} needs {requirement.name}, which the bundle carries no wheel for")
+        try:
+            satisfied = requirement.specifier.contains(Version(found), prereleases=True)
+        except Exception:
+            satisfied = False
+        if not satisfied:
+            raise BundledWheelsError(f"{path} needs {requirement.name}{requirement.specifier}, but the bundle carries {found}")
 
 
 def _sha256_file(path: Path) -> str:
@@ -157,7 +181,7 @@ def verified_wheels_dir(manifest: Any, bundle_path: str | Path) -> Path | None:
 
     by_name = {normalized_name(requirement.name): requirement for requirement in requirements}
     covered: set[str] = set()
-    wheel_versions: dict[str, tuple[str, str]] = {}
+    wheels: list[tuple[str, str, str]] = []
     for path, declared_digest in sorted(declared.items()):
         parts = PurePosixPath(path).parts
         match = _WHEEL_RE.match(parts[-1]) if len(parts) == 2 else None
@@ -179,7 +203,7 @@ def verified_wheels_dir(manifest: Any, bundle_path: str | Path) -> Path | None:
         if _sha256_file(wheel) != declared_digest:
             raise BundledWheelsError(f"{path} does not match its declared digest")
         covered.add(key)
-        wheel_versions.setdefault(key, (match.group("version").replace("_", "-"), path))
+        wheels.append((key, requirement.version.replace("_", "-"), path))
 
     for key, requirement in sorted(by_name.items()):
         if key not in covered:
@@ -190,5 +214,5 @@ def verified_wheels_dir(manifest: Any, bundle_path: str | Path) -> Path | None:
     extra = sorted(on_disk - set(declared))
     if extra:
         raise BundledWheelsError(f"{extra[0]} sits among the bundle's wheels but the manifest does not declare it")
-    _check_requirements(wheel_versions, root)
+    _check_requirements(wheels, root)
     return wheels_dir
