@@ -619,7 +619,7 @@ def test_uninstall_job_fails_when_the_provider_is_gone(queue, hub_state, monkeyp
     from provider_hub import service
 
     hub_jobs.queue_uninstall("examplehub", "Example")
-    monkeypatch.setattr(service, "remove_installation", lambda provider_id: False)
+    monkeypatch.setattr(service, "remove_installation", lambda provider_id, **_kwargs: False)
     job = run_next(queue)
 
     assert job["status"] == "failed"
