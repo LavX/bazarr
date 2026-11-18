@@ -2041,6 +2041,13 @@ class WorkerPool:
         """
         self._detached.add(slot)
         self._tearing.setdefault(slot.definition.key, set()).add(slot)
+        # A runtime that can cut its own start short (a long image pull) is asked to, without waiting.
+        cancel = getattr(slot.session, "cancel_start", None)
+        if callable(cancel):
+            try:
+                cancel()
+            except Exception as error:
+                _log_failure("cancelling a start failed", error)
 
     def _wait_ephemeral_starts(self):
         """Wait (bounded) for one-off workers that are still being started."""
@@ -2135,7 +2142,9 @@ class WorkerPool:
                     "memory_limit_bytes": (slot.definition if slot else entry.definition).memory_limit(),
                     "idle_seconds": max(0.0, now - slot.last_used) if slot and not slot.busy() else 0.0,
                     "retiring": len(entry.retiring),
-                    "failures": len(entry.failures),
+                    # Only failures still inside the breaker window: the others no longer count toward it and
+                    # are dropped when the next failure is recorded.
+                    "failures": sum(1 for stamp in entry.failures if now - stamp <= self.limits.breaker_window),
                     "retry_after": max(0.0, until - now) if entry.state in (_S.BACKOFF, _S.BROKEN) else None,
                     "last_error": entry.last_error,
                     "starts": entry.starts,
@@ -2909,6 +2918,10 @@ class WorkerPool:
             slot.stderr_sink(key),
         )
         slot.session = session
+        with self._cond:
+            if slot in self._detached:
+                # Cut loose before the session existed: tell it before it starts.
+                self._detach(slot)
         session.start()
 
     def _wrap_host_call(self, slot, key, handler):

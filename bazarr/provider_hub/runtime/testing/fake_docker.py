@@ -23,6 +23,11 @@ Knobs a test sets on the instance:
 ``create_returns``    a container id the ``create`` reply names instead of the new container's own.
 ``no_swap_accounting`` the daemon cannot limit swap: ``create`` warns and the stored ``MemorySwap`` is -1, as
                       Docker does on cgroup v1 without swap accounting.
+``attach_network_id`` the network id the daemon assigns when it connects a started container (default: the id
+                      of the network the container joined).
+``min_api_version``   a ``"major.minor"`` string: a versioned request below it is answered 400 with the daemon's
+                      "too old" text, as a daemon whose minimum is above the client's version does.
+``pull_delay``        seconds between the lines of a pull's progress stream, to make a pull long.
 ``mutate``            ``callable(inspect_dict)`` applied to every container inspect, to fake a daemon that built
                       something other than what was asked.
 """
@@ -39,6 +44,7 @@ import socketserver
 import sys
 import tempfile
 import threading
+import time
 import urllib.parse
 
 from typing import Any, Callable
@@ -77,6 +83,14 @@ def forbid_real_sockets(monkeypatch) -> None:
 
     monkeypatch.setattr(docker_api._UnixConnection, "connect", connect)
     monkeypatch.setattr(docker_api._TcpConnection, "connect", connect_tcp)
+
+
+class _Stream:
+    """The lines of a streamed answer and the pause between them."""
+
+    def __init__(self, lines, delay=0.0):
+        self.lines = lines
+        self.delay = delay
 
 
 class _Quiet:
@@ -150,6 +164,9 @@ class FakeDocker:
         self.image_volumes: list[dict[str, Any]] = []
         self.mutate: Callable[[dict[str, Any]], None] | None = None
         self.create_returns: str | None = None
+        self.attach_network_id: str | None = None
+        self.min_api_version: str | None = None
+        self.pull_delay = 0.0
         self.no_swap_accounting = False
         self._counter = 0
         self._server: _Server | None = None
@@ -222,7 +239,7 @@ class FakeDocker:
                 "Config": {"Labels": {}, "Env": [], "Image": "bazarr:test", "Hostname": hostname or container_id[:12]},
                 "HostConfig": {"NetworkMode": network_mode},
                 "Mounts": [],
-                "NetworkSettings": {"Networks": {name: {"IPAddress": "172.17.0.2", "Aliases": []}
+                "NetworkSettings": {"Networks": {name: {"IPAddress": "192.0.2.2", "Aliases": []}
                                                  for name in networks}},
                 "_polls": 0, "_self": True,
             }
@@ -258,6 +275,11 @@ class FakeDocker:
             self.requests.append({"method": method, "path": path, "version": version, "query": query,
                                   "body": body, "raw_path": handler.path})
             label = f"{method} {path}"
+            if version and self.min_api_version and tuple(map(int, version.split("."))) < tuple(
+                    map(int, self.min_api_version.split("."))):
+                return self._send(handler, 400, {"message": (
+                    f"client version {version} is too old. Minimum supported API version is "
+                    f"{self.min_api_version}, please upgrade your client to a newer version")})
             for pattern in self.deny:
                 if re.search(pattern, label):
                     return self._send(handler, 403, {"message": "Forbidden by the socket proxy"})
@@ -269,8 +291,9 @@ class FakeDocker:
                 status, payload, headers = self._route(method, path, query, body)
             except KeyError as error:
                 status, payload, headers = 404, {"message": f"No such object: {error.args[0]}"}, {}
-            if isinstance(payload, list) and payload and isinstance(payload[0], bytes):
-                return self._stream(handler, status, payload)
+        if isinstance(payload, _Stream):
+            # Streamed outside the lock, so a slow stream never holds up other requests.
+            return self._stream(handler, status, payload)
         return self._send(handler, status, payload, headers)
 
     @staticmethod
@@ -284,12 +307,15 @@ class FakeDocker:
         handler.wfile.write(data)
 
     @staticmethod
-    def _stream(handler, status, lines):
+    def _stream(handler, status, stream):
         handler.send_response(status)
         handler.send_header("Content-Type", "application/json")
         handler.end_headers()
-        for line in lines:
+        for line in stream.lines:
             handler.wfile.write(line + b"\n")
+            handler.wfile.flush()
+            if stream.delay:
+                time.sleep(stream.delay)
 
     # ------------------------------------------------------------ routes
 
@@ -403,8 +429,8 @@ class FakeDocker:
             "Config": {"Labels": dict(body.get("Labels") or {}), "Env": list(body.get("Env") or []),
                        "Image": ref, "Hostname": cid[:12], "Healthcheck": body.get("Healthcheck")},
             "HostConfig": host, "Mounts": mounts,
-            "NetworkSettings": {"Networks": {n: {"IPAddress": "172.30.0.%d" % (2 + len(self.containers)),
-                                                 "NetworkID": self._network_id(n),
+            # As sent: the daemon fills the id and the address in when the start connects the network.
+            "NetworkSettings": {"Networks": {n: {"IPAddress": "", "NetworkID": (e or {}).get("NetworkID", ""),
                                                  "Aliases": list((e or {}).get("Aliases") or [])}
                                              for n, e in endpoints.items()}},
             "_polls": 0,
@@ -440,6 +466,9 @@ class FakeDocker:
                 state.update(Running=False, Status="exited", ExitCode=self.exit_on_start, OOMKilled=self.oom)
             else:
                 state.update(Running=True, Status="running", ExitCode=0)
+            for index, (name, endpoint) in enumerate(record["NetworkSettings"]["Networks"].items()):
+                endpoint["NetworkID"] = self.attach_network_id or self._network_id(name)
+                endpoint["IPAddress"] = "198.51.100.%d" % (2 + index + len(self.containers))
             return 204, None, {}
         if method == "POST" and action == "stop":
             if not state["Running"]:
@@ -489,7 +518,7 @@ class FakeDocker:
             container = self._find_container(body["Container"])
             aliases = (body.get("EndpointConfig") or {}).get("Aliases") or []
             container["NetworkSettings"]["Networks"][record["Name"]] = {
-                "IPAddress": "172.30.1.9", "NetworkID": record["Id"], "Aliases": aliases}
+                "IPAddress": "198.51.100.200", "NetworkID": record["Id"], "Aliases": aliases}
             return 200, None, {}
         if method == "POST" and action == "disconnect":
             container = self._find_container(body["Container"])
@@ -500,11 +529,15 @@ class FakeDocker:
     def _pull(self, query):
         ref = query.get("fromImage", "")
         if self.pull_error:
-            return 200, [json.dumps({"status": "Pulling from x"}).encode(),
-                         json.dumps({"errorDetail": {"message": self.pull_error}, "error": self.pull_error}).encode()], {}
+            return 200, _Stream([json.dumps({"status": "Pulling from x"}).encode(),
+                                 json.dumps({"errorDetail": {"message": self.pull_error},
+                                             "error": self.pull_error}).encode()]), {}
         if ref not in self.registry:
             return 404, {"message": f"manifest for {ref} not found: manifest unknown"}, {}
+        lines = [json.dumps({"status": "Pulling from x"}).encode()]
+        if self.pull_delay:
+            lines += [json.dumps({"status": "Downloading", "id": str(index)}).encode() for index in range(600)]
+        lines += [json.dumps({"status": "Digest: " + ref.split("@", 1)[1]}).encode(),
+                  json.dumps({"status": "Status: Downloaded newer image"}).encode()]
         self.images[ref] = dict(self.registry[ref])
-        return 200, [json.dumps({"status": "Pulling from x"}).encode(),
-                     json.dumps({"status": "Digest: " + ref.split("@", 1)[1]}).encode(),
-                     json.dumps({"status": "Status: Downloaded newer image"}).encode()], {}
+        return 200, _Stream(lines, self.pull_delay), {}

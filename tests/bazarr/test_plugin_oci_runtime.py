@@ -4,6 +4,7 @@
 Every test runs against ``FakeDocker`` on a temp Unix socket (or a stub client). No test reaches a real Docker
 daemon and no container is ever started: the fake only flips flags in a dict.
 """
+import errno
 import os
 import stat
 import threading
@@ -654,7 +655,7 @@ def test_status_and_endpoint_are_answered_locally(docker):
 
     assert status["state"] == "running" and status["health"] == "healthy" and status["image"].endswith(DIGEST)
     assert endpoint["network"] == runtime.network and endpoint["alias"] == DAEMON_ALIAS
-    assert endpoint["port"] == 8191 and endpoint["ip"].startswith("172.30.")
+    assert endpoint["port"] == 8191 and endpoint["ip"].startswith("198.51.100.")
     assert runtime.in_flight == 0 and runtime.process is None and runtime.recycle_needed is False
     runtime.close(0)
 
@@ -858,7 +859,7 @@ def test_the_labels_are_checked_again_on_what_the_daemon_returned():
 
     greedy = Greedy()
 
-    report = cleanup_orphans(greedy, OWNER)
+    report = cleanup_orphans(greedy, OWNER, self_id=SELF_ID)
 
     assert greedy.removed == ["c" * 12] and report.containers == 1 and report.networks == 0
 
@@ -891,16 +892,16 @@ def test_a_network_someone_else_is_attached_to_is_left_and_reported(docker):
 def test_removal_with_the_daemon_down_reports_instead_of_raising(tmp_path):
     dead = DockerClient(Endpoint("unix", path=str(tmp_path / "missing.sock")))
 
-    report = cleanup_orphans(dead, OWNER)
+    report = cleanup_orphans(dead, OWNER, self_id=SELF_ID)
 
     assert report.containers == 0 and report.errors and "cannot be used" in report.errors[0]
 
 
 def test_removal_refuses_a_bad_owner_or_plugin_id(docker):
     with pytest.raises(ValueError):
-        cleanup_orphans(docker.client(), "not-an-owner")
+        cleanup_orphans(docker.client(), "not-an-owner", self_id=SELF_ID)
     with pytest.raises(ValueError):
-        remove_plugin(docker.client(), OWNER, "Bad Id")
+        remove_plugin(docker.client(), OWNER, "Bad Id", self_id=SELF_ID)
 
 
 # ------------------------------------------------------------------ through the pool
@@ -1440,13 +1441,85 @@ def test_events_are_emitted_after_the_runtimes_lock_is_let_go(docker):
     runtime.close(0)
 
 
-def test_the_network_id_the_container_joined_must_be_the_label_checked_network(docker):
+def test_the_create_body_names_the_checked_network_by_id_and_the_daemon_stores_it_as_sent(docker):
+    runtime = make_runtime(docker)
+    seen = []
+    original = runtime._audit_container
+
+    def spy():
+        record = docker.containers[runtime.container_id]
+        seen.append(dict(record["NetworkSettings"]["Networks"][runtime.network]))
+        original()
+
+    runtime._audit_container = spy
+    runtime.start()
+
+    sent = docker.calls("POST", "/containers/create")[0]["body"]["NetworkingConfig"]["EndpointsConfig"]
+    [network] = docker.networks.values()
+    assert sent == {runtime.network: {"Aliases": [DAEMON_ALIAS], "NetworkID": network["Id"]}}
+    # Before the start the stored endpoint is what was sent: the id as sent, and no address yet.
+    assert seen == [{"IPAddress": "", "NetworkID": network["Id"], "Aliases": [DAEMON_ALIAS]}]
+    # After the start the daemon has connected it and filled the address in.
+    after = managed(docker)[0]["NetworkSettings"]["Networks"][runtime.network]
+    assert after["NetworkID"] == network["Id"] and after["IPAddress"].startswith("198.51.100.")
+    runtime.close(0)
+
+
+def test_a_daemon_that_leaves_the_network_id_empty_until_the_start_passes_the_pre_start_audit(docker):
+    """The old audit demanded the id before the start and so removed every container a real daemon built."""
+    original = docker._create_container
+
+    def create_without_the_id(query, body):
+        for entry in body["NetworkingConfig"]["EndpointsConfig"].values():
+            entry.pop("NetworkID", None)  # nothing sent: the stored id is empty until the connect
+        return original(query, body)
+
+    docker._create_container = create_without_the_id
+    runtime = make_runtime(docker)
+
+    runtime.start()
+
+    assert runtime.alive
+    runtime.close(0)
+
+
+def test_a_pre_start_network_id_that_is_neither_sent_nor_empty_is_refused(docker):
     name = network_name(OWNER, "flaresolverr")
     docker.mutate = lambda view: view["NetworkSettings"]["Networks"][name].update(NetworkID="f" * 64) \
         if name in view["NetworkSettings"]["Networks"] else None
 
     with pytest.raises(OciError, match="wrong id"):
         make_runtime(docker).start()
+
+    assert not docker.calls("POST", "/start")
+
+
+def test_a_container_the_daemon_attaches_to_another_network_at_start_is_stopped_and_removed(docker):
+    docker.attach_network_id = "e" * 64  # the connect at start lands on a network other than the checked one
+    runtime = make_runtime(docker)
+
+    with pytest.raises(OciError, match="started container is on a network with the wrong id"):
+        runtime.start()
+
+    assert docker.calls("POST", "/start") and not managed(docker) and not runtime.alive
+    assert docker.calls("POST", "/stop") and docker.calls("DELETE", "/containers/")
+
+
+def test_a_container_attached_to_an_extra_network_at_start_is_removed(docker):
+    docker.networks["extra"] = {"Id": "extra", "Name": "extra", "Labels": {}, "Containers": {}}
+    original = docker._container_route
+
+    def start_and_attach(method, ident, action, query):
+        result = original(method, ident, action, query)
+        if action == "start":
+            docker._find_container(ident)["NetworkSettings"]["Networks"]["extra"] = {"NetworkID": "extra"}
+        return result
+
+    docker._container_route = start_and_attach
+    runtime = make_runtime(docker)
+
+    with pytest.raises(OciError, match="wrong networks"):
+        runtime.start()
 
     assert not managed(docker)
 
@@ -1482,7 +1555,7 @@ def test_owner_ids_with_a_trailing_newline_are_refused():
     with pytest.raises(ValueError):
         OciDaemonRuntime(spec_for(), client=None, owner_id=OWNER + "\n")
     with pytest.raises(ValueError):
-        cleanup_orphans(None, OWNER + "\n")
+        cleanup_orphans(None, OWNER + "\n", self_id=SELF_ID)
 
 
 @pytest.mark.parametrize("overrides", [
@@ -1495,3 +1568,135 @@ def test_a_spec_with_a_trailing_newline_anywhere_is_refused(overrides):
 
     with pytest.raises(ValueError):
         ContainerSpec(**values)
+
+
+# ------------------------------------------------------------------ the owner id on a filesystem without links
+
+
+@pytest.mark.parametrize("code", [errno.EPERM, errno.ENOTSUP, errno.EOPNOTSUPP])
+def test_the_owner_id_is_created_exclusively_when_hard_links_are_not_supported(tmp_path, monkeypatch, code):
+    def no_links(src, dst):
+        raise OSError(code, "no hard links here")
+
+    monkeypatch.setattr(os, "link", no_links)
+    path = tmp_path / "owner"
+
+    first = load_owner_id(path)
+
+    assert oci_module.OWNER_ID_RE.fullmatch(first) and load_owner_id(path) == first
+    assert os.listdir(tmp_path) == ["owner"] and stat.S_IMODE(os.stat(path).st_mode) == 0o600
+
+
+def test_without_links_a_file_that_appeared_first_wins(tmp_path, monkeypatch):
+    path = tmp_path / "owner"
+
+    def no_links(src, dst):
+        path.write_text(OTHER + "\n")
+        raise OSError(errno.EPERM, "no hard links here")
+
+    monkeypatch.setattr(os, "link", no_links)
+
+    assert load_owner_id(path) == OTHER
+
+
+def test_any_other_link_failure_refuses_and_leaves_nothing_behind(tmp_path, monkeypatch):
+    def broken(src, dst):
+        raise OSError(errno.EIO, "disk")
+
+    monkeypatch.setattr(os, "link", broken)
+
+    with pytest.raises(OciUnavailable, match="cannot be created"):
+        load_owner_id(tmp_path / "owner")
+
+    assert os.listdir(tmp_path) == []
+
+
+# ------------------------------------------------------------------ the failure count shown
+
+
+def test_the_status_counts_only_failures_inside_the_breaker_window(docker, make_pool, clock):
+    pool = make_pool(breaker_window=300.0)
+    pool.register(pooled(docker))
+    pool.run("fs", "status")
+    managed(docker)[0]["State"].update(Running=False, Status="exited", ExitCode=1)
+    assert wait_until(lambda: not pool._entries["fs"].slot.session.alive)
+    assert wait_until(lambda: (pool.sweep() or pool.state("fs") in (WorkerState.STOPPED, WorkerState.BACKOFF)))
+    assert pool.status()["workers"]["fs"]["failures"] == 1
+
+    clock.advance(301)
+
+    status = pool.status()["workers"]["fs"]
+    assert status["failures"] == 0
+    # What the breaker decides is untouched: the stale stamp is still in its list until the next failure.
+    assert len(pool._entries["fs"].failures) == 1
+
+
+# ------------------------------------------------------------------ a start that can be cut short
+
+
+def test_a_stop_during_a_long_pull_ends_the_start_within_seconds(docker, make_pool):
+    docker.pull_delay = 0.2  # 600 progress lines: the pull would take two minutes
+    pool = make_pool()
+    pool.register(pooled(docker))
+    outcome = []
+
+    def run():
+        try:
+            pool.run("fs", "status")
+        except Exception as error:
+            outcome.append(error)
+
+    caller = threading.Thread(target=run)
+    caller.start()
+    assert wait_until(lambda: docker.calls("POST", "/images/create"))
+    began = time.monotonic()
+
+    pool.stop("fs")
+    caller.join(timeout=10)
+
+    assert not caller.is_alive() and time.monotonic() - began < 6.0
+    assert outcome and isinstance(outcome[0], PoolUnavailable)
+    assert not docker.calls("POST", "/containers/create") and not managed(docker)
+
+
+def test_cancelling_a_start_cuts_the_pull_and_leaves_nothing_behind(docker):
+    docker.pull_delay = 0.2
+    runtime = make_runtime(docker)
+    result = []
+
+    def run():
+        try:
+            runtime.start()
+        except OciError as error:
+            result.append(str(error))
+
+    thread = threading.Thread(target=run)
+    thread.start()
+    assert wait_until(lambda: docker.calls("POST", "/images/create"))
+    began = time.monotonic()
+
+    runtime.cancel_start()
+    thread.join(timeout=10)
+
+    assert result == ["the start was cancelled"] and time.monotonic() - began < 3.0
+    assert not runtime.alive and not docker.calls("POST", "/containers/create")
+
+
+def test_a_cancel_while_waiting_for_health_stops_and_removes_the_container(docker):
+    docker.health_after = 10_000
+    runtime = make_runtime(docker, sleep=lambda seconds: time.sleep(0.01))
+    result = []
+
+    def run():
+        try:
+            runtime.start()
+        except OciError as error:
+            result.append(str(error))
+
+    thread = threading.Thread(target=run)
+    thread.start()
+    assert wait_until(lambda: docker.calls("POST", "/start"))
+    runtime.cancel_start()
+    thread.join(timeout=5)
+
+    assert result == ["the start was cancelled"] and not managed(docker) and not runtime.alive
