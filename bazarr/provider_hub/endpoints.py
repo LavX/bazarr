@@ -134,9 +134,48 @@ def may_receive_flaresolverr(installation) -> bool:
         isinstance(requires, (list, tuple)) and FLARESOLVERR_CAPABILITY in requires)
 
 
-def _probe_flaresolverr(url: str) -> bool:
+def _read_json_object(response, limit: int):
+    """The JSON object a 200 answer carries, or None when it is not one.
+
+    Whatever answers is not trusted to be short: reading stops one chunk past
+    ``limit`` and the answer is refused. The caller closes the response.
+    """
     import json
 
+    if response.status_code != 200:
+        return None
+    chunks, size = [], 0
+    for chunk in response.iter_content(limit):
+        chunks.append(chunk)
+        size += len(chunk)
+        if size > limit:
+            return None
+    try:
+        payload = json.loads(b"".join(chunks))
+    except ValueError:
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _is_flaresolverr_index(payload) -> bool:
+    return isinstance(payload, dict) and "flaresolverr" in str(payload.get("msg", "")).casefold()
+
+
+def _fetch_index(session, url: str, timeout, headers=None, verify=True):
+    """GET the service root and return its JSON object, or None when the answer is not one.
+
+    Connection problems propagate as ``requests`` exceptions. The one probe
+    behind both the sibling hint and the Test of a typed address.
+    """
+    response = session.get(url, timeout=timeout, allow_redirects=False, stream=True,
+                           headers=headers, verify=verify)
+    try:
+        return _read_json_object(response, SIBLING_PROBE_MAX_BYTES)
+    finally:
+        response.close()
+
+
+def _probe_flaresolverr(url: str) -> bool:
     import requests
 
     try:
@@ -144,23 +183,10 @@ def _probe_flaresolverr(url: str) -> bool:
             # A container name is looked up directly: a proxy set for the
             # environment must not decide whether the sibling answers.
             session.trust_env = False
-            response = session.get(url, timeout=SIBLING_PROBE_TIMEOUT_SECONDS, allow_redirects=False, stream=True)
-            try:
-                if response.status_code != 200:
-                    return False
-                # Whatever answers on that name is not trusted to be short.
-                chunks, size = [], 0
-                for chunk in response.iter_content(SIBLING_PROBE_MAX_BYTES):
-                    chunks.append(chunk)
-                    size += len(chunk)
-                    if size > SIBLING_PROBE_MAX_BYTES:
-                        return False
-                payload = json.loads(b"".join(chunks))
-            finally:
-                response.close()
+            payload = _fetch_index(session, url, SIBLING_PROBE_TIMEOUT_SECONDS)
     except Exception:
         return False
-    return isinstance(payload, dict) and "flaresolverr" in str(payload.get("msg", "")).casefold()
+    return _is_flaresolverr_index(payload)
 
 
 def _record_sibling_locked(found: bool) -> None:
@@ -317,3 +343,150 @@ def flaresolverr_status(settings=None, refresh: bool = False) -> dict:
         # already in use and so has nothing left to offer.
         "sibling_found": detected is not None,
     }
+
+
+# The Test of an address the user typed. Same rules as the other connection
+# tests in Settings (``app.ui``): loopback and LAN hosts are fine, multicast and
+# unspecified targets and anything that smuggles a query, a fragment, ``..`` or
+# credentials into the address are refused, redirects are never followed, and
+# only what a version string can look like is echoed back.
+ADDRESS_TEST_REQUEST_TIMEOUT_SECONDS = 4.0
+# The whole Test across every address the host name resolves to. The name lookup
+# itself is not covered by it, as with the other connection tests.
+ADDRESS_TEST_DEADLINE_SECONDS = 10.0
+# The /v1 answer to sessions.list carries a session name per open session.
+ADDRESS_TEST_V1_MAX_BYTES = 65536
+ADDRESS_TEST_MAX_LENGTH = 2048
+
+ADDRESS_TEST_MESSAGES = {
+    "ok": "FlareSolverr answered.",
+    "not_flaresolverr": "Something answered, but it is not FlareSolverr.",
+    "v1_not_flaresolverr": "FlareSolverr answered at the root, but its /v1 endpoint did not respond as expected.",
+    "unreachable": "Could not connect. Check the host name, the port and that FlareSolverr is running.",
+    "unresolved": "The host name could not be resolved.",
+    "timeout": "The address did not answer in time.",
+    "tls": "The secure connection failed. Check the certificate, or use http.",
+    "invalid_address": ("Not a usable address. Use http or https with a host, an optional port and path, "
+                        "and no credentials, query or fragment."),
+    "empty": "Type an address to test.",
+}
+ADDRESS_TEST_CODES = ("ok", "not_flaresolverr", "unreachable", "timeout", "tls", "invalid_address")
+
+
+def _address_result(code: str, message_key: str | None = None, version: str | None = None) -> dict:
+    message = ADDRESS_TEST_MESSAGES[message_key or code]
+    if code == "ok" and version:
+        message = f"FlareSolverr {version} answered."
+    return {"ok": code == "ok", "code": code, "message": message, "version": version if code == "ok" else None}
+
+
+def _flaresolverr_root_path(path: str) -> str:
+    """The service root's path: the address without a trailing slash or a /v1 endpoint."""
+    path = (path or "").rstrip("/")
+    if path.lower().endswith("/v1"):
+        path = path[:-3].rstrip("/")
+    return path
+
+
+def _attempt_flaresolverr(base, ip, hostname, pin, deadline, version_of) -> dict:
+    """Probe the root, then the /v1 endpoint, through one resolved address."""
+    import requests
+    from urllib3.exceptions import ReadTimeoutError
+
+    from app.ui import _build_request_url
+
+    def remaining() -> float | None:
+        left = deadline - time.monotonic()
+        return None if left <= 0 else min(ADDRESS_TEST_REQUEST_TIMEOUT_SECONDS, left)
+
+    try:
+        with requests.Session() as session:
+            # Direct, like the sibling probe: a proxy set for the environment
+            # must not decide whether the address answers.
+            session.trust_env = False
+            timeout = remaining()
+            if timeout is None:
+                return _address_result("timeout")
+            url, headers = _build_request_url(base, "", ip, hostname, pin)
+            index = _fetch_index(session, url, timeout, headers=headers)
+            if not _is_flaresolverr_index(index):
+                return _address_result("not_flaresolverr")
+            version = version_of(index)
+
+            timeout = remaining()
+            if timeout is None:
+                return _address_result("timeout")
+            url, headers = _build_request_url(base, "/v1", ip, hostname, pin)
+            # sessions.list only reads: it names the browser sessions that are
+            # open and starts nothing.
+            response = session.post(url, json={"cmd": "sessions.list"}, timeout=timeout,
+                                    allow_redirects=False, stream=True, headers=headers, verify=True)
+            try:
+                answer = _read_json_object(response, ADDRESS_TEST_V1_MAX_BYTES)
+            finally:
+                response.close()
+            if not isinstance(answer, dict) or answer.get("status") != "ok":
+                return _address_result("not_flaresolverr", "v1_not_flaresolverr")
+            return _address_result("ok", version=version or version_of(answer))
+    except requests.exceptions.SSLError as error:
+        logger.debug("FlareSolverr address test: TLS failure (%s)", type(error).__name__)
+        return _address_result("tls")
+    except requests.Timeout as error:
+        logger.debug("FlareSolverr address test: timeout (%s)", type(error).__name__)
+        return _address_result("timeout")
+    except requests.ConnectionError as error:
+        # A body that stalls mid-read reaches here wrapped as a connection error.
+        stalled = any(isinstance(arg, ReadTimeoutError) for arg in error.args)
+        logger.debug("FlareSolverr address test: %s", "read timeout" if stalled else type(error).__name__)
+        return _address_result("timeout" if stalled else "unreachable")
+    except requests.RequestException as error:
+        logger.debug("FlareSolverr address test: request failed (%s)", type(error).__name__)
+        return _address_result("unreachable")
+
+
+def check_flaresolverr_address(address) -> dict:
+    """Test an address the user typed, saved or not, and say what answered.
+
+    The result is ``{"ok", "code", "message", "version"}``, the code being one
+    of ``ok``, ``not_flaresolverr``, ``unreachable``, ``timeout``, ``tls`` and
+    ``invalid_address``. The message is a short sentence for the person. It never
+    writes the setting and never logs the address: it can name a private host.
+    """
+    import socket
+
+    from app.ui import _BlockedTarget, _handshake_version, _resolve_and_validate_constrained, _validate_test_base_url
+
+    text = address.strip() if isinstance(address, str) else ""
+    if not text:
+        return _address_result("invalid_address", "empty")
+    if len(text) > ADDRESS_TEST_MAX_LENGTH or "\\" in text or any(char.isspace() or ord(char) < 32 for char in text):
+        return _address_result("invalid_address")
+    try:
+        parsed = _validate_test_base_url(text)
+        if parsed.username is not None or parsed.password is not None:
+            return _address_result("invalid_address")
+        base = parsed._replace(path=_flaresolverr_root_path(parsed.path))
+        resolved_ips, hostname, _ = _resolve_and_validate_constrained(base.geturl())
+    except socket.gaierror:
+        return _address_result("unreachable", "unresolved")
+    except ValueError as error:
+        logger.debug("FlareSolverr address test: refused (%s)",
+                     error.code if isinstance(error, _BlockedTarget) else type(error).__name__)
+        return _address_result("invalid_address")
+
+    def version_of(payload):
+        return _handshake_version(payload) if isinstance(payload, dict) else None
+
+    # Pin to the address that was checked, so a rebinding name cannot move the
+    # request, except over https where the certificate check does that work.
+    pin = base.scheme != "https"
+    candidates = resolved_ips if pin else resolved_ips[:1]
+    deadline = time.monotonic() + ADDRESS_TEST_DEADLINE_SECONDS
+    result = _address_result("unreachable")
+    for ip in candidates:
+        result = _attempt_flaresolverr(base, ip, hostname, pin, deadline, version_of)
+        # A dual-stack name can answer on one family only: try the next address
+        # only when this one could not be connected to at all.
+        if result["code"] != "unreachable":
+            break
+    return result
