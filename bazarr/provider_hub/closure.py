@@ -130,6 +130,13 @@ def resolve_closure(
             entries, plugin_id, usable=lambda entry: usable(entry) and provides(entry, capability),
             above_version=running.version)
 
+    def _way_out(plugin_id: str, capability: str) -> str:
+        """The end of a refusal over a revoked supplier: update it when a release that can be installed
+        exists, and say there is none when it does not."""
+        if upgrade(plugin_id, capability) is not None:
+            return f". Update {plugin_id} first."
+        return f", and no release of {plugin_id} can be installed."
+
     def satisfy(owner: PluginManifest, how: str, needed_id: str | None, capability: str) -> None:
         if how == "extends":
             held = installed.get(needed_id)
@@ -138,7 +145,7 @@ def resolve_closure(
                 if _revoked_without_update(held[1]):
                     closure.unresolved.append(
                         f"{owner.name} extends {needed_id}, whose installed release was revoked by the "
-                        f"official catalog. Update {needed_id} first.")
+                        f"official catalog{_way_out(needed_id, capability)}")
                 elif not _supplies(held[1], capability):
                     newer = upgrade(needed_id, capability)
                     closure.unresolved.append(
@@ -200,7 +207,7 @@ def resolve_closure(
             if revoked and not switched_off:
                 closure.unresolved.append(
                     f"{owner.name} needs {capability}, which only {', '.join(revoked)} provides, and its "
-                    "installed release was revoked by the official catalog. Update it first.")
+                    f"installed release was revoked by the official catalog{_way_out(revoked[0], capability)}")
                 return
             if dropping and not switched_off:
                 closure.unresolved.append(
@@ -327,10 +334,10 @@ def dependents(
         return enabled[pid] if enabled is not None and pid in enabled else _enabled(row)
 
     def usable_alternative(pid: str, row: dict[str, Any]) -> bool:
-        # One that is held back, whose environment needs repair or whose kind this Bazarr+ does not define
-        # does not run, as the boot check sees it.
+        # One that is held back, revoked, whose environment needs repair or whose kind this Bazarr+ does not
+        # define does not run, as the boot check sees it.
         return (on(pid, row) and not row.get("needs_repair") and not row.get("blocked")
-                and _kind_defined(row))
+                and not _revoked_without_update(row) and _kind_defined(row))
 
     found = []
     for other_id, (_active, row) in sorted(installed.items()):
@@ -408,7 +415,7 @@ def broken_by(state: dict[str, Any], plugin_id: str, replacement: dict[str, Any]
 def _supplied_elsewhere(installed: dict[str, Any], capability: str, excluding: tuple[str, ...]) -> bool:
     for held_id, (_held, held_row) in installed.items():
         if (held_id in excluding or not _enabled(held_row) or held_row.get("needs_repair")
-                or held_row.get("blocked") or not _kind_defined(held_row)):
+                or held_row.get("blocked") or _revoked_without_update(held_row) or not _kind_defined(held_row)):
             continue
         supplier = _manifest_in(held_row, "next")
         if supplier is not None and capability in supplier.provides:

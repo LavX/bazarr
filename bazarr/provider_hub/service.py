@@ -19,6 +19,7 @@ import requests
 from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
+from collections.abc import Iterable
 from typing import Any
 from urllib.parse import urlparse
 
@@ -1650,7 +1651,7 @@ def refresh_catalog(source_ids: set[str] | None = None, checkpoint=None) -> dict
                           and (not catalog_feed.signed_feed_enabled() or (
                               source.get("catalog_signature")
                               and not source.get("signed_feed_retry")
-                              and not _revocations_stale(state)
+                              and not _revocations_stale(state, (catalog_feed.CHANNEL_MAIN,))
                               and source.get("catalog_channel") == catalog_feed.CHANNEL_MAIN
                               and catalog_feed.supply_refusal(state, source) is None))):
                         # A source refreshed before the signature check existed, on another channel, or
@@ -2241,8 +2242,10 @@ def switch_on_refusal(name: str, needs: list[str]) -> str:
 def revoked_switch_on_refusal(provider_id: str, state: dict[str, Any] | None = None) -> str | None:
     """Why a plugin cannot be switched on: the official catalog revoked the release it would run, or None.
 
-    A revoked plugin whose staged update is not revoked may be switched on: that update takes over at the
-    next restart, and the revoked release does not start before it.
+    A revoked plugin whose staged update is not revoked may be switched on only once the boot has held the
+    revoked release back, because from then on it cannot run and the staged update takes over at the next
+    restart. Until then the revoked release is still registered and unblocked, and switching it on would let
+    it run, so the person is told to restart first.
     """
     state = state if state is not None else load_state()
     row = (state.get("installations") or {}).get(provider_id)
@@ -2252,11 +2255,13 @@ def revoked_switch_on_refusal(provider_id: str, state: dict[str, Any] | None = N
     found = revocation.lookup(revocations, provider_id, row.get("active_version"))
     if found is None:
         return None
+    name = row.get("name") or provider_id
     staged = row.get("staged_version")
     if staged and revocation.lookup(revocations, provider_id, staged) is None:
-        return None
-    return _revocation_text(revocation.refusal, found, row.get("name") or provider_id, row.get("active_version"),
-                            "switched on")
+        if _held_for_revocation(row):
+            return None
+        return _revocation_text(revocation.held_back, found, name, row.get("active_version"), revocation.STAGED)
+    return _revocation_text(revocation.refusal, found, name, row.get("active_version"), "switched on")
 
 
 def update_provider(provider_id: str, enabled: bool | None = None, config: dict[str, Any] | None = None) -> dict[str, Any] | None:
@@ -3383,16 +3388,17 @@ def _revocations(state: dict[str, Any]) -> tuple[revocation.Revocation, ...]:
     return revocation.entries_of(_revocation_lists(state))
 
 
-def _revocations_stale(state: dict[str, Any]) -> list[str]:
-    """The channels whose revocation list is older than the catalog this host last accepted for them.
+def _revocations_stale(state: dict[str, Any], channels: Iterable[str] = revocation.CHANNELS) -> list[str]:
+    """The given channels whose revocation list is older than the catalog this host last accepted for them.
 
     The counter file survives a restored database, and the list the database held does not, so a list that
     is behind the counter cannot be trusted to be the latest. Such a list is kept (dropping it would lift
-    what it revokes) and the channel is read again at the next refresh.
+    what it revokes) and the channel is read again at the next refresh. Only the channel a host reads is
+    judged by the caller: another channel it once used is read again only when the host goes back to it.
     """
     lists = _revocation_lists(state)
     stale = []
-    for channel in revocation.CHANNELS:
+    for channel in channels:
         accepted = catalog_feed.stored_record(state, channel).signed_version
         held = lists.get(channel)
         if accepted is not None and (held is None or (held.signed_version or 0) < accepted):
@@ -3601,11 +3607,13 @@ def _hold_revoked_installations(state: dict[str, Any]) -> None:
     """After a refresh: mark each installed release the list now revokes, release one it no longer does, and
     drop a staged release it names. Nothing else about the installations is judged here, and nothing stops
     what runs: the release keeps running, with its settings and its place in the registry, until the next
-    restart holds it back."""
+    restart holds it back. The restart cue it raises is the Hub's ordinary one, so while it is up a connection
+    test asks for the restart first and Discover leaves the plugin out: both are the safe direction."""
     installations = state.setdefault("installations", {})
     revocations = _revocations(state)
-    _mark_revoked_installations(installations, revocations)
+    # A revoked staged release goes first, so the text and the restart cue are decided on what is left.
     _drop_revoked_staged(installations, revocations)
+    _mark_revoked_installations(installations, revocations)
 
 
 def _staged_installation(
@@ -3656,7 +3664,9 @@ def _staged_installation(
         # What the running release was met by, and whether it was held back, stay with it until the update
         # takes over.
         **({"supplied_by": existing["supplied_by"]} if existing.get("supplied_by") else {}),
-        **({"blocked": True, "blocked_reason": existing.get("blocked_reason")} if existing.get("blocked") else {}),
+        **({"blocked": True, "blocked_reason": existing.get("blocked_reason"),
+            **({"blocked_cause": existing["blocked_cause"]} if existing.get("blocked_cause") else {})}
+           if existing.get("blocked") else {}),
         # A release the catalog revoked stays revoked, and is no supplier, until the update takes over.
         **({"revoked": True, "revoked_reason": existing.get("revoked_reason")} if existing.get("revoked") else {}),
     }
@@ -4400,14 +4410,24 @@ def stage_install_local(package: bytes | str | Path, checkpoint=None) -> dict[st
         shutil.rmtree(work_dir, ignore_errors=True)
 
 
+BLOCKED_BY_REVOCATION = "revoked"
+BLOCKED_BY_NEEDS = "needs"
+
+
+def _held_for_revocation(row: dict[str, Any]) -> bool:
+    """Whether the boot has held this row back because its release is revoked. Judged on the hold's own cause,
+    never on the text it shows."""
+    return bool(row.get("blocked")) and row.get("blocked_cause") == BLOCKED_BY_REVOCATION
+
+
 def _revoked_reasons(
-    installations: dict[str, Any], revocations: tuple[revocation.Revocation, ...], running: bool,
+    installations: dict[str, Any], revocations: tuple[revocation.Revocation, ...], boot: bool,
 ) -> dict[str, str]:
     """For each installation whose active release the revocation list names, what it shows.
 
-    ``running`` is true when the release is still running (a refresh found the revocation, so the person has
-    to restart), false at boot, where it is held back and does not start. A release with an update staged
-    over it says that instead.
+    At boot the release is held back and does not start. After a refresh it is still running, so the person has
+    to restart, unless the boot has already held it back. A release with an update staged over it says that
+    instead. A plugin being removed is left out: its removal is pending and nothing else is judged about it.
     """
     reasons = {}
     for plugin_id, row in installations.items():
@@ -4419,7 +4439,7 @@ def _revoked_reasons(
         if row.get("staged_version"):
             state = revocation.STAGED
         else:
-            state = revocation.RUNNING if running else revocation.HELD
+            state = revocation.HELD if boot or _held_for_revocation(row) else revocation.RUNNING
         reasons[str(plugin_id)] = _revocation_text(
             revocation.held_back, found, row.get("name") or plugin_id, row.get("active_version"), state)
     return reasons
@@ -4430,13 +4450,16 @@ def _mark_revoked_installations(installations: dict[str, Any], revocations: tupl
 
     A revoked release is still running, so it is neither held back nor taken from the registry and the
     settings overlay here: that is the boot's to do. It is marked ``revoked`` with its reason as its error,
-    and the restart cue the Hub already reads is raised so the person restarts to stop it. A release the list
-    no longer names loses the mark, and the restart cue when this raised it. Returns whether any row changed.
+    and the restart cue the Hub already reads is raised so the person restarts to stop it. A row the boot
+    already held back is left as the boot wrote it and gets no cue. A release the list no longer names
+    loses the marks; if the boot had held it back it is released and the restart cue is raised, because it
+    starts again only after a restart, and a cue this raised is dropped when nothing is left to restart for.
+    A plugin being removed is not touched. Returns whether any row changed.
     """
     changed = False
-    reasons = _revoked_reasons(installations, revocations, running=True)
+    reasons = _revoked_reasons(installations, revocations, boot=False)
     for plugin_id, row in installations.items():
-        if not isinstance(row, dict):
+        if not isinstance(row, dict) or row.get("state") == "removed":
             continue
         if str(plugin_id) in reasons:
             reason = reasons[str(plugin_id)]
@@ -4448,7 +4471,8 @@ def _mark_revoked_installations(installations: dict[str, Any], revocations: tupl
                 row["revoked_reason"] = reason
                 row["last_error"] = reason
                 changed = True
-            if row.get("state") == "active" and not row.get("pending_restart") and not row.get("staged_version"):
+            if (row.get("state") == "active" and not row.get("pending_restart") and not row.get("staged_version")
+                    and not _held_for_revocation(row)):
                 row.update(pending_restart=True, revoked_restart=True)
                 changed = True
         elif row.get("revoked"):
@@ -4456,11 +4480,12 @@ def _mark_revoked_installations(installations: dict[str, Any], revocations: tupl
             row.pop("revoked", None)
             if previous and row.get("last_error") == previous:
                 row["last_error"] = None
-            if previous and row.get("blocked") and row.get("blocked_reason") == previous:
+            if _held_for_revocation(row):
                 # It was held back at boot for this and does not run: it starts again after a restart.
-                row.pop("blocked", None)
-                row.pop("blocked_reason", None)
-                row.update(pending_restart=True, revoked_restart=True)
+                for field in ("blocked", "blocked_reason", "blocked_cause"):
+                    row.pop(field, None)
+                if row.get("state") == "active":
+                    row.update(pending_restart=True, revoked_restart=True)
             elif row.pop("revoked_restart", None):
                 row["pending_restart"] = False
             changed = True
@@ -4478,7 +4503,7 @@ def _apply_unmet_needs(installations: dict[str, Any], revocations: tuple[revocat
     raised for a revocation is dropped, because this boot is that restart. Returns whether any row changed.
     """
     changed = False
-    revoked = _revoked_reasons(installations, revocations, running=False)
+    revoked = _revoked_reasons(installations, revocations, boot=True)
     for plugin_id, row in installations.items():
         if not isinstance(row, dict):
             continue
@@ -4504,16 +4529,19 @@ def _apply_unmet_needs(installations: dict[str, Any], revocations: tuple[revocat
         if not isinstance(row, dict):
             continue
         if plugin_id in revoked:
-            reason, always = revoked[plugin_id], True
+            reason, always, cause = revoked[plugin_id], True, BLOCKED_BY_REVOCATION
         elif plugin_id in unmet:
             reason = (f"It needs {', '.join(unmet[plugin_id])}, which is not running, so it was not started. "
                       "Once that is running again, restart Bazarr+.")
-            always = False
+            always, cause = False, BLOCKED_BY_NEEDS
         else:
-            reason, always = None, False
+            reason, always, cause = None, False, None
         if reason is not None:
             on = always or closure.is_on(row)
             previous = row.get("blocked_reason")
+            if row.get("blocked_cause") != cause:
+                row["blocked_cause"] = cause
+                changed = True
             if not row.get("blocked") or previous != reason:
                 row.update(blocked=True, blocked_reason=reason)
                 if on:
@@ -4533,6 +4561,7 @@ def _apply_unmet_needs(installations: dict[str, Any], revocations: tuple[revocat
                 row["last_error"] = None
             row.pop("blocked", None)
             row.pop("blocked_reason", None)
+            row.pop("blocked_cause", None)
             changed = True
     return changed
 
@@ -4543,8 +4572,9 @@ def enforce_activation_needs() -> bool:
     A supplier whose environment is missing or damaged does not run, and that is only known once the
     environments have been reconciled, which is after activation. Returns whether any row changed."""
     def apply(state: dict[str, Any]) -> bool:
-        stale = _revocations_stale(state)
         official = (state.get("catalog_sources") or {}).get(OFFICIAL_CATALOG_SOURCE_ID)
+        read = catalog_feed.feed_channel(official.get("dev_ref")) if isinstance(official, dict) else None
+        stale = _revocations_stale(state, (read,) if read else ())
         if stale and isinstance(official, dict):
             logging.getLogger(__name__).warning(
                 "Provider Hub: the revocation list this host holds for %s is older than the catalog it last "

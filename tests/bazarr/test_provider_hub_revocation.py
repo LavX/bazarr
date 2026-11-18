@@ -152,8 +152,9 @@ def test_every_text_fits_the_message_limit_and_always_ends_with_what_to_do_next(
     entry = revocation.parse([fields])[0]
     tails = {"install": "so it cannot be installed.", "update": "so it cannot be offered as an update.",
              "switch on": "so it cannot be switched on.",
-             "held": "It will not start. Update it or remove it.",
-             "running": "Restart Bazarr+ to stop it, then update or remove it.",
+             "held": "It will not start. Update it or remove it." if version else "It will not start. Remove it.",
+             "running": ("Restart Bazarr+ to stop it, then update or remove it." if version
+                         else "Restart Bazarr+ to stop it, then remove it."),
              "staged": "Restart Bazarr+ to apply the staged update."}
     for name, text in _texts(entry, version="1.0.0").items():
         assert len(text) <= LIMIT, (name, len(text))
@@ -452,7 +453,8 @@ def test_a_revoked_plugin_with_a_staged_update_that_is_not_revoked_may_be_switch
 
     installed = _plugin(version="1.0.0")
     staged = {"state": "staged", "pending_restart": True, "staged_version": "1.1.0",
-              "staged_manifest": _plugin(version="1.1.0")}
+              "staged_manifest": _plugin(version="1.1.0"), "blocked": True, "blocked_cause": "revoked",
+              "blocked_reason": "held"}
     _stored_world(tmp_path, monkeypatch, [installed], installations=_row(installed, enabled=False, **staged),
                   revocations=_list({"id": PLUGIN, "version": "1.0.0"}))
 
@@ -625,7 +627,7 @@ def test_a_revoked_dependency_does_not_satisfy_what_needs_it_unless_a_safe_updat
         assert resolve(owner).resolved
         refused = resolve(owner, **flagged)
         assert not refused.resolved and "revoked by the official catalog" in refused.refusal
-        assert "Update parent first" in refused.refusal or "Update it first" in refused.refusal
+        assert "no release of parent can be installed" in refused.refusal
         staged = {"staged_version": "1.1.0", "state": "staged", "pending_restart": True,
                   "staged_manifest": _plugin("parent", "1.1.0", provides=[capability])}
         assert resolve(owner, **flagged, **staged).resolved
@@ -702,7 +704,8 @@ def test_a_verified_catalog_stores_its_list_by_channel_and_in_a_file_beside_the_
     assert mirrored["channels"] == stored
 
 
-def test_a_refresh_marks_a_running_revoked_release_and_asks_for_a_restart_but_stops_nothing(world):
+def test_a_refresh_marks_a_running_revoked_release_and_asks_for_a_restart_but_takes_nothing_from_the_registry(
+        world):
     from provider_hub import service
     from provider_hub.kinds.subtitle_provider import apply_settings_overlay
     from provider_hub.state import blocked_installations, running_installations
@@ -724,13 +727,15 @@ def test_a_refresh_marks_a_running_revoked_release_and_asks_for_a_restart_but_st
         row = _rows()[plugin_id]
         assert row["revoked"] is True and "blocked" not in row and "blocked_reason" not in row
         assert row["revoked_reason"] == row["last_error"]
-        assert "Restart Bazarr+ to stop it, then update or remove it." in row["revoked_reason"]
+        assert "Restart Bazarr+ to stop it, then " in row["revoked_reason"]
         assert "It will not start" not in row["revoked_reason"] and len(row["revoked_reason"]) <= LIMIT
         # The restart cue the Hub already reads.
         assert row["pending_restart"] is True and row["revoked_restart"] is True
     # needs_restart is derived from that cue by the kind's attach policy: a restart-attached kind reports it.
     assert service.get_provider("runningsub")["needs_restart"] is True
-    # Nothing was taken from what runs: not the running set, and not the settings overlay.
+    # The restart cue has its own effect, and it is the safe one: a connection test says to restart first.
+    assert service.test_provider_connection("runningsub")["status"] == "pending_restart"
+    # The registry was not touched: not the running set, and not the settings overlay.
     assert {item.provider_id for item in running_installations(kind=None)} == {"runningsub", PLUGIN}
     assert blocked_installations(kind=None) == []
     configs = {}
@@ -741,7 +746,7 @@ def test_a_refresh_marks_a_running_revoked_release_and_asks_for_a_restart_but_st
     for plugin_id in ("runningsub", PLUGIN):
         row = _rows()[plugin_id]
         assert row["blocked"] is True and row["pending_restart"] is False and "revoked_restart" not in row
-        assert "It will not start. Update it or remove it." in row["blocked_reason"]
+        assert "It will not start. " in row["blocked_reason"] and row["blocked_cause"] == "revoked"
         assert row["last_error"] == row["blocked_reason"] == row["revoked_reason"]
     assert service.get_provider("runningsub")["needs_restart"] is False
     assert running_installations(kind=None) == []
@@ -1133,3 +1138,231 @@ def test_an_update_staged_over_a_revoked_release_keeps_it_revoked_and_is_not_tol
     assert "Update it or remove it" not in row["revoked_reason"]
     assert row["last_error"] in (None, row["revoked_reason"]) and "Update it or remove" not in (row["last_error"] or "")
     assert service.revoked_switch_on_refusal(PLUGIN) is None
+
+
+# --- a second review of the hold ----------------------------------------------------------------------------
+
+
+def _hold(state):
+    from provider_hub import service
+
+    service._hold_revoked_installations(state)
+
+
+def _refresh_part():
+    """What every refresh does to the installations, unchanged heads and failed fetches included."""
+    from provider_hub.state import mutate_state
+
+    mutate_state(_hold)
+
+
+def test_a_revoked_plugin_with_a_staged_update_is_switched_on_only_once_the_revoked_release_cannot_run(
+        tmp_path, monkeypatch, service_kind):
+    from provider_hub import service
+
+    installed = _plugin(version="1.0.0")
+    staged = {"state": "staged", "pending_restart": True, "staged_version": "1.1.0",
+              "staged_manifest": _plugin(version="1.1.0")}
+    _stored_world(tmp_path, monkeypatch, [installed], installations=_row(installed, enabled=False, **staged),
+                  revocations=_list({"id": PLUGIN, "version": "1.0.0", "reason": REASON}))
+
+    # The refresh found the revocation and left the release registered and unblocked: it would run.
+    _refresh_part()
+    assert "blocked" not in _rows()[PLUGIN]
+    refusal = service.revoked_switch_on_refusal(PLUGIN)
+    assert refusal and "Restart Bazarr+ to apply the staged update." in refusal
+    with pytest.raises(ValueError, match="Restart Bazarr"):
+        service.update_provider(PLUGIN, enabled=True)
+    assert _rows()[PLUGIN]["enabled"] is False
+
+    # Once the boot hold has stopped it, the staged update takes over at the next restart: switching on is safe.
+    service.enforce_activation_needs()
+    assert _rows()[PLUGIN]["blocked"] is True and _rows()[PLUGIN]["staged_version"] == "1.1.0"
+    assert service.revoked_switch_on_refusal(PLUGIN) is None
+    assert service.update_provider(PLUGIN, enabled=True)["enabled"] is True
+
+
+def test_a_revoked_supplier_is_no_alternative_when_a_removal_or_an_update_is_judged(
+        tmp_path, monkeypatch, service_kind):
+    from provider_hub import closure
+
+    capability = "demo_parent.backend.v1"
+    first = _plugin("first", provides=[capability])
+    second = _plugin("second", provides=[capability])
+    user = _plugin("user", requires=[capability])
+    rows = {**_row(first), **_row(second, revoked=True, revoked_reason="x"),
+            **_row(user, supplied_by={capability: "first"})}
+    _stored_world(tmp_path, monkeypatch, [], installations=rows)
+    state = _state()
+
+    # The second supplier is revoked, so the first is the only one that runs after the restart.
+    assert closure.dependents(state, "first") == ["user"]
+    assert closure.dependents(state, "first", enabled_only=True) == ["user"]
+    assert closure.broken_by(state, "first", _plugin("first", "2.0.0")) == [("user", capability)]
+    # With nothing revoked the second one carries the need, as before.
+    rows["second"].pop("revoked")
+    _stored_world(tmp_path, monkeypatch, [], installations=rows)
+    assert closure.dependents(_state(), "first") == []
+    assert closure.broken_by(_state(), "first", _plugin("first", "2.0.0")) == []
+
+
+def test_a_refresh_on_a_row_the_boot_already_held_changes_nothing_and_a_lift_cues_the_restart(world):
+    from provider_hub import service
+
+    _install_row(_plugin(version="1.0.0"))
+    _publish(world, version=100, revocations=[{"id": PLUGIN, "version": "1.0.0", "reason": REASON}])
+    _refresh()
+    assert _rows()[PLUGIN]["pending_restart"] is True
+    service.enforce_activation_needs()
+    held = dict(_rows()[PLUGIN])
+    assert held["blocked"] is True and held["pending_restart"] is False and "revoked_restart" not in held
+    assert "It will not start." in held["revoked_reason"]
+
+    # Refreshes that change nothing, and ones that fail, leave the held row exactly as it is.
+    _refresh()
+    _refresh_part()
+    _refresh()
+    assert _rows()[PLUGIN] == held
+
+    # A refresh that lifts it: the revocation fields go, the hold is released and the restart is asked for.
+    _new_head(world, "e" * 40)
+    _publish(world, commit="e" * 40, version=101, revocations=[], source_commit="e" * 40)
+    _refresh()
+    row = _rows()[PLUGIN]
+    assert not {"revoked", "revoked_reason", "blocked", "blocked_reason", "blocked_cause"} & set(row)
+    assert row["last_error"] is None and row["pending_restart"] is True and row["revoked_restart"] is True
+
+    # The boot after that is the restart: the cue goes and the plugin runs.
+    assert service.enforce_activation_needs() is True
+    row = _rows()[PLUGIN]
+    assert row["pending_restart"] is False and "revoked_restart" not in row and "blocked" not in row
+
+
+def test_a_whole_plugin_revocation_drops_a_staged_update_before_the_text_and_the_cue_are_decided(world):
+    active = _plugin(version="1.0.0")
+    staged = {"state": "staged", "pending_restart": True, "staged_version": "1.1.0",
+              "staged_manifest": _plugin(version="1.1.0"), "staged_path": "/nowhere", "staged_python_path": "/nowhere"}
+    _install_row(active, **staged)
+    _publish(world, revocations=[{"id": PLUGIN, "reason": REASON}])
+
+    _refresh()
+
+    row = _rows()[PLUGIN]
+    assert row["staged_version"] is None and row["state"] == "active"
+    assert "apply the staged update" not in row["revoked_reason"]
+    assert "Restart Bazarr+ to stop it, then remove it." in row["revoked_reason"]
+    assert row["pending_restart"] is True and row["revoked_restart"] is True
+
+
+def test_a_refresh_leaves_the_pending_removal_of_a_revoked_plugin_alone(tmp_path, monkeypatch, service_kind):
+    from provider_hub import service
+
+    installed = _plugin(version="1.0.0")
+    removed = {"state": "removed", "pending_restart": True, "revoked": True, "revoked_restart": True,
+               "revoked_reason": "x"}
+    for revocations in (_list({"id": PLUGIN}), _list(version=101)):
+        _stored_world(tmp_path, monkeypatch, [], installations=_row(installed, **removed), revocations=revocations)
+        before = dict(_rows()[PLUGIN])
+
+        _refresh_part()
+
+        assert _rows()[PLUGIN] == before
+        service.activate_staged_installations()
+        assert PLUGIN not in _rows()
+
+
+def test_a_whole_plugin_entry_says_remove_and_never_update(tmp_path, monkeypatch, service_kind):
+    from provider_hub import closure, revocation, service
+
+    whole = revocation.parse([{"id": PLUGIN}])[0]
+    one = revocation.parse([{"id": PLUGIN, "version": "1.0.0"}])[0]
+    assert revocation.held_back(whole, NAME, "1.0.0").endswith("It will not start. Remove it.")
+    assert revocation.held_back(whole, NAME, "1.0.0", revocation.RUNNING).endswith(
+        "Restart Bazarr+ to stop it, then remove it.")
+    assert revocation.held_back(one, NAME, "1.0.0").endswith("Update it or remove it.")
+
+    capability = "demo_parent.backend.v1"
+    parent = _plugin("parent", provides=[capability])
+    flagged = {"revoked": True, "revoked_reason": "x"}
+    for owner in (_plugin("user", requires=[capability]),
+                  _plugin("addon", extends={"id": "parent", "capability": capability})):
+        # Nothing newer can be installed: the text does not send the person to an update.
+        _stored_world(tmp_path, monkeypatch, [owner], installations=_row(parent, **flagged))
+        entry = next(e for e in _state()["catalog_entries"].values() if e["provider_id"] == owner["id"])
+        refusal = service._closure_of(_state(), entry).refusal
+        assert "revoked by the official catalog" in refusal and "Update" not in refusal
+        assert "no release of parent can be installed" in refusal
+        # A newer release the catalog lists does.
+        newer = _plugin("parent", "1.1.0", provides=[capability])
+        _stored_world(tmp_path, monkeypatch, [owner, newer], installations=_row(parent, **flagged))
+        entry = next(e for e in _state()["catalog_entries"].values() if e["provider_id"] == owner["id"])
+        assert "Update" in service._closure_of(_state(), entry).refusal
+
+
+@pytest.mark.parametrize("ending, tail_start", [("!", ""), ("?", ""), (".", ". "), ("", ". ")])
+def test_a_reason_that_ends_with_its_own_stop_does_not_get_a_second_one(ending, tail_start):
+    from provider_hub import revocation
+
+    reason = "Do not trust it" + ending
+    entry = revocation.parse([{"id": PLUGIN, "version": "1.0.0", "reason": reason}])[0]
+
+    held = revocation.held_back(entry, NAME, "1.0.0")
+    assert ".." not in held and "!." not in held and "?." not in held
+    expected = f"Do not trust it{ending} It will not start." if ending in ("!", "?") else "Do not trust it. It will"
+    assert expected in held
+    refused = revocation.refusal(entry, NAME, "1.0.0", "installed")
+    assert "!," not in refused and "?," not in refused and ".." not in refused
+    assert refused.endswith("so it cannot be installed.") or refused.endswith("So it cannot be installed.")
+
+
+def test_the_staleness_of_the_list_is_judged_on_the_channel_being_read(world, tmp_path):
+    from provider_hub import service
+    from provider_hub.catalog_feed import ChannelRecord, write_counter_file
+
+    _publish(world, version=100, revocations=[])
+    _refresh()
+    # The host once accepted a beta catalog and has no list for it: beta is stale, main is not.
+    write_counter_file({"beta": ChannelRecord(500, 1)})
+
+    assert service._revocations_stale(_state(), ["main"]) == []
+    assert service._revocations_stale(_state(), ["beta"]) == ["beta"]
+    assert service._revocations_stale(_state()) == ["beta"]
+    # A host reading main is not told to read again for beta's sake.
+    service.enforce_activation_needs()
+    assert "signed_feed_retry" not in _official()
+    asked = len(world.fetched("signed/main/catalog.json"))
+    _refresh()
+    assert len(world.fetched("signed/main/catalog.json")) == asked
+
+
+def test_the_mirror_is_synced_before_it_replaces_the_file_and_the_directory_after(tmp_path, monkeypatch):
+    import os
+
+    from provider_hub import revocation
+
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(tmp_path / "state.json"))
+    order = []
+    real_fsync, real_replace = os.fsync, os.replace
+    monkeypatch.setattr(os, "fsync", lambda fd: (order.append("fsync"), real_fsync(fd))[1])
+    monkeypatch.setattr(os, "replace", lambda *a: (order.append("replace"), real_replace(*a))[1])
+
+    revocation.write_mirror({"main": revocation.ChannelList(5, ())})
+
+    assert order[:2] == ["fsync", "replace"] and order.count("fsync") == 2 and order[-1] == "fsync"
+
+
+def test_a_corrupt_mirror_is_read_and_reported_once_until_it_changes(tmp_path, monkeypatch, caplog):
+    from provider_hub import revocation
+
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(tmp_path / "state.json"))
+    path = tmp_path / "plugins" / "feed-revocations.json"
+    path.parent.mkdir()
+    path.write_text("not json", encoding="utf-8")
+
+    with caplog.at_level("WARNING"):
+        for _ in range(5):
+            assert revocation.read_mirror() == {}
+    assert sum("could not be read" in record.getMessage() for record in caplog.records) == 1
+    # A write replaces it, and the cache follows.
+    revocation.write_mirror({"main": revocation.ChannelList(5, ())})
+    assert revocation.read_mirror()["main"].signed_version == 5

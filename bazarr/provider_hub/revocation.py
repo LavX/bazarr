@@ -249,11 +249,27 @@ def read_mirror() -> dict[str, ChannelList]:
     try:
         document = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
+        # Remembered until the file changes, so a lookup per catalog entry reads it and says so once.
+        _MIRROR_CACHE = (key, {})
         logger.warning("The mirrored revocation lists could not be read, so they are ignored")
         return {}
     lists = _lists_from(document)
     _MIRROR_CACHE = (key, lists)
     return dict(lists)
+
+
+def _sync_directory(directory: Path) -> None:
+    """Make the replacement durable too. A platform that cannot open a directory skips it."""
+    try:
+        handle = os.open(str(directory), os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        os.fsync(handle)
+    except OSError:
+        pass
+    finally:
+        os.close(handle)
 
 
 def write_mirror(lists: Mapping[str, ChannelList]) -> None:
@@ -283,7 +299,10 @@ def write_mirror(lists: Mapping[str, ChannelList]) -> None:
             try:
                 with os.fdopen(handle, "w", encoding="utf-8") as stream:
                     json.dump(document, stream, sort_keys=True)
+                    stream.flush()
+                    os.fsync(stream.fileno())
                 os.replace(temporary, path)
+                _sync_directory(path.parent)
             except BaseException:
                 try:
                     os.unlink(temporary)
@@ -360,14 +379,19 @@ def _compose(subject: str, entry: Revocation, tail: str, limit: int) -> str:
     """``subject was revoked by the official catalog[: reason]`` plus ``tail``, within ``limit`` characters.
 
     The reason is the only part that is cut. It is cut with an ellipsis, and left out when what room is left
-    would show too little of it, so the sentence and what to do next always come whole.
+    would show too little of it, so the sentence and what to do next always come whole. A reason that ends
+    with its own ``!`` or ``?`` is not given a second stop.
     """
     base = f"{subject} was revoked by the official catalog"
     reason = (entry.reason or "").strip().rstrip(".").strip()
     room = limit - len(base) - len(tail) - 2
-    if reason and room >= _MIN_REASON:
-        return f"{base}: {_cut(reason, room)}{tail}"
-    return f"{base}{tail}"
+    if not reason or room < _MIN_REASON:
+        return f"{base}{tail}"
+    shown = _cut(reason, room)
+    if shown[-1] in "!?":
+        # "wrong host!" then "It will not start." and "wrong host! So it cannot be installed."
+        tail = " So " + tail[5:] if tail.startswith(", so ") else tail[1:]
+    return f"{base}: {shown}{tail}"
 
 
 def _subject(entry: Revocation, name: str, version: Any) -> str:
@@ -386,16 +410,20 @@ def refusal(entry: Revocation, name: str, version: Any, action: str, limit: int 
 HELD = "held"          # it does not start
 RUNNING = "running"    # it still runs until the next restart
 STAGED = "staged"      # a release that is not revoked waits for the restart
-_TAILS = {
-    HELD: ". It will not start. Update it or remove it.",
-    RUNNING: ". Restart Bazarr+ to stop it, then update or remove it.",
-    STAGED: ". Restart Bazarr+ to apply the staged update.",
-}
+
+
+def _tail(entry: Revocation, state: str) -> str:
+    # With every release revoked there is none to update to, so the only way out is to remove it.
+    if state == HELD:
+        return ". It will not start. " + ("Update it or remove it." if entry.version else "Remove it.")
+    if state == RUNNING:
+        return ". Restart Bazarr+ to stop it, then " + ("update or remove it." if entry.version else "remove it.")
+    return ". Restart Bazarr+ to apply the staged update."
 
 
 def held_back(entry: Revocation, name: str, version: Any, state: str = HELD, limit: int = MESSAGE_LIMIT) -> str:
     """What an installed revoked release shows: that it is revoked, and what to do next."""
-    return _compose(_subject(entry, name, version), entry, _TAILS[state], limit)
+    return _compose(_subject(entry, name, version), entry, _tail(entry, state), limit)
 
 
 def with_reason(entry: Revocation, reason: str | None) -> Revocation:
