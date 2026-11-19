@@ -165,7 +165,7 @@ Two limits worth knowing before you set this up:
 
 ## Quick Start
 
-**CPU requirement:** on x86-64 hardware the Docker image and a native install need an x86-64-v2 CPU (SSE4.2 and POPCNT, roughly 2009 and later), because numpy 2.4 and newer raise that baseline. On an older x86-64 CPU Bazarr+ stops at startup with an illegal instruction error. ARM64 is not affected.
+**CPU requirement:** on x86-64 hardware the Docker image and a native install need an x86-64-v2 CPU (SSE4.2 and POPCNT, roughly 2009 and later), because numpy 2.4 and newer raise that baseline. On an older x86-64 CPU on Linux, Bazarr+ still starts, logs a warning and leaves ffsubsync and autosubsync out of subtitle synchronization, because they load numpy. ALASS does not use numpy and keeps working, so enable it there. The check reads `/proc/cpuinfo`, so it does not cover Windows or macOS. ARM64 is not affected.
 
 **OCR requirement:** reading PGS or VobSub subtitles into text needs ffmpeg 6.1 or newer and ffprobe. OCR uses ffmpeg's per-frame timestamp log, which is unavailable before 6.1. Each OCR run checks the ffmpeg version before preparing its language pack or rendering images.
 
@@ -561,6 +561,9 @@ services:
     # host. A new port applies after a container restart.
     ports:
       - "6767:6767"
+    # The image starts as root and drops to PUID/PGID itself. Do not set
+    # user: on this service, put the ids in PUID and PGID. If you must run
+    # non-root, PUID/PGID are ignored and /config must already be writable.
     environment:
       - PUID=1000
       - PGID=1000

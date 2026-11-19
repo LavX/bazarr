@@ -584,12 +584,12 @@ class DockerClient:
             raise DockerUnavailable("the Docker daemon answered with something unexpected")
         return result
 
-    def create_network(self, name: str, *, labels: Mapping[str, str]) -> str:
-        """Create a user-defined bridge network with outbound access, no IPv6. Returns its id."""
+    def create_network(self, name: str, *, labels: Mapping[str, str], internal: bool = False) -> str:
+        """Create a user-defined bridge network, no IPv6, with outbound access unless ``internal``. Returns its id."""
         body = {
             "Name": self._name(name, "network"),
             "Driver": "bridge",
-            "Internal": False,
+            "Internal": bool(internal),
             "EnableIPv6": False,
             "Attachable": False,
             "CheckDuplicate": True,

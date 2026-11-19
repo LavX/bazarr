@@ -57,6 +57,10 @@ configure_captcha_func()
 configure_logging(settings.general.debug or args.debug)
 import logging  # noqa: E402
 
+# numpy needs SSE4.2 and POPCNT. Say so in the log once, before anything imports it.
+from utilities.cpu_features import log_cpu_check  # noqa: E402
+log_cpu_check()
+
 # What reading the configuration changed in what was stored. It was found before there was a log to say it in.
 log_startup_notices()
 

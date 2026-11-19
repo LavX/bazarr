@@ -107,3 +107,57 @@ def test_a_real_daemon_stores_the_network_id_as_sent_and_fills_it_in_at_start():
             client.remove_container(container_id, force=True)
         if network_id is not None:
             client.remove_network(network_id)
+
+
+@needs_daemon
+@needs_image
+def test_a_real_daemon_takes_a_second_network_before_the_start_and_keeps_an_internal_one_internal():
+    """What the authenticating front relies on: created on an internal network, joined to a second one before it starts.
+
+    The front's other real-daemon assumption, that a container's own tmpfs mount replaces a volume its image
+    declares, needs an image that declares one (Bazarr+'s own does, at /config) and is left to the box run.
+    """
+    import ipaddress
+
+    client = DockerClient(ENDPOINT)
+    client.ping()
+    image, digest = IMAGE_REF.split("@", 1)
+    suffix = secrets.token_hex(4)
+    owner = secrets.token_hex(8)
+    labels = {"bazarr-plus.real-docker-test": suffix}
+    spec = lifecycle_spec(image, digest)
+    name_a, name_b = f"bazarr-plus-realtest-{suffix}-a", f"bazarr-plus-realtest-{suffix}-b"
+    container_name = f"bazarr-plus-realtest-{suffix}-c"
+    net_a = net_b = container_id = None
+    try:
+        client.pull_image(image, digest)
+        net_a = client.create_network(name_a, labels=labels, internal=True)
+        net_b = client.create_network(name_b, labels=labels)
+        assert client.inspect_network(net_a)["Internal"] is True
+        assert client.inspect_network(net_b)["Internal"] is False
+        body = container_config(spec, owner_id=owner, network=name_a, network_id=net_a, aliases=())
+        body["Cmd"] = ["sleep", "30"]
+        body["Labels"].update(labels)
+        container_id, _warnings = client.create_container(container_name, body)
+
+        client.connect_network(net_b, container_id)
+        client.start_container(container_id)
+
+        attached = client.inspect_container(container_id)["NetworkSettings"]["Networks"]
+        assert set(attached) == {name_a, name_b}
+        assert attached[name_a]["NetworkID"] == net_a and attached[name_b]["NetworkID"] == net_b
+        for name, network in ((name_a, net_a), (name_b, net_b)):
+            subnet = client.inspect_network(network)["IPAM"]["Config"][0]["Subnet"]
+            assert ipaddress.ip_address(attached[name]["IPAddress"]) in ipaddress.ip_network(subnet)
+        assert client.inspect_network(net_a)["IPAM"]["Config"][0]["Subnet"] != \
+            client.inspect_network(net_b)["IPAM"]["Config"][0]["Subnet"]
+    finally:
+        if container_id is not None:
+            try:
+                client.stop_container(container_id, 0)
+            except DockerNotFound:
+                pass
+            client.remove_container(container_id, force=True)
+        for network in (net_a, net_b):
+            if network is not None:
+                client.remove_network(network)

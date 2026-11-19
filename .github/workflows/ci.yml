@@ -468,6 +468,7 @@ jobs:
             tests/bazarr/test_subsync_engines.py \
             tests/bazarr/test_autosubsync_diagnostics.py \
             tests/bazarr/test_alass_ffprobe_shim.py \
+            tests/bazarr/test_old_cpu_startup.py \
             tests/bazarr/test_sync_offset_acceptance.py \
             tests/bazarr/test_sync_instance_overrides.py \
             tests/bazarr/test_sync_outcome_reporting.py \
@@ -902,6 +903,8 @@ jobs:
             tests/bazarr/test_plugin_docker_api.py \
             tests/bazarr/test_plugin_oci_runtime.py \
             tests/bazarr/test_plugin_oci_real_docker.py \
+            tests/bazarr/test_plugin_front.py \
+            tests/bazarr/test_plugin_front_runtime.py \
             tests/bazarr/test_plugin_sandbox_sweep.py \
             tests/bazarr/test_provider_hub_ai_events.py \
             tests/bazarr/test_ai_translated_history.py \
