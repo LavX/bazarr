@@ -15,12 +15,12 @@ from .utils import get_ban_list
 
 
 # fmt: on
-def _init_pool(media_type, profile_id=None, providers=None, context=None):
+def _init_pool(media_type, profile_id=None, providers=None, context=None, source=None):
     pool = provider_pool()
     return pool(
         providers=providers or get_providers_sorted(),
         provider_configs=get_providers_auth(),
-        blacklist=_blacklist(media_type, context),
+        blacklist=_blacklist(media_type, context, source),
         throttle_callback=provider_throttle,
         # A download announces its one line once its attempts are done, naming
         # the deadline the throttle table holds; see announce_provider_throttle.
@@ -32,14 +32,22 @@ def _init_pool(media_type, profile_id=None, providers=None, context=None):
     )
 
 
-def _blacklist(media_type, context=None):
+def _blacklist(media_type, context=None, source=None):
+    if source is not None:
+        # A source search neither sees nor feeds the arr or Sportarr blacklists.
+        from media_sources.history import get_blacklist_source
+        return get_blacklist_source(source.kind)
     if media_type == 'sports':
         from sportarr.subtitles import get_blacklist_sports
         return get_blacklist_sports(context)
     return get_blacklist() if media_type == 'series' else get_blacklist_movie()
 
 
-def _pool_key(media_type, profile_id, context):
+def _pool_key(media_type, profile_id, context, source=None):
+    if source is not None:
+        if context is not None:
+            raise ValueError('A source item cannot be combined with a sports context')
+        return f'source_{source.kind}_{profile_id or ""}'
     if media_type == 'sports':
         from sportarr.subtitles import validate_context
         validate_context(context)
@@ -50,23 +58,23 @@ def _pool_key(media_type, profile_id, context):
 _pools = {}
 
 
-def _get_pool(media_type, profile_id=None, context=None):
+def _get_pool(media_type, profile_id=None, context=None, source=None):
     try:
-        return _pools[_pool_key(media_type, profile_id, context)]
+        return _pools[_pool_key(media_type, profile_id, context, source)]
     except KeyError:
-        _update_pool(media_type, profile_id, context)
+        _update_pool(media_type, profile_id, context, source)
 
-        return _pools[_pool_key(media_type, profile_id, context)]
+        return _pools[_pool_key(media_type, profile_id, context, source)]
 
 
-def _update_pool(media_type, profile_id=None, context=None):
-    pool_key = _pool_key(media_type, profile_id, context)
+def _update_pool(media_type, profile_id=None, context=None, source=None):
+    pool_key = _pool_key(media_type, profile_id, context, source)
     logging.debug("BAZARR updating pool: %s", pool_key)
 
     # Init a new pool if not present
     if pool_key not in _pools:
         logging.debug("BAZARR pool not initialized: %s. Initializing", pool_key)
-        _pools[pool_key] = _init_pool(media_type, profile_id, context=context)
+        _pools[pool_key] = _init_pool(media_type, profile_id, context=context, source=source)
 
     pool = _pools[pool_key]
     if pool is None:
@@ -75,7 +83,7 @@ def _update_pool(media_type, profile_id=None, context=None):
     return pool.update(
         get_providers_sorted(),
         get_providers_auth(),
-        _blacklist(media_type, context),
+        _blacklist(media_type, context, source),
         get_ban_list(profile_id),
         get_language_equals(),
     )
@@ -118,7 +126,11 @@ def update_pools(f):
                 media_type = None
 
         context = kwargs.get("context")
-        updated = _update_pool(media_type, profile_id, context)
+        source = kwargs.get("source")
+        if source is not None:
+            updated = _update_pool(media_type, profile_id, context, source)
+        else:
+            updated = _update_pool(media_type, profile_id, context)
 
         if updated:
             logging.debug(

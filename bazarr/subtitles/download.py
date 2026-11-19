@@ -32,9 +32,14 @@ from .processing import process_subtitle
 def generate_subtitles(path, languages, audio_language, sceneName, title, media_type, profile_id,
                        forced_minimum_score=None, is_upgrade=False, check_if_still_required=False,
                        previous_subtitles_to_delete=None, job_id=None, fallback_allowed=False,
-                       arr_instance_id=None):
+                       arr_instance_id=None, source=None):
     if not languages:
         return None
+
+    # A media source item is described by its context. Its publication type is what the media servers hear
+    # (a sports event publishes as sports although it is scored as a movie), and nothing here reads or writes
+    # an arr row for it.
+    publication_type = media_type if source is None else source.publication_type
 
     logging.debug(f'BAZARR Searching subtitles for this file: {path}')  # noqa: G004
 
@@ -43,7 +48,7 @@ def generate_subtitles(path, languages, audio_language, sceneName, title, media_
     else:
         os.environ["SZ_KEEP_ENCODING"] = "True"
 
-    pool = _get_pool(media_type, profile_id)
+    pool = _get_pool(media_type, profile_id) if source is None else _get_pool(media_type, profile_id, source=source)
     providers = pool.providers
 
     language_set = _get_language_obj(languages=languages)
@@ -52,7 +57,9 @@ def generate_subtitles(path, languages, audio_language, sceneName, title, media_
     hi_required = "force HI" if all([x.hi for x in language_set]) else "don't prefer"
 
     try:
-        video = get_video(force_unicode(path), title, sceneName, providers=providers, media_type=media_type)
+        video_extra = {} if source is None else {'source': source}
+        video = get_video(force_unicode(path), title, sceneName, providers=providers, media_type=media_type,
+                          **video_extra)
     except ValueError as e:
         logging.exception(f'BAZARR Unable to get video object for {path}: {e}')  # noqa: G004
         return None
@@ -67,6 +74,9 @@ def generate_subtitles(path, languages, audio_language, sceneName, title, media_
             video.arr_instance_id = arr_instance_id
         minimum_score = settings.general.minimum_score
         minimum_score_movie = settings.general.minimum_score_movie
+        if source is not None and source.kind == 'sports_event':
+            # Scored as a movie, held to the sports minimum.
+            minimum_score_movie = settings.general.minimum_score_sports
         min_score, max_score, scores = _get_scores(media_type, minimum_score_movie, minimum_score)
 
         from subtitles.tools.mods import get_subzero_mods
@@ -99,7 +109,9 @@ def generate_subtitles(path, languages, audio_language, sceneName, title, media_
             languages_that_landed = []
             for language in language_set:
                 # confirm if language is still missing or if cutoff has been reached
-                if check_if_still_required and language not in check_missing_languages(path, media_type, arr_instance_id):
+                if check_if_still_required and language not in (
+                        check_missing_languages(path, media_type, arr_instance_id) if source is None
+                        else check_missing_languages_source(source)):
                     # cutoff has been reached
                     logging.debug(f"BAZARR this language ({parse_language_object(language)}) is ignored because cutoff "  # noqa: G004
                                   f"has been reached during this search.")
@@ -140,7 +152,7 @@ def generate_subtitles(path, languages, audio_language, sceneName, title, media_
                     # "rejected" by construction and nothing is actually
                     # missing. Reporting a mismatch there would be pure noise.
                     if not downloaded_subtitles.get(video) and not is_upgrade \
-                            and not forced_minimum_score:
+                            and not forced_minimum_score and source is None:
                         try:
                             report_release_type_mismatch(video, media_type, language,
                                                          candidate_sink, int(min_score),
@@ -184,7 +196,8 @@ def generate_subtitles(path, languages, audio_language, sceneName, title, media_
                                                                  write_subtitle=partial(
                                                                      write_subtitle_file, path, written_paths=written_paths,
                                                                      on_publish=publication_callback(
-                                                                         media_type, path, 'download', arr_instance_id))
+                                                                         publication_type, path, 'download',
+                                                                         arr_instance_id))
                                                                  )
                                 if is_upgrade and previous_subtitles_to_delete and written_paths and (
                                         os.path.normcase(os.path.realpath(previous_subtitles_to_delete)) not in
@@ -192,8 +205,8 @@ def generate_subtitles(path, languages, audio_language, sceneName, title, media_
                                     try:
                                         with subtitle_mutation(path, previous_subtitles_to_delete):
                                             os.remove(previous_subtitles_to_delete)
-                                            publication_callback(media_type, path, 'download', arr_instance_id)(
-                                                previous_subtitles_to_delete)
+                                            publication_callback(publication_type, path, 'download',
+                                                                 arr_instance_id)(previous_subtitles_to_delete)
                                     except OSError:
                                         logging.exception('BAZARR unable to remove superseded subtitle: %s',
                                                           previous_subtitles_to_delete)
@@ -220,7 +233,9 @@ def generate_subtitles(path, languages, audio_language, sceneName, title, media_
                                        if getattr(saved, 'storage_path', None)
                                        and os.path.isfile(saved.storage_path)}
                             for landed_video, landed_language in languages_that_landed:
-                                if str(landed_language) not in written:
+                                if str(landed_language) not in written or source is not None:
+                                    # The release-type mismatch detector resolves an item by path in the arr
+                                    # tables, so it never runs for a source item.
                                     continue
                                 clear_mismatch_for_video(landed_video, media_type, landed_language,
                                                          arr_instance_id=arr_instance_id)
@@ -234,7 +249,8 @@ def generate_subtitles(path, languages, audio_language, sceneName, title, media_
                                                                       audio_language=audio_language,
                                                                       is_upgrade=is_upgrade, is_manual=False,
                                                                       path=path, max_score=max_score, job_id=job_id,
-                                                                      arr_instance_id=arr_instance_id)
+                                                                      arr_instance_id=arr_instance_id,
+                                                                      **({} if source is None else {'source': source}))
                                 if not processed_subtitle:
                                     logging.debug(f"BAZARR unable to process this subtitles: {subtitle}")  # noqa: G004
                                     continue
@@ -274,6 +290,22 @@ def _get_language_obj(languages):
         language_set.add(lang_obj)
 
     return language_set
+
+
+def check_missing_languages_source(source):
+    """The languages a source item still lacks, from the item itself. The arr lookup goes by path through the
+    arr tables, where an unknown path answers nothing and so skips every target as satisfied."""
+    from media_sources import repository
+    item = repository.get_item(source.item_id)
+    if item is None or not item.missing_subtitles:
+        return []
+    languages = []
+    for language in ast.literal_eval(item.missing_subtitles):
+        if language is not None:
+            hi_ = "True" if language.endswith(':hi') else "False"
+            forced_ = "True" if language.endswith(':forced') else "False"
+            languages.append((language.split(":")[0], hi_, forced_))
+    return _get_language_obj(languages=languages)
 
 
 def parse_language_object(language):

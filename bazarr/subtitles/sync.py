@@ -195,6 +195,10 @@ def _sync_progress_total(enabled_engines):
     return max(len(usable_sync_engines(normalize_enabled_engines(configured_engines))), 1)
 
 
+def _is_series_item(sonarr_episode_id, source):
+    return bool(sonarr_episode_id) or (source is not None and source.kind == 'episode')
+
+
 def _resolve_subsync_overrides(arr_instance_id, is_series, enabled_engines, max_offset_seconds):
     """Resolve the audio-sync settings against the owning instance's per-instance
     overrides (#227), honouring any explicit caller-supplied values.
@@ -226,7 +230,13 @@ def _resolve_subsync_overrides(arr_instance_id, is_series, enabled_engines, max_
 
 
 def _index_keep_all_outputs(video_path, sonarr_series_id=None, sonarr_episode_id=None, radarr_id=None,
-                            arr_instance_id=None):
+                            arr_instance_id=None, source=None):
+    if source is not None:
+        from media_sources.indexer import index_item
+
+        index_item(source.item_id)
+        return
+
     if sonarr_episode_id:
         from app.event_handler import event_stream
         from subtitles.indexer.series import store_subtitles
@@ -353,7 +363,10 @@ def sync_subtitles(video_path,
                    validate=None,
                    cancel=None,
                    publication_guard=None,
-                   return_job_id=False):
+                   return_job_id=False,
+                   source=None):
+    if source is not None and context is not None:
+        raise ValueError('A source item cannot be combined with a sports context')
     try:
         if context is not None:
             if validate is None or publication_guard is None:
@@ -369,8 +382,11 @@ def sync_subtitles(video_path,
         # unchanged. The use_subsync gate is evaluated inline via the module-level
         # helper so NO non-signature local is created before add_job_from_function
         # below, which re-passes the frame's locals as kwargs on re-invocation.
+        # A source item is a series item or a movie by its kind, where an arr item is by its Sonarr id. No
+        # local is bound here: the queueing call below re-passes the frame's locals as the job's arguments.
         if (not _resolve_subsync_overrides(
-                arr_instance_id, bool(sonarr_episode_id), enabled_engines, max_offset_seconds)[0]
+                arr_instance_id, _is_series_item(sonarr_episode_id, source), enabled_engines,
+                max_offset_seconds)[0]
                 and not force_sync):
             logging.debug('BAZARR automatic syncing is disabled in settings. Skipping sync routine.')
             release_subtitle_publication(source_version)
@@ -411,7 +427,7 @@ def sync_subtitles(video_path,
         # overrides for the real run (the use_subsync gate already passed above).
         (_, use_subsync_threshold, subsync_threshold,
          enabled_engines, max_offset_seconds) = _resolve_subsync_overrides(
-            arr_instance_id, bool(sonarr_episode_id), enabled_engines, max_offset_seconds)
+            arr_instance_id, _is_series_item(sonarr_episode_id, source), enabled_engines, max_offset_seconds)
         progress_total = _sync_progress_total(enabled_engines)
 
         def report(message, value=None, total=None, name=None):
@@ -437,7 +453,8 @@ def sync_subtitles(video_path,
             subsync = SubSyncer()
             published_versions = {}
             notify_publication = publication_callback(
-                'sports' if context is not None else 'episode' if sonarr_episode_id is not None else 'movie',
+                'sports' if context is not None else source.publication_type if source is not None
+                else 'episode' if sonarr_episode_id is not None else 'movie',
                 video_path, publication_operation, arr_instance_id)
 
             def on_publish(path):
@@ -466,6 +483,8 @@ def sync_subtitles(video_path,
                 'arr_instance_id': arr_instance_id,
                 'on_publish': on_publish,
             }
+            if source is not None:
+                sync_kwargs['source'] = source
             if context is not None:
                 from sportarr.subtitles import candidate_signature
                 sports_signature = candidate_signature(context)
@@ -495,6 +514,7 @@ def sync_subtitles(video_path,
                             sonarr_episode_id=sonarr_episode_id,
                             radarr_id=radarr_id,
                             arr_instance_id=arr_instance_id,
+                            **({} if source is None else {'source': source}),
                         )
                     if context is not None and not callback:
                         sports_refresh_attempted = True

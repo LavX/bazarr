@@ -310,11 +310,16 @@ def _postprocessing_config(media_type, arr_instance_id):
 
 def process_subtitle(subtitle, media_type, audio_language, path, max_score, is_upgrade=False, is_manual=False,
                      job_id=None, arr_instance_id=None, *,
-                     context=None, validate=None, cancel=None, publication_guard=None, auto_translate=True):
+                     context=None, validate=None, cancel=None, publication_guard=None, auto_translate=True,
+                     source=None):
     if media_type == 'sports' and (context is None or validate is None or publication_guard is None):
         raise ValueError('Sports processing requires its owned publication guard')
     if context is not None and media_type != 'sports':
         raise ValueError('Sports context requires sports media type')
+    if source is not None and context is not None:
+        raise ValueError('A source item cannot be combined with a sports context')
+    # What the media servers hear about a write. A source sports event is scored as a movie and published as sports.
+    publication_type = media_type if source is None else source.publication_type
     downloaded_provider = subtitle.provider_name
     uploader = subtitle.uploader
     release_info = subtitle.release_info
@@ -348,7 +353,25 @@ def process_subtitle(subtitle, media_type, audio_language, path, max_score, is_u
     sync_checker = _defaul_sync_checker
     logging.debug("Sync checker: %s", sync_checker)
 
-    if media_type == 'sports':
+    if source is not None:
+        # A media source item. The search that got here may have outlived its item, so it is resolved again by id.
+        from media_sources.context import SourceItemGone, resolve_item
+        try:
+            current_source = resolve_item(source.item_id)
+        except SourceItemGone:
+            logging.info('BAZARR source item %s was deleted while its subtitles were being fetched; the file '
+                         'was kept: %s', source.item_id, downloaded_path)
+            return
+        series_id = ''
+        episode_id = ''
+        owner_instance_id = None
+        if sync_checker(subtitle) is True:
+            from .sync import sync_subtitles
+            sync_subtitles(video_path=path, srt_path=downloaded_path, forced=subtitle.language.forced,
+                           hi=subtitle.language.hi, srt_lang=downloaded_language_code2,
+                           percent_score=percent_score, job_id=job_id, owns_job_progress=False,
+                           publication_operation='download', source=current_source)
+    elif media_type == 'sports':
         # A subtitle write does not change Sportarr's video inventory, so
         # Sportarr is not asked to rescan. The save that called this reports
         # the final file to the media servers once it releases its locks,
@@ -449,14 +472,22 @@ def process_subtitle(subtitle, media_type, audio_language, path, max_score, is_u
                 lock_paths = (path, destination, downloaded_path)
                 # Match the command's complete lock set before observing any bytes.
                 with subtitle_write_locks(path, *lock_paths):
-                    with observe_subtitle_change(media_type, path, downloaded_path, 'download', owner_instance_id):
+                    with observe_subtitle_change(publication_type, path, downloaded_path, 'download',
+                                                 owner_instance_id):
                         postprocessing(command, path, subtitle_path=downloaded_path, lock_paths=lock_paths)
                         set_chmod(subtitles_path=downloaded_path)
         elif command is not None:
             logging.debug(f"BAZARR post-processing skipped because subtitles score isn't below this "  # noqa: G004
                           f"threshold value: {pp_threshold}%")
 
-    if media_type == 'sports':
+    if source is not None:
+        # The stored path is already the Bazarr-visible one: nothing is mapped, in either direction, and no arr
+        # is told to rescan.
+        from media_sources.indexer import index_item
+        reversed_path = path
+        reversed_subtitles_path = downloaded_path
+        index_item(source.item_id)
+    elif media_type == 'sports':
         from utilities.path_mappings import apply_sports_mapping, read_sports_mappings
         if validate is not None:
             instance = validate()
@@ -496,10 +527,12 @@ def process_subtitle(subtitle, media_type, audio_language, path, max_score, is_u
         subtitle_path=downloaded_path,
         media_path=path,
         language=downloaded_language,
-        media_type=media_type
+        media_type=publication_type
     )
 
-    if media_type != 'sports':
+    # Auto-translate and combine read and write arr rows by arr ids, so a source item does not take this block yet:
+    # they arrive with the after-download work for source items.
+    if media_type != 'sports' and source is None:
         # Auto-translate: trigger translation to any profile language configured with translate_from.
         # A caller that downloads on purpose to replace a source it distrusts (the forced duplicate search)
         # turns it off, so the new file is not turned into translations of other languages.
