@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import contextlib
+import itertools
 import logging
 import json
 import sys
@@ -26,7 +27,7 @@ from .migration import (
 )
 from .protocol import candidate_from_worker, language_to_payload, video_to_payload, worker_download_to_content
 from .state import active_installations, blocked_installations, provider_hub_dir
-from . import runtime_status
+from . import leases, runtime_status
 from .env_registry import env_dir_of
 from .venv import hold_environment, validated_bundle_path, validated_interpreter
 from .worker import ProviderWorkerClient, release_when_gone, RequestNotAdmitted, WorkerBusy, WorkerError, worker_command
@@ -96,6 +97,9 @@ _PROXY_LOCK = threading.Lock()
 _PROXY_OPERATIONS_ENDED = threading.Condition(_PROXY_LOCK)
 
 
+# Names each proxy instance as the holder of the leases its calls take, so a drained instance gives back exactly those.
+_LEASE_OWNERS = itertools.count(1)
+
 # The workers that hold a host capability, by provider id, so a withdrawn trust can take it back at once.
 _HOST_CALL_CLIENTS: dict[str, "weakref.WeakSet"] = {}
 
@@ -131,6 +135,8 @@ class HubProxyProvider(Provider):
     _active_operations = 0
     #: Set by whichever path stops this proxy's worker first, so only one does.
     _stopping = False
+    #: Names this instance as the holder of the service leases its calls take.
+    _lease_owner = None
 
     def __init__(self, timeout=None, worker_client=None, **config):
         # An explicit per-instance timeout override is optional; when absent the
@@ -164,6 +170,20 @@ class HubProxyProvider(Provider):
             client.stop()
         return True
 
+    def _call_leases(self):
+        """What this call may lease, for the manifest of the release this instance runs. Never raises."""
+        from .capabilities import CallLeases
+
+        try:
+            with _PROXY_LOCK:
+                if self._lease_owner is None:
+                    self._lease_owner = f"{self.provider_name}#{next(_LEASE_OWNERS)}"
+                owner = self._lease_owner
+            return CallLeases.for_provider(self.provider_name, getattr(self.__class__, "manifest", None), owner)
+        except Exception:
+            logger.exception("Provider Hub: could not prepare the service leases of %s", self.provider_name)
+            return CallLeases(self.provider_name, {}, [], "")
+
     @contextlib.contextmanager
     def _operation(self):
         """One admitted call: it holds the environment against cleanup for as long as it runs.
@@ -171,6 +191,9 @@ class HubProxyProvider(Provider):
         A retired proxy refuses it, so the caller asks the pool for the current
         instance. When the last admitted call of a retired proxy ends, the worker
         it may have started is stopped before the hold is released.
+
+        What it yields is the call's service leases: the request's configuration comes from ``call.config`` and the
+        leases are given back when the call ends, whatever way it ends.
         """
         from subliminal_patch.core import ProviderRetiredError
 
@@ -180,9 +203,13 @@ class HubProxyProvider(Provider):
             env_dir = _instance_environment(self)
             release = hold_environment(env_dir) if env_dir else (lambda: None)
             self._active_operations += 1
+        call = None
         try:
-            yield
+            call = self._call_leases()
+            yield call
         finally:
+            if call is not None:
+                call.close()
             with _PROXY_LOCK:
                 self._active_operations -= 1
                 last_of_retired = self._retired and self._active_operations == 0
@@ -218,6 +245,10 @@ class HubProxyProvider(Provider):
             self._shutdown_worker()
         except Exception:
             logger.exception("Provider Hub: could not stop the worker of %s", self.provider_name)
+        finally:
+            # A call that was cut never reached its own release. Nothing of an ended instance keeps a service.
+            if self._lease_owner is not None:
+                leases.release_owner(self._lease_owner)
         release_when_gone(self.worker_client, release, self.provider_name)
 
     def outcome_recorded(self):
@@ -356,7 +387,8 @@ class HubProxyProvider(Provider):
             "video": video_to_payload(video),
             "languages": [language_to_payload(item) for item in languages],
         }
-        with self._operation():
+        with self._operation() as call:
+            request["config"] = call.config(self.config)
             result = self._gated_request("search", request, timeout)
         _consume_runtime_events(
             self.provider_name,
@@ -380,10 +412,10 @@ class HubProxyProvider(Provider):
     def download_subtitle(self, subtitle):
         # The archive member selection inside the download talks to the same
         # worker, so the whole download is one admitted operation.
-        with self._operation():
-            return self._download_subtitle(subtitle)
+        with self._operation() as call:
+            return self._download_subtitle(subtitle, call)
 
-    def _download_subtitle(self, subtitle):
+    def _download_subtitle(self, subtitle, call=None):
         timeout = self._request_timeout()
         status_generation = runtime_status.generation(self.provider_name)
         status_configuration_generation = runtime_status.configuration_generation(
@@ -393,7 +425,7 @@ class HubProxyProvider(Provider):
             "provider": self.provider_name,
             "provider_payload": subtitle.provider_payload,
             "language": language_to_payload(subtitle.language),
-            "config": self.config,
+            "config": call.config(self.config) if call is not None else self.config,
         }
         result = self._gated_request("download", request, timeout)
         _consume_runtime_events(
@@ -412,7 +444,7 @@ class HubProxyProvider(Provider):
                 "members": members,
                 "season": context.get("season", getattr(subtitle, "season", None)),
                 "episode": context.get("episode", getattr(subtitle, "episode", None)),
-                "config": self.config,
+                "config": request["config"],
             }
             if "absolute_episode" in context:
                 selector_payload["absolute_episode"] = context["absolute_episode"]

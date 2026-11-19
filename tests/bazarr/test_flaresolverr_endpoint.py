@@ -77,20 +77,23 @@ class TestResolution:
 
 
 class TestFill:
-    def test_an_empty_field_of_a_trusted_installation_is_filled(self, monkeypatch):
+    """The address is not put in a plugin's configuration: the key is reserved empty and each call fills it from a
+    lease (``capabilities.CallLeases``, covered in ``test_service_leases``)."""
+
+    def test_an_empty_field_of_a_trusted_installation_is_reserved_not_filled(self, monkeypatch):
         configs = _overlay(monkeypatch, [_installation("alpha", trusted=True)],
                            {"alpha": {FIELD: ""}}, _settings())
-        assert configs["alpha"][FIELD] == GLOBAL_URL
+        assert configs["alpha"][FIELD] == ""
 
-    def test_a_missing_stored_config_is_filled_too(self, monkeypatch):
+    def test_a_missing_stored_config_is_reserved_too(self, monkeypatch):
         configs = _overlay(monkeypatch, [_installation("alpha", trusted=True)], {}, _settings())
-        assert configs["alpha"][FIELD] == GLOBAL_URL
+        assert configs["alpha"][FIELD] == ""
 
-    def test_an_untrusted_plugin_whose_manifest_is_flagged_is_filled(self, monkeypatch):
+    def test_an_untrusted_plugin_whose_manifest_is_flagged_is_reserved(self, monkeypatch):
         configs = _overlay(monkeypatch,
                            [_installation("alpha", manifest_extra={"flaresolverr": True})],
                            {}, _settings())
-        assert configs["alpha"][FIELD] == GLOBAL_URL
+        assert configs["alpha"][FIELD] == ""
 
     def test_an_untrusted_unflagged_plugin_never_gets_the_address(self, monkeypatch):
         configs = _overlay(monkeypatch, [_installation("alpha")], {"alpha": {FIELD: ""}}, _settings())
@@ -150,11 +153,11 @@ class TestFill:
         monkeypatch.setitem(provider_registry.providers, "alpha", Provider)
         properties = {FIELD: {"type": "string"}}
         installations = [_installation("alpha", properties, trusted=True)]
-        pool = SZProviderPool(providers=["alpha"], provider_configs=_overlay(
-            monkeypatch, installations, {}, _settings(GLOBAL_URL)))
+        # A pool built by a release that put the address in the configuration.
+        pool = SZProviderPool(providers=["alpha"], provider_configs={"alpha": {FIELD: GLOBAL_URL}})
         assert pool.provider_configs["alpha"][FIELD] == GLOBAL_URL
 
-        pool.provider_configs.update(_overlay(monkeypatch, installations, {}, _settings("")))
+        pool.provider_configs.update(_overlay(monkeypatch, installations, {}, _settings(GLOBAL_URL)))
 
         assert pool.provider_configs["alpha"][FIELD] == ""
         assert pool["alpha"].config[FIELD] == ""
@@ -164,10 +167,10 @@ class TestFill:
                            {"alpha": {FIELD: ""}}, _settings(), blocked={"alpha"})
         assert configs["alpha"][FIELD] == ""
 
-    def test_the_environment_address_is_used_when_no_setting_is_saved(self, monkeypatch):
+    def test_the_environment_address_is_not_put_in_the_configuration_either(self, monkeypatch):
         monkeypatch.setenv(endpoints.FLARESOLVERR_ENV, "http://from-env:8191")
         configs = _overlay(monkeypatch, [_installation("alpha", trusted=True)], {}, _settings(""))
-        assert configs["alpha"][FIELD] == "http://from-env:8191"
+        assert configs["alpha"][FIELD] == ""
 
     def test_with_no_address_every_config_is_byte_identical(self, monkeypatch):
         installations = [_installation("alpha", trusted=True), _installation("beta")]
@@ -184,7 +187,7 @@ class TestFill:
         ]
         stored = {"alpha": {"apikey": "a"}, "plain": {"apikey": "p"}, "owned": {FIELD: "http://own:8191"}}
         configs = _overlay(monkeypatch, installations, stored, _settings())
-        assert configs["alpha"] == {FIELD: GLOBAL_URL, "apikey": "a"}
+        assert configs["alpha"] == {FIELD: "", "apikey": "a"}
         assert configs["plain"] == {"apikey": "p"}
         assert configs["owned"][FIELD] == "http://own:8191"
 

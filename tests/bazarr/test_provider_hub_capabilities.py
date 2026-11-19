@@ -52,15 +52,15 @@ class TestFlareSolverrThroughRequires:
                              installation, _settings())
         return config
 
-    def test_an_untrusted_plugin_that_requires_it_gets_the_address(self):
+    def test_an_untrusted_plugin_that_requires_it_has_the_key_reserved_for_a_lease(self):
         config = self._deliver(_installation({"requires": ["flaresolverr.v1"]}))
-        assert config == {"flaresolverr_url": SOLVER_URL}
+        assert config == {"flaresolverr_url": ""}
 
     def test_an_untrusted_plugin_that_never_asked_gets_nothing(self):
         assert self._deliver(_installation({})) == {}
 
-    def test_a_trusted_plugin_with_the_field_gets_it_unasked(self):
-        assert self._deliver(_installation({}, trusted=True)) == {"flaresolverr_url": SOLVER_URL}
+    def test_a_trusted_plugin_with_the_field_has_it_reserved_unasked(self):
+        assert self._deliver(_installation({}, trusted=True)) == {"flaresolverr_url": ""}
 
     def test_a_plugin_without_the_field_is_left_alone(self):
         assert self._deliver(_installation({"requires": ["flaresolverr.v1"]}), properties={}) == {}

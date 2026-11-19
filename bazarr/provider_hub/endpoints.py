@@ -684,4 +684,17 @@ def run_flaresolverr_test(typed, settings=None) -> dict:
         source = "typed"
     result = check_flaresolverr_address(typed)
     result["source"] = source
+    _record_health_of_address_in_use(typed, result, settings)
     return result
+
+
+def _record_health_of_address_in_use(address, result: dict, settings=None) -> None:
+    """A Test of the address providers use is also the health the cards show. A different typed address is not."""
+    try:
+        in_use = flaresolverr_url_source(settings)[0]
+        if isinstance(address, str) and same_flaresolverr_service(address, in_use):
+            from . import service_health
+
+            service_health.record(FLARESOLVERR_CAPABILITY, in_use, result)
+    except Exception as error:
+        logger.warning("Could not keep the result of a FlareSolverr test (%s)", type(error).__name__)

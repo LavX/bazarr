@@ -908,6 +908,7 @@ jobs:
             tests/bazarr/test_plugin_oci_real_docker.py \
             tests/bazarr/test_plugin_front.py \
             tests/bazarr/test_plugin_front_runtime.py \
+            tests/bazarr/test_service_leases.py \
             tests/bazarr/test_plugin_sandbox_sweep.py \
             tests/bazarr/test_provider_hub_ai_events.py \
             tests/bazarr/test_ai_translated_history.py \
