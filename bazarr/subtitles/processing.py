@@ -530,6 +530,8 @@ def process_subtitle(subtitle, media_type, audio_language, path, max_score, is_u
         media_type=publication_type
     )
 
+    # Auto-translate and combine read and write arr rows by arr ids, so a source item does not take this block yet:
+    # they arrive with the after-download work for source items.
     if media_type != 'sports' and source is None:
         # Auto-translate: trigger translation to any profile language configured with translate_from.
         # A caller that downloads on purpose to replace a source it distrusts (the forced duplicate search)

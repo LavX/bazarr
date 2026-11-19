@@ -12,6 +12,9 @@ from .context import SourceItemContext
 
 
 def refine_from_source(path, video, source: SourceItemContext):
+    """What the item says wins over what the file name guessed where the user set it, and fills the gaps where
+    it did not."""
+    user = source.identity_source == 'user'
     if isinstance(video, Episode):
         if source.group_title:
             video.series = source.group_title
@@ -20,9 +23,13 @@ def refine_from_source(path, video, source: SourceItemContext):
         if source.episode is not None:
             video.episode = int(source.episode)
         video.title = source.title
-        # Only refine year as a fallback.
-        if not video.year and source.year:
+        # Only refine year as a fallback, unless the user set it.
+        if source.year and (user or not video.year):
             video.year = source.year
+        if source.tvdb_id and (user or not video.tvdb_id):
+            video.tvdb_id = int(source.tvdb_id)
+        if source.imdb_id and (user or not video.imdb_id):
+            video.imdb_id = source.imdb_id
         if source.series_tvdb_id:
             video.series_tvdb_id = int(source.series_tvdb_id)
         if source.series_imdb_id and not video.series_imdb_id:
@@ -40,10 +47,10 @@ def refine_from_source(path, video, source: SourceItemContext):
                 pass
         else:
             video.title = source.title
-            if not video.year and source.year:
+            if source.year and (user or not video.year):
                 video.year = source.year
-            if source.imdb_id and not video.imdb_id:
+            if source.imdb_id and (user or not video.imdb_id):
                 video.imdb_id = source.imdb_id
-            if source.tmdb_id and not video.tmdb_id:
+            if source.tmdb_id and (user or not video.tmdb_id):
                 video.tmdb_id = source.tmdb_id
     return video

@@ -1,5 +1,6 @@
 # coding=utf-8
 """The folder kind: a library is a directory Bazarr+ can read, and the listing is a walk of it."""
+import logging
 import os
 import re
 from typing import Callable, Optional
@@ -25,6 +26,14 @@ def is_video_file(name):
 def is_skipped_file(name):
     stem = os.path.splitext(name)[0]
     return name.startswith('.') or bool(_SAMPLE_FILE.search(stem))
+
+
+def is_storable(path):
+    try:
+        path.encode('utf-8')
+    except UnicodeEncodeError:
+        return False
+    return True
 
 
 def is_skipped_directory(name):
@@ -102,6 +111,13 @@ class FolderKind:
                     listing.problems.append(f"Cannot read {entry.path}: {error.strerror or error}")
                     readable = False
             for entry in with_files:
+                if not is_storable(entry.path):
+                    # os.scandir hands back such a name as surrogate escapes, which neither database driver can
+                    # bind: one of them would fail the scan of the whole library. No stored row can have this
+                    # name, so leaving it out loses nothing and the listing stays complete.
+                    logging.warning('BAZARR skipping a file whose name is not valid UTF-8: %r', entry.path)
+                    listing.skipped_names += 1
+                    continue
                 try:
                     info = entry.stat()
                 except OSError as error:

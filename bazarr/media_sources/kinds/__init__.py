@@ -62,6 +62,8 @@ class Listing:
     files: Iterator[DiscoveredFile]
     complete: bool = False
     problems: list = field(default_factory=list)
+    #: Files left out because their name cannot be stored (bytes that are not valid UTF-8).
+    skipped_names: int = 0
 
     def __iter__(self):
         return iter(self.files)

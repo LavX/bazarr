@@ -265,3 +265,79 @@ def test_malformed_values_are_refused_with_a_400(api, change):
               for key, value in change.items()}
     response = _create(api, **change)
     assert response.status_code == 400
+
+
+# Overlap through links and under concurrency
+
+def test_a_symlinked_second_root_to_the_same_folder_is_refused(api, tmp_path):
+    assert _create(api).status_code == 201
+    link = tmp_path / "alias"
+    link.symlink_to(api.movies, target_is_directory=True)
+    response = _create(api, name="Alias", library={"path": str(link), "content_kind": "movie"})
+    assert response.status_code == 409 and response.json["error"] == "overlap"
+    # Reaching into the existing root through a link is the same folder too.
+    nested = _create(api, name="Nested", library={"path": str(link / "Sub"), "content_kind": "movie"})
+    assert nested.status_code in (400, 409)
+    (api.movies / "Sub").mkdir()
+    nested = _create(api, name="Nested", library={"path": str(link / "Sub"), "content_kind": "movie"})
+    assert nested.status_code == 409 and nested.json["error"] == "overlap"
+
+
+def test_two_roots_with_the_same_device_and_inode_are_refused_whatever_their_spelling(api, tmp_path, monkeypatch):
+    """A bind mount shows one folder at two paths that no string or realpath comparison relates."""
+    from media_sources import repository
+
+    assert _create(api).status_code == 201
+    second = tmp_path / "Bound"
+    second.mkdir()
+    real = repository.folder_identity
+
+    def same_as_movies(path):
+        return real(str(api.movies)) if path == str(second) else real(path)
+
+    monkeypatch.setattr(repository, "folder_identity", same_as_movies)
+    response = _create(api, name="Bound", library={"path": str(second), "content_kind": "movie"})
+    assert response.status_code == 409 and response.json["error"] == "overlap"
+
+
+def test_a_double_leading_slash_is_the_same_folder(api):
+    assert _create(api).status_code == 201
+    response = _create(api, name="Slashes", library={"path": "/" + str(api.movies), "content_kind": "movie"})
+    assert response.status_code == 409 and response.json["error"] == "overlap"
+
+
+def test_two_overlapping_creations_at_once_cannot_both_succeed(api, monkeypatch):
+    import threading
+
+    from media_sources import repository, service
+
+    inner = api.movies / "Inner"
+    inner.mkdir()
+    real = repository.overlapping_root
+    barrier = threading.Barrier(2)
+
+    def slow_check(path, target=None):
+        found = real(path, target)
+        try:
+            barrier.wait(timeout=0.7)
+        except threading.BrokenBarrierError:
+            pass
+        return found
+
+    monkeypatch.setattr(service.repository, "overlapping_root", slow_check)
+    outcomes = []
+
+    def create(name, path):
+        try:
+            outcomes.append(service.create_source({"name": name, "library": {"path": str(path),
+                                                                           "content_kind": "movie"}}))
+        except service.SourceError as error:
+            outcomes.append(error.code)
+
+    threads = [threading.Thread(target=create, args=("One", api.movies)),
+               threading.Thread(target=create, args=("Two", inner))]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    assert len(repository.list_sources()) == 1 and outcomes.count("overlap") == 1

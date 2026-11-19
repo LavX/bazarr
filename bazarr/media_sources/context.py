@@ -32,6 +32,7 @@ class SourceItemContext:
     publication_type: str        # 'movie', 'episode' or 'sports'
     scene_name: Optional[str] = None
     audio_language: Optional[str] = None
+    identity_source: str = 'filename'  # 'user' when the user set the identity: it outranks the file name
 
     @property
     def media_type(self):
@@ -82,4 +83,4 @@ def resolve_item(item_id, target=None) -> SourceItemContext:
         series_imdb_id=group.imdb_id if is_episode and group is not None else None,
         series_tvdb_id=group.tvdb_id if is_episode and group is not None else None,
         publication_type=_PUBLICATION[item.kind], scene_name=item.scene_name,
-        audio_language=item.audio_language)
+        audio_language=item.audio_language, identity_source=item.identity_source)

@@ -133,12 +133,13 @@ def scan_library(source, library, *, cancel=None, session=None) -> LibraryScan:
             cancel()
 
     for batch in _chunks(pending_update):
+        # Parsing is slow and holds nothing: it happens before the write lock is taken.
+        parses = {found.path: parse_movie_file(found.path) for _, found, changed, _ in batch if changed}
         with source_transaction(session) as connection:
             for item_id, found, changed, user_set in batch:
                 result.item_ids.append(item_id)
                 if changed:
-                    parse = parse_movie_file(found.path)
-                    values = _item_values(found, parse, keep_identity=user_set)
+                    values = _item_values(found, parses[found.path], keep_identity=user_set)
                     # The file changed: its codec cache described the old content.
                     repository.update_item(item_id, connection, ffprobe_cache=None, **values)
                     result.updated += 1
@@ -149,6 +150,8 @@ def scan_library(source, library, *, cancel=None, session=None) -> LibraryScan:
         if cancel is not None:
             cancel()
 
+    # Each root's device is recorded below but not yet compared here: refusing to delete after a root moved to
+    # another device belongs to the scanner's device-change rules, with the group and rename handling.
     if listing.complete:
         found_paths = {found.path for found in discovered}
         gone = [row.id for path, row in existing.items() if path not in found_paths and _path_is_gone(path)]
@@ -178,6 +181,8 @@ def scan_library(source, library, *, cancel=None, session=None) -> LibraryScan:
                     else f"; {count} held by {name}, which is disabled")
     if result.skipped:
         summary += f"; {result.skipped} could not be added (see the log)"
+    if listing.skipped_names:
+        summary += f"; {listing.skipped_names} file(s) with a name that is not valid UTF-8 were skipped"
     result.message = f"{summary}. {result.message}".strip() if result.message else summary
     repository.record_library_scan(library.id, result.status, result.message, session)
     return result

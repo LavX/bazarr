@@ -826,3 +826,187 @@ def test_the_webhook_hears_the_publication_type_of_a_source_item(world, monkeypa
     processing.process_subtitle(subtitle, context.media_type, "None", context.path, 100, source=context)
     assert webhook.call_args.kwargs["media_type"] == {"movie": "movie", "series": "episode",
                                                       "sports": "sports"}[expected]
+
+
+# The sync path asks the source tables, not the arr tables, who owns a generated output
+
+def _custom_folder(world, monkeypatch, tmp_path):
+    from app.config import settings
+    from media_sources import indexer
+
+    subtitles = tmp_path / "subtitles"
+    subtitles.mkdir()
+    monkeypatch.setattr(settings.general, "subfolder", "absolute")
+    monkeypatch.setattr(settings.general, "subfolder_custom", str(subtitles))
+    monkeypatch.setattr(indexer, "get_target_folder", lambda path, create=False: str(subtitles))
+    return subtitles
+
+
+def _statements(world):
+    statements = []
+
+    @event.listens_for(world.db.get_bind(), "before_cursor_execute")
+    def record(connection, cursor, statement, parameters, context, executemany):
+        statements.append(statement)
+
+    return statements, lambda: event.remove(world.db.get_bind(), "before_cursor_execute", record)
+
+
+ARR_READ = re.compile(r"table_(shows|episodes|movies|sports_events)\b|arr_instances")
+
+
+def test_a_source_publication_proves_ownership_from_the_source_tables_only(world, monkeypatch, tmp_path):
+    from media_sources.indexer import SourceOutputOwnerIndex
+    from subtitles.tools.subsync_engines import SubtitlePublication, subtitle_source_version
+
+    subtitles = _custom_folder(world, monkeypatch, tmp_path)
+    context = _movie(world)
+    source = subtitles / (context.path.rsplit("/", 1)[1].replace(".mkv", ".en.srt"))
+    source.write_text(CONTENT.decode())
+    statements, stop = _statements(world)
+    try:
+        owned = SubtitlePublication(context.path, str(source), subtitle_source_version(str(source)),
+                                    ownership_index=SourceOutputOwnerIndex())
+        # Without the source index the arr tables are asked, and a source item owns nothing there.
+        arr_way = SubtitlePublication(context.path, str(source), subtitle_source_version(str(source)))
+    finally:
+        stop()
+    assert owned.owns_destinations is True and arr_way.owns_destinations is False
+    assert any(ARR_READ.search(s) for s in statements)
+    assert not any(ARR_READ.search(s) for s in statements[:statements.index(
+        next(s for s in statements if ARR_READ.search(s)))])
+
+
+def test_the_syncer_hands_a_source_ownership_index_to_the_publication_and_the_cleanup(world, monkeypatch, tmp_path):
+    from media_sources.indexer import SourceOutputOwnerIndex
+    from subtitles.tools import subsyncer
+
+    subtitles = _custom_folder(world, monkeypatch, tmp_path)
+    context = _movie(world)
+    base = context.path.rsplit("/", 1)[1].replace(".mkv", "")
+    source = subtitles / f"{base}.en.srt"
+    source.write_text(CONTENT.decode())
+    stale = subtitles / f"{base}.en.ffsubsync.srt"
+    stale.write_text(CONTENT.decode())
+    seen = {}
+
+    class Publication:
+        def __init__(self, video_path, srt_path, version, **kwargs):
+            seen["publication"] = kwargs
+            self.state = None
+
+        def release(self):
+            pass
+
+    class Runner:
+        def run(self, **kwargs):
+            seen["after_publish"] = kwargs["after_publish"]
+            kwargs["after_publish"]()
+            raise RuntimeError("stop after the cleanup")
+
+    monkeypatch.setattr(subsyncer, "SubtitlePublication", Publication)
+    monkeypatch.setattr(subsyncer, "SubsyncEngineRunner", Runner)
+    statements, stop = _statements(world)
+    try:
+        with pytest.raises(RuntimeError, match="stop after the cleanup"):
+            subsyncer.SubSyncer().sync(
+                video_path=context.path, srt_path=str(source), srt_lang="en", hi=False, forced=False,
+                max_offset_seconds="60", no_fix_framerate=False, gss=False, output_mode="overwrite",
+                enabled_engines=["ffsubsync"], source=context)
+    finally:
+        stop()
+    assert isinstance(seen["publication"]["ownership_index"], SourceOutputOwnerIndex)
+    assert not any(ARR_READ.search(s) for s in statements)
+    # The generated output of this item was proven its own and quarantined, which an arr lookup would not do.
+    assert not stale.exists() and list(subtitles.glob(".bazarr-sync-obsolete-*"))
+
+
+def test_an_arr_sync_keeps_the_call_it_always_made(world, monkeypatch, tmp_path):
+    from subtitles.tools import subsyncer
+
+    context = _movie(world)
+    source = tmp_path / "x.en.srt"
+    source.write_text(CONTENT.decode())
+    seen = {}
+
+    class Publication:
+        def __init__(self, *args, **kwargs):
+            seen["kwargs"] = kwargs
+            self.state = None
+
+        def release(self):
+            pass
+
+    class Runner:
+        def run(self, **kwargs):
+            raise RuntimeError("stop")
+
+    monkeypatch.setattr(subsyncer, "SubtitlePublication", Publication)
+    monkeypatch.setattr(subsyncer, "SubsyncEngineRunner", Runner)
+    with pytest.raises(RuntimeError):
+        subsyncer.SubSyncer().sync(video_path=context.path, srt_path=str(source), srt_lang="en", hi=False,
+                                   forced=False, max_offset_seconds="60", no_fix_framerate=False, gss=False,
+                                   output_mode="overwrite", enabled_engines=["ffsubsync"])
+    assert seen["kwargs"] == {}
+
+
+# A race between resolving an item and reading it
+
+def test_an_item_deleted_between_resolving_and_reading_it_fails_the_job_by_name(world, monkeypatch):
+    from app.jobs_queue import JobFailed
+    from media_sources import repository, service
+
+    context = _movie(world)
+    monkeypatch.setattr(service.jobs_queue, "update_job_progress", lambda **kwargs: None)
+    real = repository.get_item
+    calls = []
+
+    def vanishing(item_id, target=None):
+        calls.append(item_id)
+        return None if len(calls) > 1 else real(item_id, target)
+
+    monkeypatch.setattr(service.repository, "get_item", vanishing)
+    with pytest.raises(JobFailed) as failure:
+        service.search_source_item(context.item_id, job_id=2)
+    assert failure.value.reason == "not_found"
+
+
+# What the user decided reaches the provider video
+
+def test_a_user_set_identity_overrides_the_year_and_gives_the_ids_to_the_provider_video(world, monkeypatch):
+    from media_sources import repository
+    from media_sources.context import resolve_item
+    from subtitles import utils
+
+    monkeypatch.setattr(utils, "registered_refiners", {"anidb": lambda p, v: None, "anilist": lambda p, v: None})
+    movie = _movie(world, "Film.1999.1080p.mkv")
+    repository.update_item(movie.item_id, world.db, year="2001", identity_source="user", imdb_id="tt0133093",
+                           tmdb_id="603")
+    found = utils.get_video(movie.path, "Film", "None", media_type="movie", source=resolve_item(movie.item_id))
+    assert (found.year, found.imdb_id, found.tmdb_id) == (2001, "tt0133093", 603 if isinstance(found.tmdb_id, int)
+                                                          else "603")
+    # An identity read from the file name only fills what the file name left out.
+    other = _movie(world, "Other.1998.mkv")
+    repository.update_item(other.item_id, world.db, year="2005")
+    found = utils.get_video(other.path, "Other", "None", media_type="movie", source=resolve_item(other.item_id))
+    assert found.year == 1998
+
+    episode = _episode(world)
+    repository.update_item(episode.item_id, world.db, identity_source="user", tvdb_id=777, imdb_id="tt777")
+    found = utils.get_video(episode.path, "Bluey", "None", media_type="series", source=resolve_item(episode.item_id))
+    assert (found.tvdb_id, found.imdb_id) == (777, "tt777")
+
+
+# The blacklist outlives its source, by design
+
+def test_the_blacklist_of_a_deleted_source_still_applies_to_its_kind(world):
+    from media_sources import history, repository
+    from subtitles import pool
+
+    movie = _movie(world)
+    history.blacklist_log_source(movie, "alpha", "release-1", "en")
+    repository.delete_source(world.source_id)
+    other_source, other_library, root = add_source(world.db, world.tmp_path, name="Other", folder="Other")
+    other = add_item(world.db, other_source, other_library, root / "X.2003.mkv")
+    from media_sources.context import resolve_item
+    assert pool._blacklist("movie", None, resolve_item(other)) == [("alpha", "release-1")]

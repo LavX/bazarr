@@ -610,3 +610,61 @@ def test_an_emptied_folder_is_covered_by_the_empty_walk_rule_and_the_message_say
     (result,) = _scan(source_id)
     assert result.status == "root_missing" and result.deleted == 0
     assert "remove the library" in result.message
+
+
+# File names the database cannot hold, and parsing outside the write lock
+
+def test_a_name_that_is_not_valid_utf8_is_skipped_and_reported_and_the_scan_goes_on(library):
+    from media_sources import repository
+
+    session, source_id, library_id, root = library
+    video(root / "Good.2001.mkv")
+    bad_file = root / os.fsdecode(b"Bad\xe9.2002.mkv")
+    video(bad_file)
+    bad_directory = root / os.fsdecode(b"Dir\xff")
+    video(bad_directory / "Inside.2003.mkv")
+    video(root / "Fine" / "Fine.2004.mkv")
+
+    (result,) = _scan(source_id)
+
+    assert result.status == "ok" and result.inserted == 2
+    assert sorted(row.title for row in _items(library_id).values()) == ["Fine", "Good"]
+    assert "2 file(s) with a name that is not valid UTF-8 were skipped" in result.message
+    assert "UTF-8" in repository.get_library(library_id).last_scan_message
+    # A second scan skips them again without failing, and deletes nothing.
+    (again,) = _scan(source_id)
+    assert (again.inserted, again.deleted) == (0, 0)
+
+
+def test_changed_files_are_parsed_before_the_write_transaction_opens(library, monkeypatch):
+    from media_sources import scanner
+
+    session, source_id, library_id, root = library
+    paths = [video(root / f"Film.{2000 + number}.mkv") for number in range(3)]
+    _scan(source_id)
+    for path in paths:
+        path.write_bytes(b"\0" * 2000)
+    inside = []
+    real_transaction, real_parse = scanner.source_transaction, scanner.parse_movie_file
+
+    class Tracking:
+        def __init__(self, *args, **kwargs):
+            self.manager = real_transaction(*args, **kwargs)
+
+        def __enter__(self):
+            inside.append(True)
+            return self.manager.__enter__()
+
+        def __exit__(self, *exc):
+            result = self.manager.__exit__(*exc)
+            inside.pop()
+            return result
+
+    def parse(path):
+        assert not inside, "a file was parsed while a write transaction was open"
+        return real_parse(path)
+
+    monkeypatch.setattr(scanner, "source_transaction", Tracking)
+    monkeypatch.setattr(scanner, "parse_movie_file", parse)
+    (result,) = _scan(source_id)
+    assert result.updated == 3

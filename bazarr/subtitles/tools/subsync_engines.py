@@ -67,7 +67,7 @@ def subtitle_source_version(path):
 class SubtitlePublication:
     """Hold a media coordinator while a queued sync watches exact destinations."""
 
-    def __init__(self, video_path, source_path, source_version):
+    def __init__(self, video_path, source_path, source_version, ownership_index=None):
         self.state = subtitle_write_lock(video_path, os.path.dirname(source_path))
         self.source_path = source_path
         self.source_version = source_version
@@ -80,7 +80,8 @@ class SubtitlePublication:
             # folder, so nothing else is relaxed.
             self.preview = is_preview_destination(source_path)
             self.owns_destinations = (self.preview
-                                      or sync_output_owner_is_unique(video_path, source_path))
+                                      or sync_output_owner_is_unique(video_path, source_path,
+                                                                     ownership_index=ownership_index))
             self.destinations = {
                 str(path): (self.state.revision(path), subtitle_source_version(path))
                 for path in (engine_output_path(source_path, engine) for engine in SYNC_ENGINES)
@@ -428,15 +429,16 @@ def sync_output_owner_is_unique(video_path, source_path, ownership_index=None):
         return False
 
 
-def quarantine_sync_outputs(video_path, source_path):
+def quarantine_sync_outputs(video_path, source_path, ownership_index=None):
     """Preserve proven generated siblings under names no subtitle scan accepts."""
-    if is_sync_engine_output(source_path) or not sync_output_owner_is_unique(video_path, source_path):
+    if is_sync_engine_output(source_path) or not sync_output_owner_is_unique(
+            video_path, source_path, ownership_index=ownership_index):
         return
     from subtitles.indexer.utils import add_sync_engine_outputs
 
     directory = os.path.dirname(source_path)
     with subtitle_write_lock(video_path, directory) as state:
-        owned = add_sync_engine_outputs(directory, {}, video_path=video_path)
+        owned = add_sync_engine_outputs(directory, {}, video_path=video_path, ownership_index=ownership_index)
         for engine in SYNC_ENGINES:
             output = engine_output_path(source_path, engine)
             if output.name not in owned:
@@ -456,10 +458,10 @@ def quarantine_sync_outputs(video_path, source_path):
             state.changed(output)
 
 
-def quarantine_sync_outputs_after_mutation(video_path, source_path):
+def quarantine_sync_outputs_after_mutation(video_path, source_path, ownership_index=None):
     """Report cleanup failure separately from an already completed file change."""
     try:
-        quarantine_sync_outputs(video_path, source_path)
+        quarantine_sync_outputs(video_path, source_path, ownership_index)
     except OSError as exc:
         logging.error(
             'BAZARR subtitle change completed for %s, but obsolete generated subtitle cleanup failed (%s). '

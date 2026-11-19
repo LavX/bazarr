@@ -7,6 +7,7 @@ by the caller that did the work, never inside ``process_subtitle``.
 import ast
 import logging
 import os
+import threading
 
 from sqlalchemy.exc import IntegrityError
 
@@ -20,6 +21,9 @@ from .db import source_transaction
 from .history import history_log_source
 from .indexer import index_item
 from .kinds import UnknownSourceKind, get_kind
+
+
+_creation_lock = threading.Lock()
 
 
 class SourceError(ValueError):
@@ -59,16 +63,11 @@ def create_source(payload, session=None):
     path = library.get('path')
     if isinstance(path, str) and path.strip() and '\x00' not in path:
         # Stored the way it will be walked: a trailing slash or a ".." must not make one folder two locators.
-        path = os.path.normpath(path)
+        path = repository.normalize_path(path)
     draft = _LibraryDraft(path, content_kind)
     problems = kind.validate_library(None, draft)
     if problems:
         raise SourceError(' '.join(problem.message for problem in problems))
-    clash = repository.overlapping_root(path, session)
-    if clash is not None:
-        raise SourceError(f"This folder overlaps {clash[1]}, a library of the media source {clash[0]}. A folder "
-                          f"can belong to one library only: use a folder that neither contains nor sits inside "
-                          f"another library's.", 409, 'overlap')
     profile_id = library.get('profile_id')
     if profile_id is not None and (type(profile_id) is not int or profile_id < 1
                                    or get_profiles_list(profile_id=profile_id) is None):
@@ -79,20 +78,28 @@ def create_source(payload, session=None):
     frequency = payload.get('scan_frequency_hours', 12)
     if type(frequency) is not int or frequency < 0:
         raise SourceError('scan_frequency_hours must be a whole number, 0 or more')
-    if repository.name_taken(name, session):
-        raise SourceError('A media source with that name already exists', 409, 'name_taken')
-
-    try:
-        with source_transaction(session) as connection:
-            source_id = repository.create_source(
-                kind=kind_name, name=name, enabled=enabled, scan_frequency_hours=frequency, target=connection)
-            repository.create_library(source_id=source_id, content_kind=content_kind, locator=path,
-                                      profile_id=profile_id, target=connection)
-    except IntegrityError as error:
-        # Another request took the name or the folder between the checks above and the insert.
+    # The overlap has no constraint behind it, so the check and the insert are one step: two requests for
+    # overlapping folders cannot both pass.
+    with _creation_lock:
+        clash = repository.overlapping_root(path, session)
+        if clash is not None:
+            raise SourceError(f"This folder overlaps {clash[1]}, a library of the media source {clash[0]}. A "
+                              f"folder can belong to one library only: use a folder that neither contains nor "
+                              f"sits inside another library's.", 409, 'overlap')
         if repository.name_taken(name, session):
-            raise SourceError('A media source with that name already exists', 409, 'name_taken') from error
-        raise
+            raise SourceError('A media source with that name already exists', 409, 'name_taken')
+        try:
+            with source_transaction(session) as connection:
+                source_id = repository.create_source(
+                    kind=kind_name, name=name, enabled=enabled, scan_frequency_hours=frequency,
+                    target=connection)
+                repository.create_library(source_id=source_id, content_kind=content_kind, locator=path,
+                                          profile_id=profile_id, target=connection)
+        except IntegrityError as error:
+            # Another process took the name between the check above and the insert.
+            if repository.name_taken(name, session):
+                raise SourceError('A media source with that name already exists', 409, 'name_taken') from error
+            raise
     return source_id
 
 
@@ -177,10 +184,13 @@ def search_source_item(item_id, job_id=None):
         raise JobFailed(f"The file is missing: {context.path}", reason='missing_file')
 
     item = repository.get_item(item_id)
-    if item.missing_subtitles is None:
+    if item is not None and item.missing_subtitles is None:
         # Indexing for this item is incomplete, so it is done again.
         index_item(item_id)
         item = repository.get_item(item_id)
+    if item is None:
+        # Deleted between resolving it and reading it.
+        raise JobFailed('The item no longer exists', reason='not_found')
     languages = _missing_languages(item)
     jobs_queue.update_job_progress(job_id=job_id, progress_max=len(languages), progress_message=context.title)
     if not languages:

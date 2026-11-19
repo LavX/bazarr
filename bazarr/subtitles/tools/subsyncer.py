@@ -626,11 +626,18 @@ class SubSyncer:
             return raw_result
 
         runner = SubsyncEngineRunner()
+        # A source item's generated outputs are owned by the source tables: asking the arr index about it would
+        # read the arr tables, and would find no owner for the item.
+        owner_index = {}
+        if source is not None:
+            from media_sources.indexer import SourceOutputOwnerIndex
+            owner_index = {'ownership_index': SourceOutputOwnerIndex()}
         publication_lock = subtitle_write_lock(video_path, os.path.dirname(srt_path))
         publication = source_version
         if publication is None:
             with publication_lock:
-                publication = SubtitlePublication(video_path, srt_path, subtitle_source_version(srt_path))
+                publication = SubtitlePublication(video_path, srt_path, subtitle_source_version(srt_path),
+                                                  **owner_index)
 
         def publish():
             if validate is not None and publication_guard is None:
@@ -649,7 +656,8 @@ class SubSyncer:
                 publication_lock=publication_lock,
                 on_publish=on_publish,
                 **({'publication_guard': publication_guard} if publication_guard is not None else {}),
-                after_publish=(lambda: quarantine_sync_outputs_after_mutation(video_path, srt_path))
+                after_publish=(lambda: quarantine_sync_outputs_after_mutation(video_path, srt_path,
+                                                                              **owner_index))
                 if output_mode == OUTPUT_MODE_OVERWRITE and source_version is None else None,
             )
         finally:

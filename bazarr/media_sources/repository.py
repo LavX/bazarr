@@ -239,7 +239,11 @@ def insert_blacklist(target=None, **values):
 
 
 def blacklist_pairs(item_kind, target=None):
-    """The ``(provider, subs_id)`` pairs the source pool of one item kind must skip."""
+    """The ``(provider, subs_id)`` pairs the source pool of one item kind must skip.
+
+    Every row of the kind, whichever source it was written for and whether or not that source still exists: a
+    moved file keeps its exclusions, and a removed source's rows stay listed as removed until the user clears
+    them."""
     return [(row.provider, row.subs_id) for row in _target(target).execute(
         sa.select(Blacklist.c.provider, Blacklist.c.subs_id).where(Blacklist.c.item_kind == item_kind)).all()]
 
@@ -247,7 +251,7 @@ def blacklist_pairs(item_kind, target=None):
 # Enabled flags, overlap and holders
 
 def item_state(item_id, target=None):
-    """``(item row, library enabled, source enabled, library, source)`` of an item, or None."""
+    """The id, title, source name and the two enabled flags of an item's library and source, or None."""
     row = _target(target).execute(
         sa.select(Items.c.id, Items.c.title, Libraries.c.enabled.label('library_enabled'),
                   Sources.c.enabled.label('source_enabled'), Sources.c.name.label('source_name'))
@@ -257,8 +261,27 @@ def item_state(item_id, target=None):
     return row
 
 
+def normalize_path(path):
+    """The form a folder path is stored and compared in: normalised, with no doubled leading slash."""
+    path = os.path.normpath(path)
+    if path.startswith('//') and not path.startswith('///'):
+        # POSIX keeps exactly two leading slashes, which name the same folder as one.
+        path = path[1:]
+    return path
+
+
 def _normal(path):
-    return os.path.normcase(os.path.normpath(path))
+    return os.path.normcase(normalize_path(path))
+
+
+def folder_identity(path):
+    """``(st_dev, st_ino)`` of a folder, or None when it cannot be read. Two paths with one identity are one
+    folder, which no spelling of the path shows for a bind mount."""
+    try:
+        info = os.stat(path)
+    except (OSError, ValueError):
+        return None
+    return (info.st_dev, info.st_ino)
 
 
 def _inside(path, parent):
@@ -266,20 +289,28 @@ def _inside(path, parent):
 
 
 def overlapping_root(path, target=None):
-    """The ``(source name, root path)`` of a library root that is inside ``path`` or contains it, or None."""
-    wanted = _normal(path)
+    """The ``(source name, root path)`` of a library root that is inside ``path`` or contains it, or None.
+
+    Compared by the spelling, by the real path (a symlink to a root is that root) and by device and inode (a bind
+    mount of a root is that root, whatever its path)."""
+    wanted = [_normal(path), os.path.normcase(os.path.realpath(path))]
+    identity = folder_identity(path)
     rows = _target(target).execute(
         sa.select(Roots.c.local_path, Sources.c.name)
         .select_from(Roots.join(Libraries, Roots.c.library_id == Libraries.c.id)
                      .join(Sources, Libraries.c.source_id == Sources.c.id))).all()
     for row in rows:
-        existing = _normal(row.local_path)
-        if _inside(wanted, existing) or _inside(existing, wanted):
+        existing = {_normal(row.local_path), os.path.normcase(os.path.realpath(row.local_path))}
+        if any(_inside(one, other) or _inside(other, one) for one in wanted for other in existing):
+            return row.name, row.local_path
+        if identity is not None and folder_identity(row.local_path) == identity:
             return row.name, row.local_path
     return None
 
 
 def holders_of(paths, library_id, target=None):
+    # Held by path only. Matching a file to a row of another library by device and inode, so that a hardlink, a
+    # symlinked file or a second mount of one folder is one item too, belongs to the scanner's same-file rules.
     """``{path: (source name, held by an enabled library of an enabled source)}`` for the paths another library
     already holds. One item per file: a file another library holds is not inserted again."""
     held = {}
