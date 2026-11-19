@@ -315,7 +315,9 @@ class SubtitleProviderKind(Kind):
             reset_compat_pool()
         except Exception:
             logger.exception("Failed to replace the compat pool after detaching %s", plugin_id)
-        registry.revoke_untrusted_host_calls()
+        if withdraw:
+            # The release is gone for good: a worker still finishing its calls asks the host for nothing more.
+            registry.revoke_host_calls_of(plugin_id)
         drains = registry.retire_provider_instances(plugin_id, grace)
         return drains
 

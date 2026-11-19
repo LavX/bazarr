@@ -723,6 +723,49 @@ def test_a_replaced_release_whose_detach_failed_stays_draining_until_the_next_st
     assert _releases_in(hub) == [("exampleservice", "1.0.0", "retired"), ("exampleservice", "1.1.0", "active")]
 
 
+def test_a_second_live_activation_retires_only_the_release_it_replaced(hub, stopping_kind, monkeypatch):
+    import threading
+
+    from provider_hub.service import activate_release
+    from provider_hub.state import mutate_state
+
+    _live_update(hub, monkeypatch)
+    drains = []
+
+    def detach(plugin_id, *, withdraw, grace=None, release_key=None):
+        event = threading.Event()
+        drains.append(event)
+        thread = threading.Thread(target=event.wait, args=(20,), daemon=True)
+        thread.start()
+        return [thread]
+
+    stopping_kind.detach = detach
+    first = activate_release("exampleservice")
+    assert (first.previous_version, first.version) == ("1.0.0", "1.1.0")
+
+    # Another release is staged and activated while the first one's calls are still running.
+    manifest = service_manifest("exampleservice", "1.2.0")
+
+    def stage(state):
+        state["installations"]["exampleservice"].update(
+            state="staged", pending_restart=True, staged_version="1.2.0", staged_manifest=manifest,
+            staged_path=_bundle("exampleservice", "1.2.0"), staged_python_path=_python("exampleservice"))
+
+    mutate_state(stage)
+    second = activate_release("exampleservice")
+    assert (second.previous_version, second.version) == ("1.1.0", "1.2.0")
+    drains[1].set()
+    second.drained.join(20)
+
+    # 1.1.0 retired with its calls done; 1.0.0 is still draining because its calls are not.
+    assert _releases_in(hub) == [("exampleservice", "1.0.0", "draining"), ("exampleservice", "1.1.0", "retired"),
+                                 ("exampleservice", "1.2.0", "active")]
+    drains[0].set()
+    first.drained.join(20)
+    assert _releases_in(hub) == [("exampleservice", "1.0.0", "retired"), ("exampleservice", "1.1.0", "retired"),
+                                 ("exampleservice", "1.2.0", "active")]
+
+
 def test_the_boot_drains_nothing_because_nothing_is_running_yet(hub, stopping_kind, monkeypatch):
     from provider_hub.service import activate_release
 

@@ -183,3 +183,38 @@ def test_a_removal_detached_live_is_not_a_running_installation_and_one_waiting_f
                  "pending_restart": pending_restart, "manifest": {"provider_id": PLUGIN}}}})
 
     assert [item.provider_id for item in running_installations(kind="translator")] == ([PLUGIN] if running else [])
+
+
+def test_a_detach_with_no_grace_still_ends_at_the_ceiling_and_cuts_the_job(port):
+    held = _translate(port, job="job-1")
+    time.sleep(0.3)
+    port.DETACH_CEILING_SECONDS = 0.5
+
+    threads = port.detach(PLUGIN)
+
+    assert _ended(held) is not None
+    for thread in threads:
+        thread.join(20)
+    assert port.idle(PLUGIN)
+
+
+def test_a_worker_that_cannot_be_stopped_is_reported_once_and_looked_at_less_often_as_it_waits(caplog, monkeypatch):
+    import logging
+
+    waits = []
+
+    class Pool:
+        def stop(self, key):
+            raise RuntimeError("would not stop")
+
+    port = workers.PoolWorkers(Pool(), lambda plugin_id: None)
+    polls = iter([False] * 12 + [True])
+    monkeypatch.setattr(port, "idle", lambda plugin_id: next(polls))
+    monkeypatch.setattr(port, "_worker_status", lambda plugin_id: {"state": "ready", "in_flight": 0})
+    monkeypatch.setattr(time, "sleep", waits.append)
+
+    with caplog.at_level(logging.WARNING):
+        port._finish_detach(PLUGIN, PLUGIN, None)
+
+    assert len([record for record in caplog.records if "Could not stop the worker" in record.getMessage()]) == 1
+    assert waits[0] == 0.1 and waits[-1] == 2.0 and waits == sorted(waits)

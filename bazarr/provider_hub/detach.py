@@ -37,6 +37,9 @@ logger = logging.getLogger(__name__)
 # acting against the person, so it is not left to run out a request that can last hours; a call a few seconds
 # from done still finishes.
 REVOKE_GRACE_SECONDS = 15.0
+# How long the calls of a plugin the person removed may go on. The removal is theirs, so a call that is nearly done
+# still finishes, but a request that can last hours does not keep the removal open for that long.
+REMOVE_GRACE_SECONDS = 300.0
 
 
 def detaches_live(kind_name: str) -> bool:
@@ -57,18 +60,28 @@ def detach(plugin_id: str, kind_name: str, *, withdraw: bool, grace: float | Non
     return list(kind.detach(plugin_id, withdraw=withdraw, grace=grace, release_key=release_key) or ())
 
 
-def stop_stragglers(plugin_id: str, release_key: str | None = None, *, cut: bool = False) -> int:
-    """Stop the workers of the release that no pool instance reached (a connection test's, one a build was
-    still starting). With ``cut`` they are killed at once, otherwise asked to shut down. Returns how many."""
+def snapshot_workers(plugin_id: str, release_key: str | None = None) -> list:
+    """The workers the plugin has now, taken before its consumers are detached.
+
+    What is stopped after the drain is exactly these: a worker started later (a plugin that was switched on again
+    and searched before the drain ended) belongs to an instance that is in use, and is never swept.
+    """
     from .worker import live_workers
 
+    return live_workers(plugin_id, release_key)
+
+
+def stop_stragglers(clients: Iterable, *, cut: bool = False) -> int:
+    """Stop the workers of a snapshot that no pool instance reached (one a build was still starting, a connection
+    test's). With ``cut`` they are killed at once, otherwise asked to shut down. Returns how many."""
     stopped = 0
-    for client in live_workers(plugin_id, release_key):
+    for client in clients:
         try:
             client.cancel() if cut else client.stop()
             stopped += 1
         except Exception:
-            logger.warning("Provider Hub: could not stop a worker of %s", plugin_id, exc_info=True)
+            logger.warning("Provider Hub: could not stop a worker of %s", getattr(client, "provider_id", "?"),
+                           exc_info=True)
     return stopped
 
 

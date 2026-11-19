@@ -1408,6 +1408,17 @@ class SZProviderPool(ProviderPool):
             subtitle.skip_reason = 'provider_excluded'
             return False
 
+        # A candidate a plugin found is downloaded by that plugin. When the plugin was detached while Bazarr+ ran
+        # and the id now names a built-in provider, the built-in cannot read the candidate: it is
+        # refused quietly, not handed over to fail and be recorded against a provider that did nothing wrong.
+        registered = provider_registry[subtitle.provider_name]
+        if getattr(subtitle, 'hub_proxy', False) and registered is not None and not getattr(
+                registered, 'hub_proxy', False):
+            logger.info('Provider %r no longer serves the plugin that found %r; not downloading it',
+                        subtitle.provider_name, subtitle)
+            subtitle.skip_reason = 'provider_excluded'
+            return False
+
         logger.info('Downloading subtitle %r', subtitle)
         tries = 0
 
@@ -1442,7 +1453,9 @@ class SZProviderPool(ProviderPool):
 
                     try:
                         initialized_provider = self[subtitle.provider_name]
-                    except ProviderExcludedError:
+                    except KeyError:
+                        # ProviderExcludedError, or a provider that left the registry after the admission check
+                        # above (a plugin detached while Bazarr+ runs): refused quietly either way.
                         logger.info('Provider %r is currently excluded (disabled, '
                                     'throttled or discarded); not downloading from it',
                                     subtitle.provider_name)

@@ -78,10 +78,16 @@ type CtaState =
   | "restart"
   | "repair"
   | "broken"
-  | "blocked";
+  | "blocked"
+  | "removing";
 
 function isPendingRemoval(installed: ProviderHubInstallation | null) {
   return installed?.needs_restart === true && installed.state === "removed";
+}
+
+/** Removed while Bazarr+ runs: no restart is waited for, the row goes when the calls it holds are done. */
+function isRemoving(installed: ProviderHubInstallation | null) {
+  return installed?.needs_restart !== true && installed?.state === "removed";
 }
 
 function isPendingInstall(installed: ProviderHubInstallation | null) {
@@ -107,6 +113,7 @@ function deriveCta(
 ): CtaState {
   if (!installed && !manifestValid) return "broken";
   if (!installed) return entry.blocked_reason ? "blocked" : "install";
+  if (isRemoving(installed)) return "removing";
   if (isAwaitingRestart(installed)) return "restart";
   if (installed.needs_repair) return "repair";
   if (
@@ -140,7 +147,8 @@ export const CatalogCard: FunctionComponent<CatalogCardProps> = ({
   const pendingRemoval = isPendingRemoval(installed);
   const pendingInstall = isPendingInstall(installed);
   const pendingUpdate = isPendingUpdate(installed);
-  const canShowActions = installed !== null && !pendingRemoval;
+  const canShowActions =
+    installed !== null && !pendingRemoval && !isRemoving(installed);
   const canTest = installed?.state === "active" && !installed.needs_restart;
   const removeLabel = pendingInstall
     ? "Cancel staged install"
@@ -188,6 +196,12 @@ export const CatalogCard: FunctionComponent<CatalogCardProps> = ({
           >
             Update
           </Button>
+        );
+      case "removing":
+        return (
+          <Tooltip label="This plugin is being removed. It finishes when the calls it is running end.">
+            <span className={styles.hubCardPendingText}>Removing</span>
+          </Tooltip>
         );
       case "restart":
         return (

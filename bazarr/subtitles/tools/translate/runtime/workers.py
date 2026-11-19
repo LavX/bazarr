@@ -357,8 +357,8 @@ class PoolWorkers:
         as any killed worker's job does. The thread this returns ends when no process of the plugin is left."""
         key = self._key_for(plugin_id)
         with self._lock:
-            # Under the lock every submission takes first: one that finds the plugin not withdrawn is already
-            # sent to the pool when the retirement below runs, so it is held by the worker that is retired.
+            # A submission that checked before this and is still on its way to the pool is caught by the recheck
+            # after the pool takes the job (``submit``), which cancels it and retires the worker it started.
             self._withdrawn.add(plugin_id)
         self.retire(plugin_id)
         thread = threading.Thread(target=self._finish_detach, args=(plugin_id, key, grace),
@@ -366,14 +366,21 @@ class PoolWorkers:
         thread.start()
         return [thread]
 
+    # The longest a detach waits for the jobs a worker holds when it was given no grace: a request may run for the
+    # ceiling a worker is allowed (a day), and after that the worker is stopped.
+    DETACH_CEILING_SECONDS = 25 * 3600.0
+
     def _finish_detach(self, plugin_id: str, key: str, grace: float | None) -> None:
         import time
 
-        deadline = None if grace is None else time.monotonic() + max(0.0, grace)
+        began = time.monotonic()
+        deadline = began + (self.DETACH_CEILING_SECONDS if grace is None else max(0.0, grace))
         cut = False
+        pause = 0.1
+        failed = False
         while not self.idle(plugin_id):
             stop = False
-            if deadline is not None and not cut and time.monotonic() >= deadline:
+            if not cut and time.monotonic() >= deadline:
                 cut = stop = True
             else:
                 # A worker the pool started for a job that arrived as the detach ran was not the one retired: once it
@@ -384,8 +391,12 @@ class PoolWorkers:
                 try:
                     self._pool.stop(key)
                 except Exception:
-                    logger.warning("Could not stop the worker of translator %s", plugin_id, exc_info=True)
-            time.sleep(0.1)
+                    if not failed:
+                        failed = True
+                        logger.warning("Could not stop the worker of translator %s", plugin_id, exc_info=True)
+            time.sleep(pause)
+            # The wait is long when a job is: it looks less often the longer it has waited.
+            pause = min(2.0, pause * 1.5)
 
     def runtime(self, plugin_id: str) -> dict | None:
         """How the plugin's long-lived worker is doing, for a card. None when it never had one."""

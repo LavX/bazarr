@@ -2581,8 +2581,9 @@ def _stop_serving(provider_id: str, row: dict[str, Any]) -> None:
     if not _detaches_live(row):
         return
     try:
+        workers = detach.snapshot_workers(provider_id)
         drains = detach.detach(provider_id, kind_of(row), withdraw=False)
-        detach.when_drained(drains, lambda: detach.stop_stragglers(provider_id), name=provider_id)
+        detach.when_drained(drains, lambda: detach.stop_stragglers(workers), name=provider_id)
     except Exception:
         logging.getLogger(__name__).exception("Provider Hub: could not release the pools of %s after it was switched "
                                               "off", provider_id)
@@ -2600,6 +2601,11 @@ def runtime_provider_configs() -> dict[str, dict[str, Any]]:
         # pending-restart row and the live search would run without
         # credentials. Use ``active_version`` as the gate instead.
         if not installation.get("active_version"):
+            continue
+        # A release that was held back or detached live runs nothing, so what it was configured with is not handed
+        # to the class that took its id back (a built-in a plugin had replaced).
+        if installation.get("blocked") or (
+                installation.get("state") == "removed" and not installation.get("pending_restart")):
             continue
         # Fail closed: a stored credential that will not decrypt is left
         # out of the worker's config (never sent as the credential), and
@@ -3643,10 +3649,12 @@ def _drop_revoked_staged(installations: dict[str, Any], revocations: tuple[revoc
 
 def _hold_revoked_installations(state: dict[str, Any]) -> None:
     """After a refresh: mark each installed release the list now revokes, release one it no longer does, and
-    drop a staged release it names. Nothing else about the installations is judged here, and nothing stops
-    what runs: the release keeps running, with its settings and its place in the registry, until the next
-    restart holds it back. The restart cue it raises is the Hub's ordinary one, so while it is up a connection
-    test asks for the restart first and Discover leaves the plugin out: both are the safe direction."""
+    drop a staged release it names. Nothing else about the installations is judged here, and nothing is stopped
+    here: a release of a kind that cannot stop live keeps running, with its settings and its place in the
+    registry, until the next restart holds it back, and the restart cue it raises is the Hub's ordinary one, so
+    while it is up a connection test asks for the restart first and Discover leaves the plugin out: both are the
+    safe direction. A release of a kind that stops live is stopped right after this commits
+    (``enforce_revocations_live``)."""
     installations = state.setdefault("installations", {})
     revocations = _revocations(state)
     # A revoked staged release goes first, so the text and the restart cue are decided on what is left.
@@ -4472,13 +4480,17 @@ def _detaches_live(row: Any) -> bool:
 
 def _revoked_reasons(
     installations: dict[str, Any], revocations: tuple[revocation.Revocation, ...], boot: bool,
+    stopped: bool = False,
 ) -> dict[str, str]:
     """For each installation whose active release the revocation list names, what it shows.
 
     At boot the release is held back and does not start. After a refresh a release of a kind that stops while
     Bazarr+ runs is stopped at once, and says so; one of any other kind is still running, so the person has to
     restart, unless the boot has already held it back. A release with an update staged over it says that
-    instead. A plugin being removed is left out: its removal is pending and nothing else is judged about it.
+    instead. A release that was stopped live keeps saying so (``revoked_stopped``) until a boot holds it back
+    instead, and one whose stop failed (``detach_failed``) says it still runs. ``stopped`` is the live hold itself
+    judging the release it is about to stop. A plugin being removed is left out: its removal is pending and nothing
+    else is judged about it.
     """
     reasons = {}
     for plugin_id, row in installations.items():
@@ -4489,11 +4501,16 @@ def _revoked_reasons(
             continue
         if row.get("staged_version"):
             state = revocation.STAGED
-        elif boot or row.get("blocked"):
+        elif boot:
+            state = revocation.HELD
+        elif row.get("detach_failed"):
+            # It could not be stopped live: it still runs, whatever else the row says.
+            state = revocation.RUNNING
+        elif _detaches_live(row) and (stopped or row.get("revoked_stopped") or not row.get("blocked")):
+            state = revocation.STOPPED
+        elif row.get("blocked"):
             # A row the boot held back for anything is not running, so it gets the held text.
             state = revocation.HELD
-        elif _detaches_live(row):
-            state = revocation.STOPPED
         else:
             state = revocation.RUNNING
         reasons[str(plugin_id)] = _revocation_text(
@@ -4572,13 +4589,13 @@ def _apply_unmet_needs(installations: dict[str, Any], revocations: tuple[revocat
     raised for a revocation is dropped, because this boot is that restart. Returns whether any row changed.
     """
     changed = False
-    revoked = _revoked_reasons(installations, revocations, boot=True)
     if live:
-        revoked = {plugin_id: reason for plugin_id, reason in revoked.items()
-                   if _detaches_live(installations.get(plugin_id))}
-        # The text of a release that was stopped, not of one that will not start.
-        revoked = {plugin_id: _stopped_reason(plugin_id, installations[plugin_id], revocations, reason)
-                   for plugin_id, reason in revoked.items()}
+        # The text of a release that is being stopped, not of one that will not start.
+        revoked = {plugin_id: reason for plugin_id, reason in _revoked_reasons(
+            installations, revocations, boot=False, stopped=True).items()
+            if _detaches_live(installations.get(plugin_id))}
+    else:
+        revoked = _revoked_reasons(installations, revocations, boot=True)
     for plugin_id, row in installations.items():
         if not isinstance(row, dict):
             continue
@@ -4592,6 +4609,12 @@ def _apply_unmet_needs(installations: dict[str, Any], revocations: tuple[revocat
             if row.get("revoked_reason") != revoked[str(plugin_id)]:
                 row["revoked_reason"] = revoked[str(plugin_id)]
                 changed = True
+            if live:
+                row["revoked_stopped"] = True
+            elif row.pop("revoked_stopped", None):
+                changed = True
+            if row.pop("detach_failed", None):
+                changed = True
         elif row.get("revoked"):
             row.pop("revoked", None)
             row.pop("revoked_reason", None)
@@ -4603,6 +4626,15 @@ def _apply_unmet_needs(installations: dict[str, Any], revocations: tuple[revocat
                 row["pending_restart"] = False
             changed = True
     unmet = closure.unmet_needs(installations)
+    if live:
+        # Only what relies on a revoked plugin is held here: judged against the same rows with the revocation
+        # taken off, so a plugin that already lacked what it needs (a supplier flagged for repair) is the boot's
+        # to hold, and is not stopped by a refresh.
+        lifted = {plugin_id: ({key: value for key, value in row.items() if key != "revoked"}
+                              if plugin_id in revoked and isinstance(row, dict) else row)
+                  for plugin_id, row in installations.items()}
+        already = closure.unmet_needs(lifted)
+        unmet = {plugin_id: needs for plugin_id, needs in unmet.items() if plugin_id not in already}
     for plugin_id, row in installations.items():
         if not isinstance(row, dict):
             continue
@@ -4647,17 +4679,6 @@ def _apply_unmet_needs(installations: dict[str, Any], revocations: tuple[revocat
     return changed
 
 
-def _stopped_reason(plugin_id: str, row: dict[str, Any], revocations: tuple[revocation.Revocation, ...],
-                    held_text: str) -> str:
-    """What a revoked release that was stopped as the revocation arrived shows, in place of the text of one that
-    will not start. A release with an update staged over it keeps the text that names the update."""
-    found = revocation.lookup(revocations, plugin_id, row.get("active_version"))
-    if found is None or row.get("staged_version"):
-        return held_text
-    return _revocation_text(revocation.held_back, found, row.get("name") or plugin_id,
-                            row.get("active_version"), revocation.STOPPED)
-
-
 def enforce_revocations_live() -> list[str]:
     """After a refresh has committed: stop each running release the list revokes, without a restart.
 
@@ -4665,16 +4686,19 @@ def enforce_revocations_live() -> list[str]:
     and says so, so everything that reads what runs (the registry rebuild, the settings overlay, the translator
     binding, the host's trust record) stops seeing it, and the kind detaches its consumers, which cuts the calls
     the release still has after ``detach.REVOKE_GRACE_SECONDS``. What relies on a revoked plugin is held back
-    and stopped with it. The restart cue is raised only for a release that could not be stopped. Returns the
-    ids that were stopped.
+    and stopped with it. A release whose stop failed is tried again by the next refresh. The restart cue is
+    raised only for a release that could not be stopped. Returns the ids that were stopped.
     """
     def apply(state: dict[str, Any]) -> list[tuple[str, str, Any]]:
         installations = state.setdefault("installations", {})
         before = {str(pid) for pid, row in installations.items() if isinstance(row, dict) and row.get("blocked")}
+        # A stop that failed last time is tried again: the row is judged as one still to be stopped.
+        retry = {str(pid) for pid, row in installations.items() if isinstance(row, dict) and row.pop(
+            "detach_failed", None)}
         _apply_unmet_needs(installations, _revocations(state), live=True)
         return [(str(pid), kind_of(row), (row.get("manifest") or {}).get("bundle_sha256"))
                 for pid, row in installations.items()
-                if isinstance(row, dict) and row.get("blocked") and str(pid) not in before
+                if isinstance(row, dict) and row.get("blocked") and (str(pid) not in before or str(pid) in retry)
                 and row.get("active_version") and row.get("state") != "removed"]
 
     newly = mutate_state(apply) or []
@@ -4682,9 +4706,10 @@ def enforce_revocations_live() -> list[str]:
     failed: list[str] = []
     for plugin_id, kind_name, release_key in newly:
         try:
+            workers = detach.snapshot_workers(plugin_id, release_key)
             drains = detach.detach(plugin_id, kind_name, withdraw=True, grace=detach.REVOKE_GRACE_SECONDS)
-            detach.when_drained(drains, lambda plugin_id=plugin_id, release_key=release_key: detach.stop_stragglers(
-                plugin_id, release_key, cut=True), name=plugin_id)
+            detach.when_drained(drains, lambda workers=workers: detach.stop_stragglers(workers, cut=True),
+                                name=plugin_id)
             stopped.append(plugin_id)
         except Exception:
             logging.getLogger(__name__).exception("Provider Hub: could not stop %s live; it stops at the next restart",
@@ -4696,13 +4721,16 @@ def enforce_revocations_live() -> list[str]:
 
 
 def _ask_restart_to_stop(plugin_ids: list[str]) -> None:
-    """A release could not be stopped while Bazarr+ runs: it says so, and asks for the restart that holds it back."""
+    """A release could not be stopped while Bazarr+ runs: it says so, and asks for the restart that holds it back.
+    The row is marked (``detach_failed``) so the next refresh tries to stop it again and does not clear the cue."""
     def apply(state: dict[str, Any]) -> None:
         revocations = _revocations(state)
         for plugin_id in plugin_ids:
             row = (state.get("installations") or {}).get(plugin_id)
             if not isinstance(row, dict) or row.get("state") != "active":
                 continue
+            row["detach_failed"] = True
+            row.pop("revoked_stopped", None)
             found = revocation.lookup(revocations, plugin_id, row.get("active_version"))
             if found is not None and not row.get("staged_version"):
                 running = _revocation_text(revocation.held_back, found, row.get("name") or plugin_id,
@@ -4944,11 +4972,12 @@ def activate_release(provider_id: str, *, at_boot: bool = False) -> Activation:
         else:
             job.update(message=f"Activated plugin '{target_name}' v{target_version}")
     draining = bool(previous_version and not at_boot)
-    drained = _drain_replaced_release(provider_id, kind_of(installation), previous_manifest) if draining else None
+    drained = (_drain_replaced_release(provider_id, kind_of(installation), previous_manifest, previous_version)
+               if draining else None)
     return Activation(provider_id, ACTIVATED, target_version, previous_version, draining=draining, drained=drained)
 
 
-def _drain_replaced_release(provider_id: str, kind_name: str, previous_manifest: Any):
+def _drain_replaced_release(provider_id: str, kind_name: str, previous_manifest: Any, previous_version: Any):
     """A live activation replaced a release that may still be serving calls: for a kind that stops a release while
     Bazarr+ runs, its pools let go of it, its workers end once their calls are done, and it retires. Returns the
     thread that does the last of that, or None when the kind cannot (the release stays draining) or the detach
@@ -4956,6 +4985,7 @@ def _drain_replaced_release(provider_id: str, kind_name: str, previous_manifest:
     if not detach.detaches_live(kind_name):
         return None
     release_key = previous_manifest.get("bundle_sha256") if isinstance(previous_manifest, dict) else None
+    workers = detach.snapshot_workers(provider_id, release_key)
     try:
         drains = detach.detach(provider_id, kind_name, withdraw=False, release_key=release_key)
     except Exception:
@@ -4964,8 +4994,9 @@ def _drain_replaced_release(provider_id: str, kind_name: str, previous_manifest:
         return None
 
     def retire() -> None:
-        detach.stop_stragglers(provider_id, release_key)
-        retire_release(provider_id)
+        detach.stop_stragglers(workers)
+        # Only the release that was replaced: a second live activation may have another one still draining.
+        retire_release(provider_id, previous_version)
 
     return detach.when_drained(drains, retire, name=provider_id)
 
@@ -5500,8 +5531,9 @@ def _detach_removed(provider_id: str, kind_name: str) -> bool:
     """A removal is saved and the release is still running: take its consumers away now, and delete the row once
     the calls it holds are done. False when that could not be done, and then the row asks for the restart that
     finishes the removal, as it did before releases could be stopped live."""
+    workers = detach.snapshot_workers(provider_id)
     try:
-        drains = detach.detach(provider_id, kind_name, withdraw=True)
+        drains = detach.detach(provider_id, kind_name, withdraw=True, grace=detach.REMOVE_GRACE_SECONDS)
     except Exception:
         logging.getLogger(__name__).exception(
             "Provider Hub: could not stop %s live; its removal finishes at the next restart", provider_id)
@@ -5515,8 +5547,8 @@ def _detach_removed(provider_id: str, kind_name: str) -> bool:
         return False
 
     def finish() -> None:
-        # Every worker of the plugin goes, whatever release it was started for.
-        detach.stop_stragglers(provider_id)
+        # The workers it had when it was detached go, whatever release they were started for.
+        detach.stop_stragglers(workers, cut=True)
         if _drop_removed_row(provider_id):
             try:
                 get_kind(kind_name).removal_finished(provider_id)

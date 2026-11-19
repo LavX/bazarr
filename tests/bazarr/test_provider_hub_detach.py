@@ -563,22 +563,42 @@ def test_the_calls_a_revoked_provider_still_has_are_cut_after_the_grace_and_not_
 
 
 def test_a_revoked_providers_workers_lose_their_host_capabilities_at_once(revoked):
-    from provider_hub import registry, service
+    import weakref
+
+    from provider_hub import detach, registry, service
+    from provider_hub.capabilities import live_trust
 
     revoked.install()
     worker = FakeWorker()
     revoked.run(worker=worker)
-    registry._HOST_CALL_CLIENTS.setdefault(PLUGIN, __import__("weakref").WeakSet()).add(worker)
+    registry._HOST_CALL_CLIENTS.setdefault(PLUGIN, weakref.WeakSet()).add(worker)
     _mark_revoked(revoked)
-
     # Trusted on the record, but revoked: a worker that is finishing its calls is trusted no more.
-    from provider_hub.capabilities import live_trust
-
     assert live_trust(PLUGIN) is False
-    registry.revoke_untrusted_host_calls()
-    assert worker.host_calls_revoked == 1
-    registry._HOST_CALL_CLIENTS.pop(PLUGIN, None)
-    service.enforce_revocations_live()
+
+    try:
+        service.enforce_revocations_live()
+        assert detach.wait_idle(WAIT)
+        assert worker.host_calls_revoked == 1
+    finally:
+        registry._HOST_CALL_CLIENTS.pop(PLUGIN, None)
+
+
+def test_switching_a_provider_off_does_not_take_its_host_capabilities_away(world):
+    import weakref
+
+    from provider_hub import detach, registry, service
+
+    world.install()
+    worker = FakeWorker()
+    world.run(worker=worker)
+    registry._HOST_CALL_CLIENTS.setdefault(PLUGIN, weakref.WeakSet()).add(worker)
+    try:
+        service.update_provider(PLUGIN, enabled=False)
+        assert detach.wait_idle(WAIT)
+        assert worker.host_calls_revoked == 0
+    finally:
+        registry._HOST_CALL_CLIENTS.pop(PLUGIN, None)
 
 
 def test_a_plugin_that_relies_on_a_revoked_one_is_held_back_and_stopped_with_it(revoked, monkeypatch):
@@ -617,7 +637,7 @@ def test_a_release_that_cannot_be_stopped_live_asks_for_the_restart_instead(revo
     assert service.enforce_revocations_live() == []
 
     row = revoked.row()
-    assert row["pending_restart"] is True and row["revoked_restart"] is True
+    assert row["pending_restart"] is True and row["revoked_restart"] is True and row["detach_failed"] is True
     assert "Restart Bazarr+ to stop it" in row["revoked_reason"] and row["last_error"] == row["revoked_reason"]
 
 
@@ -688,3 +708,290 @@ def test_a_kind_that_stops_on_restart_keeps_the_restart_cue_for_a_removal(world)
         assert row["state"] == "removed" and row["pending_restart"] is True
     finally:
         unregister_kind("slow_kind")
+
+
+# ---- switching off and on again while a call is held ------------------------------------------------------------
+
+
+def _real_client_class(clients, *, gate=None, started=None):
+    """A plugin class whose every instance has a worker client of its own, listed among the live workers the way a
+    started client is, so the sweep after a detach can see it."""
+    from subzero.language import Language
+    from provider_hub import worker
+    from provider_hub.registry import HubProxyProvider
+
+    class Plugin(HubProxyProvider):
+        provider_name = PLUGIN
+        languages = {Language("eng")}
+
+        def __init__(self, **config):
+            client = worker.ProviderWorkerClient(["python"], provider_id=PLUGIN)
+            with worker._live_clients_lock:
+                worker._live_clients.add(client)
+            clients.append(client)
+            super().__init__(worker_client=client, **config)
+
+        def list_subtitles(self, video, languages):
+            with self._operation():
+                if started is not None and not started.is_set():
+                    started.set()
+                    gate.wait(WAIT)
+                if self.worker_client._closed:
+                    from provider_hub.worker import WorkerBusy
+
+                    raise WorkerBusy("worker client is stopped")
+                return []
+
+    return Plugin
+
+
+def test_switching_off_and_on_while_a_call_is_held_leaves_the_new_instance_with_a_working_worker(world):
+    from provider_hub import detach, service
+    from provider_hub.registry import HubProxyProvider
+
+    world.install()
+    clients, gate, started = [], threading.Event(), threading.Event()
+    world.registry.register(PLUGIN, _real_client_class(clients, gate=gate, started=started))
+    pool = world.pool()
+    held, outcome = _in_thread(_search, pool)
+    assert started.wait(WAIT)
+
+    # Off, on, off, on in quick succession while the first call is still held on its instance.
+    service.update_provider(PLUGIN, enabled=False)
+    service.update_provider(PLUGIN, enabled=True)
+    assert _search(pool).status == "empty"  # builds a fresh instance with a worker of its own
+    service.update_provider(PLUGIN, enabled=False)
+    service.update_provider(PLUGIN, enabled=True)
+    assert _search(pool).status == "empty"
+    current = pool.initialized_providers[PLUGIN]
+    assert isinstance(current, HubProxyProvider) and current.worker_client is clients[-1]
+
+    gate.set()
+    held.join(WAIT)
+    assert detach.wait_idle(WAIT)
+
+    # What the drain ended is the worker of the instance that was detached: the one the pool holds now is open.
+    assert clients[-1]._closed is False
+    assert pool.initialized_providers[PLUGIN] is current
+    assert _search(pool).status == "empty"
+
+
+# ---- the cue, the text and the retry across refreshes -----------------------------------------------------------
+
+
+def test_a_refresh_after_a_failed_stop_keeps_the_cue_and_the_text_and_tries_again(revoked, monkeypatch):
+    from provider_hub import detach, registry, service
+
+    revoked.install()
+    _, worker = revoked.run()
+    pool = revoked.pool()
+    _search(pool)
+    _mark_revoked(revoked)
+    failing = {"on": True}
+    real = registry.retire_provider_instances
+
+    def retire(plugin_id, grace=None):
+        if failing["on"]:
+            raise registry.RetirementIncomplete("a pool would not let go")
+        return real(plugin_id, grace)
+
+    monkeypatch.setattr(registry, "retire_provider_instances", retire)
+    assert service.enforce_revocations_live() == []
+    text = revoked.row()["revoked_reason"]
+    assert "Restart Bazarr+ to stop it" in text
+
+    # The next refresh marks the row again and tries again: the cue and the words stay while it still fails.
+    _mark_revoked(revoked)
+    assert service.enforce_revocations_live() == []
+    row = revoked.row()
+    assert row["pending_restart"] is True and row["revoked_restart"] is True and row["revoked_reason"] == text
+    assert row["last_error"] == text
+
+    # Once it can be stopped it is, and the cue goes with the stop.
+    failing["on"] = False
+    _mark_revoked(revoked)
+    assert service.enforce_revocations_live() == [PLUGIN]
+    assert detach.wait_idle(WAIT)
+    row = revoked.row()
+    assert row["pending_restart"] is False and "revoked_restart" not in row and "detach_failed" not in row
+    assert "It was stopped." in row["revoked_reason"] and worker.stops == 1
+
+
+def test_a_stopped_release_keeps_the_same_words_through_the_next_refresh(revoked):
+    from provider_hub import detach, service
+
+    revoked.install()
+    revoked.run()
+    pool = revoked.pool()
+    _search(pool)
+    _mark_revoked(revoked)
+    service.enforce_revocations_live()
+    assert detach.wait_idle(WAIT)
+    before = revoked.row()
+    words = (before["revoked_reason"], before["blocked_reason"], before["last_error"])
+    assert len(set(words)) == 1 and "It was stopped." in words[0]
+
+    # A refresh marks the row again, and the live pass has nothing new to stop.
+    _mark_revoked(revoked)
+    assert service.enforce_revocations_live() == []
+
+    after = revoked.row()
+    assert (after["revoked_reason"], after["blocked_reason"], after["last_error"]) == words
+
+
+def test_the_boot_words_a_stopped_release_as_one_that_will_not_start(revoked):
+    from provider_hub import detach, service
+
+    revoked.install()
+    revoked.run()
+    _mark_revoked(revoked)
+    service.enforce_revocations_live()
+    assert detach.wait_idle(WAIT)
+
+    service.enforce_activation_needs()
+
+    row = revoked.row()
+    assert "It will not start." in row["blocked_reason"] and "revoked_stopped" not in row
+    # And a refresh after that keeps the words the boot wrote.
+    _mark_revoked(revoked)
+    assert "It will not start." in revoked.row()["revoked_reason"]
+
+
+def test_the_live_hold_stops_only_what_relies_on_the_revoked_plugin(revoked, monkeypatch):
+    from provider_hub import detach, service
+
+    dependent, other = "dependenthub", "lacksthing"
+    revoked.install()
+    revoked.install(dependent)
+    revoked.install(other)
+    for plugin_id in (PLUGIN, dependent, other):
+        revoked.run(plugin_id)
+
+    def unmet(installations):
+        # ``other`` lacks what it needs whatever happens; ``dependent`` lacks it once the revoked plugin is out.
+        found = {other: ["thing.v1"]}
+        if installations[PLUGIN].get("revoked"):
+            found[dependent] = ["thing.v1"]
+        return found
+
+    monkeypatch.setattr("provider_hub.closure.unmet_needs", unmet)
+    _mark_revoked(revoked)
+
+    assert sorted(service.enforce_revocations_live()) == sorted([PLUGIN, dependent])
+
+    assert detach.wait_idle(WAIT)
+    assert "blocked" not in revoked.row(other) and revoked.registry[other] is not None
+
+
+# ---- configuration and the registry after a detach --------------------------------------------------------------
+
+
+@pytest.mark.parametrize("marks, gives_config", [({}, True), ({"blocked": True}, False),
+                                                  ({"state": "removed", "pending_restart": False}, False),
+                                                  ({"state": "removed", "pending_restart": True}, True)])
+def test_a_built_in_that_took_its_id_back_is_not_handed_the_detached_plugins_configuration(world, marks,
+                                                                                           gives_config):
+    from provider_hub.service import runtime_provider_configs
+
+    world.install(config={"request_delay_ms": 5}, **marks)
+
+    assert (PLUGIN in runtime_provider_configs()) is gives_config
+
+
+def test_a_candidate_a_detached_plugin_found_is_not_downloaded_by_the_built_in_that_took_its_id(world):
+    from provider_hub.protocol import HubWorkerSubtitle
+
+    class BuiltIn:
+        hub_proxy = False
+        provider_name = PLUGIN
+        languages = set()
+        called = []
+
+        def __init__(self, **config):
+            pass
+
+        def initialize(self):
+            pass
+
+        def download_subtitle(self, subtitle):
+            BuiltIn.called.append(subtitle)
+
+    world.registry.register(PLUGIN, BuiltIn)
+    pool = world.pool()
+    subtitle = HubWorkerSubtitle.__new__(HubWorkerSubtitle)
+    subtitle.provider_name = PLUGIN
+
+    assert pool.download_subtitle(subtitle) is False
+
+    assert subtitle.skip_reason == "provider_excluded" and BuiltIn.called == []
+
+
+def test_a_download_for_a_provider_that_left_the_registry_after_the_admission_check_is_refused_quietly(world):
+    pool = world.pool("other")
+    subtitle = _subtitle()  # names PLUGIN, which this pool was not built with and the registry does not hold
+
+    assert pool.download_subtitle(subtitle) is False
+
+    assert subtitle.skip_reason == "provider_excluded"
+
+
+# ---- a removal's bound ------------------------------------------------------------------------------------------
+
+
+def test_a_removal_cuts_the_calls_that_outlive_its_grace(world, monkeypatch):
+    from provider_hub import detach, service
+
+    monkeypatch.setattr(detach, "REMOVE_GRACE_SECONDS", 0.3)
+    world.install()
+    gate, started = threading.Event(), threading.Event()
+    _, worker = world.run(gate=gate, started=started)
+    pool = world.pool()
+    thread, outcome = _in_thread(_search, pool)
+    assert started.wait(WAIT)
+
+    service.remove_installation(PLUGIN)
+
+    thread.join(WAIT)
+    assert detach.wait_idle(WAIT)
+    assert worker.cancels >= 1 and outcome["value"].status != "empty"
+    assert world.row() is None
+
+
+def test_a_removal_that_waits_is_marked_removed_with_no_restart_for_the_interface(world):
+    from provider_hub import detach, service
+
+    world.install()
+    gate, started = threading.Event(), threading.Event()
+    world.run(gate=gate, started=started)
+    pool = world.pool()
+    thread, _ = _in_thread(_search, pool)
+    assert started.wait(WAIT)
+
+    service.remove_installation(PLUGIN)
+    shown = service.get_provider(PLUGIN)
+
+    # The state the interface reads: removed, and no restart to wait for.
+    assert shown["state"] == "removed" and shown["needs_restart"] is False
+    gate.set()
+    thread.join(WAIT)
+    assert detach.wait_idle(WAIT)
+
+
+# ---- a cancelled client -----------------------------------------------------------------------------------------
+
+
+def test_a_request_that_reaches_a_cancelled_client_does_not_start_the_worker_again(monkeypatch):
+    from provider_hub import worker
+
+    client = worker.ProviderWorkerClient(["python"], provider_id=PLUGIN)
+    spawned = []
+    monkeypatch.setattr(client, "_spawn", lambda env: spawned.append(env))
+
+    client.cancel()
+
+    # A request that passed its own check just before the cancel gets this far, and must not respawn.
+    with pytest.raises(worker.WorkerError):
+        client.start()
+    with pytest.raises(worker.WorkerError):
+        client.request("search", {})
+    assert spawned == []

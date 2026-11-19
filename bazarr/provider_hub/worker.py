@@ -614,6 +614,11 @@ class ProviderWorkerClient:
                 # left running before its slot is reused.
                 self._kill_tree(self.process, 5.0)
 
+        if getattr(self, "_closed", False):
+            # Stopped or cancelled: nothing starts on this client again. A request that passed its own check just
+            # before a cancel reaches here, and must not respawn the worker the cancel killed.
+            raise WorkerError("worker client is stopped")
+
         before_start = getattr(self, "_before_start", None)
         if before_start is not None:
             before_start()

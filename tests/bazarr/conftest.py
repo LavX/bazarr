@@ -139,7 +139,13 @@ def _finish_detached_releases():
 
     detach = sys.modules.get("provider_hub.detach")
     if detach is not None:
-        detach.wait_idle(30)
+        # A release whose detach never ends is a test that leaked a thread: it fails here, and is not left to write
+        # into the state of whatever test runs next.
+        finished = detach.wait_idle(30)
+        if not finished:
+            with detach._PENDING_LOCK:
+                detach._PENDING.clear()
+        assert finished, "a release detached by this test was still being detached 30 seconds after it ended"
 
 
 @pytest.fixture

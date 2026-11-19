@@ -74,7 +74,7 @@ export function attentionCause(
       installation.revoked_reason ??
       installation.blocked_reason ??
       installation.last_error ??
-      "The official catalog revoked this version, so it was stopped. Update it or remove it."
+      "The official catalog revoked this version. Update it or remove it."
     );
   }
   if (installation.needs_repair) {
