@@ -554,11 +554,15 @@ def _resolve_and_validate(url_str):
 def _resolve_and_validate_constrained(url_str):
     """Relaxed twin of _resolve_and_validate for the connection-test path.
 
-    Caller hard-codes the request path to /api/system/status or
-    /api/v3/system/status, so an authenticated UI session can only probe
-    whether a Sonarr/Radarr-shaped service is listening at the user's
-    typed host:port. The bounded surface justifies allowing loopback,
-    link-local, and private targets that the strict guard rejects.
+    The request path is fixed by the caller, not typed: the Sonarr, Radarr and
+    Whisper tests hard-code a status path, so an authenticated UI session can
+    only probe whether such a service is listening at the user's typed
+    host:port. The FlareSolverr address test is the one caller that also GETs
+    the service root as typed, and POSTs a read-only command to /v1. That stays
+    bounded: the session needs authentication, no response body is echoed, and
+    only a regex-bounded version string and fixed sentences come back. The
+    bounded surface justifies allowing loopback, link-local, and private
+    targets that the strict guard rejects.
 
     Loopback supports bare-metal installs where Bazarr+ and Sonarr both
     bind to localhost. IPv6 link-local (fe80::/10) is the default for

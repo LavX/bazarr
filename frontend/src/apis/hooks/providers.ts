@@ -37,6 +37,13 @@ export function useFlareSolverrDetect() {
   });
 }
 
+/** Tests the address the person typed. It reports only and never writes the setting. */
+export function useFlareSolverrTest() {
+  return useMutation({
+    mutationFn: (url: string) => api.providers.testFlaresolverr(url),
+  });
+}
+
 // The manual searches run as standard jobs: the request queues one and the
 // query follows it to its rows. Closing the modal does not stop the job, and
 // pressing Search again for the same item follows the search that is running.

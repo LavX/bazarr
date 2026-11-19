@@ -134,9 +134,57 @@ def may_receive_flaresolverr(installation) -> bool:
         isinstance(requires, (list, tuple)) and FLARESOLVERR_CAPABILITY in requires)
 
 
-def _probe_flaresolverr(url: str) -> bool:
+def _read_json_object(response, limit: int, deadline: float | None = None):
+    """The JSON object a 200 answer carries, or None when it is not one.
+
+    Whatever answers is not trusted to be short: reading stops one chunk past
+    ``limit`` and the answer is refused. The caller closes the response.
+
+    With a ``deadline`` (a ``time.monotonic`` value) the body is read a byte at
+    a time and the clock is checked between bytes: a server that drips its
+    answer never trips a socket read timeout, so only this check bounds it. A
+    body still arriving at the deadline raises ``requests.ReadTimeout``.
+    """
     import json
 
+    import requests
+
+    if response.status_code != 200:
+        return None
+    chunks, size = [], 0
+    for chunk in response.iter_content(limit if deadline is None else 1):
+        if deadline is not None and time.monotonic() > deadline:
+            raise requests.exceptions.ReadTimeout("the answer was still arriving at the deadline")
+        chunks.append(chunk)
+        size += len(chunk)
+        if size > limit:
+            return None
+    try:
+        payload = json.loads(b"".join(chunks))
+    except ValueError:
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _is_flaresolverr_index(payload) -> bool:
+    return isinstance(payload, dict) and "flaresolverr" in str(payload.get("msg", "")).casefold()
+
+
+def _fetch_index(session, url: str, timeout, headers=None, verify=True, deadline: float | None = None):
+    """GET the service root and return its JSON object, or None when the answer is not one.
+
+    Connection problems propagate as ``requests`` exceptions. The one probe
+    behind both the sibling hint and the Test of a typed address.
+    """
+    response = session.get(url, timeout=timeout, allow_redirects=False, stream=True,
+                           headers=headers, verify=verify)
+    try:
+        return _read_json_object(response, SIBLING_PROBE_MAX_BYTES, deadline)
+    finally:
+        response.close()
+
+
+def _probe_flaresolverr(url: str) -> bool:
     import requests
 
     try:
@@ -144,23 +192,10 @@ def _probe_flaresolverr(url: str) -> bool:
             # A container name is looked up directly: a proxy set for the
             # environment must not decide whether the sibling answers.
             session.trust_env = False
-            response = session.get(url, timeout=SIBLING_PROBE_TIMEOUT_SECONDS, allow_redirects=False, stream=True)
-            try:
-                if response.status_code != 200:
-                    return False
-                # Whatever answers on that name is not trusted to be short.
-                chunks, size = [], 0
-                for chunk in response.iter_content(SIBLING_PROBE_MAX_BYTES):
-                    chunks.append(chunk)
-                    size += len(chunk)
-                    if size > SIBLING_PROBE_MAX_BYTES:
-                        return False
-                payload = json.loads(b"".join(chunks))
-            finally:
-                response.close()
+            payload = _fetch_index(session, url, SIBLING_PROBE_TIMEOUT_SECONDS)
     except Exception:
         return False
-    return isinstance(payload, dict) and "flaresolverr" in str(payload.get("msg", "")).casefold()
+    return _is_flaresolverr_index(payload)
 
 
 def _record_sibling_locked(found: bool) -> None:
@@ -317,3 +352,336 @@ def flaresolverr_status(settings=None, refresh: bool = False) -> dict:
         # already in use and so has nothing left to offer.
         "sibling_found": detected is not None,
     }
+
+
+# The Test of an address the user typed. Same rules as the other connection
+# tests in Settings (``app.ui``): loopback and LAN hosts are fine, multicast and
+# unspecified targets and anything that smuggles a query, a fragment, ``..`` or
+# credentials into the address are refused, redirects are never followed, and
+# only what a version string can look like is echoed back.
+ADDRESS_TEST_REQUEST_TIMEOUT_SECONDS = 4.0
+# The whole Test across every address the host name resolves to. The name lookup
+# itself is not covered by it, as with the other connection tests.
+ADDRESS_TEST_DEADLINE_SECONDS = 10.0
+# How long past the deadline the caller waits for the worker before it answers
+# "timeout" on its own and cuts the worker's sockets.
+ADDRESS_TEST_ANSWER_MARGIN_SECONDS = 0.5
+# The /v1 answer to sessions.list carries a session name per open session.
+ADDRESS_TEST_V1_MAX_BYTES = 65536
+ADDRESS_TEST_MAX_LENGTH = 2048
+
+ADDRESS_TEST_MESSAGES = {
+    "ok": "FlareSolverr answered.",
+    "not_flaresolverr": "Something answered, but it is not FlareSolverr.",
+    "v1_not_flaresolverr": "FlareSolverr answered at the root, but its /v1 endpoint did not respond as expected.",
+    "unreachable": "Could not connect. Check the host name, the port and that FlareSolverr is running.",
+    "unresolved": "The host name could not be resolved.",
+    "timeout": "The address did not answer in time.",
+    "tls": "The secure connection failed. Check the certificate, or use http.",
+    "invalid_address": ("Not a usable address. Use http or https with a host, an optional port and path, "
+                        "and no credentials, query or fragment."),
+    "empty": "Type an address to test.",
+    "failed": "The test could not be completed.",
+}
+ADDRESS_TEST_CODES = ("ok", "not_flaresolverr", "unreachable", "timeout", "tls", "invalid_address")
+
+
+def _address_result(code: str, message_key: str | None = None, version: str | None = None) -> dict:
+    message = ADDRESS_TEST_MESSAGES[message_key or code]
+    if code == "ok" and version:
+        message = f"FlareSolverr {version} answered."
+    return {"ok": code == "ok", "code": code, "message": message, "version": version if code == "ok" else None}
+
+
+def _flaresolverr_root_path(path: str) -> str:
+    """The service root's path: the address without a trailing slash or a /v1 endpoint."""
+    path = (path or "").rstrip("/")
+    if path.lower().endswith("/v1"):
+        path = path[:-3].rstrip("/")
+    return path
+
+
+class _SocketTracker:
+    """The sockets one Test opened, so the waiting side can cut them.
+
+    A far end that drips its status line or headers one byte at a time never
+    trips a socket read timeout, because every byte restarts it, and neither the
+    request timeout nor the body deadline can see inside ``getresponse``. Cutting
+    the connection from outside makes the blocked read fail at once. Each socket
+    is held through a ``dup``: sharing the one connection, it survives the TLS
+    wrapper detaching the original, and shutting it down shuts the connection.
+    """
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._sockets: list = []
+        self._cut = False
+
+    def add(self, sock) -> None:
+        import socket
+
+        with self._lock:
+            if not self._cut:
+                self._sockets.append(sock.dup())
+                return
+        # Opened after the Test was given up on: never let it connect on.
+        try:
+            sock.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+
+    def _drain(self, shutdown: bool) -> None:
+        import socket
+
+        with self._lock:
+            sockets, self._sockets = self._sockets, []
+            self._cut = self._cut or shutdown
+        for sock in sockets:
+            try:
+                if shutdown:
+                    sock.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+            try:
+                sock.close()
+            except OSError:
+                pass
+
+    def cut(self) -> None:
+        """Shut every connection down, and any opened from now on."""
+        self._drain(shutdown=True)
+
+    def release(self) -> None:
+        """The Test is over: drop the duplicates and leave the connections alone."""
+        self._drain(shutdown=False)
+
+
+def _tracking_adapter(tracker: _SocketTracker):
+    """A ``requests`` adapter whose connections report their sockets to ``tracker``."""
+    from requests.adapters import HTTPAdapter
+    from urllib3.connection import HTTPConnection, HTTPSConnection
+    from urllib3.connectionpool import HTTPConnectionPool, HTTPSConnectionPool
+
+    class Connection(HTTPConnection):
+        def _new_conn(self):
+            sock = super()._new_conn()
+            tracker.add(sock)
+            return sock
+
+    class SecureConnection(HTTPSConnection):
+        def _new_conn(self):
+            sock = super()._new_conn()
+            tracker.add(sock)
+            return sock
+
+    class Pool(HTTPConnectionPool):
+        ConnectionCls = Connection
+
+    class SecurePool(HTTPSConnectionPool):
+        ConnectionCls = SecureConnection
+
+    class Adapter(HTTPAdapter):
+        def init_poolmanager(self, *args, **kwargs):
+            super().init_poolmanager(*args, **kwargs)
+            self.poolmanager.pool_classes_by_scheme = {"http": Pool, "https": SecurePool}
+
+    return Adapter(max_retries=0)
+
+
+def _attempt_flaresolverr(base, ip, hostname, pin, deadline, version_of, tracker) -> tuple[dict, bool]:
+    """Probe the root, then the /v1 endpoint, through one resolved address.
+
+    Returns the result and whether the next address is worth trying: only when
+    this one could not be connected to (refused, unreachable or a connect timeout).
+    """
+    import requests
+    from urllib3.exceptions import ReadTimeoutError
+
+    from app.ui import _build_request_url
+
+    def remaining() -> tuple[float, float] | None:
+        """The (connect, read) timeout for the next request, capped by what is left."""
+        left = deadline - time.monotonic()
+        if left <= 0:
+            return None
+        capped = min(ADDRESS_TEST_REQUEST_TIMEOUT_SECONDS, left)
+        return capped, capped
+
+    try:
+        with requests.Session() as session:
+            # Direct, like the sibling probe: a proxy set for the environment
+            # must not decide whether the address answers.
+            session.trust_env = False
+            adapter = _tracking_adapter(tracker)
+            session.mount("http://", adapter)
+            session.mount("https://", adapter)
+            timeout = remaining()
+            if timeout is None:
+                return _address_result("timeout"), False
+            # The root is probed as the person typed it. The path is not ours
+            # to fix here, which is why it is acceptable: the session needs
+            # authentication, the body is never echoed, and only a regex-bounded
+            # version string and fixed sentences come back.
+            url, headers = _build_request_url(base, "", ip, hostname, pin)
+            index = _fetch_index(session, url, timeout, headers=headers, deadline=deadline)
+            if not _is_flaresolverr_index(index):
+                return _address_result("not_flaresolverr"), False
+            version = version_of(index)
+
+            timeout = remaining()
+            if timeout is None:
+                return _address_result("timeout"), False
+            url, headers = _build_request_url(base, "/v1", ip, hostname, pin)
+            # sessions.list only reads: it names the browser sessions that are
+            # open and starts nothing.
+            response = session.post(url, json={"cmd": "sessions.list"}, timeout=timeout,
+                                    allow_redirects=False, stream=True, headers=headers, verify=True)
+            try:
+                answer = _read_json_object(response, ADDRESS_TEST_V1_MAX_BYTES, deadline)
+            finally:
+                response.close()
+            if not isinstance(answer, dict) or answer.get("status") != "ok":
+                return _address_result("not_flaresolverr", "v1_not_flaresolverr"), False
+            return _address_result("ok", version=version or version_of(answer)), False
+    except requests.exceptions.SSLError as error:
+        logger.debug("FlareSolverr address test: TLS failure (%s)", type(error).__name__)
+        return _address_result("tls"), False
+    except requests.exceptions.ConnectTimeout as error:
+        # Nothing answered at this address; another one the name resolves to may.
+        logger.debug("FlareSolverr address test: connect timeout (%s)", type(error).__name__)
+        return _address_result("timeout"), True
+    except requests.Timeout as error:
+        logger.debug("FlareSolverr address test: timeout (%s)", type(error).__name__)
+        return _address_result("timeout"), False
+    except requests.ConnectionError as error:
+        # A body that stalls mid-read reaches here wrapped as a connection error.
+        stalled = any(isinstance(arg, ReadTimeoutError) for arg in error.args)
+        logger.debug("FlareSolverr address test: %s", "read timeout" if stalled else type(error).__name__)
+        return (_address_result("timeout"), False) if stalled else (_address_result("unreachable"), True)
+    except requests.RequestException as error:
+        logger.debug("FlareSolverr address test: request failed (%s)", type(error).__name__)
+        return _address_result("unreachable"), False
+    except Exception as error:
+        # Last resort, as the sibling tester has: an address that parses but
+        # cannot be sent (a non-latin-1 host name in a header, for one) must
+        # still end in a sentence, not a server error.
+        logger.debug("FlareSolverr address test: failed (%s)", type(error).__name__)
+        return _address_result("unreachable", "failed"), False
+
+
+def check_flaresolverr_address(address) -> dict:
+    """Test an address the user typed, saved or not, and say what answered.
+
+    The result is ``{"ok", "code", "message", "version"}``, the code being one
+    of ``ok``, ``not_flaresolverr``, ``unreachable``, ``timeout``, ``tls`` and
+    ``invalid_address``. The message is a short sentence for the person. It never
+    writes the setting, and this module never logs the address, which can name a
+    private host. Library debug logs (urllib3) may name the host, as they do for
+    any saved service address.
+
+    What is bounded, exactly. The answer comes back within
+    ``ADDRESS_TEST_DEADLINE_SECONDS`` plus ``ADDRESS_TEST_ANSWER_MARGIN_SECONDS``
+    (``timeout`` if the check has not finished), whatever the far end does: a
+    refused or silent connect, an answer held back, or one dripped byte by byte
+    in the status line, the headers or the body. Inside, each request carries a
+    connect and read timeout capped by the time left, and body reads check the
+    clock. The check runs in a daemon worker thread, and when the caller gives up
+    the worker's connections are shut down from this side, so a read it is
+    blocked in fails at once, not when the far end tires.
+
+    What is not bounded. The name lookup runs first, on the caller's thread, and
+    has no timeout (``getaddrinfo``), as with the other connection tests. A
+    socket is registered once urllib3 has connected it, so a connection attempt
+    cannot be cut from this side: it ends at its own connect timeout, capped by
+    the time left. A worker cut while in one therefore ends when that attempt
+    returns, and the thread can outlive the answer by up to that connect
+    timeout. The answer itself never waits for it.
+    """
+    import socket
+
+    from app.ui import _BlockedTarget, _handshake_version, _resolve_and_validate_constrained, _validate_test_base_url
+
+    text = address.strip() if isinstance(address, str) else ""
+    if not text:
+        return _address_result("invalid_address", "empty")
+    if len(text) > ADDRESS_TEST_MAX_LENGTH or "\\" in text or any(char.isspace() or ord(char) < 32 for char in text):
+        return _address_result("invalid_address")
+    try:
+        parsed = _validate_test_base_url(text)
+        if parsed.username is not None or parsed.password is not None:
+            return _address_result("invalid_address")
+        base = parsed._replace(path=_flaresolverr_root_path(parsed.path))
+        resolved_ips, hostname, _ = _resolve_and_validate_constrained(base.geturl())
+    except socket.gaierror:
+        return _address_result("unreachable", "unresolved")
+    except ValueError as error:
+        logger.debug("FlareSolverr address test: refused (%s)",
+                     error.code if isinstance(error, _BlockedTarget) else type(error).__name__)
+        return _address_result("invalid_address")
+
+    def version_of(payload):
+        return _handshake_version(payload) if isinstance(payload, dict) else None
+
+    # Pin to the address that was checked, so a rebinding name cannot move the
+    # request, except over https where the certificate check does that work.
+    pin = base.scheme != "https"
+    candidates = resolved_ips if pin else resolved_ips[:1]
+    deadline = time.monotonic() + ADDRESS_TEST_DEADLINE_SECONDS
+    tracker = _SocketTracker()
+
+    def check() -> dict:
+        result = _address_result("unreachable")
+        timed_out = False
+        for ip in candidates:
+            if time.monotonic() >= deadline:
+                return _address_result("timeout")
+            result, try_next = _attempt_flaresolverr(base, ip, hostname, pin, deadline, version_of, tracker)
+            timed_out = timed_out or result["code"] == "timeout"
+            # A dual-stack name can answer on one family only: try the next
+            # address only when this one could not be connected to at all.
+            if not try_next:
+                return result
+        # Every address failed to connect: one that timed out is the better
+        # report than one that was refused.
+        return _address_result("timeout") if timed_out else result
+
+    outcome: dict = {}
+
+    def work() -> None:
+        try:
+            outcome["result"] = check()
+        except Exception as error:
+            logger.debug("FlareSolverr address test: failed (%s)", type(error).__name__)
+            outcome["result"] = _address_result("unreachable", "failed")
+        finally:
+            tracker.release()
+
+    worker = threading.Thread(target=work, name="flaresolverr-address-test", daemon=True)
+    worker.start()
+    worker.join(max(0.0, deadline - time.monotonic()) + ADDRESS_TEST_ANSWER_MARGIN_SECONDS)
+    if worker.is_alive():
+        # Blocked somewhere a timeout cannot reach. Answer now, and cut its
+        # connections so a blocked read ends at once.
+        tracker.cut()
+        return _address_result("timeout")
+    # A worker that ended without a result cannot happen; if it did, say so.
+    return outcome.get("result") or _address_result("unreachable", "failed")
+
+
+def run_flaresolverr_test(typed, settings=None) -> dict:
+    """The Test as the Settings page asks for it.
+
+    A typed address is checked as typed. An empty field checks the address in
+    use (the saved setting, then ``FLARESOLVERR_URL``), so a person who typed
+    nothing still gets an answer for what providers will use. The result also
+    carries ``source``: ``typed``, ``setting``, ``env`` or ``none`` (nothing to
+    test).
+    """
+    if typed is None or (isinstance(typed, str) and not typed.strip()):
+        address, source = flaresolverr_url_source(settings)
+        typed = address or None
+    else:
+        source = "typed"
+    result = check_flaresolverr_address(typed)
+    result["source"] = source
+    return result

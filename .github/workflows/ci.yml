@@ -402,6 +402,7 @@ jobs:
             tests/bazarr/test_provider_hub_signing.py \
             tests/bazarr/test_plugin_kinds.py \
             tests/bazarr/test_flaresolverr_endpoint.py \
+            tests/bazarr/test_flaresolverr_address_test.py \
             tests/bazarr/test_provider_hub_capabilities.py \
             tests/bazarr/test_plugin_api.py \
             tests/bazarr/test_translator_runtime_summary.py \

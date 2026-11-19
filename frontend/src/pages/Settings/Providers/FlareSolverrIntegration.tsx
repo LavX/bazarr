@@ -1,4 +1,4 @@
-import { FunctionComponent } from "react";
+import { FunctionComponent, useEffect, useRef } from "react";
 import {
   Alert,
   Button,
@@ -9,6 +9,7 @@ import {
 import {
   useFlareSolverrDetect,
   useFlareSolverrStatus,
+  useFlareSolverrTest,
 } from "@/apis/hooks/providers";
 import { Text } from "@/pages/Settings/components";
 import { useFormActions } from "@/pages/Settings/utilities/FormValues";
@@ -19,17 +20,64 @@ export const flaresolverrSettingKey = "settings-endpoints-flaresolverr_v1_url";
 export const flaresolverrHelp =
   "Used by every provider that supports FlareSolverr and has no URL of its own. There is no per-provider opt-out; give a provider its own URL to override it.";
 
+const testHintId = "flaresolverr-test-hint";
+const errorColor = "var(--mantine-color-error)";
+
+// The server says which address it tested; an empty field means the one in use.
+function testOutcome(result: System.FlareSolverrTestResult) {
+  const tested =
+    result.source === "env"
+      ? "Tested the address from the FLARESOLVERR_URL environment variable. "
+      : result.source === "setting"
+        ? "Tested the saved address. "
+        : "";
+  return result.ok
+    ? `${tested}${result.message}`
+    : `Test failed. ${tested}${result.message}`;
+}
+
 const FlareSolverrIntegration: FunctionComponent = () => {
   const { setValue } = useFormActions();
   const value = useSettingValue<string>(flaresolverrSettingKey);
   const status = useFlareSolverrStatus();
   const detect = useFlareSolverrDetect();
+  const test = useFlareSolverrTest();
 
   // One source: pressing Detect writes its answer into the status query, and a
   // settings save refetches it, so the newer of the two is always what shows.
   const current = status.data;
   const detected = current?.detected ?? null;
   const typed = (value ?? "").trim();
+  const effectiveKey = current ? `${current.source}|${current.url}` : undefined;
+  const resetTest = test.reset;
+  // A result belongs to the address it was asked about. Once the field
+  // changes, it no longer says anything about what is typed.
+  useEffect(() => {
+    resetTest();
+  }, [typed, resetTest]);
+  // An empty field tests the address in use, so a change of that address (a
+  // save, say) outdates a result that came from it. A test of a typed address
+  // is unaffected, and so is one that was running when the status first
+  // loaded: that is not a change.
+  const usedFallback = test.variables === "";
+  const usedFallbackRef = useRef(usedFallback);
+  usedFallbackRef.current = usedFallback;
+  const lastEffectiveKey = useRef<string | undefined>(undefined);
+  useEffect(() => {
+    const previous = lastEffectiveKey.current;
+    lastEffectiveKey.current = effectiveKey;
+    if (
+      previous !== undefined &&
+      previous !== effectiveKey &&
+      usedFallbackRef.current
+    ) {
+      resetTest();
+    }
+  }, [effectiveKey, resetTest]);
+  // An empty field tests the address in use. Only a loaded status that confirms
+  // there is none rules the Test out; while it loads, or if it failed, the
+  // server decides.
+  const nothingToTest = typed === "" && status.isSuccess && !current?.url;
   const fromEnvironment = current?.source === "env" && typed === "";
   const checked =
     detect.isSuccess && current !== undefined && !current.detecting;
@@ -48,6 +96,34 @@ const FlareSolverrIntegration: FunctionComponent = () => {
         description={flaresolverrHelp}
         settingKey={flaresolverrSettingKey}
       />
+      <Group align="center" gap="sm">
+        <Button
+          type="button"
+          variant="default"
+          mih={44}
+          disabled={nothingToTest}
+          aria-describedby={nothingToTest ? testHintId : undefined}
+          loading={test.isPending}
+          onClick={() => test.mutate(typed)}
+        >
+          Test
+        </Button>
+        {/* Test results only, so a screen reader announces just what a press produced. */}
+        <MantineText
+          size="sm"
+          role="status"
+          c={test.data && !test.data.ok ? errorColor : undefined}
+        >
+          {test.isPending && "Testing the address."}
+          {test.data && testOutcome(test.data)}
+          {test.isError && "The test could not be completed."}
+        </MantineText>
+        {nothingToTest && (
+          <MantineText size="sm" c="dimmed" id={testHintId}>
+            Type an address, or set FLARESOLVERR_URL, to test.
+          </MantineText>
+        )}
+      </Group>
       {fromEnvironment && (
         <MantineText size="sm">
           Currently taken from the FLARESOLVERR_URL environment variable (
