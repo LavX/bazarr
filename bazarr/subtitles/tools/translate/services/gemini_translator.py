@@ -3,7 +3,6 @@
 import json
 import re
 import os
-import json_tricks
 import signal
 import threading
 import time
@@ -23,6 +22,7 @@ from typing import List
 from srt import Subtitle
 
 from app.config import settings
+from utilities.cpu_features import numpy_engines_usable
 from sonarr.history import history_log
 from radarr.history import history_log_movie
 from utilities.path_mappings import path_mappings  # noqa: F401
@@ -41,6 +41,18 @@ DEFAULT_GEMINI_KEY_COOLDOWN_SECONDS = 60
 GEMINI_REQUEST_TIMEOUT = (10, 600)
 _GEMINI_KEY_COOLDOWNS = {}
 _GEMINI_KEY_COOLDOWNS_LOCK = threading.Lock()
+
+
+def _loads_reply(text):
+    """Parse the JSON reply, keeping json_tricks' leniency wherever it can load.
+
+    json_tricks imports numpy, which ends the process with an illegal instruction
+    on an x86-64 CPU without SSE4.2 or POPCNT. There the plain parser is used.
+    """
+    if numpy_engines_usable():
+        import json_tricks
+        return json_tricks.loads(text)
+    return json.loads(text)
 
 
 class SubtitleObject(typing.TypedDict):
@@ -437,7 +449,7 @@ class GeminiTranslatorService:
             parts = json.loads(response.text)['candidates'][0]['content']['parts']
             result = clean_json_string(''.join(part['text'] for part in parts))
 
-            translated_lines = json_tricks.loads(result)
+            translated_lines = _loads_reply(result)
             if not isinstance(translated_lines, list):
                 # Nothing to realign by index: the reply is not the shape the
                 # batch asks for, so the retry below re-asks for it.

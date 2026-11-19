@@ -8,6 +8,7 @@ import logging
 import time
 
 from .mods import EMPTY_TAG_PROCESSOR
+from .markup import unwrap_entry
 from .exc import EmptyEntryError
 from .registry import registry
 from subzero.language import Language
@@ -15,6 +16,14 @@ import six
 
 logger = logging.getLogger(__name__)
 
+
+# Remove HI rules that strip bracket and speaker-label text before the case count.
+CASE_DETECTION_PROCESSORS = (
+    "HI_brackets_full",
+    "HI_before_colon_caps",
+    "HI_before_colon_noncaps",
+    "HI_brackets",
+)
 
 
 class SubtitleModifications(object):
@@ -187,7 +196,10 @@ class SubtitleModifications(object):
 
         return line_mods, non_line_mods, used_mods
 
-    def detect_uppercase(self):
+    def detect_uppercase(self, unwrap_markup=False):
+            """Whether the subtitle is mostly uppercase. With unwrap_markup (a Remove HI run),
+            whole-line markup the layer accepts is counted as plain text; anything else is
+            counted exactly as before."""
             MAXIMUM_ENTRIES = 50
             MINIMUM_UPPERCASE_PERCENTAGE = 90
             MINIMUM_UPPERCASE_COUNT = 100
@@ -195,11 +207,19 @@ class SubtitleModifications(object):
             uppercase_count = 0
             lowercase_count = 0
 
+            # Bracket and speaker-label rules of Remove HI, selected by name so that
+            # inserting a rule into the list can never change what is counted.
+            detection = [p for p in registry.mods["remove_HI"].processors if p.name in CASE_DETECTION_PROCESSORS]
+
             for entry in self.f:
                 sub = entry.text
                 # skip HI bracket entries, those might actually be lowercase
                 sub = sub.strip()
-                for processor in registry.mods["remove_HI"].processors[:4]:
+                # Markup the layer does not take apart is counted exactly as development counts it.
+                wrapped = unwrap_entry(sub) if unwrap_markup else None
+                if wrapped is not None:
+                    sub = wrapped.plain.strip()
+                for processor in detection:
                     sub = processor.process(sub)
 
                 if sub.strip():
@@ -221,7 +241,8 @@ class SubtitleModifications(object):
     def modify(self, *mods):
         new_entries = []
         start = time.time()
-        self.mostly_uppercase = self.detect_uppercase()
+        identifiers = [SubtitleModifications.parse_identifier(mod)[0] for mod in mods]
+        self.mostly_uppercase = self.detect_uppercase(unwrap_markup="remove_HI" in identifiers)
 
         if self.mostly_uppercase and self.debug:
             logger.debug("Mostly-uppercase subtitle found")
@@ -272,6 +293,7 @@ class SubtitleModifications(object):
                 mod.modify(None, debug=self.debug, parent=self, **args)
 
     def apply_line_mods(self, new_entries, mods):
+        remove_hi = any(identifier == "remove_HI" for _order, identifier, _args in mods)
         for index, entry in enumerate(self.f, 1):
             applied_mods = []
             lines = []
@@ -281,6 +303,13 @@ class SubtitleModifications(object):
             end_tags = []
 
             t = entry.text.strip()
+            # Markup layer (Remove HI runs only): the rules see the plain text of a cue whose
+            # markup is simple, and each surviving line gets its own tags back.
+            wrapped = None
+            if remove_hi:
+                wrapped = unwrap_entry(t)
+                if wrapped is not None:
+                    t = wrapped.plain.strip()
             if not t:
                 if self.debug:
                     logger.debug(u"Skipping empty line: %s", index)
@@ -292,7 +321,8 @@ class SubtitleModifications(object):
                 continue
 
             skip_entry = False
-            for line in line_split:
+            origins = []
+            for line_no, line in enumerate(line_split):
                 # don't bother the mods with surrounding tags
                 old_line = line
                 line = line.strip()
@@ -387,6 +417,7 @@ class SubtitleModifications(object):
                             continue
 
                     lines.append(cleaned_line)
+                    origins.append(line_no)
                 else:
                     if self.debug:
                         logger.debug(u"%d: Ditching now empty line (%r)", index, line)
@@ -397,6 +428,8 @@ class SubtitleModifications(object):
                     logger.debug(u"%d: %r -> ''", index, entry.text)
                 continue
 
+            if wrapped is not None:
+                lines = wrapped.rewrap(lines, origins)
             new_text = r"\N".join(lines)
 
             # cheap man's approach to avoid open tags

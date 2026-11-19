@@ -92,12 +92,12 @@ describe("SubtitleToolsMenu red slot", () => {
     );
 
     await user.click(screen.getByRole("button", { name: "Tools" }));
+    // Wait for the open menu before asserting an item is absent from it.
+    const hide = await screen.findByRole("menuitem", { name: "Hide track..." });
     expect(
       screen.queryByRole("menuitem", { name: "Delete..." }),
     ).not.toBeInTheDocument();
-    await user.click(
-      await screen.findByRole("menuitem", { name: "Hide track..." }),
-    );
+    await user.click(hide);
 
     const dialog = within(
       await screen.findByRole("dialog", { name: "Hide this embedded track?" }),
@@ -197,9 +197,9 @@ describe("SubtitleToolsMenu modes", () => {
     return user;
   }
 
-  // The dropdown can already be closing by the time the assertions run, so
-  // items are looked up whether or not they are still visible: what is
-  // checked is what the menu rendered, enabled or not.
+  // Items are looked up with hidden: true so they are found whether or not
+  // the dropdown is currently visible: what is checked is what the menu
+  // rendered, enabled or not.
   const item = (name: string) =>
     screen.getByRole("menuitem", { name, hidden: true });
   const noItem = (name: string) =>
@@ -312,8 +312,9 @@ describe("SubtitleToolsMenu modes", () => {
 });
 
 describe("SubtitleToolsMenu, View, Edit and Download on an embedded track", () => {
-  // Mantine hides a floating dropdown once jsdom reports its target has no
-  // size, so the rows are found with hidden: true, as the other menu tests do.
+  // hidden: true dates from when jsdom's missing layout made Mantine hide
+  // the dropdown. The test theme now turns that check off, so it only widens
+  // the query and finds the rows either way.
   const item = (name: string) =>
     screen.findByRole("menuitem", { name, hidden: true });
 

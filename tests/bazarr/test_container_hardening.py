@@ -120,6 +120,85 @@ def test_the_entrypoint_drops_privileges_by_number():
         'uid was only remapped if /etc was writable.')
 
 
+def test_the_entrypoint_has_a_non_root_branch_that_never_calls_gosu():
+    """A container started with ``user:`` cannot be handed to gosu.
+
+    gosu needs setgroups and setgid, which only root has, so it fails with
+    "operation not permitted" even when the ids already match. The branch has to
+    sit before every root-only step and exec the app without gosu.
+    """
+    text = _entrypoint()
+    branch = re.search(r'^if \[ "\$\(id -u\)" != "0" \]; then\n(.*?)^fi$', text, re.S | re.M)
+    assert branch, 'the entrypoint has no early branch for a non-root start'
+
+    body = branch.group(1)
+    assert 'gosu' not in body, 'the non-root branch must not call gosu'
+    assert 'exec /usr/bin/tini -s -- env HOME=/config "$@"' in body, (
+        'the non-root branch must exec the app the way the root path does, minus gosu')
+
+    for step in ('usermod -o', 'groupmod -o', 'chown "$PUID:$PGID"', 'exec gosu'):
+        later = text.find(step, branch.end())
+        assert later != -1, f'{step} should still run on the root path'
+
+    assert 'exit 1' in body, 'an unusable /config must stop the start, not warn and go on'
+
+
+def _non_root_branch():
+    text = _entrypoint()
+    branch = re.search(r'^if \[ "\$\(id -u\)" != "0" \]; then\n(.*?)^fi$', text, re.S | re.M)
+    assert branch
+    return branch.group(1)
+
+
+def _run_non_root_branch(tmp_path, config):
+    """Run the branch with /config pointed at ``config`` and tini replaced by a stub."""
+    stub = tmp_path / 'tini'
+    stub.write_text('#!/bin/sh\necho "TINI $*"\n')
+    stub.chmod(0o755)
+    body = _non_root_branch().replace('/usr/bin/tini', str(stub)).replace('/config', str(config))
+    program = f'id() {{ [ "$1" = -u ] && echo 5000 || echo 5000; }}\n{body}'
+    return subprocess.run(['bash', '-c', program, 'entry', 'python', 'app.py'],
+                          capture_output=True, text=True, timeout=30)
+
+
+def test_the_non_root_branch_runs_the_app_when_config_is_writable(tmp_path):
+    result = _run_non_root_branch(tmp_path, tmp_path)
+    assert result.returncode == 0, result.stderr
+    assert 'TINI -s -- env HOME=' in result.stdout and 'python app.py' in result.stdout
+    assert not list(tmp_path.glob('.write-probe.*')), 'the write probe was left behind'
+
+
+def test_the_non_root_branch_names_a_missing_config(tmp_path):
+    result = _run_non_root_branch(tmp_path, tmp_path / 'nope')
+    assert result.returncode == 1
+    assert 'missing' in result.stderr and 'TINI' not in result.stdout
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason='root writes anywhere, so there is nothing to refuse')
+def test_the_non_root_branch_refuses_an_unwritable_config(tmp_path):
+    locked = tmp_path / 'locked'
+    locked.mkdir()
+    locked.chmod(0o555)
+    try:
+        result = _run_non_root_branch(tmp_path, locked)
+    finally:
+        locked.chmod(0o755)
+    assert result.returncode == 1
+    assert 'not writable' in result.stderr and 'TINI' not in result.stdout
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason='root writes anywhere, so there is nothing to refuse')
+def test_the_non_root_branch_refuses_a_stale_subdirectory(tmp_path):
+    (tmp_path / 'db').mkdir()
+    (tmp_path / 'db').chmod(0o555)
+    try:
+        result = _run_non_root_branch(tmp_path, tmp_path)
+    finally:
+        (tmp_path / 'db').chmod(0o755)
+    assert result.returncode == 1
+    assert f'{tmp_path}/db is not writable' in result.stderr
+
+
 def _dockerfile_instruction(name):
     """The last ``name`` instruction of the Dockerfile, with its JSON argument list."""
     import json

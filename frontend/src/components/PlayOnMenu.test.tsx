@@ -85,8 +85,9 @@ describe("PlayOnMenu", () => {
     });
     expect(asked).toEqual([]);
     await user.click(trigger);
-    // Mantine hides a floating dropdown once jsdom reports its target has no
-    // size, so the rows are found with hidden: true, as the other menu tests do.
+    // hidden: true dates from when jsdom's missing layout made Mantine hide
+    // the dropdown. The test theme now turns that check off, so it only widens
+    // the query and finds the rows either way.
     const row = (name: string) =>
       screen.findByRole("menuitem", { name, hidden: true });
     const emby = await row("Play on Emby");

@@ -10,6 +10,7 @@ target-version = "py312"
 extend-exclude = [
     "libs",
     "custom_libs",
+    "tests/bazarr/fixtures/hi_reference",
     "ai-subtitle-translator",
     "bazarr/ai-subtitle-translator",
     "bazarr-provider-catalog",
