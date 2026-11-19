@@ -28,8 +28,8 @@ import {
 } from "@/components/plugin-consent/parts";
 import {
   manifestFacts,
-  permissionMark,
-  sandboxNote,
+  providerPermissionMark,
+  providerSandboxNote,
 } from "@/pages/PluginHub/model";
 import styles from "./SchemaTwoDetails.module.scss";
 import consent from "@/components/plugin-consent/PluginConsent.module.scss";
@@ -46,6 +46,7 @@ export type SignatureState = "signed" | "unsigned" | "not-signed";
 /**
  * What the signature check of the entry's catalog came to, from Bazarr+'s own record of the source. Only
  * the official catalog is checked, so another source is "not-signed", never unsigned by a failed check.
+ * The official catalog with no record of a check is unsigned, not "not signed": nothing was checked yet.
  * Null for a local package, which is from no catalog, and while the source record is not known.
  */
 export function signatureState(
@@ -58,12 +59,15 @@ export function signatureState(
   if (source.signature_verified === true) {
     return "signed";
   }
-  return source.catalog_signature ? "unsigned" : "not-signed";
+  // The official catalog with no record of a check yet is the snapshot that shipped, or the older format.
+  return source.catalog_signature || source.official === true
+    ? "unsigned"
+    : "not-signed";
 }
 
 const SIGNATURE_TEXT: Record<SignatureState, string> = {
   signed: "Its catalog is signed, and Bazarr+ checked the signature.",
-  unsigned: "Its catalog is not signed. This is the older catalog format.",
+  unsigned: "Its catalog is not signed yet. This is the older catalog format.",
   "not-signed":
     "Its catalog is not signed. Bazarr+ checks signatures only on its official catalog.",
 };
@@ -146,11 +150,14 @@ export const SchemaTwoDetails: FunctionComponent<SchemaTwoDetailsProps> = ({
   const facts = manifestFacts(entry);
   const permissions: PluginPermission[] = facts.permissions.map((item) => ({
     name: item,
-    mark: permissionMark(item, sandbox),
+    mark: providerPermissionMark(item, sandbox?.providers),
   }));
   const hasNetwork = facts.permissions.includes("network");
   const signature = signatureState(source, local);
-  const sandboxLine = sandboxNote(facts.permissions, sandbox);
+  const sandboxLine = providerSandboxNote(
+    facts.permissions,
+    sandbox?.providers,
+  );
 
   const provider: PluginSourceInfo = {
     id: entry.source ?? null,
@@ -233,6 +240,20 @@ export const SchemaTwoDetails: FunctionComponent<SchemaTwoDetailsProps> = ({
               <p className={styles.text}>
                 An uploaded package. It belongs to no catalog, so Bazarr+ does
                 not trust it.
+              </p>
+            ) : !entry.source ? (
+              <p className={styles.text}>
+                Bazarr+ has no record of where this came from.
+              </p>
+            ) : provider.official && !provider.trusted ? (
+              // Trust is the entry's own field: an official source can still hold an entry it does not trust.
+              <p className={consent.line} style={{ margin: 0 }}>
+                <strong>{provider.name ?? provider.id}</strong>
+                <span className={consent.quiet}>
+                  This source is not trusted
+                  {source?.trust_reason ? `: ${source.trust_reason}` : ""}.
+                  Review it before you install.
+                </span>
               </p>
             ) : (
               <SourceLine source={provider} />

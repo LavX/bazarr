@@ -77,12 +77,21 @@ let sandbox: Record<string, unknown>;
 
 beforeEach(() => {
   queryClient.clear();
+  // The host as the backend reports it today: plugin workers are not sandboxed, and the provider
+  // profile confines the folders of a subtitle provider.
   sandbox = {
-    workers_sandboxed: true,
-    network: "enforced",
+    workers_sandboxed: false,
+    network: "declared",
     filesystem: "declared",
-    label: "Sandboxed (Landlock ABI 4)",
+    label: "Sandbox available. Not active for plugin workers yet.",
     pending: false,
+    providers: {
+      enabled: true,
+      state: "enforced",
+      notice: null,
+      unsandboxed: [],
+      limitations: [],
+    },
   };
   server.use(
     http.get("/api/system/status", () =>
@@ -150,9 +159,9 @@ describe("a schema 2 provider on its Subtitle Hub card", () => {
     );
     const [network, data] = may.getAllByRole("listitem");
     expect(network).toHaveTextContent("Network access");
-    expect(network).toHaveTextContent("Enforced");
+    expect(network).toHaveTextContent("Declared only");
     expect(data).toHaveTextContent("Keep its own data folder");
-    expect(data).toHaveTextContent("Declared only");
+    expect(data).toHaveTextContent("Enforced");
     expect(
       may.getByText(/Declared only means the plugin says it needs it/),
     ).toBeVisible();
@@ -198,8 +207,36 @@ describe("a schema 2 provider on its Subtitle Hub card", () => {
     expect(toggle()).toHaveFocus();
   });
 
-  it("never calls a permission enforced on a host that does not sandbox its workers", async () => {
-    sandbox = { workers_sandboxed: false, label: "Not sandboxed on this host" };
+  it("never calls the network enforced for a provider, whatever the plugin sandbox says", async () => {
+    sandbox = {
+      ...sandbox,
+      workers_sandboxed: true,
+      network: "enforced",
+      filesystem: "enforced",
+    };
+    show(schemaTwo());
+
+    const region = await open();
+
+    const [network, data] = within(
+      within(region).getByRole("group", { name: "What it may do" }),
+    ).getAllByRole("listitem");
+    expect(network).toHaveTextContent("Declared only");
+    expect(data).toHaveTextContent("Enforced");
+  });
+
+  it("calls nothing enforced, and says why, when the provider sandbox is not applied", async () => {
+    sandbox = {
+      ...sandbox,
+      providers: {
+        enabled: true,
+        state: "unsandboxed",
+        notice:
+          "Subtitle provider plugins run without the sandbox on this host, so nothing keeps them from reading the configuration or the database: this host has no Landlock.",
+        unsandboxed: [],
+        limitations: [],
+      },
+    };
     show(schemaTwo());
 
     const region = await open();
@@ -207,7 +244,49 @@ describe("a schema 2 provider on its Subtitle Hub card", () => {
     expect(within(region).queryByText("Enforced")).not.toBeInTheDocument();
     expect(within(region).getAllByText("Declared only")).toHaveLength(2);
     expect(within(region).getByRole("note")).toHaveTextContent(
-      "Not sandboxed on this host",
+      "Subtitle provider plugins run without the sandbox on this host",
+    );
+  });
+
+  it("calls a sandbox with gaps declared, with the gaps named", async () => {
+    sandbox = {
+      ...sandbox,
+      providers: {
+        enabled: true,
+        state: "partial",
+        notice: "The sandbox has gaps: an older Landlock ABI.",
+        unsandboxed: [],
+        limitations: [],
+      },
+    };
+    show(schemaTwo());
+
+    const region = await open();
+
+    expect(within(region).queryByText("Enforced")).not.toBeInTheDocument();
+    expect(within(region).getByRole("note")).toHaveTextContent(
+      "an older Landlock ABI",
+    );
+  });
+
+  it("says so when the provider sandbox is switched off", async () => {
+    sandbox = {
+      ...sandbox,
+      providers: {
+        enabled: false,
+        state: "off",
+        notice: null,
+        unsandboxed: [],
+        limitations: [],
+      },
+    };
+    show(schemaTwo());
+
+    const region = await open();
+
+    expect(within(region).queryByText("Enforced")).not.toBeInTheDocument();
+    expect(within(region).getByRole("note")).toHaveTextContent(
+      "The provider sandbox is switched off",
     );
   });
 
@@ -303,9 +382,61 @@ describe("a schema 2 provider on its Subtitle Hub card", () => {
 
     expect(
       within(region).getByText(
-        "Its catalog is not signed. This is the older catalog format.",
+        "Its catalog is not signed yet. This is the older catalog format.",
       ),
     ).toBeVisible();
+  });
+
+  it("does not claim a signature check for an official catalog with no signature record yet", async () => {
+    show(schemaTwo(), {
+      ...official,
+      catalog_signature: undefined,
+      signature_verified: undefined,
+    });
+
+    const region = await open();
+
+    expect(
+      within(region).getByText(
+        "Its catalog is not signed yet. This is the older catalog format.",
+      ),
+    ).toBeVisible();
+    expect(
+      within(region).queryByText(/checks signatures only on its official/),
+    ).not.toBeInTheDocument();
+    expect(screen.getByText("Unsigned catalog")).toBeVisible();
+  });
+
+  it("does not call an official source trusted when the entry is not", async () => {
+    show(schemaTwo({}, { trusted: false }), {
+      ...official,
+      trust_reason: "outside main and beta",
+    });
+
+    const region = await open();
+
+    expect(
+      within(region).queryByText("The official catalog, which Bazarr+ trusts."),
+    ).not.toBeInTheDocument();
+    expect(
+      within(region).getByText(/not trusted: outside main and beta/i),
+    ).toBeVisible();
+  });
+
+  it("says Bazarr+ has no record of the source when it is gone", async () => {
+    show(
+      schemaTwo({}, { source: undefined, source_name: "Unknown source" }),
+      undefined,
+    );
+
+    const region = await open();
+
+    expect(
+      within(region).getByText(/no record of where this came from/i),
+    ).toBeVisible();
+    expect(
+      within(region).queryByText(/community catalog source/i),
+    ).not.toBeInTheDocument();
   });
 
   it("says a development source has not been reviewed", async () => {

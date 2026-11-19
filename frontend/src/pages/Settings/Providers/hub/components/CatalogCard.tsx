@@ -57,6 +57,8 @@ interface CatalogCardProps {
   isRepairing?: boolean;
   /** True for providers installed from an uploaded local package, not a catalog. */
   isLocal?: boolean;
+  /** Why Install and Update wait, when another install is going ahead. Both are disabled while it is set. */
+  installBlocked?: string;
   /** The catalog source the entry comes from, as Bazarr+ records it: what a schema 2 card says about its signature. */
   source?: PluginCatalogSource;
 }
@@ -122,6 +124,7 @@ export const CatalogCard: FunctionComponent<CatalogCardProps> = ({
   isRepairing = false,
   isLocal = false,
   source,
+  installBlocked,
 }) => {
   const manifest = useMemo(() => parseManifest(entry), [entry]);
   const cta = deriveCta(entry, installed, manifest !== null);
@@ -158,6 +161,8 @@ export const CatalogCard: FunctionComponent<CatalogCardProps> = ({
             variant="light"
             color="yellow"
             loading={isInstalling}
+            disabled={Boolean(installBlocked)}
+            title={installBlocked}
             onClick={() => onInstall(entry)}
             leftSection={<FontAwesomeIcon icon={faRotate} />}
           >
@@ -224,6 +229,8 @@ export const CatalogCard: FunctionComponent<CatalogCardProps> = ({
             size="xs"
             variant="light"
             loading={isInstalling}
+            disabled={Boolean(installBlocked)}
+            title={installBlocked}
             onClick={() => onInstall(entry)}
             leftSection={<FontAwesomeIcon icon={faDownload} />}
           >

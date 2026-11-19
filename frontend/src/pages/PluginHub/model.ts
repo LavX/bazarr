@@ -41,6 +41,59 @@ export function typeFilterOf(value: string | null): TypeFilter {
     : "all";
 }
 
+/** What the status route says about the profile subtitle provider workers run under. */
+export interface ProviderSandboxFacts {
+  enabled?: boolean;
+  state?: string;
+  notice?: string | null;
+}
+
+/**
+ * Whether this host holds a subtitle provider to a permission. A provider runs under its own profile, not
+ * the plugin workers': that profile confines the folders, and only while it applies in full. It lets every
+ * outbound connection through but those to Bazarr+'s own ports, so the network is never enforced for one.
+ * A status that has not answered marks everything declared.
+ */
+export function providerPermissionMark(
+  name: string,
+  providers: ProviderSandboxFacts | null | undefined,
+): PluginPermissionMark {
+  if (
+    (name === "media_read" || name === "data_dir") &&
+    providers?.enabled !== false &&
+    providers?.state === "enforced"
+  ) {
+    return "enforced";
+  }
+  return "declared";
+}
+
+/**
+ * What a provider card says when the provider profile does not hold in full: the backend's own notice when
+ * it has one, else the plain state. Null when the profile holds, or while the status has not answered.
+ */
+export function providerSandboxNote(
+  permissions: string[],
+  providers: ProviderSandboxFacts | null | undefined,
+): string | null {
+  if (permissions.length === 0 || !providers?.state) {
+    return null;
+  }
+  if (providers.state === "enforced") {
+    return null;
+  }
+  if (providers.notice) {
+    return providers.notice;
+  }
+  if (providers.state === "off") {
+    return "The provider sandbox is switched off.";
+  }
+  if (providers.state === "pending") {
+    return "Checking the provider sandbox";
+  }
+  return "Not sandboxed on this host";
+}
+
 /** What each kind is for, for the empty state of a kind with nothing to show. */
 export const KIND_PURPOSE: Record<TypeFilter, string> = {
   all: "Plugins add engines and helpers to Bazarr+. Subtitle providers stay in the Subtitle Hub.",

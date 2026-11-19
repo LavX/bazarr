@@ -14,9 +14,11 @@ import { http, HttpResponse } from "msw";
 import { beforeEach, describe, expect, it } from "vitest";
 import queryClient from "@/apis/queries";
 import type { PluginConsentSummary } from "@/apis/raw/plugins";
+import type { ProviderHubInstallation } from "@/apis/raw/providerHub";
 import {
   installSummary,
   plainSummary,
+  updateDelta,
 } from "@/components/plugin-consent/fixtures";
 import { MarketplacePanel } from "@/pages/Settings/Providers/hub/MarketplacePanel";
 import { customRender, screen, waitFor, within } from "@/tests";
@@ -226,5 +228,171 @@ describe("installing a schema 2 provider from the Subtitle Hub", () => {
     });
     expect(calls.some((call) => call.path === "consent")).toBe(false);
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  });
+});
+
+const installedRow = (
+  id: string,
+  over: Partial<ProviderHubInstallation> = {},
+) =>
+  ({
+    provider_id: id,
+    name: `Provider ${id}`,
+    active_version: "0.9.0",
+    state: "active",
+    trusted: true,
+    source_id: "official",
+    source_bound: true,
+    manifest: { schema_version: 1, provider_id: id, version: "0.9.0" },
+    ...over,
+  }) as unknown as ProviderHubInstallation;
+
+describe("updating an installed provider whose catalog entry is schema 2", () => {
+  it("applies an ordinary provider update when the server has no consent step for it", async () => {
+    summary = noConsent;
+    server.use(
+      http.get("/api/plugins/updates/consent", () => {
+        calls.push({ path: "update-consent", body: null });
+        return HttpResponse.json("No update is available.", { status: 404 });
+      }),
+    );
+    const user = userEvent.setup();
+    customRender(
+      <MarketplacePanel
+        catalog={catalog("plain", 2)}
+        providers={[installedRow("plain")]}
+      />,
+    );
+
+    await user.click(await screen.findByRole("button", { name: /^update$/i }));
+
+    await waitFor(() => expect(installed()).toHaveLength(1));
+    expect(installed()[0].body).toMatchObject({
+      source: "official",
+      id: "plain",
+      version: "1.0.0",
+      consent: "sha256:plain-provider",
+    });
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  });
+
+  it("opens the update dialog when the server has a delta that needs consent", async () => {
+    server.use(
+      http.get("/api/plugins/updates/consent", () =>
+        HttpResponse.json({ ...updateDelta, needs_consent: true }),
+      ),
+      http.post("/api/plugins/updates/apply", async ({ request }) => {
+        calls.push({ path: "apply", body: await request.json() });
+        return HttpResponse.json({ job_id: null }, { status: 202 });
+      }),
+    );
+    const user = userEvent.setup();
+    customRender(
+      <MarketplacePanel
+        catalog={catalog("relay", 2)}
+        providers={[installedRow("relay")]}
+      />,
+    );
+
+    await user.click(await screen.findByRole("button", { name: /^update$/i }));
+
+    const dialog = await screen.findByRole("dialog");
+    expect(calls.some((call) => call.path === "apply")).toBe(false);
+    const agree = await within(dialog).findByRole("button", {
+      name: "Update",
+    });
+    await waitFor(() => expect(agree).toBeEnabled());
+    await user.click(agree);
+    await waitFor(() =>
+      expect(calls.some((call) => call.path === "apply")).toBe(true),
+    );
+    expect(installed()).toEqual([]);
+  });
+});
+
+describe("a second install while one is going ahead", () => {
+  it("disables the other Install buttons, with the reason, until it finishes", async () => {
+    summary = noConsent;
+    let release: () => void = () => undefined;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    server.use(
+      http.post("/api/plugins/installations", async ({ request }) => {
+        calls.push({ path: "plugin-install", body: await request.json() });
+        await gate;
+        return HttpResponse.json({ job_id: null }, { status: 202 });
+      }),
+    );
+    const user = userEvent.setup();
+    customRender(
+      <MarketplacePanel
+        catalog={{
+          sources: [officialSource],
+          entries: [entry("plain", 2), entry("other", 2)],
+        }}
+        providers={[]}
+      />,
+    );
+
+    const buttons = await screen.findAllByRole("button", {
+      name: /^install$/i,
+    });
+    await user.click(buttons[0]);
+
+    await waitFor(() => expect(installed()).toHaveLength(1));
+    const waiting = screen.getByTitle(
+      "Another plugin is being changed. Wait for it to finish.",
+    );
+    expect(waiting).toBeDisabled();
+    expect(waiting).toHaveAccessibleName(/install/i);
+
+    release();
+    await waitFor(() =>
+      expect(
+        screen.getAllByRole("button", { name: /^install$/i })[0],
+      ).toBeEnabled(),
+    );
+  });
+});
+
+describe("focus after the dialog", () => {
+  it("goes to the search box when the install replaced the button that opened it", async () => {
+    const user = userEvent.setup();
+    const { rerender } = customRender(
+      <MarketplacePanel catalog={catalog("relay", 2)} providers={[]} />,
+    );
+
+    await user.click(await screen.findByRole("button", { name: /^install$/i }));
+    const dialog = await screen.findByRole("dialog");
+    const agree = await within(dialog).findByRole("button", {
+      name: "Install",
+    });
+    await waitFor(() => expect(agree).toBeEnabled());
+    await user.click(agree);
+    await waitFor(() => expect(installed()).toHaveLength(1));
+    // The server now lists the install, so the card has no Install button any more.
+    rerender(
+      <MarketplacePanel
+        catalog={catalog("relay", 2)}
+        providers={[
+          installedRow("relay", {
+            active_version: undefined,
+            staged_version: "1.0.0",
+            state: "staged",
+            needs_restart: true,
+          }),
+        ]}
+      />,
+    );
+
+    await waitFor(() =>
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument(),
+    );
+    await waitFor(() =>
+      expect(
+        screen.getByRole("textbox", { name: "Search marketplace" }),
+      ).toHaveFocus(),
+    );
   });
 });
