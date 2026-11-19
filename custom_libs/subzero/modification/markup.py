@@ -9,12 +9,14 @@ markup is not understood here, and the cue reaches the rules exactly as it alway
 """
 import re
 
+_HTML_NAMES = ("i", "b", "u", "font")
 _HTML_OPEN = re.compile(r"<(i|b|u|font)(?:\s[^>]*)?>", re.IGNORECASE)
 _SSA_OPEN = re.compile(r"\{\\([iusb])1\}")
 # Any tag or override that the layer does not take apart.
 _ANY_MARKUP = re.compile(r"<|\{\\")
-# The markup that Remove HI and the other modifications look at, for counting text.
-MARKUP_RE = re.compile(r"(?i)</?(?:[ibu]|font)(?:\s[^>]*)?>|\{\\[^}]*\}")
+# The closing tag that matches each opening tag name, compiled once.
+_HTML_CLOSE = {name: re.compile(r"</%s>$" % name, re.IGNORECASE) for name in _HTML_NAMES}
+_SSA_CLOSE = {name: re.compile(r"\{\\%s0\}$" % name) for name in "iusb"}
 
 LINE_BREAK = r"\N"
 
@@ -29,12 +31,18 @@ class EntryMarkup(object):
 
     def rewrap(self, lines, origins):
         """Wrap each output line in the tags of the input line it came from."""
+        if len(lines) != len(origins):
+            raise ValueError("%d lines but %d origins" % (len(lines), len(origins)))
         return [self.opens[origin] + line + self.closes[origin] for line, origin in zip(lines, origins)]
 
 
 def _unwrap_line(line):
     """(plain, opening tags, closing tags) for one line, or None when its markup is not
     simple pairs around the whole line."""
+    if "<" not in line and "{\\" not in line:
+        return line, "", ""
+    if not line.strip():
+        return line, "", ""
     stripped = line.strip()
     lead = line[:len(line) - len(line.lstrip())]
     trail = line[len(line.rstrip()):]
@@ -46,11 +54,7 @@ def _unwrap_line(line):
         if not html and not ssa:
             break
         open_text = (html or ssa).group(0)
-        if html:
-            name = html.group(1).lower()
-            close_re = re.compile(r"</%s>$" % name, re.IGNORECASE)
-        else:
-            close_re = re.compile(r"\{\\%s0\}$" % ssa.group(1))
+        close_re = _HTML_CLOSE[html.group(1).lower()] if html else _SSA_CLOSE[ssa.group(1)]
         close_match = close_re.search(core)
         if not close_match or close_match.start() < len(open_text):
             return None
@@ -58,6 +62,9 @@ def _unwrap_line(line):
         closes.append(close_match.group(0))
         core = core[len(open_text):close_match.start()]
     if _ANY_MARKUP.search(core):
+        return None
+    # An empty or blank pair is not a wrapped line. Development keeps such cues verbatim.
+    if opens and not core.strip():
         return None
     return lead + core + trail, "".join(opens), "".join(reversed(closes))
 

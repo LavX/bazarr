@@ -8,7 +8,7 @@ import logging
 import time
 
 from .mods import EMPTY_TAG_PROCESSOR
-from .markup import MARKUP_RE, unwrap_entry
+from .markup import unwrap_entry
 from .exc import EmptyEntryError
 from .registry import registry
 from subzero.language import Language
@@ -212,13 +212,12 @@ class SubtitleModifications(object):
                 sub = entry.text
                 # skip HI bracket entries, those might actually be lowercase
                 sub = sub.strip()
+                # Markup the layer does not take apart is counted exactly as development counts it.
                 wrapped = unwrap_entry(sub)
                 if wrapped is not None:
-                    sub = wrapped.plain
+                    sub = wrapped.plain.strip()
                 for processor in detection:
                     sub = processor.process(sub)
-                # Markup is not text: the letters of <font color=...> or {\i1} do not count.
-                sub = MARKUP_RE.sub("", sub)
 
                 if sub.strip():
                     uppercase_count += sum(1 for char in sub if char.isupper())
@@ -306,7 +305,7 @@ class SubtitleModifications(object):
             if remove_hi:
                 wrapped = unwrap_entry(t)
                 if wrapped is not None:
-                    t = wrapped.plain
+                    t = wrapped.plain.strip()
             if not t:
                 if self.debug:
                     logger.debug(u"Skipping empty line: %s", index)
@@ -410,7 +409,6 @@ class SubtitleModifications(object):
                     if len(cleaned_line) == 5 and cleaned_line.startswith("{\\") and cleaned_line.endswith("0}"):
                         if lines:
                             prev_line = lines.pop()
-                            origins.pop()
                             lines.append(prev_line + cleaned_line)
                             continue
 
