@@ -470,6 +470,13 @@ def _outcome_recorded(provider):
         recorded()
 
 
+def _source_kwargs(carrier):
+    """The media source item a video or subtitle belongs to, as a throttle callback keyword. Passed only when
+    there is one, so a callback that predates sources sees the call it always saw."""
+    context = getattr(carrier, 'source_context', None)
+    return {} if context is None else {'source_context': context}
+
+
 def _adapt_throttle_callback(callback):
     """Negotiate the optional context once, without retrying callback failures.
 
@@ -489,7 +496,7 @@ def _adapt_throttle_callback(callback):
     if any(item.kind == inspect.Parameter.VAR_KEYWORD for item in parameters.values()):
         return callback
 
-    unsupported = [name for name in ("sports_context", "operation", "announce")
+    unsupported = [name for name in ("sports_context", "source_context", "operation", "announce")
                    if not (name in parameters
                            and parameters[name].kind in (inspect.Parameter.POSITIONAL_OR_KEYWORD,
                                                          inspect.Parameter.KEYWORD_ONLY))]
@@ -499,9 +506,9 @@ def _adapt_throttle_callback(callback):
     unset = object()
 
     @wraps(callback)
-    def legacy(*args, sports_context=unset, operation=unset, announce=unset, **kwargs):
-        for name, value in (("sports_context", sports_context), ("operation", operation),
-                            ("announce", announce)):
+    def legacy(*args, sports_context=unset, source_context=unset, operation=unset, announce=unset, **kwargs):
+        for name, value in (("sports_context", sports_context), ("source_context", source_context),
+                            ("operation", operation), ("announce", announce)):
             if value is not unset and name not in unsupported:
                 kwargs[name] = value
         return callback(*args, **kwargs)
@@ -677,7 +684,7 @@ class SZProviderPool(ProviderPool):
             # returning nothing, so a pool without a real callback records no
             # backoff and has nothing to announce.
             self.throttle_callback = lambda x, y, ids=None, language=None, sports_context=None, \
-                operation=None, announce=None: None
+                operation=None, announce=None, source_context=None: None
 
         self.throttle_callback = _adapt_throttle_callback(self.throttle_callback)
 
@@ -1119,6 +1126,8 @@ class SZProviderPool(ProviderPool):
                     # callback needs it at download time, when only the
                     # subtitle is in scope.
                     s.sports_context = getattr(video, 'sports_context', None)
+                    # A media source item travels beside it, never through it.
+                    s.source_context = getattr(video, 'source_context', None)
 
                     s.plex_media_fps = float(video.fps) if video.fps else None
                     out.append(s)
@@ -1156,7 +1165,7 @@ class SZProviderPool(ProviderPool):
             # same event two records.
             self._notify_throttle(provider, e, ids=ids, language=list(languages)[0] if len(languages) else None,
                                   sports_context=getattr(video, 'sports_context', None), operation="search",
-                                  announce=True)
+                                  announce=True, **_source_kwargs(video))
             if detailed:
                 return provider_search_failure(provider, e)
             discard()
@@ -1174,7 +1183,7 @@ class SZProviderPool(ProviderPool):
                 _log_unexpected_provider_error(provider, e)
             self._notify_throttle(provider, e, ids=ids, language=list(languages)[0] if len(languages) else None,
                                   sports_context=getattr(video, 'sports_context', None), operation="search",
-                                  announce=True)
+                                  announce=True, **_source_kwargs(video))
             if detailed:
                 return provider_search_failure(provider, e)
             discard()
@@ -1474,14 +1483,16 @@ class SZProviderPool(ProviderPool):
                     subtitle.download_error = e
                     if self._notify_throttle(subtitle.provider_name, e, ids=ids, language=subtitle.language,
                                              sports_context=getattr(subtitle, 'sports_context', None),
-                                             operation="download", announce=False):
+                                             operation="download", announce=False,
+                                             **_source_kwargs(subtitle)):
                         recorded = True
                         recorded_error = e
 
                 except (rarfile.BadRarFile, MustGetBlacklisted) as e:
                     if self._notify_throttle(subtitle.provider_name, e, ids=ids, language=subtitle.language,
                                              sports_context=getattr(subtitle, 'sports_context', None),
-                                             operation="download", announce=False):
+                                             operation="download", announce=False,
+                                             **_source_kwargs(subtitle)):
                         recorded = True
                         recorded_error = e
                     return False
@@ -1494,7 +1505,8 @@ class SZProviderPool(ProviderPool):
                     subtitle.download_error = e
                     if self._notify_throttle(subtitle.provider_name, e, ids=ids, language=subtitle.language,
                                              sports_context=getattr(subtitle, 'sports_context', None),
-                                             operation="download", announce=False):
+                                             operation="download", announce=False,
+                                             **_source_kwargs(subtitle)):
                         recorded = True
                         recorded_error = e
                     self._discard_provider(subtitle.provider_name)

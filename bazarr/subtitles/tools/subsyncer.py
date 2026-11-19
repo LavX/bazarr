@@ -500,7 +500,7 @@ class SubSyncer:
 
     def _log_sync_history(self, success_result, output_mode, srt_lang, hi, forced,
                           sonarr_series_id=None, sonarr_episode_id=None, radarr_id=None,
-                          arr_instance_id=None, sports_context=None, history_session=None):
+                          arr_instance_id=None, sports_context=None, history_session=None, source=None):
         raw_result = success_result.raw_result if isinstance(success_result.raw_result, dict) else {}
         offset_seconds = raw_result.get('offset_seconds') or 0
         framerate_scale_factor = raw_result.get('framerate_scale_factor') or 0
@@ -517,7 +517,11 @@ class SubSyncer:
         if quality_of_fit is not None:
             message += f' Quality of fit: {quality_of_fit:.2f}.'
 
-        if sports_context is not None:
+        if source is not None:
+            # The stored path of a source item is already the Bazarr-visible one: nothing is mapped.
+            def prr(path):
+                return path
+        elif sports_context is not None:
             def prr(path):
                 return path_mappings.path_replace_reverse_instance(
                     path, sports_context.arr_instance_id, 'sports')
@@ -540,7 +544,10 @@ class SubSyncer:
                                         reversed_subtitles_path=prr(success_result.output_path),
                                         hearing_impaired=hi)
 
-        if sports_context is not None:
+        if source is not None:
+            from media_sources.history import history_log_source
+            history_log_source(5, source, result)
+        elif sports_context is not None:
             from sportarr.subtitles import sports_history
             sports_history(history_session, sports_context, result, action=5)
         elif sonarr_episode_id:
@@ -554,7 +561,7 @@ class SubSyncer:
              max_offset_seconds, no_fix_framerate, gss, reference=None, sonarr_series_id=None, sonarr_episode_id=None,
              radarr_id=None, progress_callback=None, job_id=None, force_sync=False, output_mode=None,
              enabled_engines=None, write_history=True, arr_instance_id=None, source_version=None,
-             on_publish=None, validate=None, publication_guard=None):
+             on_publish=None, validate=None, publication_guard=None, source=None):
         self.reference = video_path
         self.srtin = srt_path
         self.progress_callback = progress_callback
@@ -668,6 +675,7 @@ class SubSyncer:
                     sonarr_episode_id=sonarr_episode_id,
                     radarr_id=radarr_id,
                     arr_instance_id=arr_instance_id,
+                    **({} if source is None else {'source': source}),
                 )
 
         return self.sync_result

@@ -593,13 +593,21 @@ def get_providers_auth():
     return provider_configs
 
 
-def _handle_mgb(name, exception, ids, language, sports_context=None):
+def _handle_mgb(name, exception, ids, language, sports_context=None, source_context=None):
     if language.forced:
         language_str = f'{language.basename}:forced'
     elif language.hi:
         language_str = f'{language.basename}:hi'
     else:
         language_str = language.basename
+
+    if source_context is not None:
+        # A media source item records into its own blacklist and nothing else. This comes before the sports and
+        # arr branches: the release ids of its video are all None, which those would file as an unattributed
+        # movie or episode row.
+        from media_sources.history import blacklist_log_source_guarded
+        blacklist_log_source_guarded(source_context, name, exception.id, language_str)
+        return
 
     if sports_context is not None:
         # A sports search carries the event and its instance on the video, and
@@ -699,7 +707,7 @@ def _failure_class_name(exception):
 
 
 def provider_throttle(name, exception, ids=None, language=None, sports_context=None, wait=True,
-                      operation=None, announce=True):
+                      operation=None, announce=True, source_context=None):
     """Record a provider failure in the throttle table.
 
     ``wait`` is the caller's promise about its own deadline. The count gate
@@ -720,7 +728,7 @@ def provider_throttle(name, exception, ids=None, language=None, sports_context=N
     nothing to announce later.
     """
     if isinstance(exception, MustGetBlacklisted) and isinstance(ids, dict) and isinstance(language, Language):
-        _handle_mgb(name, exception, ids, language, sports_context)
+        _handle_mgb(name, exception, ids, language, sports_context, source_context)
         return False
 
     cls = getattr(exception, "__class__")

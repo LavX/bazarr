@@ -26,7 +26,7 @@ def upload_fake_score(media_type, local_score):
     return round(full * local_score / 100) if local_score > 0 else full
 
 
-def get_video(path, title, sceneName, providers=None, media_type="movie", context=None, cancel=None):
+def get_video(path, title, sceneName, providers=None, media_type="movie", context=None, cancel=None, source=None):
     """
     Construct `Video` instance
     :param path: path to video
@@ -34,8 +34,13 @@ def get_video(path, title, sceneName, providers=None, media_type="movie", contex
     :param sceneName: sceneName
     :param providers: provider list for selective hashing
     :param media_type: movie/series
+    :param source: the context of a media source item, which replaces the arr lookups
     :return: `Video` instance
     """
+    if source is not None:
+        if context is not None:
+            raise ValueError('A source item cannot be combined with a sports context')
+        return _get_source_video(path, title, sceneName, providers, source)
     if media_type == 'sports':
         from sportarr.video import get_sports_video
         return get_sports_video(path, title, sceneName, providers, context, cancel)
@@ -67,6 +72,32 @@ def get_video(path, title, sceneName, providers=None, media_type="movie", contex
                                                                                       ensure_ascii=False))
         return video
 
+    except Exception as error:
+        logging.exception("BAZARR Error (%s) trying to get video information for this file: %s", error, path)
+
+
+def _get_source_video(path, title, sceneName, providers, source):
+    """The `Video` of a source item: parsed from the path, then filled from the item's context. The arr
+    refiners are skipped, since for a file an arr also holds they would read the arr row. AniDB and AniList
+    still run for episodes, and a sports event runs no registered refiner at all."""
+    from media_sources.refiner import refine_from_source
+
+    is_episode = source.kind == 'episode'
+    hints = {"title": title, "type": "episode" if is_episode else "movie"}
+    try:
+        logging.debug('BAZARR guessing video object for a source item using its path: %s', path)
+        video = parse_video(path, hints=hints, skip_hashing=settings.general.skip_hashing, dry_run=False,
+                            providers=providers)
+        if sceneName != "None":
+            scenename_video = _parse_scenename_video(sceneName, os.path.splitext(path)[1], hints)
+            if scenename_video is not None:
+                refine_video_with_scenename(initial_video=video, scenename_video=scenename_video)
+        video.source_context = source
+        refine_from_source(path, video, source)
+        if is_episode:
+            for key in ("anidb", "anilist"):
+                registered_refiners[key](path, video)
+        return video
     except Exception as error:
         logging.exception("BAZARR Error (%s) trying to get video information for this file: %s", error, path)
 
