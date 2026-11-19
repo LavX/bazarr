@@ -1,5 +1,13 @@
 import { FunctionComponent, useMemo } from "react";
-import { ActionIcon, Badge, Button, Menu, Tooltip } from "@mantine/core";
+import {
+  ActionIcon,
+  Badge,
+  Button,
+  Menu,
+  Tooltip,
+  VisuallyHidden,
+} from "@mantine/core";
+import { useId } from "@mantine/hooks";
 import {
   faCheck,
   faDownload,
@@ -10,6 +18,7 @@ import {
   faVial,
 } from "@fortawesome/free-solid-svg-icons";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
+import type { PluginCatalogSource } from "@/apis/raw/plugins";
 import type {
   ProviderHubCatalogEntry,
   ProviderHubInstallation,
@@ -26,6 +35,12 @@ import {
 } from "@/components/hub/utils";
 import { AntiCaptchaBadge } from "@/pages/Settings/Providers/hub/components/AntiCaptchaBadge";
 import { FlareSolverrBadge } from "@/pages/Settings/Providers/hub/components/FlareSolverrBadge";
+import {
+  isSchemaTwo,
+  SchemaTwoDetails,
+  SignatureBadge,
+  signatureState,
+} from "@/pages/Settings/Providers/hub/components/SchemaTwoDetails";
 import { TranslationQuotaLine } from "@/pages/Settings/Providers/hub/components/TranslationQuotaLine";
 import {
   AUTH_LABEL,
@@ -50,6 +65,10 @@ interface CatalogCardProps {
   isRepairing?: boolean;
   /** True for providers installed from an uploaded local package, not a catalog. */
   isLocal?: boolean;
+  /** Why Install and Update wait, when another install is going ahead. Both are disabled while it is set. */
+  installBlocked?: string;
+  /** The catalog source the entry comes from, as Bazarr+ records it: what a schema 2 card says about its signature. */
+  source?: PluginCatalogSource;
 }
 
 type CtaState =
@@ -112,6 +131,8 @@ export const CatalogCard: FunctionComponent<CatalogCardProps> = ({
   isTesting,
   isRepairing = false,
   isLocal = false,
+  source,
+  installBlocked,
 }) => {
   const manifest = useMemo(() => parseManifest(entry), [entry]);
   const cta = deriveCta(entry, installed, manifest !== null);
@@ -126,6 +147,20 @@ export const CatalogCard: FunctionComponent<CatalogCardProps> = ({
     : pendingUpdate
       ? "Uninstall instead"
       : "Uninstall";
+
+  // While another install is going ahead the button stays in the tab order and says why, to a screen reader
+  // as well as on hover, as the Plugin Hub's Unavailable button does. It does nothing when pressed.
+  const blockedId = useId();
+  const waiting = installBlocked
+    ? {
+        "data-disabled": true,
+        "aria-disabled": true,
+        "aria-describedby": blockedId,
+        title: installBlocked,
+        onClick: (event: { preventDefault: () => void }) =>
+          event.preventDefault(),
+      }
+    : { onClick: () => onInstall(entry) };
 
   const ctaButton = (() => {
     switch (cta) {
@@ -148,7 +183,7 @@ export const CatalogCard: FunctionComponent<CatalogCardProps> = ({
             variant="light"
             color="yellow"
             loading={isInstalling}
-            onClick={() => onInstall(entry)}
+            {...waiting}
             leftSection={<FontAwesomeIcon icon={faRotate} />}
           >
             Update
@@ -214,7 +249,7 @@ export const CatalogCard: FunctionComponent<CatalogCardProps> = ({
             size="xs"
             variant="light"
             loading={isInstalling}
-            onClick={() => onInstall(entry)}
+            {...waiting}
             leftSection={<FontAwesomeIcon icon={faDownload} />}
           >
             Install
@@ -230,6 +265,8 @@ export const CatalogCard: FunctionComponent<CatalogCardProps> = ({
     (manifest?.description as string | undefined) ??
     (manifest?.summary as string | undefined) ??
     "";
+
+  const schemaTwo = isSchemaTwo(entry);
 
   const auth = detectAuthFromManifest(manifest);
   const manifestLangs = getLanguagesFromManifest(manifest);
@@ -285,6 +322,14 @@ export const CatalogCard: FunctionComponent<CatalogCardProps> = ({
         <>
           <TranslationQuotaLine status={installed?.runtime_status} />
           <CapabilityStatus capabilities={installed?.capabilities} />
+          {schemaTwo && (
+            <SchemaTwoDetails
+              entry={entry}
+              name={displayName}
+              source={source}
+              local={isLocal}
+            />
+          )}
         </>
       }
       chips={
@@ -331,11 +376,21 @@ export const CatalogCard: FunctionComponent<CatalogCardProps> = ({
           ) : (
             <TrustBadge trusted={entry.trusted} />
           )}
+          {schemaTwo && (
+            <SignatureBadge state={signatureState(source, isLocal)} />
+          )}
           {usesAntiCaptcha(entry) && <AntiCaptchaBadge />}
           {usesFlaresolverr(entry) && <FlareSolverrBadge />}
         </>
       }
-      action={ctaButton}
+      action={
+        <>
+          {ctaButton}
+          {installBlocked && (
+            <VisuallyHidden id={blockedId}>{installBlocked}</VisuallyHidden>
+          )}
+        </>
+      }
     />
   );
 };

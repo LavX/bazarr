@@ -14,6 +14,7 @@ import {
   faUpload,
 } from "@fortawesome/free-solid-svg-icons";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
+import { isAxiosError } from "axios";
 import {
   useProviderHubInstall,
   useProviderHubInstallLocal,
@@ -21,6 +22,9 @@ import {
   useProviderHubTest,
   useProviderHubUninstall,
 } from "@/apis/hooks";
+import api from "@/apis/raw";
+import { withInlineErrors } from "@/apis/raw/inlineWrites";
+import { SUBTITLE_PROVIDER_KIND } from "@/apis/raw/plugins";
 import type {
   ProviderHubCatalog,
   ProviderHubCatalogEntry,
@@ -30,8 +34,14 @@ import { EmptyState } from "@/components/hub/EmptyState";
 import { SearchBar } from "@/components/hub/SearchBar";
 import { getLatestCatalogEntry, parseManifest } from "@/components/hub/utils";
 import { useGatedAction } from "@/components/modals/PasswordConfirmModal";
+import {
+  type PluginConsentTarget,
+  usePluginConsentFlow,
+} from "@/components/plugin-consent";
+import { reasonOf } from "@/components/plugin-consent/refusal";
 import { notification } from "@/modules/notification";
 import { CatalogCard } from "@/pages/Settings/Providers/hub/components/CatalogCard";
+import { isSchemaTwo } from "@/pages/Settings/Providers/hub/components/SchemaTwoDetails";
 import { SourcesDrawer } from "@/pages/Settings/Providers/hub/SourcesDrawer";
 import styles from "@/components/hub/hub.module.scss";
 
@@ -84,6 +94,26 @@ export const MarketplacePanel: FunctionComponent<MarketplacePanelProps> = ({
   const uninstall = useProviderHubUninstall();
   const repair = useProviderHubRepair();
   const runGated = useGatedAction();
+  // A schema 2 provider is decided by the same flow the Plugin Hub and the Translation page use: it asks
+  // for consent when its closure adds a plugin that is not a subtitle provider, and installs at once when
+  // it does not. A schema 1 provider keeps the direct install.
+  const consent = usePluginConsentFlow({
+    // A finished install replaces the button that opened the dialog, and focus would fall to the page. It
+    // goes to the search box instead, so the next keypress starts from a known place.
+    onClosed: () => {
+      if (
+        document.activeElement === document.body ||
+        document.activeElement === null
+      ) {
+        document
+          .querySelector<HTMLElement>('input[aria-label="Search marketplace"]')
+          ?.focus();
+      }
+    },
+  });
+  // The card whose schema 2 install or update is being started, so only that card shows progress and the
+  // others wait for it, as the flow takes one request at a time.
+  const [starting, setStarting] = useState<string | null>(null);
 
   const sources = catalog?.sources ?? [];
 
@@ -215,6 +245,58 @@ export const MarketplacePanel: FunctionComponent<MarketplacePanelProps> = ({
     (entry: ProviderHubCatalogEntry) => {
       if (!entry.source || !parseManifest(entry)) return;
       const source = entry.source;
+      if (isSchemaTwo(entry)) {
+        const name = entry.name ?? entry.provider_id;
+        const installed = installedFor(entry);
+        const install: PluginConsentTarget = {
+          action: "install",
+          pluginId: entry.provider_id,
+          name,
+          source,
+          version: entry.version,
+          kind: SUBTITLE_PROVIDER_KIND,
+          // A new release of an installed provider goes out as an install of that release, and says update.
+          wording: installed?.active_version ? "update" : "install",
+        };
+        setStarting(cardKey(entry.source, entry.provider_id));
+        void (async () => {
+          try {
+            // An update asks for the delta only where the server has one, which is when it adds a plugin of
+            // another kind. For an ordinary provider it has none (a 404), and the new release is installed as
+            // it always was, with the digest of what it adds.
+            let hasDelta = false;
+            if (installed?.active_version) {
+              try {
+                await withInlineErrors(() =>
+                  api.plugins.updateConsent(entry.provider_id),
+                );
+                hasDelta = true;
+              } catch (error) {
+                // Only a 404 means there is no delta. Any other answer, or none, is not a reason to go on
+                // as if the server had said so: the person is told, and nothing is sent.
+                if (!isAxiosError(error) || error.response?.status !== 404) {
+                  showNotification(
+                    notification.error(
+                      `${name} was not updated`,
+                      reasonOf(error) ||
+                        "Bazarr+ could not ask what the update adds. Try again.",
+                    ),
+                  );
+                  return;
+                }
+              }
+            }
+            await consent.begin(
+              hasDelta
+                ? { action: "update", pluginId: entry.provider_id, name }
+                : install,
+            );
+          } finally {
+            setStarting(null);
+          }
+        })();
+        return;
+      }
       void runGated(
         () =>
           install.mutate({
@@ -225,7 +307,14 @@ export const MarketplacePanel: FunctionComponent<MarketplacePanelProps> = ({
         "install this provider",
       );
     },
-    [install, runGated],
+    [consent, install, installedFor, runGated],
+  );
+
+  // The record Bazarr+ keeps of the entry's source, which says what the check of its signature came to.
+  const sourceOf = useCallback(
+    (entry: ProviderHubCatalogEntry) =>
+      catalog?.sources.find((item) => item.id === entry.source),
+    [catalog?.sources],
   );
 
   const marketplaceCards = useMemo(
@@ -248,12 +337,19 @@ export const MarketplacePanel: FunctionComponent<MarketplacePanelProps> = ({
             : installedFor(entry)
         }
         onInstall={handleInstall}
+        installBlocked={
+          (starting !== null || consent.busy) &&
+          starting !== cardKey(entry.source, entry.provider_id)
+            ? "Another plugin is being changed. Wait for it to finish."
+            : undefined
+        }
         isInstalling={
-          install.isPending &&
-          install.variables !== undefined &&
-          "source" in install.variables &&
-          install.variables.source === entry.source &&
-          install.variables.provider_id === entry.provider_id
+          starting === cardKey(entry.source, entry.provider_id) ||
+          (install.isPending &&
+            install.variables !== undefined &&
+            "source" in install.variables &&
+            install.variables.source === entry.source &&
+            install.variables.provider_id === entry.provider_id)
         }
         onTest={(providerId) => testProvider.mutate(providerId)}
         onUninstall={(providerId) => uninstall.mutate(providerId)}
@@ -268,6 +364,7 @@ export const MarketplacePanel: FunctionComponent<MarketplacePanelProps> = ({
           testProvider.isPending && testProvider.variables === entry.provider_id
         }
         isLocal={isLocal}
+        source={isLocal ? undefined : sourceOf(entry)}
       />
     ),
     [
@@ -275,10 +372,13 @@ export const MarketplacePanel: FunctionComponent<MarketplacePanelProps> = ({
       installedFor,
       handleInstall,
       install,
+      consent.busy,
+      starting,
       testProvider,
       uninstall,
       repair,
       runGated,
+      sourceOf,
     ],
   );
 
@@ -419,6 +519,8 @@ export const MarketplacePanel: FunctionComponent<MarketplacePanelProps> = ({
           )}
         </>
       )}
+
+      {consent.dialog}
 
       <SourcesDrawer
         opened={drawerOpen}

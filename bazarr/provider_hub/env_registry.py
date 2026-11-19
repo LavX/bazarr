@@ -87,6 +87,11 @@ def referenced_env_paths(state: dict[str, Any]) -> set[str]:
         for key in ("python_path", "staged_python_path"):
             if row.get(key):
                 referenced.add(env_dir_of(row[key]))
+    # The previous release of each plugin is kept so it can be gone back to, and a release that is still draining
+    # runs: their environments are in use as much as the active ones are.
+    for release in getattr(state, "retained_releases", ()):
+        if release.get("python_path"):
+            referenced.add(env_dir_of(release["python_path"]))
     return referenced
 
 

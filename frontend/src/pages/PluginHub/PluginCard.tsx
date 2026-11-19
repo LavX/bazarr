@@ -27,6 +27,7 @@ import {
   permissionMark,
   PluginRow,
   SandboxFacts,
+  sandboxNote as sandboxNoteOf,
 } from "./model";
 import { PluginStatus, pluginStatus } from "./status";
 import pageStyles from "./PluginHub.module.scss";
@@ -178,13 +179,7 @@ const Action: FunctionComponent<PluginCardProps> = ({
 export const PluginCard: FunctionComponent<PluginCardProps> = (props) => {
   const { row, sandbox } = props;
   const { installation, facts } = row;
-  const sandboxNote =
-    facts.permissions.length > 0 && sandbox && !sandbox.workers_sandboxed
-      ? (sandbox.label ??
-        (sandbox.pending
-          ? "Checking the worker sandbox"
-          : "Not sandboxed on this host"))
-      : null;
+  const sandboxNote = sandboxNoteOf(facts.permissions, sandbox);
   const needs = facts.requires;
   const status: PluginStatus | null = pluginStatus(row, props.openJobs);
   const installed = isInstalled(installation) ? installation : null;
