@@ -62,6 +62,7 @@ def _full_document():
     installations["iota"] = _row("iota", active="1.0.0", supplied_by={}, source_id="community", origin="local")
     installations["kappa"] = _row("kappa", active="1.0.0")
     installations["kappa"]["manifest"] = None
+    installations["lambda"] = _row("lambda", active="1.0.0", staged="1.1.0", supplied_by=None, staged_supplied_by=None)
     return {"installations": installations, "jobs": [{"id": "j"}], "plugin_secret_paths": ["alpha.api_key"],
             "kept_data": {}, "catalog_sources": {}, "catalog_entries": {}, "plugin_envs": {}}
 
@@ -134,7 +135,7 @@ def test_the_upgrade_makes_the_releases_the_store_would_have_made(hub_store, hub
          _fields_of(hub_engine, item.id), item.source_id, item.origin)
         for item in state_store.list_releases(bind=hub_engine))
     assert found == wanted
-    assert len(found) == 9
+    assert len(found) == 11
     assert {(item[0], item[-2], item[-1]) for item in found if item[0] == "iota"} == {("iota", "community", "local")}
 
 

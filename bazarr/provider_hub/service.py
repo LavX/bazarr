@@ -4834,6 +4834,32 @@ def retire_release(plugin_id: str, version: str | None = None) -> int:
     return moved
 
 
+def _previous_release(provider_id: str):
+    from .state import _uses_file
+    if _uses_file(None):
+        return None
+    from . import state_store
+    previous = state_store.list_releases(provider_id, states=(releases.RETIRED,))
+    return max(previous, key=lambda release: (release.ended_seq or 0, release.id)) if previous else None
+
+
+def rollback_consent(provider_id: str, *, _state=None, _row=None, _target=None) -> dict[str, Any] | None:
+    """What going back to the previous release adds to what the active release is allowed, or None.
+
+    Worked out from the two manifests alone, so it does not depend on the catalog still listing the old release.
+    The Subtitle Hub has no consent step for a provider without dependencies, as for an update. The digest in the
+    result is what ``rollback_release`` takes as ``consent_digest``.
+    """
+    state = _state if _state is not None else load_state()
+    row = _row if _row is not None else (state.get("installations") or {}).get(provider_id)
+    target = _target if _target is not None else _previous_release(provider_id)
+    if not isinstance(row, dict) or target is None or target.manifest is None:
+        return None
+    if kind_of(row) == SUBTITLE_PROVIDER and not closure.has_needs(target.manifest):
+        return None
+    return consent.update_delta(state, row.get("manifest"), {"manifest": target.manifest}, closure.Closure())
+
+
 def rollback_release(provider_id: str, consent_digest: str | None = None) -> Activation:
     """Go back to the release this plugin ran before its active one.
 
@@ -4845,20 +4871,15 @@ def rollback_release(provider_id: str, consent_digest: str | None = None) -> Act
     now. Raises ``ProviderHubInstallError`` when there is nothing to go back to or the rules refuse it, and then
     changes nothing: the previous release stays recorded.
     """
-    from .state import _uses_file
     state = load_state()
     row = (state.get("installations") or {}).get(provider_id)
     if not isinstance(row, dict) or not row.get("active_version") or row.get("state") == "removed":
         raise ProviderHubInstallError(f"{provider_id} is not installed")
     if row.get("staged_version"):
         raise ProviderHubInstallError(f"{provider_id} has an update waiting; discard it before going back")
-    previous = []
-    if not _uses_file(None):
-        from . import state_store
-        previous = state_store.list_releases(provider_id, states=(releases.RETIRED,))
-    if not previous:
+    target = _previous_release(provider_id)
+    if target is None:
         raise ProviderHubInstallError(f"{provider_id} has no previous release to go back to")
-    target = max(previous, key=lambda release: (release.ended_seq or 0, release.id))
     name = row.get("name") or provider_id
     if (target.source_id, target.origin) != (row.get("source_id"), row.get("origin")):
         raise ProviderHubInstallError(
@@ -4883,7 +4904,15 @@ def rollback_release(provider_id: str, consent_digest: str | None = None) -> Act
         raise ProviderHubInstallError(
             f"{name} v{target.version} is no longer on disk, or no longer matches what it was, "
             f"so it cannot be restored ({refusal_text(error)})") from error
-    delta = _update_delta(state, row, target.manifest, row.get("source_id"))
+    plugin = parse_plugin_manifest(target.manifest) if target.manifest.get("schema_version") == 2 else None
+    if plugin is not None:
+        # What this release relied on has to be running now: its bindings are worked out again at staging, and
+        # one that finds no supplier would leave the boot guard nothing to hold it to.
+        missing = closure.unsupplied_needs(state, plugin, provider_id, target.supplied_by)
+        if missing:
+            raise ProviderHubInstallError(
+                f"{name} v{target.version} needs {', '.join(missing)}, which is not running, so it is not restored")
+    delta = rollback_consent(provider_id, _state=state, _row=row, _target=target)
     if delta and delta["needs_consent"] and consent_digest != delta["digest"]:
         raise ProviderHubConsentError(consent.delta_text(delta))
 
@@ -4948,6 +4977,11 @@ def activate_staged_installations() -> list[str]:
         logging.getLogger(__name__).warning("Could not check who owns the data kept for staged plugins",
                                             exc_info=True)
     try:
+        _note_orphan_releases()
+    except Exception:
+        logging.getLogger(__name__).warning("Could not look for release records without an installation",
+                                            exc_info=True)
+    try:
         _retire_stale_draining()
     except Exception:
         logging.getLogger(__name__).warning("Could not retire the releases an earlier run left draining",
@@ -4980,6 +5014,21 @@ def activate_staged_installations() -> list[str]:
 
             mutate_state(hold)
     return activated
+
+
+def _note_orphan_releases() -> None:
+    """Say so when the tables hold releases of plugins the document does not list. They are never deleted
+    silently: a plugin listed again is matched to them, and ``state_store.discard_orphan_releases`` ends them."""
+    from .state import _uses_file
+    if _uses_file(None):
+        return
+    from . import state_store
+
+    orphans = state_store.orphan_plugin_ids()
+    if orphans:
+        logging.getLogger(__name__).warning(
+            "Provider Hub: the release records of %s have no installation in the state document and are kept",
+            ", ".join(orphans))
 
 
 def _retire_stale_draining() -> None:

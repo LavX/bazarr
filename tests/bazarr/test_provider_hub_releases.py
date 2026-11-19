@@ -825,18 +825,6 @@ def test_a_reader_and_a_writer_in_two_threads_never_disagree(hub):
     assert seen and all(name == version for name, version in seen)
 
 
-def test_a_document_rebuilt_after_damage_leaves_the_releases_it_lost_alone(hub):
-    from provider_hub.state import mutate_state
-
-    _seed(alpha=_row("alpha", active="1.0.0"), beta=_row("beta", active="2.0.0"))
-    with hub.begin() as connection:
-        connection.execute(sa.text("UPDATE provider_hub_state SET document = '{broken' WHERE id = 1"))
-
-    mutate_state(lambda state: state["jobs"].append({"id": "after"}), recover_corrupt=True)
-
-    assert _releases_in(hub) == [("alpha", "1.0.0", "active"), ("beta", "2.0.0", "active")]
-
-
 def test_a_release_still_draining_at_boot_is_retired_and_a_boot_with_none_writes_nothing(hub, service_kind,
                                                                                          monkeypatch):
     from provider_hub import state_store
@@ -1091,6 +1079,115 @@ def test_a_rollback_that_would_leave_a_dependent_without_its_capability_is_refus
     row = load_state()["installations"]["helper"]
     assert (row["state"], row["active_version"], row["staged_version"]) == ("active", "2.0.0", None)
     assert _releases_in(hub, "helper") == [("helper", "1.0.0", "retired"), ("helper", "2.0.0", "active")]
+
+
+def _two_releases(hub, monkeypatch, plugin_id, old, new, **row_extra):
+    """``plugin_id`` ran ``old`` and now runs ``new`` (manifests), with ``old`` kept as the previous release."""
+    from provider_hub.service import activate_staged_installations
+
+    monkeypatch.setattr("provider_hub.service.verify_bundle_tree", lambda manifest, root: None)
+    monkeypatch.setattr("provider_hub.service.validated_bundle_path", lambda root, path: Path(path))
+    monkeypatch.setattr("provider_hub.service.validated_interpreter", lambda root, path: Path(path))
+    row = _row(plugin_id, active="1.0.0", kind=SERVICE_KIND, manifest=old, staged=("2.0.0", None), **row_extra)
+    row.update(staged_manifest=new)
+    _seed(**{plugin_id: row})
+    activate_staged_installations()
+
+
+def test_a_rollback_to_a_release_that_asks_for_more_asks_for_consent_even_when_the_feed_no_longer_lists_it(
+        hub, service_kind, monkeypatch):
+    from provider_hub.service import ProviderHubConsentError, rollback_consent, rollback_release
+    from provider_hub.state import load_state
+
+    wide = service_manifest("helper", "1.0.0", permissions=["network"], endpoints=["https://api.example.org:443"])
+    _two_releases(hub, monkeypatch, "helper", wide, service_manifest("helper", "2.0.0"))
+    assert not load_state().get("catalog_entries")
+
+    with pytest.raises(ProviderHubConsentError, match="network"):
+        rollback_release("helper")
+    assert load_state()["installations"]["helper"]["active_version"] == "2.0.0"
+
+    delta = rollback_consent("helper")
+    assert delta["needs_consent"] and delta["added"]["destinations"] == ["https://api.example.org:443"]
+    assert rollback_release("helper", consent_digest=delta["digest"]).activated
+    assert load_state()["installations"]["helper"]["active_version"] == "1.0.0"
+
+
+def test_a_rollback_to_a_release_that_needs_a_helper_removed_since_is_refused_before_anything_changes(
+        hub, service_kind, monkeypatch):
+    from provider_hub.service import ProviderHubInstallError, rollback_release
+    from provider_hub.state import load_state, mutate_state
+
+    _seed(dep=_row("dep", active="1.0.0", kind=SERVICE_KIND,
+                   manifest=service_manifest("dep", "1.0.0", provides=["translit.v1"])))
+    needing = service_manifest("main", "1.0.0", requires=["translit.v1"])
+    _two_releases(hub, monkeypatch, "main", needing, service_manifest("main", "2.0.0"),
+                  supplied_by={"translit.v1": "dep"})
+    mutate_state(lambda state: state["installations"].pop("dep"))
+
+    with pytest.raises(ProviderHubInstallError, match="translit.v1"):
+        rollback_release("main")
+
+    row = load_state()["installations"]["main"]
+    assert (row["active_version"], row["staged_version"]) == ("2.0.0", None)
+    assert _releases_in(hub, "main") == [("main", "1.0.0", "retired"), ("main", "2.0.0", "active")]
+
+
+def test_a_rollback_to_a_release_that_needs_a_helper_that_is_there_records_the_binding(
+        hub, service_kind, monkeypatch):
+    from provider_hub.service import rollback_release
+    from provider_hub.state import load_state
+
+    _seed(dep=_row("dep", active="1.0.0", kind=SERVICE_KIND,
+                   manifest=service_manifest("dep", "1.0.0", provides=["translit.v1"])))
+    needing = service_manifest("main", "1.0.0", requires=["translit.v1"])
+    _two_releases(hub, monkeypatch, "main", needing, service_manifest("main", "2.0.0"),
+                  supplied_by={"translit.v1": "dep"})
+
+    assert rollback_release("main").activated
+
+    assert load_state()["installations"]["main"]["supplied_by"] == {"translit.v1": "dep"}
+
+
+def test_releases_a_damaged_document_lost_survive_ordinary_writes_until_someone_discards_them(hub):
+    from provider_hub import state_store
+    from provider_hub.state import load_state, mutate_state
+
+    _seed(alpha=_row("alpha", active="1.0.0"), beta=_row("beta", active="2.0.0"))
+    with hub.begin() as connection:
+        connection.execute(sa.text("UPDATE provider_hub_state SET document = '{broken' WHERE id = 1"))
+
+    mutate_state(lambda state: state["jobs"].append({"id": "after"}), recover_corrupt=True)
+    mutate_state(lambda state: state["jobs"].append({"id": "again"}))
+    mutate_state(lambda state: state["installations"].update(gamma=_row("gamma", active="3.0.0")))
+
+    assert _releases_in(hub) == [("alpha", "1.0.0", "active"), ("beta", "2.0.0", "active"),
+                                 ("gamma", "3.0.0", "active")]
+    assert sorted(state_store.orphan_plugin_ids(hub)) == ["alpha", "beta"]
+    # A plugin listed again with the same release is matched to the record it left, not given a second one.
+    kept_id = [item.id for item in state_store.list_releases("alpha", bind=hub)]
+    mutate_state(lambda state: state["installations"].update(alpha=_row("alpha", active="1.0.0", name="Alpha")))
+    assert [item.id for item in state_store.list_releases("alpha", bind=hub)] == kept_id
+    assert load_state()["installations"]["alpha"]["active_version"] == "1.0.0"
+    assert sorted(state_store.orphan_plugin_ids(hub)) == ["beta"]
+    # Removing a plugin the document lists still takes its releases with it.
+    mutate_state(lambda state: state["installations"].pop("gamma"))
+    assert ("gamma", "3.0.0", "active") not in _releases_in(hub)
+    # Only an explicit discard takes the others.
+    assert state_store.discard_orphan_releases(["beta"], bind=hub) == 1
+    assert _releases_in(hub) == [("alpha", "1.0.0", "active")]
+
+
+def test_a_null_map_of_bindings_reads_back_as_null_and_an_empty_one_as_empty(table):
+    null = _row("alpha", active="1.0.0", staged="1.1.0", supplied_by=None, staged_supplied_by=None)
+    empty = _row("beta", active="1.0.0", supplied_by={})
+    document = _document(alpha=null, beta=empty)
+
+    stored = table.write(document)
+
+    read = table.read(stored)["installations"]
+    assert read["alpha"]["supplied_by"] is None and read["alpha"]["staged_supplied_by"] is None
+    assert read["beta"]["supplied_by"] == {}
 
 
 # ---- workers are keyed by release ---------------------------------------------------------------------------

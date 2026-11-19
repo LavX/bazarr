@@ -453,6 +453,49 @@ def supplier_map(state: dict[str, Any], plugin: PluginManifest, owner_id: str) -
     return found
 
 
+def unsupplied_needs(state: dict[str, Any], plugin: PluginManifest, owner_id: str,
+                     recorded: Any = None) -> list[str]:
+    """What ``plugin`` relies on that no plugin running now supplies, for a release that is about to come back.
+
+    A release that ran before relies on every capability it once had an installed supplier for (``recorded``,
+    its bindings), and on any capability it requires that some catalog plugin provides; a capability nothing
+    provides is external and never blocks, as at install. The plugin it extends must be running and provide
+    the capability. Judged on the plugins that run now: switched on, of a defined kind, not revoked, not
+    flagged for repair and not themselves unmet. Returns descriptions, sorted.
+    """
+    from .kinds import known_kinds, kind_of
+
+    installations = state.get("installations") or {}
+    unmet = unmet_needs(installations)
+    registered = set(known_kinds())
+    running: dict[str, PluginManifest] = {}
+    for pid, row in installations.items():
+        if str(pid) == owner_id or not isinstance(row, dict) or not row.get("active_version") \
+                or row.get("state") == "removed":
+            continue
+        held = _parse(row.get("manifest"))
+        if (held is None or kind_of(row) not in registered or not _enabled(row) or row.get("needs_repair")
+                or row.get("revoked") or str(pid) in unmet):
+            continue
+        running[str(pid)] = held
+    catalog = [_parse(entry.get("manifest")) for entry in (state.get("catalog_entries") or {}).values()
+               if isinstance(entry, dict)]
+    providable = {capability for held in catalog if held is not None for capability in held.provides}
+    wanted = {capability for capability in (recorded or {}) if capability in plugin.requires}
+    wanted |= {capability for capability in plugin.requires if capability in providable}
+    missing = []
+    for capability in sorted(wanted):
+        if capability in plugin.provides or capability.startswith(HOST_CAPABILITY_PREFIX):
+            continue
+        if not any(capability in held.provides for held in running.values()):
+            missing.append(capability)
+    if plugin.extends is not None:
+        parent = running.get(plugin.extends.plugin_id)
+        if parent is None or plugin.extends.capability not in parent.provides:
+            missing.append(f"{plugin.extends.plugin_id} ({plugin.extends.capability})")
+    return missing
+
+
 def is_on(row: dict[str, Any]) -> bool:
     """Whether an installation is switched on, by the rule of its own kind."""
     return _enabled(row)

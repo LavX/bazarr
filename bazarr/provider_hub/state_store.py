@@ -792,3 +792,34 @@ def retire_draining(bind=None) -> int:
         return moved
 
     return change_releases(retire, bind)
+
+
+def orphan_plugin_ids(bind=None) -> list[str]:
+    """The ids of plugins that have release rows and are not in the document.
+
+    A document rebuilt after damage no longer lists the plugins it lost, and their releases are kept. A plugin
+    that is listed again is matched to them by its id; the rest stay until ``discard_orphan_releases``.
+    """
+    document = json.loads(read_document(bind)[1])
+    listed = set((document.get("installations") or {}))
+    return sorted({row["plugin_id"] for row in read_release_rows(bind)} - listed)
+
+
+def discard_orphan_releases(plugin_ids, bind=None) -> int:
+    """Delete the releases of the named plugins, which must not be in the document. Returns how many went.
+
+    The explicit end of what a damaged document lost: nothing else deletes them.
+    """
+    wanted = set(plugin_ids)
+
+    def discard(connection):
+        listed = set((json.loads(connection.execute(
+            sa.select(_state_table.c.document).where(_state_table.c.id == ROW_ID)).scalar()).get("installations")
+            or {}))
+        ids = [row["id"] for row in releases.read_rows(connection, manifests=()) if row["plugin_id"] in wanted
+               and row["plugin_id"] not in listed]
+        if ids:
+            releases.apply_plan(connection, releases.Plan(deletes=ids))
+        return len(ids)
+
+    return change_releases(discard, bind)

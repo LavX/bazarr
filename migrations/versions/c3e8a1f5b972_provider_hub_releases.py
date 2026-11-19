@@ -36,6 +36,7 @@ _ACTIVE = ("active_version", "active_path", "python_path", "manifest", "supplied
 _STAGED = ("staged_version", "staged_path", "staged_python_path", "staged_manifest", "staged_supplied_by")
 # What each key after the version is, in order. ``fields`` records which of them the row carried.
 _NAMES = ("path", "python_path", "manifest", "supplied_by", "activated_at")
+_NULL_BINDINGS = "supplied_by:null"
 
 
 def _guard(bind):
@@ -111,8 +112,12 @@ def _slot(row, keys, with_activation):
         return None
     digest = manifest.get("bundle_sha256") if isinstance(manifest, dict) else None
     names = _NAMES if with_activation else _NAMES[:4]
+    present = [name for name, key in zip(names, keys[1:]) if key in row]
+    if "supplied_by" in present and supplied is None:
+        # A null map and an empty one are different values of the row: the null is remembered.
+        present.append(_NULL_BINDINGS)
     return {
-        "present": [name for name, key in zip(names, keys[1:]) if key in row],
+        "present": present,
         "version": version, "bundle_path": path, "python_path": python,
         "manifest": None if manifest is None else json.dumps(manifest, sort_keys=True),
         "bundle_digest": digest if isinstance(digest, str) and digest else None,
@@ -221,7 +226,8 @@ def put_releases_back(bind):
         values = {
             "path": release.bundle_path, "python_path": release.python_path,
             "manifest": json.loads(release.manifest) if release.manifest else None,
-            "supplied_by": supplied.get(release.id, {}), "activated_at": release.activated_at,
+            "supplied_by": None if _NULL_BINDINGS in present else supplied.get(release.id, {}),
+            "activated_at": release.activated_at,
         }
         row[keys[0]] = release.version
         for name, key in zip(names, keys[1:]):

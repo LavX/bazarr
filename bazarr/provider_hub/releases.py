@@ -134,6 +134,8 @@ bindings_table = sa.Table(
 # The release fields an installation row carries, per slot.
 _ACTIVE_KEYS = ("active_version", "active_path", "python_path", "manifest", "supplied_by", "activated_at")
 _STAGED_KEYS = ("staged_version", "staged_path", "staged_python_path", "staged_manifest", "staged_supplied_by")
+# Recorded in ``fields`` when the row's map of bindings was null and not empty.
+NULL_BINDINGS = "supplied_by:null"
 # What each key after the version is, in order, for the ``fields`` column.
 _FIELD_NAMES = ("path", "python_path", "manifest", "supplied_by", "activated_at")
 
@@ -237,6 +239,9 @@ def _slot(row: dict[str, Any], keys: tuple[str, ...], with_activation: bool) -> 
         return None
     names = _FIELD_NAMES if with_activation else _FIELD_NAMES[:4]
     present = [name for name, key in zip(names, keys[1:]) if key in row]
+    if "supplied_by" in present and supplied is None:
+        # A null map and an empty one are different values of the row: the null is remembered.
+        present.append(NULL_BINDINGS)
     return _Slot(version, path, python, manifest, dict(supplied or {}), activated, present)
 
 
@@ -319,7 +324,7 @@ def compose(data: dict[str, Any], rows: list[dict[str, Any]]) -> "StateDocument"
                 elif name == "manifest":
                     installation[key] = _loads(release.get("manifest"))
                 elif name == "supplied_by":
-                    installation[key] = dict(release.get("supplied_by") or {})
+                    installation[key] = None if NULL_BINDINGS in present else dict(release.get("supplied_by") or {})
                 elif name == "activated_at":
                     installation[key] = release.get("activated_at")
     return document
@@ -343,7 +348,7 @@ def _matches(release: dict[str, Any], slot: _Slot) -> bool:
 
 
 def split(data: dict[str, Any], rows: list[dict[str, Any]], *, now: str | None = None,
-          keep_orphans: bool = False) -> tuple[dict[str, Any], Plan]:
+          previously_listed: "set[str] | None" = None) -> tuple[dict[str, Any], Plan]:
     """The document to store, and the release-table changes that go with it.
 
     ``data`` is the full dict a caller works with. It is not changed (except that
@@ -351,8 +356,10 @@ def split(data: dict[str, Any], rows: list[dict[str, Any]], *, now: str | None =
     the returned document is a copy without the release fields of the rows whose
     slots became releases. ``rows`` are the stored releases at the moment of the
     write, with their bindings, and with ``manifest`` for the ones in a slot.
-    ``keep_orphans`` leaves the releases of a plugin the document does not list
-    alone, for a document that was rebuilt from nothing after damage.
+    ``previously_listed`` is the set of plugin ids the document listed before this write. Only a plugin that was
+    listed and no longer is has its releases deleted: a release whose plugin the document never listed (what a
+    document rebuilt after damage lost) is an orphan, and stays until ``state_store.discard_orphan_releases``
+    is asked for it. Without it every release of a plugin the document does not list is deleted.
     """
     stamp = now or now_text()
     stored = dict(data)
@@ -449,10 +456,9 @@ def split(data: dict[str, Any], rows: list[dict[str, Any]], *, now: str | None =
             for key in _STAGED_KEYS:
                 row.pop(key, None)
         stored_rows[plugin_id] = row
-    if not keep_orphans:
-        for plugin_id, existing in by_plugin.items():
-            if plugin_id not in installations:
-                plan.deletes.extend(release["id"] for release in existing)
+    for plugin_id, existing in by_plugin.items():
+        if plugin_id not in installations and (previously_listed is None or plugin_id in previously_listed):
+            plan.deletes.extend(release["id"] for release in existing)
     _prune(plan, by_plugin, installations)
     return stored, plan
 
