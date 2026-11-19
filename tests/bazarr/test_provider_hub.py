@@ -1506,9 +1506,10 @@ def test_provider_hub_database_tables_are_registered():
     assert set(metadata.tables["provider_hub_state"].columns.keys()) == {
         "id", "schema_version", "revision", "document", "updated_at"}
     # The first revision's per-record tables were never written to; the state
-    # is one document row now, so nothing else carries the provider_hub_ prefix.
-    assert [name for name in metadata.tables
-            if name.startswith("provider_hub_") and name != "provider_hub_state"] == []
+    # is one document row now, and the only other tables with the prefix are the releases of its installations.
+    assert sorted(name for name in metadata.tables
+                  if name.startswith("provider_hub_") and name != "provider_hub_state") == [
+        "provider_hub_release_bindings", "provider_hub_releases"]
 
 
 def test_provider_hub_api_namespace_is_registered():

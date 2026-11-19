@@ -431,6 +431,7 @@ jobs:
             tests/bazarr/test_provider_hub_revocation.py \
             tests/bazarr/test_provider_hub_consent.py \
             tests/bazarr/test_provider_hub_dev_source.py \
+            tests/bazarr/test_provider_hub_releases.py \
             tests/bazarr/test_arr_instances_schema.py \
             tests/bazarr/test_sportarr_instances.py \
             tests/bazarr/test_arr_ownership_columns.py \
@@ -953,6 +954,8 @@ jobs:
             tests/bazarr/test_episode_forced_search_api.py \
             tests/bazarr/test_provider_hub_state_pg.py \
             tests/bazarr/test_provider_hub_state_migration.py \
+            tests/bazarr/test_provider_hub_releases.py \
+            tests/bazarr/test_provider_hub_releases_migration.py \
             tests/bazarr/test_provider_hub_state_flows.py \
             tests/bazarr/test_provider_hub_state_safety.py \
             tests/bazarr/test_plugin_review_notice_store.py \
