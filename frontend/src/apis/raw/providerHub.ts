@@ -72,13 +72,31 @@ export interface ProviderHubRuntimeStatus {
 }
 
 /** One host capability a plugin declares, and whether the host can supply it right now. */
+export interface ProviderHubCapabilityHealth {
+  /** The answer of the last check of the service. */
+  state: "ready" | "unreachable";
+  /** Why, in a word: ok, unreachable, timeout, tls, not_flaresolverr or invalid_address. */
+  code: string;
+  /** When it was checked, in seconds since the epoch. */
+  checked_at: number;
+  /** The version the service reported, when it answered. */
+  version?: string;
+}
+
 export interface ProviderHubCapability {
   capability: string;
-  /** Where the answer comes from: a setting, the environment, the host itself, or nowhere. */
-  source: "setting" | "env" | "host" | "none";
+  /**
+   * Where the answer comes from: an address the user typed (a setting or the environment), a service
+   * Bazarr+ runs itself, the host itself, or nowhere.
+   */
+  source: "setting" | "env" | "managed" | "host" | "none";
   ready: boolean;
   /** Why it is not ready, in a sentence. Empty when it is. */
   reason: string;
+  /** True when someone else runs the service: an address the user typed. Absent otherwise. */
+  external?: boolean;
+  /** The last health check of an external service. Absent until it is tested or used. */
+  health?: ProviderHubCapabilityHealth;
 }
 
 export interface ProviderHubInstallation {
