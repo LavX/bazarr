@@ -1390,6 +1390,59 @@ def test_a_provider_without_dependencies_has_no_consent_step_on_a_rollback(stage
     assert rollback_consent("nobody") is None
 
 
+def _chain_world(hub, monkeypatch, e_extra=None, e_manifest=None):
+    """``main`` ran a release that needed translit.v1. ``bravo`` has an update staged that adds translit.v1 and needs
+    other.v1, which ``echo`` supplies."""
+    needing = service_manifest("main", "1.0.0", requires=["translit.v1"])
+    _two_releases(hub, monkeypatch, "main", needing, service_manifest("main", "2.0.0"),
+                  supplied_by={"translit.v1": "bravo"})
+    bravo = _row("bravo", active="1.0.0", staged=("2.0.0", {"other.v1": "echo"}), kind=SERVICE_KIND,
+             manifest=service_manifest("bravo", "1.0.0"),
+             staged_manifest=service_manifest("bravo", "2.0.0", provides=["translit.v1"], requires=["other.v1"]))
+    echo = _row("echo", active="1.0.0", kind=SERVICE_KIND,
+             manifest=e_manifest or service_manifest("echo", "1.0.0", provides=["other.v1"]))
+    echo.update(e_extra or {})
+    _seed(bravo=bravo, echo=echo)
+
+
+def test_a_rollback_is_refused_when_the_supplier_it_counts_on_would_be_unmet_after_the_restart(hub, service_kind,
+                                                                                               monkeypatch):
+    """b's staged update adds translit.v1 and needs other.v1, whose supplier is revoked: at the restart b would
+    be held back, and main with it."""
+    from provider_hub.service import ProviderHubInstallError, rollback_release
+    from provider_hub.state import load_state
+
+    _chain_world(hub, monkeypatch, e_extra={"revoked": True})
+
+    with pytest.raises(ProviderHubInstallError, match="translit.v1"):
+        rollback_release("main")
+
+    assert load_state()["installations"]["main"]["active_version"] == "2.0.0"
+
+
+def test_a_rollback_is_refused_when_any_link_of_the_chain_of_suppliers_would_be_unmet(hub, service_kind,
+                                                                                       monkeypatch):
+    """b needs e, and e needs a plugin that is gone: two levels down."""
+    from provider_hub.service import ProviderHubInstallError, rollback_release
+
+    _chain_world(hub, monkeypatch, e_extra={"supplied_by": {"f.v1": "golf"}},
+                 e_manifest=service_manifest("echo", "1.0.0", provides=["other.v1"], requires=["f.v1"]))
+
+    with pytest.raises(ProviderHubInstallError, match="translit.v1"):
+        rollback_release("main")
+
+
+def test_a_rollback_goes_ahead_when_every_supplier_in_the_chain_runs_after_the_restart(hub, service_kind,
+                                                                                        monkeypatch):
+    from provider_hub.service import rollback_release
+    from provider_hub.state import load_state
+
+    _chain_world(hub, monkeypatch)
+    assert rollback_release("main").activated
+
+    assert load_state()["installations"]["main"]["supplied_by"] == {"translit.v1": "bravo"}
+
+
 # ---- workers are keyed by release ---------------------------------------------------------------------------
 
 
