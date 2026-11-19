@@ -17,6 +17,15 @@ logger = logging.getLogger(__name__)
 
 
 
+CASE_DETECTION_PROCESSORS = (
+    "HI_brackets_full",
+    "HI_before_colon_caps",
+    "HI_before_colon_noncaps",
+    "HI_brackets_tagged",
+    "HI_brackets",
+)
+
+
 class SubtitleModifications(object):
     debug = False
     language = None
@@ -195,11 +204,16 @@ class SubtitleModifications(object):
             uppercase_count = 0
             lowercase_count = 0
 
+            # Bracket and speaker-label rules of Remove HI, selected by name so that
+            # inserting a rule into the list can never change what is counted.
+            detection_names = CASE_DETECTION_PROCESSORS
+            detection = [p for p in registry.mods["remove_HI"].processors if p.name in detection_names]
+
             for entry in self.f:
                 sub = entry.text
                 # skip HI bracket entries, those might actually be lowercase
                 sub = sub.strip()
-                for processor in registry.mods["remove_HI"].processors[:4]:
+                for processor in detection:
                     sub = processor.process(sub)
 
                 if sub.strip():

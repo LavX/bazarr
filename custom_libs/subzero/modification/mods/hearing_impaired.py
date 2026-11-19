@@ -40,13 +40,36 @@ _HTML_NAMES = ("i", "b", "u", "font")
 # A bracket cue body: "[...]" or with quotes, at least 3 characters inside.
 HI_BRACKET = r"""["']*\[(?=[^\[\]]{3,})[A-Za-zÀ-ž0-9\s'".:-_&+]+[)\]]["']*"""
 
-# Edge slot for the one rule that consumes a whole entry (HI_brackets_full). Only one
-# run of tags with optional whitespace around each, so backtracking stays linear.
-# Safe for HTML because the rule is anchored with ^ and $: it either removes the whole
-# entry, tags included, or matches nothing.
-HTML_TAG = r"(?i:</?(?:[ibu]|font(?:\s[^>]*)?)\s*>)"
-_EDGE_TOKEN = r"(?:{\\[iusb][0-1]}|%s)" % HTML_TAG
-EDGE_TAG = r"(?:\s*%s(?:\s*%s)*\s*)?" % (_EDGE_TOKEN, _EDGE_TOKEN)
+# The body of a bracket cue that spans a whole entry (HI_brackets_full).
+FULL_BRACKET_CORE = r"[([].+(?=[^)\]]{3,}).+[)\]]"
+
+
+# One character of an entry that does not start a literal \N line break. The mods see
+# a whole cue as one string in which the line break is the two characters \N.
+_ENTRY_CHAR = r"(?:(?!\\N).)"
+# A line of the entry that holds a music symbol, consumed up to the next line break.
+_SYMBOL_LINE = r"(?=%s*[*#¶♫♪])%s*" % (_ENTRY_CHAR, _ENTRY_CHAR)
+
+
+def _tag_pair(body, group):
+    """Regex for body wrapped in one simple tag pair, or in two nested pairs.
+
+    Each opening tag is matched with its own closing tag inside the same match, so a
+    rule built on it can never remove half a pair. Group names are unique per call.
+    """
+    # Python rejects a group name used twice, even in different alternatives.
+    a, b, c, d = ("t%d%s" % (group, s) for s in "abcd")
+    one = r"<(?P<%s>font|[ibu])(?:\s[^>]*)?>%s</(?P=%s)>" % (a, body, a)
+    two = (r"<(?P<%s>font|[ibu])(?:\s[^>]*)?><(?P<%s>font|[ibu])(?:\s[^>]*)?>%s</(?P=%s)></(?P=%s)>"
+           % (c, d, body, d, c))
+    return r"(?i:%s|%s)" % (one, two)
+
+
+def _tagged_bracket_repl(match):
+    """Drop a removed bracket cue together with the space after it, unless a space
+    already separates it from the text before it."""
+    before = match.string[match.start() - 1] if match.start() else " "
+    return "" if before.isspace() else match.group("trail")
 
 
 def _has_unpaired_html(text):
@@ -110,7 +133,8 @@ class HearingImpaired(SubtitleTextModification):
 
     processors = [
         # full bracket entry, single or multiline; starting with brackets and ending with brackets
-        FullBracketEntryProcessor(re.compile(r'(?sux)^-?%(t)s[([].+(?=[^)\]]{3,}).+[)\]]%(t)s$' % {"t": EDGE_TAG}),
+        FullBracketEntryProcessor(re.compile((r'(?sux)^-?%(t)s(?:' + _tag_pair(FULL_BRACKET_CORE, 5)
+                                              + r'|' + FULL_BRACKET_CORE + r')%(t)s$') % {"t": TAG}),
                                   "", name="HI_brackets_full"),
 
         # uppercase text before colon (at least 3 uppercase chars); at start or after a sentence,
@@ -131,14 +155,15 @@ class HearingImpaired(SubtitleTextModification):
 
         # brackets (only remove if at least 3 chars in brackets, allow numbers and spaces inside brackets)
         # a bracket cue wrapped in one simple tag pair: the pair goes with its text
-        NReProcessor(re.compile(r'(?iu)<(?P<h>font|[ibu])(?:\s[^>]*)?>\s*%(b)s\s*</(?P=h)>[\s:]*' % {"b": HI_BRACKET}),
-                     "", name="HI_brackets_tagged"),
+        NReProcessor(re.compile(_tag_pair(r"\s*" + HI_BRACKET + r"\s*", 6) + r"(?P<trail>[\s:]*)"),
+                     _tagged_bracket_repl, name="HI_brackets_tagged"),
 
         # brackets (only remove if at least 3 chars in brackets, allow numbers and spaces inside brackets).
         # The SSA tags are taken without their whitespace: TAG's \s* would take the space
         # that separates the words around the tag.
-        NReProcessor(re.compile(r'(?sux)-?(?:{\\[iusb][0-1]})*%(b)s(?:{\\[iusb][0-1]})*[\s:]*' % {"b": HI_BRACKET}),
-                     "", name="HI_brackets"),
+        NReProcessor(re.compile(r'(?sux)-?(?:{\\[iusb][0-1]}\s*)*%(b)s(?:{\\[iusb][0-1]})*(?P<trail>[\s:]*)'
+                                % {"b": HI_BRACKET}),
+                     _tagged_bracket_repl, name="HI_brackets"),
 
         #NReProcessor(re.compile(r'(?sux)-?%(t)s[([]%(t)s(?=[A-zÀ-ž"\'.]{3,})[^([)\]]+%(t)s$' % {"t": TAG}),
         #             "", name="HI_bracket_open_start"),
@@ -193,15 +218,24 @@ class HearingImpaired(SubtitleTextModification):
     post_processors = empty_line_post_processors
     last_processors = [
         # remove music symbols
-        NReProcessor(re.compile(r'(?u)(^%(t)s[*#¶♫♪\s]*%(t)s[*#¶♫♪\s]+%(t)s[*#¶♫♪\s]*%(t)s$'
-                                r'|(?i:^<(?P<h>font|[ibu])(?:\s[^>]*)?>[*#¶♫♪\s]+</(?P=h)>$))' % {"t": TAG}),
+        NReProcessor(re.compile((r'(?u)(^%(t)s[*#¶♫♪\s]*%(t)s[*#¶♫♪\s]+%(t)s[*#¶♫♪\s]*%(t)s$'
+                                 r'|^' + _tag_pair(r"[*#¶♫♪\s]+", 1) + r'$)') % {"t": TAG}),
                      "", name="HI_music_symbols_only"),
 
         # remove music entries (song lyrics); skipped when keep_lyrics is set
-        # a simple tag pair must wrap the whole line, so the line removal takes both halves
-        MusicEntryProcessor(re.compile(r'(?ums)(^[-\s>~]*[*#¶♫♪]+\s*%(t)s.+|.+\s*[*#¶♫♪]+\s*%(t)s\s*$|.+\s*[*#¶♫♪]+[)\]]'
-                                       r'|(?i:^<(?P<h>font|[ibu])(?:\s[^>]*)?>[-\s>~]*[*#¶♫♪].*</(?P=h)>\s*$)'
-                                       r'|(?i:^<(?P<g>font|[ibu])(?:\s[^>]*)?>.*[*#¶♫♪]\s*</(?P=g)>\s*$))' % {"t": TAG}),
+        # Tag pairs are matched with their own closing tag. A pair may span the lines of an
+        # entry only when every line holds a music symbol, so dialogue in the same cue is
+        # never removed with it. The rule runs on the whole entry (entry=True).
+        MusicEntryProcessor(re.compile((r'(?ums)(^[-\s>~]*[*#¶♫♪]+\s*%(t)s.+'
+                                        r'|^(?!.*\\N)[-\s>~]*%(t)s[*#¶♫♪]+\s*%(t)s.+'
+                                        r'|.+\s*[*#¶♫♪]+\s*$|^(?!.*\\N).+\s*[*#¶♫♪]+\s*%(t)s\s*$|.+\s*[*#¶♫♪]+[)\]]'
+                                        r'|^[-\s>~]*%(t)s[*#¶♫♪]' + _ENTRY_CHAR + r'*(?:\\N' + _SYMBOL_LINE + r')*$'
+                                        r'|^[-\s>~]*' + _tag_pair(r"[-\s>~]*[*#¶♫♪]" + _ENTRY_CHAR + "*"
+                                                                   + r"(?:\\N" + _SYMBOL_LINE + ")*", 2)
+                                        + r'\s*$'
+                                        r'|^[-\s>~]*' + _tag_pair(r"(?:" + _SYMBOL_LINE + r"\\N)*"
+                                                                   + _ENTRY_CHAR + r"*[*#¶♫♪]\s*", 3)
+                                        + r'\s*$)') % {"t": TAG}),
                             "", name="HI_music", entry=True),
     ]
 

@@ -13,6 +13,8 @@
 #
 # The HI_music rule has to match the music symbols on both routes, so every case
 # below runs through both.
+import re
+
 import pytest
 
 from subliminal_patch import Subtitle
@@ -137,6 +139,11 @@ def test_remove_hi_removes_tagged_symbol_only_cue(cue, render):
     assert "Hallo." in out
 
 
+def _visible(out):
+    """The text a viewer sees: markup (HTML or SSA override tags) removed."""
+    return re.sub(r"<[^>]+>|\{\\[^}]*\}", "", out)
+
+
 def _balanced(out, name):
     return out.count("<%s>" % name) == out.count("</%s>" % name)
 
@@ -179,24 +186,24 @@ def test_tagged_bracket_only_line_is_removed_whole(render):
     assert "Hallo." in out
 
 
-@pytest.mark.parametrize("cue, expected", [
-    ("<i>He said # is a symbol</i>", "is a symbol"),
-    ("He said <i>#</i> is a symbol", "is a symbol"),
+@pytest.mark.parametrize("cue, line", [
+    ("<i>He said # is a symbol</i>", "He said # is a symbol"),
+    ("He said <i>#</i> is a symbol", "He said # is a symbol"),
     ("<font color=\"#ffffff\">Hello there.</font>", "Hello there."),
 ])
-def test_remove_hi_keeps_tagged_text_with_hash(cue, expected, render):
+def test_remove_hi_keeps_tagged_text_with_hash(cue, line, render):
     out = render(_cue(cue), ["remove_HI"])
-    assert expected in out
+    assert line in _visible(out)
     assert "Hallo." in out
 
 
-@pytest.mark.parametrize("cue, expected", [
+@pytest.mark.parametrize("cue, line", [
     ("<font color=\"#ffffff\">Hello there.</font>", "Hello there."),
-    ("<i>He said # is a symbol</i>", "is a symbol"),
+    ("<i>He said # is a symbol</i>", "He said # is a symbol"),
 ])
-def test_keep_lyrics_keeps_tagged_dialogue(cue, expected, render):
+def test_keep_lyrics_keeps_tagged_dialogue(cue, line, render):
     out = render(_cue(cue), ["remove_HI(keep_lyrics=1)"])
-    assert expected in out
+    assert line in _visible(out)
     assert "Hallo." in out
 
 
@@ -215,4 +222,108 @@ def test_keep_lyrics_drops_tagged_decoration(cue, render):
 def test_keep_lyrics_keeps_tagged_lyric(render):
     out = render(_cue("<i>♪ la la ♪</i>"), ["remove_HI(keep_lyrics=1)"])
     assert "la la" in out
+    assert "Hallo." in out
+
+
+# --- detect_uppercase -------------------------------------------------------
+# detect_uppercase strips HI bracket cues before counting case, so an all-caps
+# file with lowercase bracket cues must still read as uppercase.
+def _detect_uppercase(srt, tmp_path):
+    path = tmp_path / "movie.en.srt"
+    path.write_bytes(srt.encode("utf-8"))
+    sm = SubtitleModifications()
+    assert sm.load(fn=str(path), language=Language("eng"))
+    return sm.detect_uppercase()
+
+
+def test_detect_uppercase_counts_all_caps_file_with_lowercase_bracket_cues(tmp_path):
+    entries = "".join(
+        "{}\n00:00:{:02d},000 --> 00:00:{:02d},000\nWE ARE GOING NOW THE PLAN IS ON [door creaks]\n\n".format(
+            i, i, i)
+        for i in range(1, 11)
+    )
+    assert _detect_uppercase(entries, tmp_path) is True
+
+
+def test_detect_uppercase_rejects_lowercase_dialogue(tmp_path):
+    entries = "".join(
+        "{}\n00:00:{:02d},000 --> 00:00:{:02d},000\nwe are going now the plan is on [door creaks]\n\n".format(
+            i, i, i)
+        for i in range(1, 11)
+    )
+    assert _detect_uppercase(entries, tmp_path) is False
+
+
+@pytest.mark.parametrize("cue", [
+    "<i><font color=\"#ffff00\">♪ la ♪</font></i>",
+    "<b><i>♪ la ♪</i></b>",
+    "<i><b>♪♪</b></i>",
+    "- <i>♪ la ♪</i>",
+    "<I>♪ MTV ♪</I>",
+])
+def test_tagged_music_cue_nested_or_prefixed_is_removed(cue, render):
+    out = render(_cue(cue), ["remove_HI"])
+    assert "♪" not in out
+    assert "Hallo." in out
+
+
+def test_tagged_bracket_cue_nested_is_removed(render):
+    out = render(_cue("<i><font color=\"#ffff00\">[door creaks]</font></i>"), ["remove_HI"])
+    assert "door creaks" not in out
+    assert "<i" not in out
+    assert "Hallo." in out
+
+
+@pytest.mark.parametrize("cue, line", [
+    ("Hello <i> [sighs]</i> world", "Hello world"),
+    ("Hello<i> [sighs]</i> world", "Hello world"),
+    ("Hello <i>[sighs]</i> world", "Hello world"),
+    ("Hello<i>[sighs]</i> world", "Hello world"),
+])
+def test_bracket_cue_between_words_keeps_one_space(cue, line, render):
+    out = render(_cue(cue), ["remove_HI"])
+    assert line in _visible(out)
+    assert _balanced(out, "i")
+
+
+def test_opening_only_ssa_lyric_is_removed(render):
+    out = render(_cue("{\\i1}♪ Some lyric{\\i0}"), ["remove_HI"])
+    assert "Some lyric" not in out
+    assert "Hallo." in out
+
+
+def test_cross_cue_italic_bracket_keeps_tags_balanced(render):
+    srt = (
+        "1\n00:00:01,000 --> 00:00:02,000\n<i>[door creaks]\n\n"
+        "2\n00:00:03,000 --> 00:00:04,000\nHallo.</i>\n"
+    )
+    out = render(srt, ["remove_HI"])
+    assert "door creaks" not in out
+    assert "Hallo." in out
+    assert out.count("<i>") == out.count("</i>")
+
+
+def test_keep_lyrics_keeps_unpaired_tagged_music_line_on_content_route():
+    # Content route only: on the file route the engine has already peeled the
+    # opening SSA tag, so the line is plain decoration there and is dropped.
+    # The guard keeps the HTML line because its closing tag sits on the next line.
+    srt = (
+        "1\n00:00:01,000 --> 00:00:02,000\n<i>♪♪\nHello.</i>\n\n"
+        "2\n00:00:03,000 --> 00:00:04,000\nHallo.\n"
+    )
+    out = _render_content(srt, ["remove_HI(keep_lyrics=1)"], None)
+    assert "<i>♪♪" in out
+    assert "Hello.</i>" in out
+    assert "Hallo." in out
+
+
+@pytest.mark.parametrize("cue, dialogue", [
+    ("<i>♪ MTV ♪</i>\n<i>Hallo.</i>", "Hallo."),
+    ("Hallo.\n<i>♪ MTV ♪</i>", "Hallo."),
+    ("<i>♪ yeah</i>\nWhat did you say?", "What did you say?"),
+])
+def test_tagged_music_line_never_takes_the_dialogue_in_its_cue(cue, dialogue, render):
+    # Music and dialogue share one cue: the dialogue line must survive either way round.
+    out = render(_cue(cue), ["remove_HI"])
+    assert dialogue in out
     assert "Hallo." in out
