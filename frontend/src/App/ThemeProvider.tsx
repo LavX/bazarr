@@ -7,6 +7,7 @@ import {
   Input,
   MantineProvider,
   Pagination,
+  Popover,
   Progress,
 } from "@mantine/core";
 import ThemeLoader from "@/App/ThemeLoader";
@@ -229,9 +230,34 @@ const themeProvider = createTheme({
   },
 });
 
-const ThemeProvider: FunctionComponent<PropsWithChildren> = ({ children }) => {
+// jsdom has no layout: every rect is zero, so Mantine's check for a popover
+// whose trigger has scrolled out of view reads the trigger as clipped and sets
+// display: none on the dropdown as soon as floating-ui resolves its position.
+// Whether a test sees an open menu then depends on whether its query lands
+// before that resolve, which a loaded CI runner loses. The check is for real
+// scrolling, so the test harness turns it off and nothing else.
+const themeWithoutDetachedCheck = createTheme({
+  ...themeProvider,
+  components: {
+    ...themeProvider.components,
+    Popover: Popover.extend({ defaultProps: { hideDetached: false } }),
+  },
+});
+
+type ThemeProviderProps = PropsWithChildren<{
+  // Only the jsdom test harness passes false.
+  hideDetached?: boolean;
+}>;
+
+const ThemeProvider: FunctionComponent<ThemeProviderProps> = ({
+  children,
+  hideDetached = true,
+}) => {
   return (
-    <MantineProvider theme={themeProvider} defaultColorScheme="auto">
+    <MantineProvider
+      theme={hideDetached ? themeProvider : themeWithoutDetachedCheck}
+      defaultColorScheme="auto"
+    >
       <ThemeLoader />
       {children}
     </MantineProvider>

@@ -21,7 +21,7 @@ const AllProvidersWithStrictMode: FunctionComponent<PropsWithChildren> = ({
 
   return (
     <StrictMode>
-      <AllProviders>
+      <AllProviders hideDetached={false}>
         <RouterProvider router={router} />
       </AllProviders>
     </StrictMode>

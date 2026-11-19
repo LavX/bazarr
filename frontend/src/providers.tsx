@@ -10,12 +10,18 @@ import { DiscoverProvider } from "./contexts/Discover";
 import { UniversalSearchProvider } from "./contexts/UniversalSearch";
 import { Environment } from "./utilities";
 
-export const AllProviders: FunctionComponent<PropsWithChildren> = ({
+type AllProvidersProps = PropsWithChildren<{
+  // Forwarded to the theme. Only the jsdom test harness passes false.
+  hideDetached?: boolean;
+}>;
+
+export const AllProviders: FunctionComponent<AllProvidersProps> = ({
   children,
+  hideDetached,
 }) => {
   return (
     <QueryClientProvider client={queryClient}>
-      <ThemeProvider>
+      <ThemeProvider hideDetached={hideDetached}>
         <ModalsProvider>
           <Notifications position="bottom-left" limit={5} zIndex={10001} />
           {/* c8 ignore next 3 */}
