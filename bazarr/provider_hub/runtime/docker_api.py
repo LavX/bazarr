@@ -322,8 +322,13 @@ class DockerClient:
         raise DockerRefused(f"{method} {path} is not a Docker route this client uses")
 
     def _send(self, method: str, path: str, *, query: Mapping[str, str] | None = None, body: Any = None,
-              timeout: float | None = None):
-        """Open a connection, send, and return ``(connection, response)``. The caller reads and closes."""
+              timeout: float | None = None, cancel: threading.Event | None = None):
+        """Open a connection, send, and return ``(connection, response)``. The caller reads and closes.
+
+        With ``cancel``, the connection is made first (within ``CONNECT_TIMEOUT``) and a watcher is running before
+        the request is sent, so setting the event shuts the socket under whatever is blocked: the send or the wait
+        for the response headers. The caller sets ``connection.cancel_finished`` when it is done with the connection.
+        """
         self._check_route(method, path)
         target = self._prefix(path)
         if query:
@@ -333,14 +338,32 @@ class DockerClient:
         if body is not None:
             payload = json.dumps(body, separators=(",", ":")).encode("utf-8")
             headers["Content-Type"] = "application/json"
-        connection = self._connection(self.timeout if timeout is None else timeout)
+        wait = self.timeout if timeout is None else timeout
+        connection = self._connection(wait)
+        finished = threading.Event()
+        connection.cancel_finished = finished
         try:
+            if cancel is not None:
+                if cancel.is_set():
+                    raise DockerCancelled("the call was cancelled")
+                connection.timeout = min(wait, CONNECT_TIMEOUT)
+                connection.connect()
+                connection.sock.settimeout(wait)
+                # A response that will close detaches the socket from the connection; keep it for a cancel.
+                connection.cancel_socket = connection.sock
+                threading.Thread(target=self._watch_cancel, args=(cancel, finished, connection),
+                                 name="docker-cancel", daemon=True).start()
             connection.request(method, target, body=payload, headers=headers)
-            # A response that will close detaches the socket from the connection; keep it for a cancel.
-            connection.cancel_socket = getattr(connection, "sock", None)
             return connection, connection.getresponse()
-        except (OSError, http.client.HTTPException) as error:
+        except DockerCancelled:
+            finished.set()
             connection.close()
+            raise
+        except (OSError, http.client.HTTPException) as error:
+            finished.set()
+            connection.close()
+            if cancel is not None and cancel.is_set():
+                raise DockerCancelled("the call was cancelled") from error
             raise DockerUnavailable(f"the Docker daemon could not be reached: {type(error).__name__}") from error
 
     @staticmethod
@@ -498,13 +521,8 @@ class DockerClient:
         if "@" in repository or ":" in repository.rsplit("/", 1)[-1]:
             raise DockerRefused("the image name must carry neither a tag nor a digest")
         connection, response = self._send("POST", "/images/create", query={"fromImage": reference},
-                                          timeout=idle_timeout)
-        finished = threading.Event()
-        watcher = None
-        if cancel is not None:
-            watcher = threading.Thread(target=self._watch_cancel, args=(cancel, finished, connection),
-                                       name="docker-pull-cancel", daemon=True)
-            watcher.start()
+                                          timeout=idle_timeout, cancel=cancel)
+        finished = connection.cancel_finished
         try:
             if response.status != 200:
                 self._raise_for(response.status, self._read(response, MAX_BODY_BYTES))

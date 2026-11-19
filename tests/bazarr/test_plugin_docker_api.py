@@ -489,3 +489,49 @@ def test_the_guard_refuses_a_tcp_address_that_is_not_a_fake(monkeypatch):
 
     with pytest.raises(AssertionError, match="real Docker connection over tcp"):
         client.ping()
+
+
+# ------------------------------------------------------------------ cancelling at any point of a call
+
+
+def test_a_cancel_during_the_wait_for_response_headers_ends_the_pull_within_seconds(docker):
+    import threading
+    import time
+
+    docker.add_registry_image(REPO, DIGEST)
+    docker.header_delay = 30.0  # a slow registry: the daemon says nothing for a long while
+    client = docker.client()
+    cancel = threading.Event()
+    outcome = []
+
+    def pull():
+        try:
+            client.pull_image(REPO, DIGEST, cancel=cancel)
+        except Exception as error:
+            outcome.append(error)
+
+    thread = threading.Thread(target=pull)
+    thread.start()
+    deadline = time.monotonic() + 5
+    while not any("/images/create" in path for path in docker.arrivals) and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert any("/images/create" in path for path in docker.arrivals)
+    began = time.monotonic()
+
+    cancel.set()
+    thread.join(timeout=10)
+
+    assert not thread.is_alive() and time.monotonic() - began < 3.0
+    assert len(outcome) == 1 and isinstance(outcome[0], docker_api.DockerCancelled)
+
+
+def test_a_pull_that_is_cancelled_before_it_starts_sends_nothing(docker):
+    import threading
+
+    cancel = threading.Event()
+    cancel.set()
+
+    with pytest.raises(docker_api.DockerCancelled):
+        docker.client().pull_image(REPO, DIGEST, cancel=cancel)
+
+    assert docker.arrivals == []

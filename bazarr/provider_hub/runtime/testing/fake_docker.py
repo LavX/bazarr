@@ -27,6 +27,9 @@ Knobs a test sets on the instance:
                       of the network the container joined).
 ``min_api_version``   a ``"major.minor"`` string: a versioned request below it is answered 400 with the daemon's
                       "too old" text, as a daemon whose minimum is above the client's version does.
+``header_delay``      seconds a pull waits, once it has arrived (see ``arrivals``), before the daemon answers at all:
+                      a slow registry or a busy daemon. ``stop`` cuts the wait short.
+``arrivals``          the raw path of every request as it arrived, before any delay.
 ``pull_delay``        seconds between the lines of a pull's progress stream, to make a pull long.
 ``mutate``            ``callable(inspect_dict)`` applied to every container inspect, to fake a daemon that built
                       something other than what was asked.
@@ -167,6 +170,9 @@ class FakeDocker:
         self.attach_network_id: str | None = None
         self.min_api_version: str | None = None
         self.pull_delay = 0.0
+        self.header_delay = 0.0
+        self.arrivals: list[str] = []
+        self._wake = threading.Event()
         self.no_swap_accounting = False
         self._counter = 0
         self._server: _Server | None = None
@@ -195,6 +201,7 @@ class FakeDocker:
         self._thread.start()
 
     def stop(self):
+        self._wake.set()
         _LIVE_SOCKETS.discard(self.socket_path)
         _LIVE_ADDRESSES.discard(self.address)
         if self._server is not None:
@@ -260,6 +267,9 @@ class FakeDocker:
     # ------------------------------------------------------------ dispatch
 
     def _dispatch(self, handler: _Handler, method: str, raw: bytes):
+        self.arrivals.append(handler.path)
+        if self.header_delay and "/images/create" in handler.path:
+            self._wake.wait(self.header_delay)
         parsed = urllib.parse.urlsplit(handler.path)
         path = parsed.path
         version = None

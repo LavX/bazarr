@@ -1700,3 +1700,26 @@ def test_a_cancel_while_waiting_for_health_stops_and_removes_the_container(docke
     thread.join(timeout=5)
 
     assert result == ["the start was cancelled"] and not managed(docker) and not runtime.alive
+
+
+def test_cancelling_a_start_whose_registry_has_not_answered_yet_ends_within_seconds(docker):
+    docker.header_delay = 30.0
+    runtime = make_runtime(docker)
+    result = []
+
+    def run():
+        try:
+            runtime.start()
+        except OciError as error:
+            result.append(str(error))
+
+    thread = threading.Thread(target=run)
+    thread.start()
+    assert wait_until(lambda: any("/images/create" in path for path in docker.arrivals))
+    began = time.monotonic()
+
+    runtime.cancel_start()
+    thread.join(timeout=10)
+
+    assert result == ["the start was cancelled"] and time.monotonic() - began < 3.0
+    assert not runtime.alive

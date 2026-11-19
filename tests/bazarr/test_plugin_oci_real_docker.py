@@ -32,6 +32,25 @@ needs_image = pytest.mark.skipif(
     "@sha256:" not in IMAGE_REF, reason="set BAZARR_REAL_DOCKER_IMAGE to name@sha256:<index digest> to run this")
 
 
+def lifecycle_spec(image, digest):
+    """The spec the lifecycle test runs: small enough for a 64 MiB container."""
+    return ContainerSpec(plugin_id="realtest", image=image, index_digest=digest, port=8191,
+                         memory_bytes=64 * 1024 * 1024, shm_bytes=8 * 1024 * 1024,
+                         tmpfs=(("/tmp", 8 * 1024 * 1024),))
+
+
+def test_the_lifecycle_test_builds_a_valid_spec_and_a_body_the_client_accepts():
+    """Plain unit test, no daemon: the spec the opt-in test uses must stay valid."""
+    from provider_hub.runtime.docker_api import check_create_body
+
+    spec = lifecycle_spec("docker.io/library/busybox", "sha256:" + "ab" * 32)
+    body = container_config(spec, owner_id="0123456789abcdef", network="bazarr-plus-realtest-x", network_id="n" * 64)
+    body["Cmd"] = ["sleep", "30"]
+
+    check_create_body(body)
+    assert body["HostConfig"]["Memory"] == 64 * 1024 * 1024 and body["HostConfig"]["ShmSize"] == 8 * 1024 * 1024
+
+
 @needs_daemon
 def test_a_real_daemon_answers_the_ping_and_a_label_query_that_matches_nothing():
     client = DockerClient(ENDPOINT)
@@ -53,8 +72,7 @@ def test_a_real_daemon_stores_the_network_id_as_sent_and_fills_it_in_at_start():
     suffix = secrets.token_hex(4)
     owner = secrets.token_hex(8)
     labels = {"bazarr-plus.real-docker-test": suffix}
-    spec = ContainerSpec(plugin_id="realtest", image=image, index_digest=digest, port=8191, memory_bytes=64 * 1024 * 1024,
-                         tmpfs=(("/tmp", 8 * 1024 * 1024),))
+    spec = lifecycle_spec(image, digest)
     network_name = f"bazarr-plus-realtest-{suffix}"
     container_name = f"bazarr-plus-realtest-{suffix}-c"
     network_id = container_id = None
