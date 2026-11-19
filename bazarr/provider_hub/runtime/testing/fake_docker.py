@@ -33,6 +33,13 @@ Knobs a test sets on the instance:
 ``pull_delay``        seconds between the lines of a pull's progress stream, to make a pull long.
 ``mutate``            ``callable(inspect_dict)`` applied to every container inspect, to fake a daemon that built
                       something other than what was asked.
+
+Networks keep ``Internal`` and an ``IPAM`` subnet (every fake network uses the same test subnet,
+``198.51.100.0/24``, and a started container's addresses come from it). A container's ``Config`` keeps the
+``User``, ``Entrypoint`` and ``Cmd`` it was created with. An image declared with ``image_volumes`` gets an
+anonymous volume mount at each path unless the container's own ``Tmpfs`` covers that path, as the real daemon
+lets a mount of your own take the place of a declared volume. A container connected to a network while it is
+stopped has no address there until it starts.
 """
 from __future__ import annotations
 
@@ -235,6 +242,11 @@ class FakeDocker:
         self.images[ref] = dict(self.registry[ref])
         return image_id
 
+    def add_image_by_id(self, image_id: str, repo_digests: tuple[str, ...] = ()) -> None:
+        """A local image that is run by its id (``sha256:...``), as a locally built one is."""
+        self.images[image_id] = {"Id": image_id, "RepoDigests": list(repo_digests), "Architecture": "amd64",
+                                 "Os": "linux"}
+
     def add_self(self, container_id: str | None = None, *, network_mode: str = "bridge",
                  networks: tuple[str, ...] = ("bridge",), hostname: str | None = None) -> str:
         """The container Bazarr+ itself runs in."""
@@ -416,6 +428,7 @@ class FakeDocker:
         ref = body["Image"]
         if ref not in self.images:
             return 404, {"message": f"No such image: {ref}"}, {}
+        covered = set((body.get("HostConfig") or {}).get("Tmpfs") or {})
         host = dict(body["HostConfig"])
         for key in ("Binds", "Devices", "CapAdd", "VolumesFrom", "Links", "ExtraHosts", "GroupAdd"):
             host.setdefault(key, None)
@@ -428,7 +441,7 @@ class FakeDocker:
             return 404, {"message": f"network {network} not found"}, {}
         cid = self._next(name)
         mounts = [{"Type": "volume", "Destination": v["Destination"], "Name": self._next("vol")[:16]}
-                  for v in self.image_volumes]
+                  for v in self.image_volumes if v["Destination"] not in covered]
         mounts += [{"Type": "tmpfs", "Destination": p} for p in (host.get("Tmpfs") or {})]
         state = {"Running": False, "Status": "created", "ExitCode": 0, "OOMKilled": False}
         if body.get("Healthcheck"):
@@ -437,7 +450,9 @@ class FakeDocker:
         self.containers[cid] = {
             "Id": cid, "Name": "/" + name, "Image": self.images[ref]["Id"], "State": state,
             "Config": {"Labels": dict(body.get("Labels") or {}), "Env": list(body.get("Env") or []),
-                       "Image": ref, "Hostname": cid[:12], "Healthcheck": body.get("Healthcheck")},
+                       "Image": ref, "Hostname": cid[:12], "Healthcheck": body.get("Healthcheck"),
+                       "User": body.get("User", ""), "Entrypoint": body.get("Entrypoint"),
+                       "Cmd": body.get("Cmd")},
             "HostConfig": host, "Mounts": mounts,
             # As sent: the daemon fills the id and the address in when the start connects the network.
             "NetworkSettings": {"Networks": {n: {"IPAddress": "", "NetworkID": (e or {}).get("NetworkID", ""),
@@ -509,6 +524,8 @@ class FakeDocker:
         nid = self._next(body["Name"])
         self.networks[nid] = {"Id": nid, "Name": body["Name"], "Driver": body.get("Driver"),
                               "Internal": body.get("Internal", False), "Labels": dict(body.get("Labels") or {}),
+                              "IPAM": {"Driver": "default", "Config": [{"Subnet": "198.51.100.0/24",
+                                                                        "Gateway": "198.51.100.1"}]},
                               "Containers": {}}
         return 201, {"Id": nid, "Warning": ""}, {}
 
@@ -527,8 +544,9 @@ class FakeDocker:
         if method == "POST" and action == "connect":
             container = self._find_container(body["Container"])
             aliases = (body.get("EndpointConfig") or {}).get("Aliases") or []
+            running = container["State"]["Running"]
             container["NetworkSettings"]["Networks"][record["Name"]] = {
-                "IPAddress": "198.51.100.200", "NetworkID": record["Id"], "Aliases": aliases}
+                "IPAddress": "198.51.100.200" if running else "", "NetworkID": record["Id"], "Aliases": aliases}
             return 200, None, {}
         if method == "POST" and action == "disconnect":
             container = self._find_container(body["Container"])
