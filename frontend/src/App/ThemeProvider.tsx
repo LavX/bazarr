@@ -11,6 +11,7 @@ import {
   Progress,
 } from "@mantine/core";
 import ThemeLoader from "@/App/ThemeLoader";
+import { isTestEnv } from "@/utilities/env";
 import "@mantine/core/styles.layer.css";
 import "@mantine/notifications/styles.layer.css";
 import styleVars from "@/assets/_variables.module.scss";
@@ -235,29 +236,27 @@ const themeProvider = createTheme({
 // display: none on the dropdown as soon as floating-ui resolves its position.
 // Whether a test sees an open menu then depends on whether its query lands
 // before that resolve, which a loaded CI runner loses. The check is for real
-// scrolling, so the test harness turns it off and nothing else.
-const themeWithoutDetachedCheck = createTheme({
-  ...themeProvider,
-  components: {
-    ...themeProvider.components,
-    Popover: Popover.extend({ defaultProps: { hideDetached: false } }),
-  },
-});
+// scrolling, so the test environment turns it off and nothing else. Tooltip
+// has its own default and does not read this entry.
+export const createAppTheme = (testEnv: boolean) => {
+  const existing = themeProvider.components?.Popover;
+  return createTheme({
+    ...themeProvider,
+    components: {
+      ...themeProvider.components,
+      Popover: Popover.extend({
+        ...existing,
+        defaultProps: { ...existing?.defaultProps, hideDetached: !testEnv },
+      }),
+    },
+  });
+};
 
-type ThemeProviderProps = PropsWithChildren<{
-  // Only the jsdom test harness passes false.
-  hideDetached?: boolean;
-}>;
+const appTheme = createAppTheme(isTestEnv);
 
-const ThemeProvider: FunctionComponent<ThemeProviderProps> = ({
-  children,
-  hideDetached = true,
-}) => {
+const ThemeProvider: FunctionComponent<PropsWithChildren> = ({ children }) => {
   return (
-    <MantineProvider
-      theme={hideDetached ? themeProvider : themeWithoutDetachedCheck}
-      defaultColorScheme="auto"
-    >
+    <MantineProvider theme={appTheme} defaultColorScheme="auto">
       <ThemeLoader />
       {children}
     </MantineProvider>

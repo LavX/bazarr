@@ -99,8 +99,9 @@ describe("HiddenTracks disclosure", () => {
       name: "Hidden tracks (1)",
     });
     await user.click(trigger);
-    // jsdom lays nothing out, so the positioning code treats the trigger as
-    // off screen and hides the list from the accessibility tree.
+    // hidden: true dates from when jsdom's missing layout made Mantine hide
+    // the list. The test theme now turns that check off, so it only widens
+    // the query and finds the dialog either way.
     const dialog = await screen.findByRole("dialog", { hidden: true });
     return { trigger, dialog };
   }
