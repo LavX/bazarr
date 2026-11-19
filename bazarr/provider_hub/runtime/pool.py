@@ -3280,6 +3280,12 @@ class WorkerPool:
         except Exception:
             # A reading that failed is not a reading of zero.
             sample = MemorySample(bytes=0, rss_bytes=0, processes=0, source="error", truncated=True)
+        if sample is not None and sample.truncated and not getattr(session, "alive", True):
+            # The reading overlapped the end of the worker (the session closes before it kills, and
+            # a /proc entry of a process on its way out reads as unreadable). Its tree is not
+            # too big to measure, it is gone, and the error that ended it is the one to report.
+            # A worker that is still running keeps the fail-closed rule below.
+            return
         now = self._clock()
         with self._cond:
             slot.last_sample_at = now
@@ -3299,8 +3305,8 @@ class WorkerPool:
             return None
         if slot.memory_truncated:
             return (PoolCodes.MEMORY_LIMIT,
-                    "worker runs more processes than can be measured, counted as over its %d MiB limit" % (
-                        limit // MIB))
+                    "worker's memory could not be measured in full (too many processes, or part of its /proc "
+                    "was unreadable), counted as over its %d MiB limit" % (limit // MIB))
         return (PoolCodes.MEMORY_LIMIT, "worker used %d MiB, over its %d MiB limit" % (
             slot.memory_bytes // MIB, limit // MIB))
 

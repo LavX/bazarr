@@ -10,6 +10,7 @@ import logging
 import os
 import subprocess
 import sys
+import threading
 import time
 from collections import deque
 from pathlib import Path
@@ -17,7 +18,7 @@ from pathlib import Path
 import pytest
 
 from provider_hub.runtime import pool as pool_module
-from provider_hub.runtime.errors import RequestCancelled, RequestFailed, SessionError
+from provider_hub.runtime.errors import RequestCancelled, RequestFailed, RequestTimeout, SessionError
 from provider_hub.runtime.pool import (
     CONFIG_RESERVE_BYTES,
     DEFAULT_MAX_RESIDENT,
@@ -39,7 +40,7 @@ from provider_hub.runtime.pool import (
     memory_limit_for,
     read_process_tree_memory,
 )
-from provider_hub.runtime.session import SessionLimits
+from provider_hub.runtime.session import SessionLimits, WorkerSession
 from provider_hub.runtime.testing.fake_worker import fake_worker_command, fake_worker_env
 
 has_smaps = os.path.exists("/proc/self/smaps_rollup")
@@ -804,6 +805,50 @@ def test_run_once_enforces_the_memory_limit(make_pool):
     pool = make_pool(fast_pool_limits(), autostart=True, use_clock=False)
     with pytest.raises(WorkerKilled) as killed:
         pool.run_once(definition("draft", memory_limit_bytes=80 * MIB), "alloc", {"mb": 300, "seconds": 20}, timeout=20)
+    assert killed.value.code == "memory_limit"
+
+
+def test_a_reading_cut_short_by_the_worker_being_ended_does_not_replace_the_real_error(make_pool, monkeypatch):
+    """A /proc reading that overlaps the session killing a worker (an ignored cancel) comes back incomplete.
+
+    That is the worker dying, not a worker too big to measure: the caller must still see the timeout,
+    not a memory kill. The reading is held in flight across the kill, and the kill is held open until
+    it has answered, so the overlap that is a race on a real host happens on every run.
+    """
+    armed = threading.Event()
+    killed = threading.Event()
+    answered = threading.Event()
+    real_reap = WorkerSession._reap
+
+    def reap(self, process, timeout):
+        if armed.is_set():
+            killed.set()  # the session is closed and the group is ended
+            answered.wait(10.0)
+        return real_reap(self, process, timeout)
+
+    def reader(pid):
+        sample = read_process_tree_memory(pid)
+        if armed.is_set() and not answered.is_set():
+            assert killed.wait(10.0)
+            answered.set()
+            return MemorySample(0, 0, 0, "error", truncated=True)  # what an unreadable tree comes back as
+        return sample
+
+    monkeypatch.setattr(WorkerSession, "_reap", reap)
+    pool = make_pool(fast_pool_limits(), autostart=True, use_clock=False, memory_reader=reader)
+    threading.Timer(0.3, armed.set).start()  # after the request is out and before the cancel grace ends
+    with pytest.raises((RequestTimeout, RequestCancelled, SessionError)) as ended:
+        pool.run_once(definition("draft", memory_limit_bytes=GIB), "sleep",
+                      {"seconds": 60, "ignore_cancel": True}, timeout=0.2)
+    assert answered.is_set()
+    assert not isinstance(ended.value, WorkerKilled)
+
+
+def test_a_reading_that_cannot_be_completed_still_stops_a_worker_that_is_running(make_pool):
+    pool = make_pool(fast_pool_limits(), autostart=True, use_clock=False,
+                     memory_reader=lambda pid: MemorySample(0, 0, 0, "error", truncated=True))
+    with pytest.raises(WorkerKilled) as killed:
+        pool.run_once(definition("draft", memory_limit_bytes=GIB), "sleep", {"seconds": 30}, timeout=20)
     assert killed.value.code == "memory_limit"
 
 
