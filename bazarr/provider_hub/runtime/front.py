@@ -98,6 +98,8 @@ MAX_CONCURRENT = 16
 MAX_ADMIN_CONCURRENT = 4
 SOCKET_TIMEOUT = 30.0
 HEAD_DEADLINE = 10.0
+# The admin client is Bazarr+ itself and sends its whole head at once, so this listener gives a stranger less time.
+ADMIN_HEAD_DEADLINE = 2.0
 BODY_DEADLINE = 30.0
 CHUNK = 64 * 1024
 
@@ -155,6 +157,8 @@ class FrontConfig:
             raise ValueError("the admin digest must be a lowercase sha256 hex string")
         if not 1 <= upstream_port <= 65535 or not 0 <= port <= 65535 or not 0 <= admin_port <= 65535:
             raise ValueError("a port is out of range")
+        if port and port == admin_port:
+            raise ValueError("the proxy and admin ports must differ")
         if not 1 <= max_body <= 64 * 1024 * 1024 or not 1 <= max_response <= 256 * 1024 * 1024:
             raise ValueError("a size cap is out of range")
         if not 1 <= upstream_timeout <= 900:
@@ -220,7 +224,8 @@ class _Handler(http.server.BaseHTTPRequestHandler):
     sys_version = ""
 
     def handle(self) -> None:
-        self._head_deadline = _Deadline(HEAD_DEADLINE, lambda: self.request)
+        limit = ADMIN_HEAD_DEADLINE if self.server.role == ROLE_ADMIN else HEAD_DEADLINE  # type: ignore[attr-defined]
+        self._head_deadline = _Deadline(limit, lambda: self.request)
         try:
             super().handle()
         finally:

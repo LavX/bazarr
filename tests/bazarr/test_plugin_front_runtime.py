@@ -156,6 +156,8 @@ class Harness:
         assert port == FRONT_ADMIN_PORT, "Bazarr+ talks to the front's admin listener"
         record = self.docker.container_named(FRONT_NAME)
         assert record is not None
+        if host != record["NetworkSettings"]["Networks"][NET_A]["IPAddress"]:
+            raise OSError("no route to host")
         if record["Id"] != self.container:
             self.boot()
         return http.client.HTTPConnection("127.0.0.1", self.admin_port, timeout=timeout)
@@ -914,3 +916,131 @@ def test_the_front_script_path_is_the_one_the_images_layout_gives():
     production = dockerfile.split("AS production", 1)[1]
     assert "WORKDIR /app/bazarr\n" in production and "COPY bazarr ./bazarr\n" in production
     assert FRONT_SCRIPT == "/app/bazarr/bazarr/provider_hub/runtime/front.py"
+
+
+# ------------------------------------------------------------------ round two
+
+
+def test_registered_secrets_survive_a_database_refresh_and_a_closed_lease_is_released(docker, harness, runtimes,
+                                                                                     clean_scrubber, monkeypatch):
+    runtime = make_front(docker, harness, runtimes)
+    runtime.start()
+    lease = runtime.open_lease()
+    other = runtime.open_lease()
+    url, secret, token = lease.url(), runtime._secret, lease.token
+
+    monkeypatch.setattr(clean_scrubber, "collect_database_secret_values", lambda session: set())
+    clean_scrubber.refresh_database_secret_values(object())
+
+    masked = clean_scrubber.scrub_text("POST %s failed, Bearer %s, again %s" % (url, secret, other.url()))
+    assert token not in masked and secret not in masked and other.token not in masked
+    lease.close()
+    held = clean_scrubber.registered_secret_values()
+    assert token not in held and other.token in held and secret in held
+    runtime.close(0)
+    assert secret not in clean_scrubber.registered_secret_values()
+
+
+def test_a_token_that_never_reached_the_front_is_released_from_the_scrubber(front, harness, clean_scrubber):
+    harness.down = True
+    before = set(clean_scrubber.registered_secret_values())
+
+    with pytest.raises(FrontError):
+        front.open_lease()
+
+    assert set(clean_scrubber.registered_secret_values()) == before
+
+
+def test_a_lease_url_is_masked_by_its_shape_even_for_a_token_nobody_registered(clean_scrubber):
+    masked = clean_scrubber.scrub_text("POST http://198.51.100.7:8080/l/%s/v1 HTTP/1.1" % ("q" * 43))
+
+    assert "q" * 43 not in masked and masked.startswith("POST http://198.51.100.7:8080/l/")
+
+
+def test_a_restart_after_a_close_that_could_not_remove_the_front_keeps_it_known(docker, harness, front):
+    lease = front.open_lease()
+    url = lease.url()
+    docker.deny.append(r"DELETE /containers/")
+    front.close(0)
+    assert front_record(docker) is not None
+
+    with pytest.raises(OciError):
+        front.start()
+    lease.close()
+
+    assert harness.post(url) == 401
+    docker.deny.clear()
+    front.start()
+    assert front.alive and front_record(docker) is not None
+
+
+def test_a_front_whose_removal_failed_is_cut_off_from_bazarr(docker, front, harness):
+    lease = front.open_lease()
+    harness.down = True
+    docker.deny.append(r"DELETE /containers/")
+    assert NET_A in docker.containers[SELF_ID]["NetworkSettings"]["Networks"]
+
+    lease.close()
+
+    assert front_record(docker) is not None
+    assert NET_A not in docker.containers[SELF_ID]["NetworkSettings"]["Networks"]
+
+
+def test_a_front_that_comes_back_on_another_address_is_adopted(docker, front, harness):
+    lease = front.open_lease()
+    old = front.address()[0]
+
+    docker.containers[front.container_id]["NetworkSettings"]["Networks"][NET_A]["IPAddress"] = "198.51.101.77"
+
+    assert wait_until(lambda: front._ip == "198.51.101.77")
+    assert front.alive and front.address()[0] == "198.51.101.77" != old
+    assert lease.url().startswith("http://198.51.101.77:")
+
+
+def test_docker_errors_during_a_close_do_not_escape_it(docker, front):
+    docker.fail.append((r"GET /networks/", 500, "boom"))
+
+    front.close(0)
+
+    assert not front.alive and front.status()["state"] != "removed"
+
+
+def test_a_revoke_never_raises_when_docker_fails_as_well(docker, front, harness):
+    lease = front.open_lease()
+    harness.down = True
+    docker.deny.append(r"GET /networks/")
+
+    lease.close()
+
+    assert lease.closed and front.lease_count == 0
+
+
+def test_a_failed_start_keeps_its_own_error_when_the_cleanup_fails_too(docker, harness, runtimes):
+    runtime = make_front(docker, harness, runtimes)
+    real = runtime._client.start_container
+
+    def start(ident):
+        docker.deny.append(r"GET /networks/")
+        raise oci_module.DockerApiError("the start was refused", status=500)
+
+    runtime._client.start_container = start
+
+    with pytest.raises(OciError, match="refused the request"):
+        runtime.start()
+    assert real is not None
+
+
+def test_only_bazarr_and_the_front_may_be_on_the_front_network(docker, harness, runtimes):
+    client = docker.client()
+    client.create_network(NET_A, internal=True, labels={MANAGED_LABEL: "true", OWNER_LABEL: OWNER,
+                                                         PLUGIN_LABEL: PLUGIN, CREATOR_LABEL: SELF_ID})
+    # This install's own daemon container, but not the front: it must not share network A.
+    client._call("POST", "/containers/create", query={"name": "ours-but-a-daemon"}, body={
+        "Image": SELF_IMAGE, "Labels": {MANAGED_LABEL: "true", OWNER_LABEL: OWNER, PLUGIN_LABEL: PLUGIN,
+                                        ROLE_LABEL: "daemon"},
+        "HostConfig": {"NetworkMode": NET_A, "Memory": 1, "MemorySwap": 1},
+        "NetworkingConfig": {"EndpointsConfig": {NET_A: {}}}})
+    runtime = make_front(docker, harness, runtimes)
+
+    with pytest.raises(OciError, match="front network"):
+        runtime.start()

@@ -97,6 +97,10 @@ def _mask_bearer(match):
     return match.group(1) + MASK
 
 
+# The path a provider POSTs to when it reaches a managed daemon through the authenticating front: the lease
+# token sits in it. Masked by shape, so a token that was never registered (or was released) is covered too.
+_LEASE_URL_RE = re.compile(r'(/l/)[A-Za-z0-9_-]{32,128}(/v1\b)')
+
 # Every pattern with what replaces its match: a replacement string keeps the
 # label a value sits behind, so a scrubbed line still says what leaked.
 _PATTERNS = (
@@ -105,6 +109,7 @@ _PATTERNS = (
     (_GOOGLE_KEY_RE, MASK),
     (_OPENROUTER_KEY_RE, MASK),
     (_ENC_CIPHERTEXT_RE, MASK),
+    (_LEASE_URL_RE, r'\1' + MASK + r'\2'),
 )
 
 # The exact credential values currently masked, with the regex that masks the
@@ -134,11 +139,14 @@ _ADDED_SEQUENCE = 0
 # The declared Provider Hub secrets the state store reports as it writes a state
 # document. No refresh replaces or prunes them: they stay until clear_secret_values.
 _DECLARED_VALUES: frozenset[str] = frozenset()
+# Secrets that live only as long as something in this process (a lease token, the key of a running container's
+# admin path). They are added and removed by their owner, and no refresh touches them.
+_RUNTIME_VALUES: frozenset[str] = frozenset()
 
 
 def _registered_union() -> frozenset[str]:
     """Every credential the sets above hold. Called with the publish lock held."""
-    return _COLLECTED | _DATABASE_VALUES | _ADDED_VALUES.keys() | _DECLARED_VALUES
+    return _COLLECTED | _DATABASE_VALUES | _ADDED_VALUES.keys() | _DECLARED_VALUES | _RUNTIME_VALUES
 
 # Publishing the union of the sets above. A leaf lock: whoever holds it only
 # builds a regex from values already in memory and takes no other lock, so it can
@@ -415,11 +423,12 @@ def _merge_spans(spans: list[tuple[int, int]]) -> list[tuple[int, int]]:
 def clear_secret_values() -> None:
     """Forget every registered value, so tests and a torn-down boot leave no
     stale credential masked."""
-    global _COLLECTED, _DATABASE_VALUES, _ADDED_VALUES, _DECLARED_VALUES
+    global _COLLECTED, _DATABASE_VALUES, _ADDED_VALUES, _DECLARED_VALUES, _RUNTIME_VALUES
     _COLLECTED = frozenset()
     _DATABASE_VALUES = frozenset()
     _ADDED_VALUES = {}
     _DECLARED_VALUES = frozenset()
+    _RUNTIME_VALUES = frozenset()
     register_secret_values(())
 
 
@@ -737,6 +746,39 @@ def add_declared_secret_values(values: Iterable[Any]) -> int:
             return register_secret_values(_registered_union())
     except Exception as error:
         logger.warning("The declared secrets to scrub could not be registered: %s", type(error).__name__)
+        return len(_VALUE_STATE[0])
+
+
+def add_runtime_secret_values(values: Iterable[Any]) -> int:
+    """Mask secrets that exist only while something runs: a lease token, a running container's admin key.
+
+    Unlike the sets a refresh rebuilds, these stay until ``remove_runtime_secret_values`` takes them out, so a
+    refresh in the middle never lets one through. Takes only the leaf publish lock. Never raises."""
+    global _RUNTIME_VALUES
+    try:
+        fresh = frozenset(value.strip() for value in values or () if isinstance(value, str) and value.strip())
+        if not fresh:
+            return len(_VALUE_STATE[0])
+        with _publish_lock:
+            _RUNTIME_VALUES = _RUNTIME_VALUES | fresh
+            return register_secret_values(_registered_union())
+    except Exception as error:
+        logger.warning("The runtime secrets to scrub could not be registered: %s", type(error).__name__)
+        return len(_VALUE_STATE[0])
+
+
+def remove_runtime_secret_values(values: Iterable[Any]) -> int:
+    """Stop masking runtime secrets that are gone. A value that is also held by another set stays masked there."""
+    global _RUNTIME_VALUES
+    try:
+        gone = frozenset(value.strip() for value in values or () if isinstance(value, str) and value.strip())
+        if not gone:
+            return len(_VALUE_STATE[0])
+        with _publish_lock:
+            _RUNTIME_VALUES = _RUNTIME_VALUES - gone
+            return register_secret_values(_registered_union())
+    except Exception as error:
+        logger.warning("The runtime secrets to scrub could not be released: %s", type(error).__name__)
         return len(_VALUE_STATE[0])
 
 

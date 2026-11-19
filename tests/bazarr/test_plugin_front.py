@@ -474,6 +474,29 @@ def test_the_front_reads_its_configuration_from_the_environment():
     assert front.FrontConfig.from_env(good_env()).port == front.FRONT_PORT
 
 
+def test_the_two_listeners_cannot_share_a_port():
+    with pytest.raises(ValueError, match="differ"):
+        front.FrontConfig.from_env(good_env(**{front.ENV_PORT: "9000", front.ENV_ADMIN_PORT: "9000"}))
+    assert front.FrontConfig(admin_sha256=digest(ADMIN_SECRET), upstream_host="x", upstream_port=1, port=0,
+                             admin_port=0).port == 0
+
+
+def test_the_header_limits_the_front_tightens_still_exist_in_the_standard_library():
+    assert isinstance(http.client._MAXLINE, int) and isinstance(http.client._MAXHEADERS, int)
+
+
+def test_an_admin_head_that_is_trickled_is_cut_off_much_sooner_than_a_proxy_head(upstream, monkeypatch):
+    monkeypatch.setattr(front, "ADMIN_HEAD_DEADLINE", 0.3)
+    instance = Running(upstream)
+    try:
+        started = time.monotonic()
+        with socket.create_connection(("127.0.0.1", instance.admin_port), timeout=5) as sock:
+            sock.sendall(b"PUT /_admin/leases HTTP/1.0\r\n")
+            assert sock.recv(64) == b"" and time.monotonic() - started < 3
+    finally:
+        instance.close()
+
+
 @pytest.mark.parametrize("overrides", [
     {front.ENV_ADMIN_SHA256: ""},
     {front.ENV_ADMIN_SHA256: "A" * 64},

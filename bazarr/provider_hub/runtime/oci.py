@@ -1092,6 +1092,9 @@ def remove_private_network(client: DockerClient, network: str, *, owner_id: str,
         net = client.inspect_network(network)
     except DockerNotFound:
         return True
+    except DockerApiError as error:
+        logger.warning("%s: checking the network failed: %s", plugin_id, error.message[:120])
+        return False
     labels = net.get("Labels") or {}
     if not _ours(labels, owner_id, plugin_id) or _creator_elsewhere(client, labels, self_id):
         return True
