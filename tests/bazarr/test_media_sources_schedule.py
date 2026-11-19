@@ -6,7 +6,6 @@ from types import ModuleType, SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
-import sqlalchemy as sa
 
 from media_source_helpers import add_source, stamped_video
 

@@ -6,7 +6,6 @@ One physical file is one source item, whatever paths reach it. The rules here ne
 scanner writes.
 """
 import errno
-import logging
 import os
 from collections import defaultdict, namedtuple
 from dataclasses import dataclass, field
@@ -82,7 +81,11 @@ def identity_holds(row, found, ignore_dev=False):
     """A row's file identity holds for a discovered file when the inode (and the device, unless the root's device
     changed) and the size and mtime are all equal, or when the path, the size and the mtime are all equal (a
     restore that kept the times, or a filesystem whose inodes are not stable). Inode reuse after a delete would
-    also need an equal size and an equal mtime to the nanosecond."""
+    also need an equal size and an equal mtime to the nanosecond.
+
+    A filesystem that derives a file's inode from its path (mergerfs with ``inodecalc=path-hash``) gives a renamed
+    file a new inode, so a rename there is not recognised: the old row is deleted and the file is added as new.
+    That setting is not supported for a library."""
     if row.file_size != found.size or row.file_mtime_ns != found.mtime_ns:
         return False
     if row.path == found.path:

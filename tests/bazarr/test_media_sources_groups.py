@@ -101,7 +101,7 @@ def test_nested_season_folders_belong_to_the_show_and_an_incomplete_name_is_not_
 @pytest.mark.parametrize("inode_back", [False, True], ids=["new-inode", "old-inode-back"])
 def test_a_remake_gets_a_fresh_group_and_the_renamed_show_keeps_its_settings(lib, walk, shared, inode_back,
                                                                            monkeypatch, identified):
-    from media_sources import groups as group_rules, repository
+    from media_sources import groups as group_rules
 
     profile = add_profile(lib.session, [("en", "False", "False")])
     lib.show("Show", count=3)
@@ -468,7 +468,6 @@ def test_a_show_deleted_and_another_created_on_its_inode_does_not_inherit_the_gr
 def test_a_show_moved_to_another_library_follows_its_items_or_is_added_new(lib, walk, shared, tmp_path,
                                                                            destination_first):
     from media_sources import repository
-    from media_sources.scanner import run_scan
 
     kids = Lib(lib.session, tmp_path, name="Kids", folder="Kids")
     lib.show("Bluey", count=2)

@@ -11,7 +11,7 @@ import logging
 import os
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import datetime
 
 from sqlalchemy.exc import DataError, IntegrityError
 
@@ -22,7 +22,6 @@ from . import identify, identity, repository
 from .db import source_transaction
 from .indexer import SourceOutputOwnerIndex, index_item
 from .kinds import get_kind
-from .kinds.folder import unsigned
 
 BATCH_SIZE = 500
 # A scan that started this long ago and never finished is taken for a crashed one, not a running one.
@@ -83,7 +82,7 @@ def _root_devices(roots):
     devices = {}
     for root in roots:
         try:
-            current = unsigned(os.stat(root.local_path).st_dev)
+            current = identity.unsigned(os.stat(root.local_path).st_dev)
         except OSError:
             continue
         devices[root.local_path] = (current, root.last_dev is not None and root.last_dev != current)
@@ -180,7 +179,10 @@ def scan_library(source, library, *, cancel=None, session=None) -> LibraryScan:
         # Empty groups: a group resolution found gone is deleted once it holds nothing.
         repository.delete_empty_groups(plan.gone, session)
 
-    for path, (current, _) in devices.items():
+    for path, (current, changed) in devices.items():
+        if changed and not complete:
+            # Some rows still carry the old device number: the next scan must go on ignoring it.
+            continue
         for root in roots:
             if root.local_path == path:
                 repository.record_root_device(root.id, current, session)
@@ -526,15 +528,10 @@ def _refresh_shadows(result, decisions, inserted, session):
     except Exception:
         logging.exception('BAZARR could not read the arr rows to check source files against')
         return
-    seen = {}
-    for row, found in decisions.unchanged:
-        seen[row.id] = found
-    for row, found, _ in decisions.repathed:
-        seen[row.id] = found
-    for row, found in decisions.path_only:
-        seen[row.id] = found
-    for item_id, found in inserted:
-        seen[item_id] = found
+    seen = {row.id: found for row, found in decisions.unchanged}
+    seen.update({row.id: found for row, found, _ in decisions.repathed})
+    seen.update({row.id: found for row, found in decisions.path_only})
+    seen.update(dict(inserted))
     if not seen:
         return
     current = {row.id: row for row in repository.shadow_state(list(seen), session)}

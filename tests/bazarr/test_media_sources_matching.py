@@ -7,7 +7,7 @@ from types import SimpleNamespace
 import pytest
 import sqlalchemy as sa
 
-from media_source_helpers import Lib, add_profile, add_source, stamped_video
+from media_source_helpers import Lib, add_profile, stamped_video
 
 
 @pytest.fixture(autouse=True)
@@ -636,3 +636,31 @@ def test_the_first_scan_of_a_series_library_adds_what_it_can_read_even_when_part
 
     assert (result.status, result.inserted, result.deferred) == ("partial", 1, 0)
     assert set(lib.groups()) == {lib.path("Show")}
+
+
+def test_a_device_change_met_on_an_incomplete_walk_is_not_recorded_so_the_next_scan_still_ignores_it(movies,
+                                                                                                      monkeypatch):
+    from media_sources import repository, scanner
+    from media_sources.kinds import DiscoveredFile
+    from test_media_sources_scanner import FakeKind
+
+    first = stamped_video(movies.root / "One.2001.mkv")
+    second = stamped_video(movies.root / "Two.2002.mkv")
+    movies.scan()
+    movies.session.execute(sa.update(repository.Roots).values(last_dev="77"))
+    movies.session.execute(sa.update(repository.Items).values(file_dev="77"))
+    info = first.stat()
+    found = DiscoveredFile(str(first), info.st_size, info.st_mtime_ns, str(info.st_dev), str(info.st_ino))
+    real_get_kind = scanner.get_kind
+    monkeypatch.setattr(scanner, "get_kind", lambda name: FakeKind([found], complete=False))
+
+    assert movies.scan().status == "partial"
+    assert repository.get_roots(movies.library_id)[0].last_dev == "77"
+
+    monkeypatch.setattr(scanner, "get_kind", real_get_kind)
+    renamed = movies.root / "Two.2002.1080p.mkv"
+    os.rename(second, renamed)
+    result = movies.scan()
+    # The second file still carries the old device number, and is found by its inode all the same.
+    assert (result.moved, result.inserted, result.deleted) == (1, 0, 0)
+    assert repository.get_roots(movies.library_id)[0].last_dev == str(os.stat(movies.root).st_dev)

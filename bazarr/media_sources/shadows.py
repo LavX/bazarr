@@ -104,7 +104,12 @@ def refresh_shadows(kind=None, job_id=None):
 
 
 def _has_items():
-    return handle().execute(sa.select(repository.Items.c.id).limit(1)).first() is not None
+    session = handle()
+    if not hasattr(session, 'get_bind'):
+        # Not a database session (a stand-in during a settings save in a test): there is nothing to read, and the
+        # probe must not add a statement to what that save is measured by.
+        return False
+    return session.execute(sa.select(repository.Items.c.id).limit(1)).first() is not None
 
 
 def queue_shadow_refresh(kind=None):

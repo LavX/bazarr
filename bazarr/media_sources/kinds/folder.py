@@ -7,16 +7,12 @@ from typing import Callable, Optional
 
 from subliminal_patch.core import VIDEO_EXTENSIONS
 
+from ..identity import unsigned
 from . import DiscoveredFile, IdentityHints, Listing, Problem, SourceHealth
 
 # Folders whose files are not the library's own titles.
 _SKIPPED_DIRECTORIES = frozenset({'sample', 'samples', 'extras', 'featurettes', 'behind the scenes'})
 _SAMPLE_FILE = re.compile(r'(^|[\W_])sample([\W_]|$)', re.IGNORECASE)
-
-
-def unsigned(value):
-    """st_dev and st_ino as unsigned decimal text, whatever width the platform reports them at."""
-    return str(value & 0xFFFFFFFFFFFFFFFF)
 
 
 def is_video_file(name):
