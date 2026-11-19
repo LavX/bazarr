@@ -1,5 +1,7 @@
 # coding=utf-8
 
+from itertools import zip_longest
+
 from flask_restx import Resource, Namespace, reqparse
 from unidecode import unidecode
 
@@ -9,9 +11,18 @@ from app.database import (TableArrInstances, TableShows, TableMovies, TableSport
 
 from ..utils import authenticate, image_proxy_path_with_instance
 
-import textdistance 
-
 api_ns_system_searches = Namespace('System Searches', description='Search for series or movies by name')
+
+
+def _hamming_distance(left, right):
+    """Count the positions at which two strings differ.
+
+    The tail of the longer string counts as a difference at every position past
+    the end of the shorter one. This is the same measure textdistance.hamming
+    gave, kept local because textdistance pulls in numpy, and numpy aborts the
+    process on CPUs without SSE4.2.
+    """
+    return sum(a != b for a, b in zip_longest(left, right))
 
 
 def _poster_url(media, path, arr_instance_id):
@@ -116,5 +127,5 @@ class Searches(Resource):
                 results.append(result)
 
         # sort results by how closely they match the query
-        results = sorted(results, key=lambda x: textdistance.hamming.distance(query, x['title']))
+        results = sorted(results, key=lambda x: _hamming_distance(query, x['title']))
         return results
