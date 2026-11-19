@@ -21,6 +21,7 @@ import {
   useProviderHubTest,
   useProviderHubUninstall,
 } from "@/apis/hooks";
+import { SUBTITLE_PROVIDER_KIND } from "@/apis/raw/plugins";
 import type {
   ProviderHubCatalog,
   ProviderHubCatalogEntry,
@@ -30,8 +31,10 @@ import { EmptyState } from "@/components/hub/EmptyState";
 import { SearchBar } from "@/components/hub/SearchBar";
 import { getLatestCatalogEntry, parseManifest } from "@/components/hub/utils";
 import { useGatedAction } from "@/components/modals/PasswordConfirmModal";
+import { usePluginConsentFlow } from "@/components/plugin-consent";
 import { notification } from "@/modules/notification";
 import { CatalogCard } from "@/pages/Settings/Providers/hub/components/CatalogCard";
+import { isSchemaTwo } from "@/pages/Settings/Providers/hub/components/SchemaTwoDetails";
 import { SourcesDrawer } from "@/pages/Settings/Providers/hub/SourcesDrawer";
 import styles from "@/components/hub/hub.module.scss";
 
@@ -84,6 +87,10 @@ export const MarketplacePanel: FunctionComponent<MarketplacePanelProps> = ({
   const uninstall = useProviderHubUninstall();
   const repair = useProviderHubRepair();
   const runGated = useGatedAction();
+  // A schema 2 provider is decided by the same flow the Plugin Hub and the Translation page use: it asks
+  // for consent when its closure adds a plugin that is not a subtitle provider, and installs at once when
+  // it does not. A schema 1 provider keeps the direct install.
+  const consent = usePluginConsentFlow();
 
   const sources = catalog?.sources ?? [];
 
@@ -215,6 +222,23 @@ export const MarketplacePanel: FunctionComponent<MarketplacePanelProps> = ({
     (entry: ProviderHubCatalogEntry) => {
       if (!entry.source || !parseManifest(entry)) return;
       const source = entry.source;
+      if (isSchemaTwo(entry)) {
+        const name = entry.name ?? entry.provider_id;
+        const installed = installedFor(entry);
+        void consent.begin(
+          installed?.active_version
+            ? { action: "update", pluginId: entry.provider_id, name }
+            : {
+                action: "install",
+                pluginId: entry.provider_id,
+                name,
+                source,
+                version: entry.version,
+                kind: SUBTITLE_PROVIDER_KIND,
+              },
+        );
+        return;
+      }
       void runGated(
         () =>
           install.mutate({
@@ -225,7 +249,7 @@ export const MarketplacePanel: FunctionComponent<MarketplacePanelProps> = ({
         "install this provider",
       );
     },
-    [install, runGated],
+    [consent, install, installedFor, runGated],
   );
 
   // The record Bazarr+ keeps of the entry's source, which says what the check of its signature came to.
@@ -256,11 +280,12 @@ export const MarketplacePanel: FunctionComponent<MarketplacePanelProps> = ({
         }
         onInstall={handleInstall}
         isInstalling={
-          install.isPending &&
-          install.variables !== undefined &&
-          "source" in install.variables &&
-          install.variables.source === entry.source &&
-          install.variables.provider_id === entry.provider_id
+          consent.updating === entry.provider_id ||
+          (install.isPending &&
+            install.variables !== undefined &&
+            "source" in install.variables &&
+            install.variables.source === entry.source &&
+            install.variables.provider_id === entry.provider_id)
         }
         onTest={(providerId) => testProvider.mutate(providerId)}
         onUninstall={(providerId) => uninstall.mutate(providerId)}
@@ -283,6 +308,7 @@ export const MarketplacePanel: FunctionComponent<MarketplacePanelProps> = ({
       installedFor,
       handleInstall,
       install,
+      consent.updating,
       testProvider,
       uninstall,
       repair,
@@ -428,6 +454,8 @@ export const MarketplacePanel: FunctionComponent<MarketplacePanelProps> = ({
           )}
         </>
       )}
+
+      {consent.dialog}
 
       <SourcesDrawer
         opened={drawerOpen}
