@@ -561,6 +561,9 @@ services:
     # host. A new port applies after a container restart.
     ports:
       - "6767:6767"
+    # The image starts as root and drops to PUID/PGID itself. Do not set
+    # user: on this service, put the ids in PUID and PGID. If you must run
+    # non-root, PUID/PGID are ignored and /config must already be writable.
     environment:
       - PUID=1000
       - PGID=1000
