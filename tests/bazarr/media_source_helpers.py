@@ -126,6 +126,20 @@ def video(path, size=1000):
     return path
 
 
+_stamp = [0]
+
+
+def stamped_video(path, size=None):
+    """A video whose size and modification time no other stamped video shares, so that "the same file" and "a
+    different file" are decided by identity and not by two files that happen to look alike."""
+    _stamp[0] += 1
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(b"\0" * (size or 1000 + _stamp[0]))
+    stamp = 1_700_000_000_000_000_000 + _stamp[0] * 1_000_000_007
+    os.utime(path, ns=(stamp, stamp))
+    return path
+
+
 def table_counts(session, names):
     return {name: session.execute(sa.text(f'SELECT count(*) FROM "{name}"')).scalar_one() for name in names}
 

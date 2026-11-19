@@ -47,6 +47,7 @@ def config_directory():
 
 class FolderKind:
     kind = 'folder'
+    groups_are_directories = True
 
     def validate_library(self, source, library):
         """Refuse a path Bazarr+ cannot use. ``library`` carries ``locator`` and ``content_kind``."""
@@ -73,24 +74,27 @@ class FolderKind:
         if real == config or real.startswith(config + os.sep) or config.startswith(real.rstrip(os.sep) + os.sep):
             problems.append(Problem('config_directory', "The folder cannot contain or sit inside Bazarr+'s own "
                                                         "configuration folder."))
-        if library.content_kind != 'movie':
-            problems.append(Problem('content_kind', 'Only movie libraries can be scanned so far.'))
+        if library.content_kind not in ('movie', 'series'):
+            problems.append(Problem('content_kind', 'Only movie and series libraries can be scanned so far.'))
         return problems
 
     def enumerate(self, source, library, cancel: Optional[Callable[[], None]] = None):
         listing = Listing(files=iter(()))
-        listing.files = self._walk(library.locator, listing, cancel)
+        listing.files = self._walk(library.locator, listing, cancel, grouped=library.content_kind != 'movie')
         return listing
 
-    def _walk(self, root, listing, cancel):
-        """Every video file under ``root``. Marks the listing complete only when the whole tree was read."""
+    def _walk(self, root, listing, cancel, grouped=False):
+        """Every video file under ``root``. Marks the listing complete only when the whole tree was read.
+
+        In a series or sports library each first-level directory is a show or league: the files below it carry
+        its path as their group key, and a video file directly in the root has no group and is only counted."""
         seen = set()
-        pending = [root]
+        pending = [(root, None)]
         readable = True
         while pending:
             if cancel is not None:
                 cancel()
-            directory = pending.pop()
+            directory, group_key = pending.pop()
             try:
                 entries = sorted(os.scandir(directory), key=lambda entry: entry.name)
             except OSError as error:
@@ -104,13 +108,17 @@ class FolderKind:
                     # A directory symlink is not followed; a file symlink is.
                     if entry.is_dir(follow_symlinks=False):
                         if not is_skipped_directory(entry.name):
-                            subdirectories.append(entry.path)
+                            subdirectories.append((entry.path, entry.path if grouped and group_key is None
+                                                   else group_key))
                     elif is_video_file(entry.name) and not is_skipped_file(entry.name):
                         with_files.append(entry)
                 except OSError as error:
                     listing.problems.append(f"Cannot read {entry.path}: {error.strerror or error}")
                     readable = False
             for entry in with_files:
+                if grouped and group_key is None:
+                    listing.ungrouped += 1
+                    continue
                 if not is_storable(entry.path):
                     # os.scandir hands back such a name as surrogate escapes, which neither database driver can
                     # bind: one of them would fail the scan of the whole library. No stored row can have this
@@ -129,7 +137,7 @@ class FolderKind:
                     continue
                 seen.add(identity)
                 yield DiscoveredFile(path=entry.path, size=info.st_size, mtime_ns=info.st_mtime_ns,
-                                     dev=unsigned(info.st_dev), ino=unsigned(info.st_ino))
+                                     dev=unsigned(info.st_dev), ino=unsigned(info.st_ino), group_key=group_key)
             pending.extend(reversed(subdirectories))
         listing.complete = readable
 

@@ -68,7 +68,7 @@ def test_a_source_is_created_with_its_library_and_root(api):
     ({"library": {"path": "relative", "content_kind": "movie"}}, "must be absolute"),
     ({"library": {"path": "/definitely/not/there", "content_kind": "movie"}}, "does not exist"),
     ({"library": {"path": "{movies}", "content_kind": "music"}}, "content_kind must be one of"),
-    ({"library": {"path": "{movies}", "content_kind": "series"}}, "Only movie libraries"),
+    ({"library": {"path": "{movies}", "content_kind": "sports"}}, "Only movie and series libraries"),
     ({"library": {"path": "{movies}", "content_kind": "movie", "profile_id": 99}}, "profile does not exist"),
     ({"scan_frequency_hours": -1}, "scan_frequency_hours"),
     ({"scan_frequency_hours": "6"}, "scan_frequency_hours"),
