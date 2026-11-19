@@ -616,3 +616,23 @@ def test_twenty_thousand_entries_are_written_in_batches_not_one_transaction(movi
     assert len(opened) == 40
     # No transaction ever held more than one batch of rows beyond what earlier batches had already committed.
     assert [after - before for before, after in zip([0] + largest, largest)] == [500] * 40
+
+
+def test_the_first_scan_of_a_series_library_adds_what_it_can_read_even_when_part_of_it_cannot_be(source_db, tmp_path,
+                                                                                               monkeypatch):
+    lib = Lib(source_db, tmp_path)
+    stamped_video(lib.root / "Show" / "Show - S01E01.mkv")
+    stamped_video(lib.root / "Locked" / "Locked - S01E01.mkv")
+    real_scandir = os.scandir
+
+    def scandir(path):
+        if str(path).endswith("Locked"):
+            raise PermissionError(13, "denied", str(path))
+        return real_scandir(path)
+
+    monkeypatch.setattr("media_sources.kinds.folder.os.scandir", scandir)
+
+    result = lib.scan()
+
+    assert (result.status, result.inserted, result.deferred) == ("partial", 1, 0)
+    assert set(lib.groups()) == {lib.path("Show")}

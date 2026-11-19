@@ -269,7 +269,8 @@ def _decide(matching, rows, groups, plan, group_for_dir, grouped, follows_direct
     needs a group decision the walk cannot support, or a path a row that could not be deleted still holds, is
     left for a scan that can read the whole folder."""
     decisions = _Decisions()
-    decisions.conservative = grouped and follows_directories and not complete
+    # With no group yet (the first scan) nothing can be moving anywhere, so a fresh group is always safe.
+    decisions.conservative = grouped and follows_directories and not complete and bool(groups)
     # Rows that would be deleted because their path was reused cannot be, on an incomplete walk: whatever wants
     # their path waits.
     blocked = set() if complete else {row.path for row in matching.displaced}

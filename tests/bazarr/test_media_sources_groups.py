@@ -165,6 +165,10 @@ def test_a_renamed_show_directory_keeps_its_group_id_and_settings_with_no_empty_
     identified.clear()
 
     os.rename(lib.root / "Show", lib.root / "Show.new")
+    if not shared:
+        # The files take the new name too: a rename of the directory and of every file in one go.
+        for entry in sorted((lib.root / "Show.new").iterdir()):
+            os.rename(entry, lib.root / "Show.new" / entry.name.replace("Show - ", "Show.new - "))
     lib.scan()
 
     groups = lib.groups()
@@ -174,8 +178,10 @@ def test_a_renamed_show_directory_keeps_its_group_id_and_settings_with_no_empty_
     # Identity is looked up again from the new name (it was not the user's).
     assert (group.identity_source, group.tvdb_id) == ("filename", None)
     assert identified == [lib.path("Show.new")]
-    assert {path: row.id for path, row in lib.items().items()} == {
-        path.replace("/Show/", "/Show.new/"): item_id for path, item_id in ids.items()}
+    renamed = {path.replace("/Show/", "/Show.new/") if shared else
+               path.replace("/Show/", "/Show.new/").replace("Show - ", "Show.new - "): item_id
+               for path, item_id in ids.items()}
+    assert {path: row.id for path, row in lib.items().items()} == renamed
     _no_stale_keys(lib)
 
 
@@ -294,7 +300,7 @@ def test_a_staying_group_that_wins_a_directory_still_writes_the_note_and_the_log
 
 # 6. Misfiled episodes
 
-def test_misfiled_episodes_join_the_new_show_and_take_nothing_of_the_old_group(lib, walk, identified):
+def test_misfiled_episodes_join_the_new_show_and_take_nothing_of_the_old_group(lib, walk, shared, identified):
     profile = add_profile(lib.session, [("en", "False", "False")])
     lib.show("The Office (UK)", count=4, prefix="The Office")
     lib.scan()
@@ -304,8 +310,11 @@ def test_misfiled_episodes_join_the_new_show_and_take_nothing_of_the_old_group(l
     ids = {path: row.id for path, row in lib.items().items()}
     moving = [lib.root / "The Office (UK)" / f"The Office - S01E0{number}.mkv" for number in (3, 4)]
     (lib.root / "The Office (US)").mkdir()
+    renamed = {}
     for path in moving:
-        os.rename(path, lib.root / "The Office (US)" / path.name)
+        name = path.name if shared else path.name.replace("The Office", "The Office (US)")
+        renamed[path] = name
+        os.rename(path, lib.root / "The Office (US)" / name)
     identified.clear()
 
     lib.scan()
@@ -319,7 +328,7 @@ def test_misfiled_episodes_join_the_new_show_and_take_nothing_of_the_old_group(l
     assert (new.identity_source, new.title) == ("filename", "The Office")
     assert identified == [lib.path("The Office (US)")]
     items = lib.items()
-    moved = [items[lib.path("The Office (US)", path.name)] for path in moving]
+    moved = [items[lib.path("The Office (US)", renamed[path])] for path in moving]
     assert {row.group_id for row in moved} == {new.id}
     assert {row.id for row in moved} == {ids[str(path)] for path in moving}
     assert {row.group_id for path, row in items.items() if "(UK)" in path} == {uk.id}
@@ -328,7 +337,7 @@ def test_misfiled_episodes_join_the_new_show_and_take_nothing_of_the_old_group(l
 # 7. Every episode moved to a new directory
 
 @pytest.mark.parametrize("keep_old", [True, False], ids=["old-kept", "old-removed"])
-def test_moving_every_episode_into_a_new_directory_moves_the_group(lib, walk, keep_old, identified):
+def test_moving_every_episode_into_a_new_directory_moves_the_group(lib, walk, shared, keep_old, identified):
     lib.show("Show", count=3)
     lib.scan()
     old = lib.group("Show")
@@ -336,7 +345,7 @@ def test_moving_every_episode_into_a_new_directory_moves_the_group(lib, walk, ke
     ids = {row.id for row in lib.items().values()}
     (lib.root / "Elsewhere").mkdir()
     for entry in sorted((lib.root / "Show").iterdir()):
-        os.rename(entry, lib.root / "Elsewhere" / entry.name)
+        os.rename(entry, lib.root / "Elsewhere" / (entry.name if shared else entry.name.replace("Show", "Moved")))
     if not keep_old:
         (lib.root / "Show").rmdir()
     identified.clear()
@@ -379,28 +388,38 @@ def lib_items():
 # 9. The in-place replacement by another show
 
 @pytest.mark.parametrize("user_identity", [False, True], ids=["identified-again", "user-kept"])
-def test_replacing_every_file_in_place_keeps_the_group_and_identifies_it_again(lib, walk, user_identity, identified):
+def test_replacing_every_file_in_place_keeps_the_group_and_identifies_it_again(lib, walk, shared, user_identity,
+                                                                              identified):
     lib.show("Show", count=3)
     lib.scan()
     group = lib.group("Show")
     if user_identity:
         lib.set_group("Show", identity_source="user", title="Mine")
-    ids = {row.id for row in lib.items().values()}
+    # SQLite hands a deleted id to the next row, so kept rows are told from new ones by what the user set.
+    lib.session.execute(sa.update(lib_items()).where(lib_items().c.library_id == lib.library_id).values(monitored=0))
+    if not shared:
+        for entry in (lib.root / "Show").iterdir():
+            entry.unlink()
     for number in range(1, 4):
-        stamped_video(lib.root / "Show" / f"Show - S01E0{number}.mkv", size=7000 + number)
+        name = f"Show - S01E0{number}.mkv" if shared else f"Another - S01E0{number}.mkv"
+        stamped_video(lib.root / "Show" / name, size=7000 + number)
     identified.clear()
 
     lib.scan()
 
     assert lib.group("Show").id == group.id
-    assert {row.id for row in lib.items().values()} == ids
+    items = lib.items()
+    assert len(items) == 3 and {row.group_id for row in items.values()} == {group.id}
+    # With shared names the rows are path-only matches and are kept; with others the old rows are deleted.
+    assert {row.monitored for row in items.values()} == {0 if shared else 1}
     # The group has no held item and an unchanged directory, so it stays; new content looks it up again, unless
     # the identity is the user's.
     assert identified == ([] if user_identity else [lib.path("Show")])
     assert (lib.group("Show").title == "Mine") is user_identity
 
 
-def test_a_directory_removed_and_recreated_at_the_same_path_with_the_old_inode_is_the_same_group(lib, walk, monkeypatch,
+def test_a_directory_removed_and_recreated_at_the_same_path_with_the_old_inode_is_the_same_group(lib, walk, shared,
+                                                                                               monkeypatch,
                                                                                                identified):
     from media_sources import groups as group_rules
 
@@ -408,7 +427,7 @@ def test_a_directory_removed_and_recreated_at_the_same_path_with_the_old_inode_i
     lib.scan()
     group = lib.group("Show")
     shutil.rmtree(lib.root / "Show")
-    lib.show("Show", count=2, prefix="Other")
+    lib.show("Show", count=2, prefix="Show" if shared else "Other")
     real = group_rules.stat_directory
     monkeypatch.setattr(group_rules, "stat_directory", lambda path: group_rules.DirState(
         "dir", group.dir_dev, group.dir_ino) if path == lib.path("Show") else real(path))
@@ -422,7 +441,7 @@ def test_a_directory_removed_and_recreated_at_the_same_path_with_the_old_inode_i
 
 # 10. Inode reuse after a delete
 
-def test_a_show_deleted_and_another_created_on_its_inode_does_not_inherit_the_group(lib, walk, monkeypatch):
+def test_a_show_deleted_and_another_created_on_its_inode_does_not_inherit_the_group(lib, walk, shared, monkeypatch):
     from media_sources import groups as group_rules
 
     lib.show("Show", count=2)
@@ -430,7 +449,7 @@ def test_a_show_deleted_and_another_created_on_its_inode_does_not_inherit_the_gr
     old = lib.group("Show")
     lib.set_group("Show", monitored=0, tvdb_id=5)
     shutil.rmtree(lib.root / "Show")
-    lib.show("Different", count=2)
+    lib.show("Different", count=2, prefix="Show" if shared else None)
     real = group_rules.stat_directory
     monkeypatch.setattr(group_rules, "stat_directory", lambda path: group_rules.DirState(
         "dir", old.dir_dev, old.dir_ino) if path == lib.path("Different") else real(path))
@@ -446,7 +465,8 @@ def test_a_show_deleted_and_another_created_on_its_inode_does_not_inherit_the_gr
 # 11. A move to another series library, in both scan orders
 
 @pytest.mark.parametrize("destination_first", [True, False], ids=["destination-first", "old-first"])
-def test_a_show_moved_to_another_library_follows_its_items_or_is_added_new(lib, walk, tmp_path, destination_first):
+def test_a_show_moved_to_another_library_follows_its_items_or_is_added_new(lib, walk, shared, tmp_path,
+                                                                           destination_first):
     from media_sources import repository
     from media_sources.scanner import run_scan
 
@@ -462,6 +482,9 @@ def test_a_show_moved_to_another_library_follows_its_items_or_is_added_new(lib, 
                                   item_title=row.title, group_title="Bluey", source_name="TV", action=1,
                                   description="downloaded")
     shutil.move(str(lib.root / "Bluey"), str(kids.root / "Bluey"))
+    if shared:
+        # A different show is made at the old place, with the same file names.
+        lib.show("Bluey", count=2)
 
     order = [kids, lib] if destination_first else [lib, kids]
     for library in order:
@@ -472,7 +495,13 @@ def test_a_show_moved_to_another_library_follows_its_items_or_is_added_new(lib, 
     # (not its looked-up ids); with the old library first nothing is carried.
     assert (new_group.monitored, new_group.tvdb_id) == ((0 if destination_first else 1), None)
     assert new_group.id != old.id
-    assert set(lib.groups()) == {lib.path("Other Show")}
+    remade = {lib.path("Other Show")} | ({lib.path("Bluey")} if shared else set())
+    assert set(lib.groups()) == remade
+    if shared:
+        # The remake is a fresh show: none of the old group's settings, and no old row moved into it.
+        assert (lib.group("Bluey").monitored, lib.group("Bluey").tvdb_id) == (1, None)
+        assert lib.group("Bluey").id != old.id
+        assert not ({row.id for row in lib.items().values() if "/Bluey/" in row.path} & set(old_items))
     kids_items = kids.items()
     assert len(kids_items) == 2 and {row.group_id for row in kids_items.values()} == {new_group.id}
     history = lib.session.execute(sa.select(repository.History.c.item_id, repository.History.c.item_title)).all()
@@ -692,3 +721,20 @@ def test_renaming_200_episode_files_identifies_the_show_zero_times(lib, identifi
     assert identified == []
     assert {row.id for row in lib.items().values()} == ids
     assert all("Show.renamed" in path for path in lib.items())
+
+
+def test_file_symlinks_are_followed_and_directory_symlinks_are_not_in_a_series_library(lib, tmp_path):
+    real = stamped_video(tmp_path / "elsewhere" / "Real - S01E01.mkv")
+    other = stamped_video(tmp_path / "elsewhere" / "Other" / "Other - S01E01.mkv")
+    (lib.root / "Show").mkdir()
+    (lib.root / "Show" / "Linked - S01E02.mkv").symlink_to(real)
+    # The same file twice in one walk is one item.
+    (lib.root / "Show" / "Linked again - S01E02.mkv").symlink_to(real)
+    # A directory symlink, inside a show and as a show, is never followed.
+    (lib.root / "Show" / "Folder Link").symlink_to(other.parent, target_is_directory=True)
+    (lib.root / "Linked Show").symlink_to(other.parent, target_is_directory=True)
+
+    lib.scan()
+
+    assert set(lib.groups()) == {lib.path("Show")}
+    assert len(lib.items()) == 1

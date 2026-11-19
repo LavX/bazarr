@@ -22,12 +22,15 @@ def api(source_db, monkeypatch, tmp_path, languages_loaded):
     for module in (scanner, service):
         monkeypatch.setattr(module.jobs_queue, "add_job_from_function",
                             lambda name, is_progress, queued=queued: queued.append(name) or 33)
+    # The scheduled tasks are rebuilt after every change that alters what is enabled; here that is only counted.
+    refreshes = []
+    monkeypatch.setattr(service, "refresh_tasks", lambda: refreshes.append(True))
     app = Flask(__name__)
     app.register_blueprint(api_bp)
     movies = tmp_path / "Movies"
     movies.mkdir()
     return type("Api", (), {"client": app.test_client(), "db": source_db, "movies": movies, "queued": queued,
-                            "tmp_path": tmp_path})
+                            "tmp_path": tmp_path, "refreshes": refreshes})
 
 
 def _create(api, **extra):
@@ -341,3 +344,181 @@ def test_two_overlapping_creations_at_once_cannot_both_succeed(api, monkeypatch)
     for thread in threads:
         thread.join()
     assert len(repository.list_sources()) == 1 and outcomes.count("overlap") == 1
+
+
+# Editing, enabling and removing sources and libraries, and checking a folder
+
+def test_a_source_is_listed_read_edited_and_removed(api):
+    from media_sources import repository
+
+    created = _create(api).json
+    source_url = f"{SOURCES}/{created['id']}"
+    assert [row["name"] for row in api.client.get(SOURCES, headers=HEADERS).json] == ["Local movies"]
+    assert api.client.get(source_url, headers=HEADERS).json["libraries"][0]["locator"] == str(api.movies)
+    assert api.client.get(f"{SOURCES}/999", headers=HEADERS).status_code == 404
+
+    edited = api.client.patch(source_url, json={"name": "Renamed", "enabled": False, "scan_frequency_hours": 0},
+                              headers=HEADERS)
+    assert edited.status_code == 200
+    assert (edited.json["name"], edited.json["enabled"], edited.json["scan_frequency_hours"]) == ("Renamed", False, 0)
+    assert len(api.refreshes) == 2  # the create, then the edit
+    for body, status in (({"name": " "}, 400), ({"enabled": "yes"}, 400), ({"scan_frequency_hours": -1}, 400),
+                         ({"kind": "emby"}, 400)):
+        assert api.client.patch(source_url, json=body, headers=HEADERS).status_code == status
+    other = _create(api, name="Other", library={"path": str(api.tmp_path / "Other"), "content_kind": "movie"})
+    assert other.status_code == 400
+    (api.tmp_path / "Other").mkdir()
+    assert _create(api, name="Other", library={"path": str(api.tmp_path / "Other"), "content_kind": "movie"}
+                   ).status_code == 201
+    assert api.client.patch(source_url, json={"name": "Other"}, headers=HEADERS).status_code == 409
+
+    assert api.client.delete(source_url, headers=HEADERS).status_code == 204
+    assert api.client.delete(source_url, headers=HEADERS).status_code == 404
+    assert [row.name for row in repository.list_sources()] == ["Other"]
+    assert len(api.refreshes) >= 4
+
+
+def test_a_library_is_added_edited_and_removed_and_its_path_cannot_change(api):
+    from media_sources import repository
+
+    created = _create(api).json
+    base = f"{SOURCES}/{created['id']}/libraries"
+    series = api.tmp_path / "TV"
+    series.mkdir()
+
+    added = api.client.post(base, json={"path": str(series), "content_kind": "series"}, headers=HEADERS)
+    assert added.status_code == 201 and added.json["content_kind"] == "series"
+    library_url = f"{base}/{added.json['id']}"
+    assert [root["local_path"] for root in added.json["roots"]] == [str(series)]
+
+    # Overlapping folders are refused with a message that names the other folder.
+    (series / "Show").mkdir()
+    clash = api.client.post(base, json={"path": str(series / "Show"), "content_kind": "series"}, headers=HEADERS)
+    assert clash.status_code == 409 and str(series) in clash.json["message"] and clash.json["error"] == "overlap"
+    assert api.client.post(base, json={"path": str(api.movies), "content_kind": "movie"},
+                           headers=HEADERS).status_code == 409
+
+    profile = add_profile(api.db, [("en", "False", "False")])
+    edited = api.client.patch(library_url, json={"enabled": False, "profile_id": profile, "name": "Series"},
+                              headers=HEADERS)
+    assert edited.status_code == 200 and edited.json["enabled"] is False and edited.json["profile_id"] == profile
+    for path_field in ("path", "locator"):
+        refused = api.client.patch(library_url, json={path_field: str(api.movies)}, headers=HEADERS)
+        assert refused.status_code == 400 and refused.json["error"] == "immutable"
+        assert "cannot be edited" in refused.json["message"]
+    assert repository.get_library(added.json["id"]).locator == str(series)
+    assert api.client.patch(library_url, json={"profile_id": 99}, headers=HEADERS).status_code == 400
+    assert api.client.patch(f"{base}/999", json={"enabled": True}, headers=HEADERS).status_code == 404
+    assert api.client.patch(f"{SOURCES}/999/libraries/{added.json['id']}", json={"enabled": True},
+                            headers=HEADERS).status_code == 404
+
+    assert api.client.delete(library_url, headers=HEADERS).status_code == 204
+    assert api.client.delete(library_url, headers=HEADERS).status_code == 404
+    assert [row.id for row in repository.list_libraries(created["id"])] == [created["libraries"][0]["id"]]
+
+
+def test_removing_a_library_or_a_source_keeps_the_history_it_wrote(api):
+    from media_sources import repository, scanner
+
+    created = _create(api).json
+    video(api.movies / "Film.2001.mkv")
+    scanner.run_scan(created["id"])
+    (item,) = repository.list_items(source_id=created["id"])
+    repository.insert_history(api.db, item_id=item.id, source_id=created["id"], item_kind="movie",
+                              item_title="Film", source_name="Local movies", action=1, description="downloaded",
+                              video_path=item.path)
+
+    library_id = created["libraries"][0]["id"]
+    assert api.client.delete(f"{SOURCES}/{created['id']}/libraries/{library_id}", headers=HEADERS).status_code == 204
+    assert repository.count_items(source_id=created["id"]) == 0
+    (history,) = api.db.execute(sa.select(repository.History)).all()
+    assert (history.item_id, history.item_title, history.source_name, history.video_path) == (
+        None, "Film", "Local movies", item.path)
+
+
+def test_a_library_scan_is_queued_for_that_library_only(api):
+    created = _create(api).json
+    library_id = created["libraries"][0]["id"]
+    url = f"{SOURCES}/{created['id']}/libraries/{library_id}/scan"
+    assert api.client.post(url, headers=HEADERS).status_code == 202
+    assert api.client.post(f"{SOURCES}/{created['id']}/libraries/999/scan", headers=HEADERS).status_code == 404
+    api.db.execute(sa.text("UPDATE media_source_libraries SET enabled = 0"))
+    assert api.client.post(url, headers=HEADERS).status_code == 409
+
+
+def test_validate_path_says_what_refuses_a_folder_and_what_only_warns(api, monkeypatch):
+    from app.database import TableArrInstances, TableMoviesRootfolder
+
+    url = f"{SOURCES}/validate-path"
+    api.db.execute(sa.insert(TableArrInstances).values(
+        id=1, kind="radarr", name="Radarr", stable_key="r", port=7878, enabled=1, is_default=0,
+        path_mappings=f'[["/arr/movies", "{api.tmp_path / "Arr"}"]]'))
+    api.db.execute(sa.insert(TableMoviesRootfolder).values(arr_instance_id=1, upstream_rootfolder_id=1,
+                                                           path="/arr/movies", accessible=1))
+    (api.tmp_path / "Arr" / "Inside").mkdir(parents=True)
+    fresh = api.tmp_path / "Fresh"
+    fresh.mkdir()
+
+    clean = api.client.post(url, json={"path": str(fresh), "content_kind": "movie"}, headers=HEADERS)
+    assert clean.status_code == 200 and clean.json["ok"] is True and clean.json["warnings"] == []
+
+    warned = api.client.post(url, json={"path": str(api.tmp_path / "Arr" / "Inside")}, headers=HEADERS).json
+    assert warned["ok"] is True and "root folder of Radarr" in warned["warnings"][0]
+    containing = api.client.post(url, json={"path": str(api.tmp_path)}, headers=HEADERS).json
+    assert any("root folder of Radarr" in warning for warning in containing["warnings"])
+
+    refused = api.client.post(url, json={"path": "relative"}, headers=HEADERS).json
+    assert refused["ok"] is False and refused["errors"][0]["code"] == "not_absolute"
+    assert api.client.post(url, json={"path": str(fresh), "content_kind": "music"}, headers=HEADERS).status_code == 400
+
+    _create(api)
+    (api.movies / "Sub").mkdir()
+    clash = api.client.post(url, json={"path": str(api.movies / "Sub")}, headers=HEADERS).json
+    assert clash["ok"] is False and clash["errors"][0]["code"] == "overlap"
+    assert str(api.movies) in clash["errors"][0]["message"]
+
+    monkeypatch.setattr("media_sources.paths.os.access", lambda path, mode: not (mode & 2))
+    unwritable = api.client.post(url, json={"path": str(fresh)}, headers=HEADERS).json
+    assert unwritable["ok"] is True and "not writable" in unwritable["warnings"][0]
+
+
+def test_editing_the_roots_of_a_server_library_deletes_only_what_is_out_of_scope_and_still_on_disk(api, monkeypatch):
+    """The folder kind refuses the edit; the server kinds (their libraries come with them) use this rule."""
+    from media_sources import repository, scanner, service
+
+    created = _create(api).json
+    library_id = created["libraries"][0]["id"]
+    inside = video(api.movies / "In.2001.mkv")
+    outside_still_there = video(api.movies / "Moved" / "Out.2002.mkv")
+    outside_gone = video(api.movies / "Gone" / "Away.2003.mkv")
+    scanner.run_scan(created["id"])
+    for path in (inside, outside_still_there, outside_gone):
+        assert repository.get_item_by_path(str(path)) is not None
+    outside_gone.unlink()
+    # A folder library's root is its path, which cannot be edited.
+    with pytest.raises(service.SourceError) as refused:
+        service.change_library_roots(created["id"], library_id, [{"local_path": str(api.movies)}])
+    assert refused.value.code == "immutable"
+
+    queued = []
+    monkeypatch.setattr(service, "queue_scan", lambda source_id, library_id=None: queued.append((source_id, library_id)))
+    monkeypatch.setattr(repository, "get_source", lambda source_id, target=None: type(
+        "Source", (), {"kind": "jellyfin", "id": source_id})())
+    # Narrow the library to one folder that holds none of the files.
+    narrow = api.movies / "Only"
+    narrow.mkdir()
+    deleted = service.change_library_roots(created["id"], library_id, [
+        {"server_path": "/server/only", "local_path": str(narrow)}])
+
+    # Both files that are still on disk are out of scope and deleted; the one whose path is gone is left alone,
+    # so that a mount that moved can have its rows re-pathed by the next scan.
+    assert deleted == 2
+    assert repository.get_item_by_path(str(inside)) is None
+    assert repository.get_item_by_path(str(outside_still_there)) is None
+    assert repository.get_item_by_path(str(outside_gone)) is not None
+    assert [(root.server_path, root.local_path) for root in repository.get_roots(library_id)] == [
+        ("/server/only", str(narrow))]
+    assert queued == [(created["id"], library_id)]
+    # An edit that changes only the server path deletes nothing.
+    assert service.change_library_roots(created["id"], library_id, [
+        {"server_path": "/elsewhere", "local_path": str(narrow)}]) == 0
