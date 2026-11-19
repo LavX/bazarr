@@ -283,6 +283,8 @@ export function isUpdateAvailable(
 ): boolean {
   if (!provider.active_version) return false;
   if (isAwaitingRestart(provider)) return false;
+  // A plugin that is being removed is on its way out, so nothing newer is offered for it.
+  if (isRemoving(provider)) return false;
   const latest = getLatestCatalogEntry(
     catalog,
     provider.provider_id,
