@@ -8,6 +8,7 @@ import logging
 import time
 
 from .mods import EMPTY_TAG_PROCESSOR
+from .markup import MARKUP_RE, unwrap_entry
 from .exc import EmptyEntryError
 from .registry import registry
 from subzero.language import Language
@@ -16,14 +17,11 @@ import six
 logger = logging.getLogger(__name__)
 
 
-
-_MARKUP_RE = re.compile(r"(?i)</?(?:[ibu]|font)(?:\s[^>]*)?>|\{\\[^}]*\}")
-
+# Remove HI rules that strip bracket and speaker-label text before the case count.
 CASE_DETECTION_PROCESSORS = (
     "HI_brackets_full",
     "HI_before_colon_caps",
     "HI_before_colon_noncaps",
-    "HI_brackets_tagged",
     "HI_brackets",
 )
 
@@ -208,17 +206,19 @@ class SubtitleModifications(object):
 
             # Bracket and speaker-label rules of Remove HI, selected by name so that
             # inserting a rule into the list can never change what is counted.
-            detection_names = CASE_DETECTION_PROCESSORS
-            detection = [p for p in registry.mods["remove_HI"].processors if p.name in detection_names]
+            detection = [p for p in registry.mods["remove_HI"].processors if p.name in CASE_DETECTION_PROCESSORS]
 
             for entry in self.f:
                 sub = entry.text
                 # skip HI bracket entries, those might actually be lowercase
                 sub = sub.strip()
+                wrapped = unwrap_entry(sub)
+                if wrapped is not None:
+                    sub = wrapped.plain
                 for processor in detection:
                     sub = processor.process(sub)
                 # Markup is not text: the letters of <font color=...> or {\i1} do not count.
-                sub = _MARKUP_RE.sub("", sub)
+                sub = MARKUP_RE.sub("", sub)
 
                 if sub.strip():
                     uppercase_count += sum(1 for char in sub if char.isupper())
@@ -290,6 +290,7 @@ class SubtitleModifications(object):
                 mod.modify(None, debug=self.debug, parent=self, **args)
 
     def apply_line_mods(self, new_entries, mods):
+        remove_hi = any(identifier == "remove_HI" for _order, identifier, _args in mods)
         for index, entry in enumerate(self.f, 1):
             applied_mods = []
             lines = []
@@ -299,6 +300,13 @@ class SubtitleModifications(object):
             end_tags = []
 
             t = entry.text.strip()
+            # Markup layer (Remove HI runs only): the rules see the plain text of a cue whose
+            # markup is simple, and each surviving line gets its own tags back.
+            wrapped = None
+            if remove_hi:
+                wrapped = unwrap_entry(t)
+                if wrapped is not None:
+                    t = wrapped.plain
             if not t:
                 if self.debug:
                     logger.debug(u"Skipping empty line: %s", index)
@@ -310,7 +318,8 @@ class SubtitleModifications(object):
                 continue
 
             skip_entry = False
-            for line in line_split:
+            origins = []
+            for line_no, line in enumerate(line_split):
                 # don't bother the mods with surrounding tags
                 old_line = line
                 line = line.strip()
@@ -401,10 +410,12 @@ class SubtitleModifications(object):
                     if len(cleaned_line) == 5 and cleaned_line.startswith("{\\") and cleaned_line.endswith("0}"):
                         if lines:
                             prev_line = lines.pop()
+                            origins.pop()
                             lines.append(prev_line + cleaned_line)
                             continue
 
                     lines.append(cleaned_line)
+                    origins.append(line_no)
                 else:
                     if self.debug:
                         logger.debug(u"%d: Ditching now empty line (%r)", index, line)
@@ -415,6 +426,8 @@ class SubtitleModifications(object):
                     logger.debug(u"%d: %r -> ''", index, entry.text)
                 continue
 
+            if wrapped is not None:
+                lines = wrapped.rewrap(lines, origins)
             new_text = r"\N".join(lines)
 
             # cheap man's approach to avoid open tags
