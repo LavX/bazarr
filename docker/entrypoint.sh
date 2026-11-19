@@ -28,6 +28,23 @@ __/\\\\\\\\\\\\\________________________________________________________________
 Repository: https://github.com/LavX/bazarr
 '
 
+# Started non-root (Compose `user:`, docker run --user): there is nothing to
+# drop. gosu would fail with "operation not permitted" because setgroups and
+# setgid need root, even when the ids already match. PUID and PGID, usermod and
+# chown are all root-only too, so skip them and run the app as this user.
+# /config has to be writable by it already. Same tini flags and HOME as the
+# root path at the end of this file, minus gosu.
+if [ "$(id -u)" != "0" ]; then
+    echo "Started as non-root $(id -u):$(id -g); PUID/PGID are ignored and /config must already be writable by this user."
+    if ! [ -d /config ] || ! [ -w /config ]; then
+        echo "ERROR: /config is not writable by $(id -u):$(id -g). Fix the ownership of the" >&2
+        echo "config directory on the host, or start the container as root and use PUID/PGID." >&2
+        exit 1
+    fi
+    echo "Starting Bazarr..."
+    exec /usr/bin/tini -s -- env HOME=/config "$@"
+fi
+
 echo "Starting with UID: $PUID, GID: $PGID"
 
 # Update bazarr user/group IDs if they differ. -o allows the target UID/GID

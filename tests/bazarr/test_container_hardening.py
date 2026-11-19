@@ -120,6 +120,28 @@ def test_the_entrypoint_drops_privileges_by_number():
         'uid was only remapped if /etc was writable.')
 
 
+def test_the_entrypoint_has_a_non_root_branch_that_never_calls_gosu():
+    """A container started with ``user:`` cannot be handed to gosu.
+
+    gosu needs setgroups and setgid, which only root has, so it fails with
+    "operation not permitted" even when the ids already match. The branch has to
+    sit before every root-only step and exec the app without gosu.
+    """
+    text = _entrypoint()
+    branch = re.search(r'^if \[ "\$\(id -u\)" != "0" \]; then\n(.*?)^fi$', text, re.S | re.M)
+    assert branch, 'the entrypoint has no early branch for a non-root start'
+
+    body = branch.group(1)
+    assert 'gosu' not in body, 'the non-root branch must not call gosu'
+    assert 'exec /usr/bin/tini -s -- env HOME=/config "$@"' in body, (
+        'the non-root branch must exec the app the way the root path does, minus gosu')
+
+    for step in ('usermod -o', 'groupmod -o', 'chown "$PUID:$PGID"', 'exec gosu'):
+        assert step in text[branch.end():], f'{step} should still run on the root path'
+        assert branch.end() < text.index(step), (
+            f'the non-root branch has to come before {step}')
+
+
 def _dockerfile_instruction(name):
     """The last ``name`` instruction of the Dockerfile, with its JSON argument list."""
     import json
