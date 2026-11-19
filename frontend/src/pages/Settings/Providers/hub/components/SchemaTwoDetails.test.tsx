@@ -317,7 +317,9 @@ describe("a schema 2 provider on its Subtitle Hub card", () => {
     const region = await open();
 
     expect(
-      within(region).getByText("Nothing is sent from this machine."),
+      within(region).getByText(
+        "No network access or destinations are declared.",
+      ),
     ).toBeVisible();
     expect(
       within(region).getByText(/Runs a program it downloads/),
@@ -407,9 +409,10 @@ describe("a schema 2 provider on its Subtitle Hub card", () => {
     expect(screen.getByText("Unsigned catalog")).toBeVisible();
   });
 
-  it("does not call an official source trusted when the entry is not", async () => {
+  it("gives the source's reason only when the source is untrusted too", async () => {
     show(schemaTwo({}, { trusted: false }), {
       ...official,
+      trusted: false,
       trust_reason: "outside main and beta",
     });
 
@@ -421,6 +424,29 @@ describe("a schema 2 provider on its Subtitle Hub card", () => {
     expect(
       within(region).getByText(/not trusted: outside main and beta/i),
     ).toBeVisible();
+    expect(
+      screen.getByRole("status", { name: "Community source" }),
+    ).toBeVisible();
+  });
+
+  it("never pairs an untrusted entry with a reason from a source that is trusted now", async () => {
+    show(schemaTwo({}, { trusted: false }), {
+      ...official,
+      trusted: true,
+      trust_reason: "default branch",
+    });
+
+    const region = await open();
+
+    expect(
+      within(region).getByText(/This entry is not marked as trusted\./),
+    ).toBeVisible();
+    expect(
+      within(region).queryByText(/default branch/),
+    ).not.toBeInTheDocument();
+    expect(
+      within(region).queryByText(/source is not trusted/i),
+    ).not.toBeInTheDocument();
   });
 
   it("says Bazarr+ has no record of the source when it is gone", async () => {
@@ -561,5 +587,46 @@ describe("the Marketplace of the Subtitle Hub", () => {
     ).toHaveLength(2);
     expect(screen.getAllByText("Signed catalog")).toHaveLength(1);
     expect(screen.getAllByText("Unsigned catalog")).toHaveLength(1);
+  });
+});
+
+describe("the provider sandbox check that is still running", () => {
+  it("asks the status again every 3 seconds until it has answered, and then stops", async () => {
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+    try {
+      let asked = 0;
+      let settled = false;
+      server.use(
+        http.get("/api/system/status", () => {
+          asked += 1;
+          return HttpResponse.json({
+            data: {
+              sandbox: settled
+                ? sandbox
+                : {
+                    ...sandbox,
+                    pending: true,
+                    providers: { enabled: true, state: "pending" },
+                  },
+            },
+          });
+        }),
+      );
+      show(schemaTwo());
+      await waitFor(() => expect(asked).toBe(1));
+
+      await vi.advanceTimersByTimeAsync(3000);
+      await waitFor(() => expect(asked).toBe(2));
+
+      settled = true;
+      await vi.advanceTimersByTimeAsync(3000);
+      await waitFor(() => expect(asked).toBe(3));
+      await waitFor(() => expect(toggle()).toHaveTextContent("(1 enforced)"));
+
+      await vi.advanceTimersByTimeAsync(9000);
+      expect(asked).toBe(3);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

@@ -20,6 +20,7 @@ import {
   plainSummary,
   updateDelta,
 } from "@/components/plugin-consent/fixtures";
+import { forgetPasswordConfirmation } from "@/modules/passwordConfirm";
 import { MarketplacePanel } from "@/pages/Settings/Providers/hub/MarketplacePanel";
 import { customRender, screen, waitFor, within } from "@/tests";
 import server from "@/tests/mocks/node";
@@ -267,6 +268,7 @@ describe("updating an installed provider whose catalog entry is schema 2", () =>
     await user.click(await screen.findByRole("button", { name: /^update$/i }));
 
     await waitFor(() => expect(installed()).toHaveLength(1));
+    expect(calls.some((call) => call.path === "update-consent")).toBe(true);
     expect(installed()[0].body).toMatchObject({
       source: "official",
       id: "plain",
@@ -280,6 +282,9 @@ describe("updating an installed provider whose catalog entry is schema 2", () =>
     server.use(
       http.get("/api/plugins/updates/consent", () =>
         HttpResponse.json({ ...updateDelta, needs_consent: true }),
+      ),
+      http.get("/api/plugins/installations/relay", () =>
+        HttpResponse.json(installedRow("relay")),
       ),
       http.post("/api/plugins/updates/apply", async ({ request }) => {
         calls.push({ path: "apply", body: await request.json() });
@@ -307,6 +312,151 @@ describe("updating an installed provider whose catalog entry is schema 2", () =>
       expect(calls.some((call) => call.path === "apply")).toBe(true),
     );
     expect(installed()).toEqual([]);
+  });
+});
+
+describe("the probe for an update's consent", () => {
+  it("applies the update with the digest, and no dialog, when the delta needs no consent", async () => {
+    server.use(
+      http.get("/api/plugins/updates/consent", () =>
+        HttpResponse.json({ ...updateDelta, needs_consent: false }),
+      ),
+      http.post("/api/plugins/updates/apply", async ({ request }) => {
+        calls.push({ path: "apply", body: await request.json() });
+        return HttpResponse.json({ job_id: null }, { status: 202 });
+      }),
+    );
+    const user = userEvent.setup();
+    customRender(
+      <MarketplacePanel
+        catalog={catalog("relay", 2)}
+        providers={[installedRow("relay")]}
+      />,
+    );
+
+    await user.click(await screen.findByRole("button", { name: /^update$/i }));
+
+    await waitFor(() =>
+      expect(calls.find((call) => call.path === "apply")?.body).toEqual({
+        id: "relay",
+        consent: updateDelta.digest,
+      }),
+    );
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(installed()).toEqual([]);
+  });
+
+  it("tells the person and sends nothing when the probe fails with anything but a 404", async () => {
+    server.use(
+      http.get("/api/plugins/updates/consent", () =>
+        HttpResponse.json("The catalog could not be read.", { status: 500 }),
+      ),
+    );
+    const user = userEvent.setup();
+    customRender(
+      <MarketplacePanel
+        catalog={catalog("plain", 2)}
+        providers={[installedRow("plain")]}
+      />,
+    );
+
+    await user.click(await screen.findByRole("button", { name: /^update$/i }));
+
+    expect(
+      await screen.findByText("Provider plain was not updated"),
+    ).toBeVisible();
+    expect(screen.getByText("The catalog could not be read.")).toBeVisible();
+    expect(installed()).toEqual([]);
+    expect(calls.some((call) => call.path === "apply")).toBe(false);
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    // The card can be tried again.
+    await waitFor(() =>
+      expect(
+        screen.getByRole("button", { name: /^update$/i }),
+      ).not.toHaveAttribute("aria-disabled"),
+    );
+  });
+});
+
+describe("an update that goes out as an install of the new release", () => {
+  beforeEach(() => {
+    summary = noConsent;
+    server.use(
+      http.get("/api/plugins/updates/consent", () =>
+        HttpResponse.json("No update is available.", { status: 404 }),
+      ),
+    );
+  });
+
+  it("says update, not install, when it fails", async () => {
+    server.use(
+      http.post("/api/plugins/installations", () =>
+        HttpResponse.json("The bundle could not be fetched.", { status: 400 }),
+      ),
+    );
+    const user = userEvent.setup();
+    customRender(
+      <MarketplacePanel
+        catalog={catalog("plain", 2)}
+        providers={[installedRow("plain")]}
+      />,
+    );
+
+    await user.click(await screen.findByRole("button", { name: /^update$/i }));
+
+    expect(
+      await screen.findByText("Provider plain was not updated"),
+    ).toBeVisible();
+    expect(screen.queryByText(/was not installed/)).not.toBeInTheDocument();
+  });
+
+  it("asks for the password to update, not to install", async () => {
+    forgetPasswordConfirmation();
+    server.use(
+      http.get("/api/system/settings", () =>
+        HttpResponse.json({
+          general: {},
+          auth: { type: "form", username: "admin", password: "***" },
+        }),
+      ),
+    );
+    const user = userEvent.setup();
+    customRender(
+      <MarketplacePanel
+        catalog={catalog("plain", 2)}
+        providers={[installedRow("plain")]}
+      />,
+    );
+
+    await user.click(await screen.findByRole("button", { name: /^update$/i }));
+
+    const prompt = await screen.findByRole("dialog", {
+      name: "Confirm your password",
+    });
+    expect(prompt).toHaveTextContent("to update Provider plain");
+    expect(prompt).not.toHaveTextContent(/to install/);
+  });
+
+  it("still says install for a first install", async () => {
+    forgetPasswordConfirmation();
+    server.use(
+      http.get("/api/system/settings", () =>
+        HttpResponse.json({
+          general: {},
+          auth: { type: "form", username: "admin", password: "***" },
+        }),
+      ),
+    );
+    const user = userEvent.setup();
+    customRender(
+      <MarketplacePanel catalog={catalog("plain", 2)} providers={[]} />,
+    );
+
+    await user.click(await screen.findByRole("button", { name: /^install$/i }));
+
+    expect(
+      await screen.findByRole("dialog", { name: "Confirm your password" }),
+    ).toHaveTextContent("to install Provider plain");
   });
 });
 
@@ -344,14 +494,22 @@ describe("a second install while one is going ahead", () => {
     const waiting = screen.getByTitle(
       "Another plugin is being changed. Wait for it to finish.",
     );
-    expect(waiting).toBeDisabled();
+    // Still in the tab order, and the reason is read to a screen reader, not only shown on hover.
+    expect(waiting).toHaveAttribute("aria-disabled", "true");
     expect(waiting).toHaveAccessibleName(/install/i);
+    expect(waiting).toHaveAccessibleDescription(
+      "Another plugin is being changed. Wait for it to finish.",
+    );
+    await user.click(waiting);
+    expect(installed()).toHaveLength(1);
 
     release();
     await waitFor(() =>
       expect(
-        screen.getAllByRole("button", { name: /^install$/i })[0],
-      ).toBeEnabled(),
+        screen.queryByTitle(
+          "Another plugin is being changed. Wait for it to finish.",
+        ),
+      ).not.toBeInTheDocument(),
     );
   });
 });

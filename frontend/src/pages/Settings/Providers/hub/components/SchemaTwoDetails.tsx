@@ -1,4 +1,10 @@
-import { Fragment, FunctionComponent, ReactNode, useState } from "react";
+import {
+  Fragment,
+  FunctionComponent,
+  ReactNode,
+  useEffect,
+  useState,
+} from "react";
 import { useId } from "@mantine/hooks";
 import {
   faChevronDown,
@@ -147,6 +153,18 @@ export const SchemaTwoDetails: FunctionComponent<SchemaTwoDetailsProps> = ({
   const regionId = useId();
   const status = useSystemStatus();
   const sandbox = status.data?.sandbox;
+  // The host check runs once, in the background, after boot. Until it has answered the status is asked
+  // again every 3 seconds, as the provider sandbox setting does, and no longer once it has.
+  const pending =
+    sandbox?.pending === true || sandbox?.providers?.state === "pending";
+  const { refetch } = status;
+  useEffect(() => {
+    if (!pending) {
+      return;
+    }
+    const timer = setInterval(() => void refetch(), 3000);
+    return () => clearInterval(timer);
+  }, [pending, refetch]);
   const facts = manifestFacts(entry);
   const permissions: PluginPermission[] = facts.permissions.map((item) => ({
     name: item,
@@ -246,12 +264,14 @@ export const SchemaTwoDetails: FunctionComponent<SchemaTwoDetailsProps> = ({
                 Bazarr+ has no record of where this came from.
               </p>
             ) : provider.official && !provider.trusted ? (
-              // Trust is the entry's own field: an official source can still hold an entry it does not trust.
+              // The verdict is the entry's own trusted flag, the one the pill on the card shows. The source's
+              // reason is printed only when the source is untrusted too, so the two never contradict.
               <p className={consent.line} style={{ margin: 0 }}>
                 <strong>{provider.name ?? provider.id}</strong>
                 <span className={consent.quiet}>
-                  This source is not trusted
-                  {source?.trust_reason ? `: ${source.trust_reason}` : ""}.
+                  {source?.trusted === false
+                    ? `This source is not trusted${source.trust_reason ? `: ${source.trust_reason}` : ""}.`
+                    : "This entry is not marked as trusted."}{" "}
                   Review it before you install.
                 </span>
               </p>
@@ -287,7 +307,7 @@ export const SchemaTwoDetails: FunctionComponent<SchemaTwoDetailsProps> = ({
               </p>
             ) : (
               <p className={consent.quiet}>
-                Nothing is sent from this machine.
+                No network access or destinations are declared.
               </p>
             )}
             {facts.hasDestinationField && (

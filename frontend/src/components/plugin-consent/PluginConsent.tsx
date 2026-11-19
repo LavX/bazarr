@@ -29,6 +29,11 @@ export type PluginConsentTarget =
       version: string;
       /** The kind of the plugin, when the caller knows it. A subtitle provider whose closure adds no other kind installs without the dialog. */
       kind?: string;
+      /**
+       * How the action is worded to the person. A new release of an installed plugin is sent as an install
+       * of that release, and a caller that does so says "update", so every prompt and failure does too.
+       */
+      wording?: "install" | "update";
     }
   | { action: "update"; pluginId: string; name?: string };
 
@@ -42,6 +47,11 @@ export interface PluginConsentProps {
   onClosed?: () => void;
   /** The spending caps to show for an AI engine. Left out, no spending line is shown. */
   costCaps?: PluginCostCaps;
+}
+
+/** How a target is worded to the person: its own action, unless the caller said otherwise. */
+export function wordingOf(target: PluginConsentTarget): "install" | "update" {
+  return target.action === "install" ? (target.wording ?? "install") : "update";
 }
 
 const FAILED = {
@@ -128,7 +138,7 @@ const PluginConsent: FunctionComponent<PluginConsentProps> = ({
         await applyUpdate.mutateAsync({ id: target.pluginId, consent: digest });
       }
     };
-    const action = `${target.action} ${target.name ?? target.pluginId}`;
+    const action = `${wordingOf(target)} ${target.name ?? target.pluginId}`;
     try {
       // Installing runs code on this machine, so the server asks for the password first where a login
       // is set up. The gate asks before the request goes out.
@@ -163,7 +173,7 @@ const PluginConsent: FunctionComponent<PluginConsentProps> = ({
         );
         return;
       }
-      setProblem(reasonOf(error) || FAILED[target.action]);
+      setProblem(reasonOf(error) || FAILED[wordingOf(target)]);
     } finally {
       running.current = false;
       setBusy(false);
@@ -172,9 +182,10 @@ const PluginConsent: FunctionComponent<PluginConsentProps> = ({
 
   const name = current?.name ?? current?.pluginId ?? "";
   const title = current
-    ? `${current.action === "install" ? "Install" : "Update"} ${name}?`
+    ? `${wordingOf(current) === "install" ? "Install" : "Update"} ${name}?`
     : "";
-  const verb = current?.action === "update" ? "Update" : "Install";
+  const verb =
+    current && wordingOf(current) === "update" ? "Update" : "Install";
 
   return (
     <Modal

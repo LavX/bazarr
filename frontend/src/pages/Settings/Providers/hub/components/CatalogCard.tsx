@@ -1,5 +1,13 @@
 import { FunctionComponent, useMemo } from "react";
-import { ActionIcon, Badge, Button, Menu, Tooltip } from "@mantine/core";
+import {
+  ActionIcon,
+  Badge,
+  Button,
+  Menu,
+  Tooltip,
+  VisuallyHidden,
+} from "@mantine/core";
+import { useId } from "@mantine/hooks";
 import {
   faCheck,
   faDownload,
@@ -140,6 +148,20 @@ export const CatalogCard: FunctionComponent<CatalogCardProps> = ({
       ? "Uninstall instead"
       : "Uninstall";
 
+  // While another install is going ahead the button stays in the tab order and says why, to a screen reader
+  // as well as on hover, as the Plugin Hub's Unavailable button does. It does nothing when pressed.
+  const blockedId = useId();
+  const waiting = installBlocked
+    ? {
+        "data-disabled": true,
+        "aria-disabled": true,
+        "aria-describedby": blockedId,
+        title: installBlocked,
+        onClick: (event: { preventDefault: () => void }) =>
+          event.preventDefault(),
+      }
+    : { onClick: () => onInstall(entry) };
+
   const ctaButton = (() => {
     switch (cta) {
       case "installed":
@@ -161,9 +183,7 @@ export const CatalogCard: FunctionComponent<CatalogCardProps> = ({
             variant="light"
             color="yellow"
             loading={isInstalling}
-            disabled={Boolean(installBlocked)}
-            title={installBlocked}
-            onClick={() => onInstall(entry)}
+            {...waiting}
             leftSection={<FontAwesomeIcon icon={faRotate} />}
           >
             Update
@@ -229,9 +249,7 @@ export const CatalogCard: FunctionComponent<CatalogCardProps> = ({
             size="xs"
             variant="light"
             loading={isInstalling}
-            disabled={Boolean(installBlocked)}
-            title={installBlocked}
-            onClick={() => onInstall(entry)}
+            {...waiting}
             leftSection={<FontAwesomeIcon icon={faDownload} />}
           >
             Install
@@ -365,7 +383,14 @@ export const CatalogCard: FunctionComponent<CatalogCardProps> = ({
           {usesFlaresolverr(entry) && <FlareSolverrBadge />}
         </>
       }
-      action={ctaButton}
+      action={
+        <>
+          {ctaButton}
+          {installBlocked && (
+            <VisuallyHidden id={blockedId}>{installBlocked}</VisuallyHidden>
+          )}
+        </>
+      }
     />
   );
 };

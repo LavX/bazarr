@@ -7,7 +7,7 @@ import { SUBTITLE_PROVIDER_KIND } from "@/apis/raw/plugins";
 import { useGatedAction } from "@/components/modals/PasswordConfirmModal";
 import { notification } from "@/modules/notification";
 import { PluginCostCaps } from "./InstallSummary";
-import PluginConsent, { PluginConsentTarget } from "./PluginConsent";
+import PluginConsent, { PluginConsentTarget, wordingOf } from "./PluginConsent";
 import { needsPassword, reasonOf } from "./refusal";
 
 export interface PluginConsentFlow {
@@ -97,7 +97,7 @@ export function usePluginConsentFlow({
                     version: next.version,
                     consent: summary.digest,
                   }),
-                `install ${label}`,
+                `${wordingOf(next)} ${label}`,
               );
               if (confirmed) {
                 onDone?.(next);
@@ -129,9 +129,9 @@ export function usePluginConsentFlow({
       } catch (error) {
         showNotification(
           notification.error(
-            `${label} was not ${next.action === "install" ? "installed" : "updated"}`,
+            `${label} was not ${wordingOf(next) === "install" ? "installed" : "updated"}`,
             reasonOf(error) ||
-              `The ${next.action} did not finish. Check the Activity tab for the reason.`,
+              `The ${wordingOf(next)} did not finish. Check the Activity tab for the reason.`,
           ),
         );
       } finally {

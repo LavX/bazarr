@@ -14,6 +14,7 @@ import {
   faUpload,
 } from "@fortawesome/free-solid-svg-icons";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
+import { isAxiosError } from "axios";
 import {
   useProviderHubInstall,
   useProviderHubInstallLocal,
@@ -37,6 +38,7 @@ import {
   type PluginConsentTarget,
   usePluginConsentFlow,
 } from "@/components/plugin-consent";
+import { reasonOf } from "@/components/plugin-consent/refusal";
 import { notification } from "@/modules/notification";
 import { CatalogCard } from "@/pages/Settings/Providers/hub/components/CatalogCard";
 import { isSchemaTwo } from "@/pages/Settings/Providers/hub/components/SchemaTwoDetails";
@@ -253,6 +255,8 @@ export const MarketplacePanel: FunctionComponent<MarketplacePanelProps> = ({
           source,
           version: entry.version,
           kind: SUBTITLE_PROVIDER_KIND,
+          // A new release of an installed provider goes out as an install of that release, and says update.
+          wording: installed?.active_version ? "update" : "install",
         };
         setStarting(cardKey(entry.source, entry.provider_id));
         void (async () => {
@@ -260,13 +264,30 @@ export const MarketplacePanel: FunctionComponent<MarketplacePanelProps> = ({
             // An update asks for the delta only where the server has one, which is when it adds a plugin of
             // another kind. For an ordinary provider it has none (a 404), and the new release is installed as
             // it always was, with the digest of what it adds.
-            const delta = installed?.active_version
-              ? await withInlineErrors(() =>
+            let hasDelta = false;
+            if (installed?.active_version) {
+              try {
+                await withInlineErrors(() =>
                   api.plugins.updateConsent(entry.provider_id),
-                ).catch(() => null)
-              : null;
+                );
+                hasDelta = true;
+              } catch (error) {
+                // Only a 404 means there is no delta. Any other answer, or none, is not a reason to go on
+                // as if the server had said so: the person is told, and nothing is sent.
+                if (!isAxiosError(error) || error.response?.status !== 404) {
+                  showNotification(
+                    notification.error(
+                      `${name} was not updated`,
+                      reasonOf(error) ||
+                        "Bazarr+ could not ask what the update adds. Try again.",
+                    ),
+                  );
+                  return;
+                }
+              }
+            }
             await consent.begin(
-              delta
+              hasDelta
                 ? { action: "update", pluginId: entry.provider_id, name }
                 : install,
             );
