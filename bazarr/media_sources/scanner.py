@@ -1,7 +1,7 @@
 # coding=utf-8
 """Scan a source: ask its kind what is in each library, then keep the item rows in step with the answer.
 
-Kind-agnostic. It consumes ``SourceKind.enumerate`` and does the rest. The tracer handles movie libraries: files
+Kind-agnostic. It consumes ``SourceKind.enumerate`` and does the rest. It handles movie libraries so far: files
 are matched to rows by path, changed files are parsed again, and a row is deleted only when its own path is gone
 from a disk whose roots are readable. A listing that is incomplete, or an empty one over a library that holds
 items, deletes nothing: an unmounted share must never empty a library.
@@ -59,7 +59,8 @@ def _item_values(found, parse):
         missing_scans=0, server_missing=0)
 
 
-def _chunks(values, size=BATCH_SIZE):
+def _chunks(values, size=None):
+    size = size or BATCH_SIZE
     for start in range(0, len(values), size):
         yield values[start:start + size]
 

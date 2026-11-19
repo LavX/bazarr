@@ -34,7 +34,7 @@ def item_to_dict(item):
     }
 
 
-@api_ns_sources_items.route("/sources/items")
+@api_ns_sources_items.route("sources/items")
 class SourceItemsList(Resource):
     get_request_parser = reqparse.RequestParser()
     get_request_parser.add_argument('source_id', type=int, required=False, help='Only this source')
@@ -57,7 +57,7 @@ class SourceItemsList(Resource):
         return {'data': [item_to_dict(row) for row in rows], 'total': repository.count_items(**filters)}
 
 
-@api_ns_sources_items.route("/sources/items/<int:item_id>/search")
+@api_ns_sources_items.route("sources/items/<int:item_id>/search")
 class SourceItemSearch(Resource):
     @authenticate
     @api_ns_sources_items.response(202, 'The search was queued as a job')

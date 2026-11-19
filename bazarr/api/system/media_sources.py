@@ -21,7 +21,7 @@ def _body():
     return body
 
 
-@api_ns_system_media_sources.route("/system/media-sources")
+@api_ns_system_media_sources.route("system/media-sources")
 class MediaSourcesList(Resource):
     @authenticate
     @api_ns_system_media_sources.response(201, 'The source was created, with its library')
@@ -36,7 +36,7 @@ class MediaSourcesList(Resource):
         return service.describe_source(source_id), 201
 
 
-@api_ns_system_media_sources.route("/system/media-sources/<int:source_id>/scan")
+@api_ns_system_media_sources.route("system/media-sources/<int:source_id>/scan")
 class MediaSourceScan(Resource):
     @authenticate
     @api_ns_system_media_sources.response(202, 'The scan was queued as a job')

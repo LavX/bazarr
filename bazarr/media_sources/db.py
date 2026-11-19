@@ -20,7 +20,11 @@ def handle(session=None):
 def source_transaction(session=None):
     """A connection inside a transaction that commits on success and rolls back on any error."""
     engine = handle(session).get_bind()
-    with engine.connect().execution_options(isolation_level='SERIALIZABLE') as connection:
+    # The engine is AUTOCOMMIT, so a transaction needs an isolation level of its own. PostgreSQL waits for a
+    # concurrent writer at READ COMMITTED instead of failing the batch with a serialization error; SQLite has
+    # one writer at a time whatever the level.
+    isolation = 'READ COMMITTED' if engine.dialect.name == 'postgresql' else 'SERIALIZABLE'
+    with engine.connect().execution_options(isolation_level=isolation) as connection:
         with connection.begin():
             if connection.dialect.name == 'sqlite':
                 # The legacy driver does not begin a transaction for a SELECT: take the write lock first.

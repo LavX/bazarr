@@ -17,6 +17,9 @@ for _document in ("releases.txt", "announcements.txt"):
 
 logging.getLogger("rebulk").setLevel(logging.WARNING)
 
+# The media source tests run on SQLite and on PostgreSQL through these two fixtures.
+from media_source_helpers import backend, source_db  # noqa: E402, F401
+
 
 @pytest.fixture
 def schema_session():
