@@ -1,0 +1,601 @@
+# coding=utf-8
+"""Plugin releases: the release model and the tables that hold it.
+
+An installation is the plugin as the person sees it: its settings, whether it
+is switched on, where it came from. A release is one version of that plugin's
+code with the bundle, environment and manifest it runs from. An installation
+has at most one active release and at most one staged one, and keeps the
+release it replaced for a rollback.
+
+States: ``staged`` (written, not running), ``active`` (the release the plugin
+runs), ``draining`` (replaced or stopped, finishing the calls it already took),
+``retired`` (no longer runs, kept as the previous release) and ``failed`` (a
+staged release that did not activate, kept so the reason can be shown).
+
+The rest of the Hub reads and writes installation rows as dicts, with the
+release fields (``active_version``, ``staged_path``, ``python_path`` and so on)
+inline. This module is the other half of that shape: ``split`` takes those
+fields out of a row into release rows, ``compose`` puts them back, so the
+database holds releases in tables of their own while every caller keeps one
+dict API. The fields of an installation row that are not about a release
+(``name``, ``config``, ``enabled``, the revocation and hold marks) stay in the
+state document.
+
+Everything here is pure except the functions that take a connection.
+
+Two things to know before changing this module:
+
+* On a real upgrade the store, not the migration, does the move. Settings load reads the state before the
+  schema step runs, so ``ensure_ready`` creates the tables and the first write splits every row through
+  ``split``. The migration moves the rows of a database the store has not written to yet, with its own frozen
+  copy of the logic; the two are pinned together by a test. A column added here later has to be created by
+  ``create_tables`` as well as by its revision, and ``read_rows`` must not select it before then.
+* Release rows of a plugin the document does not list (what a damaged document lost) are never deleted by a
+  write. They are logged at boot and their files stay protected. Ending them is an administrator's repair step,
+  with no screen of its own: ``state_store.discard_orphan_releases(state_store.orphan_plugin_ids())`` run in a
+  Python shell against the app's database, once whoever runs it has looked at what is kept.
+* Reached only once something activates or stops a release while Bazarr+ runs: a draining release is not a
+  rollback target until it has retired, nothing yet calls ``retire_release`` at runtime, and an activation takes
+  no install lock. Jobs do not bind a release, and only provider workers carry the release key.
+"""
+from __future__ import annotations
+
+import functools
+import json
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from typing import Any
+
+import sqlalchemy as sa
+
+RELEASES_TABLE = "provider_hub_releases"
+BINDINGS_TABLE = "provider_hub_release_bindings"
+
+STAGED = "staged"
+ACTIVE = "active"
+DRAINING = "draining"
+RETIRED = "retired"
+FAILED = "failed"
+RELEASE_STATES = (STAGED, ACTIVE, DRAINING, RETIRED, FAILED)
+# States an installation holds one release in at most: the partial unique index
+# enforces it, so two writers cannot both promote.
+SLOT_STATES = (STAGED, ACTIVE)
+# States whose code may still be running in this process.
+RUNNING_STATES = (ACTIVE, DRAINING)
+
+# What a release may become. A retired release can come back as the active one
+# (a rollback); a failed one is history only.
+_TRANSITIONS = {
+    STAGED: {ACTIVE, FAILED, RETIRED},
+    ACTIVE: {DRAINING, RETIRED},
+    DRAINING: {RETIRED, ACTIVE},
+    RETIRED: {ACTIVE, STAGED},
+    FAILED: set(),
+}
+
+# At most this many of each are kept per installation besides the active, staged
+# and draining ones: the previous release, and the last failure.
+KEEP_RETIRED = 1
+KEEP_FAILED = 1
+
+# Set on an installation row by whatever replaces the active release while its
+# calls are still being served. ``split`` consumes it: the replaced release goes
+# to ``draining`` instead of straight to ``retired``.
+DRAIN_PREVIOUS = "drain_previous"
+# Set on an installation row when a staged release is dropped because it failed to activate, with the reason.
+# ``split`` consumes it: that release is kept as failed, or as the previous release again when it came from there.
+# A staged release that leaves its slot for any other reason is forgotten, whatever error the row shows.
+FAIL_STAGED = "fail_staged"
+
+metadata = sa.MetaData()
+
+releases_table = sa.Table(
+    RELEASES_TABLE,
+    metadata,
+    sa.Column("id", sa.Integer, primary_key=True, autoincrement=True),
+    sa.Column("plugin_id", sa.Text, nullable=False),
+    sa.Column("version", sa.Text, nullable=False),
+    sa.Column("state", sa.Text, nullable=False),
+    sa.Column("bundle_path", sa.Text),
+    sa.Column("python_path", sa.Text),
+    # The content address of the bundle (its manifest's bundle_sha256) and the
+    # key of the environment it runs from, when the hub recorded one.
+    sa.Column("bundle_digest", sa.Text),
+    sa.Column("env_key", sa.Text),
+    sa.Column("manifest", sa.Text),
+    sa.Column("error", sa.Text),
+    # Where the release came from, recorded when it is created: a release of the same id from another source
+    # is not the previous release of this one.
+    sa.Column("source_id", sa.Text),
+    sa.Column("origin", sa.Text),
+    # Timestamps as the hub writes them everywhere else: ISO 8601 text.
+    sa.Column("created_at", sa.Text, nullable=False),
+    sa.Column("activated_at", sa.Text),
+    sa.Column("retired_at", sa.Text),
+    # The order releases ended in: a number taken from a counter that only grows, written when a release
+    # becomes retired or failed. Ids say when a release was created, and a rollback reuses an id.
+    sa.Column("ended_seq", sa.Integer),
+    # Which of the row's release fields the installation row carried (a JSON list), so the row reads back with
+    # the keys it had.
+    sa.Column("fields", sa.Text),
+    sa.CheckConstraint("state IN ('staged', 'active', 'draining', 'retired', 'failed')",
+                       name="ck_provider_hub_releases_state"),
+    sa.Index("ix_provider_hub_releases_plugin_id", "plugin_id"),
+    sa.Index("ux_provider_hub_releases_slot", "plugin_id", "state", unique=True,
+             sqlite_where=sa.text("state IN ('staged', 'active')"),
+             postgresql_where=sa.text("state IN ('staged', 'active')")),
+)
+
+bindings_table = sa.Table(
+    BINDINGS_TABLE,
+    metadata,
+    sa.Column("release_id", sa.Integer, sa.ForeignKey(f"{RELEASES_TABLE}.id", ondelete="CASCADE"),
+              primary_key=True),
+    sa.Column("capability", sa.Text, primary_key=True),
+    sa.Column("supplier_id", sa.Text, nullable=False),
+)
+
+# The release fields an installation row carries, per slot.
+_ACTIVE_KEYS = ("active_version", "active_path", "python_path", "manifest", "supplied_by", "activated_at")
+_STAGED_KEYS = ("staged_version", "staged_path", "staged_python_path", "staged_manifest", "staged_supplied_by")
+# Recorded in ``fields`` when the row's map of bindings was null and not empty.
+NULL_BINDINGS = "supplied_by:null"
+# What each key after the version is, in order, for the ``fields`` column.
+_FIELD_NAMES = ("path", "python_path", "manifest", "supplied_by", "activated_at")
+
+
+def now_text() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def can_move(current: str, target: str) -> bool:
+    return target in _TRANSITIONS.get(current, ())
+
+
+class ReleaseTransitionError(ValueError):
+    """A release was asked to move to a state it cannot move to from where it is."""
+
+
+@dataclass(frozen=True)
+class Release:
+    """One stored release, as the callers that are not installation rows read it."""
+
+    id: int
+    plugin_id: str
+    version: str
+    state: str
+    bundle_path: str | None = None
+    python_path: str | None = None
+    bundle_digest: str | None = None
+    env_key: str | None = None
+    manifest: dict[str, Any] | None = None
+    supplied_by: dict[str, str] = field(default_factory=dict)
+    error: str | None = None
+    created_at: str | None = None
+    activated_at: str | None = None
+    retired_at: str | None = None
+    ended_seq: int | None = None
+    source_id: str | None = None
+    origin: str | None = None
+
+
+def release_of(row: dict[str, Any]) -> Release:
+    return Release(
+        id=int(row["id"]), plugin_id=row["plugin_id"], version=row["version"], state=row["state"],
+        bundle_path=row.get("bundle_path"), python_path=row.get("python_path"),
+        bundle_digest=row.get("bundle_digest"), env_key=row.get("env_key"),
+        manifest=_loads(row.get("manifest")), supplied_by=dict(row.get("supplied_by") or {}),
+        error=row.get("error"), created_at=row.get("created_at"), activated_at=row.get("activated_at"),
+        retired_at=row.get("retired_at"), ended_seq=row.get("ended_seq"), source_id=row.get("source_id"),
+        origin=row.get("origin"),
+    )
+
+
+def _loads(text: Any) -> dict[str, Any] | None:
+    if not isinstance(text, str):
+        return None
+    try:
+        value = json.loads(text)
+    except ValueError:
+        return None
+    return value if isinstance(value, dict) else None
+
+
+def _dumps(manifest: dict[str, Any] | None) -> str | None:
+    return None if manifest is None else json.dumps(manifest, sort_keys=True)
+
+
+def _optional_text(value: Any) -> bool:
+    return value is None or isinstance(value, str)
+
+
+def _bindings_ok(value: Any) -> bool:
+    return value is None or (isinstance(value, dict) and all(
+        isinstance(key, str) and isinstance(item, str) for key, item in value.items()))
+
+
+@dataclass
+class _Slot:
+    version: str
+    bundle_path: str | None
+    python_path: str | None
+    manifest: dict[str, Any] | None
+    supplied_by: dict[str, str]
+    activated_at: str | None
+    # The names (``_FIELD_NAMES``) of the fields the installation row carried.
+    present: list[str]
+
+
+def _slot(row: dict[str, Any], keys: tuple[str, ...], with_activation: bool) -> _Slot | None:
+    """The release an installation row describes in one slot, or None.
+
+    A slot is a release only when it is well formed: a version, and values of the
+    types the tables hold. Anything else is left in the document untouched, so a
+    row an older build or a test wrote in an odd shape is kept as it is.
+    """
+    version = row.get(keys[0])
+    if not isinstance(version, str) or not version:
+        return None
+    path, python, manifest, supplied = (row.get(key) for key in keys[1:5])
+    activated = row.get(keys[5]) if with_activation else None
+    if not (_optional_text(path) and _optional_text(python) and _optional_text(activated)
+            and (manifest is None or isinstance(manifest, dict)) and _bindings_ok(supplied)):
+        return None
+    names = _FIELD_NAMES if with_activation else _FIELD_NAMES[:4]
+    present = [name for name, key in zip(names, keys[1:]) if key in row]
+    if "supplied_by" in present and supplied is None:
+        # A null map and an empty one are different values of the row: the null is remembered.
+        present.append(NULL_BINDINGS)
+    return _Slot(version, path, python, manifest, dict(supplied or {}), activated, present)
+
+
+@functools.lru_cache(maxsize=1024)
+def _resolved(path: str) -> str:
+    from .env_registry import path_key
+    return path_key(path)
+
+
+def _env_key(data: dict[str, Any], python_path: str | None) -> str | None:
+    """The fingerprint the environment of ``python_path`` is recorded under, when the registry knows it."""
+    envs = data.get("plugin_envs")
+    if not python_path or not isinstance(envs, dict) or not envs:
+        return None
+    try:
+        from pathlib import Path
+        wanted = _resolved(str(Path(python_path).parent.parent))
+        for fingerprint, entry in envs.items():
+            if isinstance(entry, dict) and isinstance(entry.get("path"), str) and _resolved(entry["path"]) == wanted:
+                return str(fingerprint)
+    except Exception:
+        return None
+    return None
+
+
+def _digest(manifest: dict[str, Any] | None) -> str | None:
+    value = manifest.get("bundle_sha256") if isinstance(manifest, dict) else None
+    return value if isinstance(value, str) and value else None
+
+
+class StateDocument(dict):
+    """The state as the callers see it: a plain dict that also knows which retired and draining releases exist.
+
+    The extra is not part of the document and is never stored or written to state.json. What cleans up files
+    reads it, so the bundle and environment of the release a rollback would go back to are not taken away.
+    """
+
+    retained_releases: tuple[dict[str, Any], ...] = ()
+
+
+def compose(data: dict[str, Any], rows: list[dict[str, Any]]) -> "StateDocument":
+    """Put the active and staged release of each installation back into its row, in place.
+
+    ``rows`` are release rows as ``read_rows`` returns them (the retired and draining ones may come without
+    their manifest). An installation whose releases are not in the tables yet (a document written before they
+    existed) keeps the fields it has: they are moved out at its next write. Returns the document, with the
+    releases kept besides the active and staged ones attached.
+    """
+    document = StateDocument(data)
+    installations = data.get("installations")
+    listed = installations if isinstance(installations, dict) else {}
+    # The previous and draining releases, and every release of a plugin the document does not list (what a
+    # damaged document lost): they are kept until discarded on purpose, and so are their files.
+    document.retained_releases = tuple(
+        {"plugin_id": release["plugin_id"], "version": release["version"], "state": release["state"],
+         "bundle_path": release.get("bundle_path"), "python_path": release.get("python_path")}
+        for release in rows
+        if release["state"] in (RETIRED, DRAINING) or release["plugin_id"] not in listed)
+    if not isinstance(installations, dict) or not rows:
+        return document
+    by_plugin: dict[str, dict[str, dict[str, Any]]] = {}
+    for release in rows:
+        if release["state"] in SLOT_STATES:
+            by_plugin.setdefault(release["plugin_id"], {})[release["state"]] = release
+    for plugin_id, installation in installations.items():
+        slots = by_plugin.get(plugin_id)
+        if not slots or not isinstance(installation, dict):
+            continue
+        for state, keys in ((ACTIVE, _ACTIVE_KEYS), (STAGED, _STAGED_KEYS)):
+            release = slots.get(state)
+            if release is None:
+                continue
+            installation[keys[0]] = release["version"]
+            recorded = release.get("fields")
+            names = _FIELD_NAMES if state == ACTIVE else _FIELD_NAMES[:4]
+            present = set(json.loads(recorded)) if recorded else set(names)
+            for name, key in zip(names, keys[1:]):
+                if name not in present:
+                    installation.pop(key, None)
+                elif name == "path":
+                    installation[key] = release.get("bundle_path")
+                elif name == "python_path":
+                    installation[key] = release.get("python_path")
+                elif name == "manifest":
+                    installation[key] = _loads(release.get("manifest"))
+                elif name == "supplied_by":
+                    installation[key] = None if NULL_BINDINGS in present else dict(release.get("supplied_by") or {})
+                elif name == "activated_at":
+                    installation[key] = release.get("activated_at")
+    return document
+
+
+@dataclass
+class Plan:
+    """What a write does to the release tables, worked out from the document it stores."""
+
+    deletes: list[int] = field(default_factory=list)
+    # (id, changed columns, bindings or None when they did not change)
+    updates: list[tuple[int, dict[str, Any], dict[str, str] | None]] = field(default_factory=list)
+    inserts: list[tuple[dict[str, Any], dict[str, str]]] = field(default_factory=list)
+
+    def __bool__(self) -> bool:
+        return bool(self.deletes or self.updates or self.inserts)
+
+
+def _matches(release: dict[str, Any], slot: _Slot) -> bool:
+    return release["version"] == slot.version and release.get("bundle_path") == slot.bundle_path
+
+
+def split(data: dict[str, Any], rows: list[dict[str, Any]], *, now: str | None = None,
+          previously_listed: "set[str] | None" = None) -> tuple[dict[str, Any], Plan]:
+    """The document to store, and the release-table changes that go with it.
+
+    ``data`` is the full dict a caller works with. It is not changed (except that
+    the ``DRAIN_PREVIOUS`` and ``FAIL_STAGED`` marks are consumed from its rows):
+    the returned document is a copy without the release fields of the rows whose
+    slots became releases. ``rows`` are the stored releases at the moment of the
+    write, with their bindings, and with ``manifest`` for the ones in a slot.
+    ``previously_listed`` is the set of plugin ids the document listed before this write. Only a plugin that was
+    listed and no longer is has its releases deleted: a release whose plugin the document never listed (what a
+    document rebuilt after damage lost) is an orphan, and stays until ``state_store.discard_orphan_releases``
+    is asked for it. Without it every release of a plugin the document does not list is deleted.
+    """
+    stamp = now or now_text()
+    stored = dict(data)
+    plan = Plan()
+    installations = data.get("installations")
+    by_plugin: dict[str, list[dict[str, Any]]] = {}
+    for release in rows:
+        by_plugin.setdefault(release["plugin_id"], []).append(release)
+    if not isinstance(installations, dict):
+        # Not a document this module understands: leave the tables as they are.
+        return stored, plan
+    counter = [max((release.get("ended_seq") or 0 for release in rows), default=0)]
+
+    def next_seq() -> int:
+        counter[0] += 1
+        return counter[0]
+
+    stored["installations"] = stored_rows = {}
+    for plugin_id, installation in installations.items():
+        if not isinstance(installation, dict):
+            stored_rows[plugin_id] = installation
+            continue
+        drain = bool(installation.pop(DRAIN_PREVIOUS, False))
+        failure = installation.pop(FAIL_STAGED, None)
+        row = dict(installation)
+        active = _slot(row, _ACTIVE_KEYS, True)
+        staged = _slot(row, _STAGED_KEYS, False)
+        existing = by_plugin.get(plugin_id, [])
+        claimed: set[int] = set()
+
+        def find(slot: _Slot, states: tuple[str, ...]) -> dict[str, Any] | None:
+            for state in states:
+                for release in existing:
+                    if release["id"] not in claimed and release["state"] == state and _matches(release, slot):
+                        return release
+            return None
+
+        def settle(slot: _Slot, release: dict[str, Any] | None, state: str) -> None:
+            unchanged_env = release is not None and release.get("python_path") == slot.python_path
+            values = {
+                "state": state, "bundle_path": slot.bundle_path, "python_path": slot.python_path,
+                "manifest": _dumps(slot.manifest), "bundle_digest": _digest(slot.manifest),
+                "env_key": (release.get("env_key") if unchanged_env and release.get("env_key")
+                            else _env_key(data, slot.python_path)),
+                "error": None, "fields": json.dumps(slot.present),
+            }
+            if state == ACTIVE:
+                values["activated_at"] = slot.activated_at
+                values["retired_at"] = None
+            if release is None:
+                source, origin = row.get("source_id"), row.get("origin")
+                values.update(plugin_id=plugin_id, version=slot.version, created_at=stamp,
+                              source_id=source if isinstance(source, str) else None,
+                              origin=origin if isinstance(origin, str) else None)
+                plan.inserts.append((values, dict(slot.supplied_by)))
+                return
+            claimed.add(release["id"])
+            changed = {key: value for key, value in values.items() if release.get(key) != value}
+            bindings = slot.supplied_by if (release.get("supplied_by") or {}) != slot.supplied_by else None
+            if changed or bindings is not None:
+                plan.updates.append((release["id"], changed, None if bindings is None else dict(bindings)))
+
+        if staged is not None:
+            settle(staged, find(staged, (STAGED, RETIRED)), STAGED)
+        if active is not None:
+            settle(active, find(active, (ACTIVE, STAGED, DRAINING, RETIRED)), ACTIVE)
+        # What the slots no longer name.
+        for release in existing:
+            if release["id"] in claimed:
+                continue
+            state = release["state"]
+            if state == ACTIVE:
+                if drain:
+                    plan.updates.append((release["id"], {"state": DRAINING}, None))
+                else:
+                    plan.updates.append((release["id"], {
+                        "state": RETIRED, "retired_at": stamp, "ended_seq": next_seq()}, None))
+            elif state == STAGED:
+                if release.get("retired_at"):
+                    # It was the previous release, staged again to go back to. It stays the previous release,
+                    # with the reason it did not come back when there is one.
+                    plan.updates.append((release["id"], {
+                        "state": RETIRED, "error": failure, "ended_seq": next_seq()}, None))
+                elif staged is None and failure:
+                    plan.updates.append((release["id"], {
+                        "state": FAILED, "error": failure, "ended_seq": next_seq()}, None))
+                else:
+                    plan.deletes.append(release["id"])
+        # The slots that did not become releases keep their fields in the document.
+        if active is not None:
+            for key in _ACTIVE_KEYS:
+                row.pop(key, None)
+        if staged is not None:
+            for key in _STAGED_KEYS:
+                row.pop(key, None)
+        stored_rows[plugin_id] = row
+    for plugin_id, existing in by_plugin.items():
+        if plugin_id not in installations and (previously_listed is None or plugin_id in previously_listed):
+            plan.deletes.extend(release["id"] for release in existing)
+    _prune(plan, by_plugin, installations)
+    return stored, plan
+
+
+def _ended(release: dict[str, Any], changes: dict[str, Any] | None) -> tuple[int, int]:
+    """Where a release stands in the order releases ended in: newest sorts last."""
+    seq = (changes or {}).get("ended_seq", release.get("ended_seq")) or 0
+    return seq, release["id"]
+
+
+def _prune(plan: Plan, by_plugin: dict[str, list[dict[str, Any]]], installations: dict[str, Any]) -> None:
+    """Drop the retired and failed releases past what is kept, the ones that ended first."""
+    changes = {release_id: changed for release_id, changed, _bindings in plan.updates}
+    deleted = set(plan.deletes)
+    for plugin_id, existing in by_plugin.items():
+        if plugin_id not in installations:
+            continue
+        for state, keep in ((RETIRED, KEEP_RETIRED), (FAILED, KEEP_FAILED)):
+            held = [release for release in existing if release["id"] not in deleted
+                    and changes.get(release["id"], {}).get("state", release["state"]) == state]
+            for release in sorted(held, key=lambda item: _ended(item, changes.get(item["id"])), reverse=True)[keep:]:
+                plan.deletes.append(release["id"])
+                deleted.add(release["id"])
+
+
+# ---- database access ------------------------------------------------------------------------------------------
+
+
+def create_tables(bind) -> None:
+    """Create the release tables when missing, tolerating a second process creating them first."""
+    metadata.create_all(bind, checkfirst=True)
+
+
+def read_rows(connection, *, states: tuple[str, ...] | None = None, manifests: tuple[str, ...] | None = None,
+              plugin_id: str | None = None) -> list[dict[str, Any]]:
+    """The stored releases, oldest first, each with its bindings.
+
+    ``manifests`` names the states whose manifest text is loaded; the others come
+    without the key, which is what keeps a read of the retired and failed history
+    cheap.
+    """
+    columns = [column for column in releases_table.c if column.name != "manifest"]
+    wanted = manifests if manifests is not None else (ACTIVE, STAGED)
+    query = sa.select(*columns, sa.case(
+        (releases_table.c.state.in_(wanted), releases_table.c.manifest), else_=None).label("manifest"))
+    if states is not None:
+        query = query.where(releases_table.c.state.in_(states))
+    if plugin_id is not None:
+        query = query.where(releases_table.c.plugin_id == plugin_id)
+    rows = [dict(row._mapping) for row in connection.execute(query.order_by(releases_table.c.id))]
+    for row in rows:
+        row["supplied_by"] = {}
+        if row["state"] not in wanted:
+            row.pop("manifest", None)
+    if rows:
+        ids = [row["id"] for row in rows]
+        by_id = {row["id"]: row for row in rows}
+        for release_id, capability, supplier in connection.execute(
+                sa.select(bindings_table.c.release_id, bindings_table.c.capability, bindings_table.c.supplier_id)
+                .where(bindings_table.c.release_id.in_(ids))):
+            by_id[release_id]["supplied_by"][capability] = supplier
+    return rows
+
+
+def apply_plan(connection, plan: Plan) -> None:
+    """Run a plan inside the caller's transaction.
+
+    Releases that leave a slot state go first, so a promotion never meets the
+    release it replaces in the partial unique index.
+    """
+    if not plan:
+        return
+    if plan.deletes:
+        connection.execute(sa.delete(bindings_table).where(bindings_table.c.release_id.in_(plan.deletes)))
+        connection.execute(sa.delete(releases_table).where(releases_table.c.id.in_(plan.deletes)))
+
+    def vacates(changes: dict[str, Any]) -> bool:
+        return "state" in changes and changes["state"] not in SLOT_STATES
+
+    ordered = [item for item in plan.updates if vacates(item[1])] + [
+        item for item in plan.updates if not vacates(item[1])]
+    for release_id, changes, bindings in ordered:
+        if changes:
+            connection.execute(sa.update(releases_table).where(releases_table.c.id == release_id).values(**changes))
+        if bindings is not None:
+            _write_bindings(connection, release_id, bindings)
+    for values, bindings in plan.inserts:
+        result = connection.execute(sa.insert(releases_table).values(**values))
+        _write_bindings(connection, int(result.inserted_primary_key[0]), bindings)
+
+
+def _write_bindings(connection, release_id: int, bindings: dict[str, str]) -> None:
+    connection.execute(sa.delete(bindings_table).where(bindings_table.c.release_id == release_id))
+    if bindings:
+        connection.execute(sa.insert(bindings_table), [
+            {"release_id": release_id, "capability": capability, "supplier_id": supplier}
+            for capability, supplier in sorted(bindings.items())])
+
+
+def _next_seq(connection) -> int:
+    return (connection.execute(sa.select(sa.func.max(releases_table.c.ended_seq))).scalar() or 0) + 1
+
+
+def set_state(connection, release_id: int, target: str, *, error: str | None = None) -> bool:
+    """Move one release to ``target`` if its current state allows it. Returns whether a row changed.
+
+    Raises ``ReleaseTransitionError`` for a move the model forbids. A release that is no longer there answers False.
+    """
+    current = connection.execute(
+        sa.select(releases_table.c.plugin_id, releases_table.c.state).where(releases_table.c.id == release_id)).first()
+    if current is None:
+        return False
+    if current.state == target:
+        return False
+    if not can_move(current.state, target):
+        raise ReleaseTransitionError(f"a {current.state} release cannot become {target}")
+    values: dict[str, Any] = {"state": target}
+    if target == RETIRED:
+        values.update(retired_at=now_text(), ended_seq=_next_seq(connection))
+    if target == ACTIVE:
+        values["retired_at"] = None
+    if target == FAILED:
+        values.update(error=error, ended_seq=_next_seq(connection))
+    if target in SLOT_STATES:
+        # The slot is taken by whatever holds it now: it leaves first.
+        connection.execute(
+            sa.update(releases_table)
+            .where(releases_table.c.plugin_id == current.plugin_id, releases_table.c.state == target,
+                   releases_table.c.id != release_id)
+            .values(state=RETIRED, retired_at=now_text(), ended_seq=_next_seq(connection)))
+    connection.execute(sa.update(releases_table).where(releases_table.c.id == release_id).values(**values))
+    return True

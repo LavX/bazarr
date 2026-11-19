@@ -273,6 +273,7 @@ class HubProxyProvider(Provider):
                     "BAZARR_HOST_CALLS": json.dumps(sorted(host_calls)),
                 },
                 provider_id=self.provider_name,
+                release=getattr(self.__class__, "release_key", None),
                 before_start=self._verify_bundle_before_start,
                 host_calls=host_calls,
             )
@@ -449,6 +450,8 @@ def _make_provider_class(manifest, worker_client=None, installation=None):
         ),
         "manifest": manifest,
         "manifest_json": json.dumps(manifest.raw),
+        # The release this class serves, as its workers are keyed.
+        "release_key": getattr(manifest, "bundle_sha256", None),
     }
     if worker_client is not None:
         attrs["worker_client"] = worker_client
