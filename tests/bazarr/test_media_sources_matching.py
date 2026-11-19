@@ -664,3 +664,27 @@ def test_a_device_change_met_on_an_incomplete_walk_is_not_recorded_so_the_next_s
     # The second file still carries the old device number, and is found by its inode all the same.
     assert (result.moved, result.inserted, result.deleted) == (1, 0, 0)
     assert repository.get_roots(movies.library_id)[0].last_dev == str(os.stat(movies.root).st_dev)
+
+
+def test_history_and_blacklist_rows_of_a_deleted_item_keep_their_snapshots_with_no_item_link(movies):
+    from media_sources import repository
+
+    path = stamped_video(movies.root / "Gone.2001.mkv")
+    stamped_video(movies.root / "Kept.2002.mkv")
+    movies.scan()
+    item = movies.items()[str(path)]
+    repository.insert_history(movies.session, item_id=item.id, source_id=movies.source_id, item_kind="movie",
+                              item_title="Gone", source_name="Local", action=1, description="downloaded",
+                              video_path=str(path))
+    repository.insert_blacklist(movies.session, item_id=item.id, source_id=movies.source_id, item_kind="movie",
+                                video_path=str(path), item_title="Gone", source_name="Local", provider="alpha",
+                                subs_id="s1", language="en")
+    path.unlink()
+
+    assert movies.scan().deleted == 1
+
+    (history,) = movies.session.execute(sa.select(repository.History)).all()
+    (blacklisted,) = movies.session.execute(sa.select(repository.Blacklist)).all()
+    for row in (history, blacklisted):
+        assert (row.item_id, row.item_title, row.source_name, row.video_path) == (None, "Gone", "Local", str(path))
+        assert row.source_id == movies.source_id

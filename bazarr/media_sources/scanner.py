@@ -153,7 +153,7 @@ def scan_library(source, library, *, cancel=None, session=None) -> LibraryScan:
     else:
         group_for_dir = {row.group_key: row.id for row in groups.values()}
 
-    decisions = _decide(matching, rows, groups, plan, group_for_dir, grouped, follows_directories, complete)
+    decisions = _decide(matching, groups, plan, group_for_dir, grouped, follows_directories, complete)
     result.deferred = decisions.deferred
     group_for_dir.update(_create_groups(library, decisions, group_for_dir, groups, session))
     if cancel is not None:
@@ -266,7 +266,7 @@ def _resolve_groups(groups, matching, devices, dev_changed, session):
     return plan
 
 
-def _decide(matching, rows, groups, plan, group_for_dir, grouped, follows_directories, complete):
+def _decide(matching, groups, plan, group_for_dir, grouped, follows_directories, complete):
     """Turn the matching into writes. Nothing is deferred on a complete walk; on an incomplete one, anything that
     needs a group decision the walk cannot support, or a path a row that could not be deleted still holds, is
     left for a scan that can read the whole folder."""
