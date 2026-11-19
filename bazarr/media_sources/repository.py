@@ -23,13 +23,20 @@ SOURCE_KINDS = ('folder', 'jellyfin', 'emby')
 IDENTITY_SOURCES = ('filename', 'tmdb', 'media_server', 'user')
 IDENTITY_STATES = ('identified', 'parsed', 'ambiguous', 'unmatched')
 
-Sources = TableMediaSources.__table__
-Libraries = TableMediaSourceLibraries.__table__
-Roots = TableMediaSourceLibraryRoots.__table__
-Groups = TableSourceGroups.__table__
-Items = TableSourceItems.__table__
-History = TableSourceHistory.__table__
-Blacklist = TableSourceBlacklist.__table__
+def _table(model):
+    # Importing the API package imports this module, and several test files import it while ``app.database`` is
+    # replaced by a stub whose classes have no ``__table__``. Reading it must not be what fails the import; with
+    # the real models it is always there, and a query is the first thing that needs it.
+    return getattr(model, '__table__', None)
+
+
+Sources = _table(TableMediaSources)
+Libraries = _table(TableMediaSourceLibraries)
+Roots = _table(TableMediaSourceLibraryRoots)
+Groups = _table(TableSourceGroups)
+Items = _table(TableSourceItems)
+History = _table(TableSourceHistory)
+Blacklist = _table(TableSourceBlacklist)
 
 
 def _target(target):

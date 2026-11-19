@@ -173,3 +173,22 @@ def test_the_arr_tables_are_not_touched_by_a_source(client, arr_library, tmp_pat
     before = table_counts(arr_library, ARR_AND_SPORTS_TABLES)
     _add_a_source_with_everything(arr_library, tmp_path, monkeypatch)
     assert table_counts(arr_library, ARR_AND_SPORTS_TABLES) == before
+
+
+def test_the_repository_imports_while_the_database_module_is_a_stub(monkeypatch):
+    """Importing the API package imports the repository, and some test files do that with ``app.database``
+    replaced by a stub whose classes carry no ``__table__``."""
+    import importlib
+    import types
+
+    class Stub(types.ModuleType):
+        def __getattr__(self, name):
+            if name.startswith("__"):
+                raise AttributeError(name)
+            return type(name, (), {})
+
+    for name in ("media_sources.repository", "media_sources.db"):
+        monkeypatch.delitem(sys.modules, name, raising=False)
+    monkeypatch.setitem(sys.modules, "app.database", Stub("app.database"))
+    repository = importlib.import_module("media_sources.repository")
+    assert repository.Items is None and repository.ITEM_KINDS
