@@ -767,6 +767,30 @@ def test_a_refresh_stops_a_running_revoked_provider_at_once_and_asks_for_no_rest
     assert "It will not start. " in row["blocked_reason"]
 
 
+def test_a_refresh_whose_live_stop_could_not_run_asks_for_the_restart_instead(world, monkeypatch):
+    from provider_hub import service
+    from provider_hub.state import mutate_state
+
+    sub = provider_manifest_v1("runningsub", "1.0.0")
+    row = {"provider_id": "runningsub", "name": "Runningsub", "active_version": "1.0.0", "state": "active",
+           "pending_restart": False, "manifest": sub, "enabled": True, "trusted": True,
+           "source_id": "official", "source_bound": True}
+    mutate_state(lambda state: state["installations"].update({"runningsub": row}))
+    _publish(world, revocations=[{"id": "runningsub"}], providers=[sub])
+
+    def broken():
+        raise RuntimeError("the write failed")
+
+    monkeypatch.setattr(service, "enforce_revocations_live", broken)
+
+    _refresh()
+
+    row = _rows()["runningsub"]
+    # The refresh worded it as stopped and raised no cue before the stop; the stop could not run, so it still runs.
+    assert row["pending_restart"] is True and row["revoked_restart"] is True
+    assert "Restart Bazarr+ to stop it" in row["revoked_reason"] and "blocked" not in row
+
+
 def test_a_verified_catalog_that_revokes_an_offered_update_still_offers_the_next_one(world):
     from provider_hub import service
 

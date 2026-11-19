@@ -177,6 +177,7 @@ def apply_settings_overlay(provider_configs: dict[str, dict[str, Any]], settings
     The two hub modules are read through their module attributes at call time,
     because the tests of the pool overlay patch them there.
     """
+    from provider_hub import registry
     from provider_hub import service as hub_service
     from provider_hub import state as hub_state
     from provider_hub.capabilities import deliver
@@ -193,6 +194,9 @@ def apply_settings_overlay(provider_configs: dict[str, dict[str, Any]], settings
         # a restart, so a pending update must not strip the section overlay.
         for installation in hub_state.running_installations():
             if installation.provider_id in blocked:
+                continue
+            if not registry.is_plugin_class(installation.provider_id):
+                # A built-in holds the id: it is built from its own settings, not from this plugin's.
                 continue
             manifest = installation.manifest
             schema = manifest.get("config_schema") if isinstance(manifest, dict) else {}
@@ -307,6 +311,9 @@ class SubtitleProviderKind(Kind):
             # First: a pool that builds an instance from here on finds no class, and the built-in a plugin had
             # replaced is registered again in the same step.
             registry.unregister_provider_class(plugin_id)
+            # The pools merge settings into what they hold, so what they hold for the id is dropped: the built-in
+            # that may take the id back is built from its own settings, never from the plugin's.
+            registry.forget_pool_configs(plugin_id)
         try:
             from compat.service import reset_compat_pool
 

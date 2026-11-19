@@ -29,6 +29,7 @@ import { ProviderStatusBadge } from "@/components/hub/StatusBadge";
 import { TrustBadge } from "@/components/hub/TrustBadge";
 import {
   isAwaitingRestart,
+  isRemoving,
   parseManifest,
   usesAntiCaptcha,
   usesFlaresolverr,
@@ -83,11 +84,6 @@ type CtaState =
 
 function isPendingRemoval(installed: ProviderHubInstallation | null) {
   return installed?.needs_restart === true && installed.state === "removed";
-}
-
-/** Removed while Bazarr+ runs: no restart is waited for, the row goes when the calls it holds are done. */
-function isRemoving(installed: ProviderHubInstallation | null) {
-  return installed?.needs_restart !== true && installed?.state === "removed";
 }
 
 function isPendingInstall(installed: ProviderHubInstallation | null) {
@@ -199,7 +195,7 @@ export const CatalogCard: FunctionComponent<CatalogCardProps> = ({
         );
       case "removing":
         return (
-          <Tooltip label="This plugin is being removed. It finishes when the calls it is running end.">
+          <Tooltip label="This plugin is being removed. It goes when the calls it is running end, or after a few minutes.">
             <span className={styles.hubCardPendingText}>Removing</span>
           </Tooltip>
         );

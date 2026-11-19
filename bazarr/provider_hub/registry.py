@@ -648,6 +648,33 @@ def is_withdrawn(provider_id: str) -> bool:
         return provider_id in _WITHDRAWN_PROVIDER_IDS and provider_registry[provider_id] is None
 
 
+def forget_pool_configs(provider_id: str) -> int:
+    """Make every pool that is alive forget the configuration it holds for ``provider_id``. Used when a plugin
+    leaves the registry: the id may name a built-in again, and that class is built from its own settings only.
+    Returns how many pools held something."""
+    try:
+        from subliminal_patch.core import live_provider_pools
+    except ImportError:
+        return 0
+    forgot = 0
+    for pool in live_provider_pools():
+        try:
+            if provider_id in pool.provider_configs:
+                forgot += 1
+            pool.forget_provider_config(provider_id)
+        except Exception:
+            logger.exception("Provider Hub: could not clear what a pool holds for %s", provider_id)
+    return forgot
+
+
+def is_plugin_class(provider_id: str) -> bool:
+    """Whether the provider registry holds no class under the id, or holds a plugin's. A plugin's configuration is
+    handed only to a plugin's class: when a built-in holds the id (the plugin was detached, or its registration was
+    refused) it is built from its own settings."""
+    current = provider_registry[provider_id]
+    return current is None or issubclass(current, HubProxyProvider) or bool(getattr(current, "hub_proxy", False))
+
+
 def revoke_host_calls_of(provider_id: str) -> int:
     """Take the host capabilities back from every running worker of one plugin, for the calls that follow.
 

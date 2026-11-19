@@ -131,7 +131,7 @@ def _keep_the_session_generation():
 
 
 @pytest.fixture(autouse=True)
-def _finish_detached_releases():
+def _finish_detached_releases(monkeypatch):
     """A release that is detached while a test runs is finished on threads of its own (its row deleted once its
     calls are done). They end before the next test, so none of them writes into another test's state."""
     yield
@@ -139,8 +139,9 @@ def _finish_detached_releases():
 
     detach = sys.modules.get("provider_hub.detach")
     if detach is not None:
-        # A release whose detach never ends is a test that leaked a thread: it fails here, and is not left to write
-        # into the state of whatever test runs next.
+        # A release whose detach never ends is a test that leaked a thread: it fails here. (The fixture asks for
+        # ``monkeypatch`` so that this runs before the test's own patches are undone: a thread that ends late
+        # finishes against the state the test set up. The list is cleared so the next test does not wait on it.)
         finished = detach.wait_idle(30)
         if not finished:
             with detach._PENDING_LOCK:

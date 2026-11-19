@@ -1905,6 +1905,10 @@ def refresh_catalog(source_ids: set[str] | None = None, checkpoint=None) -> dict
             enforce_revocations_live()
         except Exception:
             logging.getLogger(__name__).exception("Provider Hub: could not stop the releases the refresh revoked")
+            try:
+                ask_restart_for_unstopped()
+            except Exception:
+                logging.getLogger(__name__).exception("Provider Hub: could not ask for the restart that stops them")
         if result["accepted_feeds"]:
             catalog_feed.write_counter_file(result["accepted_feeds"])
         if result["revocation_lists"]:
@@ -2603,9 +2607,15 @@ def runtime_provider_configs() -> dict[str, dict[str, Any]]:
         if not installation.get("active_version"):
             continue
         # A release that was held back or detached live runs nothing, so what it was configured with is not handed
-        # to the class that took its id back (a built-in a plugin had replaced).
+        # to the class that took its id back (a built-in a plugin had replaced). The registry is what says whose
+        # class holds the id: a row that still names a release (a revocation lifted without a restart, an install
+        # over a removal) is not enough.
         if installation.get("blocked") or (
                 installation.get("state") == "removed" and not installation.get("pending_restart")):
+            continue
+        from .registry import is_plugin_class
+
+        if not is_plugin_class(provider_id):
             continue
         # Fail closed: a stored credential that will not decrypt is left
         # out of the worker's config (never sent as the credential), and
@@ -4574,12 +4584,14 @@ def _mark_revoked_installations(installations: dict[str, Any], revocations: tupl
 
 
 def _apply_unmet_needs(installations: dict[str, Any], revocations: tuple[revocation.Revocation, ...] = (),
-                       *, live: bool = False) -> bool:
+                       *, live: bool = False, again: frozenset[str] = frozenset()) -> bool:
     """Hold back each plugin that must not run, and release the others. This is the boot check.
 
     With ``live`` it is the same check made while Bazarr+ runs, for the kinds that stop a release live (see
     ``enforce_revocations_live``): it only adds holds, and only to rows of those kinds. It never releases one,
     since a held release comes back only after a restart, and it leaves every other kind as the refresh marked it.
+    A row that is already held back (by the boot, or by an earlier live stop) is left as it is, with the words it
+    has, unless it is one whose stop failed and is tried again (``again``).
 
     A plugin is held back when the official catalog revoked its active release, or when that release relies on
     a plugin that is not running. A held-back plugin carries the reason. A revoked one always shows it as its
@@ -4593,13 +4605,14 @@ def _apply_unmet_needs(installations: dict[str, Any], revocations: tuple[revocat
         # The text of a release that is being stopped, not of one that will not start.
         revoked = {plugin_id: reason for plugin_id, reason in _revoked_reasons(
             installations, revocations, boot=False, stopped=True).items()
-            if _detaches_live(installations.get(plugin_id))}
+            if _detaches_live(installations.get(plugin_id))
+            and (plugin_id in again or not installations[plugin_id].get("blocked"))}
     else:
         revoked = _revoked_reasons(installations, revocations, boot=True)
     for plugin_id, row in installations.items():
         if not isinstance(row, dict):
             continue
-        if live and str(plugin_id) not in revoked:
+        if live and str(plugin_id) not in revoked and str(plugin_id) not in again:
             continue
         if str(plugin_id) in revoked:
             if not row.get("revoked"):
@@ -4695,7 +4708,7 @@ def enforce_revocations_live() -> list[str]:
         # A stop that failed last time is tried again: the row is judged as one still to be stopped.
         retry = {str(pid) for pid, row in installations.items() if isinstance(row, dict) and row.pop(
             "detach_failed", None)}
-        _apply_unmet_needs(installations, _revocations(state), live=True)
+        _apply_unmet_needs(installations, _revocations(state), live=True, again=frozenset(retry))
         return [(str(pid), kind_of(row), (row.get("manifest") or {}).get("bundle_sha256"))
                 for pid, row in installations.items()
                 if isinstance(row, dict) and row.get("blocked") and (str(pid) not in before or str(pid) in retry)
@@ -4718,6 +4731,21 @@ def enforce_revocations_live() -> list[str]:
     if failed:
         _ask_restart_to_stop(failed)
     return stopped
+
+
+def ask_restart_for_unstopped() -> list[str]:
+    """The live stop could not run at all (the write that holds the releases back failed): each running release the
+    list revokes that is of a kind that stops live was worded as stopped and given no restart cue, so it is given the
+    cue and the words of a release that still runs. Returns their ids."""
+    state = load_state()
+    revocations = _revocations(state)
+    ids = [str(plugin_id) for plugin_id, row in (state.get("installations") or {}).items()
+           if isinstance(row, dict) and row.get("state") == "active" and row.get("active_version")
+           and not row.get("blocked") and _detaches_live(row)
+           and revocation.lookup(revocations, plugin_id, row.get("active_version")) is not None]
+    if ids:
+        _ask_restart_to_stop(ids)
+    return ids
 
 
 def _ask_restart_to_stop(plugin_ids: list[str]) -> None:
@@ -4985,8 +5013,8 @@ def _drain_replaced_release(provider_id: str, kind_name: str, previous_manifest:
     if not detach.detaches_live(kind_name):
         return None
     release_key = previous_manifest.get("bundle_sha256") if isinstance(previous_manifest, dict) else None
-    workers = detach.snapshot_workers(provider_id, release_key)
     try:
+        workers = detach.snapshot_workers(provider_id, release_key)
         drains = detach.detach(provider_id, kind_name, withdraw=False, release_key=release_key)
     except Exception:
         logging.getLogger(__name__).exception(
@@ -5531,8 +5559,8 @@ def _detach_removed(provider_id: str, kind_name: str) -> bool:
     """A removal is saved and the release is still running: take its consumers away now, and delete the row once
     the calls it holds are done. False when that could not be done, and then the row asks for the restart that
     finishes the removal, as it did before releases could be stopped live."""
-    workers = detach.snapshot_workers(provider_id)
     try:
+        workers = detach.snapshot_workers(provider_id)
         drains = detach.detach(provider_id, kind_name, withdraw=True, grace=detach.REMOVE_GRACE_SECONDS)
     except Exception:
         logging.getLogger(__name__).exception(

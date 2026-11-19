@@ -375,13 +375,14 @@ class PoolWorkers:
 
         began = time.monotonic()
         deadline = began + (self.DETACH_CEILING_SECONDS if grace is None else max(0.0, grace))
-        cut = False
+        cut = False  # set once a stop has worked; the loop goes on until the worker is gone
         pause = 0.1
         failed = False
         while not self.idle(plugin_id):
             stop = False
-            if not cut and time.monotonic() >= deadline:
-                cut = stop = True
+            if time.monotonic() >= deadline and not cut:
+                # Tried on every look from here on until a stop has worked: a cut that failed is not given up on.
+                stop = True
             else:
                 # A worker the pool started for a job that arrived as the detach ran was not the one retired: once it
                 # holds no job it is stopped here, since nothing is sent to it again.
@@ -390,6 +391,7 @@ class PoolWorkers:
             if stop:
                 try:
                     self._pool.stop(key)
+                    cut = True
                 except Exception:
                     if not failed:
                         failed = True

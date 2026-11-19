@@ -929,6 +929,16 @@ class SZProviderPool(ProviderPool):
             logger.error('Throttle announce failed for provider %r while naming the %s it recorded',
                          name, type(error).__name__)
 
+    def forget_provider_config(self, name):
+        """Drop what this pool holds as the configuration of a provider.
+
+        The configs are merged into, never replaced, so a provider whose id was taken over by another class (a
+        plugin detached while Bazarr+ runs gives its id back to the built-in it replaced) would otherwise keep the
+        keys of the class that left. The next ``update`` brings the settings the new class is given, and nothing else.
+        """
+        with self._store_lock:
+            self.provider_configs.pop(name, None)
+
     def retire_provider(self, name):
         """Terminate an initialized provider without throttling its name.
 

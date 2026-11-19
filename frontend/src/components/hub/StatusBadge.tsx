@@ -106,7 +106,7 @@ export const ProviderStatusBadge: FunctionComponent<{
         label="Removing"
         icon={meta.icon}
         variant="dot"
-        tooltip="This plugin is being removed. It finishes when the calls it is running end."
+        tooltip="This plugin is being removed. It goes when the calls it is running end, or after a few minutes."
       />
     );
   }

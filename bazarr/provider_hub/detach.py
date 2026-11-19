@@ -72,8 +72,9 @@ def snapshot_workers(plugin_id: str, release_key: str | None = None) -> list:
 
 
 def stop_stragglers(clients: Iterable, *, cut: bool = False) -> int:
-    """Stop the workers of a snapshot that no pool instance reached (one a build was still starting, a connection
-    test's). With ``cut`` they are killed at once, otherwise asked to shut down. Returns how many."""
+    """Stop the workers of a snapshot that no pool instance reached (one a build was still starting). With ``cut``
+    they are killed at once, otherwise asked to shut down. Returns how many. (A connection test's worker is not
+    among them: it carries no provider id, and ends with its own request.)"""
     stopped = 0
     for client in clients:
         try:

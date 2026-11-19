@@ -271,3 +271,35 @@ describe("the jobs that lock a card", () => {
     ).toBe("active");
   });
 });
+
+describe("a plugin that is being removed", () => {
+  const removing = { ...base, state: "removed", needs_restart: false };
+  // The Installed tab leaves a removed row out, but the marketplace card of the same plugin carries it.
+  const rowOf = (item: PluginInstallation, update: string | null = null) => ({
+    ...rowFor(base),
+    installation: item,
+    update,
+  });
+
+  it("says Removing before anything else it could say, whatever is on offer", () => {
+    for (const update of [null, "9.9.9"]) {
+      expect(pluginStatus(rowOf(removing, update), openJobs([]))?.key).toBe(
+        "removing",
+      );
+    }
+    // A switched-off plugin, a revoked one and one with a repair running are being removed all the same.
+    for (const item of [
+      { ...removing, enabled: false },
+      { ...removing, revoked: true, revoked_reason: "Revoked." },
+    ]) {
+      expect(pluginStatus(rowOf(item), openJobs([job("repair")]))?.key).toBe(
+        "removing",
+      );
+    }
+  });
+
+  it("is not what a removal that waits for a restart says", () => {
+    const staged = { ...base, state: "removed", needs_restart: true };
+    expect(pluginStatus(rowOf(staged), openJobs([]))?.key).not.toBe("removing");
+  });
+});

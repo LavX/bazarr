@@ -136,6 +136,10 @@ def world(tmp_path, monkeypatch):
             return SZProviderPool(providers=list(names or [PLUGIN]), provider_configs={})
 
     yield World()
+    # Before the registry and the settings are put back: a detach that ends late finishes against what the test set up.
+    from provider_hub import detach
+
+    assert detach.wait_idle(WAIT)
     provider_registry.providers.clear()
     provider_registry.providers.update(before)
     registry._REGISTERED_PROVIDER_HUB_IDS.clear()
@@ -995,3 +999,218 @@ def test_a_request_that_reaches_a_cancelled_client_does_not_start_the_worker_aga
     with pytest.raises(worker.WorkerError):
         client.request("search", {})
     assert spawned == []
+
+
+# ---- a built-in that takes its id back --------------------------------------------------------------------------
+
+
+def _built_in_class(name):
+    """A built-in provider: its constructor takes no settings, as most built-ins that have a catalog plugin do not take
+    the plugin's keys."""
+    from subzero.language import Language
+    from subliminal.video import Episode, Movie
+
+    class BuiltIn:
+        provider_name = name
+        hub_proxy = False
+        languages = {Language("eng")}
+        video_types = (Episode, Movie)
+
+        def __init__(self):
+            pass
+
+        def initialize(self):
+            pass
+
+        def terminate(self):
+            pass
+
+        @classmethod
+        def check(cls, video):
+            return True
+
+        def list_subtitles(self, video, languages):
+            return []
+
+    return BuiltIn
+
+
+def _plugin_over_built_in(world, monkeypatch, plugin_id=BUILT_IN):
+    """A built-in class that a plugin of the same id replaced in the registry, as the boot leaves it."""
+    from provider_hub import registry
+    from provider_hub.registry import HubProxyProvider
+    from provider_hub.state import active_installations
+    from subzero.language import Language
+
+    built_in = _built_in_class(plugin_id)
+    world.registry.register(plugin_id, built_in)
+    world.install(plugin_id, config={"request_delay_ms": 5})
+
+    class Plugin(HubProxyProvider):
+        provider_name = plugin_id
+        languages = {Language("eng")}
+
+        def list_subtitles(self, video, languages):
+            return []
+
+    monkeypatch.setattr(registry, "_make_provider_class", lambda manifest, installation=None: Plugin)
+    assert registry.register_active_provider_classes(active_installations()) == [plugin_id]
+    return built_in, Plugin
+
+
+def test_a_long_lived_pool_rebuilds_the_built_in_that_took_its_id_back_without_the_plugins_configuration(
+        world, monkeypatch):
+    from provider_hub import detach, service
+
+    built_in, plugin = _plugin_over_built_in(world, monkeypatch)
+    # The pool is long lived: it was built with the plugin's configuration under the id, and keeps merging into it.
+    pool = world.pool(BUILT_IN)
+    pool.provider_configs[BUILT_IN] = {"request_delay_ms": 5}
+    assert type(pool[BUILT_IN]) is plugin
+
+    service.remove_installation(BUILT_IN)
+    assert detach.wait_idle(WAIT)
+    assert world.registry[BUILT_IN] is built_in
+    # What the settings give the built-in now: nothing of the plugin's.
+    pool.update([BUILT_IN], {BUILT_IN: {}}, [], {})
+
+    result = _search(pool, BUILT_IN)
+
+    assert (result.status, result.reason) == ("empty", None)
+    assert type(pool.initialized_providers[BUILT_IN]) is built_in
+
+
+def test_a_long_lived_pool_that_gets_no_settings_for_the_built_in_builds_it_with_none(world, monkeypatch):
+    from provider_hub import detach, service
+
+    built_in, _ = _plugin_over_built_in(world, monkeypatch)
+    pool = world.pool(BUILT_IN)
+    pool.provider_configs[BUILT_IN] = {"request_delay_ms": 5, "api_key": "k"}
+    pool[BUILT_IN]
+
+    service.remove_installation(BUILT_IN)
+    assert detach.wait_idle(WAIT)
+    pool.update([BUILT_IN], {}, [], {})  # no static entry for the id: nothing arrives for it
+
+    assert _search(pool, BUILT_IN).status == "empty"
+    assert BUILT_IN not in pool.provider_configs or pool.provider_configs[BUILT_IN] == {}
+
+
+@pytest.mark.parametrize("marks", [
+    {},
+    {"blocked": True},
+    {"state": "removed", "pending_restart": False},
+    # A revocation lifted without a restart: unblocked, restart pending, the release still not running.
+    {"pending_restart": True},
+    # Installed again over a row that was being removed: staged, with the old release still named.
+    {"state": "staged", "pending_restart": True, "staged_version": "1.1.0"},
+])
+def test_no_path_hands_the_plugins_configuration_to_a_built_in_that_holds_the_id(world, marks):
+    from provider_hub.kinds.subtitle_provider import apply_settings_overlay
+    from provider_hub.service import runtime_provider_configs
+
+    world.registry.register(BUILT_IN, _built_in_class(BUILT_IN))
+    world.install(BUILT_IN, config={"request_delay_ms": 5}, **marks)
+
+    assert BUILT_IN not in runtime_provider_configs()
+    configs = {}
+    apply_settings_overlay(configs, {}, set(), set())
+    assert BUILT_IN not in configs
+
+
+def test_the_plugins_configuration_is_handed_to_the_plugin_that_holds_the_id(world, monkeypatch):
+    from provider_hub.kinds.subtitle_provider import apply_settings_overlay
+    from provider_hub.service import runtime_provider_configs
+
+    _plugin_over_built_in(world, monkeypatch)
+
+    assert runtime_provider_configs()[BUILT_IN]["request_delay_ms"] == 5
+    configs = {}
+    apply_settings_overlay(configs, {}, set(), set())
+    assert BUILT_IN in configs
+
+
+# ---- what a refresh leaves alone, and what a retry clears -------------------------------------------------------
+
+
+def test_a_refresh_leaves_the_words_the_boot_wrote_for_a_release_it_held_back(revoked):
+    from provider_hub import detach, service
+
+    revoked.install()
+    revoked.run()
+    _mark_revoked(revoked)
+    # A boot held the release back before this process ran: it never started here.
+    service.enforce_activation_needs()
+    before = revoked.row()
+    assert "It will not start." in before["blocked_reason"]
+    words = (before["revoked_reason"], before["blocked_reason"], before["last_error"])
+
+    _mark_revoked(revoked)
+    assert service.enforce_revocations_live() == []
+
+    after = revoked.row()
+    assert (after["revoked_reason"], after["blocked_reason"], after["last_error"]) == words
+    assert "revoked_stopped" not in after and detach.wait_idle(WAIT)
+
+
+def test_a_dependent_whose_stop_failed_and_then_worked_loses_its_restart_cue(revoked, monkeypatch):
+    from provider_hub import detach, registry, service
+
+    dependent = "dependenthub"
+    revoked.install()
+    revoked.install(dependent)
+    revoked.run()
+    revoked.run(dependent)
+    pool = revoked.pool(PLUGIN, dependent)
+    _search(pool), _search(pool, dependent)
+    monkeypatch.setattr("provider_hub.closure.unmet_needs",
+                        lambda installations: {dependent: ["thing.v1"]} if installations[PLUGIN].get("revoked") else {})
+    failing = {"on": True}
+    real = registry.retire_provider_instances
+
+    def retire(plugin_id, grace=None):
+        if failing["on"] and plugin_id == dependent:
+            raise registry.RetirementIncomplete("a pool would not let go")
+        return real(plugin_id, grace)
+
+    monkeypatch.setattr(registry, "retire_provider_instances", retire)
+    _mark_revoked(revoked)
+    assert service.enforce_revocations_live() == [PLUGIN]
+    assert revoked.row(dependent)["pending_restart"] is True and revoked.row(dependent)["detach_failed"] is True
+
+    failing["on"] = False
+    _mark_revoked(revoked)
+    assert service.enforce_revocations_live() == [dependent]
+
+    assert detach.wait_idle(WAIT)
+    row = revoked.row(dependent)
+    assert row["pending_restart"] is False and "revoked_restart" not in row and "detach_failed" not in row
+
+
+def test_a_refresh_that_cannot_run_the_live_stop_asks_for_the_restart(revoked, monkeypatch):
+    from provider_hub import service
+
+    revoked.install()
+    revoked.run()
+    _mark_revoked(revoked)
+    assert revoked.row()["pending_restart"] is False  # the words say stopped, and the stop is still to come
+
+    service.ask_restart_for_unstopped()
+
+    row = revoked.row()
+    assert row["pending_restart"] is True and row["detach_failed"] is True
+    assert "Restart Bazarr+ to stop it" in row["revoked_reason"]
+
+
+def test_the_pools_of_every_kind_forget_the_configuration_of_a_provider_that_left(world):
+    from provider_hub.registry import forget_pool_configs
+    from subliminal_patch.core import SZAsyncProviderPool
+
+    world.run()
+    plain = world.pool()
+    plain.provider_configs[PLUGIN] = {"request_delay_ms": 5}
+    asynchronous = SZAsyncProviderPool(providers=[PLUGIN], provider_configs={PLUGIN: {"request_delay_ms": 5}})
+
+    assert forget_pool_configs(PLUGIN) >= 2
+
+    assert PLUGIN not in plain.provider_configs and PLUGIN not in asynchronous.provider_configs

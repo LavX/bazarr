@@ -218,3 +218,28 @@ def test_a_worker_that_cannot_be_stopped_is_reported_once_and_looked_at_less_oft
 
     assert len([record for record in caplog.records if "Could not stop the worker" in record.getMessage()]) == 1
     assert waits[0] == 0.1 and waits[-1] == 2.0 and waits == sorted(waits)
+
+
+def test_a_cut_that_failed_is_tried_again_until_the_worker_is_gone(monkeypatch):
+    stops = []
+
+    class Pool:
+        def stop(self, key):
+            stops.append(key)
+            if len(stops) < 3:
+                raise RuntimeError("would not stop")
+
+    port = workers.PoolWorkers(Pool(), lambda plugin_id: None)
+    state = {"idle": False}
+    monkeypatch.setattr(port, "idle", lambda plugin_id: state["idle"])
+    monkeypatch.setattr(port, "_worker_status", lambda plugin_id: {"state": "busy", "in_flight": 1})
+
+    def sleep(seconds):
+        # The worker is gone once a stop has worked.
+        state["idle"] = len(stops) >= 3
+
+    monkeypatch.setattr(time, "sleep", sleep)
+
+    port._finish_detach(PLUGIN, PLUGIN, 0.0)
+
+    assert stops == [PLUGIN] * 3

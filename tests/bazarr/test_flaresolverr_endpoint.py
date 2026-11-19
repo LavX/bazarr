@@ -135,6 +135,9 @@ class TestFill:
         from subliminal_patch.extensions import provider_registry
 
         class Provider:
+            # The class registered under the id stands for the plugin's proxy.
+            hub_proxy = True
+
             def __init__(self, **config):
                 self.config = config
 
