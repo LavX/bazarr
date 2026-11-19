@@ -124,6 +124,18 @@ describe("the status badge precedence", () => {
     expect(attentionCause(base)).toBeNull();
   });
 
+  it("says a revoked release was stopped, not that a restart will stop it, when the server gave no words", () => {
+    const text = attentionCause({
+      ...base,
+      revoked: true,
+      revoked_reason: null,
+      blocked_reason: null,
+      last_error: null,
+    });
+    expect(text).toContain("was stopped");
+    expect(text).not.toContain("Restart");
+  });
+
   it("says a revoked release needs attention, switched on or off", () => {
     const revoked = {
       ...base,
