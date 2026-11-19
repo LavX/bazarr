@@ -133,17 +133,13 @@ describe("a schema 2 provider on its Subtitle Hub card", () => {
     show(schemaTwo());
 
     await waitFor(() =>
-      expect(toggle()).toHaveTextContent(
-        "2 permissions (1 enforced, 1 declared only)",
-      ),
+      expect(toggle()).toHaveTextContent("2 permissions (1 enforced)"),
     );
   });
 
   it("opens the permissions with their marks, the destinations, the capabilities and the source", async () => {
     show(schemaTwo());
-    await waitFor(() =>
-      expect(toggle()).toHaveTextContent("1 enforced, 1 declared only"),
-    );
+    await waitFor(() => expect(toggle()).toHaveTextContent("(1 enforced)"));
 
     const region = await open();
 
@@ -170,7 +166,7 @@ describe("a schema 2 provider on its Subtitle Hub card", () => {
       within(region).getByRole("group", { name: "Capabilities" }),
     );
     const [needs, supplies] = capabilities.getAllByRole("listitem");
-    expect(needs).toHaveTextContent("NeedsFlareSolverrflaresolverr.v1");
+    expect(needs).toHaveTextContent("NeedsFlareSolverr flaresolverr.v1");
     expect(supplies).toHaveTextContent("Suppliesrelay.search.v1");
 
     const origin = within(

@@ -2,6 +2,7 @@
 
 .root {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 8px;
   min-width: 0;
 }
@@ -44,6 +45,11 @@
   flex: 1 1 auto;
   min-width: 0;
   overflow-wrap: anywhere;
+}
+
+/* A phrase wraps as a whole, so the line breaks between facts and never inside one. */
+.phrase {
+  white-space: nowrap;
 }
 
 .lead {
@@ -110,16 +116,15 @@
 }
 
 .capabilityRow {
-  display: flex;
-  flex-wrap: wrap;
+  display: grid;
+  grid-template-columns: 4.5rem minmax(0, 1fr);
   align-items: baseline;
-  gap: 2px 8px;
+  gap: 0 8px;
   min-width: 0;
   font-size: 13px;
   color: var(--bz-text-primary);
 }
 
 .capabilityRole {
-  min-width: 4.5rem;
   color: var(--bz-text-secondary);
 }

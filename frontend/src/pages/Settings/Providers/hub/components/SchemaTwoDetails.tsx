@@ -1,4 +1,4 @@
-import { FunctionComponent, ReactNode, useState } from "react";
+import { Fragment, FunctionComponent, ReactNode, useState } from "react";
 import { useId } from "@mantine/hooks";
 import {
   faChevronDown,
@@ -95,7 +95,7 @@ export const SignatureBadge: FunctionComponent<{
 const count = (n: number, one: string, many = `${one}s`) =>
   `${n} ${n === 1 ? one : many}`;
 
-/** "declared only" when this host confines none of them, "enforced" when it confines all, the split otherwise. */
+/** "declared only" when this host confines none of them, "enforced" when it confines all, the count of enforced ones otherwise. */
 function markSummary(permissions: PluginPermission[]): string {
   const enforced = permissions.filter(
     (item) => item.mark === "enforced",
@@ -106,7 +106,7 @@ function markSummary(permissions: PluginPermission[]): string {
   if (enforced === permissions.length) {
     return "enforced";
   }
-  return `${enforced} enforced, ${permissions.length - enforced} declared only`;
+  return `${enforced} enforced`;
 }
 
 interface SchemaTwoDetailsProps {
@@ -160,7 +160,7 @@ export const SchemaTwoDetails: FunctionComponent<SchemaTwoDetailsProps> = ({
     development: (entry as PluginCatalogEntry).development_source === true,
   };
 
-  const summary = [
+  const phrases = [
     permissions.length === 0
       ? "no permissions"
       : `${count(permissions.length, "permission")} (${markSummary(permissions)})`,
@@ -175,9 +175,7 @@ export const SchemaTwoDetails: FunctionComponent<SchemaTwoDetailsProps> = ({
     facts.provides.length > 0
       ? `supplies ${count(facts.provides.length, "capability", "capabilities")}`
       : null,
-  ]
-    .filter(Boolean)
-    .join(" · ");
+  ].filter((item): item is string => Boolean(item));
 
   const capabilityRows: Array<[string, string]> = [
     ...facts.requires.map((id): [string, string] => ["Needs", id]),
@@ -209,7 +207,13 @@ export const SchemaTwoDetails: FunctionComponent<SchemaTwoDetailsProps> = ({
           aria-hidden="true"
         />
         <span className={styles.toggleText}>
-          <span className={styles.lead}>Declares</span> {summary}
+          <span className={styles.lead}>Declares</span>{" "}
+          {phrases.map((phrase, index) => (
+            <Fragment key={phrase}>
+              {index > 0 && " \u00b7 "}
+              <span className={styles.phrase}>{phrase}</span>
+            </Fragment>
+          ))}
         </span>
         <FontAwesomeIcon
           icon={open ? faChevronUp : faChevronDown}
@@ -282,10 +286,15 @@ export const SchemaTwoDetails: FunctionComponent<SchemaTwoDetailsProps> = ({
                 {capabilityRows.map(([role, id]) => (
                   <li key={`${role}-${id}`} className={styles.capabilityRow}>
                     <span className={styles.capabilityRole}>{role}</span>
-                    <span>{capabilityLabel(id)}</span>
-                    {capabilityLabel(id) !== id && (
-                      <span className={consent.code}>{id}</span>
-                    )}
+                    <span>
+                      {capabilityLabel(id)}
+                      {capabilityLabel(id) !== id && (
+                        <>
+                          {" "}
+                          <span className={consent.code}>{id}</span>
+                        </>
+                      )}
+                    </span>
                   </li>
                 ))}
               </ul>
