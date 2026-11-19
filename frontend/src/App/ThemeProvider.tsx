@@ -236,8 +236,9 @@ const themeProvider = createTheme({
 // display: none on the dropdown as soon as floating-ui resolves its position.
 // Whether a test sees an open menu then depends on whether its query lands
 // before that resolve, which a loaded CI runner loses. The check is for real
-// scrolling, so the test environment turns it off and nothing else. Tooltip
-// has its own default and does not read this entry.
+// scrolling, so the test environment turns it off and nothing else. In Mantine
+// 9.7.4 Tooltip is built on its own floating-ui hook with its own hideDetached
+// default, not on Popover, so this entry does not reach it.
 export const createAppTheme = (testEnv: boolean) => {
   const existing = themeProvider.components?.Popover;
   return createTheme({

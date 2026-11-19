@@ -197,9 +197,9 @@ describe("SubtitleToolsMenu modes", () => {
     return user;
   }
 
-  // The dropdown can already be closing by the time the assertions run, so
-  // items are looked up whether or not they are still visible: what is
-  // checked is what the menu rendered, enabled or not.
+  // Items are looked up with hidden: true so they are found whether or not
+  // the dropdown is currently visible: what is checked is what the menu
+  // rendered, enabled or not.
   const item = (name: string) =>
     screen.getByRole("menuitem", { name, hidden: true });
   const noItem = (name: string) =>

@@ -5,9 +5,8 @@
  * reason instead of letting the click fail invisibly.
  *
  * The gate answer is awaited before the menu opens and the items are read in
- * one snapshot: Mantine's dropdown closes itself a few hundred milliseconds
- * after opening in jsdom, which races any test that queries one item after
- * another.
+ * one snapshot, so the assertions do not depend on the menu staying open
+ * between one query and the next.
  */
 import userEvent from "@testing-library/user-event";
 import { http, HttpResponse } from "msw";
