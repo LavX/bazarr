@@ -1,6 +1,7 @@
 # coding=utf-8
 from __future__ import absolute_import
 from collections import OrderedDict
+import threading
 
 import subliminal
 import babelfish
@@ -11,19 +12,29 @@ class ProviderRegistry(object):
 
     def __init__(self):
         self.providers = OrderedDict()
+        # Registering, unregistering and listing names share this lock: a plugin that is detached while
+        # Bazarr+ runs must not change the map under a walk of it, and a caller that swaps a class for
+        # another (a detached plugin gives its place back to the built-in it shadowed) does it in one step.
+        self.lock = threading.RLock()
+        # How many times each id has changed hands between a Provider Hub plugin and anything else (a built-in, or
+        # nothing). Counted here, under the lock, at the moment the class changes, and by nothing else: a settings
+        # save never moves it. A configuration read is stamped with it (see ``subliminal_patch.core.ConfigSnapshot``).
+        self._ownership = {}
 
     def __contains__(self, item):
         return item in self.providers
 
     def __setitem__(self, key, item):
-        self.providers[key] = item
+        self.register(key, item)
 
     def __iter__(self):
-        return iter(self.providers)
+        with self.lock:
+            return iter(list(self.providers))
 
     def __getitem__(self, key):
-        if key in self.providers:
-            return self.providers[key]
+        # One lookup, so a class removed between a membership test and the read is an answer of None and not a
+        # KeyError. Callers hold the class they got and never look the name up twice.
+        return self.providers.get(key)
 
     def __repr__(self):
         return repr(self.providers)
@@ -35,13 +46,42 @@ class ProviderRegistry(object):
         return len(self.providers)
 
     def __delitem__(self, key):
-        del self.providers[key]
+        with self.lock:
+            del self.providers[key]
+
+    @staticmethod
+    def _is_plugin(cls):
+        return bool(getattr(cls, "hub_proxy", False))
+
+    def _note_handover(self, name, old, new):
+        if self._is_plugin(old) != self._is_plugin(new):
+            self._ownership[name] = self._ownership.get(name, 0) + 1
+
+    def ownership_generations(self):
+        with self.lock:
+            return dict(self._ownership)
 
     def register(self, name, cls):
-        self.providers[name] = cls
+        with self.lock:
+            self._note_handover(name, self.providers.get(name), cls)
+            self.providers[name] = cls
+
+    def unregister(self, name, expected=None):
+        """Take ``name`` out of the registry and return the class that was there, or None.
+
+        With ``expected``, only that class is removed: a name that has since been registered to another class
+        is left alone."""
+        with self.lock:
+            current = self.providers.get(name)
+            if current is None or (expected is not None and current is not expected):
+                return None
+            self._note_handover(name, current, None)
+            del self.providers[name]
+            return current
 
     def names(self):
-        return list(self.providers.keys())
+        with self.lock:
+            return list(self.providers.keys())
 
 
 provider_registry = ProviderRegistry()

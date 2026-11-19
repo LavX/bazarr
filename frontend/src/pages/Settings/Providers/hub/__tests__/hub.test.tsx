@@ -296,6 +296,45 @@ describe("Settings > Providers (Provider Hub)", () => {
     await waitFor(() => expect(uninstallRequest).toHaveBeenCalledTimes(1));
   });
 
+  it("shows a removal that finishes without a restart as removing, with no action and no restart prompt", async () => {
+    server.use(
+      http.get("/api/provider-hub/providers", () => {
+        return HttpResponse.json({
+          data: [
+            {
+              provider_id: "officialhub",
+              name: "Official Hub Provider",
+              active_version: "1.0.0",
+              staged_version: null,
+              state: "removed",
+              needs_restart: false,
+              trusted: true,
+              active_path: "/config/provider_hub/active/officialhub",
+              python_path: "/config/provider_hub/venvs/officialhub/bin/python",
+              last_error: null,
+              manifest,
+            },
+          ],
+        });
+      }),
+    );
+
+    customRender(<SettingsProvidersView />);
+
+    await userEvent.click(screen.getByRole("tab", { name: /Marketplace/i }));
+    const panel = await screen.findByRole("tabpanel", {
+      name: /Marketplace/i,
+    });
+
+    expect(within(panel).getAllByText("Removing").length).toBeGreaterThan(0);
+    expect(
+      within(panel).queryByText("Pending restart"),
+    ).not.toBeInTheDocument();
+    expect(
+      within(panel).queryByLabelText("Official Hub Provider actions"),
+    ).not.toBeInTheDocument();
+  });
+
   it("shows staged uninstall as removal pending without another uninstall action", async () => {
     server.use(
       http.get("/api/provider-hub/providers", () => {

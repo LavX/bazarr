@@ -655,6 +655,127 @@ def test_a_kind_that_attaches_live_is_activated_now_and_the_release_it_replaces_
     assert _releases_in(hub) == [("exampleservice", "1.0.0", "retired"), ("exampleservice", "1.1.0", "active")]
 
 
+@pytest.fixture
+def stopping_kind(service_kind):
+    """The service kind, made one that stops a release live: its detach is recorded and ends when ``release`` is set."""
+    import threading
+
+    from provider_hub.kinds import DETACH_LIVE
+
+    service_kind.detach_policy = DETACH_LIVE
+    service_kind.detached = []
+    service_kind.release = threading.Event()
+    service_kind.fail = False
+
+    def detach(plugin_id, *, withdraw, grace=None, release_key=None):
+        if service_kind.fail:
+            raise RuntimeError("a pool would not let go")
+        service_kind.detached.append((plugin_id, withdraw, release_key))
+        drain = threading.Thread(target=service_kind.release.wait, args=(20,), daemon=True)
+        drain.start()
+        return [drain]
+
+    service_kind.detach = detach
+    return service_kind
+
+
+def _live_update(hub, monkeypatch):
+    monkeypatch.setattr("provider_hub.service.verify_bundle_tree", lambda manifest, root: None)
+    monkeypatch.setattr("provider_hub.service.validated_bundle_path", lambda root, path: Path(path))
+    monkeypatch.setattr("provider_hub.service.validated_interpreter", lambda root, path: Path(path))
+    _seed(exampleservice=_service_row(
+        "1.1.0", active_version="1.0.0", active_path=_bundle("exampleservice", "1.0.0"),
+        python_path=_python("exampleservice"), manifest=service_manifest("exampleservice", "1.0.0")))
+
+
+def test_a_replaced_release_drains_through_the_kind_and_retires_when_its_calls_are_done(
+        hub, stopping_kind, monkeypatch):
+    from provider_hub.service import activate_release
+
+    _live_update(hub, monkeypatch)
+
+    result = activate_release("exampleservice")
+
+    # The old release is draining while the kind still holds its calls; its key is what the kind is told to stop.
+    assert result.activated and result.draining and result.drained is not None
+    assert stopping_kind.detached == [("exampleservice", False, service_manifest("exampleservice", "1.0.0")[
+        "bundle_sha256"])]
+    assert _releases_in(hub) == [("exampleservice", "1.0.0", "draining"), ("exampleservice", "1.1.0", "active")]
+
+    stopping_kind.release.set()
+    result.drained.join(20)
+
+    assert _releases_in(hub) == [("exampleservice", "1.0.0", "retired"), ("exampleservice", "1.1.0", "active")]
+
+
+def test_a_replaced_release_whose_detach_failed_stays_draining_until_the_next_start_retires_it(
+        hub, stopping_kind, monkeypatch):
+    from provider_hub.service import activate_release, activate_staged_installations
+
+    _live_update(hub, monkeypatch)
+    stopping_kind.fail = True
+
+    result = activate_release("exampleservice")
+
+    assert result.activated and result.draining and result.drained is None
+    assert _releases_in(hub) == [("exampleservice", "1.0.0", "draining"), ("exampleservice", "1.1.0", "active")]
+    activate_staged_installations()
+    assert _releases_in(hub) == [("exampleservice", "1.0.0", "retired"), ("exampleservice", "1.1.0", "active")]
+
+
+def test_a_second_live_activation_retires_only_the_release_it_replaced(hub, stopping_kind, monkeypatch):
+    import threading
+
+    from provider_hub.service import activate_release
+    from provider_hub.state import mutate_state
+
+    _live_update(hub, monkeypatch)
+    drains = []
+
+    def detach(plugin_id, *, withdraw, grace=None, release_key=None):
+        event = threading.Event()
+        drains.append(event)
+        thread = threading.Thread(target=event.wait, args=(20,), daemon=True)
+        thread.start()
+        return [thread]
+
+    stopping_kind.detach = detach
+    first = activate_release("exampleservice")
+    assert (first.previous_version, first.version) == ("1.0.0", "1.1.0")
+
+    # Another release is staged and activated while the first one's calls are still running.
+    manifest = service_manifest("exampleservice", "1.2.0")
+
+    def stage(state):
+        state["installations"]["exampleservice"].update(
+            state="staged", pending_restart=True, staged_version="1.2.0", staged_manifest=manifest,
+            staged_path=_bundle("exampleservice", "1.2.0"), staged_python_path=_python("exampleservice"))
+
+    mutate_state(stage)
+    second = activate_release("exampleservice")
+    assert (second.previous_version, second.version) == ("1.1.0", "1.2.0")
+    drains[1].set()
+    second.drained.join(20)
+
+    # 1.1.0 retired with its calls done; 1.0.0 is still draining because its calls are not.
+    assert _releases_in(hub) == [("exampleservice", "1.0.0", "draining"), ("exampleservice", "1.1.0", "retired"),
+                                 ("exampleservice", "1.2.0", "active")]
+    drains[0].set()
+    first.drained.join(20)
+    assert _releases_in(hub) == [("exampleservice", "1.0.0", "retired"), ("exampleservice", "1.1.0", "retired"),
+                                 ("exampleservice", "1.2.0", "active")]
+
+
+def test_the_boot_drains_nothing_because_nothing_is_running_yet(hub, stopping_kind, monkeypatch):
+    from provider_hub.service import activate_release
+
+    _live_update(hub, monkeypatch)
+
+    result = activate_release("exampleservice", at_boot=True)
+
+    assert result.activated and not result.draining and result.drained is None and stopping_kind.detached == []
+
+
 def test_a_boot_finds_no_release_still_draining(hub, service_kind, monkeypatch):
     from provider_hub.service import activate_release, activate_staged_installations
 

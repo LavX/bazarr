@@ -227,7 +227,19 @@ def provider_is_usable(name):
         return False
     if name in _decrypt_blocked_provider_ids():
         return False
+    if _provider_detached(name):
+        return False
     return True
+
+
+def _provider_detached(name):
+    """Whether a plugin was detached from this provider id while Bazarr+ ran (revoked or removed), so a download
+    that names it from an earlier search is refused quietly instead of looking for a class that is gone."""
+    try:
+        from provider_hub.registry import is_withdrawn
+        return is_withdrawn(name)
+    except Exception:
+        return False
 
 
 def provider_pool():
@@ -443,6 +455,11 @@ _FFMPEG_BINARY = get_binary("ffmpeg")
 
 
 def get_providers_auth():
+    from subliminal_patch.core import ConfigSnapshot
+
+    # Stamped first: a pool that is handed this later skips what it holds for an id that changed hands between a
+    # plugin and a built-in meanwhile. Only that moves the stamp, never a settings save.
+    ownership = provider_registry.ownership_generations()
     provider_configs = {
         'addic7ed': {
             'username': settings.addic7ed.username,
@@ -590,7 +607,9 @@ def get_providers_auth():
         logging.exception("Unable to load Provider Hub settings config")
     else:
         apply_settings_overlay(provider_configs, settings, _REPORTED_RESERVED_SECTION_PLUGINS, blocked)
-    return provider_configs
+    snapshot = ConfigSnapshot(provider_configs)
+    snapshot.ownership = ownership
+    return snapshot
 
 
 def _handle_mgb(name, exception, ids, language, sports_context=None, source_context=None):
@@ -1039,6 +1058,18 @@ def reset_throttled_provider(name):
         set_throttled_providers(tp)
     event_stream(type='badges')
     logging.info('BAZARR throttle for %s has been reset (was: %s).', name, reason)
+    return True
+
+
+def forget_provider_throttle(name):
+    """Drop whatever backoff is recorded for a provider id, of any kind. For an id that now names another class (a
+    plugin detached while Bazarr+ runs gives its id back to a built-in): the backoff was the old class's to earn."""
+    with _THROTTLE_LOCK:
+        if tp.pop(name, None) is None:
+            return False
+        set_throttled_providers(tp)
+    event_stream(type='badges')
+    logging.info('BAZARR throttle for %s has been dropped, its id changed hands.', name)
     return True
 
 

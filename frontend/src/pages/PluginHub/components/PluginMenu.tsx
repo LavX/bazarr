@@ -11,6 +11,7 @@ import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import {
   isAwaitingRestart,
   isInstalled,
+  isRemoving,
   PluginRow,
 } from "@/pages/PluginHub/model";
 import styles from "@/pages/PluginHub/PluginHub.module.scss";
@@ -89,13 +90,15 @@ export const PluginMenu: FunctionComponent<PluginMenuProps> = ({
     return null;
   }
   const isOn = installation.enabled !== false;
-  const waiting = isAwaitingRestart(installation)
-    ? "Restart Bazarr+ to finish the change in progress."
-    : busy
-      ? "Something is being done to this plugin. Wait for it to finish."
-      : elsewhere
-        ? "Another plugin is being changed. Wait for it to finish."
-        : null;
+  const waiting = isRemoving(installation)
+    ? "This plugin is being removed. Wait for it to finish."
+    : isAwaitingRestart(installation)
+      ? "Restart Bazarr+ to finish the change in progress."
+      : busy
+        ? "Something is being done to this plugin. Wait for it to finish."
+        : elsewhere
+          ? "Another plugin is being changed. Wait for it to finish."
+          : null;
   const needed =
     isOn && enabledDependents.length > 0
       ? `${enabledDependents.join(", ")} ${enabledDependents.length === 1 ? "needs" : "need"} it. Turn ${enabledDependents.length === 1 ? "that" : "those"} off first.`

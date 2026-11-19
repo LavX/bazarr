@@ -9,6 +9,7 @@ import threading
 import weakref
 import time
 
+from dataclasses import dataclass
 from pathlib import Path
 
 from subliminal.video import Episode, Movie
@@ -33,6 +34,14 @@ from .worker import ProviderWorkerClient, release_when_gone, RequestNotAdmitted,
 logger = logging.getLogger(__name__)
 
 _REGISTERED_PROVIDER_HUB_IDS: set[str] = set()
+# Held for every change that puts a plugin's class into the provider registry or takes it out, so a class that
+# replaces a built-in is saved in the same step, and a detach gives the built-in its place back in one step.
+_REGISTRY_GUARD = threading.RLock()
+# The built-in class a plugin of the same id replaced, by provider id, kept so that detaching the plugin restores it.
+_SHADOWED_BUILT_INS: dict[str, type] = {}
+# Provider ids a plugin was detached from while Bazarr+ ran and nothing has taken the place of: no pool serves them,
+# and the pools' admission check says so, so a download that names one is refused quietly.
+_WITHDRAWN_PROVIDER_IDS: set[str] = set()
 _MAX_WORKER_REQUEST_TIMEOUT = 86400.0
 _HOST_TIMEOUT_MARGIN_SECONDS = 30.0
 _DEFAULT_GLOBAL_WORKER_TIMEOUT = 120.0
@@ -584,12 +593,141 @@ def register_active_provider_classes(installations=None) -> list[str]:
             except Exception:
                 logger.exception("Provider Hub: could not flag %s for repair", provider_id)
             continue
-        provider_registry.register(manifest.provider_id, provider_cls)
+        with _REGISTRY_GUARD:
+            replaced = provider_registry[manifest.provider_id]
+            if replaced is not None and not issubclass(replaced, HubProxyProvider):
+                # A built-in provider this plugin takes the id of: kept, so detaching the plugin restores it.
+                _SHADOWED_BUILT_INS[manifest.provider_id] = replaced
+            provider_registry.register(manifest.provider_id, provider_cls)
+            _REGISTERED_PROVIDER_HUB_IDS.add(manifest.provider_id)
+            _WITHDRAWN_PROVIDER_IDS.discard(manifest.provider_id)
         _note_registration(provider_id, True)
-        _REGISTERED_PROVIDER_HUB_IDS.add(manifest.provider_id)
         registered.append(manifest.provider_id)
 
     return registered
+
+
+@dataclass(frozen=True)
+class Unregistered:
+    """What taking a plugin's class out of the provider registry did."""
+
+    # A plugin class was in the registry and is gone.
+    removed: bool = False
+    # A built-in provider the plugin had replaced is registered again.
+    restored_built_in: bool = False
+
+
+def unregister_provider_class(provider_id: str) -> Unregistered:
+    """Take a plugin's class out of the provider registry. Searches that start afterwards do not see it.
+
+    A plugin that took over a built-in provider's id gives it back: the class it replaced was saved when it
+    registered, and goes back in the same step, under the lock registration takes, so there is no moment at
+    which the id names neither. A registry that holds no plugin class under the id (a built-in, or nothing) is
+    left as it is. A search that already holds the class it looked up goes on with it: the pools drop their
+    instances separately (``retire_provider_instances``).
+    """
+    with _REGISTRY_GUARD:
+        current = provider_registry[provider_id]
+        removed = current is not None and issubclass(current, HubProxyProvider) and provider_registry.unregister(
+            provider_id, expected=current) is not None
+        built_in = _SHADOWED_BUILT_INS.pop(provider_id, None)
+        restored = False
+        if removed:
+            _REGISTERED_PROVIDER_HUB_IDS.discard(provider_id)
+            if built_in is not None and provider_registry[provider_id] is None:
+                provider_registry.register(provider_id, built_in)
+                restored = True
+            else:
+                _WITHDRAWN_PROVIDER_IDS.add(provider_id)
+        return Unregistered(removed=removed, restored_built_in=restored)
+
+
+def is_withdrawn(provider_id: str) -> bool:
+    """Whether a plugin was detached from this provider id while Bazarr+ ran, and nothing serves it now."""
+    with _REGISTRY_GUARD:
+        return provider_id in _WITHDRAWN_PROVIDER_IDS and provider_registry[provider_id] is None
+
+
+def release_provider_id(provider_id: str) -> int:
+    """A plugin's class left the registry, and the id may name a built-in again: hand the id over clean.
+
+    Every pool that is alive gets the settings the built-in is given in place of what it held under the id (read
+    now, after the plugin's configuration stopped being handed out), so a call that reaches the id before the next
+    settings read builds the built-in from its own settings. A throttle or discard the plugin earned is dropped:
+    the built-in starts with a clean record. Returns how many pools held something under the id.
+    """
+    own: dict = {}
+    try:
+        from app.get_providers import forget_provider_throttle, get_providers_auth
+
+        own = dict(get_providers_auth().get(provider_id) or {})
+        forget_provider_throttle(provider_id)
+    except Exception:
+        logger.exception("Provider Hub: could not read the settings of %s for the pools", provider_id)
+    try:
+        from subliminal_patch.provider_health import get_tracker
+
+        get_tracker().forget(provider_id)
+    except Exception:
+        logger.exception("Provider Hub: could not clear the health record of %s", provider_id)
+    try:
+        from subliminal_patch.core import live_provider_pools
+    except ImportError:
+        return 0
+    forgot = 0
+    for pool in live_provider_pools():
+        try:
+            if provider_id in pool.provider_configs:
+                forgot += 1
+            pool.forget_provider_config(provider_id, own)
+        except Exception:
+            logger.exception("Provider Hub: could not clear what a pool holds for %s", provider_id)
+    _retire_built_in_instances(provider_id, live_provider_pools)
+    return forgot
+
+
+def _retire_built_in_instances(provider_id: str, live_provider_pools) -> None:
+    """Drop every instance of a built-in that a pool made for ``provider_id`` before the pools were released.
+
+    The registry gives the built-in back one step before the pools are told, and a pool that builds in between holds
+    an instance made from the plugin's configuration. While the plugin held the id no built-in instance could exist, so
+    whatever is there now was made in that window. In-progress builds are made to start over (the provider generation
+    moves), and the next call builds the built-in from its own settings.
+    """
+    from subliminal_patch.core import bump_provider_generation
+
+    bump_provider_generation(provider_id)
+    for pool in live_provider_pools():
+        try:
+            stale = pool.detach_provider(provider_id, lambda cached: not isinstance(cached, HubProxyProvider))
+            if stale is not None:
+                try:
+                    stale.terminate()
+                except Exception:
+                    logger.exception("Provider Hub: could not end a built-in %s made before its pools were released",
+                                     provider_id)
+        except Exception:
+            logger.exception("Provider Hub: could not retire a built-in %s of a pool", provider_id)
+
+
+def is_plugin_class(provider_id: str) -> bool:
+    """Whether the provider registry holds no class under the id, or holds a plugin's. A plugin's configuration is
+    handed only to a plugin's class: when a built-in holds the id (the plugin was detached, or its registration was
+    refused) it is built from its own settings."""
+    current = provider_registry[provider_id]
+    return current is None or issubclass(current, HubProxyProvider) or bool(getattr(current, "hub_proxy", False))
+
+
+def revoke_host_calls_of(provider_id: str) -> int:
+    """Take the host capabilities back from every running worker of one plugin, for the calls that follow.
+
+    A worker that is finishing what it was given keeps what it has already sent, but cannot ask the host for
+    anything more (a captcha solved with the user's key). Returns how many workers were told."""
+    with _PROXY_LOCK:
+        clients = list(_HOST_CALL_CLIENTS.get(provider_id, ()))
+    for client in clients:
+        client.revoke_host_calls()
+    return len(clients)
 
 
 def _instance_environment(instance) -> str | None:
@@ -599,15 +737,24 @@ def _instance_environment(instance) -> str | None:
     return env_dir_of(python_path) if python_path else None
 
 
-def _wait_for_operations(instance) -> None:
+def _wait_for_operations(instance, grace: float | None = None) -> bool:
     """Block until every call admitted before the retirement has ended.
 
-    There is no point at which it gives up: a call that outlives its expected
-    time is logged once and still waited for, because stopping the worker under
-    it, or releasing the environment it runs from, would cut a call that is still
-    legitimately working (a download is a search-queue wait, a download and an
-    archive selection in one operation).
+    Without ``grace`` there is no point at which it gives up: a call that outlives its expected time is logged
+    once and still waited for, because stopping the worker under it, or releasing the environment it runs from,
+    would cut a call that is still legitimately working (a download is a search-queue wait, a download and an
+    archive selection in one operation). With ``grace`` (a release that must stop, a revoked one) it waits at
+    most that many seconds and answers False when calls are still running. True when none is.
     """
+    if grace is not None:
+        deadline = time.monotonic() + max(0.0, grace)
+        with _PROXY_OPERATIONS_ENDED:
+            while getattr(instance, "_active_operations", 0) > 0:
+                left = deadline - time.monotonic()
+                if left <= 0:
+                    return False
+                _PROXY_OPERATIONS_ENDED.wait(left)
+        return True
     try:
         limit = float(instance._request_timeout()) + _HOST_TIMEOUT_MARGIN_SECONDS
     except Exception:
@@ -625,21 +772,34 @@ def _wait_for_operations(instance) -> None:
                     getattr(instance, "provider_name", "?"), limit,
                 )
             _PROXY_OPERATIONS_ENDED.wait(None if warned else max(left, 0.0))
+    return True
 
 
-def _drain_instance(instance, release) -> None:
+def _drain_instance(instance, release, grace: float | None = None) -> None:
     """Let the instance finish what it was admitted for, then end its worker through the one termination path.
 
     A call admitted before the retirement may still be on its way to the worker,
     or between the two requests of a download. Stopping first would fail it as
     busy or cut it between them, so the stop waits for those calls. ``release``
     is the hold taken at detach time; it is given up only once the worker and
-    its process group are confirmed gone.
+    its process group are confirmed gone. With ``grace`` the wait is bounded: calls still
+    running when it ends are cut by killing the worker, and fail as a worker that went away.
     """
+    finished = True
     try:
-        _wait_for_operations(instance)
+        finished = _wait_for_operations(instance, grace)
     except Exception:
         logger.exception("Provider Hub: could not wait for the calls of a replaced %s", getattr(instance, "provider_name", "?"))
+    if not finished:
+        client = getattr(instance, "worker_client", None)
+        cancel = getattr(client, "cancel", None)
+        logger.warning("Provider Hub: cutting the calls %s still had running after %.0fs",
+                       getattr(instance, "provider_name", "?"), grace)
+        if callable(cancel):
+            try:
+                cancel()
+            except Exception:
+                logger.exception("Provider Hub: could not cut the calls of %s", getattr(instance, "provider_name", "?"))
     instance._terminate_holding(release)
 
 
@@ -647,13 +807,15 @@ class RetirementIncomplete(RuntimeError):
     """A cached instance could not be retired, so its environment may still be in use."""
 
 
-def retire_provider_instances(provider_id: str) -> list[threading.Thread]:
+def retire_provider_instances(provider_id: str, grace: float | None = None) -> list[threading.Thread]:
     """Replace the instances every pool has cached for ``provider_id``.
 
-    Used after the environment a provider runs from changed. Each pool drops its
+    Used after the environment a provider runs from changed, and when a plugin is detached. Each pool drops its
     cached instance at once, so the next request builds one from the registered
-    class and runs in the new environment. The dropped instance is drained in the
-    background: it finishes the request it is serving, then its worker stops. Its
+    class (or finds none, for a plugin that left the registry) and runs in the new environment. The dropped
+    instance is drained in the
+    background: it finishes the request it is serving, then its worker stops. With ``grace`` the
+    calls it still has after that many seconds are cut. Its
     environment is held against cleanup until that worker has exited. Returns the
     drain threads.
     """
@@ -678,7 +840,7 @@ def retire_provider_instances(provider_id: str) -> list[threading.Thread]:
             env_dir = _instance_environment(instance)
             release = hold_environment(env_dir) if env_dir else (lambda: None)
             drain = threading.Thread(
-                target=_drain_instance, args=(instance, release), name=f"hub-drain-{provider_id}", daemon=True
+                target=_drain_instance, args=(instance, release, grace), name=f"hub-drain-{provider_id}", daemon=True
             )
             drain.start()
             drains.append(drain)

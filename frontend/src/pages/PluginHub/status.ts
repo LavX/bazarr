@@ -5,6 +5,7 @@ import {
   faCircleNotch,
   faPause,
   faScrewdriverWrench,
+  faTrash,
   faTriangleExclamation,
 } from "@fortawesome/free-solid-svg-icons";
 import type {
@@ -12,10 +13,11 @@ import type {
   PluginJob,
   PluginRuntime,
 } from "@/apis/raw/plugins";
-import type { Tone } from "@/components/hub/utils";
+import { isRemoving, type Tone } from "@/components/hub/utils";
 import { isInstalled, PluginRow } from "./model";
 
 export type StatusKey =
+  | "removing"
   | "attention"
   | "rebuilding"
   | "installing"
@@ -74,7 +76,7 @@ export function attentionCause(
       installation.revoked_reason ??
       installation.blocked_reason ??
       installation.last_error ??
-      "The official catalog revoked this version. Restart Bazarr+ to stop it, then update or remove it."
+      "The official catalog revoked this version. Update it or remove it."
     );
   }
   if (installation.needs_repair) {
@@ -96,7 +98,7 @@ export function attentionCause(
 }
 
 /**
- * One status for an installed plugin, by precedence: needs attention, rebuilding, installing,
+ * One status for an installed plugin, by precedence: being removed, needs attention, rebuilding, installing,
  * activating, update available, active, off. Text and an icon carry every state, never colour alone.
  * Null for a plugin that is not installed. A plugin that needs Docker access has no place yet: the
  * server does not report it.
@@ -108,6 +110,18 @@ export function pluginStatus(
   const installation = row.installation;
   if (!installation || !isInstalled(installation)) {
     return null;
+  }
+  // Removed while Bazarr+ runs: the row stays until the calls the plugin took are done, and whatever else it says
+  // (an update on offer, switched on) no longer matters.
+  if (isRemoving(installation)) {
+    return {
+      key: "removing",
+      label: "Removing",
+      tone: "warning",
+      icon: faTrash,
+      tooltip:
+        "This plugin is being removed. It goes when the calls it is running end, or after a few minutes.",
+    };
   }
   const actions = open.get(row.id);
   const cause = attentionCause(installation);

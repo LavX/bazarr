@@ -45,6 +45,12 @@ A host keeps the list of every channel it has verified (``main`` and ``beta``), 
 It enforces the union of the channels. A channel's list is replaced only by a newer signed catalog of that
 channel, so only that catalog lifts an entry, and of the two copies of one channel the one with the higher
 ``signed_version`` counts, so restoring an older database cannot lift anything the file remembers.
+
+A release the list names is stopped when the refresh that learns of it commits, for every kind that can stop a
+release while Bazarr+ runs (``Kind.detach_policy``, see ``service.enforce_revocations_live``): the installation
+is held back as the boot would hold it, the release leaves the registry and every pool, and its calls are cut
+once ``detach.REVOKE_GRACE_SECONDS`` have passed. No restart is asked for. A kind that cannot stop one live keeps
+the restart cue, and so does a release whose stop failed.
 """
 from __future__ import annotations
 
@@ -409,7 +415,8 @@ def refusal(entry: Revocation, name: str, version: Any, action: str, limit: int 
 
 # What follows the revocation in each state of the installed release.
 HELD = "held"          # it does not start
-RUNNING = "running"    # it still runs until the next restart
+RUNNING = "running"    # it still runs until the next restart (a kind that cannot be stopped while Bazarr+ runs)
+STOPPED = "stopped"    # it was stopped as the revocation arrived
 STAGED = "staged"      # a release that is not revoked waits for the restart
 
 
@@ -417,6 +424,8 @@ def _tail(entry: Revocation, state: str) -> str:
     # With every release revoked there is none to update to, so the only way out is to remove it.
     if state == HELD:
         return ". It will not start. " + ("Update it or remove it." if entry.version else "Remove it.")
+    if state == STOPPED:
+        return ". It was stopped. " + ("Update it or remove it." if entry.version else "Remove it.")
     if state == RUNNING:
         return ". Restart Bazarr+ to stop it, then " + ("update or remove it." if entry.version else "remove it.")
     return ". Restart Bazarr+ to apply the staged update."

@@ -267,6 +267,16 @@ export function isAwaitingRestart(
   );
 }
 
+/**
+ * Whether the plugin is being removed while Bazarr+ runs: its removal waits for no restart, and the row goes when
+ * the calls the plugin already took are done. Nothing can be done with it meanwhile.
+ */
+export function isRemoving(installation: ProviderHubInstallation): boolean {
+  return (
+    installation.state === "removed" && installation.needs_restart !== true
+  );
+}
+
 export function isUpdateAvailable(
   provider: ProviderHubInstallation,
   catalog: ProviderHubCatalog | undefined | null,

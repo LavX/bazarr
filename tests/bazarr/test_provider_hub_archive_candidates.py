@@ -127,6 +127,9 @@ def pool_for(monkeypatch, payload, selector=None):
     throttled = []
 
     class Provider:
+        # The registered class stands for the plugin's proxy: the candidates here are the plugin's own.
+        hub_proxy = True
+
         def initialize(self):
             pass
 
@@ -657,6 +660,9 @@ def test_malformed_selector_keeps_provider_error_handling(monkeypatch, response)
 @pytest.mark.parametrize("response", [None, [], {}, {"decision": "unknown"}])
 def test_runner_does_not_turn_malformed_selector_into_candidate_rejection(response):
     class Provider:
+        # The registered class stands for the plugin's proxy: the candidates here are the plugin's own.
+        hub_proxy = True
+
         def select_archive_member(self, **kwargs):
             return response
 
@@ -733,6 +739,9 @@ def selection_pool_for(monkeypatch):
     downloads, throttled = [], []
 
     class Provider:
+        # The registered class stands for the plugin's proxy: the candidates here are the plugin's own.
+        hub_proxy = True
+
         def initialize(self):
             pass
 
@@ -775,6 +784,9 @@ def test_selection_loop_keeps_absolute_context_after_rejected_archive(monkeypatc
     downloads, throttled = [], []
 
     class Provider:
+        # The registered class stands for the plugin's proxy: the candidates here are the plugin's own.
+        hub_proxy = True
+
         def initialize(self):
             pass
 
