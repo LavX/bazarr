@@ -4,7 +4,7 @@ from __future__ import unicode_literals
 import re
 
 from subzero.language import Language
-from subzero.modification.mods import SubtitleTextModification, empty_line_post_processors, TAG
+from subzero.modification.mods import SubtitleTextModification, empty_line_post_processors
 from subzero.modification.exc import EmptyEntryError
 from subzero.modification.processors.re_processor import NReProcessor
 from subzero.modification import registry
@@ -30,6 +30,12 @@ _MUSIC_SYMBOL_RE = re.compile(r'[*#¶♫♪]')
 # SSA/ASS override tags ({\i1}, {\an8}, {\c&H..&}, ...) carry letters/digits that
 # must not be mistaken for lyric content when testing a line.
 _OVERRIDE_TAG_RE = re.compile(r'\{[^}]*\}')
+
+# Literal simple HTML tags. Subtitle.get_modified_content keeps them in the text the
+# mods see (keep_html_tags=True), so the edge slot must accept them next to the SSA
+# override tags of TAG. Case-insensitive, scoped to this one alternative.
+HTML_TAG = r"(?i:</?(?:[ibu]|font(?:\s[^>]*)?)\s*>)"
+EDGE_TAG = r"(?:\s*(?:{\\[iusb][0-1]}|%s)\s*)*" % HTML_TAG
 
 
 class MusicEntryProcessor(NReProcessor):
@@ -77,7 +83,7 @@ class HearingImpaired(SubtitleTextModification):
 
     processors = [
         # full bracket entry, single or multiline; starting with brackets and ending with brackets
-        FullBracketEntryProcessor(re.compile(r'(?sux)^-?%(t)s[([].+(?=[^)\]]{3,}).+[)\]]%(t)s$' % {"t": TAG}),
+        FullBracketEntryProcessor(re.compile(r'(?sux)^-?%(t)s[([].+(?=[^)\]]{3,}).+[)\]]%(t)s$' % {"t": EDGE_TAG}),
                                   "", name="HI_brackets_full"),
 
         # uppercase text before colon (at least 3 uppercase chars); at start or after a sentence,
@@ -98,7 +104,7 @@ class HearingImpaired(SubtitleTextModification):
 
         # brackets (only remove if at least 3 chars in brackets, allow numbers and spaces inside brackets)
         NReProcessor(re.compile(r'(?sux)-?%(t)s["\']*\[(?=[^\[\]]{3,})[A-Za-zÀ-ž0-9\s\'".:-_&+]+[)\]]["\']*[\s:]*%(t)s' %
-                                {"t": TAG}), "", name="HI_brackets"),
+                                {"t": EDGE_TAG}), "", name="HI_brackets"),
 
         #NReProcessor(re.compile(r'(?sux)-?%(t)s[([]%(t)s(?=[A-zÀ-ž"\'.]{3,})[^([)\]]+%(t)s$' % {"t": TAG}),
         #             "", name="HI_bracket_open_start"),
@@ -153,11 +159,11 @@ class HearingImpaired(SubtitleTextModification):
     post_processors = empty_line_post_processors
     last_processors = [
         # remove music symbols
-        NReProcessor(re.compile(r'(?u)(^%(t)s[*#¶♫♪\s]*%(t)s[*#¶♫♪\s]+%(t)s[*#¶♫♪\s]*%(t)s$)' % {"t": TAG}),
+        NReProcessor(re.compile(r'(?u)(^%(t)s[*#¶♫♪\s]*%(t)s[*#¶♫♪\s]+%(t)s[*#¶♫♪\s]*%(t)s$)' % {"t": EDGE_TAG}),
                      "", name="HI_music_symbols_only"),
 
         # remove music entries (song lyrics); skipped when keep_lyrics is set
-        MusicEntryProcessor(re.compile(r'(?ums)(^[-\s>~]*[*#¶♫♪]+\s*%(t)s.+|.+\s*[*#¶♫♪]+\s*%(t)s\s*$|.+\s*[*#¶♫♪]+[)\]])' % {"t": TAG}),
+        MusicEntryProcessor(re.compile(r'(?ums)(^[-\s>~]*%(t)s[*#¶♫♪]+\s*%(t)s.+|.+\s*[*#¶♫♪]+\s*%(t)s\s*$|.+\s*[*#¶♫♪]+[)\]])' % {"t": EDGE_TAG}),
                             "", name="HI_music", entry=True),
     ]
 
