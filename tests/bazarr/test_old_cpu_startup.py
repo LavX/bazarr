@@ -2,7 +2,7 @@
 """Startup on x86-64 CPUs without SSE4.2 or POPCNT.
 
 numpy 2.4 and newer abort the process with an illegal instruction on such CPUs,
-and textdistance, ffsubsync and autosubsync all import numpy. These tests pin
+and textdistance, ffsubsync, autosubsync and json_tricks all import numpy. These tests pin
 the three parts of the fix: nothing imported at startup needs numpy, the CPU is
 checked without importing it, and the engines that need it are left out of a
 sync instead of killing the process.
@@ -19,18 +19,30 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
-REAL_TITLES = [
-    'The Matrix', 'The Matrix Reloaded', 'The Matrix Revolutions', 'Matrix',
-    'Breaking Bad', 'Better Call Saul', 'Game of Thrones', 'House of the Dragon',
-    'Star Trek: The Next Generation', 'Star Trek', 'Star Wars: Episode IV - A New Hope',
-    'Spirited Away', 'Sen to Chihiro no Kamikakushi', 'Amélie', 'Amelie',
-    'Léon: The Professional', 'Leon', 'Pokémon', 'Pokemon', 'Dr. Strangelove',
-    'Se7en', 'Seven', 'WALL-E', 'Wall E', 'Mr. Robot', 'Mr Robot', 'Fargo',
-    'A Gyertyák csonkig égnek', 'Családi pótlék', 'Tóth Ica', 'Kontroll',
-    '9-1-1', '911', '1917', '2001: A Space Odyssey', '', 'A', 'a',
-]
-QUERIES = ['matrix', 'Matrix', 'the matrix', 'star', 'Star Trek', 'amelie', 'robot', 'house', 'fargo', '1917',
-           'tóth', '', 'x']
+# Expected hamming distances, recorded from textdistance 4.6 (the library this
+# helper replaced) so the search ordering stays pinned without needing it
+# installed. Each row lists the distance from the query to TITLES in order.
+TITLES = ['The Matrix', 'Matrix', 'The Matrix Reloaded', 'Star Trek', 'Star Trek: The Next Generation',
+          'Amélie', 'Amelie', 'Tóth Ica', 'Fargo', 'Se7en', '']
+EXPECTED_DISTANCES = {
+    'matrix': [10, 1, 19, 8, 29, 5, 5, 7, 5, 6, 6],
+    'Matrix': [10, 0, 19, 8, 29, 5, 5, 7, 5, 6, 6],
+    'star trek': [10, 8, 19, 2, 23, 9, 9, 8, 9, 9, 9],
+    'amelie': [9, 5, 18, 9, 30, 2, 1, 8, 6, 6, 6],
+    'tóth': [10, 5, 19, 9, 30, 6, 6, 5, 5, 5, 4],
+    '': [10, 6, 19, 9, 30, 6, 6, 8, 5, 5, 0],
+    'x': [10, 6, 19, 9, 30, 6, 6, 8, 5, 5, 1],
+}
+EXPECTED_ORDER = {
+    'matrix': ['Matrix', 'Amélie', 'Amelie', 'Fargo', 'Se7en', '', 'Tóth Ica', 'Star Trek', 'The Matrix',
+               'The Matrix Reloaded', 'Star Trek: The Next Generation'],
+    'amelie': ['Amelie', 'Amélie', 'Matrix', 'Fargo', 'Se7en', '', 'Tóth Ica', 'The Matrix', 'Star Trek',
+               'The Matrix Reloaded', 'Star Trek: The Next Generation'],
+    'star trek': ['Star Trek', 'Matrix', 'Tóth Ica', 'Amélie', 'Amelie', 'Fargo', 'Se7en', '', 'The Matrix',
+                  'The Matrix Reloaded', 'Star Trek: The Next Generation'],
+    'tóth': ['', 'Matrix', 'Tóth Ica', 'Fargo', 'Se7en', 'Amélie', 'Amelie', 'Star Trek', 'The Matrix',
+             'The Matrix Reloaded', 'Star Trek: The Next Generation'],
+}
 
 
 # ---------------------------------------------------------------- hamming
@@ -47,16 +59,18 @@ def test_hamming_counts_the_length_difference():
     assert _hamming_distance('abcde', 'bcd') == 5
 
 
-def test_hamming_matches_textdistance_on_real_titles():
-    textdistance = pytest.importorskip('textdistance')
+def test_hamming_matches_the_recorded_textdistance_distances():
     from api.system.searches import _hamming_distance
 
-    for query in QUERIES:
-        for title in REAL_TITLES:
-            assert _hamming_distance(query, title) == textdistance.hamming.distance(query, title), (query, title)
-        local_order = sorted(REAL_TITLES, key=lambda title: _hamming_distance(query, title))
-        reference_order = sorted(REAL_TITLES, key=lambda title: textdistance.hamming.distance(query, title))
-        assert local_order == reference_order, query
+    for query, expected in EXPECTED_DISTANCES.items():
+        assert [_hamming_distance(query, title) for title in TITLES] == expected, query
+
+
+def test_search_order_matches_the_recorded_textdistance_order():
+    from api.system.searches import _hamming_distance
+
+    for query, expected in EXPECTED_ORDER.items():
+        assert sorted(TITLES, key=lambda title: _hamming_distance(query, title)) == expected, query
 
 
 # ------------------------------------------------------- numpy-free startup
@@ -116,6 +130,145 @@ def test_searches_import_needs_no_numpy(tmp_path):
 
     assert completed.returncode == 0, completed.stdout + completed.stderr
     assert 'numpy-free' in completed.stdout
+
+
+# The whole of main.py, run the way a native install runs it, on a CPU the check
+# fails. Two things differ from a plain start and both are on purpose: no
+# --no-update (so the requirements probe runs, the one that used to import
+# numpy), and `updatemethod=External` is switched off (a git worktree has no
+# .git directory to tell the tracked package_info apart from a real image).
+# The network is cut so the release and announcement fetches fail fast.
+_NUMPY_FREE_STARTUP = textwrap.dedent("""
+    import os, runpy, socket, subprocess, sys
+
+    class NumpyImported(Exception):
+        pass
+
+    class BlockNumpy:
+        def find_spec(self, name, path=None, target=None):
+            if name == 'numpy' or name.startswith('numpy.'):
+                raise NumpyImported(name)
+
+    sys.meta_path.insert(0, BlockNumpy())
+    try:
+        import numpy
+    except NumpyImported:
+        pass
+    else:
+        raise SystemExit('the numpy block did not engage')
+
+    bazarr, custom_libs, config_dir = sys.argv[1:4]
+    sys.path[:0] = [bazarr, custom_libs]
+
+    real_getaddrinfo = socket.getaddrinfo
+    def offline(host, *args, **kwargs):
+        if host in (None, '', '0.0.0.0', '::', '127.0.0.1', '::1', 'localhost'):
+            return real_getaddrinfo(host, *args, **kwargs)
+        raise socket.gaierror('offline')
+    socket.getaddrinfo = offline
+
+    real_check_output = subprocess.check_output
+    def no_pip(command, *args, **kwargs):
+        if 'pip' in command:
+            raise SystemExit('the requirements probe tried to install: %r' % (command,))
+        return real_check_output(command, *args, **kwargs)
+    subprocess.check_output = no_pip
+
+    from utilities import cpu_features, package
+    package.updates_are_externally_managed = lambda *args, **kwargs: False
+    cpu_features._cached_missing_flags = ['sse4_2', 'popcnt']
+
+    sys.argv = ['main.py', '-c', config_dir, '--no-signalr']
+    runpy.run_path(os.path.join(bazarr, 'main.py'), run_name='bazarr_startup_probe')
+
+    from app.get_args import args
+    if args.no_update:
+        raise SystemExit('the requirements probe was skipped by --no-update')
+    leaked = sorted(name for name in sys.modules if name.split('.')[0] in ('numpy', 'textdistance'))
+    if leaked:
+        raise SystemExit('imported at startup: ' + ', '.join(leaked))
+    print('startup finished without numpy')
+    sys.stdout.flush()
+    os._exit(0)
+""")
+
+
+def test_full_startup_without_no_update_needs_no_numpy(tmp_path):
+    config_dir = tmp_path / 'config-root'
+    config_dir.mkdir()
+
+    environment = dict(os.environ)
+    for name in ('NO_CLI', 'NO_UPDATE', 'PYTHONPATH', 'BAZARR_CONFIG_DIR'):
+        environment.pop(name, None)
+    environment.update({'SZ_USER_AGENT': 'test', 'BAZARR_VERSION': 'test'})
+
+    completed = subprocess.run(
+        [sys.executable, '-I', '-c', _NUMPY_FREE_STARTUP, str(REPO_ROOT / 'bazarr'),
+         str(REPO_ROOT / 'custom_libs'), str(config_dir)],
+        env=environment, capture_output=True, text=True, timeout=600, cwd=str(tmp_path),
+    )
+
+    assert completed.returncode == 0, completed.stdout[-2000:] + completed.stderr[-4000:]
+    assert 'startup finished without numpy' in completed.stdout
+
+
+def test_requirements_probe_checks_numpy_packages_by_metadata(cpu_without_sse42, monkeypatch):
+    from app import requirements
+
+    imported = []
+    monkeypatch.setattr(requirements.importlib, 'import_module', lambda name: imported.append(name))
+    monkeypatch.setattr(requirements, '_has_forbidden_origin', lambda module: False)
+    checked = []
+
+    def satisfied(distribution, spec):
+        checked.append(distribution)
+        return True
+
+    monkeypatch.setattr(requirements, '_requirement_is_satisfied', satisfied)
+
+    assert requirements.missing_runtime_requirements() == []
+
+    assert not set(imported) & requirements.NUMPY_RUNTIME_IMPORTS
+    assert {'numpy', 'ffsubsync', 'autosubsync', 'json_tricks'} <= set(checked)
+    assert 'flask' in imported
+
+
+def test_requirements_probe_reports_a_numpy_package_whose_metadata_is_wrong(cpu_without_sse42, monkeypatch):
+    from app import requirements
+
+    monkeypatch.setattr(requirements.importlib, 'import_module', lambda name: None)
+    monkeypatch.setattr(requirements, '_has_forbidden_origin', lambda module: False)
+    monkeypatch.setattr(requirements, '_requirement_is_satisfied',
+                        lambda distribution, spec: distribution != 'ffsubsync')
+
+    assert requirements.missing_runtime_requirements() == ['ffsubsync']
+
+
+def test_requirements_probe_still_imports_everything_on_a_modern_cpu(modern_cpu, monkeypatch):
+    from app import requirements
+
+    imported = []
+    monkeypatch.setattr(requirements.importlib, 'import_module', lambda name: imported.append(name))
+    monkeypatch.setattr(requirements, '_has_forbidden_origin', lambda module: False)
+    monkeypatch.setattr(requirements, '_requirement_is_satisfied', lambda distribution, spec: True)
+
+    assert requirements.missing_runtime_requirements() == []
+    assert requirements.NUMPY_RUNTIME_IMPORTS <= set(imported)
+
+
+def test_gemini_reply_parser_skips_json_tricks_on_a_cpu_without_sse42(cpu_without_sse42, monkeypatch):
+    from subtitles.tools.translate.services import gemini_translator
+
+    # None in sys.modules makes any import of the package raise.
+    monkeypatch.setitem(sys.modules, 'json_tricks', None)
+
+    assert gemini_translator._loads_reply('[{"index": 1, "text": "a"}]') == [{'index': 1, 'text': 'a'}]
+
+
+def test_gemini_reply_parser_keeps_json_tricks_on_a_modern_cpu(modern_cpu):
+    from subtitles.tools.translate.services import gemini_translator
+
+    assert gemini_translator._loads_reply('[{"index": 1, "text": "a"}]') == [{'index': 1, 'text': 'a'}]
 
 
 def test_textdistance_is_no_longer_a_requirement():
@@ -191,8 +344,11 @@ def test_cpu_check_never_imports_numpy(tmp_path):
 def cpu_without_sse42(monkeypatch):
     from utilities import cpu_features
 
+    from subtitles.tools import subsyncer
+
     monkeypatch.setattr(cpu_features, '_cached_missing_flags', ['sse4_2', 'popcnt'])
     monkeypatch.setattr(cpu_features, '_engines_logged', False)
+    monkeypatch.setattr(subsyncer, '_no_usable_engine_logged', False)
     return cpu_features
 
 
@@ -330,6 +486,72 @@ def test_no_usable_engine_result_reads_clearly_in_the_job_card(cpu_without_sse42
     assert 'No usable sync engine on this CPU.' in message
     assert 'SSE4.2 and POPCNT' in message
     assert sync_module._sync_complete_job_name('/subtitle.hu.srt', result) == 'Failed to sync /subtitle.hu.srt'
+
+
+def test_no_usable_engine_message_uses_labels_and_agrees_in_number(cpu_without_sse42, monkeypatch, tmp_path,
+                                                                  schema_session):
+    two, _subtitle, _progress = _sync(tmp_path, ['ffsubsync', 'autosubsync'], monkeypatch, schema_session)
+    one, _subtitle, _progress = _sync(tmp_path, ['autosubsync'], monkeypatch, schema_session)
+
+    assert two.results[0].message == ('FFsubsync and Autosubsync need SSE4.2 and POPCNT, which this CPU lacks. '
+                                      'Enable ALASS to synchronize on this machine.')
+    assert one.results[0].message == ('Autosubsync needs SSE4.2 and POPCNT, which this CPU lacks. '
+                                      'Enable ALASS to synchronize on this machine.')
+
+
+def test_no_usable_engine_card_does_not_count_the_placeholder_row(cpu_without_sse42, monkeypatch, tmp_path,
+                                                                 schema_session):
+    from subtitles import sync as sync_module
+
+    result, _subtitle, _progress = _sync(tmp_path, ['ffsubsync'], monkeypatch, schema_session)
+
+    assert sync_module._sync_outcome_message(result) == (
+        'Sync failed: No usable sync engine on this CPU. FFsubsync needs SSE4.2 and POPCNT, which this CPU '
+        'lacks. Enable ALASS to synchronize on this machine.')
+
+
+def test_no_usable_engine_failure_is_an_error_once_then_quiet(cpu_without_sse42, monkeypatch, tmp_path,
+                                                             schema_session, caplog):
+    with caplog.at_level(logging.DEBUG):
+        _sync(tmp_path, ['ffsubsync'], monkeypatch, schema_session)
+        _sync(tmp_path, ['ffsubsync'], monkeypatch, schema_session)
+
+    failures = [record for record in caplog.records if 'no usable sync engine on this CPU' in record.getMessage()]
+    assert [record.levelno for record in failures] == [logging.ERROR, logging.DEBUG]
+
+
+def test_progress_total_counts_only_the_usable_engines(cpu_without_sse42):
+    from subtitles.sync import _sync_progress_total
+
+    assert _sync_progress_total(['ffsubsync', 'autosubsync', 'alass']) == 1
+    assert _sync_progress_total(['ffsubsync', 'autosubsync']) == 1
+    assert _sync_progress_total(['alass']) == 1
+
+
+def test_progress_total_is_unchanged_on_a_modern_cpu(modern_cpu):
+    from subtitles.sync import _sync_progress_total
+
+    assert _sync_progress_total(['ffsubsync', 'autosubsync', 'alass']) == 3
+    assert _sync_progress_total(['ffsubsync', 'alass']) == 2
+
+
+def test_a_generated_output_is_still_skipped_not_failed(cpu_without_sse42, monkeypatch, tmp_path, schema_session):
+    from app import database as db_module
+    from subtitles.tools.subsync_engines import REASON_GENERATED_SOURCE, RESULT_SKIPPED
+    from subtitles.tools.subsyncer import SubSyncer
+
+    monkeypatch.setattr(db_module, 'database', schema_session)
+    generated = tmp_path / 'Movie.hu.ffsubsync.srt'
+    _write(generated, 'already synced')
+    (tmp_path / 'Movie.mkv').touch()
+
+    result = SubSyncer().sync(
+        video_path=str(tmp_path / 'Movie.mkv'), srt_path=str(generated), srt_lang='hu', hi=False, forced=False,
+        max_offset_seconds='60', no_fix_framerate=True, gss=True, enabled_engines=['ffsubsync'],
+        write_history=False,
+    )
+
+    assert [(item.status, item.reason) for item in result.results] == [(RESULT_SKIPPED, REASON_GENERATED_SOURCE)]
 
 
 def test_saved_settings_are_not_rewritten(cpu_without_sse42, monkeypatch, tmp_path, schema_session):

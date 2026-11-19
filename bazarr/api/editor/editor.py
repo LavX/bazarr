@@ -1465,7 +1465,7 @@ def run_editor_sync(job_key, video_path, tmp_in, tmp_out, encoding, max_offset, 
                 for engine_result in results:
                     message = getattr(engine_result, 'message', None)
                     engine = getattr(engine_result, 'engine', None)
-                    if message and engine:
+                    if message and engine and engine != 'all':
                         messages.append(f'{engine}: {message}')
                     elif message:
                         messages.append(message)

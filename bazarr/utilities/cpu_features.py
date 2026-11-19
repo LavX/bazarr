@@ -7,8 +7,14 @@ signal, not an exception, so no try/except can recover from it. The check here
 therefore reads /proc/cpuinfo instead of importing anything, and it never
 raises: when the answer is unknown the CPU is assumed to be fine.
 
-ffsubsync and autosubsync both import numpy. ALASS is a separate executable
-and does not.
+ffsubsync, autosubsync and json_tricks all import numpy. ALASS is a separate
+executable and does not.
+
+The check is Linux only, on purpose. /proc/cpuinfo is the one source that can be
+read without running a CPU instruction or importing anything that might fault.
+Windows and macOS would need a cpuid probe through ctypes or a helper process,
+which is more machinery than this guard is worth, so neither is covered. On those platforms the check reports nothing missing and
+the engines are left alone.
 """
 
 import logging
@@ -33,7 +39,12 @@ _engines_logged = False
 
 
 def read_cpu_flags(cpuinfo_path=CPUINFO_PATH):
-    """Return the flag set of the first CPU in cpuinfo, or None when unreadable."""
+    """Return the flag set of the first CPU in cpuinfo, or None when unreadable.
+
+    Only the first block is read. Every logical CPU of one x86-64 machine reports
+    the same SSE4.2 and POPCNT flags, hybrid performance and efficiency cores
+    included, and stopping there keeps this cheap on machines with many cores.
+    """
     try:
         with open(cpuinfo_path, 'r', encoding='utf-8', errors='replace') as cpuinfo:
             for line in cpuinfo:

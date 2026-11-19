@@ -10,6 +10,7 @@ from app.jobs_queue import jobs_queue, JobCancelled, JobFailed
 from sportarr.connection import check_cancelled
 from sportarr.output import validate_output_path
 from subtitles.tools.subsyncer import SubSyncer
+from utilities.cpu_features import usable_sync_engines
 from subtitles.tools.subsync_engines import (
     DEFAULT_ENABLED_ENGINES,
     ENGINE_LABELS,
@@ -170,6 +171,11 @@ def _sync_outcome_message(sync_result):
         head = f"Sync partially complete: {produced} of {attempted} engines produced output."
         return " ".join([head] + _engine_outcome_sentences(unsuccessful))
 
+    if [item.reason for item in unsuccessful] == [REASON_NO_USABLE_ENGINE]:
+        # One row stands for every engine that was asked for, so counting it as
+        # "no output from 1 engine" would misstate what happened.
+        return " ".join(["Sync failed:"] + _engine_outcome_sentences(unsuccessful))
+
     if sync_result.skipped_results and not sync_result.failed_results:
         head = "Sync skipped: no engine produced output."
     else:
@@ -184,7 +190,9 @@ def _sync_progress_total(enabled_engines):
         enabled_engines if enabled_engines is not None
         else getattr(settings.subsync, 'enabled_engines', DEFAULT_ENABLED_ENGINES)
     )
-    return max(len(normalize_enabled_engines(configured_engines)), 1)
+    # Count what will actually run, so the total the job is queued with is the one
+    # the syncer reports. A CPU that cannot host numpy drops two of the engines.
+    return max(len(usable_sync_engines(normalize_enabled_engines(configured_engines))), 1)
 
 
 def _resolve_subsync_overrides(arr_instance_id, is_series, enabled_engines, max_offset_seconds):

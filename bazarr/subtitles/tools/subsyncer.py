@@ -21,6 +21,7 @@ from subtitles.tools.subsync_engines import (
     RESULT_FAILED,
     SyncEngineResult,
     SyncRunResult,
+    is_sync_engine_output,
     UNCONSTRAINED_MAX_OFFSET_SECONDS,
     SubsyncEngineRunner,
     MissingSyncEngineError,
@@ -39,6 +40,10 @@ from utilities.video_analyzer import subtitles_sync_references
 from app.config import settings
 from app.database import TableMovies, TableShows, database, select
 from arr_instances.resolution import scoped, default_instance_id
+
+
+# Set once the first sync that had no usable engine has been logged as an error.
+_no_usable_engine_logged = False
 
 
 def _autosubsync_model_file():
@@ -557,9 +562,16 @@ class SubSyncer:
 
     def _no_usable_engine_result(self, requested_engines, output_mode):
         missing = describe_flags(numpy_cpu_missing_flags())
-        message = f"{' and '.join(requested_engines)} need {missing}, which this CPU lacks."
-        logging.error('BAZARR unable to sync subtitles: no usable sync engine on this CPU. %s: %s',
-                      message, self.srtin)
+        labels = [ENGINE_LABELS.get(engine, engine) for engine in requested_engines]
+        verb = 'needs' if len(labels) == 1 else 'need'
+        message = (f"{' and '.join(labels)} {verb} {missing}, which this CPU lacks. "
+                   "Enable ALASS to synchronize on this machine.")
+        # Every subtitle of a batch ends here, so only the first one is an error.
+        global _no_usable_engine_logged
+        level = logging.DEBUG if _no_usable_engine_logged else logging.ERROR
+        _no_usable_engine_logged = True
+        logging.log(level, 'BAZARR unable to sync subtitles: no usable sync engine on this CPU. %s (%s)',
+                    message, self.srtin)
         self._report_progress('No usable sync engine on this CPU', 0, 1)
         self.sync_result = SyncRunResult(
             source_path=self.srtin,
@@ -602,7 +614,9 @@ class SubSyncer:
         # machine lacks are only left out of this run, since importing numpy there
         # kills the whole process rather than raising.
         enabled_engines = usable_sync_engines(requested_engines)
-        if requested_engines and not enabled_engines:
+        # A generated output is not a source, and the runner reports that on its own,
+        # so it keeps its "skipped" answer on every CPU.
+        if requested_engines and not enabled_engines and not is_sync_engine_output(self.srtin):
             return self._no_usable_engine_result(requested_engines, output_mode)
         progress_total = max(len(enabled_engines), 1)
         engine_positions = {engine: index + 1 for index, engine in enumerate(enabled_engines)}
