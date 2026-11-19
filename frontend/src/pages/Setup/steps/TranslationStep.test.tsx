@@ -400,6 +400,49 @@ describe("TranslationStep", () => {
     ).not.toBeInTheDocument();
   });
 
+  it("shows an engine removed while Bazarr+ runs as Removing, with no restart prompt and no repair hint", async () => {
+    serve(
+      firstRun({
+        instances: [
+          aiEngine({
+            plugin: {
+              name: "AI Subtitle Translator",
+              version: "2.2.0",
+              active: true,
+            },
+          }),
+        ],
+        available_engines: [{ ...GOOGLE_OFFER }],
+      }),
+    );
+    server.use(
+      http.get("/api/plugins/installations", () =>
+        HttpResponse.json({
+          data: [
+            {
+              provider_id: "ai_translator",
+              kind: "translator",
+              state: "removed",
+              active_version: "1.0.0",
+              needs_restart: false,
+            },
+          ],
+        }),
+      ),
+    );
+    customRender(<TranslationStep onNext={onNext} />);
+
+    expect(await screen.findByText("Removing")).toBeVisible();
+    expect(
+      screen.getByText(
+        /This plugin is being removed\. It goes when the calls it is running end/,
+      ),
+    ).toBeVisible();
+    expect(screen.queryByText("Plugin not running")).not.toBeInTheDocument();
+    expect(screen.queryByText(/waiting for a restart/)).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("OpenRouter key")).not.toBeInTheDocument();
+  });
+
   it.each([
     [{ state: "staged", active_version: null }, "It is installed. Restart"],
     [

@@ -183,6 +183,7 @@ const EnginePanel: FunctionComponent<EnginePanelProps> = ({
         key={engine.id}
         className={styles.engineCard}
         data-checked={chosen === engine.id}
+        data-unavailable={engine.removing ? "true" : undefined}
       >
         <input
           type="radio"
@@ -190,6 +191,7 @@ const EnginePanel: FunctionComponent<EnginePanelProps> = ({
           id={id}
           name={group}
           checked={chosen === engine.id}
+          disabled={engine.removing}
           aria-describedby={`${id}-text`}
           onChange={() => pointers.choose({ engine: engine.id })}
         />
@@ -218,7 +220,7 @@ const EnginePanel: FunctionComponent<EnginePanelProps> = ({
                 Update available
               </Link>
             )}
-            {openId !== engine.id && (
+            {openId !== engine.id && !engine.removing && (
               <Button
                 size="compact-xs"
                 variant="subtle"

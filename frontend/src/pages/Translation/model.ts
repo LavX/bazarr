@@ -120,7 +120,8 @@ export function pickableChoices(state: TranslationState): PickChoice[] {
 
 /** Whether there is something to run: an engine's plugin, or Bazarr+ itself for an engine it runs. */
 export const canRun = (engine: TranslationEngine) =>
-  engine.legacy === true || engine.plugin?.active === true;
+  engine.legacy === true ||
+  (engine.plugin?.active === true && engine.removing !== true);
 
 export interface Status {
   tone: Tone;
@@ -169,6 +170,14 @@ export const RESTART_LINES: Record<RestartChange, string> = {
 
 /** Whether an engine can take a job, and when it cannot, the reason and the next step. */
 export function engineStatus(engine: TranslationEngine): Status {
+  // Removed while Bazarr+ runs: it takes no job, and there is nothing to repair or reinstall.
+  if (engine.removing) {
+    return {
+      tone: "warning",
+      label: "Removing",
+      next: "This plugin is being removed. It goes when the calls it is running end, or after a few minutes.",
+    };
+  }
   // A removal waits on the restart whether or not the plugin still runs until then.
   if (
     engine.awaiting_restart === "removal" ||

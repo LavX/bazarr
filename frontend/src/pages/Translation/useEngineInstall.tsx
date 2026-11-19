@@ -5,7 +5,11 @@ import {
   PluginCostCaps,
   usePluginConsentFlow,
 } from "@/components/plugin-consent";
-import { installationKind, OFFICIAL_PLUGIN_ID } from "@/pages/PluginHub/model";
+import {
+  installationKind,
+  isRemoving,
+  OFFICIAL_PLUGIN_ID,
+} from "@/pages/PluginHub/model";
 import type {
   RestartChange,
   TranslationAvailableEngine,
@@ -99,8 +103,21 @@ export function useRestartAware(state: TranslationState | undefined): {
     }
     return changes;
   }, [installations.data]);
+  // The translator plugins being removed while Bazarr+ runs: no restart waits on them, and the row goes by itself.
+  const removing = useMemo(
+    () =>
+      new Set(
+        (installations.data ?? [])
+          .filter(
+            (item) =>
+              isRemoving(item) && TRANSLATION_KINDS.has(installationKind(item)),
+          )
+          .map((item) => item.provider_id),
+      ),
+    [installations.data],
+  );
   return useMemo(() => {
-    if (ids.size === 0) {
+    if (ids.size === 0 && removing.size === 0) {
       return { state, waiting: 0 };
     }
     if (!state) {
@@ -110,7 +127,12 @@ export function useRestartAware(state: TranslationState | undefined): {
       const change = ids.get(engine.plugin_id);
       return change ? { ...engine, awaiting_restart: change } : engine;
     };
-    const instances = state.instances.map(mark);
+    const instances = state.instances.map((engine) => {
+      const marked = mark(engine);
+      return removing.has(engine.plugin_id)
+        ? { ...marked, removing: true }
+        : marked;
+    });
     const available = state.available_engines?.map(mark);
     return {
       state: {
@@ -122,5 +144,5 @@ export function useRestartAware(state: TranslationState | undefined): {
       // data has no engine left, and a plugin whose release is still active is in neither list.
       waiting: ids.size,
     };
-  }, [state, ids]);
+  }, [state, ids, removing]);
 }

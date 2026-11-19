@@ -39,6 +39,11 @@ export interface TranslationEngine {
   id: number;
   /** Set by the page, not the server: what the restart it waits for will do to its plugin. */
   awaiting_restart?: RestartChange;
+  /**
+   * Set by the page, not the server: its plugin is being removed while Bazarr+ runs. The row goes when the
+   * calls the plugin already took are done, and nothing can be done with the engine meanwhile.
+   */
+  removing?: boolean;
   plugin_id: string;
   name: string;
   official: boolean;

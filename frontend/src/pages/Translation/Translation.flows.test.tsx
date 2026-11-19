@@ -2400,6 +2400,80 @@ describe("Translation page, an engine installed and waiting for a restart", () =
     expect(screen.queryByText(/waiting for a restart/)).not.toBeInTheDocument();
   });
 
+  const REMOVING_LINE =
+    "This plugin is being removed. It goes when the calls it is running end, or after a few minutes.";
+
+  it.each([
+    ["its plugin still running", true],
+    ["its plugin no longer running", false],
+  ])(
+    "shows a translator removed while Bazarr+ runs as Removing, with %s, and offers no restart, repair or reinstall",
+    async (_name, active) => {
+      installedEngine(active);
+      waitingFor({
+        state: "removed",
+        active_version: "1.0.0",
+        needs_restart: false,
+      });
+      await showPage();
+      expect((await screen.findAllByText("Removing")).length).toBeGreaterThan(
+        0,
+      );
+      expect(screen.getAllByText(REMOVING_LINE).length).toBeGreaterThan(0);
+      expect(screen.queryByText("Plugin not running")).not.toBeInTheDocument();
+      expect(screen.queryByText(/Repair or reinstall/)).not.toBeInTheDocument();
+      expect(screen.queryByText("Pending restart")).not.toBeInTheDocument();
+      expect(
+        screen.queryByText(/waiting for a restart/),
+      ).not.toBeInTheDocument();
+      expect(
+        screen.queryByRole("button", { name: /Restart Bazarr/ }),
+      ).not.toBeInTheDocument();
+      // Nothing can be done with it: it cannot be picked or opened for set-up.
+      expect(
+        screen.queryByRole("button", { name: "Set up AI Subtitle Translator" }),
+      ).not.toBeInTheDocument();
+      expect(
+        screen.getByRole("radio", { name: /AI Subtitle Translator/ }),
+      ).toBeDisabled();
+    },
+  );
+
+  it("shows it as Removing on the first-run panel too, with no way to set it up", async () => {
+    state = {
+      enabled: true,
+      engine: null,
+      fallback_engine: null,
+      instances: [
+        engine({
+          configured: false,
+          connections: [],
+          plugin: {
+            name: "AI Subtitle Translator",
+            version: "2.2.0",
+            active: true,
+          },
+        }),
+      ],
+    };
+    waitingFor({
+      state: "removed",
+      active_version: "1.0.0",
+      needs_restart: false,
+    });
+    customRender(<TranslationView />);
+    await screen.findByRole("heading", {
+      name: "Translate the subtitles you cannot find",
+    });
+    expect(await screen.findByText("Removing")).toBeVisible();
+    expect(screen.getByText(REMOVING_LINE)).toBeVisible();
+    expect(screen.queryByText("Plugin not running")).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: /Set up its back ends/ }),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByText(/waiting for a restart/)).not.toBeInTheDocument();
+  });
+
   it("keeps the repair hint for a plugin the server does not say is waiting", async () => {
     state = {
       ...state,

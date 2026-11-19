@@ -50,7 +50,7 @@ const EngineSetup: FunctionComponent<{
           checked={power.checked}
           aria-busy={power.busy}
           // The settings form writes the same row: while it saves, the switch waits its turn.
-          disabled={formBusy}
+          disabled={formBusy || engine.removing}
           onChange={(event) => void power.set(event.currentTarget.checked)}
         />
       </div>
@@ -91,7 +91,7 @@ const EngineSetup: FunctionComponent<{
       ))}
 
       <div className={styles.setupBody}>
-        {backends && (
+        {backends && !engine.removing && (
           <section className={styles.section}>
             <div className={styles.sectionHead}>
               <div>
@@ -107,7 +107,7 @@ const EngineSetup: FunctionComponent<{
           </section>
         )}
 
-        {fields.length > 0 && (
+        {fields.length > 0 && !engine.removing && (
           <section className={styles.section}>
             <div className={styles.sectionHead}>
               <h3 className={styles.sectionTitle}>Engine settings</h3>
