@@ -10,6 +10,7 @@ import logging
 import os
 import subprocess
 import sys
+import threading
 import time
 from collections import deque
 from pathlib import Path
@@ -17,7 +18,7 @@ from pathlib import Path
 import pytest
 
 from provider_hub.runtime import pool as pool_module
-from provider_hub.runtime.errors import RequestCancelled, RequestFailed, SessionError
+from provider_hub.runtime.errors import RequestCancelled, RequestFailed, RequestTimeout, SessionError
 from provider_hub.runtime.pool import (
     CONFIG_RESERVE_BYTES,
     DEFAULT_MAX_RESIDENT,
@@ -39,7 +40,7 @@ from provider_hub.runtime.pool import (
     memory_limit_for,
     read_process_tree_memory,
 )
-from provider_hub.runtime.session import SessionLimits
+from provider_hub.runtime.session import SessionLimits, WorkerSession
 from provider_hub.runtime.testing.fake_worker import fake_worker_command, fake_worker_env
 
 has_smaps = os.path.exists("/proc/self/smaps_rollup")
@@ -805,6 +806,108 @@ def test_run_once_enforces_the_memory_limit(make_pool):
     with pytest.raises(WorkerKilled) as killed:
         pool.run_once(definition("draft", memory_limit_bytes=80 * MIB), "alloc", {"mb": 300, "seconds": 20}, timeout=20)
     assert killed.value.code == "memory_limit"
+
+
+class _KillRace:
+    """Holds one reading in flight across the session's kill, so the overlap that is a race on a real host
+    happens on every run. ``armed`` is set once the request is with the worker (not by a clock), the kill is held
+    open until the reading has answered, and the reading is held until the kill has happened."""
+
+    def __init__(self, monkeypatch):
+        self.armed = threading.Event()
+        self.killed = threading.Event()
+        self.answered = threading.Event()
+        self.in_time = None
+        real_reap = WorkerSession._reap
+        real_submit = WorkerSession.submit
+        race = self
+
+        def reap(session, process, timeout):
+            if race.armed.is_set():
+                race.killed.set()  # the session is closed and the group is ended
+                race.answered.wait(10.0)
+            return real_reap(session, process, timeout)
+
+        def submit(session, *args, **kwargs):
+            handle = real_submit(session, *args, **kwargs)
+            race.armed.set()
+            return handle
+
+        monkeypatch.setattr(WorkerSession, "_reap", reap)
+        monkeypatch.setattr(WorkerSession, "submit", submit)
+
+    def hold(self, result):
+        """Called by a reading: the first one made after the request went out waits for the kill, then answers."""
+        if self.armed.is_set() and not self.answered.is_set():
+            self.in_time = self.killed.wait(10.0)
+            self.answered.set()
+            return result
+        return None
+
+
+def _stuck_sleep(pool, **options):
+    return pool.run_once(definition("draft", memory_limit_bytes=GIB, **options), "sleep",
+                         {"seconds": 60, "ignore_cancel": True}, timeout=0.2)
+
+
+def test_a_reading_cut_short_by_the_worker_being_ended_does_not_replace_the_real_error(make_pool, monkeypatch):
+    """A /proc reading that overlaps the session killing a worker (an ignored cancel) comes back incomplete.
+
+    That is the worker dying, not a worker too big to measure: the caller must still see the timeout,
+    not a memory kill.
+    """
+    race = _KillRace(monkeypatch)
+
+    def reader(pid):
+        sample = read_process_tree_memory(pid)
+        held = race.hold(MemorySample(0, 0, 0, "error", truncated=True))  # what an unreadable tree comes back as
+        return sample if held is None else held
+
+    pool = make_pool(fast_pool_limits(), autostart=True, use_clock=False, memory_reader=reader)
+    with pytest.raises(RequestTimeout):
+        _stuck_sleep(pool)
+    assert race.answered.is_set() and race.in_time
+
+
+def test_a_folder_reading_cut_short_by_the_worker_being_ended_does_not_replace_the_real_error(
+        make_pool, monkeypatch, tmp_path):
+    """The folder-budget check reads the same /proc: an incomplete reading of a dying worker is not an overrun."""
+    race = _KillRace(monkeypatch)
+    real = WorkerPool._deleted_open_usage
+
+    def usage(self, slot, budgets, files=None, budget=None):
+        held = race.hold(({}, True))
+        return real(self, slot, budgets, files, budget) if held is None else held
+
+    monkeypatch.setattr(WorkerPool, "_deleted_open_usage", usage)
+    pool = make_pool(fast_pool_limits(), autostart=True, use_clock=False)
+    with pytest.raises(RequestTimeout):
+        _stuck_sleep(pool, budgets=[FolderBudget(str(tmp_path), 1 * MIB, "plugin data")])
+    assert race.answered.is_set() and race.in_time
+
+
+def test_a_reading_that_cannot_be_completed_still_stops_a_worker_that_is_running(make_pool):
+    """Good readings while the worker starts and takes its request, incomplete ones after: it is killed mid-request."""
+    sent = threading.Event()
+    real_submit = WorkerSession.submit
+
+    def submit(session, *args, **kwargs):
+        handle = real_submit(session, *args, **kwargs)
+        sent.set()
+        return handle
+
+    def reader(pid):
+        if sent.is_set():
+            return MemorySample(0, 0, 0, "error", truncated=True)
+        return MemorySample(1 * MIB, 1 * MIB, 1, "test")
+
+    pool = make_pool(fast_pool_limits(), autostart=True, use_clock=False, memory_reader=reader)
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(WorkerSession, "submit", submit)
+        with pytest.raises(WorkerKilled) as killed:
+            pool.run_once(definition("draft", memory_limit_bytes=GIB), "sleep", {"seconds": 30}, timeout=20)
+    assert killed.value.code == "memory_limit"
+    assert not getattr(killed.value, "before_send", False)
 
 
 def test_run_once_respects_the_disk_reserve(make_pool):
@@ -4902,3 +5005,51 @@ def test_a_dev_shm_file_with_a_newline_in_its_name_is_charged_by_bytes_once_when
             os.unlink(path)
         except OSError:
             pass
+
+
+# ------------------------------- a reading taken while the pool is ending a worker
+
+
+@pytest.mark.parametrize("flag", ["closing", "ending"])
+def test_a_reading_cut_short_while_the_pool_is_ending_the_worker_is_dropped(make_pool, flag):
+    """The pool's own teardown (a polite stop, a launcher's stop) signals before the session is marked closed."""
+    pool = make_pool(memory_reader=lambda pid: MemorySample(0, 0, 0, "error", truncated=True))
+    slot = pool_module._Slot(definition(), 0.0, pool.limits)
+    slot.session = StubProcessRuntime()
+    slot.session.start()
+    slot.session.process.pid = os.getpid()
+    setattr(slot, flag, True)
+    pool._sample(slot)
+    assert slot.memory_truncated is False and pool._memory_problem(slot, GIB) is None
+    setattr(slot, flag, False)
+    pool._sample(slot)
+    assert pool._memory_problem(slot, GIB) is not None
+
+
+def test_every_pool_side_teardown_marks_the_worker_as_ending_before_it_signals(make_pool):
+    seen = []
+
+    class Watching(StubProcessRuntime):
+        def __init__(self, slot):
+            super().__init__()
+            self.slot = slot
+            outer = self
+
+            class Process(StubProcess):
+                def stop(self, grace=3.0):
+                    seen.append(("stop", outer.slot.ending))
+                    return super().stop(grace)
+
+            self.process = Process()
+
+        def close(self, grace=5.0):
+            seen.append(("close", self.slot.ending))
+
+    pool = make_pool(use_clock=False)
+    for call in (lambda slot: pool._polite_close(slot, 0.1), pool._terminate_now):
+        slot = pool_module._Slot(definition(), 0.0, pool.limits)
+        slot.session = Watching(slot)
+        slot.session.start()
+        call(slot)
+    assert seen and all(ending for _what, ending in seen)
+    assert {what for what, _ending in seen} == {"stop", "close"}
