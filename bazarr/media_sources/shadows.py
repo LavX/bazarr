@@ -45,8 +45,13 @@ def revalidate_shadows(item_ids=None, *, owners=None, target=None):
     if item_ids is not None:
         query = query.where(repository.Items.c.id.in_(list(item_ids)))
     counts = {'kept': 0, 'cleared': 0, 'refreshed': 0}
-    for item in session.execute(query.order_by(repository.Items.c.id)).all():
-        action, match = identity.revalidate_shadow(item, owners, queue_scan=_queue_library_scan)
+    shadowed = session.execute(query.order_by(repository.Items.c.id)).all()
+    # The arr rows are read in one query per table, not one per item.
+    fetched = owners.fetch_many({(item.shadow_arr_table, item.shadow_arr_row_id) for item in shadowed
+                                 if item.shadow_arr_table in identity.KIND_OF_TABLE
+                                 and item.shadow_arr_row_id is not None})
+    for item in shadowed:
+        action, match = identity.revalidate_shadow(item, owners, queue_scan=_queue_library_scan, fetched=fetched)
         if action == 'clear':
             repository.update_item(item.id, session, **identity.CLEARED_SHADOW)
             counts['cleared'] += 1
@@ -64,7 +69,7 @@ def run_refresh(kind=None, *, target=None):
     First every flag whose owner no longer counts is cleared, including one whose ``shadow_instance_id`` is already
     NULL (its instance was deleted and the foreign key set it NULL), and the rest are re-validated. Then both
     stages run for the files nothing shadows, against the rows of the enabled owners of ``kind`` (all kinds when
-    none is given), using each item's stored file identity so that no source file is statted."""
+    none is given), using each item's stored file identity, so no source file is statted (its path is resolved, not read)."""
     session = _session(target)
     owners = identity.ArrOwners.load(target)
     counts = revalidate_shadows(owners=owners, target=target)

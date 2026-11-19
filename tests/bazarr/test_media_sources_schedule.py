@@ -7,7 +7,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from media_source_helpers import add_source, stamped_video
+from media_source_helpers import add_source, pristine_media_source_modules, stamped_video  # noqa: F401
 
 
 @pytest.fixture
@@ -54,6 +54,8 @@ def test_the_hourly_task_queues_a_scan_for_each_due_source_and_survives_a_failur
     from media_sources import repository, schedule
 
     other = repository.create_source(kind="folder", name="Second", target=source.session)
+    repository.create_library(source_id=other, content_kind="movie", locator=str(tmp_path / "Second"),
+                              target=source.session)
     queued = []
 
     def queue(source_id, library_id=None):
@@ -186,7 +188,7 @@ def test_creating_enabling_or_disabling_an_arr_instance_queues_a_refresh_for_its
     assert queued == ["sportarr", "radarr"]
 
 
-def test_a_toggle_that_really_changed_queues_a_refresh_for_that_kind_only(monkeypatch):
+def test_a_toggle_that_really_changed_queues_a_refresh_for_that_kind_only(monkeypatch, pristine_media_source_modules):  # noqa: F811
     from app import config
     from media_sources import shadows
 
@@ -199,13 +201,14 @@ def test_a_toggle_that_really_changed_queues_a_refresh_for_that_kind_only(monkey
     monkeypatch.setattr(config.settings.general, "use_radarr", False)
     monkeypatch.setattr(config.settings.general, "use_sonarr", False)
     monkeypatch.setattr(config.settings.general, "use_sportarr", False)
+    # Imported before the stand-in database, so that nothing keeps the stand-in.
+    monkeypatch.setattr("sportarr.scheduler.refresh_sports_runtime", lambda: None)
     monkeypatch.setitem(sys.modules, "app.database", SimpleNamespace(
         database=SimpleNamespace(execute=lambda statement: None), update=lambda model: SimpleNamespace(
             values=lambda **kwargs: None), System=object))
     # The follow-ups that talk to a live scheduler and to feeds are not what is under test.
     for name in ("scheduler", "signalr_client", "event_handler"):
         monkeypatch.setitem(sys.modules, f"app.{name}", MagicMock())
-    monkeypatch.setattr("sportarr.scheduler.refresh_sports_runtime", lambda: None)
 
     config.save_settings([("settings-general-use_radarr", ["true"]), ("settings-general-use_sonarr", ["false"])])
 

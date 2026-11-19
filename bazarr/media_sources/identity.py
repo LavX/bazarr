@@ -44,6 +44,18 @@ def path_is_gone(path):
     return False
 
 
+def path_can_be_judged(path):
+    """True when a stat of the path gives a definite answer: the file is there, or it is known to be absent. Any
+    other failure (a permission error, a stale handle) means nothing can be said about it."""
+    try:
+        os.stat(path)
+    except OSError as error:
+        return error.errno in (errno.ENOENT, errno.ENOTDIR)
+    except ValueError:
+        return False
+    return True
+
+
 def same_file(first, second, *, attributes=False, stat_first=None, stat_second=None):
     """The rung at which two paths are one file, or None.
 
@@ -107,6 +119,10 @@ class Matching:
     handovers: list = field(default_factory=list)
     #: Rows of another library that cannot follow the file (another content kind): closed.
     closed_foreign: list = field(default_factory=list)
+    #: ``(found, holder)``: another library's row that would have been closed or have followed the file, but
+    #: whose library cannot vouch for it right now (unmounted, remounted, or its path cannot be read). Nothing is
+    #: done: that library's own next scan decides.
+    deferred_foreign: list = field(default_factory=list)
     #: ``(found, holder)``: the file is an alias of one an enabled library holds. Not inserted.
     supplied: list = field(default_factory=list)
     #: ``(found, holder)``: a disabled holder of another content kind. Not adopted, not inserted.
@@ -132,12 +148,17 @@ def _holds_live(row_path, found):
                      ) is not None
 
 
-def match_library(found_files, rows, *, ignore_dev, foreign_lookup, library_content_kind):
+def match_library(found_files, rows, *, ignore_dev, foreign_lookup, library_content_kind,
+                  foreign_vouched=lambda holder: True):
     """Match a library's discovered files to its stored rows, over the whole library and before any write.
 
     ``ignore_dev(found)`` says whether a file's root changed device since the last scan. ``foreign_lookup(inodes,
     paths)`` returns the rows of other libraries that may be the same files. Everything is processed in a fixed
-    order, so the answer does not depend on the order the walk produced the files in."""
+    order, so the answer does not depend on the order the walk produced the files in.
+
+    ``foreign_vouched(holder)`` says whether the holder's own library can vouch for the row being closed or moved
+    away from it: its roots readable, its device unchanged, its path really gone. Without it the row is left to
+    that library's own next scan."""
     result = Matching()
     found_files = sorted(found_files, key=lambda found: found.path)
     rows = sorted(rows, key=lambda row: row.id)
@@ -176,18 +197,25 @@ def match_library(found_files, rows, *, ignore_dev, foreign_lookup, library_cont
     unclaimed = [found for found in found_files if found.path not in claimed]
     if unclaimed:
         holders = foreign_lookup([found.ino for found in unclaimed], [found.path for found in unclaimed])
+        holders_by_inode, holders_by_path = defaultdict(list), {}
+        for holder in holders:
+            holders_by_inode[holder.file_ino].append(holder)
+            holders_by_path[holder.path] = holder
         used = set()
         for found in unclaimed:
-            ranked = sorted((holder for holder in holders if holder.id not in used
-                             and (holder.path == found.path or identity_holds(holder, found, ignore_dev(found)))),
-                            key=lambda holder: (not (holder.library_enabled and holder.source_enabled), holder.id))
-            if not ranked:
+            candidates = {holder.id: holder for holder in holders_by_inode.get(found.ino, ()) if holder.id not in used
+                          and identity_holds(holder, found, ignore_dev(found))}
+            at_path = holders_by_path.get(found.path)
+            if at_path is not None and at_path.id not in used:
+                candidates[at_path.id] = at_path
+            if not candidates:
                 continue
-            holder = ranked[0]
+            holder = sorted(candidates.values(), key=lambda holder: (
+                not (holder.library_enabled and holder.source_enabled), holder.id))[0]
             alias = holder.path == found.path or _holds_live(holder.path, found)
             same_kind = holder.content_kind == library_content_kind
+            used.add(holder.id)
             if alias:
-                used.add(holder.id)
                 claimed[found.path] = holder.id
                 if holder.library_enabled and holder.source_enabled:
                     result.supplied.append((found, holder))
@@ -195,14 +223,15 @@ def match_library(found_files, rows, *, ignore_dev, foreign_lookup, library_cont
                     result.handovers.append((holder, found))
                 else:
                     result.held_elsewhere.append((found, holder))
+            elif not foreign_vouched(holder):
+                claimed[found.path] = holder.id
+                result.deferred_foreign.append((found, holder))
             elif same_kind:
                 # The file physically moved here: the row follows its own identity, from an enabled library too.
-                used.add(holder.id)
                 claimed[found.path] = holder.id
                 result.handovers.append((holder, found))
             else:
                 # It cannot carry the row into another kind of library: the row is closed, the file is new here.
-                used.add(holder.id)
                 result.closed_foreign.append(holder)
 
     # Pass 2, path. A row no identity claimed, whose path holds a file nothing claimed: the content changed.
@@ -418,6 +447,28 @@ class ArrOwners:
             return None
         return self._arr_row(self.instances[row[4]], table, row[0], row[1], row[2], row[3])
 
+    def fetch_many(self, pairs):
+        """``{(table, row id): ArrRow}`` for the arr rows ``pairs`` name, read in one query per table. A row that
+        is gone, or whose owner no longer counts, is not in the answer."""
+        from app.database import database
+        session = database if self.target is None else self.target
+        wanted = defaultdict(set)
+        for table, row_id in pairs:
+            wanted[table].add(row_id)
+        found = {}
+        for table, ids in wanted.items():
+            model, file_id = self._columns(table)
+            ids = sorted(ids)
+            for start in range(0, len(ids), 500):
+                for row in session.execute(
+                        sa.select(model.id, model.path, model.file_size, file_id, model.arr_instance_id)
+                        .where(model.id.in_(ids[start:start + 500]))).all():
+                    if row[4] in self.instances:
+                        arr_row = self._arr_row(self.instances[row[4]], table, row[0], row[1], row[2], row[3])
+                        if arr_row is not None:
+                            found[(table, row[0])] = arr_row
+        return found
+
     def path_stage(self, path):
         """The path stage alone, for one file, with no stat: one indexed lookup per owner on the item's path and
         real path, mapped back to each arr's own side. Used right before an automatic search."""
@@ -443,7 +494,7 @@ class ArrOwners:
         return None
 
 
-def revalidate_shadow(item, owners, queue_scan=None):
+def revalidate_shadow(item, owners, queue_scan=None, fetched=None):
     """Judge one shadowed item against the row that set it, not by matching its path again.
 
     Returns ``('keep', None)``, ``('clear', None)`` or ``('refresh', match)`` where the match carries the new
@@ -451,13 +502,15 @@ def revalidate_shadow(item, owners, queue_scan=None):
     with the same file id and mapped path it is kept with no stat. If it holds another file id or path (the arr
     replaced or moved the file, or SQLite gave a deleted id to a new row) the item's file is matched against it
     again through both stages. When the item's own file cannot be statted the shadow is kept and a scan of the
-    item's library is queued, so the item never drops into the wanted rule as a missing file."""
+    item's library is queued, so the item never drops into the wanted rule as a missing file. ``fetched`` is the
+    answer of ``owners.fetch_many`` for a whole batch of items; without it the row is read on its own."""
     if (item.shadow_instance_id is None or item.shadow_arr_table not in KIND_OF_TABLE
             or item.shadow_arr_row_id is None):
         return 'clear', None
     if not owners.counts(item.shadow_instance_id):
         return 'clear', None
-    row = owners.fetch(item.shadow_arr_table, item.shadow_arr_row_id)
+    key = (item.shadow_arr_table, item.shadow_arr_row_id)
+    row = fetched.get(key) if fetched is not None else owners.fetch(*key)
     if row is None or row.instance_id != item.shadow_instance_id:
         return 'clear', None
     if row.file_id == item.shadow_arr_file_id and row.path == item.shadow_arr_path:

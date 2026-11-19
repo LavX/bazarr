@@ -1021,6 +1021,7 @@ jobs:
             tests/bazarr/test_media_sources_groups.py \
             tests/bazarr/test_media_sources_shadows.py \
             tests/bazarr/test_media_sources_schedule.py \
+            tests/bazarr/test_media_sources_review.py \
             tests/bazarr/test_media_sources_pipeline.py \
             tests/bazarr/test_media_sources_api.py \
             tests/bazarr/test_media_sources_no_change.py \

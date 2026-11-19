@@ -306,8 +306,9 @@ def update_item(item_id, target=None, **values):
 def delete_items(item_ids, target=None):
     """Delete items. Their history and blacklist rows stay, with ``item_id`` set to NULL."""
     item_ids = list(item_ids)
-    if item_ids:
-        _target(target).execute(sa.delete(Items).where(Items.c.id.in_(item_ids)))
+    # In batches: SQLite refuses an IN list of more than 32,766 values.
+    for start in range(0, len(item_ids), 500):
+        _target(target).execute(sa.delete(Items).where(Items.c.id.in_(item_ids[start:start + 500])))
     return len(item_ids)
 
 
@@ -389,18 +390,21 @@ def _inside(path, parent):
     return path == parent or path.startswith(parent.rstrip(os.sep) + os.sep)
 
 
-def overlapping_root(path, target=None):
+def overlapping_root(path, target=None, exclude_library_id=None):
     """The ``(source name, root path)`` of a library root that is inside ``path`` or contains it, or None.
 
     Compared by the spelling, by the real path (a symlink to a root is that root) and by device and inode (a bind
-    mount of a root is that root, whatever its path)."""
+    mount of a root is that root, whatever its path). The roots of ``exclude_library_id`` do not count: a library
+    does not overlap itself."""
     wanted = [_normal(path), os.path.normcase(os.path.realpath(path))]
     identity = folder_identity(path)
     rows = _target(target).execute(
-        sa.select(Roots.c.local_path, Sources.c.name)
+        sa.select(Roots.c.local_path, Roots.c.library_id, Sources.c.name)
         .select_from(Roots.join(Libraries, Roots.c.library_id == Libraries.c.id)
                      .join(Sources, Libraries.c.source_id == Sources.c.id))).all()
     for row in rows:
+        if exclude_library_id is not None and row.library_id == exclude_library_id:
+            continue
         existing = {_normal(row.local_path), os.path.normcase(os.path.realpath(row.local_path))}
         if any(_inside(one, other) or _inside(other, one) for one in wanted for other in existing):
             return row.name, row.local_path

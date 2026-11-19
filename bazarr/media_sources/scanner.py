@@ -9,11 +9,12 @@ and holds none of the known files deletes nothing. An unmounted share must never
 """
 import logging
 import os
+import threading
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime
 
-from sqlalchemy.exc import DataError, IntegrityError
+from sqlalchemy.exc import DataError, IntegrityError, OperationalError
 
 from app.jobs_queue import JobCancelled, JobFailed, jobs_queue
 
@@ -24,6 +25,9 @@ from .indexer import SourceOutputOwnerIndex, index_item
 from .kinds import get_kind
 
 BATCH_SIZE = 500
+# PostgreSQL refuses an index entry of more than about 2,700 bytes. A path above this is logged and skipped, on
+# every dialect, so that a library behaves the same wherever it runs.
+MAX_PATH_BYTES = 2600
 # A scan that started this long ago and never finished is taken for a crashed one, not a running one.
 STALE_SCAN_HOURS = 6
 
@@ -60,6 +64,35 @@ def _chunks(values, size=None):
         yield values[start:start + size]
 
 
+_library_locks = {}
+_library_locks_guard = threading.Lock()
+
+
+def library_lock(library_id):
+    """The lock one scan of a library holds. Two scans of one library at once would race on the same group keys and
+    paths, and the second would end in a constraint error."""
+    with _library_locks_guard:
+        return _library_locks.setdefault(library_id, threading.Lock())
+
+
+class ShadowContext:
+    """The arr rows a scan run checks source files against, read once per run however many libraries it scans."""
+
+    def __init__(self, session=None):
+        self.session = session
+        self._index = None
+        self._read = False
+
+    def index(self):
+        if not self._read:
+            self._read = True
+            try:
+                self._index = identity.ArrOwners.load(self.session).index()
+            except Exception:
+                logging.exception('BAZARR could not read the arr rows to check source files against')
+        return self._index
+
+
 def _file_values(found):
     return dict(file_dev=found.dev, file_ino=found.ino, file_size=found.size, file_mtime_ns=found.mtime_ns,
                 last_seen_at=datetime.now(), missing_scans=0, server_missing=0)
@@ -89,12 +122,63 @@ def _root_devices(roots):
     return devices
 
 
-def scan_library(source, library, *, cancel=None, session=None) -> LibraryScan:
-    """Scan one library and record the outcome on it. Never raises for a readable or unreadable root."""
+def scan_library(source, library, *, cancel=None, session=None, shadow_context=None) -> LibraryScan:
+    """Scan one library and record the outcome on it. Never raises for a readable or unreadable root. A library
+    already being scanned is not scanned again: the answer says so and nothing is changed or recorded."""
+    lock = library_lock(library.id)
+    if not lock.acquire(blocking=False):
+        return LibraryScan(library_id=library.id, status='busy',
+                           message='Another scan of this library is already running. Nothing was changed.')
+    try:
+        return _scan_library(source, library, cancel, session, shadow_context or ShadowContext(session))
+    finally:
+        lock.release()
+
+
+def _roots_empty(roots):
+    """True when no root holds anything at all, not even a folder. An unreadable root counts as empty: nothing
+    can be vouched for."""
+    for root in roots:
+        try:
+            with os.scandir(root.local_path) as entries:
+                if any(True for _ in entries):
+                    return False
+        except OSError:
+            continue
+    return True
+
+
+def _group_directory_vouches(group):
+    """The group's folder is still there and is the very folder recorded at the last scan (the device ignored)."""
+    state = group_rules.stat_directory(group.group_key)
+    return state.status == 'dir' and group.dir_ino is not None and state.ino == group.dir_ino
+
+
+def _foreign_guard(session):
+    """Whether another library can vouch for one of its rows being closed or moved away from: its roots are
+    readable, its device is the one recorded at its last scan, and a stat of the row's own path gives an answer."""
+    verdicts = {}
+
+    def library_vouches(library_id):
+        if library_id not in verdicts:
+            roots = repository.get_roots(library_id, session)
+            devices = _root_devices(roots)
+            verdicts[library_id] = (_roots_readable(roots) and len(devices) == len(roots)
+                                    and not any(changed for _, changed in devices.values()))
+        return verdicts[library_id]
+
+    # The row's path is either gone or holds another file (a new file at an old name): both are answers. Only
+    # a stat that fails otherwise is not.
+    return lambda holder: library_vouches(holder.library_id) and identity.path_can_be_judged(holder.path)
+
+
+def _scan_library(source, library, cancel, session, shadow_context) -> LibraryScan:
     result = LibraryScan(library_id=library.id)
     kind = get_kind(source.kind)
     roots = repository.get_roots(library.id, session)
     rows = repository.library_items(library.id, session)
+    grouped = library.content_kind != 'movie'
+    groups = {row.id: row for row in repository.library_groups(library.id, session)} if grouped else {}
 
     def refuse(status, message):
         result.status = status
@@ -114,8 +198,8 @@ def scan_library(source, library, *, cancel=None, session=None) -> LibraryScan:
     listing = kind.enumerate(source, library, cancel)
     discovered = list(listing)
 
-    if not discovered and rows:
-        # An empty walk over a library that holds items looks like an unmounted share.
+    if not discovered and (rows or (groups and _roots_empty(roots))):
+        # An empty walk over a library that holds items, or shows, looks like an unmounted share.
         return refuse('root_missing', 'The folder looks empty while it still holds known files. Nothing was '
                                       'changed. If it was emptied on purpose, remove the library.')
 
@@ -125,11 +209,23 @@ def scan_library(source, library, *, cancel=None, session=None) -> LibraryScan:
     def ignore_dev(found):
         return any(_under(found.path, root) for root in changed_roots)
 
+    too_long = [found for found in discovered if len(found.path.encode('utf-8')) > MAX_PATH_BYTES]
+    for found in too_long:
+        logging.warning('BAZARR the source file path is too long to be stored and was skipped: %s', found.path)
+    if too_long:
+        discovered = [found for found in discovered if len(found.path.encode('utf-8')) <= MAX_PATH_BYTES]
+        result.skipped += len(too_long)
+
     matching = identity.match_library(
         discovered, rows, ignore_dev=ignore_dev, library_content_kind=library.content_kind,
-        foreign_lookup=lambda inodes, paths: repository.foreign_candidates(inodes, paths, library.id, session))
+        foreign_lookup=lambda inodes, paths: repository.foreign_candidates(inodes, paths, library.id, session),
+        foreign_vouched=_foreign_guard(session))
 
-    if changed_roots and rows and not matching.identity_matched:
+    # A remounted root has to vouch for what this library knows: a file it holds by identity, or, for a library
+    # that holds only folders, a folder that is the one recorded.
+    vouched = matching.identity_matched or (not rows and any(_group_directory_vouches(group)
+                                                             for group in groups.values()))
+    if changed_roots and (rows or groups) and not vouched:
         # The root is on another device and holds none of the files this library knows. It may be the share
         # remounted empty-handed, or another filesystem altogether: either way nothing here can be vouched for.
         return refuse('root_missing', 'The folder is on a different device than at the last scan and holds none '
@@ -143,17 +239,25 @@ def scan_library(source, library, *, cancel=None, session=None) -> LibraryScan:
     if cancel is not None:
         cancel()
 
-    grouped = library.content_kind != 'movie'
     follows_directories = grouped and getattr(kind, "groups_are_directories", False)
-    groups = {row.id: row for row in repository.library_groups(library.id, session)} if grouped else {}
     plan = None
     if follows_directories and complete:
-        plan = _resolve_groups(groups, matching, devices, bool(changed_roots), session)
+        plan = _resolve_groups(groups, matching, devices, bool(changed_roots), roots, session)
         group_for_dir = dict(plan.target)
+        # Re-identified groups were rewritten: whatever was read before is stale.
+        for group_id in plan.reidentify:
+            groups.pop(group_id, None)
+    elif follows_directories and groups:
+        # An incomplete walk decides no group: a folder is trusted only when its group has a file matched at home
+        # in this very walk, which is step one of the rules decided on what was seen.
+        group_for_dir = {group.group_key: group.id for group in groups.values()
+                         if any(found.group_key == group.group_key
+                                for row, found in matching.unchanged + matching.moved
+                                if row.group_id == group.id)}
     else:
         group_for_dir = {row.group_key: row.id for row in groups.values()}
 
-    decisions = _decide(matching, groups, plan, group_for_dir, grouped, follows_directories, complete)
+    decisions = _decide(matching, groups, plan, group_for_dir, grouped, follows_directories, complete, roots)
     result.deferred = decisions.deferred
     group_for_dir.update(_create_groups(library, decisions, group_for_dir, groups, session))
     if cancel is not None:
@@ -188,7 +292,7 @@ def scan_library(source, library, *, cancel=None, session=None) -> LibraryScan:
                 repository.record_root_device(root.id, current, session)
 
     _identify_pending(library, session)
-    _refresh_shadows(result, decisions, inserted, session)
+    _refresh_shadows(decisions, inserted, session, shadow_context)
 
     # The subtitle listing is rebuilt for every item on every scan, whether or not its video changed. One
     # ownership index serves the whole pass.
@@ -213,9 +317,14 @@ def _summary(result, matching, listing):
         held[(holder.source_name, True)] += 1
     for found, holder in matching.held_elsewhere:
         held[(holder.source_name, False, holder.content_kind)] += 1
+    for found, holder in matching.deferred_foreign:
+        held[(holder.source_name, None, holder.content_kind)] += 1
     for key, number in sorted(held.items(), key=str):
         if key[1]:
             summary += f"; {number} already supplied by {key[0]}"
+        elif key[1] is None:
+            summary += (f"; {number} held by {key[0]}, a {key[2]} library that cannot be checked right now "
+                        f"(its own scan decides)")
         else:
             summary += f"; {number} held by {key[0]}, a {key[2]} library, which is disabled"
     result.held = sum(held.values())
@@ -233,7 +342,7 @@ def _summary(result, matching, listing):
 @dataclass
 class _Decisions:
     unchanged: list = field(default_factory=list)       # (row, found)
-    alias: list = field(default_factory=list)           # (row, found)
+    alias: list = field(default_factory=list)           # (row, found, the folder of the row's own path)
     repathed: list = field(default_factory=list)        # (row, found, handover: bool)
     path_only: list = field(default_factory=list)       # (row, found), kept
     new: list = field(default_factory=list)             # found
@@ -245,12 +354,28 @@ class _Decisions:
     carry_from: dict = field(default_factory=dict)
 
 
-def _resolve_groups(groups, matching, devices, dev_changed, session):
+def _own_directory(path, roots):
+    """The first-level folder (the show) a path lies in, under whichever root holds it, or None."""
+    for root in roots:
+        base = root.local_path
+        if path.startswith(base.rstrip(os.sep) + os.sep):
+            first = path[len(base.rstrip(os.sep)) + 1:].split(os.sep)[0]
+            if os.sep in path[len(base.rstrip(os.sep)) + 1:]:
+                return os.path.join(base, first)
+    return None
+
+
+def _resolve_groups(groups, matching, devices, dev_changed, roots, session):
     """Resolve every group of a folder library and apply the plan in one transaction, before any item write."""
     held_dirs = defaultdict(list)
     for row, found in matching.unchanged + matching.moved:
         if row.group_id is not None:
             held_dirs[row.group_id].append(found.group_key)
+    for row, found in matching.alias_unchanged:
+        # The file is found at another path while the row's own path still holds it: the row is where it was.
+        own = _own_directory(row.path, roots)
+        if row.group_id is not None and own is not None:
+            held_dirs[row.group_id].append(own)
     new_content = Counter(found.group_key for found in matching.new)
     new_content.update(found.group_key for _, found in matching.path_only)
     plan = group_rules.plan_groups(list(groups.values()), held_dirs, new_content, group_rules.stat_directory,
@@ -266,36 +391,46 @@ def _resolve_groups(groups, matching, devices, dev_changed, session):
     return plan
 
 
-def _decide(matching, groups, plan, group_for_dir, grouped, follows_directories, complete):
-    """Turn the matching into writes. Nothing is deferred on a complete walk; on an incomplete one, anything that
-    needs a group decision the walk cannot support, or a path a row that could not be deleted still holds, is
-    left for a scan that can read the whole folder."""
+def _decide(matching, groups, plan, group_for_dir, grouped, follows_directories, complete, roots):
+    """Turn the matching into writes. Nothing is deferred on a complete walk. On an incomplete one nothing that
+    needs a group decision is done, and nothing is written to a path that a row which has to wait still holds:
+    only a folder whose group has a file matched at home may take files, and only rows whose identity matched in
+    this walk are touched."""
     decisions = _Decisions()
     # With no group yet (the first scan) nothing can be moving anywhere, so a fresh group is always safe.
     decisions.conservative = grouped and follows_directories and not complete and bool(groups)
     # Rows that would be deleted because their path was reused cannot be, on an incomplete walk: whatever wants
-    # their path waits.
+    # their path waits, and so does whatever wants the path of a row that waits.
     blocked = set() if complete else {row.path for row in matching.displaced}
 
-    def usable(found):
-        if found.path in blocked:
-            return False
+    def trusted(found):
         return not (decisions.conservative and found.group_key not in group_for_dir)
 
+    moves = [(row, found, False) for row, found in matching.moved]
+    moves += [(holder, found, True) for holder, found in matching.handovers]
+    waiting = set()
+    changed = True
+    while changed:
+        changed = False
+        for index, (row, found, handover) in enumerate(moves):
+            if index in waiting:
+                continue
+            if found.path in blocked or not trusted(found):
+                waiting.add(index)
+                if not handover:
+                    blocked.add(row.path)
+                changed = True
+    for index, (row, found, handover) in enumerate(moves):
+        if index in waiting:
+            decisions.deferred += 1
+            continue
+        decisions.repathed.append((row, found, handover))
+        if handover and row.group_id is not None:
+            decisions.carry_from.setdefault(found.group_key, row.group_id)
+
     decisions.unchanged = list(matching.unchanged)
-    decisions.alias = list(matching.alias_unchanged)
-    for row, found in matching.moved:
-        if usable(found):
-            decisions.repathed.append((row, found, False))
-        else:
-            decisions.deferred += 1
-    for holder, found in matching.handovers:
-        if usable(found):
-            decisions.repathed.append((holder, found, True))
-            if holder.group_id is not None:
-                decisions.carry_from.setdefault(found.group_key, holder.group_id)
-        else:
-            decisions.deferred += 1
+    decisions.alias = [(row, found, _own_directory(row.path, roots) if grouped else None)
+                       for row, found in matching.alias_unchanged]
     new = list(matching.new)
     for row, found in matching.path_only:
         if not grouped:
@@ -312,7 +447,7 @@ def _decide(matching, groups, plan, group_for_dir, grouped, follows_directories,
         else:
             decisions.deferred += 1
     for found in new:
-        if usable(found):
+        if found.path not in blocked and trusted(found):
             decisions.new.append(found)
         else:
             decisions.deferred += 1
@@ -333,6 +468,8 @@ def _create_groups(library, decisions, group_for_dir, groups, session):
         return {}
     for row, found in ([] if decisions.conservative else decisions.unchanged):
         needed.add(found.group_key)
+    if not decisions.conservative:
+        needed.update(own for _, _, own in decisions.alias if own is not None)
     for row, found, _ in decisions.repathed:
         needed.add(found.group_key)
     for row, found in decisions.path_only:
@@ -406,9 +543,13 @@ def _write_unchanged(decisions, group_for_dir, groups, grouped, result, session,
                 result.unchanged += 1
         if cancel is not None:
             cancel()
-    for row, found in decisions.alias:
-        # Another path to the same file: the row stays where it is.
-        repository.update_item(row.id, session, last_seen_at=datetime.now())
+    for row, found, own_directory in decisions.alias:
+        # Another path to the same file: the row stays where it is, in the group of the folder it is in.
+        values = dict(last_seen_at=datetime.now())
+        group_id = group_for_dir.get(own_directory) if own_directory is not None else None
+        if grouped and not decisions.conservative and group_id is not None and row.group_id != group_id:
+            values['group_id'] = group_id
+        repository.update_item(row.id, session, **values)
         result.item_ids.append(row.id)
         result.unchanged += 1
 
@@ -426,22 +567,50 @@ def _write_repathed(library, decisions, group_for_dir, groups, grouped, result, 
             for row, *_ in batch:
                 repository.update_item(row.id, connection, path=f'pending:{row.id}')
     for batch in _chunks(prepared):
-        with source_transaction(session) as connection:
-            for row, found, handover, group_id, identified in batch:
-                values = _item_values(found, identified, keep_identity=row.identity_source == 'user')
-                values['path'] = found.path
-                if grouped:
-                    values['group_id'] = group_id
-                if handover:
-                    values.update(source_id=library.source_id, library_id=library.id)
-                repository.update_item(row.id, connection, **values)
-                result.item_ids.append(row.id)
-                if handover:
-                    result.handed_over += 1
-                else:
-                    result.moved += 1
+        try:
+            with source_transaction(session) as connection:
+                for entry in batch:
+                    _write_final_path(library, entry, grouped, connection)
+        except IntegrityError:
+            # A path another row still holds: the rows are tried one at a time, and the one that cannot move
+            # stays on its temporary path, which the next scan repairs through the identity pass.
+            for entry in batch:
+                try:
+                    with source_transaction(session) as connection:
+                        _write_final_path(library, entry, grouped, connection)
+                except IntegrityError:
+                    logging.warning('BAZARR the source file could not be moved to its new path and waits for the '
+                                    'next scan: %s', entry[1].path)
+                    result.deferred += 1
+                    continue
+                _count_repathed(entry, result)
+            if cancel is not None:
+                cancel()
+            continue
+        for entry in batch:
+            _count_repathed(entry, result)
         if cancel is not None:
             cancel()
+
+
+def _write_final_path(library, entry, grouped, connection):
+    row, found, handover, group_id, identified = entry
+    values = _item_values(found, identified, keep_identity=row.identity_source == 'user')
+    values['path'] = found.path
+    if grouped:
+        values['group_id'] = group_id
+    if handover:
+        values.update(source_id=library.source_id, library_id=library.id)
+    repository.update_item(row.id, connection, **values)
+
+
+def _count_repathed(entry, result):
+    row, found, handover, *_ = entry
+    result.item_ids.append(row.id)
+    if handover:
+        result.handed_over += 1
+    else:
+        result.moved += 1
 
 
 def _write_path_only(library, decisions, groups, group_for_dir, result, session, cancel):
@@ -469,6 +638,14 @@ def _insert_new(library, decisions, group_for_dir, groups, result, session, canc
     return inserted
 
 
+def _is_refused_row(error):
+    """A row the database refuses on its own account: a constraint, a value it cannot bind, or (PostgreSQL) an
+    index entry beyond its size limit, which the driver raises as an operational error."""
+    if isinstance(error, (IntegrityError, DataError)):
+        return True
+    return isinstance(error, OperationalError) and getattr(error.orig, 'pgcode', None) == '54000'
+
+
 def _insert_batch(batch, library, item_kind, group_for_dir, groups, result, session, inserted):
     """Insert a batch in one transaction. When the batch is refused as a whole (a path another row took in the
     meantime, a name the driver cannot bind), its files are tried one at a time: the ones that cannot be added
@@ -485,7 +662,9 @@ def _insert_batch(batch, library, item_kind, group_for_dir, groups, result, sess
     try:
         with source_transaction(session) as connection:
             ids = [insert(connection, found, group_id, identified) for found, group_id, identified in parses]
-    except (IntegrityError, DataError):
+    except (IntegrityError, DataError, OperationalError) as error:
+        if not _is_refused_row(error):
+            raise
         for found, group_id, identified in parses:
             try:
                 with source_transaction(session) as connection:
@@ -493,7 +672,9 @@ def _insert_batch(batch, library, item_kind, group_for_dir, groups, result, sess
                 result.item_ids.append(item_id)
                 inserted.append((item_id, found))
                 result.inserted += 1
-            except (IntegrityError, DataError):
+            except (IntegrityError, DataError, OperationalError) as refusal:
+                if not _is_refused_row(refusal):
+                    raise
                 logging.warning('BAZARR the source file could not be added and was skipped: %s', found.path)
                 result.skipped += 1
         return
@@ -520,29 +701,32 @@ def _identify_pending(library, session):
             repository.update_group(group.id, session, identify_pending=0)
 
 
-def _refresh_shadows(result, decisions, inserted, session):
+def _refresh_shadows(decisions, inserted, session, context):
     """Shadows are fully recomputed on every scan, both stages, for the files this scan saw."""
-    try:
-        owners = identity.ArrOwners.load(session)
-        index = owners.index()
-    except Exception:
-        logging.exception('BAZARR could not read the arr rows to check source files against')
-        return
-    seen = {row.id: found for row, found in decisions.unchanged}
-    seen.update({row.id: found for row, found, _ in decisions.repathed})
-    seen.update({row.id: found for row, found in decisions.path_only})
-    seen.update(dict(inserted))
+    # ``{item id: (the path to match, its stat)}``. A row reached through an alias is matched by its own path.
+    seen = {row.id: (found.path, identity.FileStat(found.dev, found.ino, found.size, found.mtime_ns))
+            for row, found in decisions.unchanged}
+    seen.update({row.id: (found.path, identity.FileStat(found.dev, found.ino, found.size, found.mtime_ns))
+                 for row, found, _ in decisions.repathed})
+    seen.update({row.id: (found.path, identity.FileStat(found.dev, found.ino, found.size, found.mtime_ns))
+                 for row, found in decisions.path_only})
+    seen.update({row.id: (row.path, identity.FileStat(found.dev, found.ino, found.size, found.mtime_ns))
+                 for row, found, _ in decisions.alias})
+    seen.update({item_id: (found.path, identity.FileStat(found.dev, found.ino, found.size, found.mtime_ns))
+                 for item_id, found in inserted})
     if not seen:
+        return
+    index = context.index()
+    if index is None:
         return
     current = {row.id: row for row in repository.shadow_state(list(seen), session)}
     if not index and not any(row.arr_shadow for row in current.values()):
         return
-    for item_id, found in seen.items():
+    for item_id, (path, stat) in seen.items():
         row = current.get(item_id)
         if row is None:
             continue
-        match = index.match(found.path, identity.FileStat(found.dev, found.ino, found.size, found.mtime_ns))
-        changes = identity.shadow_changes(row, match)
+        changes = identity.shadow_changes(row, index.match(path, stat))
         if changes is not None:
             repository.update_item(item_id, session, **changes)
 
@@ -563,21 +747,28 @@ def run_scan(source_id, library_id=None, *, cancel=None, session=None):
     libraries = [row for row in libraries if source.enabled and row.enabled]
     if not libraries:
         return []
-    repository.record_source_scan(source_id, started=datetime.now(), target=session)
+    # A scan of one library says nothing about the others: only a scan of the whole source stamps the source, and
+    # so only that one moves its next scheduled scan.
+    whole = library_id is None
+    if whole:
+        repository.record_source_scan(source_id, started=datetime.now(), target=session)
     results = []
     status = 'ok'
+    shadow_context = ShadowContext(session)
     try:
         for library in libraries:
-            outcome = scan_library(source, library, cancel=cancel, session=session)
+            outcome = scan_library(source, library, cancel=cancel, session=session, shadow_context=shadow_context)
             results.append(outcome)
             if outcome.status != 'ok':
                 status = 'partial'
     except BaseException as error:
         # A stop is not a failure: what was read before it was kept.
-        repository.record_source_scan(source_id, finished=datetime.now(), target=session,
-                                      status='partial' if isinstance(error, JobCancelled) else 'error')
+        if whole:
+            repository.record_source_scan(source_id, finished=datetime.now(), target=session,
+                                          status='partial' if isinstance(error, JobCancelled) else 'error')
         raise
-    repository.record_source_scan(source_id, finished=datetime.now(), status=status, target=session)
+    if whole:
+        repository.record_source_scan(source_id, finished=datetime.now(), status=status, target=session)
     return results
 
 

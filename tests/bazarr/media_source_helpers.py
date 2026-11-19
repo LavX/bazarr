@@ -126,6 +126,33 @@ def video(path, size=1000):
     return path
 
 
+@pytest.fixture
+def pristine_media_source_modules():
+    """A test that replaces ``app.database`` or re-imports a media source module leaves them as it found them.
+
+    ``monkeypatch`` puts the ``sys.modules`` entries back, but an import also sets the module as an attribute of
+    its package, and nothing restores that: the next ``from media_sources import repository`` would get the copy
+    bound to the stub. So the entries and the package attributes are snapshotted and restored together, and the
+    modules first imported inside the window are dropped."""
+    import sys
+
+    def mine(name):
+        return name == "app.database" or name == "media_sources" or name.startswith("media_sources.")
+
+    before = {name: module for name, module in sys.modules.items() if mine(name)}
+    try:
+        yield
+    finally:
+        for name in [name for name in sys.modules if mine(name) and name not in before]:
+            del sys.modules[name]
+        sys.modules.update(before)
+        for name, module in before.items():
+            if "." in name:
+                parent, child = name.rsplit(".", 1)
+                if parent in sys.modules:
+                    setattr(sys.modules[parent], child, module)
+
+
 _stamp = [0]
 
 

@@ -52,10 +52,20 @@ def _profile_id(library):
     return profile_id
 
 
+MAX_FREQUENCY_HOURS = 24 * 365
+
+
 def _frequency(value):
-    if type(value) is not int or value < 0:
-        raise SourceError('scan_frequency_hours must be a whole number, 0 or more')
+    if type(value) is not int or value < 0 or value > MAX_FREQUENCY_HOURS:
+        raise SourceError(f'scan_frequency_hours must be a whole number from 0 to {MAX_FREQUENCY_HOURS} (a year)')
     return value
+
+
+def _only(payload, allowed, what):
+    """Refuse the keys a request carries that nothing would read: a client that sends one is not told it worked."""
+    unknown = set(payload) - set(allowed)
+    if unknown:
+        raise SourceError(f"Cannot set {', '.join(sorted(unknown))} when {what}")
 
 
 def _flag(value, name='enabled'):
@@ -67,6 +77,7 @@ def _flag(value, name='enabled'):
 def _checked_folder(library, kind_name):
     """Validate a library's folder for a new library: the content kind, the path, the overlap. Returns
     ``(path, content_kind)``; the overlap itself is checked again under the lock, with the insert."""
+    _only(library, ('path', 'content_kind', 'profile_id'), 'adding a library')
     content_kind = library.get('content_kind')
     if content_kind not in repository.CONTENT_KINDS:
         raise SourceError(f"content_kind must be one of {', '.join(repository.CONTENT_KINDS)}")
@@ -89,6 +100,7 @@ def _overlap_error(path, session):
 
 def create_source(payload, session=None):
     """Create a source and its first library in one transaction. Returns the new source id."""
+    _only(payload, ('name', 'kind', 'library', 'enabled', 'scan_frequency_hours'), 'creating a media source')
     name = payload.get('name')
     kind_name = payload.get('kind') or 'folder'
     library = payload.get('library')
@@ -190,8 +202,10 @@ def add_library(source_id, payload, session=None):
     with _creation_lock:
         _overlap_error(path, session)
         try:
-            library_id = repository.create_library(source_id=source_id, content_kind=content_kind, locator=path,
-                                                   profile_id=profile_id, target=session)
+            # The library and its root are one step: no library is left without its root.
+            with source_transaction(session) as connection:
+                library_id = repository.create_library(source_id=source_id, content_kind=content_kind,
+                                                       locator=path, profile_id=profile_id, target=connection)
         except IntegrityError as error:
             raise SourceError('That folder is already a library of this source', 409, 'overlap') from error
     return describe_library(library_id, session)
@@ -268,14 +282,25 @@ def change_library_roots(source_id, library_id, roots, session=None):
         if not isinstance(root, dict) or not isinstance(root.get('local_path'), str) \
                 or not os.path.isabs(root['local_path']):
             raise SourceError('Each root needs an absolute local_path')
-        cleaned.append((root.get('server_path'), repository.normalize_path(root['local_path'])))
+        local = repository.normalize_path(root['local_path'])
+        if not os.path.isdir(local) or not os.access(local, os.R_OK | os.X_OK):
+            raise SourceError(f'{local} is not a readable folder')
+        clash = repository.overlapping_root(local, session, exclude_library_id=library_id)
+        if clash is not None:
+            raise SourceError(f"{local} overlaps {clash[1]}, a library of the media source {clash[0]}", 409,
+                              'overlap')
+        cleaned.append((root.get('server_path'), local))
     if not cleaned or len({local for _, local in cleaned}) != len(cleaned):
         raise SourceError('A library needs at least one root, and no root twice')
     doomed = preview_root_edit(library_id, [local for _, local in cleaned], session)
     with source_transaction(session) as connection:
         repository.replace_roots(library_id, cleaned, connection)
         repository.delete_items(doomed, connection)
-    queue_scan(source_id, library_id)
+    try:
+        queue_scan(source_id, library_id)
+    except SourceError as error:
+        # The edit is committed. A library that is disabled is scanned when it is enabled again.
+        logging.info('BAZARR no scan was queued after the roots of library %s changed: %s', library_id, error)
     return len(doomed)
 
 

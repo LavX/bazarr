@@ -23,18 +23,26 @@ def has_enabled_source(session=None):
 
 
 def due_sources(now=None, session=None):
-    """The enabled sources a scan is due for. Frequency 0 means manual scans only; a source whose scan started
-    recently and has not finished is running, and is left alone."""
+    """The enabled sources a scan is due for. Frequency 0 means manual scans only; a source with no enabled library
+    has nothing to scan; a source whose scan started recently and has not finished is running, and is left alone.
+    One source with a value that cannot be worked with never stops the others being found."""
     now = now or datetime.now()
+    with_libraries = {row.source_id for row in handle(session).execute(
+        sa.select(repository.Libraries.c.source_id).where(repository.Libraries.c.enabled == 1)).all()}
     due = []
     for source in repository.list_sources(session):
-        if not source.enabled or not source.scan_frequency_hours:
+        if not source.enabled or not source.scan_frequency_hours or source.id not in with_libraries:
             continue
-        started, finished = source.last_scan_started_at, source.last_scan_finished_at
-        if started is not None and (finished is None or started > finished) \
-                and now - started < timedelta(hours=STALE_SCAN_HOURS):
-            continue
-        if finished is not None and now - finished < timedelta(hours=source.scan_frequency_hours):
+        try:
+            started, finished = source.last_scan_started_at, source.last_scan_finished_at
+            if started is not None and (finished is None or started > finished) \
+                    and now - started < timedelta(hours=STALE_SCAN_HOURS):
+                continue
+            if finished is not None and now - finished < timedelta(hours=source.scan_frequency_hours):
+                continue
+        except OverflowError:
+            # Larger than any date: no scan is ever due.
+            logging.warning('BAZARR the scan frequency of media source %s is out of range', source.name)
             continue
         due.append(source)
     return due
@@ -42,7 +50,12 @@ def due_sources(now=None, session=None):
 
 def scan_due_media_sources():
     """The hourly task: queue a scan job for each source that is due."""
-    for source in due_sources():
+    try:
+        due = due_sources()
+    except Exception:
+        logging.exception('BAZARR could not work out which media sources are due for a scan')
+        return
+    for source in due:
         try:
             scan_media_source(source.id)
         except Exception:
