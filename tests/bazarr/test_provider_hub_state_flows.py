@@ -63,6 +63,12 @@ def _stored(engine):
     return json.loads(raw_row(engine)[1])
 
 
+def _whole():
+    """The state as the callers see it: the stored document with the releases put back into its rows."""
+    from provider_hub.state import load_state_strict
+    return load_state_strict()
+
+
 def test_a_local_install_is_stored_and_registers_its_secret_paths(hub, tmp_path, monkeypatch):
     from provider_hub.service import stage_install_local
     from provider_hub.state import load_state
@@ -83,7 +89,7 @@ def test_a_local_install_is_stored_and_registers_its_secret_paths(hub, tmp_path,
     assert load_state()["installations"]["locallyinstalled"]["trusted"] is False
     # The file copy the next start reads before the database is open.
     copy = json.loads((tmp_path / "provider_hub" / "state.json").read_text(encoding="utf-8"))
-    assert copy == json.loads(raw_row(hub)[1])
+    assert copy == _whole()
     assert any(job["action"] == "install" for job in stored["jobs"])
 
 
@@ -393,7 +399,7 @@ def test_the_next_credential_migration_sanitizes_a_file_the_database_has_outgrow
     migrate_installation_config_secrets()
 
     assert "plaintext-credential" not in _copy_text(tmp_path)
-    assert json.loads(_copy_text(tmp_path)) == _stored(migration_env)
+    assert json.loads(_copy_text(tmp_path)) == _whole()
 
 
 def test_a_successful_credential_migration_leaves_no_plaintext_in_either_place(migration_env, tmp_path):

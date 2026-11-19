@@ -453,6 +453,74 @@ def supplier_map(state: dict[str, Any], plugin: PluginManifest, owner_id: str) -
     return found
 
 
+def _after_restart(installations: dict[str, Any], leaving: str) -> dict[str, Any]:
+    """The installations as the next restart leaves them: each plugin on its staged release when it has one, with
+    the bindings that release records and no revocation mark (a revoked release is replaced by its staged one),
+    otherwise on its active release. ``leaving`` is left out: it is the plugin whose release is being judged."""
+    projected: dict[str, Any] = {}
+    for pid, row in installations.items():
+        if str(pid) == leaving or not isinstance(row, dict) or row.get("state") == "removed":
+            continue
+        if row.get("staged_version") and isinstance(row.get("staged_manifest"), dict):
+            after = dict(row)
+            after.update(active_version=row["staged_version"], manifest=row["staged_manifest"],
+                         supplied_by=row.get("staged_supplied_by") or {})
+            after.pop("revoked", None)
+            projected[str(pid)] = after
+        elif row.get("active_version"):
+            projected[str(pid)] = row
+    return projected
+
+
+def unsupplied_needs(state: dict[str, Any], plugin: PluginManifest, owner_id: str,
+                     recorded: Any = None, source_id: Any = None) -> list[str]:
+    """What ``plugin`` relies on that no plugin will supply, for a release that is about to come back.
+
+    Judged the way ``supplier_map`` records a binding: on the release each supplier runs after the next restart,
+    its staged one when it has one, else its active one. A release that ran before relies on every capability
+    it once had an installed supplier for (``recorded``, its bindings), and on any capability it requires that a
+    plugin of its own source (``source_id``) or an installed one provides; a capability nothing provides is
+    external and never blocks, as at install. The plugin it extends must be running and provide the
+    capability. A supplier counts when it is switched on, of a defined kind, not revoked without an update, not
+    flagged for repair and not itself unmet. Returns descriptions, sorted.
+    """
+    from .kinds import known_kinds, kind_of
+
+    installations = state.get("installations") or {}
+    # Whether a supplier would itself be held back is judged on the same view: what each plugin runs after the
+    # restart, with the bindings that release records, down the whole chain of what the suppliers rely on.
+    unmet = unmet_needs(_after_restart(installations, owner_id))
+    registered = set(known_kinds())
+    held: dict[str, PluginManifest] = {}
+    running: dict[str, PluginManifest] = {}
+    for pid, row in installations.items():
+        if str(pid) == owner_id or not isinstance(row, dict) or row.get("state") == "removed":
+            continue
+        after = _manifest_in(row, "next")
+        if after is None:
+            continue
+        held[str(pid)] = after
+        if (kind_of(row) in registered and _enabled(row) and not row.get("needs_repair")
+                and not _revoked_without_update(row) and str(pid) not in unmet):
+            running[str(pid)] = after
+    own = [_parse(entry.get("manifest")) for entry in _source_entries(state, source_id)]
+    providable = {capability for found in (*own, *held.values()) if found is not None
+                  for capability in found.provides}
+    wanted = {capability for capability in (recorded or {}) if capability in plugin.requires}
+    wanted |= {capability for capability in plugin.requires if capability in providable}
+    missing = []
+    for capability in sorted(wanted):
+        if capability in plugin.provides or capability.startswith(HOST_CAPABILITY_PREFIX):
+            continue
+        if not any(capability in found.provides for found in running.values()):
+            missing.append(capability)
+    if plugin.extends is not None:
+        parent = running.get(plugin.extends.plugin_id)
+        if parent is None or plugin.extends.capability not in parent.provides:
+            missing.append(f"{plugin.extends.plugin_id} ({plugin.extends.capability})")
+    return missing
+
+
 def is_on(row: dict[str, Any]) -> bool:
     """Whether an installation is switched on, by the rule of its own kind."""
     return _enabled(row)
