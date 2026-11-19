@@ -1,0 +1,130 @@
+/* What a schema 2 provider declares, on its Subtitle Hub card. Tokens only, so both colour schemes follow the app. */
+
+.root {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 8px;
+  min-width: 0;
+}
+
+/* One line that says what is declared; the button opens the rest. */
+.toggle {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  width: 100%;
+  padding: 6px 10px;
+  border: 1px solid var(--bz-border-card);
+  border-radius: var(--bz-radius-sm);
+  background: transparent;
+  color: var(--bz-text-secondary);
+  font: inherit;
+  font-size: 12px;
+  line-height: 1.5;
+  text-align: left;
+  cursor: pointer;
+  transition: background var(--bz-duration-normal) var(--bz-ease-standard);
+}
+
+.toggle:hover {
+  background: var(--bz-hover-bg);
+}
+
+.toggle:focus-visible {
+  outline: 2px solid var(--bz-focus-ring);
+  outline-offset: 2px;
+}
+
+.toggleIcon {
+  flex: 0 0 auto;
+  margin-top: 3px;
+  color: var(--bz-text-tertiary);
+}
+
+.toggleText {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+/* A phrase wraps as a whole, so the line breaks between facts and never inside one. */
+.phrase {
+  white-space: nowrap;
+}
+
+.lead {
+  font-weight: 600;
+  color: var(--bz-text-primary);
+}
+
+.chevron {
+  flex: 0 0 auto;
+  margin-top: 3px;
+  color: var(--bz-text-tertiary);
+}
+
+.panel {
+  display: grid;
+  gap: 12px;
+  min-width: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--bz-border-card);
+  border-radius: var(--bz-radius-sm);
+  background: color-mix(
+    in srgb,
+    var(--bz-surface-card) 60%,
+    var(--bz-hover-bg)
+  );
+}
+
+.group {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+  font-size: 13px;
+}
+
+.group + .group {
+  padding-top: 10px;
+  border-top: 1px solid var(--bz-border-divider);
+}
+
+.groupTitle {
+  margin: 0;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--bz-text-tertiary);
+}
+
+.text {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--bz-text-secondary);
+}
+
+.note {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--bz-text-tertiary);
+}
+
+.capabilityRow {
+  display: grid;
+  grid-template-columns: 4.5rem minmax(0, 1fr);
+  align-items: baseline;
+  gap: 0 8px;
+  min-width: 0;
+  font-size: 13px;
+  color: var(--bz-text-primary);
+}
+
+.capabilityRole {
+  color: var(--bz-text-secondary);
+}

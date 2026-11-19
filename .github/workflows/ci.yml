@@ -94,7 +94,10 @@ jobs:
       - name: Install pandoc
         # scripts/release/notes.py renders release notes with pandoc GFM, which
         # is what the public release page does.
-        run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends pandoc
+        uses: ./.github/actions/apt-packages
+        timeout-minutes: 10
+        with:
+          packages: pandoc
 
       - name: Check the changed documentation
         run: python3 .github/scripts/docs_check.py
@@ -342,7 +345,12 @@ jobs:
         # unar: the RAR fixtures cannot be read without it. 7z is present on the
         # runner and recognises RAR as a format, but carries no RAR
         # decompression codec, which is the same trap the image once shipped.
-        run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends ffmpeg unar
+        # The shared composite action caches the .deb files per runner image
+        # and bounds a slow mirror; the step timeout is its outer limit.
+        uses: ./.github/actions/apt-packages
+        timeout-minutes: 10
+        with:
+          packages: ffmpeg unar
 
       - &python-dependencies
         name: Install Python dependencies
@@ -431,6 +439,7 @@ jobs:
             tests/bazarr/test_provider_hub_revocation.py \
             tests/bazarr/test_provider_hub_consent.py \
             tests/bazarr/test_provider_hub_dev_source.py \
+            tests/bazarr/test_provider_hub_releases.py \
             tests/bazarr/test_arr_instances_schema.py \
             tests/bazarr/test_sportarr_instances.py \
             tests/bazarr/test_arr_ownership_columns.py \
@@ -954,6 +963,8 @@ jobs:
             tests/bazarr/test_episode_forced_search_api.py \
             tests/bazarr/test_provider_hub_state_pg.py \
             tests/bazarr/test_provider_hub_state_migration.py \
+            tests/bazarr/test_provider_hub_releases.py \
+            tests/bazarr/test_provider_hub_releases_migration.py \
             tests/bazarr/test_provider_hub_state_flows.py \
             tests/bazarr/test_provider_hub_state_safety.py \
             tests/bazarr/test_plugin_review_notice_store.py \

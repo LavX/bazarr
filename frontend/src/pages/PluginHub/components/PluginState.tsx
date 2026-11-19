@@ -77,11 +77,7 @@ export const ReviewNotice: FunctionComponent<{
   dismissing: boolean;
 }> = ({ name, installation, sandbox, onDismiss, dismissing }) => {
   const facts = manifestFacts(installation);
-  const endpoints = Array.isArray(installation.manifest?.endpoints)
-    ? (installation.manifest.endpoints as unknown[]).filter(
-        (item): item is string => typeof item === "string",
-      )
-    : [];
+  const endpoints = facts.endpoints;
   return (
     <section aria-label={`Review ${name}`}>
       <Alert

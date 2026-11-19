@@ -1,5 +1,6 @@
 /* eslint-disable camelcase -- kind ids are transport names. */
 import type {
+  PluginBinary,
   PluginCatalog,
   PluginCatalogEntry,
   PluginCatalogSource,
@@ -38,6 +39,59 @@ export function typeFilterOf(value: string | null): TypeFilter {
   return TYPE_FILTERS.some((item) => item.value === value)
     ? (value as TypeFilter)
     : "all";
+}
+
+/** What the status route says about the profile subtitle provider workers run under. */
+export interface ProviderSandboxFacts {
+  enabled?: boolean;
+  state?: string;
+  notice?: string | null;
+}
+
+/**
+ * Whether this host holds a subtitle provider to a permission. A provider runs under its own profile, not
+ * the plugin workers': that profile confines the folders, and only while it applies in full. It lets every
+ * outbound connection through but those to Bazarr+'s own ports, so the network is never enforced for one.
+ * A status that has not answered marks everything declared.
+ */
+export function providerPermissionMark(
+  name: string,
+  providers: ProviderSandboxFacts | null | undefined,
+): PluginPermissionMark {
+  if (
+    (name === "media_read" || name === "data_dir") &&
+    providers?.enabled !== false &&
+    providers?.state === "enforced"
+  ) {
+    return "enforced";
+  }
+  return "declared";
+}
+
+/**
+ * What a provider card says when the provider profile does not hold in full: the backend's own notice when
+ * it has one, else the plain state. Null when the profile holds, or while the status has not answered.
+ */
+export function providerSandboxNote(
+  permissions: string[],
+  providers: ProviderSandboxFacts | null | undefined,
+): string | null {
+  if (permissions.length === 0 || !providers?.state) {
+    return null;
+  }
+  if (providers.state === "enforced") {
+    return null;
+  }
+  if (providers.notice) {
+    return providers.notice;
+  }
+  if (providers.state === "off") {
+    return "The provider sandbox is switched off.";
+  }
+  if (providers.state === "pending") {
+    return "Checking the provider sandbox";
+  }
+  return "Not sandboxed on this host";
 }
 
 /** What each kind is for, for the empty state of a kind with nothing to show. */
@@ -135,6 +189,46 @@ export interface ManifestFacts {
   provides: string[];
   extendsId: string | null;
   extendsCapability: string | null;
+  /** The fixed origins the plugin's code contacts, as the manifest writes them. */
+  endpoints: string[];
+  /** A program or container the plugin runs, from its runtime. */
+  binaries: PluginBinary[];
+  /** Whether a settings field lets the person point the plugin at an address of their own. */
+  hasDestinationField: boolean;
+}
+
+/** The programs or containers a manifest's runtime starts: an archive's own program or a managed image. */
+function binariesOf(manifest: Record<string, unknown>): PluginBinary[] {
+  const runtime = manifest.runtime as
+    | { artifact?: unknown; process?: unknown }
+    | undefined;
+  if (
+    (runtime?.artifact === "archive" || runtime?.artifact === "oci") &&
+    typeof runtime.process === "string"
+  ) {
+    return [{ artifact: runtime.artifact, process: runtime.process }];
+  }
+  return [];
+}
+
+function hasDestinationField(manifest: Record<string, unknown>): boolean {
+  const settings = manifest.settings as
+    | { fields?: unknown; backend_types?: unknown }
+    | undefined;
+  const lists: unknown[] = [settings?.fields];
+  if (settings?.backend_types && typeof settings.backend_types === "object") {
+    for (const definition of Object.values(settings.backend_types)) {
+      lists.push((definition as { fields?: unknown } | null)?.fields);
+    }
+  }
+  return lists.some(
+    (fields) =>
+      Array.isArray(fields) &&
+      fields.some(
+        (field) =>
+          (field as { destination?: unknown } | null)?.destination === true,
+      ),
+  );
 }
 
 export function manifestFacts(
@@ -156,7 +250,29 @@ export function manifestFacts(
     extendsId: typeof extension?.id === "string" ? extension.id : null,
     extendsCapability:
       typeof extension?.capability === "string" ? extension.capability : null,
+    endpoints: strings(manifest.endpoints),
+    binaries: binariesOf(manifest),
+    hasDestinationField: hasDestinationField(manifest),
   };
+}
+
+/**
+ * What a card says about a host that does not hold a plugin to its permissions, in neutral words and never as
+ * protection that was not earned. Null when the plugin asks for nothing, or while the status has not answered.
+ */
+export function sandboxNote(
+  permissions: string[],
+  sandbox: (SandboxFacts & { label?: string; pending?: boolean }) | undefined,
+): string | null {
+  if (permissions.length === 0 || !sandbox || sandbox.workers_sandboxed) {
+    return null;
+  }
+  return (
+    sandbox.label ??
+    (sandbox.pending
+      ? "Checking the worker sandbox"
+      : "Not sandboxed on this host")
+  );
 }
 
 /** One plugin as a card shows it, from the catalog, from what is installed, or from both. */

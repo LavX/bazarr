@@ -17,6 +17,7 @@ import zipfile
 import requests
 
 from collections import Counter
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from collections.abc import Iterable
@@ -29,10 +30,10 @@ from secret_store.registry import SECRET_DESCRIPTOR_KEY as SECRET_DESCRIPTORS_KE
 from secret_store.scrub import mask_credential_refusal, scrub_job_secrets, scrub_text
 
 from .manifest import ManifestValidationError, manifest_provider_id, validate_manifest
-from .kinds import (ATTACH_ON_RESTART, SUBTITLE_PROVIDER, UnknownKindError, catalog_kind_of, get_kind, kind_for_api,
+from .kinds import (ATTACH_LIVE, ATTACH_ON_RESTART, SUBTITLE_PROVIDER, UnknownKindError, catalog_kind_of, get_kind, kind_for_api,
                     kind_of, known_kinds)
 from .kinds import subtitle_provider as provider_kind
-from . import catalog_feed, closure, consent, dev_source, floor, revocation
+from . import catalog_feed, closure, consent, dev_source, floor, releases, revocation
 from .bundle import verify_bundle_tree
 from .compatibility import (
     CATALOG_LIST_PLUGINS, CATALOG_LIST_PROVIDERS, HostFacts, current_host, entry_compatibility, refusal_text,
@@ -3597,8 +3598,11 @@ def _abandon_staged_release(installation: dict[str, Any], message: str) -> None:
     installation["staged_python_path"] = None
     installation["staged_manifest"] = None
     installation.pop("staged_supplied_by", None)
-    installation["pending_restart"] = False
+    # The restart a refresh asked for, to stop a revoked release, is still to come.
+    installation["pending_restart"] = bool(installation.get("revoked_restart"))
     installation["state"] = "active" if installation.get("active_version") else "failed"
+    # The release tables keep the release that did not activate, with this reason.
+    installation[releases.FAIL_STAGED] = message
 
 
 def _drop_revoked_staged(installations: dict[str, Any], revocations: tuple[revocation.Revocation, ...]) -> bool:
@@ -3984,6 +3988,9 @@ def _discard_stopped_install(paths, existing) -> None:
     """
     existing = existing if isinstance(existing, dict) else {}
     in_use = {existing.get(key) for key in ("active_path", "staged_path", "python_path", "staged_python_path")}
+    # The files of the previous release, kept to go back to, are as much in use as the active ones.
+    for release in getattr(load_state(), "retained_releases", ()):
+        in_use.update((release.get("bundle_path"), release.get("python_path")))
     in_use.discard(None)
     # This install's own hold ends here, so only other installs' holds count.
     release_pins()
@@ -4633,7 +4640,353 @@ def _enforce_kept_data_ownership() -> None:
             mutate_state(refuse)
 
 
+ACTIVATED = "activated"
+ACTIVATION_FAILED = "failed"
+# A kind that attaches on restart is not activated while Bazarr+ runs: the release stays staged for the boot.
+ACTIVATION_WAITING = "waiting"
+# There is nothing staged, or what was staged changed while the release was being checked.
+ACTIVATION_SKIPPED = "skipped"
+
+
+@dataclass(frozen=True)
+class Activation:
+    """What ``activate_release`` did for one plugin."""
+
+    plugin_id: str
+    outcome: str
+    version: str | None = None
+    previous_version: str | None = None
+    error: str | None = None
+    # The release this one replaced may still be serving calls. It is draining, and whoever asked for the
+    # activation retires it once its calls are done (``retire_release``).
+    draining: bool = False
+
+    @property
+    def activated(self) -> bool:
+        return self.outcome == ACTIVATED
+
+
+def _verified_staged_release(provider_id: str, installation: dict[str, Any], revocations):
+    """The manifest of the staged release once it has been checked, or the reason it cannot activate (raised).
+
+    The checks, in order: the release is not revoked, its kind accepts its manifest, the bundle and interpreter
+    are the hub's own, the bundle matches the manifest, and the kind's smoke test starts it.
+    """
+    target_version = installation.get("staged_version")
+    target_name = installation.get("name") or provider_id
+    found = revocation.lookup(revocations, provider_id, target_version)
+    if found is not None:
+        # Revoked since it was staged: it does not become the active release.
+        raise ProviderHubInstallError(_revocation_text(
+            revocation.refusal, found, target_name, target_version, "installed"))
+    trusted = bool(installation.get("trusted", False))
+    # The kind validates its own manifests: a translator is not a subtitle provider.
+    kind = get_kind(kind_of(installation))
+    manifest = kind.validate_manifest(installation.get("manifest") or {}, trusted)
+    if isinstance(installation.get("staged_manifest"), dict):
+        manifest = kind.validate_manifest(installation.get("staged_manifest"), trusted)
+    staged_path = installation.get("staged_path")
+    staged_python_path = installation.get("staged_python_path")
+    if not staged_path or not staged_python_path:
+        raise ProviderHubInstallError("staged bundle or python path is missing")
+    staged_interpreter = validated_interpreter(provider_hub_dir(), staged_python_path)
+    if staged_interpreter is None:
+        raise ProviderHubInstallError("staged python path is not one of the hub's environments")
+    staged_bundle_path = validated_bundle_path(provider_hub_dir(), staged_path)
+    if staged_bundle_path is None:
+        raise ProviderHubInstallError("staged bundle path is not one of the hub's bundles")
+    _remove_bundle_runtime_artifacts(staged_bundle_path)
+    verify_bundle_tree(manifest, staged_bundle_path)
+    kind.smoke_test(manifest, staged_bundle_path, staged_interpreter)
+    return manifest
+
+
+def _abandon_if_still_staged(provider_id: str, version: Any, message: str) -> None:
+    """Drop the staged release a failed activation looked at, unless another one has replaced it meanwhile."""
+    def drop(state: dict[str, Any]) -> None:
+        row = (state.get("installations") or {}).get(provider_id)
+        if isinstance(row, dict) and row.get("staged_version") == version and row.get("state") == "staged":
+            _abandon_staged_release(row, message)
+
+    mutate_state(drop)
+
+
+def activate_release(provider_id: str, *, at_boot: bool = False) -> Activation:
+    """The one way a staged release becomes the active one, at boot and while Bazarr+ runs.
+
+    The staged release is checked (not revoked, accepted by its kind, bundle matches its manifest, starts), the
+    kind's ``on_activated`` brings what it stores in line with the new manifest, and one write makes the
+    release active: the release it replaces is retired, or draining when a running process may still be
+    serving its calls, and the plugin's restart flag clears. A release that fails any step is dropped and the
+    active one, if any, stays as it was, so a failed update never takes a working plugin away.
+
+    The boot passes ``at_boot=True``: nothing is running, so every kind activates. Otherwise the kind's attach
+    policy decides: a kind that attaches on restart answers ``ACTIVATION_WAITING`` and the release stays staged
+    for the next boot; a kind that attaches live activates now and the replaced release drains.
+    """
+    state = load_state()
+    installation = (state.get("installations") or {}).get(provider_id)
+    if (not isinstance(installation, dict) or installation.get("state") != "staged"
+            or not installation.get("pending_restart")):
+        return Activation(provider_id, ACTIVATION_SKIPPED)
+    previous_version = installation.get("active_version")
+    previous_manifest = installation.get("manifest") if previous_version else None
+    target_version = installation.get("staged_version")
+    target_name = installation.get("name") or provider_id
+    try:
+        live = get_kind(kind_of(installation)).attach_policy == ATTACH_LIVE
+    except UnknownKindError:
+        live = False
+    if not at_boot and not live:
+        return Activation(provider_id, ACTIVATION_WAITING, target_version, previous_version)
+
+    with record_job(
+        "activate",
+        target_kind="provider",
+        target_id=provider_id,
+        target_name=target_name,
+        from_version=previous_version,
+        to_version=target_version,
+    ) as job:
+        try:
+            manifest = _verified_staged_release(provider_id, installation, _revocations(state))
+            # The kind's step runs before the release is written, as it always has: a plugin whose saved
+            # settings cannot be brought up to date is active and says so, never half switched.
+            try:
+                attention = get_kind(kind_of(installation)).on_activated(provider_id, previous_manifest, manifest.raw)
+            except Exception:
+                logging.getLogger(__name__).exception("The kind's activation step failed for %s", provider_id)
+                attention = "Its saved settings could not be brought up to date with this version."
+        except Exception as error:
+            message = refusal_text(error)
+            _abandon_if_still_staged(provider_id, target_version, message)
+            job.data["state"] = "failed"
+            job.update(
+                error=str(error) or error.__class__.__name__,
+                message=f"Activation failed: {error}",
+            )
+            return Activation(provider_id, ACTIVATION_FAILED, target_version, previous_version, message)
+
+        def promote(state: dict[str, Any]) -> bool:
+            row = (state.get("installations") or {}).get(provider_id)
+            if (not isinstance(row, dict) or row.get("state") != "staged"
+                    or row.get("staged_version") != target_version
+                    or row.get("staged_path") != installation.get("staged_path")
+                    or (row.get("staged_manifest") or {}).get("bundle_sha256")
+                    != (installation.get("staged_manifest") or {}).get("bundle_sha256")
+                    or revocation.lookup(_revocations(state), provider_id, target_version) is not None):
+                # Replaced, removed, revoked or finished by someone else while it was being checked: theirs
+                # stands, and a revoked release is dropped by the next refresh.
+                return False
+            row["active_version"] = row.get("staged_version")
+            if row.get("staged_path"):
+                row["active_path"] = row.get("staged_path")
+            if row.get("staged_python_path"):
+                row["python_path"] = row.get("staged_python_path")
+            row["staged_version"] = None
+            row["staged_path"] = None
+            row["staged_python_path"] = None
+            row["staged_manifest"] = None
+            row.pop("previous_catalog_list", None)
+            row["manifest"] = manifest.raw
+            row["supplied_by"] = row.pop("staged_supplied_by", None) or {}
+            row["state"] = "active"
+            row["pending_restart"] = False
+            row["last_error"] = None
+            row.pop("needs_repair", None)
+            row["activated_at"] = utcnow_iso()
+            if attention:
+                row["last_error"] = attention
+            if previous_version and not at_boot:
+                # Calls the replaced release took are still running: it drains instead of retiring at once.
+                row[releases.DRAIN_PREVIOUS] = True
+            # Activation swaps the installation's manifest for the staged one; the staged schema's secret
+            # paths (a new version can add them) join the persisted set with it.
+            _persist_plugin_secret_paths(state, row)
+            return True
+
+        if not mutate_state(promote):
+            job.update(message=f"Activation of '{target_name}' v{target_version} skipped: it changed meanwhile")
+            return Activation(provider_id, ACTIVATION_SKIPPED, target_version, previous_version)
+        if previous_version:
+            job.update(message=f"Activated update {previous_version} -> {target_version}")
+        else:
+            job.update(message=f"Activated plugin '{target_name}' v{target_version}")
+    return Activation(provider_id, ACTIVATED, target_version, previous_version,
+                      draining=bool(previous_version and not at_boot))
+
+
+def retire_release(plugin_id: str, version: str | None = None) -> int:
+    """A draining release has finished its calls: it becomes the previous release. Returns how many moved.
+
+    Without ``version`` every draining release of the plugin retires. Does nothing without the release
+    tables (the file backend a few tools use).
+    """
+    from .state import _uses_file
+    if _uses_file(None):
+        return 0
+    from . import state_store
+
+    moved = 0
+    for release in state_store.list_releases(plugin_id, states=(releases.DRAINING,)):
+        if version is None or release.version == version:
+            moved += bool(state_store.transition_release(release.id, releases.RETIRED))
+    return moved
+
+
+def _rollback_needs_refusal(state: dict[str, Any], plugin: Any, provider_id: str, name: str, target) -> str | None:
+    """Why the previous release cannot come back for want of what it relies on, or None.
+
+    The capabilities it once had a supplier for must be supplied by a plugin that runs after the next restart and
+    must be recorded as its bindings, which the boot guard holds it to.
+    """
+    if plugin is None:
+        return None
+    row = (state.get("installations") or {}).get(provider_id) or {}
+    missing = closure.unsupplied_needs(state, plugin, provider_id, target.supplied_by, row.get("source_id"))
+    if not missing:
+        bindings = closure.supplier_map(state, plugin, provider_id)
+        missing = sorted(capability for capability in (target.supplied_by or {})
+                         if capability in plugin.requires and capability not in bindings)
+    if missing:
+        return f"{name} v{target.version} needs {', '.join(missing)}, which is not running, so it is not restored"
+    return None
+
+
+def _previous_release(provider_id: str):
+    from .state import _uses_file
+    if _uses_file(None):
+        return None
+    from . import state_store
+    previous = state_store.list_releases(provider_id, states=(releases.RETIRED,))
+    return max(previous, key=lambda release: (release.ended_seq or 0, release.id)) if previous else None
+
+
+def rollback_consent(provider_id: str, *, _state=None, _row=None, _target=None) -> dict[str, Any] | None:
+    """What going back to the previous release adds to what the active release is allowed, or None.
+
+    Worked out from the two manifests alone, so it does not depend on the catalog still listing the old release.
+    The Subtitle Hub has no consent step for a provider without dependencies, as for an update. The digest in the
+    result is what ``rollback_release`` takes as ``consent_digest``.
+    """
+    state = _state if _state is not None else load_state()
+    row = _row if _row is not None else (state.get("installations") or {}).get(provider_id)
+    target = _target if _target is not None else _previous_release(provider_id)
+    if not isinstance(row, dict) or target is None or target.manifest is None:
+        return None
+    if kind_of(row) == SUBTITLE_PROVIDER and not closure.has_needs(target.manifest):
+        return None
+    return consent.update_delta(state, row.get("manifest"), {"manifest": target.manifest}, closure.Closure())
+
+
+def rollback_release(provider_id: str, consent_digest: str | None = None) -> Activation:
+    """Go back to the release this plugin ran before its active one.
+
+    The previous release is checked against what it was (its files are on disk and match its manifest, it comes
+    from the source the plugin comes from now, it is not revoked), then staged again under its own identity by the
+    same rules a new release is staged by (a plugin that relies on what the active release supplies refuses
+    it, its bindings are worked out again, what it adds over the active release needs consent), and activated by
+    ``activate_release``: a kind that attaches on restart waits for the boot, a kind that attaches live switches
+    now. Raises ``ProviderHubInstallError`` when there is nothing to go back to or the rules refuse it, and then
+    changes nothing: the previous release stays recorded.
+    """
+    state = load_state()
+    row = (state.get("installations") or {}).get(provider_id)
+    if not isinstance(row, dict) or not row.get("active_version") or row.get("state") == "removed":
+        raise ProviderHubInstallError(f"{provider_id} is not installed")
+    if row.get("staged_version"):
+        raise ProviderHubInstallError(f"{provider_id} has an update waiting; discard it before going back")
+    target = _previous_release(provider_id)
+    if target is None:
+        raise ProviderHubInstallError(f"{provider_id} has no previous release to go back to")
+    name = row.get("name") or provider_id
+    if (target.source_id, target.origin) != (row.get("source_id"), row.get("origin")):
+        raise ProviderHubInstallError(
+            f"{name} v{target.version} was installed from another source than {name} is now, so it is not restored")
+    found = revocation.lookup(_revocations(state), provider_id, target.version)
+    if found is not None:
+        raise ProviderHubInstallError(_revocation_text(revocation.refusal, found, name, target.version, "installed"))
+    if target.manifest is None or not target.bundle_path or not target.python_path:
+        raise ProviderHubInstallError(f"{name} v{target.version} is no longer on disk, so it cannot be restored")
+    # What activation checks again later, checked now, so a release that cannot come back is refused before
+    # anything changes.
+    try:
+        kind = get_kind(kind_of(row))
+        manifest = kind.validate_manifest(target.manifest, bool(row.get("trusted", False)))
+        bundle = validated_bundle_path(provider_hub_dir(), target.bundle_path)
+        interpreter = validated_interpreter(provider_hub_dir(), target.python_path)
+        if (bundle is None or interpreter is None or not Path(bundle).is_dir() or not Path(interpreter).exists()
+                or (target.bundle_digest and manifest.bundle_sha256 != target.bundle_digest)):
+            raise ProviderHubInstallError("not on disk")
+        verify_bundle_tree(manifest, bundle)
+    except Exception as error:
+        raise ProviderHubInstallError(
+            f"{name} v{target.version} is no longer on disk, or no longer matches what it was, "
+            f"so it cannot be restored ({refusal_text(error)})") from error
+    plugin = parse_plugin_manifest(target.manifest) if target.manifest.get("schema_version") == 2 else None
+    # An early answer. The check that counts runs again inside the write that stages the release.
+    refusal = _rollback_needs_refusal(state, plugin, provider_id, name, target)
+    if refusal:
+        raise ProviderHubInstallError(refusal)
+    delta = rollback_consent(provider_id, _state=state, _row=row, _target=target)
+    if delta and delta["needs_consent"] and consent_digest != delta["digest"]:
+        raise ProviderHubConsentError(consent.delta_text(delta))
+
+    def stage(state: dict[str, Any]) -> bool:
+        current = (state.get("installations") or {}).get(provider_id)
+        if (not isinstance(current, dict) or current.get("active_version") != row.get("active_version")
+                or current.get("staged_version") or current.get("state") == "removed"):
+            return False
+        # The rule every staging is held to: a plugin that relies on what the active release supplies refuses it.
+        _refuse_a_release_that_breaks_dependents(state, provider_id, target.version, target.manifest)
+        # What the release relies on has to be supplied by what runs after the restart, judged on the state this
+        # write commits to, so a supplier changed since the early check still refuses it.
+        refusal = _rollback_needs_refusal(state, plugin, provider_id, name, target)
+        if refusal:
+            raise ProviderHubInstallError(refusal)
+        current.update(
+            staged_version=target.version, staged_path=target.bundle_path, staged_python_path=target.python_path,
+            staged_manifest=target.manifest, state="staged", pending_restart=True, last_error=None)
+        if plugin is not None:
+            current["staged_supplied_by"] = closure.supplier_map(state, plugin, provider_id)
+        return True
+
+    if not mutate_state(stage):
+        raise ProviderHubInstallError(f"{provider_id} changed while it was being rolled back")
+    return activate_release(provider_id)
+
+
+def _finish_removal(provider_id: str) -> bool:
+    """The restart that follows a staged removal takes the plugin's row, and with it its releases, away."""
+    state = load_state()
+    installation = (state.get("installations") or {}).get(provider_id)
+    if (not isinstance(installation, dict) or not installation.get("pending_restart")
+            or installation.get("state") != "removed"):
+        return False
+    target_name = installation.get("name") or provider_id
+    with record_job(
+        "uninstall",
+        target_kind="provider",
+        target_id=provider_id,
+        target_name=target_name,
+        from_version=installation.get("active_version"),
+    ) as job:
+        def drop(state: dict[str, Any]) -> bool:
+            row = (state.get("installations") or {}).get(provider_id)
+            if isinstance(row, dict) and row.get("pending_restart") and row.get("state") == "removed":
+                del state["installations"][provider_id]
+                return True
+            return False
+
+        removed = mutate_state(drop)
+        if removed:
+            job.update(message=f"Removed plugin '{target_name}' on restart")
+    return removed
+
+
 def activate_staged_installations() -> list[str]:
+    """The boot step: finish the removals staged in the last run and activate what was staged, through
+    ``activate_release``. Returns the ids that activated."""
     try:
         close_stale_jobs()
     except Exception:
@@ -4643,127 +4996,67 @@ def activate_staged_installations() -> list[str]:
     except Exception:
         logging.getLogger(__name__).warning("Could not check who owns the data kept for staged plugins",
                                             exc_info=True)
+    try:
+        _note_orphan_releases()
+    except Exception:
+        logging.getLogger(__name__).warning("Could not look for release records without an installation",
+                                            exc_info=True)
+    try:
+        _retire_stale_draining()
+    except Exception:
+        logging.getLogger(__name__).warning("Could not retire the releases an earlier run left draining",
+                                            exc_info=True)
     state = load_state()
-    installations = state.get("installations") or {}
-    revocations = _revocations(state)
     activated = []
-    changed = False
-    for provider_id, installation in list(installations.items()):
-        if not isinstance(installation, dict):
-            continue
-        if installation.get("pending_restart") and installation.get("state") == "removed":
-            target_name = installation.get("name") or provider_id
-            with record_job(
-                "uninstall",
-                target_kind="provider",
-                target_id=provider_id,
-                target_name=target_name,
-                from_version=installation.get("active_version"),
-            ) as job:
-                del installations[provider_id]
-                changed = True
-                job.update(message=f"Removed plugin '{target_name}' on restart")
-            continue
-        if not installation.get("pending_restart") or installation.get("state") != "staged":
-            continue
-
-        previous_version = installation.get("active_version")
-        previous_manifest = installation.get("manifest") if previous_version else None
-        target_version = installation.get("staged_version")
-        target_name = installation.get("name") or provider_id
-
-        with record_job(
-            "activate",
-            target_kind="provider",
-            target_id=provider_id,
-            target_name=target_name,
-            from_version=previous_version,
-            to_version=target_version,
-        ) as job:
-            try:
-                found = revocation.lookup(revocations, provider_id, target_version)
-                if found is not None:
-                    # Revoked since it was staged: it does not become the active release.
-                    raise ProviderHubInstallError(_revocation_text(
-                        revocation.refusal, found, target_name, target_version, "installed"))
-                trusted = bool(installation.get("trusted", False))
-                # The kind validates its own manifests: a translator is not a subtitle provider.
-                kind = get_kind(kind_of(installation))
-                manifest_data = installation.get("manifest") or {}
-                manifest = kind.validate_manifest(manifest_data, trusted)
-                if isinstance(installation.get("staged_manifest"), dict):
-                    manifest = kind.validate_manifest(installation.get("staged_manifest"), trusted)
-                staged_path = installation.get("staged_path")
-                staged_python_path = installation.get("staged_python_path")
-                if not staged_path or not staged_python_path:
-                    raise ProviderHubInstallError("staged bundle or python path is missing")
-                staged_interpreter = validated_interpreter(provider_hub_dir(), staged_python_path)
-                if staged_interpreter is None:
-                    raise ProviderHubInstallError("staged python path is not one of the hub's environments")
-                staged_bundle_path = validated_bundle_path(provider_hub_dir(), staged_path)
-                if staged_bundle_path is None:
-                    raise ProviderHubInstallError("staged bundle path is not one of the hub's bundles")
-                _remove_bundle_runtime_artifacts(staged_bundle_path)
-                verify_bundle_tree(manifest, staged_bundle_path)
-                kind.smoke_test(manifest, staged_bundle_path, staged_interpreter)
-            except Exception as error:
-                _abandon_staged_release(installation, refusal_text(error))
-                changed = True
-                job.data["state"] = "failed"
-                job.update(
-                    error=str(error) or error.__class__.__name__,
-                    message=f"Activation failed: {error}",
-                )
+    try:
+        for provider_id, installation in list((state.get("installations") or {}).items()):
+            if not isinstance(installation, dict):
                 continue
-            installation["active_version"] = installation.get("staged_version")
-            if installation.get("staged_path"):
-                installation["active_path"] = installation.get("staged_path")
-            if installation.get("staged_python_path"):
-                installation["python_path"] = installation.get("staged_python_path")
-            installation["staged_version"] = None
-            installation["staged_path"] = None
-            installation["staged_python_path"] = None
-            installation["staged_manifest"] = None
-            installation.pop("previous_catalog_list", None)
-            installation["manifest"] = manifest.raw
-            installation["supplied_by"] = installation.pop("staged_supplied_by", None) or {}
-            installation["state"] = "active"
-            installation["pending_restart"] = False
-            installation["last_error"] = None
-            installation.pop("needs_repair", None)
-            installation["activated_at"] = utcnow_iso()
+            removal = installation.get("pending_restart") and installation.get("state") == "removed"
+            if not removal and (not installation.get("pending_restart") or installation.get("state") != "staged"):
+                continue
+            # One plugin that cannot be handled never keeps the others from starting.
             try:
-                attention = get_kind(kind_of(installation)).on_activated(
-                    provider_id, previous_manifest, manifest.raw)
+                if removal:
+                    _finish_removal(provider_id)
+                    state["installations"].pop(provider_id, None)
+                elif activate_release(provider_id, at_boot=True).activated:
+                    activated.append(provider_id)
             except Exception:
-                logging.getLogger(__name__).exception("The kind's activation step failed for %s", provider_id)
-                attention = "Its saved settings could not be brought up to date with this version."
-            if attention:
-                installation["last_error"] = attention
-            activated.append(provider_id)
-            changed = True
-            if previous_version:
-                msg = f"Activated update {previous_version} -> {target_version}"
-            else:
-                msg = f"Activated plugin '{target_name}' v{target_version}"
-            job.update(message=msg)
-    # What actually activated is known now. A plugin whose active release relies on one that is not running
-    # does not start, and says why.
-    changed = _apply_unmet_needs(installations, revocations) or changed
-    if changed:
-        updated_installations = state.get("installations") or {}
+                logging.getLogger(__name__).exception("Could not activate or remove %s at startup", provider_id)
+    finally:
+        # What actually activated is known now. A plugin whose active release relies on one that is not
+        # running does not start, and says why.
+        probe = load_state()
+        if _apply_unmet_needs(probe.get("installations") or {}, _revocations(probe)):
+            def hold(state: dict[str, Any]) -> None:
+                _apply_unmet_needs(state.setdefault("installations", {}), _revocations(state))
 
-        def persist_activated(state: dict[str, Any]) -> None:
-            state["installations"] = updated_installations
-            # Activation swaps the installation's manifest for the staged one;
-            # the staged schema's secret paths (a new version can add them)
-            # join the persisted set with it.
-            for installation in updated_installations.values():
-                if isinstance(installation, dict):
-                    _persist_plugin_secret_paths(state, installation)
-
-        mutate_state(persist_activated)
+            mutate_state(hold)
     return activated
+
+
+def _note_orphan_releases() -> None:
+    """Say so when the tables hold releases of plugins the document does not list. They are never deleted
+    silently: a plugin listed again is matched to them, and ``state_store.discard_orphan_releases`` ends them."""
+    from .state import _uses_file
+    if _uses_file(None):
+        return
+    from . import state_store
+
+    orphans = state_store.orphan_plugin_ids()
+    if orphans:
+        logging.getLogger(__name__).warning(
+            "Provider Hub: the release records of %s have no installation in the state document. They and their "
+            "files are kept; an administrator ends them with state_store.discard_orphan_releases", ", ".join(orphans))
+
+
+def _retire_stale_draining() -> None:
+    """A release left draining by the last run has no worker now: it is the previous release."""
+    from .state import _uses_file
+    if not _uses_file(None):
+        from . import state_store
+        state_store.retire_draining()
 
 
 def reconcile_plugin_environments() -> dict[str, list[str]]:

@@ -248,6 +248,16 @@ _unreaped_survivors: "set[ProviderWorkerClient]" = set()
 _SIGKILL = getattr(signal, "SIGKILL", None)
 
 
+def live_workers(provider_id: str | None = None, release: str | None = None) -> "list[ProviderWorkerClient]":
+    """The started workers of one plugin, or of one release of it, so a release that is being replaced or
+    stopped can be found by its key. A client without a release key matches only a lookup that names none."""
+    with _live_clients_lock:
+        found = list(_live_clients)
+    return [client for client in found
+            if (provider_id is None or client.provider_id == provider_id)
+            and (release is None or client.release == release)]
+
+
 def reap_idle_workers(idle_seconds: float) -> int:
     """Stop workers that have served no request for ``idle_seconds``.
 
@@ -554,6 +564,7 @@ class ProviderWorkerClient:
         provider_id: str | None = None,
         before_start=None,
         host_calls: dict[str, Any] | None = None,
+        release: str | None = None,
     ):
         # The calls this worker may make to the host while it serves a request: capability id to
         # a function (payload, seconds_left, cancelled_event) -> dict. Anything else a worker asks for is refused.
@@ -565,6 +576,9 @@ class ProviderWorkerClient:
         self.cwd = str(cwd) if cwd else None
         self.env = env
         self.provider_id = provider_id if isinstance(provider_id, str) and provider_id else None
+        # The release this worker runs, by the content address of its bundle: a release that is replaced or
+        # stopped is told apart from the one that replaces it.
+        self.release = release if isinstance(release, str) and release else None
         self.process: subprocess.Popen | None = None
         # monotonic timestamp of the last request, read by reap_idle_workers
         self.last_used: float = time.monotonic()
