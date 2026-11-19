@@ -1930,6 +1930,13 @@ def test_provider_hub_uninstall_stages_active_removal_and_discards_staged_update
     from provider_hub.service import remove_installation
     from provider_hub.state import load_state
 
+    # The release cannot be stopped while Bazarr+ runs here, so the removal is staged for the restart as it always
+    # was. (When it can, the row is finished live: see test_provider_hub_detach.)
+    def cannot_stop(*args, **kwargs):
+        raise RuntimeError("a pool would not let go")
+
+    monkeypatch.setattr("provider_hub.detach.detach", cannot_stop)
+
     provider_id = "updatedhub"
     state_file = tmp_path / "state.json"
     state_file.write_text(
@@ -6154,7 +6161,8 @@ def test_remove_installation_records_uninstall_job(tmp_path, monkeypatch):
     assert job["state"] == "completed"
     assert job["target_id"] == "examplehub"
     assert job["from_version"] == "1.0.0"
-    assert "Staged removal" in job["message"]
+    # The provider kind stops a release while Bazarr+ runs, so the removal is finished without a restart.
+    assert "Removed plugin 'Example'" in job["message"]
 
 
 def test_stage_install_records_install_job_on_success(tmp_path, monkeypatch):

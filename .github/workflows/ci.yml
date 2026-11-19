@@ -441,6 +441,7 @@ jobs:
             tests/bazarr/test_provider_hub_consent.py \
             tests/bazarr/test_provider_hub_dev_source.py \
             tests/bazarr/test_provider_hub_releases.py \
+            tests/bazarr/test_provider_hub_detach.py \
             tests/bazarr/test_arr_instances_schema.py \
             tests/bazarr/test_sportarr_instances.py \
             tests/bazarr/test_arr_ownership_columns.py \
@@ -991,6 +992,7 @@ jobs:
             tests/bazarr/test_translator_dispatch.py \
             tests/bazarr/test_translator_dispatch_entrypoints.py \
             tests/bazarr/test_translator_worker_binding.py \
+            tests/bazarr/test_translator_detach.py \
             tests/bazarr/test_translation_manual_pick.py \
             tests/bazarr/test_sportarr_library_migration.py \
             tests/bazarr/test_sportarr_review_guards.py \

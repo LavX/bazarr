@@ -705,52 +705,66 @@ def test_a_verified_catalog_stores_its_list_by_channel_and_in_a_file_beside_the_
     assert mirrored["channels"] == stored
 
 
-def test_a_refresh_marks_a_running_revoked_release_and_asks_for_a_restart_but_takes_nothing_from_the_registry(
-        world):
+def test_a_refresh_marks_a_running_revoked_release_and_asks_for_a_restart_of_a_kind_that_cannot_stop_live(world):
+    """A kind whose releases cannot be stopped while Bazarr+ runs keeps what a revocation always did: the release
+    runs on with its marks and the restart cue, and the boot holds it back. (A provider is stopped live; see
+    ``test_provider_hub_detach``.)"""
     from provider_hub import service
-    from provider_hub.kinds.subtitle_provider import apply_settings_overlay
     from provider_hub.state import blocked_installations, running_installations
+
+    plugin = _plugin(version="1.0.0")
+    _install_row(plugin)
+    _publish(world, revocations=[{"id": PLUGIN, "version": "1.0.0", "reason": REASON}])
+
+    _refresh()
+
+    row = _rows()[PLUGIN]
+    assert row["revoked"] is True and "blocked" not in row and "blocked_reason" not in row
+    assert row["revoked_reason"] == row["last_error"]
+    assert "Restart Bazarr+ to stop it, then " in row["revoked_reason"]
+    assert "It will not start" not in row["revoked_reason"] and len(row["revoked_reason"]) <= LIMIT
+    # The restart cue the Hub already reads.
+    assert row["pending_restart"] is True and row["revoked_restart"] is True
+    # The registry was not touched: not the running set.
+    assert {item.provider_id for item in running_installations(kind=None)} == {PLUGIN}
+    assert blocked_installations(kind=None) == []
+    # The next boot holds it back, and the restart it is drops the cue.
+    assert service.enforce_activation_needs() is True
+    row = _rows()[PLUGIN]
+    assert row["blocked"] is True and row["pending_restart"] is False and "revoked_restart" not in row
+    assert "It will not start. " in row["blocked_reason"] and row["blocked_cause"] == "revoked"
+    assert row["last_error"] == row["blocked_reason"] == row["revoked_reason"]
+    assert running_installations(kind=None) == []
+
+
+def test_a_refresh_stops_a_running_revoked_provider_at_once_and_asks_for_no_restart(world):
+    from provider_hub import service
+    from provider_hub.state import blocked_installations, running_installations, mutate_state
 
     sub = provider_manifest_v1("runningsub", "1.0.0")
     row = {"provider_id": "runningsub", "name": "Runningsub", "active_version": "1.0.0", "state": "active",
            "pending_restart": False, "manifest": sub, "enabled": True, "trusted": True,
            "source_id": "official", "source_bound": True}
-    from provider_hub.state import mutate_state
     mutate_state(lambda state: state["installations"].update({"runningsub": row}))
-    plugin = _plugin(version="1.0.0")
-    _install_row(plugin)
-    _publish(world, revocations=[{"id": "runningsub"}, {"id": PLUGIN, "version": "1.0.0", "reason": REASON}],
-             providers=[sub])
+    _publish(world, revocations=[{"id": "runningsub"}], providers=[sub])
 
     _refresh()
 
-    for plugin_id in ("runningsub", PLUGIN):
-        row = _rows()[plugin_id]
-        assert row["revoked"] is True and "blocked" not in row and "blocked_reason" not in row
-        assert row["revoked_reason"] == row["last_error"]
-        assert "Restart Bazarr+ to stop it, then " in row["revoked_reason"]
-        assert "It will not start" not in row["revoked_reason"] and len(row["revoked_reason"]) <= LIMIT
-        # The restart cue the Hub already reads.
-        assert row["pending_restart"] is True and row["revoked_restart"] is True
-    # needs_restart is derived from that cue by the kind's attach policy: a restart-attached kind reports it.
-    assert service.get_provider("runningsub")["needs_restart"] is True
-    # The restart cue has its own effect, and it is the safe one: a connection test says to restart first.
-    assert service.test_provider_connection("runningsub")["status"] == "pending_restart"
-    # The registry was not touched: not the running set, and not the settings overlay.
-    assert {item.provider_id for item in running_installations(kind=None)} == {"runningsub", PLUGIN}
-    assert blocked_installations(kind=None) == []
-    configs = {}
-    apply_settings_overlay(configs, {}, set(), set())
-    assert "runningsub" in configs
-    # The next boot holds them back, and the restart it is drops the cue.
-    assert service.enforce_activation_needs() is True
-    for plugin_id in ("runningsub", PLUGIN):
-        row = _rows()[plugin_id]
-        assert row["blocked"] is True and row["pending_restart"] is False and "revoked_restart" not in row
-        assert "It will not start. " in row["blocked_reason"] and row["blocked_cause"] == "revoked"
-        assert row["last_error"] == row["blocked_reason"] == row["revoked_reason"]
+    row = _rows()["runningsub"]
+    assert row["revoked"] is True and row["blocked"] is True and row["blocked_cause"] == "revoked"
+    assert row["pending_restart"] is False and "revoked_restart" not in row
+    assert row["revoked_reason"] == row["blocked_reason"] == row["last_error"]
+    assert "It was stopped. Remove it." in row["revoked_reason"] and "Restart" not in row["revoked_reason"]
+    assert len(row["revoked_reason"]) <= LIMIT
     assert service.get_provider("runningsub")["needs_restart"] is False
+    # Nothing that reads what runs sees it any more.
     assert running_installations(kind=None) == []
+    assert [item.provider_id for item in blocked_installations(kind=None)] == ["runningsub"]
+    # The boot's own check finds nothing left to hold back but the wording: the same hold.
+    service.enforce_activation_needs()
+    row = _rows()["runningsub"]
+    assert row["blocked"] is True and row["pending_restart"] is False
+    assert "It will not start. " in row["blocked_reason"]
 
 
 def test_a_verified_catalog_that_revokes_an_offered_update_still_offers_the_next_one(world):

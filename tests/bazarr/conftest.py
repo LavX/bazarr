@@ -130,6 +130,18 @@ def _keep_the_session_generation():
         auth["session_generation"] = before
 
 
+@pytest.fixture(autouse=True)
+def _finish_detached_releases():
+    """A release that is detached while a test runs is finished on threads of its own (its row deleted once its
+    calls are done). They end before the next test, so none of them writes into another test's state."""
+    yield
+    import sys
+
+    detach = sys.modules.get("provider_hub.detach")
+    if detach is not None:
+        detach.wait_idle(30)
+
+
 @pytest.fixture
 def service_kind():
     """A second plugin kind, registered for one test, that records every hook call."""

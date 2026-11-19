@@ -14,7 +14,7 @@ import logging
 from types import MappingProxyType
 from typing import Any, Sequence
 
-from . import ATTACH_ON_RESTART, SUBTITLE_PROVIDER, Kind, kind_of, register_kind
+from . import ATTACH_ON_RESTART, DETACH_LIVE, SUBTITLE_PROVIDER, Kind, kind_of, register_kind
 
 logger = logging.getLogger(__name__)
 
@@ -293,8 +293,31 @@ class SubtitleProviderKind(Kind):
     # FlareSolverr's address arrives in the provider's own ``flaresolverr_url`` field.
     capability_delivery = MappingProxyType({"flaresolverr.v1": ("flaresolverr_url", "url")})
     attach_policy = ATTACH_ON_RESTART
+    # A new release waits for the restart, but a provider that is switched off, removed or revoked is taken out
+    # of every pool and its worker stopped at once.
+    detach_policy = DETACH_LIVE
     noun = "provider"
     keeps_data = True
+
+    def detach(self, plugin_id: str, *, withdraw: bool, grace: float | None = None,
+               release_key: str | None = None):
+        from provider_hub import registry
+
+        if withdraw:
+            # First: a pool that builds an instance from here on finds no class, and the built-in a plugin had
+            # replaced is registered again in the same step.
+            registry.unregister_provider_class(plugin_id)
+        try:
+            from compat.service import reset_compat_pool
+
+            # The persistent pool of the compat endpoint and Discover is replaced, never edited: a search that
+            # already holds it finishes on it, the next one gets a pool built without the provider.
+            reset_compat_pool()
+        except Exception:
+            logger.exception("Failed to replace the compat pool after detaching %s", plugin_id)
+        registry.revoke_untrusted_host_calls()
+        drains = registry.retire_provider_instances(plugin_id, grace)
+        return drains
 
     def after_removed(self, plugin_id: str, keep_data: bool = False) -> None:
         # A provider keeps nothing but its settings: its own section of the configuration, and the settings on its

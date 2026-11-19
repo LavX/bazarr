@@ -34,9 +34,14 @@ Two things to know before changing this module:
   write. They are logged at boot and their files stay protected. Ending them is an administrator's repair step,
   with no screen of its own: ``state_store.discard_orphan_releases(state_store.orphan_plugin_ids())`` run in a
   Python shell against the app's database, once whoever runs it has looked at what is kept.
-* Reached only once something activates or stops a release while Bazarr+ runs: a draining release is not a
-  rollback target until it has retired, nothing yet calls ``retire_release`` at runtime, and an activation takes
-  no install lock. Jobs do not bind a release, and only provider workers carry the release key.
+* A release leaves while Bazarr+ runs in three ways, and ``detach`` does the consumer side of each. A live
+  activation that replaces a release (a kind that attaches live) sends the old one to ``draining`` through
+  ``DRAIN_PREVIOUS``; once the pools have let go of it and its calls are done, ``retire_release`` retires it, and
+  until then it is not a rollback target. A removal marks the installation removed and deletes the row, with all
+  its releases, once the calls are done, so those releases go through no other state. A revoked release is stopped
+  the way the boot holds it back: the installation row is marked held back and the release record stays
+  ``active``, so a restart finds the same state. An activation still takes no install lock, jobs do not bind a
+  release, and only provider workers carry the release key.
 """
 from __future__ import annotations
 

@@ -158,8 +158,9 @@ def deliver(config: dict, properties: dict, installation, settings) -> None:
 def live_trust(provider_id) -> bool:
     """Whether the installation is trusted right now, read from the stored record.
 
-    A catalog refresh can withdraw trust from an installation that is running, so this is asked at the
-    time of use and never remembered. An unreadable record, or none, is not trust.
+    A catalog refresh can withdraw trust from an installation that is running, and a release that is revoked,
+    held back or removed no longer holds it, so this is asked at the time of use and never remembered. An
+    unreadable record, or none, is not trust.
     """
     try:
         from . import state
@@ -168,7 +169,11 @@ def live_trust(provider_id) -> bool:
     except Exception:
         logger.exception("Could not read the trust of %s", provider_id)
         return False
-    return isinstance(row, dict) and row.get("trusted") is True
+    if not isinstance(row, dict) or row.get("trusted") is not True:
+        return False
+    # A release that was detached (removed, revoked or held back) is trusted no longer, though its row still says
+    # so: a worker that is finishing its calls gets nothing more from the host.
+    return not (row.get("revoked") or row.get("blocked") or row.get("state") == "removed")
 
 
 def host_call_handlers(installation) -> dict[str, Callable[[dict, float, threading.Event], dict]]:

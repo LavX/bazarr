@@ -2,7 +2,8 @@
 """Plugin kinds: the contracts plugins implement.
 
 A kind names the manifests it accepts (its kind_api majors), says when a new
-release attaches (at the next restart, or live), and owns every side effect
+release attaches (at the next restart, or live) and whether a release it runs
+can be stopped without one (``detach_policy``), and owns every side effect
 that installing, enabling, configuring or removing one of its plugins has on
 the rest of Bazarr+. The shared Provider Hub core calls is_enabled,
 set_enabled, on_config_saved, on_installed and on_removed, and validate_manifest
@@ -24,6 +25,12 @@ TRANSLATOR = "translator"
 ATTACH_ON_RESTART = "restart"
 ATTACH_LIVE = "live"
 
+# Whether a running release of the kind can be stopped and taken out of use while Bazarr+ runs. Separate from the
+# attach policy: a kind may attach new releases at the next restart and still stop one now (disable, remove and
+# revoke act live, install and update wait for the restart). A kind that detaches on restart keeps the restart cue.
+DETACH_ON_RESTART = "restart"
+DETACH_LIVE = "live"
+
 
 class UnknownKindError(ValueError):
     """Raised when a manifest or a stored row names a kind this host does not define."""
@@ -35,6 +42,7 @@ class Kind:
     name: str = ""
     kind_apis: frozenset[str] = frozenset()
     attach_policy: str = ATTACH_ON_RESTART
+    detach_policy: str = DETACH_ON_RESTART
     # What the job list calls one of these: "Installing provider X".
     noun: str = "plugin"
     # Capability id to the (config key, value shape) it is delivered under.
@@ -91,6 +99,26 @@ class Kind:
         """
         return None
 
+    def detach(self, plugin_id: str, *, withdraw: bool, grace: float | None = None,
+               release_key: str | None = None) -> "list[Any]":
+        """Stop serving this plugin's calls now. Only called for a kind whose ``detach_policy`` is live.
+
+        New calls are refused from the moment this returns; the calls the release already took finish (or, with
+        ``grace``, are cut once that many seconds have passed). ``withdraw`` is True when the release leaves for
+        good (removed, revoked or replaced) and False when the plugin is only switched off and may be switched
+        on again. ``release_key`` names the release being stopped, for a kind whose workers are told apart by it
+        (an update that keeps the new release running).
+
+        Returns the threads that end when everything the release held is gone, so the caller can finish what
+        waits for that (retiring the release, deleting a removed row). A failure is raised: the caller falls
+        back to the restart cue.
+        """
+        return []
+
+    def removal_finished(self, plugin_id: str) -> None:
+        """A live removal is complete: the release was detached, its calls are done and its row is gone. The place
+        for what had to wait for the plugin to stop existing (a folder that was in use). Never raises."""
+
     def set_enabled(self, installation: dict[str, Any], enabled: bool) -> bool:
         """Turn the plugin on or off. Same return rule."""
         installation["enabled"] = bool(enabled)
@@ -132,6 +160,8 @@ def register_kind(kind: Kind) -> Kind:
         raise ValueError("a kind needs a name")
     if kind.attach_policy not in (ATTACH_ON_RESTART, ATTACH_LIVE):
         raise ValueError(f"unknown attach policy for kind {kind.name}: {kind.attach_policy}")
+    if kind.detach_policy not in (DETACH_ON_RESTART, DETACH_LIVE):
+        raise ValueError(f"unknown detach policy for kind {kind.name}: {kind.detach_policy}")
     for kind_api in kind.kind_apis:
         owner = kind_for_api(kind_api)
         if owner is not None and owner.name != kind.name:
