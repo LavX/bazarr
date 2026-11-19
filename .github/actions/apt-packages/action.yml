@@ -19,15 +19,19 @@ runs:
       env:
         PACKAGES: ${{ inputs.packages }}
       run: |
-        # The key names the runner OS and image: the set of .deb files that are
-        # missing depends on what the image already ships, and dpkg refuses to
-        # install a .deb built against a dependency the image has since
-        # replaced. ImageOS and ImageVersion are set by the runner image.
+        # The key names the runner OS, the image release (ImageOS) and the
+        # package list, then the exact image build (ImageVersion). Runners come
+        # in several builds of one release at any moment, so a restore falls
+        # back to the prefix: debs saved on another build of the same release.
+        # If dpkg rejects them (version skew), the mirror path below takes
+        # over. ImageOS and ImageVersion are set by the runner image.
         read -ra names <<< "$PACKAGES"
         list="$(printf '%s\n' "${names[@]}" | LC_ALL=C sort -u | tr '\n' ' ')"
         digest="$(printf '%s' "$list" | sha256sum | cut -c1-16)"
+        prefix="apt-debs-${RUNNER_OS}-${ImageOS:-unknown}-${digest}-"
         {
-          echo "key=apt-debs-${RUNNER_OS}-${ImageOS:-unknown}-${ImageVersion:-unknown}-${digest}"
+          echo "prefix=${prefix}"
+          echo "key=${prefix}${ImageVersion:-unknown}"
           echo "dir=${RUNNER_TEMP}/apt-debs"
           echo "list=${list}"
         } >> "$GITHUB_OUTPUT"
@@ -39,10 +43,11 @@ runs:
       with:
         path: ${{ steps.plan.outputs.dir }}
         key: ${{ steps.plan.outputs.key }}
+        restore-keys: ${{ steps.plan.outputs.prefix }}
 
     - name: Install from the cached .deb files
       id: offline
-      if: ${{ steps.cache.outputs.cache-hit == 'true' }}
+      if: ${{ steps.cache.outputs.cache-matched-key != '' }}
       shell: bash
       env:
         DEBS: ${{ steps.plan.outputs.dir }}
@@ -86,8 +91,11 @@ runs:
         sudo find "$DEBS" -mindepth 1 ! -name '*.deb' -delete
         sudo chown -R "$(id -u):$(id -g)" "$DEBS"
 
-    - name: Save the .deb files for the next run
-      if: ${{ steps.online.outcome == 'success' && steps.cache.outputs.cache-hit != 'true' }}
+    - name: Save the .deb files under the exact key
+      # After any successful install, unless the exact key was restored. A
+      # prefix match restores cache-hit=false, so it saves under the exact key
+      # and a save that finds the key already taken only logs a warning.
+      if: ${{ (steps.offline.outputs.installed == 'true' || steps.online.outcome == 'success') && steps.cache.outputs.cache-hit != 'true' }}
       uses: actions/cache/save@v6
       with:
         path: ${{ steps.plan.outputs.dir }}
