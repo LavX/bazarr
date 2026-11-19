@@ -30,6 +30,10 @@ Two things to know before changing this module:
   ``split``. The migration moves the rows of a database the store has not written to yet, with its own frozen
   copy of the logic; the two are pinned together by a test. A column added here later has to be created by
   ``create_tables`` as well as by its revision, and ``read_rows`` must not select it before then.
+* Release rows of a plugin the document does not list (what a damaged document lost) are never deleted by a
+  write. They are logged at boot and their files stay protected. Ending them is an administrator's repair step,
+  with no screen of its own: ``state_store.discard_orphan_releases(state_store.orphan_plugin_ids())`` run in a
+  Python shell against the app's database, once whoever runs it has looked at what is kept.
 * Reached only once something activates or stops a release while Bazarr+ runs: a draining release is not a
   rollback target until it has retired, nothing yet calls ``retire_release`` at runtime, and an activation takes
   no install lock. Jobs do not bind a release, and only provider workers carry the release key.
@@ -291,11 +295,15 @@ def compose(data: dict[str, Any], rows: list[dict[str, Any]]) -> "StateDocument"
     releases kept besides the active and staged ones attached.
     """
     document = StateDocument(data)
+    installations = data.get("installations")
+    listed = installations if isinstance(installations, dict) else {}
+    # The previous and draining releases, and every release of a plugin the document does not list (what a
+    # damaged document lost): they are kept until discarded on purpose, and so are their files.
     document.retained_releases = tuple(
         {"plugin_id": release["plugin_id"], "version": release["version"], "state": release["state"],
          "bundle_path": release.get("bundle_path"), "python_path": release.get("python_path")}
-        for release in rows if release["state"] in (RETIRED, DRAINING))
-    installations = data.get("installations")
+        for release in rows
+        if release["state"] in (RETIRED, DRAINING) or release["plugin_id"] not in listed)
     if not isinstance(installations, dict) or not rows:
         return document
     by_plugin: dict[str, dict[str, dict[str, Any]]] = {}

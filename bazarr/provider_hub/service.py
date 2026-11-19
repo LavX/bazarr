@@ -4834,6 +4834,25 @@ def retire_release(plugin_id: str, version: str | None = None) -> int:
     return moved
 
 
+def _rollback_needs_refusal(state: dict[str, Any], plugin: Any, provider_id: str, name: str, target) -> str | None:
+    """Why the previous release cannot come back for want of what it relies on, or None.
+
+    The capabilities it once had a supplier for must be supplied by a plugin that runs after the next restart and
+    must be recorded as its bindings, which the boot guard holds it to.
+    """
+    if plugin is None:
+        return None
+    row = (state.get("installations") or {}).get(provider_id) or {}
+    missing = closure.unsupplied_needs(state, plugin, provider_id, target.supplied_by, row.get("source_id"))
+    if not missing:
+        bindings = closure.supplier_map(state, plugin, provider_id)
+        missing = sorted(capability for capability in (target.supplied_by or {})
+                         if capability in plugin.requires and capability not in bindings)
+    if missing:
+        return f"{name} v{target.version} needs {', '.join(missing)}, which is not running, so it is not restored"
+    return None
+
+
 def _previous_release(provider_id: str):
     from .state import _uses_file
     if _uses_file(None):
@@ -4905,13 +4924,10 @@ def rollback_release(provider_id: str, consent_digest: str | None = None) -> Act
             f"{name} v{target.version} is no longer on disk, or no longer matches what it was, "
             f"so it cannot be restored ({refusal_text(error)})") from error
     plugin = parse_plugin_manifest(target.manifest) if target.manifest.get("schema_version") == 2 else None
-    if plugin is not None:
-        # What this release relied on has to be running now: its bindings are worked out again at staging, and
-        # one that finds no supplier would leave the boot guard nothing to hold it to.
-        missing = closure.unsupplied_needs(state, plugin, provider_id, target.supplied_by)
-        if missing:
-            raise ProviderHubInstallError(
-                f"{name} v{target.version} needs {', '.join(missing)}, which is not running, so it is not restored")
+    # An early answer. The check that counts runs again inside the write that stages the release.
+    refusal = _rollback_needs_refusal(state, plugin, provider_id, name, target)
+    if refusal:
+        raise ProviderHubInstallError(refusal)
     delta = rollback_consent(provider_id, _state=state, _row=row, _target=target)
     if delta and delta["needs_consent"] and consent_digest != delta["digest"]:
         raise ProviderHubConsentError(consent.delta_text(delta))
@@ -4923,10 +4939,14 @@ def rollback_release(provider_id: str, consent_digest: str | None = None) -> Act
             return False
         # The rule every staging is held to: a plugin that relies on what the active release supplies refuses it.
         _refuse_a_release_that_breaks_dependents(state, provider_id, target.version, target.manifest)
+        # What the release relies on has to be supplied by what runs after the restart, judged on the state this
+        # write commits to, so a supplier changed since the early check still refuses it.
+        refusal = _rollback_needs_refusal(state, plugin, provider_id, name, target)
+        if refusal:
+            raise ProviderHubInstallError(refusal)
         current.update(
             staged_version=target.version, staged_path=target.bundle_path, staged_python_path=target.python_path,
             staged_manifest=target.manifest, state="staged", pending_restart=True, last_error=None)
-        plugin = parse_plugin_manifest(target.manifest) if target.manifest.get("schema_version") == 2 else None
         if plugin is not None:
             current["staged_supplied_by"] = closure.supplier_map(state, plugin, provider_id)
         return True
@@ -5027,8 +5047,8 @@ def _note_orphan_releases() -> None:
     orphans = state_store.orphan_plugin_ids()
     if orphans:
         logging.getLogger(__name__).warning(
-            "Provider Hub: the release records of %s have no installation in the state document and are kept",
-            ", ".join(orphans))
+            "Provider Hub: the release records of %s have no installation in the state document. They and their "
+            "files are kept; an administrator ends them with state_store.discard_orphan_releases", ", ".join(orphans))
 
 
 def _retire_stale_draining() -> None:

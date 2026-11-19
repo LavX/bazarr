@@ -794,28 +794,35 @@ def retire_draining(bind=None) -> int:
     return change_releases(retire, bind)
 
 
+def _listed_in(text: str) -> set[str]:
+    """The plugin ids the stored document lists. A document that is not readable raises ``StateCorruptError``."""
+    from .state import _stored_document
+    return set(_stored_document(text)["installations"])
+
+
 def orphan_plugin_ids(bind=None) -> list[str]:
     """The ids of plugins that have release rows and are not in the document.
 
-    A document rebuilt after damage no longer lists the plugins it lost, and their releases are kept. A plugin
-    that is listed again is matched to them by its id; the rest stay until ``discard_orphan_releases``.
+    A document rebuilt after damage no longer lists the plugins it lost, and their releases are kept. They are
+    logged at boot. A plugin listed again with the same release is matched to its record; the rest stay until
+    ``discard_orphan_releases``, an administrator's repair step with no screen of its own: run it in a Python
+    shell against the app's database, with ``orphan_plugin_ids()`` as the argument once what is kept has been looked at.
     """
-    document = json.loads(read_document(bind)[1])
-    listed = set((document.get("installations") or {}))
+    listed = _listed_in(read_document(bind)[1])
     return sorted({row["plugin_id"] for row in read_release_rows(bind)} - listed)
 
 
 def discard_orphan_releases(plugin_ids, bind=None) -> int:
     """Delete the releases of the named plugins, which must not be in the document. Returns how many went.
 
-    The explicit end of what a damaged document lost: nothing else deletes them.
+    The explicit end of what a damaged document lost: nothing else deletes them. An administrator's repair step
+    (see ``orphan_plugin_ids``); nothing in the app calls it.
     """
     wanted = set(plugin_ids)
 
     def discard(connection):
-        listed = set((json.loads(connection.execute(
-            sa.select(_state_table.c.document).where(_state_table.c.id == ROW_ID)).scalar()).get("installations")
-            or {}))
+        listed = _listed_in(connection.execute(
+            sa.select(_state_table.c.document).where(_state_table.c.id == ROW_ID)).scalar())
         ids = [row["id"] for row in releases.read_rows(connection, manifests=()) if row["plugin_id"] in wanted
                and row["plugin_id"] not in listed]
         if ids:

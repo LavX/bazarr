@@ -1190,6 +1190,206 @@ def test_a_null_map_of_bindings_reads_back_as_null_and_an_empty_one_as_empty(tab
     assert read["beta"]["supplied_by"] == {}
 
 
+def _needing_world(hub, service_kind, monkeypatch, **supplier):
+    """``main`` ran a release that needed translit.v1 from ``dep`` before its current one, which does not.
+
+    ``dep`` is installed after the activation that made the rollback possible, so what the test sets on it
+    (an update staged, a switch off) is as the last restart left it.
+    """
+    needing = service_manifest("main", "1.0.0", requires=["translit.v1"])
+    _two_releases(hub, monkeypatch, "main", needing, service_manifest("main", "2.0.0"),
+                  supplied_by={"translit.v1": "dep"})
+    row = _row("dep", active="1.0.0", kind=SERVICE_KIND,
+               manifest=service_manifest("dep", "1.0.0", provides=["translit.v1"]))
+    row.update(supplier)
+    _seed(dep=row)
+
+
+def test_a_rollback_is_refused_when_the_supplier_has_an_update_staged_that_drops_the_capability(
+        hub, service_kind, monkeypatch):
+    from provider_hub.service import ProviderHubInstallError, rollback_release
+    from provider_hub.state import load_state
+
+    _needing_world(hub, service_kind, monkeypatch, staged_version="2.0.0", state="staged", pending_restart=True,
+                   staged_path=_bundle("dep", "2.0.0"), staged_python_path=_python("dep", "2.0.0"),
+                   staged_manifest=service_manifest("dep", "2.0.0"))
+
+    with pytest.raises(ProviderHubInstallError, match="translit.v1"):
+        rollback_release("main")
+
+    assert load_state()["installations"]["main"]["active_version"] == "2.0.0"
+    assert _releases_in(hub, "main") == [("main", "1.0.0", "retired"), ("main", "2.0.0", "active")]
+
+
+def test_a_supplier_removed_between_the_early_check_and_the_staging_write_still_refuses_the_rollback(
+        hub, service_kind, monkeypatch):
+    from provider_hub import service
+    from provider_hub.state import load_state, mutate_state
+
+    _needing_world(hub, service_kind, monkeypatch)
+    real = service.rollback_consent
+
+    def remove_the_supplier_first(*args, **kwargs):
+        mutate_state(lambda state: state["installations"].pop("dep"))
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(service, "rollback_consent", remove_the_supplier_first)
+
+    with pytest.raises(service.ProviderHubInstallError, match="translit.v1"):
+        service.rollback_release("main")
+
+    row = load_state()["installations"]["main"]
+    assert (row["active_version"], row["staged_version"]) == ("2.0.0", None)
+
+
+@pytest.mark.parametrize("change", [
+    dict(enabled=False), dict(revoked=True), dict(needs_repair=True),
+], ids=["switched_off", "revoked", "flagged_for_repair"])
+def test_a_supplier_that_does_not_run_does_not_meet_a_rollbacks_need(hub, service_kind, monkeypatch, change):
+    from provider_hub.service import ProviderHubInstallError, rollback_release
+
+    _needing_world(hub, service_kind, monkeypatch, **change)
+
+    with pytest.raises(ProviderHubInstallError, match="translit.v1"):
+        rollback_release("main")
+
+
+def test_a_supplier_that_is_itself_unmet_does_not_meet_a_rollbacks_need(hub, service_kind, monkeypatch):
+    from provider_hub.service import ProviderHubInstallError, rollback_release
+
+    _needing_world(hub, service_kind, monkeypatch, supplied_by={"base.v1": "base"},
+                   manifest=service_manifest("dep", "1.0.0", provides=["translit.v1"], requires=["base.v1"]))
+    _seed(base=_row("base", active="1.0.0", kind=SERVICE_KIND, enabled=False,
+                    manifest=service_manifest("base", "1.0.0", provides=["base.v1"])))
+
+    with pytest.raises(ProviderHubInstallError, match="translit.v1"):
+        rollback_release("main")
+
+
+def test_a_release_that_extends_a_plugin_that_is_gone_is_not_restored(hub, service_kind, monkeypatch):
+    from provider_hub.service import ProviderHubInstallError, rollback_release
+
+    extending = service_manifest("addon", "1.0.0", extends={"id": "host", "capability": "parent.v1"})
+    _seed(host=_row("host", active="1.0.0", kind=SERVICE_KIND,
+                    manifest=service_manifest("host", "1.0.0", provides=["parent.v1"])))
+    _two_releases(hub, monkeypatch, "addon", extending, service_manifest("addon", "2.0.0"))
+    from provider_hub.state import mutate_state
+
+    mutate_state(lambda state: state["installations"].pop("host"))
+
+    with pytest.raises(ProviderHubInstallError, match="host"):
+        rollback_release("addon")
+
+
+def test_a_need_only_another_sources_catalog_provides_does_not_block_a_rollback(hub, service_kind, monkeypatch):
+    """Install resolves a need from the plugin's own source and what is installed: another source's listing is not
+    a reason to refuse a release the active one's own needs would allow."""
+    from provider_hub.service import rollback_release
+    from provider_hub.state import load_state, mutate_state
+
+    needing = service_manifest("main", "1.0.0", requires=["translit.v1"])
+    _two_releases(hub, monkeypatch, "main", needing, service_manifest("main", "2.0.0"),
+                  source_id="official")
+    other = service_manifest("lister", "1.0.0", provides=["translit.v1"])
+    mutate_state(lambda state: state["catalog_entries"].update({"community:plugins:lister:1.0.0": {
+        "source": "community", "provider_id": "lister", "version": "1.0.0", "manifest": other}}))
+
+    assert rollback_release("main").activated
+    assert load_state()["installations"]["main"]["active_version"] == "1.0.0"
+
+
+def test_a_need_the_plugins_own_source_provides_blocks_a_rollback_until_something_supplies_it(
+        hub, service_kind, monkeypatch):
+    from provider_hub.service import ProviderHubInstallError, rollback_release
+    from provider_hub.state import mutate_state
+
+    needing = service_manifest("main", "1.0.0", requires=["translit.v1"])
+    _two_releases(hub, monkeypatch, "main", needing, service_manifest("main", "2.0.0"), source_id="official")
+    listed = service_manifest("lister", "1.0.0", provides=["translit.v1"])
+    mutate_state(lambda state: state["catalog_entries"].update({"official:plugins:lister:1.0.0": {
+        "source": "official", "provider_id": "lister", "version": "1.0.0", "manifest": listed}}))
+
+    with pytest.raises(ProviderHubInstallError, match="translit.v1"):
+        rollback_release("main")
+
+
+def test_the_files_of_a_release_whose_plugin_a_damaged_document_lost_stay_protected_from_cleanup(hub):
+    from provider_hub import env_registry
+    from provider_hub.state import load_state, mutate_state
+
+    _seed(alpha=_row("alpha", active="1.0.0"), beta=_row("beta", active="2.0.0"))
+    with hub.begin() as connection:
+        connection.execute(sa.text("UPDATE provider_hub_state SET document = '{broken' WHERE id = 1"))
+    mutate_state(lambda state: state["jobs"].append({"id": "after"}), recover_corrupt=True)
+
+    referenced = env_registry.referenced_env_paths(load_state())
+
+    assert env_registry.env_dir_of(_python("alpha", "1.0.0")) in referenced
+    assert env_registry.env_dir_of(_python("beta", "2.0.0")) in referenced
+
+
+def test_a_whole_document_saved_after_a_recovery_does_not_take_the_lost_releases(hub):
+    from provider_hub.state import load_state, save_state
+
+    _seed(alpha=_row("alpha", active="1.0.0"))
+    with hub.begin() as connection:
+        connection.execute(sa.text("UPDATE provider_hub_state SET document = '{broken' WHERE id = 1"))
+    from provider_hub.state import mutate_state
+
+    mutate_state(lambda state: state["jobs"].append({"id": "after"}), recover_corrupt=True)
+
+    save_state(load_state())
+    save_state(load_state())
+
+    assert _releases_in(hub) == [("alpha", "1.0.0", "active")]
+
+
+@pytest.mark.parametrize("stored", ['{"installations": 5}', '{"installations": [{"a": 1}]}', '[1, 2]', "null"])
+def test_a_stored_document_that_is_not_an_inventory_lists_no_plugin_and_never_raises_a_type_error(stored):
+    from provider_hub.state import _listed_ids
+
+    assert _listed_ids(stored) == set()
+
+
+def test_a_damaged_document_is_reported_as_one_by_the_orphan_tools_and_a_whole_save_still_works(hub):
+    from provider_hub import state_store
+    from provider_hub.state import StateCorruptError, default_state, save_state
+
+    _seed(alpha=_row("alpha", active="1.0.0"))
+    with hub.begin() as connection:
+        connection.execute(sa.text("UPDATE provider_hub_state SET document = '{\"installations\": 5}' WHERE id = 1"))
+
+    with pytest.raises(StateCorruptError):
+        state_store.orphan_plugin_ids(hub)
+    with pytest.raises(StateCorruptError):
+        state_store.discard_orphan_releases(["alpha"], bind=hub)
+    save_state(default_state())
+
+    assert _releases_in(hub) == [("alpha", "1.0.0", "active")]
+
+
+def test_a_consent_digest_that_no_longer_matches_is_refused_again(hub, service_kind, monkeypatch):
+    from provider_hub.service import ProviderHubConsentError, rollback_consent, rollback_release
+
+    wide = service_manifest("helper", "1.0.0", permissions=["network"])
+    _two_releases(hub, monkeypatch, "helper", wide, service_manifest("helper", "2.0.0"))
+    digest = rollback_consent("helper")["digest"]
+
+    with pytest.raises(ProviderHubConsentError):
+        rollback_release("helper", consent_digest="0" * len(digest))
+    with pytest.raises(ProviderHubConsentError):
+        rollback_release("helper", consent_digest=None)
+
+
+def test_a_provider_without_dependencies_has_no_consent_step_on_a_rollback(staged):
+    from provider_hub.service import activate_staged_installations, rollback_consent
+
+    activate_staged_installations()
+
+    assert rollback_consent("alpha") is None
+    assert rollback_consent("nobody") is None
+
+
 # ---- workers are keyed by release ---------------------------------------------------------------------------
 
 

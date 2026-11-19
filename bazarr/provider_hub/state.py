@@ -492,6 +492,16 @@ def _clear_marks(data: dict[str, Any]) -> None:
                 installation.pop(releases.FAIL_STAGED, None)
 
 
+def _listed_ids(text: str | None) -> set[str]:
+    """The plugin ids a stored document lists, or none when it is not a document with an inventory."""
+    try:
+        document = json.loads(text or "{}")
+    except ValueError:
+        return set()
+    installations = document.get("installations") if isinstance(document, dict) else None
+    return set(installations) if isinstance(installations, dict) else set()
+
+
 def _database_step(compute: Callable[[], dict[str, Any]], mutate: Callable[[dict[str, Any]], Any] | None,
                    written: list[dict[str, Any]], *, whole: bool = False,
                    recovered: list[Any] | None = None, stored_text: str | None = None) -> tuple[str, Any, Any]:
@@ -514,12 +524,9 @@ def _database_step(compute: Callable[[], dict[str, Any]], mutate: Callable[[dict
     if not whole:
         data = releases.compose(data, rows)
     if whole:
-        try:
-            listed = set((json.loads(stored_text or "{}").get("installations") or {}))
-        except (ValueError, AttributeError):
-            listed = set()
+        listed = _listed_ids(stored_text)
     else:
-        listed = set(data.get("installations") or {})
+        listed = set(data["installations"]) if isinstance(data.get("installations"), dict) else set()
     result = None
     if mutate is not None:
         with _editing("database", data):
