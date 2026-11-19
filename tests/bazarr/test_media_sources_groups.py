@@ -7,7 +7,7 @@ import shutil
 import pytest
 import sqlalchemy as sa
 
-from media_source_helpers import add_profile, add_source, stamped_video
+from media_source_helpers import Lib, add_profile, stamped_video
 
 
 @pytest.fixture(autouse=True)
@@ -37,43 +37,6 @@ def walk(request, monkeypatch):
 @pytest.fixture(params=[False, True], ids=["own-names", "shared-names"])
 def shared(request):
     return request.param
-
-
-class Lib:
-    """A series library over a temporary folder."""
-
-    def __init__(self, session, tmp_path, name="TV", folder="TV"):
-        self.session = session
-        self.source_id, self.library_id, self.root = add_source(session, tmp_path, name=name, folder=folder,
-                                                                content_kind="series")
-
-    def show(self, name, count=3, prefix=None, base=None):
-        prefix = prefix or name
-        return [stamped_video(self.root / name / f"{prefix} - S01E{number:02d}.mkv")
-                for number in range(1, count + 1)]
-
-    def scan(self):
-        from media_sources.scanner import run_scan
-        (result,) = run_scan(self.source_id, self.library_id)
-        return result
-
-    def groups(self):
-        from media_sources import repository
-        return {row.group_key: row for row in repository.library_groups(self.library_id)}
-
-    def group(self, name):
-        return self.groups()[str(self.root / name)]
-
-    def items(self):
-        from media_sources import repository
-        return {row.path: row for row in repository.list_items(library_id=self.library_id, limit=1000)}
-
-    def path(self, *parts):
-        return str(self.root.joinpath(*parts))
-
-    def set_group(self, name, **values):
-        from media_sources import repository
-        repository.update_group(self.group(name).id, self.session, **values)
 
 
 @pytest.fixture

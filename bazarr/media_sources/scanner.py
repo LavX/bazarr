@@ -145,7 +145,7 @@ def scan_library(source, library, *, cancel=None, session=None) -> LibraryScan:
         cancel()
 
     grouped = library.content_kind != 'movie'
-    follows_directories = grouped and kind.groups_are_directories
+    follows_directories = grouped and getattr(kind, "groups_are_directories", False)
     groups = {row.id: row for row in repository.library_groups(library.id, session)} if grouped else {}
     plan = None
     if follows_directories and complete:

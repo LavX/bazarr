@@ -140,6 +140,43 @@ def stamped_video(path, size=None):
     return path
 
 
+class Lib:
+    """A series library over a temporary folder, with the few operations the scan tests need."""
+
+    def __init__(self, session, tmp_path, name="TV", folder="TV", content_kind="series"):
+        self.session = session
+        self.source_id, self.library_id, self.root = add_source(session, tmp_path, name=name, folder=folder,
+                                                                content_kind=content_kind)
+
+    def show(self, name, count=3, prefix=None, base=None):
+        prefix = prefix or name
+        return [stamped_video(self.root / name / f"{prefix} - S01E{number:02d}.mkv")
+                for number in range(1, count + 1)]
+
+    def scan(self):
+        from media_sources.scanner import run_scan
+        (result,) = run_scan(self.source_id, self.library_id)
+        return result
+
+    def groups(self):
+        from media_sources import repository
+        return {row.group_key: row for row in repository.library_groups(self.library_id)}
+
+    def group(self, name):
+        return self.groups()[str(self.root / name)]
+
+    def items(self):
+        from media_sources import repository
+        return {row.path: row for row in repository.list_items(library_id=self.library_id, limit=1000)}
+
+    def path(self, *parts):
+        return str(self.root.joinpath(*parts))
+
+    def set_group(self, name, **values):
+        from media_sources import repository
+        repository.update_group(self.group(name).id, self.session, **values)
+
+
 def table_counts(session, names):
     return {name: session.execute(sa.text(f'SELECT count(*) FROM "{name}"')).scalar_one() for name in names}
 
