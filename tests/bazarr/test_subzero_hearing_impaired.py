@@ -2,6 +2,9 @@
 # Remove HI mod: markup layer, and the differential gate against origin/development.
 # See https://github.com/LavX/bazarr/issues/828
 #
+# The gate runs against a frozen copy of origin/development's Remove HI implementation,
+# vendored under tests/bazarr/fixtures/hi_reference and checked by hash.
+#
 # The rules work on plain text exactly as origin/development has them. Only cues whose
 # markup is simple (whole-line pairs of <i>, <b>, <u>, <font> or SSA override tags) are
 # handed to the rules with that markup removed, and wrapped again afterwards. So:
@@ -18,6 +21,7 @@
 # * "content": SubtitleModifications.load(content=...), the call subtitles_apply_mods
 #   reaches through Subtitle.get_modified_content. It keeps literal HTML tags.
 import json
+import os
 import re
 import subprocess
 import sys
@@ -31,7 +35,33 @@ from subzero.modification.main import SubtitleModifications
 from subzero.modification.markup import unwrap_entry
 
 REPO = Path(__file__).resolve().parents[2]
-DEV_REF = "origin/development"
+# The reference: origin/development's Remove HI implementation, vendored and frozen.
+REFERENCE_LIBS = Path(__file__).resolve().parent / "fixtures" / "hi_reference"
+REFERENCE_SOURCE_SHA = "3dc435b8f4f6aadbe3cae9236b12b0e4acf9ce01"
+# SHA-256 of each vendored file, as recorded when it was copied. A test checks them, so an
+# edit to the reference shows up as a failure rather than as a silent change of the gate.
+REFERENCE_SHA256 = {
+    "subzero/__init__.py": "1aa9fcfd6358fd51f63e99d3e3b81d499b77b24862ff8752d03aab09578e894d",
+    "subzero/language.py": "1347df8df6125efec57089daa522112cb188870d524dd93cd420c6c0c4e6f413",
+    "subzero/modification/__init__.py": "19a55556b883419450f06f1454fef1cf6615d558dcf391a79246795003e46c07",
+    "subzero/modification/exc.py": "e7b3d1e3b07d8cab1deaccd920ffc3f73dcbccd382d4b9a65a477678ddf07c15",
+    "subzero/modification/main.py": "668610f6d2ba24864b6e7f460cce2fa7d0ee998b60bd6141446e5be710ec2ba6",
+    "subzero/modification/registry.py": "00d4691b0d6229f6bdbf4e0bddc846dcc85306ee9e9191da3d8060ac193c66bb",
+    "subzero/modification/dictionaries/__init__.py": "3a3cbccf72329138952acfd374b5af3e60d693443bc558b6205ffa0a87cb87dc",
+    "subzero/modification/dictionaries/data.py": "3259320bdb9bf08fd05d6675ce8155cd71b57440af0b004a41ea74d5f51a547f",
+    "subzero/modification/mods/__init__.py": "ac6e865a47748189c1f234669fb509d5a93a5f1642bf199a14a678ce849232b2",
+    "subzero/modification/mods/color.py": "c25275c781e48be806817f34938635f008aa58b6d4bb5b63bd9ad01ff2c82ed2",
+    "subzero/modification/mods/common.py": "af976c33a6f5c252f2fe313c75b4ca22f0b12ab388e1f7790846913e3ae21cff",
+    "subzero/modification/mods/emoji.py": "1d5332d2e1936286b9c23212d5bad8927fa66965f6b7d7395e70388c846839ef",
+    "subzero/modification/mods/fps.py": "c62965e51db5ac92973282908927d50b7f995249f509c680e2d8c7ceefbcba29",
+    "subzero/modification/mods/hearing_impaired.py": "14282dae9304ce935f09cc05129938b72e8dae46ce6c41cc44334f0bc143ff16",
+    "subzero/modification/mods/ocr_fixes.py": "97786e27134d6851934139b7db6110c72f4cb3ed0718beb51ed67cd0e96847ca",
+    "subzero/modification/mods/offset.py": "ca574d4e011e1518c9b3befb09b48fd0fd276fa7a1b662c8bd584a2ae3b9f7d1",
+    "subzero/modification/mods/two_point_fit.py": "ca284f13cb124752ebe7c099809c9f6051745c57c128919442d8d49cd97d53bc",
+    "subzero/modification/processors/__init__.py": "e99532a23efd2efaa3e50ca732b7ab420f3c7bb38e3f3374bcd8b449a1177cf1",
+    "subzero/modification/processors/re_processor.py": "ef38d3b643d85e4767886d97aa86a121888a810d7d57671f37f6f89b48ab2858",
+    "subzero/modification/processors/string_processor.py": "7007527032943d0a4d5826da9f5c4966caf1c07bb5158ca22fdf802223b9fc5d",
+}
 ROUTES = ("content", "file")
 MODS = (["remove_HI"], ["remove_HI(keep_lyrics=1)"])
 
@@ -127,22 +157,30 @@ json.dump(out, sys.stdout)
 '''
 
 
-@pytest.fixture(scope="session")
-def development_libs(tmp_path_factory):
-    ref = subprocess.run(["git", "-C", str(REPO), "rev-parse", "--verify", "-q", DEV_REF],
-                         capture_output=True, text=True, check=False)
-    if ref.returncode != 0:
-        pytest.skip("%s is not fetched; the development differential needs it" % DEV_REF)
-    archive = subprocess.run(["git", "-C", str(REPO), "archive", DEV_REF, "custom_libs/subzero"],
-                             capture_output=True, check=True)
-    dest = tmp_path_factory.mktemp("development")
-    subprocess.run(["tar", "-x", "-C", str(dest)], input=archive.stdout, check=True)
-    return dest / "custom_libs"
+@pytest.fixture
+def development_libs():
+    return REFERENCE_LIBS
+
+
+def test_vendored_reference_is_unchanged():
+    import hashlib
+    assert REFERENCE_SOURCE_SHA
+    recorded = dict(REFERENCE_SHA256)
+    on_disk = {}
+    for path in sorted((REFERENCE_LIBS / "subzero").rglob("*.py")):
+        rel = path.relative_to(REFERENCE_LIBS).as_posix()
+        on_disk[rel] = hashlib.sha256(path.read_bytes()).hexdigest()
+    assert on_disk == recorded, "the vendored reference changed: %r" % sorted(
+        k for k in set(on_disk) | set(recorded) if on_disk.get(k) != recorded.get(k))
+    assert all(path.exists() for path in (REFERENCE_LIBS / rel for rel in recorded))
 
 
 def _development_outputs(libs, jobs):
+    # A separate interpreter loads the reference, so its package never shares a name with
+    # the package under test. No bytecode is written into the fixture tree.
+    env = dict(os.environ, PYTHONDONTWRITEBYTECODE="1")
     proc = subprocess.run([sys.executable, "-c", _DEV_RUNNER, str(libs)],
-                          input=json.dumps(jobs), capture_output=True, text=True, check=True)
+                          input=json.dumps(jobs), capture_output=True, text=True, check=True, env=env)
     return json.loads(proc.stdout)
 
 
