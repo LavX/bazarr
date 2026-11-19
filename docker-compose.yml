@@ -47,6 +47,9 @@ services:
     environment:
       # User/Group ID for file permissions
       # Match these to your media user on the host
+      # The image starts as root and drops to PUID/PGID itself. Do not set
+      # user: on this service, put the ids here. If you must run non-root,
+      # PUID/PGID are ignored and /config must already be writable by that user.
       - PUID=${PUID:-1000}
       - PGID=${PGID:-1000}
       

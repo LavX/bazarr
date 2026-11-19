@@ -508,6 +508,7 @@ RESULT_SKIPPED = 'skipped'
 #   engine_declined   the engine ran to completion and rejected its own result
 #   result_rejected   the engine returned a result Bazarr refused to accept
 #   engine_failed     the engine errored out
+#   no_usable_engine  every enabled engine needs a CPU feature this machine lacks
 REASON_GENERATED_SOURCE = 'generated_source'
 REASON_OUTPUT_EXISTS = 'output_exists'
 REASON_MISSING_ENGINE = 'missing_engine'
@@ -518,6 +519,7 @@ REASON_ENGINE_FAILED = 'engine_failed'
 REASON_SOURCE_CHANGED = 'source_changed'
 REASON_DESTINATION_CHANGED = 'destination_changed'
 REASON_DESTINATION_AMBIGUOUS = 'destination_ambiguous'
+REASON_NO_USABLE_ENGINE = 'no_usable_engine'
 
 ENGINE_LABELS = {
     'ffsubsync': 'FFsubsync',

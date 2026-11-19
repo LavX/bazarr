@@ -10,6 +10,7 @@ from app.jobs_queue import jobs_queue, JobCancelled, JobFailed
 from sportarr.connection import check_cancelled
 from sportarr.output import validate_output_path
 from subtitles.tools.subsyncer import SubSyncer
+from utilities.cpu_features import usable_sync_engines
 from subtitles.tools.subsync_engines import (
     DEFAULT_ENABLED_ENGINES,
     ENGINE_LABELS,
@@ -19,6 +20,7 @@ from subtitles.tools.subsync_engines import (
     REASON_FAILURE_THRESHOLD,
     REASON_GENERATED_SOURCE,
     REASON_MISSING_ENGINE,
+    REASON_NO_USABLE_ENGINE,
     REASON_OUTPUT_EXISTS,
     REASON_RESULT_REJECTED,
     REASON_SOURCE_CHANGED,
@@ -50,6 +52,7 @@ _ENGINE_OUTCOME_SENTENCES = {
     REASON_ENGINE_FAILED: "{label} failed: {message}",
     REASON_SOURCE_CHANGED: "The uploaded subtitle was replaced or deleted. Sync was skipped.",
     REASON_DESTINATION_CHANGED: "The synchronized subtitle destination was changed or deleted. Sync was skipped.",
+    REASON_NO_USABLE_ENGINE: "No usable sync engine on this CPU. {message}",
     REASON_DESTINATION_AMBIGUOUS: "The synchronized subtitle destination has no unique media owner. Sync was skipped.",
 }
 _ENGINE_MESSAGE_LIMIT = 160
@@ -168,6 +171,11 @@ def _sync_outcome_message(sync_result):
         head = f"Sync partially complete: {produced} of {attempted} engines produced output."
         return " ".join([head] + _engine_outcome_sentences(unsuccessful))
 
+    if [item.reason for item in unsuccessful] == [REASON_NO_USABLE_ENGINE]:
+        # One row stands for every engine that was asked for, so counting it as
+        # "no output from 1 engine" would misstate what happened.
+        return " ".join(["Sync failed:"] + _engine_outcome_sentences(unsuccessful))
+
     if sync_result.skipped_results and not sync_result.failed_results:
         head = "Sync skipped: no engine produced output."
     else:
@@ -182,7 +190,9 @@ def _sync_progress_total(enabled_engines):
         enabled_engines if enabled_engines is not None
         else getattr(settings.subsync, 'enabled_engines', DEFAULT_ENABLED_ENGINES)
     )
-    return max(len(normalize_enabled_engines(configured_engines)), 1)
+    # Count what will actually run, so the total the job is queued with is the one
+    # the syncer reports. A CPU that cannot host numpy drops two of the engines.
+    return max(len(usable_sync_engines(normalize_enabled_engines(configured_engines))), 1)
 
 
 def _is_series_item(sonarr_episode_id, source):

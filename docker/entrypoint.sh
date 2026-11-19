@@ -3,7 +3,7 @@
 # Bazarr Docker Entrypoint
 # =============================================================================
 # Handles:
-# - User/Group ID mapping (PUID/PGID)
+# - User/Group ID mapping (PUID/PGID), skipped when started non-root
 # - Permissions setup
 # - Application startup
 # =============================================================================
@@ -27,6 +27,46 @@ __/\\\\\\\\\\\\\________________________________________________________________
 
 Repository: https://github.com/LavX/bazarr
 '
+
+# Started non-root (Compose `user:`, docker run --user): there is nothing to
+# drop. gosu would fail with "operation not permitted" because setgroups needs
+# root, even when the ids already match. Changing the bazarr user or group and
+# taking ownership of /config are root-only too, and the PUID and PGID
+# variables have no meaning here, so skip all of it and run the app as this
+# user. /config has to be writable by it already. Same tini flags and HOME as
+# the root path at the end of this file, minus gosu.
+if [ "$(id -u)" != "0" ]; then
+    uidgid="$(id -u):$(id -g)"
+    echo "Started as non-root $uidgid; PUID/PGID are ignored and /config must already be writable by this user."
+    if ! [ -d /config ]; then
+        echo "ERROR: /config is missing or is not a directory. Mount a directory at /config." >&2
+        exit 1
+    fi
+    # A real write, not [ -w ]: access(2) says yes for a read-only bind mount.
+    probe="/config/.write-probe.$$"
+    if ( : > "$probe" ) 2>/dev/null; then
+        rm -f "$probe"
+    elif [ -w /config ]; then
+        echo "ERROR: /config accepts no new files for $uidgid although its permissions allow it." >&2
+        echo "It is probably mounted read-only (remove :ro), or the disk is full." >&2
+        exit 1
+    else
+        echo "ERROR: /config is not writable by $uidgid. Give this user ownership of the config" >&2
+        echo "directory on the host (chown -R), remove :ro if it is mounted read-only, or start" >&2
+        echo "the container as root and use PUID/PGID." >&2
+        exit 1
+    fi
+    # Existing subdirectories left over from an older PUID would fail later.
+    for sub in config db log; do
+        if [ -d "/config/$sub" ] && ! [ -w "/config/$sub" ]; then
+            echo "ERROR: /config/$sub is not writable by $uidgid. Run chown -R on the whole" >&2
+            echo "config directory on the host, or start the container as root and use PUID/PGID." >&2
+            exit 1
+        fi
+    done
+    echo "Starting Bazarr..."
+    exec /usr/bin/tini -s -- env HOME=/config "$@"
+fi
 
 echo "Starting with UID: $PUID, GID: $PGID"
 

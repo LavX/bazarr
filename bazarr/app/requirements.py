@@ -12,6 +12,7 @@ import sys
 import tempfile
 
 from literals import ENV_RESTARTFILE, EXIT_NORMAL, EXIT_REQUIREMENTS_ERROR
+from utilities.cpu_features import numpy_engines_usable
 
 
 RUNTIME_IMPORTS = (
@@ -77,7 +78,6 @@ RUNTIME_IMPORTS = (
     "sqlalchemy",
     "srt",
     "subliminal",
-    "textdistance",
     "tld",
     "tomlkit",
     "tzlocal",
@@ -89,6 +89,11 @@ RUNTIME_IMPORTS = (
     "whichcraft",
     "yaml",
 )
+
+# Importing these loads numpy. On a CPU numpy cannot run on, that import ends the
+# process with an illegal instruction rather than raising, so the probe must not
+# do it there. They are checked through their installed metadata instead.
+NUMPY_RUNTIME_IMPORTS = frozenset({"numpy", "ffsubsync", "autosubsync", "json_tricks"})
 
 WINDOWS_RUNTIME_IMPORTS = (
     "win32api",
@@ -157,7 +162,6 @@ RUNTIME_REQUIREMENTS = {
     "sqlalchemy": ("sqlalchemy", "==2.1.4"),
     "srt": ("srt", "==3.5.3"),
     "subliminal": ("subliminal", "==2.7.1"),
-    "textdistance": ("textdistance", "==4.6.3"),
     "tld": ("tld", "==0.13.2"),
     "tomlkit": ("tomlkit", ">=0.15.1"),
     "tzlocal": ("tzlocal", "==5.4.4"),
@@ -271,7 +275,15 @@ def missing_runtime_requirements():
         probes.extend(WINDOWS_RUNTIME_IMPORTS)
         requirements.update(WINDOWS_RUNTIME_REQUIREMENTS)
 
+    numpy_importable = numpy_engines_usable()
+
     for module in probes:
+        if module in NUMPY_RUNTIME_IMPORTS and not numpy_importable:
+            requirement = requirements.get(module)
+            if requirement and not _requirement_is_satisfied(*requirement):
+                missing.add(module)
+            continue
+
         try:
             importlib.import_module(module)
         except ImportError:
