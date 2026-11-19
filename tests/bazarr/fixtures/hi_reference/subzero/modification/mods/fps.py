@@ -1,0 +1,28 @@
+# Vendored from origin/development @ 3dc435b8f4f6aadbe3cae9236b12b0e4acf9ce01 (custom_libs/subzero/modification/mods/fps.py).
+# Frozen reference for the Remove HI differential gate. Do not edit.
+# coding=utf-8
+
+from __future__ import absolute_import
+import logging
+
+from subzero.modification.mods import SubtitleModification
+from subzero.modification import registry
+
+logger = logging.getLogger(__name__)
+
+
+class ChangeFPS(SubtitleModification):
+    identifier = "change_FPS"
+    description = "Change the FPS of the subtitle"
+    exclusive = True
+    advanced = True
+    modifies_whole_file = True
+
+    long_description = "Re-syncs the subtitle to the framerate of the current media file."
+
+    def modify(self, content, debug=False, parent=None, **kwargs):
+        fps_from = kwargs.get("from")
+        fps_to = kwargs.get("to")
+        parent.f.transform_framerate(float(fps_from), float(fps_to))
+
+registry.register(ChangeFPS)
