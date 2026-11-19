@@ -34,8 +34,9 @@ Knobs a test sets on the instance:
 ``mutate``            ``callable(inspect_dict)`` applied to every container inspect, to fake a daemon that built
                       something other than what was asked.
 
-Networks keep ``Internal`` and an ``IPAM`` subnet (every fake network uses the same test subnet,
-``198.51.100.0/24``, and a started container's addresses come from it). A container's ``Config`` keeps the
+Networks keep ``Internal`` and an ``IPAM`` subnet. Each network gets its own test subnet in creation order
+(``198.51.100.0/24`` for the first, ``198.51.101.0/24`` for the second, and so on), and the addresses of a started
+container come from the subnet of the network it is on. A container's ``Config`` keeps the
 ``User``, ``Entrypoint`` and ``Cmd`` it was created with. An image declared with ``image_volumes`` gets an
 anonymous volume mount at each path unless the container's own ``Tmpfs`` covers that path, as the real daemon
 lets a mount of your own take the place of a declared volume. A container connected to a network while it is
@@ -182,6 +183,7 @@ class FakeDocker:
         self._wake = threading.Event()
         self.no_swap_accounting = False
         self._counter = 0
+        self._subnets = 0
         self._server: _Server | None = None
         self._thread: threading.Thread | None = None
 
@@ -375,6 +377,14 @@ class FakeDocker:
         self._counter += 1
         return hashlib.sha256(f"{seed}:{self._counter}".encode()).hexdigest()
 
+    def _address(self, network_name: str, host: int) -> str:
+        """An address inside the subnet of the named network (the first subnet for a network the fake does not keep)."""
+        for record in self.networks.values():
+            if record["Name"] == network_name and record.get("IPAM"):
+                prefix = record["IPAM"]["Config"][0]["Subnet"].rsplit(".", 1)[0]
+                return f"{prefix}.{host}"
+        return f"198.51.100.{host}"
+
     def _network_id(self, name: str) -> str:
         for record in self.networks.values():
             if record["Name"] == name:
@@ -493,7 +503,7 @@ class FakeDocker:
                 state.update(Running=True, Status="running", ExitCode=0)
             for index, (name, endpoint) in enumerate(record["NetworkSettings"]["Networks"].items()):
                 endpoint["NetworkID"] = self.attach_network_id or self._network_id(name)
-                endpoint["IPAddress"] = "198.51.100.%d" % (2 + index + len(self.containers))
+                endpoint["IPAddress"] = self._address(name, 2 + index + len(self.containers))
             return 204, None, {}
         if method == "POST" and action == "stop":
             if not state["Running"]:
@@ -522,10 +532,12 @@ class FakeDocker:
         if any(n["Name"] == body["Name"] for n in self.networks.values()):
             return 409, {"message": f"network with name {body['Name']} already exists"}, {}
         nid = self._next(body["Name"])
+        third = 100 + self._subnets
+        self._subnets += 1
         self.networks[nid] = {"Id": nid, "Name": body["Name"], "Driver": body.get("Driver"),
                               "Internal": body.get("Internal", False), "Labels": dict(body.get("Labels") or {}),
-                              "IPAM": {"Driver": "default", "Config": [{"Subnet": "198.51.100.0/24",
-                                                                        "Gateway": "198.51.100.1"}]},
+                              "IPAM": {"Driver": "default", "Config": [{"Subnet": f"198.51.{third}.0/24",
+                                                                        "Gateway": f"198.51.{third}.1"}]},
                               "Containers": {}}
         return 201, {"Id": nid, "Warning": ""}, {}
 
@@ -546,7 +558,7 @@ class FakeDocker:
             aliases = (body.get("EndpointConfig") or {}).get("Aliases") or []
             running = container["State"]["Running"]
             container["NetworkSettings"]["Networks"][record["Name"]] = {
-                "IPAddress": "198.51.100.200" if running else "", "NetworkID": record["Id"], "Aliases": aliases}
+                "IPAddress": self._address(record["Name"], 200) if running else "", "NetworkID": record["Id"], "Aliases": aliases}
             return 200, None, {}
         if method == "POST" and action == "disconnect":
             container = self._find_container(body["Container"])

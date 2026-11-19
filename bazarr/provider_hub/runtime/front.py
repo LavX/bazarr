@@ -12,8 +12,10 @@ configured URL with fixed headers, so the credential has to travel in the path.
 The token set:
 
 * The front starts empty and holds the set in memory. Bazarr+ replaces it as a whole with
-  ``PUT /_admin/leases`` and reads its size with ``GET /_admin/leases``. A revoked token is gone with the next
-  push; nothing is written to disk.
+  ``PUT /_admin/leases`` and reads its size and a digest of the set with ``GET /_admin/leases``. A revoked token
+  is gone with the next push; nothing is written to disk.
+* The admin path is its own listener (``ADMIN_PORT``) with its own small connection limit, and the proxy listener
+  answers 401 to it. A busy proxy can therefore never starve a push, and a push is how a revoke is delivered.
 * The set holds SHA-256 digests, not tokens: the push carries no token, and nothing in this process can
   hand a token back. A request's token is hashed and compared with every digest in constant time.
 * The admin path answers only to ``Authorization: Bearer <secret>`` where the secret hashes to the digest in
@@ -27,7 +29,12 @@ body cap is forwarded, to the one configured upstream, and only the ``Content-Ty
 reply is passed on only when the upstream states a ``Content-Length`` up to the response cap.
 
 When ``BAZARR_FRONT_ALLOW_NET`` is set, a connection is served only if it arrived on an address inside that
-network. The front sits on two networks, and this keeps the daemon's side from reaching it at all.
+network, and is closed before anything is read from it otherwise. The front sits on two networks, and this keeps
+the daemon's side from reaching it at all.
+
+Time is bounded in wall-clock terms: a request head must arrive within ``HEAD_DEADLINE``, a body within
+``BODY_DEADLINE``, and a proxied exchange, reply included, within the configured upstream timeout. A peer that
+trickles bytes therefore cannot hold a connection slot for longer than that.
 """
 from __future__ import annotations
 
@@ -50,7 +57,9 @@ from typing import Any, Mapping
 
 __all__ = [
     "ADMIN_PATH",
+    "ADMIN_PORT",
     "ENV_ADMIN_SHA256",
+    "ENV_ADMIN_PORT",
     "ENV_ALLOW_NET",
     "ENV_MAX_BODY",
     "ENV_MAX_RESPONSE",
@@ -61,16 +70,20 @@ __all__ = [
     "FrontConfig",
     "FrontServer",
     "LeaseSet",
+    "MAX_ADMIN_CONCURRENT",
+    "MAX_CONCURRENT",
     "MAX_LEASES",
     "main",
     "token_digest",
 ]
 
 FRONT_PORT = 8080
+ADMIN_PORT = 8081
 ADMIN_PATH = "/_admin/leases"
 ENV_ADMIN_SHA256 = "BAZARR_FRONT_ADMIN_SHA256"
 ENV_UPSTREAM = "BAZARR_FRONT_UPSTREAM"
 ENV_PORT = "BAZARR_FRONT_PORT"
+ENV_ADMIN_PORT = "BAZARR_FRONT_ADMIN_PORT"
 ENV_ALLOW_NET = "BAZARR_FRONT_ALLOW_NET"
 ENV_MAX_BODY = "BAZARR_FRONT_MAX_BODY"
 ENV_MAX_RESPONSE = "BAZARR_FRONT_MAX_RESPONSE"
@@ -82,7 +95,10 @@ DEFAULT_MAX_RESPONSE = 32 * 1024 * 1024
 DEFAULT_UPSTREAM_TIMEOUT = 180.0
 MAX_ADMIN_BODY = 64 * 1024
 MAX_CONCURRENT = 16
+MAX_ADMIN_CONCURRENT = 4
 SOCKET_TIMEOUT = 30.0
+HEAD_DEADLINE = 10.0
+BODY_DEADLINE = 30.0
 CHUNK = 64 * 1024
 
 _TOKEN_RE = re.compile(r"[A-Za-z0-9_-]{32,128}\Z")
@@ -108,6 +124,10 @@ class LeaseSet:
     def __len__(self) -> int:
         return len(self._digests)
 
+    def fingerprint(self) -> str:
+        """One digest of the whole set, so Bazarr+ can tell that the front holds exactly the set it pushed."""
+        return hashlib.sha256(b"".join(self._digests)).hexdigest()
+
     def replace(self, digests) -> int:
         fresh = tuple(sorted(set(digests)))
         self._digests = fresh
@@ -129,11 +149,11 @@ class FrontConfig:
     """What the front is told at start, read from the environment. Raises ``ValueError`` on a bad value."""
 
     def __init__(self, *, admin_sha256: str, upstream_host: str, upstream_port: int, port: int = FRONT_PORT,
-                 allow_net: str | None = None, max_body: int = DEFAULT_MAX_BODY,
+                 admin_port: int = ADMIN_PORT, allow_net: str | None = None, max_body: int = DEFAULT_MAX_BODY,
                  max_response: int = DEFAULT_MAX_RESPONSE, upstream_timeout: float = DEFAULT_UPSTREAM_TIMEOUT):
         if not _DIGEST_RE.fullmatch(admin_sha256 or ""):
             raise ValueError("the admin digest must be a lowercase sha256 hex string")
-        if not 1 <= upstream_port <= 65535 or not 0 <= port <= 65535:
+        if not 1 <= upstream_port <= 65535 or not 0 <= port <= 65535 or not 0 <= admin_port <= 65535:
             raise ValueError("a port is out of range")
         if not 1 <= max_body <= 64 * 1024 * 1024 or not 1 <= max_response <= 256 * 1024 * 1024:
             raise ValueError("a size cap is out of range")
@@ -143,6 +163,7 @@ class FrontConfig:
         self.upstream_host = upstream_host
         self.upstream_port = upstream_port
         self.port = port
+        self.admin_port = admin_port
         self.allow_net = ipaddress.ip_network(allow_net, strict=False) if allow_net else None
         self.max_body = max_body
         self.max_response = max_response
@@ -159,6 +180,7 @@ class FrontConfig:
             upstream_host=found.group(1),
             upstream_port=int(found.group(2)),
             port=int(env.get(ENV_PORT) or FRONT_PORT),
+            admin_port=int(env.get(ENV_ADMIN_PORT) or ADMIN_PORT),
             allow_net=env.get(ENV_ALLOW_NET) or None,
             max_body=int(env.get(ENV_MAX_BODY) or DEFAULT_MAX_BODY),
             max_response=int(env.get(ENV_MAX_RESPONSE) or DEFAULT_MAX_RESPONSE),
@@ -166,11 +188,43 @@ class FrontConfig:
         )
 
 
+class _Deadline:
+    """A wall-clock limit: when it passes, the sockets it was given are shut down, which wakes whatever waits on them.
+
+    A socket timeout restarts with every byte, so a peer that trickles data never trips it. This does not restart.
+    """
+
+    def __init__(self, seconds: float, *sockets) -> None:
+        self._sockets = sockets
+        self._timer = threading.Timer(seconds, self._fire)
+        self._timer.daemon = True
+        self._timer.start()
+
+    def _fire(self) -> None:
+        for getter in self._sockets:
+            try:
+                sock = getter()
+                if sock is not None:
+                    sock.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+
+    def cancel(self) -> None:
+        self._timer.cancel()
+
+
 class _Handler(http.server.BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.0"
     timeout = SOCKET_TIMEOUT
     server_version = "front"
     sys_version = ""
+
+    def handle(self) -> None:
+        self._head_deadline = _Deadline(HEAD_DEADLINE, lambda: self.request)
+        try:
+            super().handle()
+        finally:
+            self._head_deadline.cancel()
 
     def log_message(self, *args: Any) -> None:
         # Never a request line: the path holds a credential.
@@ -208,13 +262,12 @@ class _Handler(http.server.BaseHTTPRequestHandler):
     # ---------------------------------------------------------------- dispatch
 
     def _handle(self) -> None:
+        self._head_deadline.cancel()
         server: FrontServer = self.server  # type: ignore[assignment]
-        if not server.on_allowed_network(self.request):
-            # The daemon's side of the front: not served at all, not even with a credential.
-            self.close_connection = True
-            return
         target = self.path
-        if target == ADMIN_PATH:
+        if server.role == ROLE_ADMIN:
+            if target != ADMIN_PATH:
+                return self._unauthorized()
             return self._admin(server)
         found = _PROXY_RE.fullmatch(target)
         if found is None or not server.leases.allows(found.group(1)):
@@ -239,7 +292,8 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         if not self._bearer_ok(server):
             return self._unauthorized()
         if self.command == "GET":
-            return self._reply(200, json.dumps({"count": len(server.leases)}).encode())
+            return self._reply(200, json.dumps({"count": len(server.leases),
+                                                "fingerprint": server.leases.fingerprint()}).encode())
         if self.command != "PUT":
             return self._reply(405, b"{}")
         body = self._read_body(MAX_ADMIN_BODY)
@@ -264,18 +318,21 @@ class _Handler(http.server.BaseHTTPRequestHandler):
             self._reply(411, b"{}")
             return None
         raw = self.headers.get("Content-Length")
-        if raw is None or not raw.isdigit() or len(raw) > 10:
+        if raw is None or not (raw.isascii() and raw.isdigit()) or len(raw) > 10:
             self._reply(411, b"{}")
             return None
         length = int(raw)
         if length > cap:
             self._reply(413, b"{}")
             return None
+        deadline = _Deadline(BODY_DEADLINE, lambda: self.request)
         try:
             data = self.rfile.read(length) if length else b""
         except (OSError, ValueError):
             self.close_connection = True
             return None
+        finally:
+            deadline.cancel()
         if len(data) != length:
             self.close_connection = True
             return None
@@ -291,6 +348,9 @@ class _Handler(http.server.BaseHTTPRequestHandler):
             content_type = "application/json"
         connection = http.client.HTTPConnection(config.upstream_host, config.upstream_port,
                                                 timeout=config.upstream_timeout)
+        connection.set_debuglevel(0)
+        # The whole exchange, reply included, is bounded: a daemon or a client that dribbles cannot hold the slot.
+        deadline = _Deadline(config.upstream_timeout, lambda: self.request, lambda: connection.sock)
         try:
             try:
                 connection.request("POST", "/v1", body=body, headers={
@@ -305,7 +365,7 @@ class _Handler(http.server.BaseHTTPRequestHandler):
             length = response.getheader("Content-Length")
             if not 200 <= response.status <= 599:
                 return self._reply(502, b'{"error": "upstream reply refused"}')
-            if length is None or not length.isdigit() or len(length) > 12 or int(length) > config.max_response:
+            if length is None or not (length.isascii() and length.isdigit()) or len(length) > 12 or int(length) > config.max_response:
                 return self._reply(502, b'{"error": "upstream reply refused"}')
             remaining = int(length)
             upstream_type = response.getheader("Content-Type") or "application/json"
@@ -329,20 +389,32 @@ class _Handler(http.server.BaseHTTPRequestHandler):
             # A short body ends the connection, and the client sees the length it was promised go unmet.
             self.close_connection = True
         finally:
+            deadline.cancel()
             connection.close()
 
 
+ROLE_PROXY = "proxy"
+ROLE_ADMIN = "admin"
+
+
 class FrontServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
-    """The listener. A connection beyond ``MAX_CONCURRENT`` is answered 503 at once and closed."""
+    """One listener: the ``proxy`` role forwards leased requests, the ``admin`` role takes lease pushes.
+
+    Each has its own connection limit (``MAX_CONCURRENT`` and ``MAX_ADMIN_CONCURRENT``); a connection beyond it
+    is answered 503 at once and closed. They share one ``LeaseSet``.
+    """
 
     daemon_threads = True
     request_queue_size = 32
 
     def __init__(self, address: tuple[str, int], config: FrontConfig, leases: LeaseSet | None = None,
-                 *, clock=time.monotonic):
+                 *, role: str = ROLE_PROXY, clock=time.monotonic):
+        if role not in (ROLE_PROXY, ROLE_ADMIN):
+            raise ValueError("role must be proxy or admin")
+        self.role = role
         self.config = config
         self.leases = leases if leases is not None else LeaseSet()
-        self._slots = threading.BoundedSemaphore(MAX_CONCURRENT)
+        self._slots = threading.BoundedSemaphore(MAX_ADMIN_CONCURRENT if role == ROLE_ADMIN else MAX_CONCURRENT)
         self._clock = clock
         self._refusal_lock = threading.Lock()
         self._refused = 0
@@ -364,6 +436,10 @@ class FrontServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
         except (OSError, ValueError, IndexError):
             return False
         return local in net
+
+    def verify_request(self, request, client_address) -> bool:
+        """Drop a connection from outside the allowed network before a byte of it is read."""
+        return self.on_allowed_network(request)
 
     def process_request(self, request, client_address) -> None:
         if not self._slots.acquire(blocking=False):
@@ -408,16 +484,26 @@ def main(environ: Mapping[str, str] | None = None) -> int:
     except ValueError as error:
         print("front: bad configuration: %s" % error, file=sys.stderr, flush=True)
         return 2
-    server = FrontServer(("0.0.0.0", config.port), config)
+    # Smaller header limits than the library's, in this process only: a request head is read before any
+    # credential is checked.
+    http.client._MAXLINE = 16384
+    http.client._MAXHEADERS = 32
+    leases = LeaseSet()
+    proxy = FrontServer(("0.0.0.0", config.port), config, leases, role=ROLE_PROXY)
+    admin = FrontServer(("0.0.0.0", config.admin_port), config, leases, role=ROLE_ADMIN)
 
     def stop(_signum, _frame) -> None:
-        threading.Thread(target=server.shutdown, daemon=True).start()
+        for server in (proxy, admin):
+            threading.Thread(target=server.shutdown, daemon=True).start()
 
     signal.signal(signal.SIGTERM, stop)
     signal.signal(signal.SIGINT, stop)
-    print("front: listening on %d" % config.port, file=sys.stderr, flush=True)
-    server.serve_forever()
-    server.server_close()
+    print("front: listening on %d and %d" % (config.port, config.admin_port), file=sys.stderr, flush=True)
+    threading.Thread(target=admin.serve_forever, name="front-admin", daemon=True).start()
+    proxy.serve_forever()
+    admin.shutdown()
+    proxy.server_close()
+    admin.server_close()
     return 0
 
 

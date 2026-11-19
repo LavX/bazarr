@@ -88,23 +88,29 @@ def upstream():
 
 
 class Running:
+    """The proxy listener and the admin listener of one front, sharing one lease set."""
+
     def __init__(self, upstream, **config):
         values = dict(admin_sha256=digest(ADMIN_SECRET), upstream_host="127.0.0.1", upstream_port=upstream.port,
-                      port=0, upstream_timeout=5)
+                      port=0, admin_port=0, upstream_timeout=5)
         values.update(config)
         self.config = front.FrontConfig(**values)
-        self.server = front.FrontServer(("127.0.0.1", 0), self.config)
+        self.server = front.FrontServer(("127.0.0.1", 0), self.config, role=front.ROLE_PROXY)
+        self.admin = front.FrontServer(("127.0.0.1", 0), self.config, self.server.leases, role=front.ROLE_ADMIN)
         self.port = self.server.server_address[1]
-        self.thread = threading.Thread(target=self.server.serve_forever, kwargs={"poll_interval": 0.05},
-                                       daemon=True)
-        self.thread.start()
+        self.admin_port = self.admin.server_address[1]
+        for server in (self.server, self.admin):
+            threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True).start()
 
     def close(self):
-        self.server.shutdown()
-        self.server.server_close()
+        for server in (self.server, self.admin):
+            server.shutdown()
+            server.server_close()
 
-    def call(self, method, path, body=None, headers=None, timeout=10):
-        connection = http.client.HTTPConnection("127.0.0.1", self.port, timeout=timeout)
+    def call(self, method, path, body=None, headers=None, timeout=10, port=None):
+        """Admin calls go to the admin listener, everything else to the proxy listener, unless ``port`` says."""
+        port = port or (self.admin_port if path == front.ADMIN_PATH else self.port)
+        connection = http.client.HTTPConnection("127.0.0.1", port, timeout=timeout)
         try:
             connection.request(method, path, body=body, headers=headers or {})
             response = connection.getresponse()
@@ -278,7 +284,8 @@ def test_the_admin_path_replaces_the_set_and_reports_the_count(running):
     secret = {"Authorization": "Bearer " + ADMIN_SECRET}
     status, body, _ = running.push(TOKEN, OTHER_TOKEN)
     assert status == 200 and json.loads(body) == {"count": 2}
-    assert json.loads(running.call("GET", front.ADMIN_PATH, None, secret)[1]) == {"count": 2}
+    state = json.loads(running.call("GET", front.ADMIN_PATH, None, secret)[1])
+    assert state["count"] == 2 and state["fingerprint"] == running.server.leases.fingerprint()
 
     assert json.loads(running.push(TOKEN)[1]) == {"count": 1}
     assert json.loads(running.push()[1]) == {"count": 0}
@@ -304,7 +311,7 @@ def test_a_bad_lease_set_is_400_and_changes_nothing(running, payload):
     assert status == 400
     assert running.post(TOKEN)[0] == 200
     assert json.loads(running.call("GET", front.ADMIN_PATH, None,
-                                   {"Authorization": "Bearer " + ADMIN_SECRET})[1]) == {"count": 1}
+                                   {"Authorization": "Bearer " + ADMIN_SECRET})[1])["count"] == 1
 
 
 def test_the_admin_body_has_its_own_small_cap(running):
@@ -374,7 +381,7 @@ def test_a_connection_beyond_the_limit_is_503(upstream, monkeypatch):
         holder.start()
         assert upstream.arrived.wait(5)
 
-        status, _, _ = instance.post(TOKEN)
+        status = refused(lambda: instance.post(TOKEN))
 
         assert status == 503
         upstream.gate.set()
@@ -388,7 +395,7 @@ def test_a_connection_beyond_the_limit_is_503(upstream, monkeypatch):
 
 
 def test_a_connection_outside_the_allowed_network_is_dropped_even_with_a_token(upstream):
-    instance = Running(upstream, allow_net="10.0.0.0/8")
+    instance = Running(upstream, allow_net="192.0.2.0/24")
     try:
         # The admin path is the way in for the token, so allow it through a second front to prepare the set.
         instance.server.leases.replace([front.token_digest(TOKEN)])
@@ -457,9 +464,11 @@ def good_env(**overrides):
 
 def test_the_front_reads_its_configuration_from_the_environment():
     config = front.FrontConfig.from_env(good_env(**{front.ENV_ALLOW_NET: "198.51.100.0/24",
-                                                    front.ENV_MAX_BODY: "5000", front.ENV_PORT: "9000"}))
+                                                    front.ENV_MAX_BODY: "5000", front.ENV_PORT: "9000",
+                                                    front.ENV_ADMIN_PORT: "9001"}))
 
     assert (config.upstream_host, config.upstream_port, config.port) == ("daemon", 8191, 9000)
+    assert config.admin_port == 9001 and front.FrontConfig.from_env(good_env()).admin_port == front.ADMIN_PORT
     assert str(config.allow_net) == "198.51.100.0/24" and config.max_body == 5000
     assert config.admin_digest == bytes.fromhex(digest(ADMIN_SECRET))
     assert front.FrontConfig.from_env(good_env()).port == front.FRONT_PORT
@@ -476,6 +485,7 @@ def test_the_front_reads_its_configuration_from_the_environment():
     {front.ENV_UPSTREAM: "da emon:8191"},
     {front.ENV_PORT: "x"},
     {front.ENV_PORT: "70000"},
+    {front.ENV_ADMIN_PORT: "70000"},
     {front.ENV_ALLOW_NET: "not-a-network"},
     {front.ENV_MAX_BODY: "0"},
     {front.ENV_MAX_RESPONSE: "999999999999"},
@@ -521,9 +531,10 @@ def free_port():
 
 
 def test_the_program_runs_as_a_script_under_isolated_mode_and_stops_on_sigterm(upstream):
-    port = free_port()
+    port, admin_port = free_port(), free_port()
     env = {"PATH": os.environ.get("PATH", ""), **good_env(**{
-        front.ENV_UPSTREAM: "127.0.0.1:%d" % upstream.port, front.ENV_PORT: str(port)})}
+        front.ENV_UPSTREAM: "127.0.0.1:%d" % upstream.port, front.ENV_PORT: str(port),
+        front.ENV_ADMIN_PORT: str(admin_port)})}
     process = subprocess.Popen([sys.executable, "-I", front.__file__], env=env, stdout=subprocess.DEVNULL,
                                stderr=subprocess.PIPE, text=True)
     try:
@@ -531,6 +542,7 @@ def test_the_program_runs_as_a_script_under_isolated_mode_and_stops_on_sigterm(u
         while True:
             try:
                 socket.create_connection(("127.0.0.1", port), timeout=1).close()
+                socket.create_connection(("127.0.0.1", admin_port), timeout=1).close()
                 break
             except OSError:
                 assert process.poll() is None and time.monotonic() < deadline
@@ -539,7 +551,7 @@ def test_the_program_runs_as_a_script_under_isolated_mode_and_stops_on_sigterm(u
         connection.request("POST", f"/l/{TOKEN}/v1", b"{}", {"Content-Type": "application/json"})
         assert connection.getresponse().status == 401
         payload = json.dumps({"tokens": [digest(TOKEN)]}).encode()
-        connection = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+        connection = http.client.HTTPConnection("127.0.0.1", admin_port, timeout=5)
         connection.request("PUT", front.ADMIN_PATH, payload, {"Authorization": "Bearer " + ADMIN_SECRET})
         assert connection.getresponse().status == 200
         connection = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
@@ -554,3 +566,158 @@ def test_the_program_runs_as_a_script_under_isolated_mode_and_stops_on_sigterm(u
             process.kill()
             process.wait()
         process.stderr.close()
+
+
+# ------------------------------------------------------------------ the admin path has capacity of its own
+
+
+def refused(call):
+    """The status of ``call()``, or 503 when the front hung up on a body it had refused to take."""
+    try:
+        return call()[0]
+    except (BrokenPipeError, ConnectionResetError):
+        return 503
+
+
+def hold_proxy_slots(instance, upstream, count):
+    """Park ``count`` proxied requests at the daemon, so every proxy slot is taken."""
+    upstream.gate = threading.Event()
+    threads = [threading.Thread(target=lambda: instance.post(TOKEN), daemon=True) for _ in range(count)]
+    for thread in threads:
+        thread.start()
+    deadline = time.monotonic() + 5
+    while len(upstream.requests) < count and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert len(upstream.requests) == count
+    return threads
+
+
+def test_a_saturated_proxy_never_blocks_a_push_so_a_revoke_lands(running, upstream):
+    running.push(TOKEN, OTHER_TOKEN)
+    threads = hold_proxy_slots(running, upstream, front.MAX_CONCURRENT)
+    try:
+        assert refused(lambda: running.post(TOKEN)) == 503
+
+        status, body, _ = running.push(OTHER_TOKEN)
+        state = running.call("GET", front.ADMIN_PATH, None, {"Authorization": "Bearer " + ADMIN_SECRET})
+
+        assert status == 200 and json.loads(body) == {"count": 1} and state[0] == 200
+        assert refused(lambda: running.post(TOKEN)) == 503
+    finally:
+        upstream.gate.set()
+        for thread in threads:
+            thread.join(5)
+    # The slots are free again, and the revoked token is refused where the other still works.
+    assert running.post(TOKEN)[0] == 401
+    assert running.post(OTHER_TOKEN)[0] == 200
+
+
+def test_the_admin_listener_has_its_own_small_limit(upstream, monkeypatch):
+    monkeypatch.setattr(front, "MAX_ADMIN_CONCURRENT", 1)
+    instance = Running(upstream)
+    try:
+        with socket.create_connection(("127.0.0.1", instance.admin_port), timeout=5) as holder:
+            holder.sendall(b"PUT /_admin/leases HTTP/1.0\r\n")
+            time.sleep(0.2)
+            assert refused(lambda: instance.push(TOKEN)) == 503
+        assert wait_for(lambda: refused(lambda: instance.push(TOKEN)) == 200)
+    finally:
+        instance.close()
+
+
+def wait_for(predicate, timeout=5.0):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        time.sleep(0.02)
+    return predicate()
+
+
+def test_each_listener_answers_only_its_own_routes(running, upstream):
+    running.push(TOKEN)
+    secret = {"Authorization": "Bearer " + ADMIN_SECRET}
+    payload = json.dumps({"tokens": []}).encode()
+
+    on_proxy = running.call("PUT", front.ADMIN_PATH, payload, {**secret, "Content-Length": str(len(payload))},
+                            port=running.port)
+    on_admin = running.call("POST", f"/l/{TOKEN}/v1", b"{}", {"Content-Type": "application/json"},
+                            port=running.admin_port)
+
+    assert on_proxy[:2] == (401, UNAUTHORIZED) and on_admin[:2] == (401, UNAUTHORIZED)
+    assert upstream.requests == [] and len(running.server.leases) == 1
+
+
+# ------------------------------------------------------------------ time is bounded by the wall clock
+
+
+def test_a_request_head_that_is_trickled_is_cut_off_at_the_deadline(upstream, monkeypatch):
+    monkeypatch.setattr(front, "HEAD_DEADLINE", 0.4)
+    instance = Running(upstream)
+    try:
+        started = time.monotonic()
+        with socket.create_connection(("127.0.0.1", instance.port), timeout=5) as sock:
+            closed = False
+            for _ in range(40):
+                try:
+                    sock.sendall(b"x")
+                except OSError:
+                    closed = True
+                    break
+                time.sleep(0.1)
+        assert closed and time.monotonic() - started < 3
+    finally:
+        instance.close()
+
+
+def test_a_body_that_is_trickled_is_cut_off_at_the_deadline(upstream, monkeypatch):
+    monkeypatch.setattr(front, "BODY_DEADLINE", 0.4)
+    instance = Running(upstream)
+    try:
+        instance.push(TOKEN)
+        started = time.monotonic()
+        with socket.create_connection(("127.0.0.1", instance.port), timeout=5) as sock:
+            sock.sendall(b"POST /l/" + TOKEN.encode() + b"/v1 HTTP/1.0\r\nContent-Length: 100\r\n\r\nab")
+            assert sock.recv(64) == b"" and time.monotonic() - started < 3
+        assert upstream.requests == []
+    finally:
+        instance.close()
+
+
+def test_a_proxied_exchange_is_bounded_in_total_and_frees_its_slot(upstream):
+    instance = Running(upstream, upstream_timeout=1)
+    try:
+        instance.push(TOKEN)
+        upstream.gate = threading.Event()
+        started = time.monotonic()
+
+        with pytest.raises((http.client.HTTPException, ConnectionError, OSError)):
+            instance.post(TOKEN)
+
+        assert time.monotonic() - started < 4
+        upstream.gate.set()
+        assert wait_for(lambda: refused(lambda: instance.post(TOKEN)) == 200)
+    finally:
+        instance.close()
+
+
+def test_a_connection_from_outside_the_allowed_network_is_closed_before_it_is_read(upstream):
+    instance = Running(upstream, allow_net="192.0.2.0/24")
+    try:
+        started = time.monotonic()
+        with socket.create_connection(("127.0.0.1", instance.port), timeout=5) as sock:
+            # Nothing is sent: a front that waited for a request head would hold this open until its deadline.
+            assert sock.recv(64) == b"" and time.monotonic() - started < 2
+        with socket.create_connection(("127.0.0.1", instance.admin_port), timeout=5) as sock:
+            assert sock.recv(64) == b""
+    finally:
+        instance.close()
+
+
+@pytest.mark.parametrize("length", [b"\xb2", b"1\xb2", b"-1", b"+5", b"1_0", b" "])
+def test_a_content_length_that_is_not_plain_ascii_digits_is_refused(running, upstream, length):
+    running.push(TOKEN)
+    with socket.create_connection(("127.0.0.1", running.port), timeout=5) as sock:
+        sock.sendall(b"POST /l/" + TOKEN.encode() + b"/v1 HTTP/1.0\r\nContent-Length: " + length + b"\r\n\r\n")
+        assert sock.recv(64).startswith(b"HTTP/1.0 411")
+    assert upstream.requests == []

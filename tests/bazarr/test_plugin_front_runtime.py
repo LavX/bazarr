@@ -20,6 +20,7 @@ import pytest
 from provider_hub.runtime import front as front_server
 from provider_hub.runtime import oci as oci_module
 from provider_hub.runtime.front_runtime import (
+    FRONT_ADMIN_PORT,
     FRONT_ENTRYPOINT,
     FRONT_PORT,
     FRONT_USER,
@@ -117,7 +118,9 @@ class Harness:
         self.docker = docker
         self.stub = stub
         self.server = None
+        self.admin = None
         self.port = None
+        self.admin_port = None
         self.container = None
         self.down = False
         self.targets = []
@@ -129,26 +132,33 @@ class Harness:
     def boot(self):
         env, identity = self.container_env()
         assert set(env) == {front_server.ENV_ADMIN_SHA256, front_server.ENV_UPSTREAM, front_server.ENV_PORT,
-                            front_server.ENV_ALLOW_NET, front_server.ENV_MAX_BODY, front_server.ENV_MAX_RESPONSE,
+                            front_server.ENV_ADMIN_PORT, front_server.ENV_ALLOW_NET, front_server.ENV_MAX_BODY, front_server.ENV_MAX_RESPONSE,
                             front_server.ENV_UPSTREAM_TIMEOUT}
         # What a loopback test cannot keep: the real port, the daemon's alias and the network the front serves.
-        env = dict(env, **{front_server.ENV_PORT: "0", front_server.ENV_UPSTREAM: "127.0.0.1:%d" % self.stub.port})
+        env = dict(env, **{front_server.ENV_PORT: "0", front_server.ENV_ADMIN_PORT: "0",
+                           front_server.ENV_UPSTREAM: "127.0.0.1:%d" % self.stub.port})
         env.pop(front_server.ENV_ALLOW_NET)
         self.close_server()
-        self.server = front_server.FrontServer(("127.0.0.1", 0), front_server.FrontConfig.from_env(env))
+        config = front_server.FrontConfig.from_env(env)
+        self.server = front_server.FrontServer(("127.0.0.1", 0), config, role=front_server.ROLE_PROXY)
+        self.admin = front_server.FrontServer(("127.0.0.1", 0), config, self.server.leases,
+                                              role=front_server.ROLE_ADMIN)
         self.port = self.server.server_address[1]
+        self.admin_port = self.admin.server_address[1]
         self.container = identity
-        threading.Thread(target=self.server.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True).start()
+        for server in (self.server, self.admin):
+            threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True).start()
 
     def connect(self, host, port, timeout):
         if self.down:
             raise OSError("connection refused")
         self.targets.append((host, port))
+        assert port == FRONT_ADMIN_PORT, "Bazarr+ talks to the front's admin listener"
         record = self.docker.container_named(FRONT_NAME)
         assert record is not None
         if record["Id"] != self.container:
             self.boot()
-        return http.client.HTTPConnection("127.0.0.1", self.port, timeout=timeout)
+        return http.client.HTTPConnection("127.0.0.1", self.admin_port, timeout=timeout)
 
     def post(self, lease_or_url, body=b'{"cmd": "request.get"}'):
         url = lease_or_url.url() if hasattr(lease_or_url, "url") else lease_or_url
@@ -160,10 +170,12 @@ class Harness:
             connection.close()
 
     def close_server(self):
-        if self.server is not None:
-            self.server.shutdown()
-            self.server.server_close()
-            self.server = None
+        for name in ("server", "admin"):
+            server = getattr(self, name)
+            if server is not None:
+                server.shutdown()
+                server.server_close()
+                setattr(self, name, None)
 
 
 @pytest.fixture
@@ -306,10 +318,11 @@ def test_the_environment_holds_the_digest_of_the_secret_and_the_limits_and_nothi
 
     assert env[front_server.ENV_UPSTREAM] == "daemon:8191"
     assert env[front_server.ENV_PORT] == str(FRONT_PORT)
-    assert env[front_server.ENV_ALLOW_NET] == "198.51.100.0/24"
+    assert env[front_server.ENV_ALLOW_NET] == "198.51.101.0/24"  # network A, the second one made
+    assert env[front_server.ENV_ADMIN_PORT] == str(FRONT_ADMIN_PORT)
     assert env[front_server.ENV_ADMIN_SHA256] == front_server.hashlib.sha256(front._secret.encode()).hexdigest()
     assert front._secret not in "".join(env.values())
-    assert len(env) == 7
+    assert len(env) == 8
 
 
 def test_the_image_config_volume_is_replaced_by_an_empty_read_only_mount(docker, harness, runtimes):
@@ -391,7 +404,8 @@ def test_a_lease_gets_a_random_url_safe_token_and_the_front_takes_it(docker, har
     assert harness.stub.requests == [("/v1", b'{"cmd": "request.get"}')] * 2
     assert len(harness.server.leases) == 2
     host, port = front.address()
-    assert (host, port) == harness.targets[-1] and port == FRONT_PORT and host.startswith("198.51.100.")
+    assert port == FRONT_PORT and host == harness.targets[-1][0] and harness.targets[-1][1] == FRONT_ADMIN_PORT
+    assert host.startswith("198.51.101.")
     assert first.url() == "http://%s:%d/l/%s/v1" % (host, port, first.token)
 
 
@@ -504,7 +518,7 @@ def test_a_restart_gets_a_new_container_and_the_held_leases_are_pushed_again(doc
 
     assert front.alive and front_record(docker)["Id"] != before
     assert harness.post(lease) == 200
-    assert lease.url().startswith("http://198.51.100.")
+    assert lease.url().startswith("http://198.51.")  # network A was made again, with a new subnet
     assert old_url.split("/l/")[1] == lease.url().split("/l/")[1]
     assert set(docker.containers[SELF_ID]["NetworkSettings"]["Networks"]) == {"bridge", NET_A}
 
@@ -736,3 +750,167 @@ def test_a_started_front_cannot_be_started_twice(front):
 def test_the_managed_tier_is_still_off_unless_switched_on():
     assert not oci_module.managed_containers_enabled({})
     assert not oci_module.offer_status(environ={}, in_container=True).available
+
+
+# ------------------------------------------------------------------ a revoke reaches the front whatever the runtime thinks
+
+
+def test_a_lease_closed_while_docker_reports_the_front_unhealthy_is_still_revoked(docker, harness, front):
+    lease = front.open_lease()
+    url = lease.url()
+    assert harness.post(url) == 200
+    docker.unhealthy = True
+    assert wait_until(lambda: not front.alive)
+
+    lease.close()
+
+    assert harness.post(url) == 401
+
+
+def test_a_lease_closed_while_the_docker_api_is_failing_is_still_revoked(docker, harness, front):
+    lease = front.open_lease()
+    url = lease.url()
+    docker.deny.append(r"GET /containers/.*/json")
+    assert wait_until(lambda: not front.alive)
+
+    lease.close()
+
+    assert harness.post(url) == 401
+
+
+def test_a_lease_closed_after_a_close_that_could_not_remove_the_front_is_still_revoked(docker, harness, front):
+    lease = front.open_lease()
+    url = lease.url()
+    docker.deny.append(r"DELETE /containers/")
+    front.close(0)
+    assert front_record(docker) is not None and not front.alive
+
+    lease.close()
+
+    assert harness.post(url) == 401
+
+
+def test_a_lease_closed_during_the_start_is_revoked_as_soon_as_the_front_is_up(docker, harness, front):
+    lease = front.open_lease()
+    url = lease.url()
+    front.close(0)
+    closer = threading.Thread(target=lease.close, daemon=True)
+    real_connect = harness.connect
+    started = []
+
+    def connect(host, port, timeout):
+        # The first admin call of the restart is the push of the held set: end the lease right then.
+        if not started:
+            started.append(True)
+            closer.start()
+            time.sleep(0.1)
+        return real_connect(host, port, timeout)
+
+    front._connect = connect
+
+    front.start()
+    closer.join(5)
+
+    assert not closer.is_alive() and front.alive
+    assert harness.post(url) == 401
+    assert front.lease_count == 0
+
+
+def test_a_revoke_that_fails_ends_with_the_front_verifiably_gone_even_if_removal_needs_retries(docker, front, harness):
+    lease = front.open_lease()
+    harness.down = True
+    docker.fail.append((r"DELETE /containers/", 500, "busy"))
+    docker.fail.append((r"DELETE /containers/", 500, "busy"))
+
+    lease.close()
+
+    assert front_record(docker) is None and network_of(docker, NET_A) is None
+    assert front.status()["state"] == "removed"
+
+
+def test_a_revoke_that_fails_and_cannot_remove_the_front_says_so(docker, front, harness):
+    lease = front.open_lease()
+    harness.down = True
+    docker.deny.append(r"DELETE /containers/")
+
+    lease.close()
+
+    assert front_record(docker) is not None
+    assert "could not be removed" in front.status()["error"]
+
+
+# ------------------------------------------------------------------ secrecy and the small things
+
+
+@pytest.fixture
+def clean_scrubber():
+    from secret_store import scrub
+
+    scrub.clear_secret_values()
+    yield scrub
+    scrub.clear_secret_values()
+
+
+def test_the_admin_secret_and_every_token_are_registered_with_the_credential_scrubber(docker, harness, runtimes,
+                                                                                     clean_scrubber):
+    runtime = make_front(docker, harness, runtimes)
+    runtime.start()
+    lease = runtime.open_lease()
+
+    line = "POST %s failed; admin was Bearer %s" % (lease.url(), runtime._secret)
+    masked = clean_scrubber.scrub_text(line)
+
+    assert lease.token not in masked and runtime._secret not in masked
+
+
+def test_a_global_http_debug_level_does_not_print_the_admin_secret(docker, harness, runtimes, monkeypatch, capsys):
+    monkeypatch.setattr(http.client.HTTPConnection, "debuglevel", 1)
+    runtime = make_front(docker, harness, runtimes)
+    runtime.start()
+    lease = runtime.open_lease()
+    lease.close()
+
+    printed = capsys.readouterr()
+    assert runtime._secret not in printed.out + printed.err
+    assert "Authorization" not in printed.out + printed.err
+
+
+def test_a_front_set_that_differs_with_the_same_count_is_pushed_again(front, harness):
+    lease = front.open_lease()
+    assert harness.post(lease) == 200
+
+    # Same number of entries, other contents: a count alone would call this in sync.
+    harness.server.leases.replace([front_server.token_digest("S" * 43)])
+    assert len(harness.server.leases) == front.lease_count
+
+    assert wait_until(lambda: harness.server.leases.allows(lease.token))
+    assert not harness.server.leases.allows("S" * 43)
+
+
+def test_a_front_docker_calls_unhealthy_still_gets_its_set_kept_right(docker, front, harness):
+    lease = front.open_lease()
+    docker.unhealthy = True
+    assert wait_until(lambda: not front.alive)
+
+    harness.server.leases.replace([])
+
+    assert wait_until(lambda: harness.server.leases.allows(lease.token))
+    assert "unhealthy" in front.status()["error"]
+
+
+def test_the_health_check_opens_both_listeners(docker, front):
+    test = front_record(docker)["Config"]["Healthcheck"]["Test"]
+
+    assert test[:3] == ["CMD", "python3", "-I"] and str(FRONT_PORT) in test[-1] and str(FRONT_ADMIN_PORT) in test[-1]
+    assert FRONT_PORT != FRONT_ADMIN_PORT
+
+
+def test_the_front_script_path_is_the_one_the_images_layout_gives():
+    from pathlib import Path
+
+    from provider_hub.runtime.front_runtime import FRONT_SCRIPT
+
+    dockerfile = (Path(__file__).resolve().parents[2] / "Dockerfile").read_text(encoding="utf-8")
+    production = dockerfile.split("AS production", 1)[1]
+    assert "WORKDIR /app/bazarr\n" in production and "COPY bazarr ./bazarr\n" in production
+    assert FRONT_SCRIPT == "/app/bazarr/bazarr/provider_hub/runtime/front.py"

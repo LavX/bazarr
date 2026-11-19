@@ -18,9 +18,10 @@ Topology, per plugin:
 What the front container is: a fixed entrypoint (``python3 -I front.py``), a non-root numeric user, all
 capabilities dropped, ``no-new-privileges``, a read-only root filesystem, a read-only empty mount over the
 image's declared ``/config`` volume (so there is no ``/config`` and no anonymous volume), a memory and process
-cap, bounded logs, no restart policy. Its environment holds the digest of the admin secret, the upstream address,
-the size caps and network A's subnet (the front serves only connections that arrive inside it), and nothing else.
-Docker's own record of the container is read back and compared with what was asked, between create and start.
+cap, bounded logs, no restart policy. What Bazarr+ sends as its environment is the digest of the admin secret, the upstream address, the ports, the size
+caps and network A's subnet (the front serves only connections that arrive inside it); the image's own ``ENV`` is
+merged in by Docker. Docker's own record of the container is read back and compared with what was asked, between
+create and start.
 
 Tokens:
 
@@ -31,13 +32,27 @@ Tokens:
   The secret is random, lives in this object's memory, and reaches the front only as its digest in the
   container's environment, so ``docker inspect`` shows nothing that opens the admin path. ``open_lease`` returns
   only after the front has acknowledged the new set; a revoke is a push of the set without the token.
-* A revoke that cannot be delivered stops and removes the front (fail closed), and the pool's breaker decides on
-  a restart. A restarted front starts empty, and ``start`` and the monitor push the held set again.
+* A revoke is always tried while a front container exists, whatever the runtime believes about its health: Docker's
+  health, a failing Docker API or a half-finished close do not make a revoked token valid again. One that cannot be
+  delivered stops and removes the front (fail closed), retrying the removal until it is confirmed, and whoever
+  supervises the front restarts it. A restarted front starts empty, and ``start`` and the monitor push the held set
+  again.
 * A request carries the token in its path, ``/l/<token>/v1``, because the providers POST to one configured URL
   with fixed headers. That is the only place the token appears in a URL, and the front never logs a path.
 
 ``cleanup_orphans`` and ``remove_plugin`` (in ``oci``) remove the front and network A with everything else this
 install made, and disconnect Bazarr+'s own container from network A first.
+
+Known limits, for the box checks and the slice that wires this in:
+
+* Bazarr+ listens on every interface, so the front can connect to Bazarr+'s own port over network A. The front is
+  Bazarr+'s own unprivileged code and the API still wants its key.
+* The front sits on two networks. Whether its network namespace forwards between them depends on the host's
+  ``ip_forward``; with every capability dropped neither side can add a route, and Docker's bridge isolation drops
+  the traffic anyway. Read ``/proc/sys/net/ipv4/ip_forward`` in the front on the box.
+* The lease token is in the URL path. The code that hands the URL to a provider must keep the front's address out
+  of any HTTP proxy setting, and must not log the URL; the token is registered with the credential scrubber so a
+  log line that carries it is masked.
 """
 from __future__ import annotations
 
@@ -53,6 +68,8 @@ import time
 
 from dataclasses import dataclass
 from typing import Any, Callable, Mapping
+
+from secret_store.scrub import add_database_secret_values
 
 from . import front as front_server
 from .docker_api import DockerApiError, DockerCancelled, DockerClient, DockerNotFound
@@ -83,6 +100,7 @@ logger = logging.getLogger(__name__)
 
 __all__ = [
     "FRONT_ENTRYPOINT",
+    "FRONT_ADMIN_PORT",
     "FRONT_PORT",
     "FRONT_SCRIPT",
     "FRONT_USER",
@@ -100,6 +118,7 @@ MIB = 1024 * 1024
 
 ROLE_FRONT = "front"
 FRONT_PORT = front_server.FRONT_PORT
+FRONT_ADMIN_PORT = front_server.ADMIN_PORT
 # The front program, as it is laid out in Bazarr+'s image (the front runs from the same image).
 FRONT_SCRIPT = "/app/bazarr/bazarr/provider_hub/runtime/front.py"
 FRONT_ENTRYPOINT = ("python3", "-I", FRONT_SCRIPT)
@@ -346,6 +365,7 @@ class FrontRuntime:
         if not self.alive:
             raise FrontError("the front is not running")
         token = new_lease_token()
+        add_database_secret_values([token])
         with self._lock:
             if len(self._book) >= front_server.MAX_LEASES:
                 raise FrontError("too many leases are open")
@@ -361,10 +381,18 @@ class FrontRuntime:
         return FrontLease(self, lease_id, token)
 
     def _revoke(self, lease_id: int) -> None:
+        """Take the lease's digest out of the front's set. Delivered, or the front is verifiably gone.
+
+        This does not look at ``alive``: a front that Docker calls unhealthy, that the monitor lost for a while or
+        that a failed close left running can still be serving the token. It is skipped only when no container
+        with an address and the secret exists (never started, or confirmed removed), because then nothing holds
+        the token, and a front that is still coming up gets its set from the push that ends its start.
+        """
         with self._lock:
             if self._book.pop(lease_id, None) is None:
                 return
-        if not self.alive:
+            serving = bool(self._container_id and self._ip and self._secret and not self._gone)
+        if not serving:
             return
         for attempt in range(3):
             try:
@@ -372,10 +400,20 @@ class FrontRuntime:
                 return
             except FrontError:
                 self._sleep(0.2 * attempt)
-        # A token that cannot be taken back is a hole: the front goes away instead, and the pool restarts it.
+        # A token that cannot be taken back is a hole: the front goes away instead.
         self.last_error = "the front could not be told that a lease ended, so it was stopped"
         logger.warning("%s: %s", self.spec.plugin_id, self.last_error)
-        self.close(grace=0)
+        self._ensure_removed()
+
+    def _ensure_removed(self) -> None:
+        """Close the front and keep at it until the daemon confirms it is gone, a few tries at most."""
+        for attempt in range(4):
+            self.close(grace=0)
+            if self._gone:
+                return
+            self._sleep(0.2 * (attempt + 1))
+        self.last_error = "the front could not be told that a lease ended, and could not be removed"
+        logger.error("%s: %s", self.spec.plugin_id, self.last_error)
 
     def _admin(self, method: str, payload: Mapping[str, Any] | None = None) -> dict[str, Any]:
         with self._lock:
@@ -384,7 +422,9 @@ class FrontRuntime:
             raise FrontError("the front has no address yet")
         connection = None
         try:
-            connection = self._connect(ip, FRONT_PORT, ADMIN_TIMEOUT)
+            connection = self._connect(ip, FRONT_ADMIN_PORT, ADMIN_TIMEOUT)
+            # A global debug level would print the request, secret included, to stdout.
+            connection.set_debuglevel(0)
             headers = {"Authorization": "Bearer " + secret}
             body = None
             if payload is not None:
@@ -420,11 +460,12 @@ class FrontRuntime:
                 raise FrontError("the front did not take the lease set")
 
     def _sync(self) -> None:
-        """Push the held set again if the front's own count differs (it was restarted in place)."""
+        """Push the held set again if the front's own copy differs (it was restarted in place)."""
         with self._lock:
-            expected = len(self._book)
+            held = sorted(self._book.values())
+        expected = hashlib.sha256(b"".join(bytes.fromhex(item) for item in held)).hexdigest()
         reply = self._admin("GET")
-        if reply.get("count") != expected:
+        if reply.get("count") != len(held) or reply.get("fingerprint") != expected:
             logger.info("%s: the front's lease set differed, so it is pushed again", self.spec.plugin_id)
             self._push()
 
@@ -540,6 +581,7 @@ class FrontRuntime:
             front_server.ENV_ADMIN_SHA256: _digest_hex(secret),
             front_server.ENV_UPSTREAM: "%s:%d" % (spec.upstream_host, spec.upstream_port),
             front_server.ENV_PORT: str(FRONT_PORT),
+            front_server.ENV_ADMIN_PORT: str(FRONT_ADMIN_PORT),
             front_server.ENV_ALLOW_NET: str(self._subnet),
             front_server.ENV_MAX_BODY: str(spec.max_body_bytes),
             front_server.ENV_MAX_RESPONSE: str(spec.max_response_bytes),
@@ -549,7 +591,8 @@ class FrontRuntime:
             plugin_id=spec.plugin_id, reference=self._image_id or "", env=env, memory_bytes=spec.memory_bytes,
             pids_limit=spec.pids_limit, stop_timeout=spec.stop_timeout,
             health=HealthSpec(test=("python3", "-I", "-c",
-                                    "import socket;socket.create_connection(('127.0.0.1',%d),3).close()" % FRONT_PORT),
+                                    "import socket;[socket.create_connection(('127.0.0.1',p),3).close() for p in (%d,%d)]"
+                                    % (FRONT_PORT, FRONT_ADMIN_PORT)),
                               interval=5.0, timeout=4.0, retries=3, start_period=3.0))
         self._resolved = resolved
         body = container_config(resolved, owner_id=self.owner_id, role=ROLE_FRONT, network=self.names[1],
@@ -560,6 +603,7 @@ class FrontRuntime:
             self._container_id = identity
             # Set only once the container exists: from here an abort removes it.
             self._secret = secret
+        add_database_secret_values([secret])
         self._swap_unlimited = check_create_warnings(warnings)
 
     def _audit_container(self) -> None:
@@ -643,10 +687,12 @@ class FrontRuntime:
             with self._lock:
                 if self._closing:
                     return
-                if not running or health == "unhealthy":
+                if not running:
                     self._healthy = False
-                    self.last_error = "the front stopped" if not running else "the front reported itself unhealthy"
+                    self.last_error = "the front stopped"
                     continue
+            # A front Docker calls unhealthy may still serve, so its lease set is kept right all the same.
+            docker_ok = health != "unhealthy"
             try:
                 ip = self._address_from(info)
                 self._sync()
@@ -659,8 +705,8 @@ class FrontRuntime:
             with self._lock:
                 self._ip = ip
                 self._failures = 0
-                self._healthy = True
-                self.last_error = None
+                self._healthy = docker_ok
+                self.last_error = None if docker_ok else "the front reported itself unhealthy"
 
     def _miss(self, reason: str) -> None:
         """One missed answer is not a death; three in a row are."""
