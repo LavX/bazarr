@@ -104,8 +104,9 @@ describe("Movies Detail Table, Hide track with codecs", () => {
       await screen.findByRole("button", { name: "Unhide English" }),
     ).toBeInTheDocument();
     // The hidden list names the codecs as the row badges do, not as stored.
-    // jsdom lays nothing out, so once the positioning code has run it counts
-    // the list as off screen and hides it from the accessibility tree.
+    // hidden: true dates from when jsdom's missing layout made Mantine hide
+    // the list. The test theme now turns that check off, so it only widens
+    // the query.
     const dialog = screen.getByRole("dialog", { hidden: true });
     const list = within(dialog);
     expect(

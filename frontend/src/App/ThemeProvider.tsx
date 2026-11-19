@@ -7,9 +7,11 @@ import {
   Input,
   MantineProvider,
   Pagination,
+  Popover,
   Progress,
 } from "@mantine/core";
 import ThemeLoader from "@/App/ThemeLoader";
+import { isTestEnv } from "@/utilities/env";
 import "@mantine/core/styles.layer.css";
 import "@mantine/notifications/styles.layer.css";
 import styleVars from "@/assets/_variables.module.scss";
@@ -229,9 +231,33 @@ const themeProvider = createTheme({
   },
 });
 
+// jsdom has no layout: every rect is zero, so Mantine's check for a popover
+// whose trigger has scrolled out of view reads the trigger as clipped and sets
+// display: none on the dropdown as soon as floating-ui resolves its position.
+// Whether a test sees an open menu then depends on whether its query lands
+// before that resolve, which a loaded CI runner loses. The check is for real
+// scrolling, so the test environment turns it off and nothing else. In Mantine
+// 9.7.4 Tooltip is built on its own floating-ui hook with its own hideDetached
+// default, not on Popover, so this entry does not reach it.
+export const createAppTheme = (testEnv: boolean) => {
+  const existing = themeProvider.components?.Popover;
+  return createTheme({
+    ...themeProvider,
+    components: {
+      ...themeProvider.components,
+      Popover: Popover.extend({
+        ...existing,
+        defaultProps: { ...existing?.defaultProps, hideDetached: !testEnv },
+      }),
+    },
+  });
+};
+
+const appTheme = createAppTheme(isTestEnv);
+
 const ThemeProvider: FunctionComponent<PropsWithChildren> = ({ children }) => {
   return (
-    <MantineProvider theme={themeProvider} defaultColorScheme="auto">
+    <MantineProvider theme={appTheme} defaultColorScheme="auto">
       <ThemeLoader />
       {children}
     </MantineProvider>

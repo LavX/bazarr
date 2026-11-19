@@ -104,8 +104,9 @@ describe("Sports events Table, an open badge menu", () => {
     expect(contents.filter(Boolean).length).toBeGreaterThan(0);
 
     await user.click(badge);
-    // jsdom has no layout, so Mantine keeps the dropdown display:none. Its
-    // node is what shows the menu is still the one the user opened.
+    // The menu node is what shows it is still the one the user opened.
+    // hidden: true only widens the query; the test theme keeps the dropdown
+    // visible.
     expect(await screen.findByText("Translate...")).toBeInTheDocument();
     const menu = screen.getByRole("menu", { hidden: true });
 
