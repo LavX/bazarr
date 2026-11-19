@@ -88,7 +88,6 @@ subliminal[rar]==2.7.1
 # carries on without OCR if they fail.
 cysignals>=1.12.6; sys_platform == "linux" and (platform_machine == "x86_64" or platform_machine == "aarch64")
 tesserocr==2.11.0; sys_platform == "linux" and (platform_machine == "x86_64" or platform_machine == "aarch64") --only-binary=tesserocr
-textdistance==4.6.3
 tld==0.13.2
 tomlkit>=0.15.1
 tzlocal==5.4.4
