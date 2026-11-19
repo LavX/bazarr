@@ -4,7 +4,7 @@ from __future__ import unicode_literals
 import re
 
 from subzero.language import Language
-from subzero.modification.mods import SubtitleTextModification, empty_line_post_processors
+from subzero.modification.mods import SubtitleTextModification, empty_line_post_processors, TAG
 from subzero.modification.exc import EmptyEntryError
 from subzero.modification.processors.re_processor import NReProcessor
 from subzero.modification import registry
@@ -31,11 +31,32 @@ _MUSIC_SYMBOL_RE = re.compile(r'[*#¶♫♪]')
 # must not be mistaken for lyric content when testing a line.
 _OVERRIDE_TAG_RE = re.compile(r'\{[^}]*\}')
 
-# Literal simple HTML tags. Subtitle.get_modified_content keeps them in the text the
-# mods see (keep_html_tags=True), so the edge slot must accept them next to the SSA
-# override tags of TAG. Case-insensitive, scoped to this one alternative.
+# Simple HTML tags (<i>, <b>, <u>, <font ...> and their closing forms). The subtitle
+# path that applies mods keeps them as literal text (Subtitle.get_modified_content
+# loads with keep_html_tags=True), so the rules have to see them.
+_SIMPLE_HTML_RE = re.compile(r'(?i)</?(?:[ibu]|font)(?:\s[^>]*)?>')
+_HTML_NAMES = ("i", "b", "u", "font")
+
+# A bracket cue body: "[...]" or with quotes, at least 3 characters inside.
+HI_BRACKET = r"""["']*\[(?=[^\[\]]{3,})[A-Za-zÀ-ž0-9\s'".:-_&+]+[)\]]["']*"""
+
+# Edge slot for the one rule that consumes a whole entry (HI_brackets_full). Only one
+# run of tags with optional whitespace around each, so backtracking stays linear.
+# Safe for HTML because the rule is anchored with ^ and $: it either removes the whole
+# entry, tags included, or matches nothing.
 HTML_TAG = r"(?i:</?(?:[ibu]|font(?:\s[^>]*)?)\s*>)"
-EDGE_TAG = r"(?:\s*(?:{\\[iusb][0-1]}|%s)\s*)*" % HTML_TAG
+_EDGE_TOKEN = r"(?:{\\[iusb][0-1]}|%s)" % HTML_TAG
+EDGE_TAG = r"(?:\s*%s(?:\s*%s)*\s*)?" % (_EDGE_TOKEN, _EDGE_TOKEN)
+
+
+def _has_unpaired_html(text):
+    """True when a simple tag in the text has no partner in the same text."""
+    lowered = text.lower()
+    for name in _HTML_NAMES:
+        opened = len(re.findall(r'<%s(?:\s[^>]*)?>' % name, lowered))
+        if opened != lowered.count('</%s>' % name):
+            return True
+    return False
 
 
 class MusicEntryProcessor(NReProcessor):
@@ -59,16 +80,22 @@ class MusicEntryProcessor(NReProcessor):
     def process(self, content, debug=False, keep_lyrics=None, **kwargs):
         if keep_lyrics:
             text = content or ""
+            # A line whose simple tags do not pair up within the line is left alone:
+            # dropping it would take the other half of a pair that sits on a kept line.
+            if _has_unpaired_html(text):
+                return content
+            # Strip markup first, so that the # in <font color="#fff"> is not a music
+            # symbol and the letters of <i> are not counted as lyric content.
+            stripped = _SIMPLE_HTML_RE.sub('', _OVERRIDE_TAG_RE.sub('', text))
             # Only music-note lines are in this processor's scope; leave anything
             # else (it would not match the HI_music regex anyway) untouched.
-            if not _MUSIC_SYMBOL_RE.search(text):
+            if not _MUSIC_SYMBOL_RE.search(stripped):
                 return content
             # Decide per line (not via the entry-wide regex) so a symbol-only
             # line in a multi-line cue does not drag the lyric line with it:
             # keep music-note lines with alphanumeric content, drop pure
-            # symbol/punctuation decoration. Strip override tags first so their
-            # letters/digits (e.g. {\i1}) are not counted as content.
-            stripped = _OVERRIDE_TAG_RE.sub('', text)
+            # symbol/punctuation decoration. Override tags ({\i1}) are stripped
+            # above so their letters/digits are not counted as content.
             return content if _HI_CONTENT_RE.search(stripped) else ""
         return super(MusicEntryProcessor, self).process(content, debug=debug, **kwargs)
 
@@ -103,8 +130,15 @@ class HearingImpaired(SubtitleTextModification):
                      name="HI_before_colon_noncaps"),
 
         # brackets (only remove if at least 3 chars in brackets, allow numbers and spaces inside brackets)
-        NReProcessor(re.compile(r'(?sux)-?%(t)s["\']*\[(?=[^\[\]]{3,})[A-Za-zÀ-ž0-9\s\'".:-_&+]+[)\]]["\']*[\s:]*%(t)s' %
-                                {"t": EDGE_TAG}), "", name="HI_brackets"),
+        # a bracket cue wrapped in one simple tag pair: the pair goes with its text
+        NReProcessor(re.compile(r'(?iu)<(?P<h>font|[ibu])(?:\s[^>]*)?>\s*%(b)s\s*</(?P=h)>[\s:]*' % {"b": HI_BRACKET}),
+                     "", name="HI_brackets_tagged"),
+
+        # brackets (only remove if at least 3 chars in brackets, allow numbers and spaces inside brackets).
+        # The SSA tags are taken without their whitespace: TAG's \s* would take the space
+        # that separates the words around the tag.
+        NReProcessor(re.compile(r'(?sux)-?(?:{\\[iusb][0-1]})*%(b)s(?:{\\[iusb][0-1]})*[\s:]*' % {"b": HI_BRACKET}),
+                     "", name="HI_brackets"),
 
         #NReProcessor(re.compile(r'(?sux)-?%(t)s[([]%(t)s(?=[A-zÀ-ž"\'.]{3,})[^([)\]]+%(t)s$' % {"t": TAG}),
         #             "", name="HI_bracket_open_start"),
@@ -159,11 +193,15 @@ class HearingImpaired(SubtitleTextModification):
     post_processors = empty_line_post_processors
     last_processors = [
         # remove music symbols
-        NReProcessor(re.compile(r'(?u)(^%(t)s[*#¶♫♪\s]*%(t)s[*#¶♫♪\s]+%(t)s[*#¶♫♪\s]*%(t)s$)' % {"t": EDGE_TAG}),
+        NReProcessor(re.compile(r'(?u)(^%(t)s[*#¶♫♪\s]*%(t)s[*#¶♫♪\s]+%(t)s[*#¶♫♪\s]*%(t)s$'
+                                r'|(?i:^<(?P<h>font|[ibu])(?:\s[^>]*)?>[*#¶♫♪\s]+</(?P=h)>$))' % {"t": TAG}),
                      "", name="HI_music_symbols_only"),
 
         # remove music entries (song lyrics); skipped when keep_lyrics is set
-        MusicEntryProcessor(re.compile(r'(?ums)(^[-\s>~]*%(t)s[*#¶♫♪]+\s*%(t)s.+|.+\s*[*#¶♫♪]+\s*%(t)s\s*$|.+\s*[*#¶♫♪]+[)\]])' % {"t": EDGE_TAG}),
+        # a simple tag pair must wrap the whole line, so the line removal takes both halves
+        MusicEntryProcessor(re.compile(r'(?ums)(^[-\s>~]*[*#¶♫♪]+\s*%(t)s.+|.+\s*[*#¶♫♪]+\s*%(t)s\s*$|.+\s*[*#¶♫♪]+[)\]]'
+                                       r'|(?i:^<(?P<h>font|[ibu])(?:\s[^>]*)?>[-\s>~]*[*#¶♫♪].*</(?P=h)>\s*$)'
+                                       r'|(?i:^<(?P<g>font|[ibu])(?:\s[^>]*)?>.*[*#¶♫♪]\s*</(?P=g)>\s*$))' % {"t": TAG}),
                             "", name="HI_music", entry=True),
     ]
 
