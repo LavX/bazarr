@@ -1517,3 +1517,24 @@ def test_a_built_in_built_in_the_window_before_the_pools_are_released_is_retired
     # The instance made in the window is gone from the pool; the next one is built from the built-in's own settings.
     assert pool.initialized_providers.get(BUILT_IN) is not built[0]
     assert pool[BUILT_IN].config == {"password": "own"}
+
+
+def test_the_refusal_of_a_detached_plugins_candidate_logs_from_a_realistic_subtitle_too(world, caplog):
+    import logging
+
+    from provider_hub.protocol import HubWorkerSubtitle
+    from subzero.language import Language
+
+    class BuiltIn:
+        hub_proxy = False
+
+    world.registry.register(PLUGIN, BuiltIn)
+    pool = world.pool(PLUGIN)
+    subtitle = HubWorkerSubtitle(PLUGIN, PLUGIN, "result", Language("eng"), {})
+
+    with caplog.at_level(logging.INFO):
+        assert pool.download_subtitle(subtitle) is False
+
+    assert subtitle.skip_reason == "provider_excluded"
+    assert any("no longer serves the plugin" in record.getMessage() and "alphahub:result" in record.getMessage()
+               for record in caplog.records)

@@ -1450,8 +1450,10 @@ class SZProviderPool(ProviderPool):
         registered = provider_registry[subtitle.provider_name]
         if getattr(subtitle, 'hub_proxy', False) and registered is not None and not getattr(
                 registered, 'hub_proxy', False):
-            logger.info('Provider %r no longer serves the plugin that found %r; not downloading it',
-                        subtitle.provider_name, subtitle)
+            # Plain fields only: a log line must never raise, and the repr of a subtitle reads attributes a
+            # candidate may not have.
+            logger.info('Provider %r no longer serves the plugin that found subtitle %r; not downloading it',
+                        subtitle.provider_name, getattr(subtitle, 'id', None))
             subtitle.skip_reason = 'provider_excluded'
             return False
 
