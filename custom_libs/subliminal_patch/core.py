@@ -267,14 +267,16 @@ def _nested_update(item, to_update):
 
 
 class ConfigSnapshot(dict):
-    """The configuration of every provider as it was read, stamped with the provider generations of that moment.
+    """The configuration of every provider as it was read, stamped with the registry's ownership counts of that moment.
 
-    A pool that is handed one skips the entries of a provider whose id was taken over by another class since (a plugin
-    detached while Bazarr+ runs gives its id back to a built-in): they are the old class's settings, read before the
-    change and merged after it.
+    A pool that is handed one skips the entries of a provider whose id changed hands between a plugin and a built-in
+    since (a plugin detached while Bazarr+ runs gives its id back to the built-in it replaced): they are the old
+    class's settings, read before the change and merged after it. Only a handover moves the stamp; a settings save does
+    not, so the new settings of a built-in are never dropped. ``ownership`` is None when nothing stamped it, and then
+    nothing is skipped.
     """
 
-    generations = {}
+    ownership = None
 
 
 class _ProviderConfigs(dict):
@@ -283,9 +285,10 @@ class _ProviderConfigs(dict):
         self._pool = pool
 
     def update(self, items):
-        stamp = getattr(items, 'generations', None)
-        if stamp is not None:
-            current = snapshot_provider_generations()
+        stamp = getattr(items, 'ownership', None)
+        counts = getattr(provider_registry, 'ownership_generations', None)
+        if stamp is not None and counts is not None:
+            current = counts()
             stale = {key for key in items if stamp.get(key, 0) != current.get(key, 0)
                      and provider_registry[key] is not None and not getattr(provider_registry[key], 'hub_proxy', False)}
             if stale:
@@ -628,11 +631,6 @@ _PROVIDER_GENERATIONS_LOCK = threading.Lock()
 def provider_generation(name):
     with _PROVIDER_GENERATIONS_LOCK:
         return _PROVIDER_GENERATIONS.get(name, 0)
-
-
-def snapshot_provider_generations():
-    with _PROVIDER_GENERATIONS_LOCK:
-        return dict(_PROVIDER_GENERATIONS)
 
 
 def bump_provider_generation(name):

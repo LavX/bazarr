@@ -455,10 +455,11 @@ _FFMPEG_BINARY = get_binary("ffmpeg")
 
 
 def get_providers_auth():
-    from subliminal_patch.core import ConfigSnapshot, snapshot_provider_generations
+    from subliminal_patch.core import ConfigSnapshot
 
-    # Stamped first: a pool that is handed this later skips what it holds for an id that changed hands meanwhile.
-    generations = snapshot_provider_generations()
+    # Stamped first: a pool that is handed this later skips what it holds for an id that changed hands between a
+    # plugin and a built-in meanwhile. Only that moves the stamp, never a settings save.
+    ownership = provider_registry.ownership_generations()
     provider_configs = {
         'addic7ed': {
             'username': settings.addic7ed.username,
@@ -607,7 +608,7 @@ def get_providers_auth():
     else:
         apply_settings_overlay(provider_configs, settings, _REPORTED_RESERVED_SECTION_PLUGINS, blocked)
     snapshot = ConfigSnapshot(provider_configs)
-    snapshot.generations = generations
+    snapshot.ownership = ownership
     return snapshot
 
 

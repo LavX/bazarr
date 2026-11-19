@@ -682,7 +682,32 @@ def release_provider_id(provider_id: str) -> int:
             pool.forget_provider_config(provider_id, own)
         except Exception:
             logger.exception("Provider Hub: could not clear what a pool holds for %s", provider_id)
+    _retire_built_in_instances(provider_id, live_provider_pools)
     return forgot
+
+
+def _retire_built_in_instances(provider_id: str, live_provider_pools) -> None:
+    """Drop every instance of a built-in that a pool made for ``provider_id`` before the pools were released.
+
+    The registry gives the built-in back one step before the pools are told, and a pool that builds in between holds
+    an instance made from the plugin's configuration. While the plugin held the id no built-in instance could exist, so
+    whatever is there now was made in that window. In-progress builds are made to start over (the provider generation
+    moves), and the next call builds the built-in from its own settings.
+    """
+    from subliminal_patch.core import bump_provider_generation
+
+    bump_provider_generation(provider_id)
+    for pool in live_provider_pools():
+        try:
+            stale = pool.detach_provider(provider_id, lambda cached: not isinstance(cached, HubProxyProvider))
+            if stale is not None:
+                try:
+                    stale.terminate()
+                except Exception:
+                    logger.exception("Provider Hub: could not end a built-in %s made before its pools were released",
+                                     provider_id)
+        except Exception:
+            logger.exception("Provider Hub: could not retire a built-in %s of a pool", provider_id)
 
 
 def is_plugin_class(provider_id: str) -> bool:

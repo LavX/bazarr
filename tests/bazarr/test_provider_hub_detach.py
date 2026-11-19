@@ -1307,7 +1307,7 @@ def test_a_snapshot_of_the_settings_read_before_the_detach_is_not_merged_back_af
     pool.provider_configs[BUILT_IN] = {"request_delay_ms": 5}
     # A search read the settings (with the plugin's keys) just before the detach, and updates the pool just after.
     stale = core.ConfigSnapshot({BUILT_IN: {"request_delay_ms": 5}})
-    stale.generations = core.snapshot_provider_generations()
+    stale.ownership = world.registry.ownership_generations()
 
     service.remove_installation(BUILT_IN)
     assert detach.wait_idle(WAIT)
@@ -1335,7 +1335,7 @@ def test_a_removal_of_a_plugin_that_never_held_the_id_leaves_the_built_ins_pool_
 
 
 def test_a_double_failure_leaves_the_release_marked_for_a_retry_and_asks_for_the_restart(revoked, monkeypatch):
-    from provider_hub import detach, registry, service
+    from provider_hub import registry, service
 
     revoked.install()
     revoked.run()
@@ -1409,3 +1409,111 @@ def test_a_revocation_lifted_after_a_failed_stop_keeps_the_restart_cue(revoked, 
 
     row = revoked.row()
     assert row["pending_restart"] is True and "blocked" not in row
+
+
+def test_a_built_ins_ordinary_settings_change_after_a_snapshot_is_still_applied(world):
+    """The stamp changes only when an id changes hands: a settings save, which bumps the provider's own generation in
+    every pool that sees it, must never make a pool drop the new settings of a built-in."""
+    from subliminal_patch import core
+
+    world.registry.register(BUILT_IN, _credentialed_built_in(BUILT_IN))
+    pool = world.pool(BUILT_IN)
+    snapshot = core.ConfigSnapshot({BUILT_IN: {"password": "new"}})
+    snapshot.ownership = world.registry.ownership_generations()
+    pool.provider_configs[BUILT_IN] = {"password": "old"}
+    # Another pool saw the same change first and bumped the provider's generation, as every settings save does.
+    core.bump_provider_generation(BUILT_IN)
+
+    pool.update([BUILT_IN], snapshot, [], {})
+
+    assert pool.provider_configs[BUILT_IN]["password"] == "new"
+    late = core.SZProviderPool(providers=[BUILT_IN], provider_configs=snapshot)
+    assert late.provider_configs[BUILT_IN]["password"] == "new"
+
+
+def test_a_snapshot_read_before_the_plugin_left_is_dropped_even_before_the_pools_are_released(world, monkeypatch):
+    """The handover is counted by the registry at the moment the class changes, before anything else of the detach
+    runs: a snapshot read before it and merged in the gap that follows is dropped too."""
+    from provider_hub import registry
+    from subliminal_patch import core
+
+    _plugin_over_built_in(world, monkeypatch)
+    pool = world.pool(BUILT_IN)
+    stale = core.ConfigSnapshot({BUILT_IN: {"request_delay_ms": 5}})
+    stale.ownership = world.registry.ownership_generations()
+
+    assert registry.unregister_provider_class(BUILT_IN).removed
+    pool.update([BUILT_IN], stale, [], {})  # the gap: the class changed, nothing else has run yet
+
+    assert "request_delay_ms" not in pool.provider_configs.get(BUILT_IN, {})
+
+
+def test_a_snapshot_that_carries_no_stamp_is_merged_whole(world):
+    from subliminal_patch import core
+
+    world.registry.register(BUILT_IN, _credentialed_built_in(BUILT_IN))
+    pool = world.pool(BUILT_IN)
+
+    pool.update([BUILT_IN], core.ConfigSnapshot({BUILT_IN: {"password": "p"}}), [], {})
+
+    assert pool.provider_configs[BUILT_IN]["password"] == "p"
+
+
+def test_the_registry_counts_a_handover_between_a_plugin_and_a_built_in_and_nothing_else(world):
+    from provider_hub.registry import HubProxyProvider
+
+    class Plugin(HubProxyProvider):
+        provider_name = "swapped"
+
+    built_in = _built_in_class("swapped")
+    start = world.registry.ownership_generations().get("swapped", 0)
+    world.registry.register("swapped", built_in)
+    world.registry.register("swapped", built_in)  # a built-in registered again is no handover
+    assert world.registry.ownership_generations().get("swapped", 0) == start
+    world.registry.register("swapped", Plugin)  # the plugin takes the id
+    assert world.registry.ownership_generations()["swapped"] == start + 1
+    world.registry.unregister("swapped", expected=Plugin)  # and leaves
+    assert world.registry.ownership_generations()["swapped"] == start + 2
+    world.registry.register("swapped", built_in)  # the built-in is put back over nothing: no plugin involved
+    assert world.registry.ownership_generations()["swapped"] == start + 2
+
+
+def test_a_built_in_built_in_the_window_before_the_pools_are_released_is_retired_and_rebuilt_clean(world, monkeypatch):
+    """The class swap and the release of the pools are two steps. A pool that builds the restored built-in between
+    them holds an instance made from the plugin's configuration: it is retired right after the release, and the next
+    call builds the built-in from its own settings."""
+    from provider_hub import detach, registry, service
+
+    built_in, plugin = _plugin_over_built_in(world, monkeypatch)
+    pool = world.pool(BUILT_IN)
+    pool.provider_configs[BUILT_IN] = {"request_delay_ms": 5}
+    assert type(pool[BUILT_IN]) is plugin
+    monkeypatch.setattr("app.get_providers.get_providers_auth", lambda: {BUILT_IN: {"password": "own"}})
+    real = registry.release_provider_id
+    built = []
+
+    def release_after_a_build(provider_id):
+        # The window: the registry already gives the built-in, nothing of the pools has been released.
+        pool.initialized_providers.pop(BUILT_IN, None)
+        try:
+            built.append(pool._build_and_install(BUILT_IN, lambda: pool.provider_configs.get(BUILT_IN, {})))
+        except TypeError:
+            # The built-in refuses the plugin's keys: the instance is made with what it can take.
+            built.append(None)
+        return real(provider_id)
+
+    class Takes(built_in):
+        def __init__(self, **config):
+            self.config = config
+
+    world.registry.providers[BUILT_IN] = plugin  # put the plugin back so remove swaps it once more
+    registry._SHADOWED_BUILT_INS[BUILT_IN] = Takes
+    monkeypatch.setattr(registry, "release_provider_id", release_after_a_build)
+
+    service.remove_installation(BUILT_IN)
+    assert detach.wait_idle(WAIT)
+
+    assert built and built[0] is not None and built[0].config == {"request_delay_ms": 5}
+    # The instance made in the window is gone from the pool; the next one is built from the built-in's own settings.
+    assert pool.initialized_providers.get(BUILT_IN) is not built[0]
+    assert pool[BUILT_IN].config == {"password": "own"}
