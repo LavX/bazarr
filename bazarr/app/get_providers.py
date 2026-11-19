@@ -227,7 +227,19 @@ def provider_is_usable(name):
         return False
     if name in _decrypt_blocked_provider_ids():
         return False
+    if _provider_detached(name):
+        return False
     return True
+
+
+def _provider_detached(name):
+    """Whether a plugin was detached from this provider id while Bazarr+ ran (revoked or removed), so a download
+    that names it from an earlier search is refused quietly instead of looking for a class that is gone."""
+    try:
+        from provider_hub.registry import is_withdrawn
+        return is_withdrawn(name)
+    except Exception:
+        return False
 
 
 def provider_pool():

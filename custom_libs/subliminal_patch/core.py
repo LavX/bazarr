@@ -835,7 +835,12 @@ class SZProviderPool(ProviderPool):
                 if stored is not None:
                     return stored
                 generation = provider_generation(name)
-                provider = provider_registry[name](**config())
+                # Looked up once. A plugin detached while Bazarr+ runs leaves the registry, and a name with no
+                # class is excluded (the quiet answer), never a call on None.
+                provider_class = provider_registry[name]
+                if provider_class is None:
+                    raise ProviderExcludedError(name)
+                provider = provider_class(**config())
                 provider.initialize()
                 if self._install_provider(name, provider, generation):
                     return provider
@@ -1022,8 +1027,15 @@ class SZProviderPool(ProviderPool):
         if excluded_languages is None:
             excluded_languages = set()
 
+        # The class this search runs on, read once: every check below uses it, so a plugin detached while the
+        # search is running is never looked up again and found missing half way through.
+        provider_class = provider_registry[provider]
+        if provider_class is None:
+            logger.info('Skipping provider %r: it is no longer registered', provider)
+            return finish(None, "skipped", "provider_excluded")
+
         # check video validity
-        if not provider_registry[provider].check(video):
+        if not provider_class.check(video):
             logger.info('Skipping provider %r: not a valid video', provider)
             return finish([], "skipped", "unsupported_media")
 
@@ -1046,8 +1058,8 @@ class SZProviderPool(ProviderPool):
             return finish([], "skipped", "excluded_language")
 
         # check supported languages
-        search_languages = _hub_search_languages(provider_registry[provider], use_languages)
-        provider_languages = self.lang_equals.check_set(set(provider_registry[provider].languages)) & search_languages
+        search_languages = _hub_search_languages(provider_class, use_languages)
+        provider_languages = self.lang_equals.check_set(set(provider_class.languages)) & search_languages
         if not provider_languages:
             logger.info('Skipping provider %r: no language to search for', provider)
             return finish([], "skipped", "unsupported_language")
@@ -1055,7 +1067,7 @@ class SZProviderPool(ProviderPool):
         # list subtitles
         results = []
 
-        to_request = self.lang_equals.translate(provider_languages) & set(provider_registry[provider].languages)
+        to_request = self.lang_equals.translate(provider_languages) & set(provider_class.languages)
 
         logger.info('Listing subtitles with provider %r and languages %r', provider, to_request)
 
