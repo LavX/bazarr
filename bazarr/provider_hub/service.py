@@ -4612,8 +4612,13 @@ def _apply_unmet_needs(installations: dict[str, Any], revocations: tuple[revocat
     for plugin_id, row in installations.items():
         if not isinstance(row, dict):
             continue
-        if live and str(plugin_id) not in revoked and str(plugin_id) not in again:
+        if live and str(plugin_id) not in revoked and not (str(plugin_id) in again and row.get("blocked")):
+            # (A row whose stop is tried again is judged only while it is still held back: one whose revocation was
+            # lifted meanwhile is unblocked and keeps the restart cue the lift raised.)
             continue
+        if not live and row.pop("detach_pending", None):
+            # Nothing runs at boot, so no stop is waiting.
+            changed = True
         if str(plugin_id) in revoked:
             if not row.get("revoked"):
                 row["revoked"] = True
@@ -4699,20 +4704,25 @@ def enforce_revocations_live() -> list[str]:
     and says so, so everything that reads what runs (the registry rebuild, the settings overlay, the translator
     binding, the host's trust record) stops seeing it, and the kind detaches its consumers, which cuts the calls
     the release still has after ``detach.REVOKE_GRACE_SECONDS``. What relies on a revoked plugin is held back
-    and stopped with it. A release whose stop failed is tried again by the next refresh. The restart cue is
-    raised only for a release that could not be stopped. Returns the ids that were stopped.
+    and stopped with it. The hold marks the row (``detach_pending``) in the same write, and the mark is cleared
+    once the stop has been started, so a stop that did not get that far (a failure, a process that ended) is tried
+    again by the next refresh. A release whose stop failed is tried again the same way. The restart cue is raised
+    only for a release that could not be stopped. Returns the ids that were stopped.
     """
     def apply(state: dict[str, Any]) -> list[tuple[str, str, Any]]:
         installations = state.setdefault("installations", {})
         before = {str(pid) for pid, row in installations.items() if isinstance(row, dict) and row.get("blocked")}
-        # A stop that failed last time is tried again: the row is judged as one still to be stopped.
-        retry = {str(pid) for pid, row in installations.items() if isinstance(row, dict) and row.pop(
-            "detach_failed", None)}
+        # A stop that failed, or never got started, is tried again: the row is judged as one still to be stopped.
+        retry = {str(pid) for pid, row in installations.items() if isinstance(row, dict) and (
+            row.pop("detach_failed", None) or row.get("detach_pending"))}
         _apply_unmet_needs(installations, _revocations(state), live=True, again=frozenset(retry))
-        return [(str(pid), kind_of(row), (row.get("manifest") or {}).get("bundle_sha256"))
-                for pid, row in installations.items()
-                if isinstance(row, dict) and row.get("blocked") and (str(pid) not in before or str(pid) in retry)
-                and row.get("active_version") and row.get("state") != "removed"]
+        found = [(str(pid), kind_of(row), (row.get("manifest") or {}).get("bundle_sha256"))
+                 for pid, row in installations.items()
+                 if isinstance(row, dict) and row.get("blocked") and (str(pid) not in before or str(pid) in retry)
+                 and row.get("active_version") and row.get("state") != "removed"]
+        for pid, _kind, _key in found:
+            installations[pid]["detach_pending"] = True
+        return found
 
     newly = mutate_state(apply) or []
     stopped: list[str] = []
@@ -4728,9 +4738,27 @@ def enforce_revocations_live() -> list[str]:
             logging.getLogger(__name__).exception("Provider Hub: could not stop %s live; it stops at the next restart",
                                                   plugin_id)
             failed.append(plugin_id)
+    if stopped:
+        _clear_detach_pending(stopped)
     if failed:
         _ask_restart_to_stop(failed)
     return stopped
+
+
+def _clear_detach_pending(plugin_ids: list[str]) -> None:
+    """The stop of these releases has been started: they no longer wait for one."""
+    def apply(state: dict[str, Any]) -> None:
+        for plugin_id in plugin_ids:
+            row = (state.get("installations") or {}).get(plugin_id)
+            if isinstance(row, dict):
+                row.pop("detach_pending", None)
+
+    try:
+        mutate_state(apply)
+    except Exception:
+        # Left marked, the next refresh stops it again, which an instance that is already gone makes harmless.
+        logging.getLogger(__name__).warning("Provider Hub: could not clear the stop mark of %s", ", ".join(plugin_ids),
+                                            exc_info=True)
 
 
 def ask_restart_for_unstopped() -> list[str]:
@@ -4741,7 +4769,7 @@ def ask_restart_for_unstopped() -> list[str]:
     revocations = _revocations(state)
     ids = [str(plugin_id) for plugin_id, row in (state.get("installations") or {}).items()
            if isinstance(row, dict) and row.get("state") == "active" and row.get("active_version")
-           and not row.get("blocked") and _detaches_live(row)
+           and (row.get("detach_pending") or not row.get("blocked")) and _detaches_live(row)
            and revocation.lookup(revocations, plugin_id, row.get("active_version")) is not None]
     if ids:
         _ask_restart_to_stop(ids)
@@ -4758,6 +4786,7 @@ def _ask_restart_to_stop(plugin_ids: list[str]) -> None:
             if not isinstance(row, dict) or row.get("state") != "active":
                 continue
             row["detach_failed"] = True
+            row.pop("detach_pending", None)
             row.pop("revoked_stopped", None)
             found = revocation.lookup(revocations, plugin_id, row.get("active_version"))
             if found is not None and not row.get("staged_version"):

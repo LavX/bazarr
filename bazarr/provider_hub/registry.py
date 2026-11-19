@@ -648,10 +648,28 @@ def is_withdrawn(provider_id: str) -> bool:
         return provider_id in _WITHDRAWN_PROVIDER_IDS and provider_registry[provider_id] is None
 
 
-def forget_pool_configs(provider_id: str) -> int:
-    """Make every pool that is alive forget the configuration it holds for ``provider_id``. Used when a plugin
-    leaves the registry: the id may name a built-in again, and that class is built from its own settings only.
-    Returns how many pools held something."""
+def release_provider_id(provider_id: str) -> int:
+    """A plugin's class left the registry, and the id may name a built-in again: hand the id over clean.
+
+    Every pool that is alive gets the settings the built-in is given in place of what it held under the id (read
+    now, after the plugin's configuration stopped being handed out), so a call that reaches the id before the next
+    settings read builds the built-in from its own settings. A throttle or discard the plugin earned is dropped:
+    the built-in starts with a clean record. Returns how many pools held something under the id.
+    """
+    own: dict = {}
+    try:
+        from app.get_providers import forget_provider_throttle, get_providers_auth
+
+        own = dict(get_providers_auth().get(provider_id) or {})
+        forget_provider_throttle(provider_id)
+    except Exception:
+        logger.exception("Provider Hub: could not read the settings of %s for the pools", provider_id)
+    try:
+        from subliminal_patch.provider_health import get_tracker
+
+        get_tracker().forget(provider_id)
+    except Exception:
+        logger.exception("Provider Hub: could not clear the health record of %s", provider_id)
     try:
         from subliminal_patch.core import live_provider_pools
     except ImportError:
@@ -661,7 +679,7 @@ def forget_pool_configs(provider_id: str) -> int:
         try:
             if provider_id in pool.provider_configs:
                 forgot += 1
-            pool.forget_provider_config(provider_id)
+            pool.forget_provider_config(provider_id, own)
         except Exception:
             logger.exception("Provider Hub: could not clear what a pool holds for %s", provider_id)
     return forgot

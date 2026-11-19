@@ -137,18 +137,21 @@ def world(tmp_path, monkeypatch):
 
     yield World()
     # Before the registry and the settings are put back: a detach that ends late finishes against what the test set up.
+    # The registry is put back whatever the wait finds, so one leaked thread does not pollute every test after it.
     from provider_hub import detach
 
-    assert detach.wait_idle(WAIT)
-    provider_registry.providers.clear()
-    provider_registry.providers.update(before)
-    registry._REGISTERED_PROVIDER_HUB_IDS.clear()
-    registry._REGISTERED_PROVIDER_HUB_IDS.update(hub_ids)
-    registry._SHADOWED_BUILT_INS.clear()
-    registry._SHADOWED_BUILT_INS.update(shadowed)
-    registry._WITHDRAWN_PROVIDER_IDS.clear()
-    registry._WITHDRAWN_PROVIDER_IDS.update(withdrawn)
-    registry._REGISTRATION_INCOMPLETE.clear()
+    try:
+        assert detach.wait_idle(WAIT)
+    finally:
+        provider_registry.providers.clear()
+        provider_registry.providers.update(before)
+        registry._REGISTERED_PROVIDER_HUB_IDS.clear()
+        registry._REGISTERED_PROVIDER_HUB_IDS.update(hub_ids)
+        registry._SHADOWED_BUILT_INS.clear()
+        registry._SHADOWED_BUILT_INS.update(shadowed)
+        registry._WITHDRAWN_PROVIDER_IDS.clear()
+        registry._WITHDRAWN_PROVIDER_IDS.update(withdrawn)
+        registry._REGISTRATION_INCOMPLETE.clear()
 
 
 def _movie():
@@ -1063,6 +1066,7 @@ def test_a_long_lived_pool_rebuilds_the_built_in_that_took_its_id_back_without_t
     from provider_hub import detach, service
 
     built_in, plugin = _plugin_over_built_in(world, monkeypatch)
+    monkeypatch.setattr("app.get_providers.get_providers_auth", lambda: {BUILT_IN: {}})
     # The pool is long lived: it was built with the plugin's configuration under the id, and keeps merging into it.
     pool = world.pool(BUILT_IN)
     pool.provider_configs[BUILT_IN] = {"request_delay_ms": 5}
@@ -1084,6 +1088,7 @@ def test_a_long_lived_pool_that_gets_no_settings_for_the_built_in_builds_it_with
     from provider_hub import detach, service
 
     built_in, _ = _plugin_over_built_in(world, monkeypatch)
+    monkeypatch.setattr("app.get_providers.get_providers_auth", lambda: {})
     pool = world.pool(BUILT_IN)
     pool.provider_configs[BUILT_IN] = {"request_delay_ms": 5, "api_key": "k"}
     pool[BUILT_IN]
@@ -1202,15 +1207,205 @@ def test_a_refresh_that_cannot_run_the_live_stop_asks_for_the_restart(revoked, m
     assert "Restart Bazarr+ to stop it" in row["revoked_reason"]
 
 
-def test_the_pools_of_every_kind_forget_the_configuration_of_a_provider_that_left(world):
-    from provider_hub.registry import forget_pool_configs
+def test_the_pools_of_every_kind_forget_the_configuration_of_a_provider_that_left(world, monkeypatch):
+    from provider_hub.registry import release_provider_id
     from subliminal_patch.core import SZAsyncProviderPool
 
     world.run()
+    monkeypatch.setattr("app.get_providers.get_providers_auth", lambda: {})
     plain = world.pool()
     plain.provider_configs[PLUGIN] = {"request_delay_ms": 5}
     asynchronous = SZAsyncProviderPool(providers=[PLUGIN], provider_configs={PLUGIN: {"request_delay_ms": 5}})
 
-    assert forget_pool_configs(PLUGIN) >= 2
+    assert release_provider_id(PLUGIN) >= 2
 
-    assert PLUGIN not in plain.provider_configs and PLUGIN not in asynchronous.provider_configs
+    assert plain.provider_configs.get(PLUGIN, {}) == {} and asynchronous.provider_configs.get(PLUGIN, {}) == {}
+
+
+# ---- the built-in that takes its id back ------------------------------------------------------------------------
+
+
+def _credentialed_built_in(name):
+    """A built-in that refuses to be built without its credential, as most credentialed built-ins do."""
+    built_in = _built_in_class(name)
+
+    def init(self, password=None):
+        if not password:
+            raise ValueError("no password")
+        self.password = password
+
+    built_in.__init__ = init
+    return built_in
+
+
+def test_a_built_in_that_takes_its_id_back_is_built_with_its_own_saved_settings_at_once(world, monkeypatch):
+    """Nothing waits for the next settings read: a call that reaches the id right after the detach finds the built-in's
+    settings in the pool, not an empty configuration that the built-in refuses."""
+    from provider_hub import detach, service
+    from provider_hub.registry import HubProxyProvider
+    from provider_hub.state import active_installations
+    from subzero.language import Language
+
+    built_in = _credentialed_built_in(BUILT_IN)
+    world.registry.register(BUILT_IN, built_in)
+    world.install(BUILT_IN, config={"request_delay_ms": 5})
+
+    class Plugin(HubProxyProvider):
+        provider_name = BUILT_IN
+        languages = {Language("eng")}
+
+    from provider_hub import registry
+
+    monkeypatch.setattr(registry, "_make_provider_class", lambda manifest, installation=None: Plugin)
+    registry.register_active_provider_classes(active_installations())
+    monkeypatch.setattr("app.get_providers.get_providers_auth", lambda: {BUILT_IN: {"password": "secret"}})
+    pool = world.pool(BUILT_IN)
+    pool.provider_configs[BUILT_IN] = {"request_delay_ms": 5}
+    assert type(pool[BUILT_IN]) is Plugin
+
+    service.remove_installation(BUILT_IN)
+    assert detach.wait_idle(WAIT)
+
+    # No update ran: the built-in is built from what the pool was handed at the detach.
+    rebuilt = pool[BUILT_IN]
+    assert type(rebuilt) is built_in and rebuilt.password == "secret"
+
+
+def test_a_built_in_that_takes_its_id_back_inherits_no_throttle_or_discard_the_plugin_earned(world, monkeypatch):
+    import datetime as dt
+
+    from app import get_providers
+    from provider_hub import detach, service
+    from subliminal_patch.provider_health import get_tracker
+
+    _plugin_over_built_in(world, monkeypatch)
+    pool = world.pool(BUILT_IN)
+    pool.discarded_providers.add(BUILT_IN)
+    get_providers.tp[BUILT_IN] = ("ConfigurationError", dt.datetime.now() + dt.timedelta(hours=12), "12 hours")
+    tracker = get_tracker()
+    for _ in range(10):
+        tracker.record(BUILT_IN, "exception")
+    assert tracker.is_discarded(BUILT_IN)
+
+    try:
+        service.remove_installation(BUILT_IN)
+        assert detach.wait_idle(WAIT)
+
+        assert BUILT_IN not in get_providers.tp and not get_providers.provider_is_throttled(BUILT_IN)
+        assert not tracker.is_discarded(BUILT_IN) and BUILT_IN not in pool.discarded_providers
+    finally:
+        get_providers.tp.pop(BUILT_IN, None)
+        tracker.forget(BUILT_IN)
+
+
+def test_a_snapshot_of_the_settings_read_before_the_detach_is_not_merged_back_after_it(world, monkeypatch):
+    from provider_hub import detach, service
+    from subliminal_patch import core
+
+    _plugin_over_built_in(world, monkeypatch)
+    pool = world.pool(BUILT_IN)
+    pool.provider_configs[BUILT_IN] = {"request_delay_ms": 5}
+    # A search read the settings (with the plugin's keys) just before the detach, and updates the pool just after.
+    stale = core.ConfigSnapshot({BUILT_IN: {"request_delay_ms": 5}})
+    stale.generations = core.snapshot_provider_generations()
+
+    service.remove_installation(BUILT_IN)
+    assert detach.wait_idle(WAIT)
+    pool.update([BUILT_IN], stale, [], {})
+    # A pool built from the same snapshot at that moment gets nothing of it either.
+    late = core.SZProviderPool(providers=[BUILT_IN], provider_configs=stale)
+
+    assert "request_delay_ms" not in pool.provider_configs.get(BUILT_IN, {})
+    assert "request_delay_ms" not in late.provider_configs.get(BUILT_IN, {})
+
+
+def test_a_removal_of_a_plugin_that_never_held_the_id_leaves_the_built_ins_pool_settings_alone(world):
+    from provider_hub import detach, service
+
+    built_in = _built_in_class(BUILT_IN)
+    world.registry.register(BUILT_IN, built_in)  # the plugin's registration was refused: the built-in serves the id
+    world.install(BUILT_IN)
+    pool = world.pool(BUILT_IN)
+    pool.provider_configs[BUILT_IN] = {"password": "own"}
+
+    service.remove_installation(BUILT_IN)
+
+    assert detach.wait_idle(WAIT)
+    assert pool.provider_configs[BUILT_IN] == {"password": "own"}
+
+
+def test_a_double_failure_leaves_the_release_marked_for_a_retry_and_asks_for_the_restart(revoked, monkeypatch):
+    from provider_hub import detach, registry, service
+
+    revoked.install()
+    revoked.run()
+    pool = revoked.pool()
+    _search(pool)
+    _mark_revoked(revoked)
+    real_ask = service._ask_restart_to_stop
+    state = {"fail": True}
+
+    def refuse(plugin_id, grace=None):
+        raise registry.RetirementIncomplete("a pool would not let go")
+
+    def ask(plugin_ids):
+        if state["fail"]:
+            raise RuntimeError("the write failed")
+        return real_ask(plugin_ids)
+
+    monkeypatch.setattr(registry, "retire_provider_instances", refuse)
+    monkeypatch.setattr(service, "_ask_restart_to_stop", ask)
+    with pytest.raises(RuntimeError):
+        service.enforce_revocations_live()
+    # The holds committed and the stop failed, and so did the note of it: the row is marked, not left as stopped.
+    assert revoked.row()["detach_pending"] is True
+
+    state["fail"] = False
+    assert service.ask_restart_for_unstopped() == [PLUGIN]
+    row = revoked.row()
+    assert row["pending_restart"] is True and row["detach_failed"] is True
+    assert "Restart Bazarr+ to stop it" in row["revoked_reason"]
+
+
+def test_a_release_still_marked_for_a_stop_is_tried_again_by_the_next_refresh(revoked, monkeypatch):
+    from provider_hub import detach, registry, service
+
+    revoked.install()
+    revoked.run()
+    pool = revoked.pool()
+    _search(pool)
+    _mark_revoked(revoked)
+    real = registry.retire_provider_instances
+    monkeypatch.setattr(registry, "retire_provider_instances",
+                        lambda plugin_id, grace=None: (_ for _ in ()).throw(registry.RetirementIncomplete("no")))
+    service.enforce_revocations_live()
+    monkeypatch.setattr(registry, "retire_provider_instances", real)
+
+    _mark_revoked(revoked)
+    assert service.enforce_revocations_live() == [PLUGIN]
+
+    assert detach.wait_idle(WAIT)
+    row = revoked.row()
+    assert "detach_pending" not in row and "detach_failed" not in row and row["pending_restart"] is False
+
+
+def test_a_revocation_lifted_after_a_failed_stop_keeps_the_restart_cue(revoked, monkeypatch):
+    from provider_hub import registry, revocation, service
+
+    revoked.install()
+    revoked.run()
+    pool = revoked.pool()
+    _search(pool)
+    _mark_revoked(revoked)
+    monkeypatch.setattr(registry, "retire_provider_instances",
+                        lambda plugin_id, grace=None: (_ for _ in ()).throw(registry.RetirementIncomplete("no")))
+    service.enforce_revocations_live()
+    assert revoked.row()["pending_restart"] is True
+
+    # The catalog lifts the revocation: the refresh marks the row again and the live pass runs.
+    monkeypatch.setattr("provider_hub.service._revocations", lambda state: revocation.parse([]))
+    _mark_revoked(revoked)
+    service.enforce_revocations_live()
+
+    row = revoked.row()
+    assert row["pending_restart"] is True and "blocked" not in row

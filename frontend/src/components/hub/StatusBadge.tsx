@@ -87,17 +87,6 @@ export const ProviderStatusBadge: FunctionComponent<{
       />
     );
   }
-  if (needsRepair && !pendingRestart) {
-    return (
-      <StatusBadge
-        tone="danger"
-        label="Needs repair"
-        icon={meta.icon}
-        variant="dot"
-        tooltip="This plugin's Python environment is missing or broken. Use Repair to rebuild it."
-      />
-    );
-  }
   if (state === "removed" && !pendingRestart) {
     // Removed while Bazarr+ runs: the row stays until the calls the plugin already took are done.
     return (
@@ -107,6 +96,17 @@ export const ProviderStatusBadge: FunctionComponent<{
         icon={meta.icon}
         variant="dot"
         tooltip="This plugin is being removed. It goes when the calls it is running end, or after a few minutes."
+      />
+    );
+  }
+  if (needsRepair && !pendingRestart) {
+    return (
+      <StatusBadge
+        tone="danger"
+        label="Needs repair"
+        icon={meta.icon}
+        variant="dot"
+        tooltip="This plugin's Python environment is missing or broken. Use Repair to rebuild it."
       />
     );
   }

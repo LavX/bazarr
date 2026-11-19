@@ -266,12 +266,31 @@ def _nested_update(item, to_update):
     return item
 
 
+class ConfigSnapshot(dict):
+    """The configuration of every provider as it was read, stamped with the provider generations of that moment.
+
+    A pool that is handed one skips the entries of a provider whose id was taken over by another class since (a plugin
+    detached while Bazarr+ runs gives its id back to a built-in): they are the old class's settings, read before the
+    change and merged after it.
+    """
+
+    generations = {}
+
+
 class _ProviderConfigs(dict):
     def __init__(self, pool, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self._pool = pool
 
     def update(self, items):
+        stamp = getattr(items, 'generations', None)
+        if stamp is not None:
+            current = snapshot_provider_generations()
+            stale = {key for key in items if stamp.get(key, 0) != current.get(key, 0)
+                     and provider_registry[key] is not None and not getattr(provider_registry[key], 'hub_proxy', False)}
+            if stale:
+                logger.debug('Not merging settings read before %s changed hands', sorted(stale))
+                items = {key: value for key, value in items.items() if key not in stale}
         updated = set()
         # Restart providers with new configs
         for key, val in items.items():
@@ -611,6 +630,11 @@ def provider_generation(name):
         return _PROVIDER_GENERATIONS.get(name, 0)
 
 
+def snapshot_provider_generations():
+    with _PROVIDER_GENERATIONS_LOCK:
+        return dict(_PROVIDER_GENERATIONS)
+
+
 def bump_provider_generation(name):
     with _PROVIDER_GENERATIONS_LOCK:
         _PROVIDER_GENERATIONS[name] = _PROVIDER_GENERATIONS.get(name, 0) + 1
@@ -929,15 +953,19 @@ class SZProviderPool(ProviderPool):
             logger.error('Throttle announce failed for provider %r while naming the %s it recorded',
                          name, type(error).__name__)
 
-    def forget_provider_config(self, name):
-        """Drop what this pool holds as the configuration of a provider.
+    def forget_provider_config(self, name, config=None):
+        """Replace what this pool holds as the configuration of a provider with ``config`` (nothing, by default).
 
         The configs are merged into, never replaced, so a provider whose id was taken over by another class (a
         plugin detached while Bazarr+ runs gives its id back to the built-in it replaced) would otherwise keep the
-        keys of the class that left. The next ``update`` brings the settings the new class is given, and nothing else.
+        keys of the class that left. With ``config`` the new class is built from its own settings at once, without
+        waiting for the next ``update``. A discard this pool recorded for the id is lifted: it was the old class's.
         """
         with self._store_lock:
             self.provider_configs.pop(name, None)
+            if config is not None:
+                dict.__setitem__(self.provider_configs, name, dict(config))
+            self.discarded_providers.discard(name)
 
     def retire_provider(self, name):
         """Terminate an initialized provider without throttling its name.
