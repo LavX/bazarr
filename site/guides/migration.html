@@ -145,7 +145,7 @@ fi</code></pre>
 
       <h2 id="container-swap-process">Container swap process</h2>
       <p>Bazarr is still stopped from the backup step. The actual swap is just changing the Docker image name in your compose file.</p>
-      <p>Bazarr+ starts as root and drops to <code>PUID</code> and <code>PGID</code> itself. Do not set <code>user:</code> on the service: put your ids in <code>PUID</code> and <code>PGID</code> instead.</p>
+      <p>Bazarr+ starts as root and drops to <code>PUID</code> and <code>PGID</code> itself. Do not set <code>user:</code> on the service: put your ids in <code>PUID</code> and <code>PGID</code> instead. If you must run non-root, <code>PUID</code> and <code>PGID</code> are ignored and <code>/config</code> has to be writable by that user already.</p>
 
       <ol class="steps">
         <li>
