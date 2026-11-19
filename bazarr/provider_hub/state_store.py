@@ -482,6 +482,23 @@ def write_transaction(bind):
             yield connection
 
 
+@contextmanager
+def read_transaction(bind):
+    """One read transaction on its own connection, so everything read in it is the same committed state.
+
+    PostgreSQL takes REPEATABLE READ, which fixes the snapshot at the first statement. SQLite begins a deferred
+    transaction by hand (the legacy driver does not), and in WAL mode the first read fixes the snapshot there.
+    """
+    hide_parameters(bind)
+    sqlite = bind.dialect.name == "sqlite"
+    level = "SERIALIZABLE" if sqlite else "REPEATABLE READ"
+    with bind.connect().execution_options(isolation_level=level) as connection:
+        with connection.begin():
+            if sqlite:
+                connection.exec_driver_sql("BEGIN")
+            yield connection
+
+
 _DRIVER_MODULES = frozenset({"sqlite3", "_sqlite3", "psycopg2", "psycopg", "_psycopg", "psycopg_pool"})
 
 
@@ -586,29 +603,23 @@ def read_document(bind=None) -> tuple[int, str]:
 
 
 def read_state(bind=None) -> tuple[int, str, list[dict[str, Any]]]:
-    """The stored revision, the document text and the active and staged releases, as one consistent read.
+    """The stored revision, the document text and the releases (the manifests of the active and staged ones), as
+    one consistent read.
 
-    The document and the release tables are written in one transaction and every
-    such write bumps the revision, so a revision that is the same before and
-    after the release read means nothing was committed in between.
+    The document and the release tables are written in one transaction, so a reader that reads both in one
+    snapshot never gets the document of one revision with the releases of another.
     """
     bind = bind if bind is not None else engine()
     ensure_ready(bind)
 
     def fetch():
-        with bind.connect() as connection:
-            for _attempt in range(4):
-                first = connection.execute(
-                    sa.select(_state_table.c.revision, _state_table.c.document)
-                    .where(_state_table.c.id == ROW_ID)).first()
-                if first is None:
-                    return None
-                rows = releases.read_rows(connection, states=releases.SLOT_STATES)
-                again = connection.execute(
-                    sa.select(_state_table.c.revision).where(_state_table.c.id == ROW_ID)).first()
-                if again is not None and again[0] == first[0]:
-                    return first[0], first[1], rows
-            return first[0], first[1], rows
+        with read_transaction(bind) as connection:
+            first = connection.execute(
+                sa.select(_state_table.c.revision, _state_table.c.document)
+                .where(_state_table.c.id == ROW_ID)).first()
+            if first is None:
+                return None
+            return first[0], first[1], releases.read_rows(connection)
 
     found = _sanitized(fetch)
     if found is None:
@@ -722,41 +733,58 @@ def update_document(step: Callable[[str], tuple], bind=None, *,
 def change_releases(change: Callable[[Any], Any], bind=None) -> Any:
     """Run ``change(connection)`` on the release tables in a write transaction that also bumps the revision.
 
-    For a release moving between states with no change to the document (a
-    drained release retiring): the bump makes a concurrent document write
-    recompute its release changes from the new tables instead of overwriting
-    them. Returns what ``change`` returns. A lost revision race runs it once more.
+    For a release moving between states with no change to the document (a drained release retiring): the bump
+    makes a concurrent document write recompute its release changes from the new tables instead of overwriting
+    them. It runs under the state lock, so a write of this process does not use up its one retry on it.
+    Returns what ``change`` returns. A lost revision race runs it once more.
     """
+    from .state import state_write_lock
+
     bind = bind if bind is not None else engine()
     ensure_ready(bind)
-    for _attempt in (1, 2):
-        revision, text = read_document(bind)
-        outcome = []
+    with state_write_lock():
+        for _attempt in (1, 2):
+            revision, text = read_document(bind)
+            outcome = []
 
-        def commit():
-            with write_transaction(bind) as connection:
-                _commit_document(connection, revision, text)
-                outcome[:] = [change(connection)]
+            def commit():
+                with write_transaction(bind) as connection:
+                    _commit_document(connection, revision, text)
+                    outcome[:] = [change(connection)]
 
-        try:
-            _sanitized(commit)
-        except _StaleRevision:
-            continue
-        return outcome[0]
+            try:
+                _sanitized(commit)
+            except _StaleRevision:
+                continue
+            return outcome[0]
     raise StateConflictError("the Plugin Hub state kept changing under a write; nothing was saved")
 
 
+# The states a release can be moved to outside a document write. A release in a slot is changed through the
+# document, which is what the callers read and what state.json copies.
+_MOVABLE_TO = (releases.DRAINING, releases.RETIRED, releases.FAILED)
+
+
 def transition_release(release_id: int, target: str, *, error: str | None = None, bind=None) -> bool:
-    """Move one release to another state, if the model allows it. Returns whether anything changed."""
+    """Move one release to another state, if the model allows it. Returns whether anything changed.
+
+    Only ``draining``, ``retired`` and ``failed`` can be asked for here: making a release active or staged
+    changes the installation row, so it goes through ``mutate_state``.
+    """
+    if target not in _MOVABLE_TO:
+        raise releases.ReleaseTransitionError(f"a release cannot be made {target} outside a write of the state")
     return change_releases(lambda connection: releases.set_state(connection, release_id, target, error=error), bind)
 
 
 def retire_draining(bind=None) -> int:
     """End the draining state of every release: nothing in a fresh process is still serving a call.
 
-    The boot runs this, since a release left draining by the last run has no
-    worker. Returns how many moved to retired.
+    The boot runs this, since a release left draining by the last run has no worker. Returns how many moved to
+    retired. It writes nothing when no release is draining.
     """
+    if not list_releases(states=(releases.DRAINING,), bind=bind):
+        return 0
+
     def retire(connection):
         moved = 0
         for row in releases.read_rows(connection, states=(releases.DRAINING,), manifests=()):

@@ -14,7 +14,7 @@ from alembic.operations import Operations
 
 import provider_hub_state_engines as engines
 from provider_hub_state_engines import raw_row
-from test_provider_hub_releases import _rich_rows
+from test_provider_hub_releases import _rich_rows, _row
 
 hub_engine = engines.hub_engine
 hub_store = engines.hub_store
@@ -58,6 +58,10 @@ def _before_the_release_tables(hub_store, hub_engine, document):
 
 def _full_document():
     installations = {key: value for key, value in _rich_rows().items()}
+    # Activation writes an empty map of bindings, and a row can carry a null manifest: both read back as written.
+    installations["iota"] = _row("iota", active="1.0.0", supplied_by={}, source_id="community", origin="local")
+    installations["kappa"] = _row("kappa", active="1.0.0")
+    installations["kappa"]["manifest"] = None
     return {"installations": installations, "jobs": [{"id": "j"}], "plugin_secret_paths": ["alpha.api_key"],
             "kept_data": {}, "catalog_sources": {}, "catalog_entries": {}, "plugin_envs": {}}
 
@@ -120,15 +124,24 @@ def test_the_upgrade_makes_the_releases_the_store_would_have_made(hub_store, hub
     expected = releases.split(copy.deepcopy(original), [])[1]
     wanted = sorted(
         (values["plugin_id"], values["version"], values["state"], values["bundle_path"], values["python_path"],
-         values["manifest"], values["bundle_digest"], values.get("activated_at"), sorted(bindings.items()))
+         values["manifest"], values["bundle_digest"], values.get("activated_at"), sorted(bindings.items()),
+         values["fields"], values["source_id"], values["origin"])
         for values, bindings in expected.inserts)
     found = sorted(
         (item.plugin_id, item.version, item.state, item.bundle_path, item.python_path,
          json.dumps(item.manifest, sort_keys=True) if item.manifest is not None else None, item.bundle_digest,
-         item.activated_at if item.state == "active" else None, sorted(item.supplied_by.items()))
+         item.activated_at if item.state == "active" else None, sorted(item.supplied_by.items()),
+         _fields_of(hub_engine, item.id), item.source_id, item.origin)
         for item in state_store.list_releases(bind=hub_engine))
     assert found == wanted
-    assert len(found) == 7
+    assert len(found) == 9
+    assert {(item[0], item[-2], item[-1]) for item in found if item[0] == "iota"} == {("iota", "community", "local")}
+
+
+def _fields_of(engine, release_id):
+    with engine.connect() as connection:
+        return connection.execute(sa.text("SELECT fields FROM provider_hub_releases WHERE id = :id"),
+                                  {"id": release_id}).scalar()
 
 
 def test_a_second_upgrade_changes_nothing(hub_store, hub_engine):

@@ -984,9 +984,13 @@ class TableProviderHubRelease(Base):
     env_key = mapped_column(Text)
     manifest = mapped_column(Text)
     error = mapped_column(Text)
+    source_id = mapped_column(Text)
+    origin = mapped_column(Text)
     created_at = mapped_column(Text, nullable=False)
     activated_at = mapped_column(Text)
     retired_at = mapped_column(Text)
+    ended_seq = mapped_column(Integer)
+    fields = mapped_column(Text)
 
 
 class TableProviderHubReleaseBinding(Base):

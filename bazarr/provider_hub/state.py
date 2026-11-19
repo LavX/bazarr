@@ -489,10 +489,12 @@ def _clear_marks(data: dict[str, Any]) -> None:
         for installation in installations.values():
             if isinstance(installation, dict):
                 installation.pop(releases.DRAIN_PREVIOUS, None)
+                installation.pop(releases.FAIL_STAGED, None)
 
 
 def _database_step(compute: Callable[[], dict[str, Any]], mutate: Callable[[dict[str, Any]], Any] | None,
-                   written: list[dict[str, Any]], *, whole: bool = False) -> tuple[str, Any, Any]:
+                   written: list[dict[str, Any]], *, whole: bool = False,
+                   recovered: list[Any] | None = None) -> tuple[str, Any, Any]:
     """The step of one database write: the dict the callers see, changed by ``mutate``, stored as document and releases.
 
     ``compute`` builds that dict from the stored text (it may raise); the stored
@@ -500,18 +502,20 @@ def _database_step(compute: Callable[[], dict[str, Any]], mutate: Callable[[dict
     is stored is the document with the release fields taken out of the rows, and
     the release rows that go with it; ``written`` gets the whole dict for the
     state.json copy. ``whole`` says ``compute`` already returns the whole dict
-    (a caller saving the state it holds), which is not overlaid with what is stored.
+    (a caller saving the state it holds), which is not overlaid with what is stored. ``recovered`` is
+    non-empty once ``compute`` has started from an empty inventory because the stored document was damaged: the
+    releases of the plugins it lost are then left alone.
     """
     from . import state_store
     data = compute()
     rows = state_store.read_release_rows()
     if not whole:
-        releases.compose(data, [row for row in rows if row["state"] in releases.SLOT_STATES])
+        data = releases.compose(data, rows)
     result = None
     if mutate is not None:
         with _editing("database", data):
             result = mutate(data)
-    stored, plan = releases.split(data, rows)
+    stored, plan = releases.split(data, rows, keep_orphans=bool(recovered))
     written.append(data)
     return json.dumps(stored, sort_keys=True), result, state_store.StepExtra(plan, data)
 
@@ -591,7 +595,18 @@ def mutate_state(
             raise StateNotReadyError("the Provider Hub state is read-only until the database is open")
 
         def step(text: str) -> tuple[str, Any, Any]:
-            return _database_step(lambda: _document_for_mutation(text, recover_corrupt), mutator, written)
+            recovered: list[Any] = []
+
+            def compute() -> dict[str, Any]:
+                try:
+                    return _normalized_state(_stored_document(text))
+                except StateCorruptError:
+                    if not recover_corrupt:
+                        raise
+                    recovered.append(True)
+                    return default_state()
+
+            return _database_step(compute, mutator, written, recovered=recovered)
 
         written: list[dict[str, Any]] = []
         return _commit_to_database(step, written, retry_on_conflict)

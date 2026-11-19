@@ -34,6 +34,8 @@ _BINDINGS = "provider_hub_release_bindings"
 # exactly these fields.
 _ACTIVE = ("active_version", "active_path", "python_path", "manifest", "supplied_by", "activated_at")
 _STAGED = ("staged_version", "staged_path", "staged_python_path", "staged_manifest", "staged_supplied_by")
+# What each key after the version is, in order. ``fields`` records which of them the row carried.
+_NAMES = ("path", "python_path", "manifest", "supplied_by", "activated_at")
 
 
 def _guard(bind):
@@ -66,9 +68,13 @@ def _create_tables(bind):
             sa.Column("env_key", sa.Text()),
             sa.Column("manifest", sa.Text()),
             sa.Column("error", sa.Text()),
+            sa.Column("source_id", sa.Text()),
+            sa.Column("origin", sa.Text()),
             sa.Column("created_at", sa.Text(), nullable=False),
             sa.Column("activated_at", sa.Text()),
             sa.Column("retired_at", sa.Text()),
+            sa.Column("ended_seq", sa.Integer()),
+            sa.Column("fields", sa.Text()),
             sa.CheckConstraint("state IN ('staged', 'active', 'draining', 'retired', 'failed')",
                                name="ck_provider_hub_releases_state"),
         )
@@ -104,7 +110,9 @@ def _slot(row, keys, with_activation):
             and (manifest is None or isinstance(manifest, dict)) and bindings_ok):
         return None
     digest = manifest.get("bundle_sha256") if isinstance(manifest, dict) else None
+    names = _NAMES if with_activation else _NAMES[:4]
     return {
+        "present": [name for name, key in zip(names, keys[1:]) if key in row],
         "version": version, "bundle_path": path, "python_path": python,
         "manifest": None if manifest is None else json.dumps(manifest, sort_keys=True),
         "bundle_digest": digest if isinstance(digest, str) and digest else None,
@@ -124,7 +132,8 @@ def move_state_into_releases(bind):
         _RELEASES, sa.MetaData(), sa.Column("id", sa.Integer, primary_key=True),
         *(sa.Column(name, sa.Text) for name in (
             "plugin_id", "version", "state", "bundle_path", "python_path", "bundle_digest", "env_key", "manifest",
-            "error", "created_at", "activated_at", "retired_at")))
+            "error", "source_id", "origin", "created_at", "activated_at", "retired_at", "fields")),
+        sa.Column("ended_seq", sa.Integer))
     bindings = sa.table(_BINDINGS, sa.column("release_id"), sa.column("capability"), sa.column("supplier_id"))
     _guard(bind)
     found = bind.execute(sa.select(state.c.revision, state.c.document).where(state.c.id == 1)).first()
@@ -152,7 +161,10 @@ def move_state_into_releases(bind):
                 plugin_id=plugin_id, version=slot["version"], state=slot_state, bundle_path=slot["bundle_path"],
                 python_path=slot["python_path"], bundle_digest=slot["bundle_digest"], env_key=None,
                 manifest=slot["manifest"], error=None, created_at=stamp,
-                activated_at=slot["activated_at"] if slot_state == "active" else None, retired_at=None))
+                source_id=row.get("source_id") if isinstance(row.get("source_id"), str) else None,
+                origin=row.get("origin") if isinstance(row.get("origin"), str) else None,
+                activated_at=slot["activated_at"] if slot_state == "active" else None, retired_at=None,
+                ended_seq=None, fields=json.dumps(slot["present"])))
             release_id = result.inserted_primary_key[0]
             if slot["supplied_by"]:
                 bind.execute(sa.insert(bindings), [
@@ -180,7 +192,7 @@ def put_releases_back(bind):
     state = sa.table(_STATE, sa.column("id", sa.Integer), sa.column("revision", sa.Integer),
                      sa.column("document", sa.Text), sa.column("updated_at", sa.DateTime))
     releases = sa.table(_RELEASES, *(sa.column(name) for name in (
-        "id", "plugin_id", "version", "state", "bundle_path", "python_path", "manifest", "activated_at")))
+        "id", "plugin_id", "version", "state", "bundle_path", "python_path", "manifest", "activated_at", "fields")))
     bindings = sa.table(_BINDINGS, sa.column("release_id"), sa.column("capability"), sa.column("supplier_id"))
     _guard(bind)
     found = bind.execute(sa.select(state.c.revision, state.c.document).where(state.c.id == 1)).first()
@@ -202,27 +214,30 @@ def put_releases_back(bind):
         row = installations.get(release.plugin_id)
         if not isinstance(row, dict):
             continue
-        manifest = json.loads(release.manifest) if release.manifest else None
-        if release.state == "active":
-            row.update(active_version=release.version, active_path=release.bundle_path,
-                       python_path=release.python_path, activated_at=release.activated_at)
-            if manifest is not None:
-                row["manifest"] = manifest
-            if supplied.get(release.id):
-                row["supplied_by"] = supplied[release.id]
-        else:
-            row.update(staged_version=release.version, staged_path=release.bundle_path,
-                       staged_python_path=release.python_path)
-            if manifest is not None:
-                row["staged_manifest"] = manifest
-            if supplied.get(release.id):
-                row["staged_supplied_by"] = supplied[release.id]
+        active = release.state == "active"
+        keys = _ACTIVE if active else _STAGED
+        names = _NAMES if active else _NAMES[:4]
+        present = set(json.loads(release.fields)) if release.fields else set(names)
+        values = {
+            "path": release.bundle_path, "python_path": release.python_path,
+            "manifest": json.loads(release.manifest) if release.manifest else None,
+            "supplied_by": supplied.get(release.id, {}), "activated_at": release.activated_at,
+        }
+        row[keys[0]] = release.version
+        for name, key in zip(names, keys[1:]):
+            if name in present:
+                row[key] = values[name]
+            else:
+                row.pop(key, None)
         changed = True
     if changed:
-        bind.execute(
+        done = bind.execute(
             sa.update(state).where(state.c.id == 1, state.c.revision == found.revision)
             .values(document=json.dumps(document, sort_keys=True), revision=found.revision + 1,
                     updated_at=datetime.now()))
+        if done.rowcount != 1:
+            # The tables are dropped next: nothing may go if the fields did not get back into the document.
+            raise RuntimeError("the Plugin Hub state changed while its releases were being put back; run the downgrade again")
 
 
 def upgrade():

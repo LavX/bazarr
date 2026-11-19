@@ -19,6 +19,32 @@ hub_engine = engines.hub_engine
 hub_store = engines.hub_store
 
 
+# Where the files of the rows below live. The tests that touch the disk point this at a folder of their own.
+_HUB = {"root": None}
+
+
+def _bundle(plugin_id, version):
+    path = f"{_HUB['root'] or '/hub'}/bundles/{plugin_id}/{version}"
+    if _HUB["root"]:
+        Path(path).mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _python(plugin_id, version=None):
+    path = f"{_HUB['root'] or '/hub'}/envs/{plugin_id}/{version or 'shared'}/bin/python"
+    if _HUB["root"]:
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
+        Path(path).write_text("", encoding="utf-8")
+    return path
+
+
+@pytest.fixture(autouse=True)
+def _files_under_tmp(tmp_path):
+    _HUB["root"] = str(tmp_path / "provider_hub")
+    yield
+    _HUB["root"] = None
+
+
 def _release_manifest(provider_id, version):
     return _manifest(provider_id=provider_id, version=version)
 
@@ -35,15 +61,15 @@ def _row(provider_id, *, active=None, staged=None, **extra):
     }
     if active:
         version, supplied = active if isinstance(active, tuple) else (active, None)
-        row.update(active_version=version, active_path=f"/hub/bundles/{provider_id}/{version}",
-                   python_path=f"/hub/envs/{provider_id}/{version}/bin/python",
+        row.update(active_version=version, active_path=_bundle(provider_id, version),
+                   python_path=_python(provider_id, version),
                    manifest=_release_manifest(provider_id, version), activated_at="2026-11-02T00:00:00Z")
         if supplied:
             row["supplied_by"] = supplied
     if staged:
         version, supplied = staged if isinstance(staged, tuple) else (staged, None)
-        row.update(staged_version=version, staged_path=f"/hub/bundles/{provider_id}/{version}",
-                   staged_python_path=f"/hub/envs/{provider_id}/{version}/bin/python",
+        row.update(staged_version=version, staged_path=_bundle(provider_id, version),
+                   staged_python_path=_python(provider_id, version),
                    staged_manifest=_release_manifest(provider_id, version), state="staged", pending_restart=True)
         if supplied:
             row["staged_supplied_by"] = supplied
@@ -152,10 +178,18 @@ def test_only_the_previous_release_is_kept(table):
     assert table.releases("alpha") == [("1.2.0", "retired"), ("1.3.0", "active")]
 
 
-def test_a_dropped_staged_release_is_kept_as_failed_when_it_left_an_error_and_forgotten_otherwise(table):
+def _failed(row, reason):
+    from provider_hub import releases
+
+    row[releases.FAIL_STAGED] = reason
+    row["last_error"] = reason
+    return row
+
+
+def test_a_staged_release_that_failed_to_activate_is_kept_as_failed_and_any_other_is_forgotten(table):
     table.write(_document(alpha=_row("alpha", active="1.0.0", staged="1.1.0")))
 
-    table.write(_document(alpha=_row("alpha", active="1.0.0", last_error="it did not start")))
+    table.write(_document(alpha=_failed(_row("alpha", active="1.0.0"), "it did not start")))
     assert table.releases("alpha") == [("1.0.0", "active"), ("1.1.0", "failed")]
 
     table.write(_document(alpha=_row("alpha", active="1.0.0", staged="1.2.0")))
@@ -163,14 +197,46 @@ def test_a_dropped_staged_release_is_kept_as_failed_when_it_left_an_error_and_fo
     assert table.releases("alpha") == [("1.0.0", "active"), ("1.1.0", "failed")]
 
 
+def test_a_healthy_staged_release_is_not_blamed_for_the_error_of_the_one_that_replaced_it(table):
+    """An error on the row is not the release's: only a release that failed to activate is recorded as failed."""
+    table.write(_document(alpha=_row("alpha", active="1.0.0", staged="1.1.0")))
+
+    table.write(_document(alpha=_row("alpha", active="1.0.0", last_error="v1.2.0 could not be installed")))
+
+    assert table.releases("alpha") == [("1.0.0", "active")]
+
+
 def test_only_the_last_failure_is_kept(table):
     table.write(_document(alpha=_row("alpha", active="1.0.0", staged="1.1.0")))
-    table.write(_document(alpha=_row("alpha", active="1.0.0", last_error="first")))
+    table.write(_document(alpha=_failed(_row("alpha", active="1.0.0"), "first")))
     table.write(_document(alpha=_row("alpha", active="1.0.0", staged="1.2.0")))
-    table.write(_document(alpha=_row("alpha", active="1.0.0", last_error="second")))
+    table.write(_document(alpha=_failed(_row("alpha", active="1.0.0"), "second")))
 
     [(version, state)] = [item for item in table.releases("alpha") if item[1] == "failed"]
     assert version == "1.2.0"
+
+
+def test_the_previous_release_that_fails_to_come_back_stays_the_previous_release(table):
+    table.write(_document(alpha=_row("alpha", active="1.0.0", staged="2.0.0")))
+    table.write(_document(alpha=_row("alpha", active="2.0.0")))
+    table.write(_document(alpha=_row("alpha", active="2.0.0", staged="1.0.0")))
+
+    table.write(_document(alpha=_failed(_row("alpha", active="2.0.0"), "it did not start")))
+
+    assert table.releases("alpha") == [("1.0.0", "retired"), ("2.0.0", "active")]
+
+
+def test_the_empty_bindings_and_the_empty_manifest_of_a_row_come_back_as_they_were(table):
+    row = _row("alpha", active="1.0.0", staged="1.1.0", supplied_by={}, staged_supplied_by={})
+    row["manifest"] = None
+    absent = _row("beta", active="1.0.0")
+    document = _document(alpha=row, beta=absent)
+
+    stored = table.write(document)
+
+    assert table.read(stored)["installations"] == document["installations"]
+    assert "supplied_by" not in table.read(stored)["installations"]["beta"]
+    assert table.read(stored)["installations"]["alpha"]["supplied_by"] == {}
 
 
 def test_a_release_replaced_while_it_serves_calls_drains_and_the_mark_is_consumed(table):
@@ -263,7 +329,7 @@ def test_a_state_the_model_does_not_know_cannot_be_stored(table):
 @pytest.mark.parametrize("current, target, allowed", [
     ("staged", "active", True), ("staged", "failed", True), ("active", "draining", True),
     ("active", "retired", True), ("draining", "retired", True), ("retired", "active", True),
-    ("failed", "active", False), ("retired", "draining", False), ("staged", "retired", False),
+    ("failed", "active", False), ("retired", "draining", False), ("staged", "draining", False),
 ])
 def test_the_model_says_which_moves_a_release_may_make(current, target, allowed):
     from provider_hub import releases
@@ -278,7 +344,7 @@ def test_an_explicit_move_changes_the_state_and_refuses_one_the_model_forbids(ta
     ids = table.ids("alpha")
 
     with pytest.raises(releases.ReleaseTransitionError):
-        releases.set_state(table.connection, ids["1.1.0"], releases.RETIRED)
+        releases.set_state(table.connection, ids["1.1.0"], releases.DRAINING)
     assert releases.set_state(table.connection, ids["1.0.0"], releases.DRAINING) is True
     assert releases.set_state(table.connection, ids["1.0.0"], releases.DRAINING) is False
     assert releases.set_state(table.connection, 999, releases.RETIRED) is False
@@ -558,8 +624,8 @@ def test_a_kind_that_attaches_on_restart_is_not_activated_while_running(staged):
 def _service_row(version, **extra):
     manifest = service_manifest("exampleservice", version)
     row = _row("exampleservice", state="staged", pending_restart=True, kind=SERVICE_KIND, staged_version=version,
-               staged_path="/hub/bundles/exampleservice/" + version,
-               staged_python_path="/hub/envs/exampleservice/bin/python", staged_manifest=manifest, manifest=manifest)
+               staged_path=_bundle("exampleservice", version),
+               staged_python_path=_python("exampleservice"), staged_manifest=manifest, manifest=manifest)
     row.update(extra)
     return row
 
@@ -573,8 +639,8 @@ def test_a_kind_that_attaches_live_is_activated_now_and_the_release_it_replaces_
     monkeypatch.setattr("provider_hub.service.validated_interpreter", lambda root, path: Path(path))
     old = service_manifest("exampleservice", "1.0.0")
     _seed(exampleservice=_service_row(
-        "1.1.0", active_version="1.0.0", active_path="/hub/bundles/exampleservice/1.0.0",
-        python_path="/hub/envs/exampleservice/bin/python", manifest=old))
+        "1.1.0", active_version="1.0.0", active_path=_bundle("exampleservice", "1.0.0"),
+        python_path=_python("exampleservice"), manifest=old))
 
     result = activate_release("exampleservice")
 
@@ -596,8 +662,8 @@ def test_a_boot_finds_no_release_still_draining(hub, service_kind, monkeypatch):
     monkeypatch.setattr("provider_hub.service.validated_bundle_path", lambda root, path: Path(path))
     monkeypatch.setattr("provider_hub.service.validated_interpreter", lambda root, path: Path(path))
     _seed(exampleservice=_service_row(
-        "1.1.0", active_version="1.0.0", active_path="/hub/bundles/exampleservice/1.0.0",
-        python_path="/hub/envs/exampleservice/bin/python", manifest=service_manifest("exampleservice", "1.0.0")))
+        "1.1.0", active_version="1.0.0", active_path=_bundle("exampleservice", "1.0.0"),
+        python_path=_python("exampleservice"), manifest=service_manifest("exampleservice", "1.0.0")))
     activate_release("exampleservice")
 
     activate_staged_installations()
@@ -621,7 +687,7 @@ def test_a_release_replaced_while_it_was_being_checked_is_left_to_its_replacemen
         # Someone stages another version while this one is being checked.
         def change(state):
             row = state["installations"]["alpha"]
-            row.update(staged_version="1.2.0", staged_path="/hub/bundles/alpha/1.2.0",
+            row.update(staged_version="1.2.0", staged_path=_bundle("alpha", "1.2.0"),
                        staged_manifest=_release_manifest("alpha", "1.2.0"))
 
         mutate_state(change)
@@ -659,6 +725,194 @@ def test_the_held_back_plugin_and_its_reason_survive_an_activation(staged):
 
     row = load_state()["installations"]["epsilon"]
     assert row["active_version"] == "2.0.0" and row["supplied_by"] == {"cap.one": "alpha"}
+
+
+def test_a_failure_in_the_middle_of_a_write_leaves_the_document_the_releases_and_the_bindings_as_they_were(
+        hub, monkeypatch):
+    from provider_hub import releases
+    from provider_hub.state import load_state, mutate_state
+
+    _seed(alpha=_row("alpha", active=("1.0.0", {"cap.one": "beta"}), staged=("1.1.0", {"cap.one": "beta"})))
+    before = (raw_row(hub), _releases_in(hub), _bindings_in(hub))
+    real = releases._write_bindings
+    calls = []
+
+    def fail_after_the_first(connection, release_id, bindings):
+        calls.append(release_id)
+        real(connection, release_id, bindings)
+        raise RuntimeError("the database went away")
+
+    monkeypatch.setattr(releases, "_write_bindings", fail_after_the_first)
+
+    def promote(state):
+        row = state["installations"]["alpha"]
+        row.update(active_version="1.1.0", active_path=row["staged_path"], python_path=row["staged_python_path"],
+                   manifest=row["staged_manifest"], staged_version=None, staged_path=None,
+                   staged_python_path=None, staged_manifest=None, state="active", pending_restart=False,
+                   supplied_by={"cap.two": "gamma"})
+        state["jobs"].append({"id": "promoted"})
+
+    with pytest.raises(Exception):
+        mutate_state(promote)
+
+    assert calls
+    assert (raw_row(hub), _releases_in(hub), _bindings_in(hub)) == before
+    assert load_state()["installations"]["alpha"]["staged_version"] == "1.1.0"
+
+
+def _bindings_in(engine):
+    with engine.connect() as connection:
+        return sorted(tuple(row) for row in connection.execute(sa.text(
+            "SELECT release_id, capability, supplier_id FROM provider_hub_release_bindings")))
+
+
+def test_two_activations_of_one_staged_release_make_it_active_once(staged, monkeypatch):
+    import threading
+
+    from provider_hub.service import activate_release
+    from provider_hub.state import load_state
+
+    outcomes = []
+    gate = threading.Barrier(2)
+
+    def check(manifest, bundle_path, python_path):
+        try:
+            gate.wait(timeout=5)
+        except threading.BrokenBarrierError:
+            pass
+
+    monkeypatch.setattr("provider_hub.service._smoke_validate_worker", check)
+
+    def run():
+        outcomes.append(activate_release("alpha", at_boot=True).outcome)
+
+    threads = [threading.Thread(target=run) for _ in range(2)]
+    [thread.start() for thread in threads]
+    [thread.join(timeout=30) for thread in threads]
+
+    assert sorted(outcomes) == ["activated", "skipped"]
+    row = load_state()["installations"]["alpha"]
+    assert (row["active_version"], row["staged_version"]) == ("1.1.0", None)
+    assert _releases_in(staged) == [("alpha", "1.0.0", "retired"), ("alpha", "1.1.0", "active")]
+
+
+def test_a_reader_and_a_writer_in_two_threads_never_disagree(hub):
+    import threading
+    import time
+
+    from provider_hub.state import load_state, mutate_state
+
+    _seed(alpha=_row("alpha", active="1.0.0", name="1.0.0"))
+    stop = threading.Event()
+    seen = []
+
+    def write():
+        for number in range(2, 60):
+            version = f"{number}.0.0"
+            mutate_state(lambda state: state["installations"]["alpha"].update(name=version, active_version=version))
+        stop.set()
+
+    def read():
+        deadline = time.monotonic() + 60
+        while not stop.is_set() and time.monotonic() < deadline:
+            row = load_state()["installations"]["alpha"]
+            seen.append((row["name"], row["active_version"]))
+
+    threads = [threading.Thread(target=write), threading.Thread(target=read)]
+    [thread.start() for thread in threads]
+    [thread.join(timeout=90) for thread in threads]
+
+    assert seen and all(name == version for name, version in seen)
+
+
+def test_a_document_rebuilt_after_damage_leaves_the_releases_it_lost_alone(hub):
+    from provider_hub.state import mutate_state
+
+    _seed(alpha=_row("alpha", active="1.0.0"), beta=_row("beta", active="2.0.0"))
+    with hub.begin() as connection:
+        connection.execute(sa.text("UPDATE provider_hub_state SET document = '{broken' WHERE id = 1"))
+
+    mutate_state(lambda state: state["jobs"].append({"id": "after"}), recover_corrupt=True)
+
+    assert _releases_in(hub) == [("alpha", "1.0.0", "active"), ("beta", "2.0.0", "active")]
+
+
+def test_a_release_still_draining_at_boot_is_retired_and_a_boot_with_none_writes_nothing(hub, service_kind,
+                                                                                         monkeypatch):
+    from provider_hub import state_store
+
+    _seed(alpha=_row("alpha", active="1.0.0"))
+    before = raw_row(hub)
+
+    assert state_store.retire_draining() == 0
+    assert raw_row(hub) == before
+
+
+def test_a_release_cannot_be_made_active_or_staged_outside_a_write_of_the_state(hub):
+    from provider_hub import releases, state_store
+
+    _seed(alpha=_row("alpha", active="1.0.0", staged="1.1.0"))
+    [staged_release] = [item for item in state_store.list_releases("alpha", bind=hub) if item.state == "staged"]
+
+    with pytest.raises(releases.ReleaseTransitionError):
+        state_store.transition_release(staged_release.id, "active")
+    with pytest.raises(releases.ReleaseTransitionError):
+        state_store.transition_release(staged_release.id, "staged")
+    assert state_store.transition_release(staged_release.id, "failed", error="stopped") is True
+
+
+def test_one_plugin_that_cannot_be_activated_does_not_keep_the_others_from_starting(staged, monkeypatch):
+    from provider_hub import service
+    from provider_hub.state import load_state
+
+    _seed(beta=_row("beta", active="1.0.0", staged="1.1.0"))
+    real = service.activate_release
+
+    def fail_for_alpha(provider_id, **kwargs):
+        if provider_id == "alpha":
+            raise RuntimeError("the state went away")
+        return real(provider_id, **kwargs)
+
+    monkeypatch.setattr(service, "activate_release", fail_for_alpha)
+
+    assert service.activate_staged_installations() == ["beta"]
+
+    state = load_state()["installations"]
+    assert state["beta"]["active_version"] == "1.1.0" and state["alpha"]["staged_version"] == "1.1.0"
+
+
+def test_a_rollback_to_a_release_from_another_source_is_refused(staged):
+    from provider_hub.service import ProviderHubInstallError, activate_staged_installations, rollback_release
+    from provider_hub.state import mutate_state
+
+    activate_staged_installations()
+    mutate_state(lambda state: state["installations"]["alpha"].update(source_id="community"))
+
+    with pytest.raises(ProviderHubInstallError, match="another source"):
+        rollback_release("alpha")
+
+    assert _releases_in(staged) == [("alpha", "1.0.0", "retired"), ("alpha", "1.1.0", "active")]
+
+
+def test_the_previous_release_after_a_rollback_and_an_update_is_where_the_next_rollback_goes(staged, monkeypatch):
+    from provider_hub import service
+    from provider_hub.state import mutate_state
+
+    service.activate_staged_installations()
+    service.rollback_release("alpha")
+    service.activate_staged_installations()
+
+    def stage_three(state):
+        row = state["installations"]["alpha"]
+        row.update(staged_version="1.2.0", staged_path=_bundle("alpha", "1.2.0"),
+                   staged_python_path=_python("alpha", "1.2.0"), staged_manifest=_release_manifest("alpha", "1.2.0"),
+                   state="staged", pending_restart=True)
+
+    mutate_state(stage_three)
+    service.activate_staged_installations()
+
+    assert _releases_in(staged) == [("alpha", "1.0.0", "retired"), ("alpha", "1.2.0", "active")]
+    assert service.rollback_release("alpha").version == "1.0.0"
 
 
 # ---- going back to the previous release ---------------------------------------------------------------------
@@ -721,8 +975,8 @@ def test_a_rollback_of_a_kind_that_attaches_live_happens_now(hub, service_kind, 
     monkeypatch.setattr("provider_hub.service.validated_bundle_path", lambda root, path: Path(path))
     monkeypatch.setattr("provider_hub.service.validated_interpreter", lambda root, path: Path(path))
     _seed(exampleservice=_service_row(
-        "1.1.0", active_version="1.0.0", active_path="/hub/bundles/exampleservice/1.0.0",
-        python_path="/hub/envs/exampleservice/bin/python", manifest=service_manifest("exampleservice", "1.0.0")))
+        "1.1.0", active_version="1.0.0", active_path=_bundle("exampleservice", "1.0.0"),
+        python_path=_python("exampleservice"), manifest=service_manifest("exampleservice", "1.0.0")))
     activate_release("exampleservice")
     retire_release("exampleservice")
 
@@ -731,6 +985,112 @@ def test_a_rollback_of_a_kind_that_attaches_live_happens_now(hub, service_kind, 
     assert result.activated and result.draining
     assert load_state()["installations"]["exampleservice"]["active_version"] == "1.0.0"
     assert _releases_in(hub) == [("exampleservice", "1.0.0", "active"), ("exampleservice", "1.1.0", "draining")]
+
+
+def _supplier_world(hub, monkeypatch):
+    """``helper`` supplied translit.v1 from 2.0.0 on and ran without it before; ``user`` relies on it."""
+    from provider_hub.service import activate_staged_installations
+
+    monkeypatch.setattr("provider_hub.service.verify_bundle_tree", lambda manifest, root: None)
+    monkeypatch.setattr("provider_hub.service.validated_bundle_path", lambda root, path: Path(path))
+    monkeypatch.setattr("provider_hub.service.validated_interpreter", lambda root, path: Path(path))
+    old = service_manifest("helper", "1.0.0")
+    new = service_manifest("helper", "2.0.0", provides=["translit.v1"])
+    helper = _row("helper", active="1.0.0", kind=SERVICE_KIND, manifest=old, staged=("2.0.0", None))
+    helper.update(staged_manifest=new)
+    user = _row("user", active="1.0.0", kind=SERVICE_KIND,
+                manifest=service_manifest("user", "1.0.0", requires=["translit.v1"]))
+    _seed(helper=helper, user=user)
+    activate_staged_installations()
+
+
+def test_the_previous_release_after_a_rollback_and_a_new_update_is_the_one_that_was_replaced(table):
+    """v1, then v2, back to v1, then v3: v1 is what the next rollback goes to, and v2 is forgotten."""
+    steps = [dict(active="1.0.0"), dict(active="1.0.0", staged="2.0.0"), dict(active="2.0.0"),
+             dict(active="2.0.0", staged="1.0.0"), dict(active="1.0.0"), dict(active="1.0.0", staged="3.0.0"),
+             dict(active="3.0.0")]
+    for step in steps:
+        table.write(_document(alpha=_row("alpha", **step)))
+
+    assert table.releases("alpha") == [("1.0.0", "retired"), ("3.0.0", "active")]
+
+
+def test_a_reader_never_gets_the_document_of_one_revision_with_the_releases_of_another(hub, monkeypatch):
+    from provider_hub import releases, state_store
+    from provider_hub.state import load_state, mutate_state
+
+    _seed(alpha=_row("alpha", active="1.0.0", name="1.0.0"))
+    real_read_rows = releases.read_rows
+    real_read_state = state_store.read_state
+    reading = []
+    writes = []
+
+    def read_state(*args, **kwargs):
+        reading.append(1)
+        try:
+            return real_read_state(*args, **kwargs)
+        finally:
+            reading.pop()
+
+    def read_rows(connection, **kwargs):
+        if reading and len(writes) < 12:
+            # Another writer commits between the reader's two reads, every time.
+            version = f"{len(writes) + 2}.0.0"
+            writes.append(version)
+            held = list(reading)
+            reading.clear()
+            try:
+                mutate_state(lambda state: state["installations"]["alpha"].update(name=version, active_version=version))
+            finally:
+                reading.extend(held)
+        return real_read_rows(connection, **kwargs)
+
+    monkeypatch.setattr(state_store, "read_state", read_state)
+    monkeypatch.setattr(releases, "read_rows", read_rows)
+
+    row = load_state()["installations"]["alpha"]
+
+    assert writes
+    assert row["name"] == row["active_version"]
+
+
+def test_the_environment_of_the_previous_release_is_not_cleaned_up(staged):
+    from provider_hub import env_registry
+    from provider_hub.service import activate_staged_installations
+    from provider_hub.state import load_state
+
+    activate_staged_installations()
+
+    referenced = env_registry.referenced_env_paths(load_state())
+
+    assert env_registry.env_dir_of(_python("alpha", "1.0.0")) in referenced
+    assert env_registry.env_dir_of(_python("alpha", "1.1.0")) in referenced
+
+
+def test_a_rollback_whose_files_are_gone_is_refused_and_the_previous_release_stays_recorded(staged):
+    from provider_hub.service import ProviderHubInstallError, activate_staged_installations, rollback_release
+
+    activate_staged_installations()
+    Path(_python("alpha", "1.0.0")).unlink()
+
+    with pytest.raises(ProviderHubInstallError, match="no longer on disk"):
+        rollback_release("alpha")
+
+    assert _releases_in(staged) == [("alpha", "1.0.0", "retired"), ("alpha", "1.1.0", "active")]
+
+
+def test_a_rollback_that_would_leave_a_dependent_without_its_capability_is_refused(hub, service_kind, monkeypatch):
+    from provider_hub.service import ProviderHubInstallError, rollback_release
+    from provider_hub.state import load_state
+
+    _supplier_world(hub, monkeypatch)
+
+    with pytest.raises(ProviderHubInstallError, match="user"):
+        rollback_release("helper")
+
+    row = load_state()["installations"]["helper"]
+    assert (row["state"], row["active_version"], row["staged_version"]) == ("active", "2.0.0", None)
+    assert _releases_in(hub, "helper") == [("helper", "1.0.0", "retired"), ("helper", "2.0.0", "active")]
 
 
 # ---- workers are keyed by release ---------------------------------------------------------------------------
