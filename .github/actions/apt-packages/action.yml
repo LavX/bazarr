@@ -1,0 +1,94 @@
+name: Install apt packages from a cache
+description: >-
+  Installs Ubuntu packages on a GitHub-hosted runner. The .deb files that the
+  runner image lacks are downloaded once, cached per runner image version, and
+  installed from the cache on later runs, so a slow Ubuntu mirror costs one run
+  instead of all of them.
+
+inputs:
+  packages:
+    description: Space-separated package names, installed with --no-install-recommends.
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Work out the cache key
+      id: plan
+      shell: bash
+      env:
+        PACKAGES: ${{ inputs.packages }}
+      run: |
+        # The key names the runner OS and image: the set of .deb files that are
+        # missing depends on what the image already ships, and dpkg refuses to
+        # install a .deb built against a dependency the image has since
+        # replaced. ImageOS and ImageVersion are set by the runner image.
+        read -ra names <<< "$PACKAGES"
+        list="$(printf '%s\n' "${names[@]}" | LC_ALL=C sort -u | tr '\n' ' ')"
+        digest="$(printf '%s' "$list" | sha256sum | cut -c1-16)"
+        {
+          echo "key=apt-debs-${RUNNER_OS}-${ImageOS:-unknown}-${ImageVersion:-unknown}-${digest}"
+          echo "dir=${RUNNER_TEMP}/apt-debs"
+          echo "list=${list}"
+        } >> "$GITHUB_OUTPUT"
+        mkdir -p "${RUNNER_TEMP}/apt-debs"
+
+    - name: Restore the cached .deb files
+      id: cache
+      uses: actions/cache/restore@v6
+      with:
+        path: ${{ steps.plan.outputs.dir }}
+        key: ${{ steps.plan.outputs.key }}
+
+    - name: Install from the cached .deb files
+      id: offline
+      if: ${{ steps.cache.outputs.cache-hit == 'true' }}
+      shell: bash
+      env:
+        DEBS: ${{ steps.plan.outputs.dir }}
+        DEBIAN_FRONTEND: noninteractive
+      run: |
+        # No download and no apt-get update: dpkg takes the whole set at once
+        # and orders it itself. If the cache is damaged, fall through to the
+        # network install below rather than fail the job.
+        if compgen -G "$DEBS/*.deb" > /dev/null \
+           && sudo -E dpkg -i "$DEBS"/*.deb; then
+          echo "installed=true" >> "$GITHUB_OUTPUT"
+        else
+          echo "::warning::Cached .deb files could not be installed; falling back to the mirror."
+          echo "installed=false" >> "$GITHUB_OUTPUT"
+        fi
+
+    - name: Download and install from the mirror
+      id: online
+      if: ${{ steps.offline.outputs.installed != 'true' }}
+      shell: bash
+      env:
+        DEBS: ${{ steps.plan.outputs.dir }}
+        PACKAGES: ${{ steps.plan.outputs.list }}
+        DEBIAN_FRONTEND: noninteractive
+      run: |
+        # Bounded so a stuck mirror fails fast and says so, instead of eating
+        # the job's whole budget.
+        opts=(-o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30)
+        read -ra names <<< "$PACKAGES"
+        rm -rf "$DEBS"; mkdir -p "$DEBS"
+        fail() { echo "::error::apt $1 did not finish: the Ubuntu mirror is slow or unreachable. Re-run the job."; exit 1; }
+
+        timeout 300 sudo apt-get update -qq "${opts[@]}" || fail update
+        # Fetch every .deb the image lacks into DEBS, then install from there.
+        timeout 480 sudo -E apt-get install -y --no-install-recommends --download-only \
+          "${opts[@]}" -o Dir::Cache::archives="$DEBS" "${names[@]}" || fail download
+        sudo -E apt-get install -y --no-install-recommends "${opts[@]}" \
+          -o Dir::Cache::archives="$DEBS" "${names[@]}"
+        # apt leaves a root-only lock file and partial/ folder behind. Keep
+        # only the .deb files, owned by the runner user, for the cache.
+        sudo find "$DEBS" -mindepth 1 ! -name '*.deb' -delete
+        sudo chown -R "$(id -u):$(id -g)" "$DEBS"
+
+    - name: Save the .deb files for the next run
+      if: ${{ steps.online.outcome == 'success' && steps.cache.outputs.cache-hit != 'true' }}
+      uses: actions/cache/save@v6
+      with:
+        path: ${{ steps.plan.outputs.dir }}
+        key: ${{ steps.plan.outputs.key }}
