@@ -157,7 +157,7 @@ class HearingImpaired(SubtitleTextModification):
                      "", name="HI_music_symbols_only"),
 
         # remove music entries (song lyrics); skipped when keep_lyrics is set
-        MusicEntryProcessor(re.compile(r'(?ums)(^[-\s>~]*[*#¶♫♪]+\s*.+|.+\s*[*#¶♫♪]+\s*$|.+\s*[*#¶♫♪]+[)\]])'),
+        MusicEntryProcessor(re.compile(r'(?ums)(^[-\s>~]*[*#¶♫♪]+\s*%(t)s.+|.+\s*[*#¶♫♪]+\s*%(t)s\s*$|.+\s*[*#¶♫♪]+[)\]])' % {"t": TAG}),
                             "", name="HI_music", entry=True),
     ]
 
