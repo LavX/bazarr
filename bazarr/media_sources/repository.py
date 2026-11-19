@@ -117,6 +117,32 @@ def record_root_device(root_id, device, target=None):
     _target(target).execute(sa.update(Roots).where(Roots.c.id == root_id).values(last_dev=device))
 
 
+def update_source(source_id, target=None, **values):
+    values['updated_at'] = datetime.now()
+    return _target(target).execute(sa.update(Sources).where(Sources.c.id == source_id).values(**values)).rowcount
+
+
+def update_library(library_id, target=None, **values):
+    values['updated_at'] = datetime.now()
+    return _target(target).execute(sa.update(Libraries).where(Libraries.c.id == library_id).values(**values)).rowcount
+
+
+def delete_library(library_id, target=None):
+    """Delete a library. Its roots, groups and items go (cascade); their history and blacklist rows stay, with
+    their links set to NULL."""
+    _target(target).execute(sa.delete(Libraries).where(Libraries.c.id == library_id))
+
+
+def replace_roots(library_id, roots, target=None):
+    """Replace a library's roots with ``[(server_path, local_path)]``. A root whose local path is kept keeps its
+    recorded device."""
+    kept = {row.local_path: row.last_dev for row in get_roots(library_id, target)}
+    _target(target).execute(sa.delete(Roots).where(Roots.c.library_id == library_id))
+    for server_path, local_path in roots:
+        _insert(target, Roots, dict(library_id=library_id, server_path=server_path, local_path=local_path,
+                                    last_dev=kept.get(local_path)))
+
+
 def delete_source(source_id, target=None):
     """Delete a source. Its libraries, roots, groups and items go with it (cascade); its history and blacklist
     rows stay, with their links set to NULL."""

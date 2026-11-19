@@ -21,8 +21,17 @@ def _body():
     return body
 
 
+def _refused(error):
+    return {"error": error.code, "message": str(error)}, error.status
+
+
 @api_ns_system_media_sources.route("system/media-sources")
 class MediaSourcesList(Resource):
+    @authenticate
+    def get(self):
+        """List the media sources with their libraries and roots"""
+        return service.list_sources(), 200
+
     @authenticate
     @api_ns_system_media_sources.response(201, 'The source was created, with its library')
     @api_ns_system_media_sources.response(400, 'The request was refused')
@@ -34,6 +43,96 @@ class MediaSourcesList(Resource):
         except SourceError as error:
             return {"error": error.code, "message": str(error)}, error.status
         return service.describe_source(source_id), 201
+
+
+@api_ns_system_media_sources.route("system/media-sources/validate-path")
+class MediaSourceValidatePath(Resource):
+    @authenticate
+    @api_ns_system_media_sources.response(200, 'The refusals and warnings for the folder')
+    def post(self):
+        """Check a folder before it is added: {path, content_kind?}. Refusals come as errors, the rest as warnings"""
+        try:
+            return service.validate_path(_body()), 200
+        except SourceError as error:
+            return _refused(error)
+
+
+@api_ns_system_media_sources.route("system/media-sources/<int:source_id>")
+class MediaSourceItem(Resource):
+    @authenticate
+    @api_ns_system_media_sources.response(404, 'No such source')
+    def get(self, source_id):
+        """One media source with its libraries"""
+        body = service.describe_source(source_id)
+        return (body, 200) if body is not None else ({"error": "not_found"}, 404)
+
+    @authenticate
+    @api_ns_system_media_sources.response(409, 'A source with that name exists')
+    def patch(self, source_id):
+        """Edit a source: {name?, enabled?, scan_frequency_hours?}"""
+        try:
+            return service.update_source(source_id, _body()), 200
+        except SourceError as error:
+            return _refused(error)
+
+    @authenticate
+    @api_ns_system_media_sources.response(204, 'The source was removed; its history and blacklist rows stay')
+    def delete(self, source_id):
+        """Remove a source with its libraries, groups and items. History and blacklist rows are kept"""
+        try:
+            service.delete_source(source_id)
+        except SourceError as error:
+            return _refused(error)
+        return "", 204
+
+
+@api_ns_system_media_sources.route("system/media-sources/<int:source_id>/libraries")
+class MediaSourceLibraries(Resource):
+    @authenticate
+    @api_ns_system_media_sources.response(201, 'The library was added')
+    def post(self, source_id):
+        """Add a folder library: {path, content_kind, profile_id?}"""
+        try:
+            return service.add_library(source_id, _body()), 201
+        except SourceError as error:
+            return _refused(error)
+
+
+@api_ns_system_media_sources.route("system/media-sources/<int:source_id>/libraries/<int:library_id>")
+class MediaSourceLibrary(Resource):
+    @authenticate
+    @api_ns_system_media_sources.response(400, 'A folder library path cannot be edited')
+    def patch(self, source_id, library_id):
+        """Edit a library: {enabled?, profile_id?, name?}. A folder library's path is immutable"""
+        try:
+            return service.update_library(source_id, library_id, _body()), 200
+        except SourceError as error:
+            return _refused(error)
+
+    @authenticate
+    @api_ns_system_media_sources.response(204, 'The library was removed; its history and blacklist rows stay')
+    def delete(self, source_id, library_id):
+        """Remove a library with its groups and items. History and blacklist rows are kept"""
+        try:
+            service.delete_library(source_id, library_id)
+        except SourceError as error:
+            return _refused(error)
+        return "", 204
+
+
+@api_ns_system_media_sources.route("system/media-sources/<int:source_id>/libraries/<int:library_id>/scan")
+class MediaSourceLibraryScan(Resource):
+    @authenticate
+    @api_ns_system_media_sources.response(202, 'The scan was queued as a job')
+    def post(self, source_id, library_id):
+        """Queue a scan of one library"""
+        library = service.describe_library(library_id)
+        if library is None or library["source_id"] != source_id:
+            return {"error": "not_found"}, 404
+        try:
+            return queued_job_response(service.queue_scan(source_id, library_id) or None), 202
+        except SourceError as error:
+            return _refused(error)
 
 
 @api_ns_system_media_sources.route("system/media-sources/<int:source_id>/scan")
