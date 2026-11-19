@@ -36,8 +36,9 @@ logger = logging.getLogger(__name__)
 CATALOG_LIST_PROVIDERS = "providers"
 CATALOG_LIST_PLUGINS = "plugins"
 
-# The runtimes this host can start. New runtimes are added here once the host can start them.
-# An entry that needs a runtime not listed here is refused on every host.
+# The runtimes this host can always start. New runtimes are added here once the host can start them.
+# An entry that needs a runtime not listed here is refused on every host. current_host adds
+# (oci, daemon) where the Docker daemon can be used.
 AVAILABLE_RUNTIMES = frozenset({(PYTHON_BUNDLE, STDIO_WORKER)})
 
 # The most characters of validator or failure text that is recorded or shown.
@@ -102,11 +103,23 @@ def running_in_container() -> bool:
 
 
 def current_host() -> HostFacts:
+    in_container = running_in_container()
+    runtimes = AVAILABLE_RUNTIMES
+    if in_container:
+        # The managed container runtime is offered only where the Docker daemon can be used (a socket or
+        # DOCKER_HOST is configured, same host, not host networking). Outside a container nothing is probed.
+        try:
+            from .runtime.oci import offered_runtimes
+
+            runtimes = runtimes | offered_runtimes(in_container=True)
+        except Exception as error:
+            # A probe that fails must never make the host unreadable: the runtime is simply not offered.
+            logger.debug("the managed container runtime could not be checked (%s)", type(error).__name__)
     return HostFacts(
         version=os.environ.get("BAZARR_VERSION") or None,
         platform=host_platform(),
-        runtimes=AVAILABLE_RUNTIMES,
-        in_container=running_in_container(),
+        runtimes=runtimes,
+        in_container=in_container,
     )
 
 
