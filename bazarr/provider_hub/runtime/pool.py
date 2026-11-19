@@ -93,7 +93,11 @@ Evidence, and how each decision fails closed:
   listing itself complete (children lists readable, the ``/proc`` scan not capped
   and no record skipped), under ``max_processes``. A live process that denies the
   read, a cut listing or a reader that fails make the sample ``truncated``, which
-  counts as over the limit; only a root that vanished reads as no sample.
+  counts as over the limit; only a root that vanished reads as no sample. The one
+  exception is a reading taken as the worker is being ended (its session closed, or the
+  pool's own stop under way): a tree on its way out reads as unreadable, and that is not
+  evidence about its size, so the reading is dropped and the error that ended the worker
+  stands. The folder-budget reading follows the same rule.
 * "Teardown complete" (``_teardown_confirmed``): only a close job or a stuck pass
   that confirmed "process gone" reaches it, and the entry reads as stopped (and
   starts anything) only when none of its workers is still being torn down.
@@ -1782,6 +1786,9 @@ class _Slot:
         self.peak_bytes = 0
         self.ephemeral = ephemeral
         self.closing = False
+        # Set before the pool signals the worker or asks its session to stop, whichever of its own
+        # teardown paths it takes: from then on a reading of the worker's /proc is of a tree on its way out.
+        self.ending = False
         # Why a start was cut short ("stopped"), when it was.
         self.cancel_reason: str | None = None
         # Whether this worker holds a unit of its key's unverified-teardown allowance.
@@ -3202,6 +3209,11 @@ class WorkerPool:
                 problem = (PoolCodes.FOLDER_BUDGET, "%s is over its %d MiB budget" % (
                     budget.label or "a worker folder", budget.max_bytes // MIB))
                 break
+        if problem is not None and self._being_ended(tree or holder):
+            # The same overlap as for memory: what was read of a tree on its way out is not an overrun,
+            # and the error that ended it is the one to report. Not remembered, so a worker that is
+            # still running is judged afresh.
+            return None
         if holder is not None:
             holder.last_budget_check = now
             holder.budget_problem = problem
@@ -3280,6 +3292,12 @@ class WorkerPool:
         except Exception:
             # A reading that failed is not a reading of zero.
             sample = MemorySample(bytes=0, rss_bytes=0, processes=0, source="error", truncated=True)
+        if sample is not None and sample.truncated and self._being_ended(slot):
+            # The reading overlapped the end of the worker, and a /proc entry of a process on its way
+            # out reads as unreadable. Its tree is not too big to measure, it is on its way out, and
+            # the error that ended it is the one to report. A worker that is still running keeps the
+            # fail-closed rule below.
+            return
         now = self._clock()
         with self._cond:
             slot.last_sample_at = now
@@ -3293,14 +3311,27 @@ class WorkerPool:
                 slot.peak_bytes = max(slot.peak_bytes, slot.memory_bytes)
 
     @staticmethod
+    def _being_ended(slot) -> bool:
+        """Whether the worker is being, or has been, ended: by its session (which marks itself closed before it
+        signals anything) or by the pool's own teardown (``closing``, set when a close is queued, and ``ending``,
+        set before a stop, a polite close or a launcher's stop begins)."""
+        if slot is None:
+            return False
+        session = getattr(slot, "session", None)
+        if session is None:
+            return False
+        return bool(getattr(slot, "closing", False) or getattr(slot, "ending", False)
+                    or not getattr(session, "alive", True))
+
+    @staticmethod
     def _memory_problem(slot, limit):
         """``(code, text)`` when the last sample puts the worker over ``limit``, else None."""
         if slot.memory_bytes <= limit:
             return None
         if slot.memory_truncated:
             return (PoolCodes.MEMORY_LIMIT,
-                    "worker runs more processes than can be measured, counted as over its %d MiB limit" % (
-                        limit // MIB))
+                    "worker's memory could not be measured in full (for example too many processes, or part of "
+                    "its /proc unreadable or too slow to read), counted as over its %d MiB limit" % (limit // MIB))
         return (PoolCodes.MEMORY_LIMIT, "worker used %d MiB, over its %d MiB limit" % (
             slot.memory_bytes // MIB, limit // MIB))
 
@@ -3400,6 +3431,7 @@ class WorkerPool:
         One thread ends a process at a time and a second call finds it done,
         unless ``again`` (the pool retrying a worker it could not confirm gone).
         """
+        slot.ending = True
         session = slot.session
         process = session.process if session is not None else None
         stop = getattr(process, "stop", None)
@@ -3420,6 +3452,7 @@ class WorkerPool:
 
     def _terminate_now(self, slot):
         """End the worker's whole tree without a polite shutdown frame."""
+        slot.ending = True
         session = slot.session
         if session is None:
             return
@@ -3440,6 +3473,7 @@ class WorkerPool:
         children that moved into a new session. The pool's own call afterwards
         is the backstop and finds the work done.
         """
+        slot.ending = True
         slot.session.close(grace=grace)
         self._end_process(slot, 0.5)
 
