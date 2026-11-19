@@ -327,3 +327,127 @@ def test_tagged_music_line_never_takes_the_dialogue_in_its_cue(cue, dialogue, re
     out = render(_cue(cue), ["remove_HI"])
     assert dialogue in out
     assert "Hallo." in out
+
+
+# --- Round 3: dialogue must never be removed with a music cue ------------------
+# A tagged music span may only go when everything inside its own pair is music.
+@pytest.mark.parametrize("cue, dialogue", [
+    ("<i>♪ MTV ♪</i> <i>Hallo.</i>", "Hallo."),
+    ("<i>♪♪</i> <i>Hallo.</i>", "Hallo."),
+    ("{\\i1}♪ yeah{\\i0} What did you say?", "What did you say?"),
+])
+def test_same_line_music_pair_never_takes_sibling_dialogue(cue, dialogue, render):
+    out = render(_cue(cue), ["remove_HI"])
+    assert dialogue in _visible(out)
+
+
+# A symbol only counts as music when it is in the visible text of a music line.
+# A # or * in dialogue or in a tag's attributes never makes a line music.
+@pytest.mark.parametrize("cue, dialogue", [
+    ("<i>♪ Music ♪\n<font color=\"#ffffff\">Hello there.</font></i>", "Hello there."),
+    ("<font color=\"#ffff00\">♪ la la ♪</font>\n<font color=\"#00ffff\">Hello there.</font>", "Hello there."),
+    ("<i>♪ Music ♪\nWe're #1!</i>", "We're #1!"),
+    ("<i>♪ la la ♪</i>\n<i>What the f**k?</i>", "What the f**k?"),
+    ("♪ la la ♪\nHello there.", "Hello there."),
+    ("♪ la la ♪\nWe're #1!", "We're #1!"),
+])
+def test_continuation_line_with_hash_or_star_is_dialogue(cue, dialogue, render):
+    out = render(_cue(cue), ["remove_HI"])
+    assert dialogue in _visible(out)
+
+
+# Realistic dialogue with markup and symbols in ordinary speech: none of it may go.
+DIALOGUE_LINES = [
+    "<i>Where is #7 now?</i>",
+    "<font color=\"#ffff00\">Hello there, friend.</font>",
+    "<b>That's *my* car!</b>",
+    "<i>We're #1 in the league.</i>",
+    "<font color=\"#00ffff\">What the f**k is that?</font>",
+    "He said <b>#</b> is a hashtag.",
+    "<i>Press * to continue.</i>",
+    "<font color=\"#ff0000\">Stop!</font> <i>Now!</i>",
+    "<b>Room #204, please.</b>",
+    "<i>Ten * twenty = 200.</i>",
+    "<font color=\"#ffffff\">Yes, #1 is correct.</font>",
+    "<i>Get out of my *house*!</i>",
+    "<b>Call me on 555 #2.</b>",
+    "<i>I'm not * ready yet.</i>",
+    "<i>He is <b>very</b> #1 in class.</i>",
+    "<font color=\"#00ff00\">It's <i>all</i> # fine.</font>",
+    "<i>Hey, *you* there!</i>",
+    "<b>Sold #5!</b>",
+    "<i>Two * three # four</i>",
+    "<i>Hi.</i>\n<font color=\"#ff0000\">#1 fan!</font>",
+    "<i>Hello #</i>\n<i>* Hello *</i>",
+]
+
+
+@pytest.mark.parametrize("line", DIALOGUE_LINES)
+def test_realistic_tagged_dialogue_survives(line, render):
+    out = render(_cue(line), ["remove_HI"])
+    for text in _visible(line).split("\n"):
+        assert text.strip() in _visible(out)
+
+
+# --- Round 3: bracket and full-bracket rules ---------------------------------
+@pytest.mark.parametrize("cue", [
+    "He said [one] and [two] here.",
+    "[sighs] <i>I know [laughs]</i>",
+])
+def test_bracket_cue_never_swallows_words_between_cues(cue, render):
+    out = render(_cue(cue), ["remove_HI"])
+    assert "and" in _visible(out) or "I know" in _visible(out)
+    assert "here." in _visible(out) or "I know" in _visible(out)
+
+
+def test_hyphenated_bracket_cue_is_removed(render):
+    out = render(_cue("[door-creaks] Hello there."), ["remove_HI"])
+    assert "door-creaks" not in out
+    assert "Hello there." in out
+
+
+@pytest.mark.parametrize("cue", [
+    "<i>[door creaks]\nI know you're in there (knocking)</i>",
+    "[door creaks]\nI know you're in there (knocking)",
+])
+def test_full_bracket_cue_never_takes_dialogue_on_the_next_line(cue, render):
+    out = render(_cue(cue), ["remove_HI"])
+    assert "I know you're in there" in _visible(out)
+
+
+def test_lone_ssa_tag_next_to_bracket_is_removed_on_file_route(tmp_path):
+    out = _render_file(_cue("Hello <i>[sighs] </i>world"), ["remove_HI"], tmp_path)
+    assert "Hello world" in _visible(out)
+    assert out.count("<i>") == out.count("</i>")
+
+
+# --- Round 3: uppercase detection selects rules by name ----------------------
+def test_case_detection_names_all_resolve_to_processors():
+    from subzero.modification import registry
+    from subzero.modification.main import CASE_DETECTION_PROCESSORS
+
+    names = {p.name for p in registry.mods["remove_HI"].processors}
+    assert set(CASE_DETECTION_PROCESSORS) <= names
+
+
+def test_detect_uppercase_ignores_markup_letters(tmp_path):
+    # The letters of <font color=...> are markup, not text, so an all-caps file that is
+    # wrapped in font tags must still read as uppercase.
+    entries = "".join(
+        "{}\n00:00:{:02d},000 --> 00:00:{:02d},000\n"
+        "<font color=\"#ffff00\">WE ARE GOING NOW THE PLAN IS ON</font> [door creaks]\n\n".format(i, i, i)
+        for i in range(1, 11)
+    )
+    # Content route: the production load keeps the tags, pysubs2 would drop <font>.
+    sm = SubtitleModifications()
+    assert sm.load(content=entries, language=Language("eng"))
+    assert sm.detect_uppercase() is True
+
+
+@pytest.mark.parametrize("cue, dialogue", [
+    ("<i>♪ Music ♪ Hello there</i>", "Hello there"),
+    ("♪ Music ♪ Hello there", "Hello there"),
+])
+def test_text_after_a_mid_cue_music_mark_is_dialogue(cue, dialogue, render):
+    out = render(_cue(cue), ["remove_HI"])
+    assert dialogue in _visible(out)

@@ -38,17 +38,22 @@ _SIMPLE_HTML_RE = re.compile(r'(?i)</?(?:[ibu]|font)(?:\s[^>]*)?>')
 _HTML_NAMES = ("i", "b", "u", "font")
 
 # A bracket cue body: "[...]" or with quotes, at least 3 characters inside.
-HI_BRACKET = r"""["']*\[(?=[^\[\]]{3,})[A-Za-zÀ-ž0-9\s'".:-_&+]+[)\]]["']*"""
+HI_BRACKET = r"""["']*\[(?=[^\[\]]{3,})[A-Za-zÀ-ž0-9\s'".:_&+\-?!]+[)\]]["']*"""
 
 # The body of a bracket cue that spans a whole entry (HI_brackets_full).
-FULL_BRACKET_CORE = r"[([].+(?=[^)\]]{3,}).+[)\]]"
+FULL_BRACKET_CORE = r"[([](?=[^)\]]{3,})[^()\[\]<>\\]*[)\]]"
 
 
-# One character of an entry that does not start a literal \N line break. The mods see
-# a whole cue as one string in which the line break is the two characters \N.
-_ENTRY_CHAR = r"(?:(?!\\N).)"
-# A line of the entry that holds a music symbol, consumed up to the next line break.
-_SYMBOL_LINE = r"(?=%s*[*#¶♫♪])%s*" % (_ENTRY_CHAR, _ENTRY_CHAR)
+# Music marks. Only these make a line music: # and * are ordinary dialogue characters.
+_MUSIC_MARK = "♪♫¶"
+# One character of a cue's text: not a line break (the two characters \N), not an SSA
+# override tag, not the start of a simple HTML tag, and not a music mark.
+_PLAIN_CHAR = r"(?:(?!\\N)(?!\{\\)(?!</?(?:[ibu]|font)[\s>])(?![♪♫¶]).)"
+# The body of a music line: a music mark opens it and/or closes it, with no mark inside.
+# Without a mark it is dialogue, and a body with a mark in the middle may hold dialogue
+# after the closing mark, so neither is music.
+_MUSIC_BODY = (r"(?:[-\s>~]*[♪♫¶]" + _PLAIN_CHAR + r"*[♪♫¶]?\s*"
+               r"|" + _PLAIN_CHAR + r"*[♪♫¶]\s*)")
 
 
 def _tag_pair(body, group):
@@ -58,11 +63,20 @@ def _tag_pair(body, group):
     rule built on it can never remove half a pair. Group names are unique per call.
     """
     # Python rejects a group name used twice, even in different alternatives.
-    a, b, c, d = ("t%d%s" % (group, s) for s in "abcd")
+    a, c, d = ("t%d%s" % (group, s) for s in "acd")
     one = r"<(?P<%s>font|[ibu])(?:\s[^>]*)?>%s</(?P=%s)>" % (a, body, a)
     two = (r"<(?P<%s>font|[ibu])(?:\s[^>]*)?><(?P<%s>font|[ibu])(?:\s[^>]*)?>%s</(?P=%s)></(?P=%s)>"
            % (c, d, body, d, c))
     return r"(?i:%s|%s)" % (one, two)
+
+
+def _ssa_pair(body, group):
+    """Regex for body wrapped in one SSA override pair, or in two nested pairs."""
+    a, c, d = "s%d" % group, "s%dc" % group, "s%dd" % group
+    one = r"\{\\(?P<%s>[iusb])1\}%s\{\\(?P=%s)0\}" % (a, body, a)
+    two = (r"\{\\(?P<%s>[iusb])1\}\{\\(?P<%s>[iusb])1\}%s\{\\(?P=%s)0\}\{\\(?P=%s)0\}"
+           % (c, d, body, d, c))
+    return r"(?:%s|%s)" % (one, two)
 
 
 def _tagged_bracket_repl(match):
@@ -70,6 +84,13 @@ def _tagged_bracket_repl(match):
     already separates it from the text before it."""
     before = match.string[match.start() - 1] if match.start() else " "
     return "" if before.isspace() else match.group("trail")
+
+
+# One music line of a cue: plain, or wrapped in one simple HTML pair or one SSA pair.
+def _music_line(group):
+    """One music line. Each copy in a pattern needs its own group numbers."""
+    return (r"[-\s>~]*(?:" + _tag_pair(_MUSIC_BODY, group) + r"|" + _ssa_pair(_MUSIC_BODY, group + 1)
+            + r"|" + _MUSIC_BODY + r")")
 
 
 def _has_unpaired_html(text):
@@ -161,7 +182,7 @@ class HearingImpaired(SubtitleTextModification):
         # brackets (only remove if at least 3 chars in brackets, allow numbers and spaces inside brackets).
         # The SSA tags are taken without their whitespace: TAG's \s* would take the space
         # that separates the words around the tag.
-        NReProcessor(re.compile(r'(?sux)-?(?:{\\[iusb][0-1]}\s*)*%(b)s(?:{\\[iusb][0-1]})*(?P<trail>[\s:]*)'
+        NReProcessor(re.compile(r'(?sux)-?(?:{\\[iusb][0-1]}\s*)*%(b)s(?:[\s:]*{\\[iusb][0-1]})*(?P<trail>[\s:]*)'
                                 % {"b": HI_BRACKET}),
                      _tagged_bracket_repl, name="HI_brackets"),
 
@@ -223,19 +244,11 @@ class HearingImpaired(SubtitleTextModification):
                      "", name="HI_music_symbols_only"),
 
         # remove music entries (song lyrics); skipped when keep_lyrics is set
-        # Tag pairs are matched with their own closing tag. A pair may span the lines of an
-        # entry only when every line holds a music symbol, so dialogue in the same cue is
-        # never removed with it. The rule runs on the whole entry (entry=True).
-        MusicEntryProcessor(re.compile((r'(?ums)(^[-\s>~]*[*#¶♫♪]+\s*%(t)s.+'
-                                        r'|^(?!.*\\N)[-\s>~]*%(t)s[*#¶♫♪]+\s*%(t)s.+'
-                                        r'|.+\s*[*#¶♫♪]+\s*$|^(?!.*\\N).+\s*[*#¶♫♪]+\s*%(t)s\s*$|.+\s*[*#¶♫♪]+[)\]]'
-                                        r'|^[-\s>~]*%(t)s[*#¶♫♪]' + _ENTRY_CHAR + r'*(?:\\N' + _SYMBOL_LINE + r')*$'
-                                        r'|^[-\s>~]*' + _tag_pair(r"[-\s>~]*[*#¶♫♪]" + _ENTRY_CHAR + "*"
-                                                                   + r"(?:\\N" + _SYMBOL_LINE + ")*", 2)
-                                        + r'\s*$'
-                                        r'|^[-\s>~]*' + _tag_pair(r"(?:" + _SYMBOL_LINE + r"\\N)*"
-                                                                   + _ENTRY_CHAR + r"*[*#¶♫♪]\s*", 3)
-                                        + r'\s*$)') % {"t": TAG}),
+        # Remove music lines (song lyrics). Every line of the cue must be a music line: a
+        # music mark opens or closes it, and its text holds no tags, no line break and no
+        # other mark (see _MUSIC_BODY). A line of dialogue in the cue keeps the whole cue,
+        # so dialogue is never removed with a music line. The rule runs on the whole entry.
+        MusicEntryProcessor(re.compile(r'(?us)^(?:' + _music_line(7) + r')(?:\\N(?:' + _music_line(9) + r'))*\s*$'),
                             "", name="HI_music", entry=True),
     ]
 

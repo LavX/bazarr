@@ -17,6 +17,8 @@ logger = logging.getLogger(__name__)
 
 
 
+_MARKUP_RE = re.compile(r"(?i)</?(?:[ibu]|font)(?:\s[^>]*)?>|\{\\[^}]*\}")
+
 CASE_DETECTION_PROCESSORS = (
     "HI_brackets_full",
     "HI_before_colon_caps",
@@ -215,6 +217,8 @@ class SubtitleModifications(object):
                 sub = sub.strip()
                 for processor in detection:
                     sub = processor.process(sub)
+                # Markup is not text: the letters of <font color=...> or {\i1} do not count.
+                sub = _MARKUP_RE.sub("", sub)
 
                 if sub.strip():
                     uppercase_count += sum(1 for char in sub if char.isupper())
