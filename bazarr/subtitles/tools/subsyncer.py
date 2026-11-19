@@ -8,6 +8,7 @@ import subprocess
 import tempfile
 
 from utilities.binaries import get_binary
+from utilities.cpu_features import describe_flags, numpy_cpu_missing_flags, usable_sync_engines
 from radarr.history import history_log_movie
 from sonarr.history import history_log
 from subtitles.processing import ProcessSubtitlesResult
@@ -16,6 +17,10 @@ from subtitles.tools.subsync_engines import (
     DEFAULT_ENABLED_ENGINES,
     ENGINE_LABELS,
     OUTPUT_MODE_OVERWRITE,
+    REASON_NO_USABLE_ENGINE,
+    RESULT_FAILED,
+    SyncEngineResult,
+    SyncRunResult,
     UNCONSTRAINED_MAX_OFFSET_SECONDS,
     SubsyncEngineRunner,
     MissingSyncEngineError,
@@ -550,6 +555,20 @@ class SubSyncer:
             history_log_movie(action=5, radarr_id=radarr_id, result=result,
                               arr_instance_id=arr_instance_id)
 
+    def _no_usable_engine_result(self, requested_engines, output_mode):
+        missing = describe_flags(numpy_cpu_missing_flags())
+        message = f"{' and '.join(requested_engines)} need {missing}, which this CPU lacks."
+        logging.error('BAZARR unable to sync subtitles: no usable sync engine on this CPU. %s: %s',
+                      message, self.srtin)
+        self._report_progress('No usable sync engine on this CPU', 0, 1)
+        self.sync_result = SyncRunResult(
+            source_path=self.srtin,
+            output_mode=output_mode,
+            results=[SyncEngineResult(engine='all', status=RESULT_FAILED, reason=REASON_NO_USABLE_ENGINE,
+                                      message=message)],
+        )
+        return self.sync_result
+
     def sync(self, video_path, srt_path, srt_lang, hi, forced,
              max_offset_seconds, no_fix_framerate, gss, reference=None, sonarr_series_id=None, sonarr_episode_id=None,
              radarr_id=None, progress_callback=None, job_id=None, force_sync=False, output_mode=None,
@@ -575,10 +594,16 @@ class SubSyncer:
             self.reference = reference
 
         output_mode = normalize_output_mode(output_mode or getattr(settings.subsync, 'output_mode', OUTPUT_MODE_OVERWRITE))
-        enabled_engines = normalize_enabled_engines(
+        requested_engines = normalize_enabled_engines(
             enabled_engines if enabled_engines is not None else
             getattr(settings.subsync, 'enabled_engines', DEFAULT_ENABLED_ENGINES)
         )
+        # The saved settings are not touched: engines that need a CPU feature this
+        # machine lacks are only left out of this run, since importing numpy there
+        # kills the whole process rather than raising.
+        enabled_engines = usable_sync_engines(requested_engines)
+        if requested_engines and not enabled_engines:
+            return self._no_usable_engine_result(requested_engines, output_mode)
         progress_total = max(len(enabled_engines), 1)
         engine_positions = {engine: index + 1 for index, engine in enumerate(enabled_engines)}
         self._report_progress('Preparing synchronization', 0, progress_total)

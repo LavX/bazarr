@@ -19,6 +19,7 @@ from subtitles.tools.subsync_engines import (
     REASON_FAILURE_THRESHOLD,
     REASON_GENERATED_SOURCE,
     REASON_MISSING_ENGINE,
+    REASON_NO_USABLE_ENGINE,
     REASON_OUTPUT_EXISTS,
     REASON_RESULT_REJECTED,
     REASON_SOURCE_CHANGED,
@@ -50,6 +51,7 @@ _ENGINE_OUTCOME_SENTENCES = {
     REASON_ENGINE_FAILED: "{label} failed: {message}",
     REASON_SOURCE_CHANGED: "The uploaded subtitle was replaced or deleted. Sync was skipped.",
     REASON_DESTINATION_CHANGED: "The synchronized subtitle destination was changed or deleted. Sync was skipped.",
+    REASON_NO_USABLE_ENGINE: "No usable sync engine on this CPU. {message}",
     REASON_DESTINATION_AMBIGUOUS: "The synchronized subtitle destination has no unique media owner. Sync was skipped.",
 }
 _ENGINE_MESSAGE_LIMIT = 160
