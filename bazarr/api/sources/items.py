@@ -5,6 +5,7 @@ import ast
 from flask_restx import Namespace, Resource, reqparse
 
 from media_sources import repository, service
+from media_sources.service import SourceError
 
 from ..queued_job import queued_job_response
 from ..utils import authenticate
@@ -62,8 +63,12 @@ class SourceItemSearch(Resource):
     @authenticate
     @api_ns_sources_items.response(202, 'The search was queued as a job')
     @api_ns_sources_items.response(404, 'No such item')
+    @api_ns_sources_items.response(409, 'The source or library of the item is disabled')
     def post(self, item_id):
         """Search the item's missing subtitles"""
         if repository.get_item(item_id) is None:
             return {"error": "not_found"}, 404
-        return queued_job_response(service.queue_search(item_id) or None), 202
+        try:
+            return queued_job_response(service.queue_search(item_id) or None), 202
+        except SourceError as error:
+            return {"error": error.code, "message": str(error)}, error.status

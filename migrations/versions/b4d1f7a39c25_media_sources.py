@@ -18,16 +18,6 @@ down_revision = "c3e8a1f5b972"
 branch_labels = None
 depends_on = None
 
-NAMES = (
-    "media_sources",
-    "media_source_libraries",
-    "media_source_library_roots",
-    "table_source_groups",
-    "table_source_items",
-    "table_source_history",
-    "table_source_blacklist",
-)
-
 _ITEM_KINDS = "('movie', 'episode', 'sports_event')"
 _IDENTITY_SOURCES = "('filename', 'tmdb', 'media_server', 'user')"
 _IDENTITY_STATES = "('identified', 'parsed', 'ambiguous', 'unmatched')"

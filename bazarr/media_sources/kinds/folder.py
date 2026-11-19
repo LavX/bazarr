@@ -41,9 +41,17 @@ class FolderKind:
 
     def validate_library(self, source, library):
         """Refuse a path Bazarr+ cannot use. ``library`` carries ``locator`` and ``content_kind``."""
-        problems = []
         path = library.locator
-        if not isinstance(path, str) or not os.path.isabs(path):
+        if not isinstance(path, str) or '\x00' in path:
+            return [Problem('not_absolute', 'The folder path must be absolute.')]
+        try:
+            return self._validate(path, library)
+        except (OSError, ValueError):
+            return [Problem('unreadable', 'Bazarr+ cannot read the folder.')]
+
+    def _validate(self, path, library):
+        problems = []
+        if not os.path.isabs(path):
             return [Problem('not_absolute', 'The folder path must be absolute.')]
         if os.path.normpath(path) == os.path.abspath(os.sep):
             problems.append(Problem('root', 'The root of the filesystem cannot be a library.'))

@@ -754,3 +754,75 @@ def test_indexing_an_item_whose_row_is_gone_logs_a_warning_and_a_missing_file_ch
     before = repository.get_item(context.item_id)
     assert indexer.index_item(context.item_id) is None
     assert repository.get_item(context.item_id).indexed_at == before.indexed_at
+
+
+# A custom subtitle folder
+
+def test_indexing_with_a_custom_subtitle_folder_reads_no_arr_table_and_keeps_a_sync_output(
+        world, monkeypatch, tmp_path):
+    from app.config import settings
+    from media_sources import indexer, repository
+
+    subtitles = tmp_path / "subtitles"
+    subtitles.mkdir()
+    monkeypatch.setattr(settings.general, "subfolder", "absolute")
+    monkeypatch.setattr(settings.general, "subfolder_custom", str(subtitles))
+    monkeypatch.setattr(indexer, "get_target_folder", lambda path, create=False: str(subtitles))
+    context = _movie(world)
+    base = context.path.rsplit("/", 1)[1].replace(".mkv", "")
+    (subtitles / f"{base}.en.srt").write_text("1\n00:00:01,000 --> 00:00:02,000\nHello\n")
+    (subtitles / f"{base}.en.ffsubsync.srt").write_text("1\n00:00:01,000 --> 00:00:02,000\nSynced\n")
+    statements = []
+
+    @event.listens_for(world.db.get_bind(), "before_cursor_execute")
+    def record(connection, cursor, statement, parameters, context, executemany):
+        statements.append(statement)
+
+    try:
+        indexer.index_item(context.item_id)
+    finally:
+        event.remove(world.db.get_bind(), "before_cursor_execute", record)
+
+    assert not [s for s in statements if re.search(
+        r"table_(shows|episodes|movies|sports_events)\b|arr_instances", s)]
+    listing = repository.get_item(context.item_id).subtitles
+    assert f"{base}.en.srt" in listing
+    # A generated output of this item's own file is counted, which the arr ownership lookup would not have known.
+    assert f"{base}.en.ffsubsync.srt" in listing
+
+
+def test_the_source_ownership_index_only_claims_items_of_the_source_tables(world, tmp_path):
+    from media_sources.indexer import SourceOutputOwnerIndex
+
+    first, second = _movie(world), _movie(world, "Other.2002.mkv")
+    owners = SourceOutputOwnerIndex._load_owners()
+    claimed = {path for paths in owners.values() for path in paths}
+    assert claimed == {first.path, second.path}
+
+
+# Both keywords on the sync entry point, and the webhook's media type
+
+def test_a_sync_with_both_a_sports_context_and_a_source_raises(world):
+    from subtitles import sync
+
+    context = _movie(world)
+    with pytest.raises(ValueError):
+        sync.sync_subtitles(video_path=context.path, srt_path=context.path.replace(".mkv", ".en.srt"),
+                            srt_lang="en", forced=False, hi=False, percent_score=100, context=object(),
+                            validate=lambda: None, publication_guard=object(), source=context,
+                            track_job_progress=False)
+
+
+@pytest.mark.parametrize("make, expected", [(_movie, "movie"), (_episode, "series"), (_sports, "sports")])
+def test_the_webhook_hears_the_publication_type_of_a_source_item(world, monkeypatch, make, expected):
+    from subtitles import processing
+
+    context = make(world)
+    subtitle = FakeSubtitle()
+    subtitle.storage_path = context.path.replace(".mkv", ".en.srt")
+    open(subtitle.storage_path, "wb").write(CONTENT)
+    webhook = Mock()
+    monkeypatch.setattr(processing, "call_external_webhook", webhook)
+    processing.process_subtitle(subtitle, context.media_type, "None", context.path, 100, source=context)
+    assert webhook.call_args.kwargs["media_type"] == {"movie": "movie", "series": "episode",
+                                                      "sports": "sports"}[expected]

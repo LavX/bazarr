@@ -8,6 +8,8 @@ import ast
 import logging
 import os
 
+from sqlalchemy.exc import IntegrityError
+
 from app.database import get_audio_profile_languages, get_profiles_list
 from app.get_providers import get_providers
 from app.jobs_queue import JobFailed, jobs_queue
@@ -23,9 +25,10 @@ from .kinds import UnknownSourceKind, get_kind
 class SourceError(ValueError):
     """A refused request. ``status`` is the HTTP code it maps to."""
 
-    def __init__(self, message, status=400):
+    def __init__(self, message, status=400, code='invalid'):
         super().__init__(message)
         self.status = status
+        self.code = code
 
 
 class _LibraryDraft:
@@ -54,25 +57,42 @@ def create_source(payload, session=None):
     if content_kind not in repository.CONTENT_KINDS:
         raise SourceError(f"content_kind must be one of {', '.join(repository.CONTENT_KINDS)}")
     path = library.get('path')
+    if isinstance(path, str) and path.strip() and '\x00' not in path:
+        # Stored the way it will be walked: a trailing slash or a ".." must not make one folder two locators.
+        path = os.path.normpath(path)
     draft = _LibraryDraft(path, content_kind)
     problems = kind.validate_library(None, draft)
     if problems:
         raise SourceError(' '.join(problem.message for problem in problems))
+    clash = repository.overlapping_root(path, session)
+    if clash is not None:
+        raise SourceError(f"This folder overlaps {clash[1]}, a library of the media source {clash[0]}. A folder "
+                          f"can belong to one library only: use a folder that neither contains nor sits inside "
+                          f"another library's.", 409, 'overlap')
     profile_id = library.get('profile_id')
-    if profile_id is not None and get_profiles_list(profile_id=profile_id) is None:
+    if profile_id is not None and (type(profile_id) is not int or profile_id < 1
+                                   or get_profiles_list(profile_id=profile_id) is None):
         raise SourceError('That language profile does not exist')
+    enabled = payload.get('enabled', True)
+    if type(enabled) is not bool:
+        raise SourceError('enabled must be true or false')
     frequency = payload.get('scan_frequency_hours', 12)
     if type(frequency) is not int or frequency < 0:
         raise SourceError('scan_frequency_hours must be a whole number, 0 or more')
     if repository.name_taken(name, session):
-        raise SourceError('A media source with that name already exists', 409)
+        raise SourceError('A media source with that name already exists', 409, 'name_taken')
 
-    with source_transaction(session) as connection:
-        source_id = repository.create_source(
-            kind=kind_name, name=name, enabled=bool(payload.get('enabled', True)),
-            scan_frequency_hours=frequency, target=connection)
-        repository.create_library(source_id=source_id, content_kind=content_kind, locator=path,
-                                  profile_id=profile_id, target=connection)
+    try:
+        with source_transaction(session) as connection:
+            source_id = repository.create_source(
+                kind=kind_name, name=name, enabled=enabled, scan_frequency_hours=frequency, target=connection)
+            repository.create_library(source_id=source_id, content_kind=content_kind, locator=path,
+                                      profile_id=profile_id, target=connection)
+    except IntegrityError as error:
+        # Another request took the name or the folder between the checks above and the insert.
+        if repository.name_taken(name, session):
+            raise SourceError('A media source with that name already exists', 409, 'name_taken') from error
+        raise
     return source_id
 
 
@@ -94,11 +114,29 @@ def describe_source(source_id, session=None):
 
 
 def queue_scan(source_id, library_id=None):
-    from .scanner import scan_media_source
+    from .scanner import disabled_reason, scan_media_source
+    reason = disabled_reason(source_id, library_id)
+    if reason:
+        raise SourceError(reason, 409, 'disabled')
     return scan_media_source(source_id, library_id)
 
 
+def item_disabled_reason(item_id, session=None):
+    """Why an item must not be searched: its library or its source is disabled. None when it may be."""
+    state = repository.item_state(item_id, session)
+    if state is None:
+        return None
+    if not state.source_enabled:
+        return f'The media source {state.source_name} is disabled'
+    if not state.library_enabled:
+        return 'The library of this item is disabled'
+    return None
+
+
 def queue_search(item_id):
+    reason = item_disabled_reason(item_id)
+    if reason:
+        raise SourceError(reason, 409, 'disabled')
     return search_source_item(item_id)
 
 
@@ -126,6 +164,11 @@ def search_source_item(item_id, job_id=None):
         context = resolve_item(item_id)
     except SourceItemGone as error:
         raise JobFailed('The item no longer exists', reason='not_found') from error
+    reason = item_disabled_reason(item_id)
+    if reason:
+        # Disabled after the search was queued: nothing is searched, and nothing is an error.
+        jobs_queue.update_job_progress(job_id=job_id, progress_value='max', progress_message=reason)
+        return None
     if not context.profile_id:
         jobs_queue.update_job_progress(job_id=job_id, progress_value='max',
                                        progress_message='No language profile: nothing to search for')

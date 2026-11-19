@@ -353,6 +353,9 @@ class FakeKind:
     def __init__(self, files, complete=True):
         self.files, self.complete = files, complete
 
+    def validate_library(self, source, library):
+        return []
+
     def enumerate(self, source, library, cancel=None):
         from media_sources.kinds import Listing
         listing = Listing(files=iter(self.files))
@@ -449,3 +452,161 @@ def test_the_folder_kind_refuses_paths_it_cannot_use(tmp_path):
     assert "content_kind" in problems(str(tmp_path), "series")
     with pytest.raises(UnknownSourceKind):
         get_kind("jellyfin")
+
+
+# A disabled source or library is not scanned
+
+def test_a_disabled_source_is_not_scanned_even_when_a_library_is_named(library):
+    from media_sources import repository
+
+    session, source_id, library_id, root = library
+    video(root / "Film.2001.mkv")
+    session.execute(sa.update(repository.Sources).values(enabled=0))
+    assert _scan(source_id) == []
+    assert _scan(source_id, library_id) == []
+    assert _items(library_id) == {}
+    assert repository.get_library(library_id).last_scan_status is None
+
+
+def test_a_disabled_library_is_not_scanned_even_when_named(library):
+    from media_sources import repository
+
+    session, source_id, library_id, root = library
+    video(root / "Film.2001.mkv")
+    session.execute(sa.update(repository.Libraries).values(enabled=0))
+    assert _scan(source_id, library_id) == []
+    assert _items(library_id) == {}
+
+
+def test_the_scan_job_of_a_disabled_source_reports_it_and_scans_nothing(library, monkeypatch):
+    from media_sources import repository, scanner
+
+    session, source_id, library_id, root = library
+    video(root / "Film.2001.mkv")
+    session.execute(sa.update(repository.Sources).values(enabled=0))
+    progress = []
+    monkeypatch.setattr(scanner.jobs_queue, "update_job_progress", lambda **kwargs: progress.append(kwargs))
+    monkeypatch.setattr(scanner.jobs_queue, "raise_if_cancelled", lambda job_id: None)
+    scanner.scan_media_source(source_id, job_id=7)
+    assert _items(library_id) == {}
+    assert "disabled" in progress[-1]["progress_message"]
+
+
+# Two libraries over the same or nested paths
+
+def _second_library(session, root, name="Other", nested=None):
+    from media_sources import repository
+
+    source_id = repository.create_source(kind="folder", name=name, target=session)
+    path = nested or root
+    return source_id, repository.create_library(source_id=source_id, content_kind="movie", locator=str(path),
+                                                target=session)
+
+
+@pytest.mark.parametrize("nested", [False, True])
+def test_a_file_another_library_holds_is_skipped_and_reported_not_inserted(library, nested):
+    from media_sources import repository
+
+    session, source_id, library_id, root = library
+    video(root / "Film.2001.mkv")
+    video(root / "Sub" / "Deep.2002.mkv")
+    _scan(source_id)
+    other_source, other_library = _second_library(session, root, nested=root / "Sub" if nested else None)
+    video(root / "Sub" / "New.2003.mkv")
+
+    (result,) = _scan(other_source)
+
+    assert result.status == "ok"
+    # Only the file the first library has not seen yet is new; the others are held and reported.
+    paths = {row.path for row in repository.list_items(library_id=other_library, limit=100)}
+    assert paths == {str(root / "Sub" / "New.2003.mkv")}
+    assert (result.inserted, result.held) == (1, 1 if nested else 2)
+    assert "already supplied by Local" in result.message
+    assert len(_items(library_id)) == 2
+    # The file the second library took is not the first library's to insert, and nothing is deleted.
+    (first,) = _scan(source_id)
+    assert (first.inserted, first.held, first.deleted) == (0, 1, 0)
+
+
+def test_a_file_held_by_a_disabled_library_is_reported_as_held_not_adopted(library):
+    from media_sources import repository
+
+    session, source_id, library_id, root = library
+    video(root / "Film.2001.mkv")
+    _scan(source_id)
+    session.execute(sa.update(repository.Libraries).where(repository.Libraries.c.id == library_id).values(enabled=0))
+    other_source, other_library = _second_library(session, root)
+    (result,) = _scan(other_source)
+    assert result.inserted == 0 and result.held == 1 and "held by Local" in result.message
+    assert repository.count_items(library_id=other_library) == 0
+
+
+def test_a_batch_that_hits_the_unique_path_anyway_falls_back_to_one_file_at_a_time(library, monkeypatch):
+    from media_sources import repository, scanner
+
+    session, source_id, library_id, root = library
+    video(root / "Good.2001.mkv")
+    bad = video(root / "Bad.2002.mkv")
+    video(root / "Fine.2003.mkv")
+    real = repository.insert_item
+
+    def refuse_bad(target=None, **values):
+        if values["path"] == str(bad):
+            raise sa.exc.IntegrityError("insert", {}, Exception("duplicate"))
+        return real(target, **values)
+
+    monkeypatch.setattr(scanner.repository, "insert_item", refuse_bad)
+    (result,) = _scan(source_id)
+    assert result.inserted == 2 and result.skipped == 1
+    assert sorted(row.title for row in _items(library_id).values()) == ["Fine", "Good"]
+    assert "could not be added" in result.message
+
+
+# The library is checked again at scan time
+
+def test_a_locator_that_became_unusable_is_refused_at_scan_time_and_changes_nothing(library, monkeypatch):
+    from media_sources import repository
+    from media_sources.kinds import folder
+
+    session, source_id, library_id, root = library
+    video(root / "Film.2001.mkv")
+    _scan(source_id)
+    monkeypatch.setattr(folder, "config_directory", lambda: str(root))
+    video(root / "Late.2002.mkv")
+
+    (result,) = _scan(source_id)
+
+    assert result.status == "error" and "configuration folder" in result.message
+    assert len(_items(library_id)) == 1
+    assert repository.get_library(library_id).last_scan_status == "error"
+
+
+# A rescan keeps what the user set
+
+def test_a_changed_file_keeps_a_title_and_identity_the_user_set(library):
+    from media_sources import repository
+
+    session, source_id, library_id, root = library
+    path = video(root / "Mine.2001.mkv")
+    _scan(source_id)
+    item = _items(library_id)[str(path)]
+    repository.update_item(item.id, session, identity_source="user", identity_state="identified",
+                           title="Chosen Title", year="1999", tmdb_id="603")
+    path.write_bytes(b"\0" * 2222)
+
+    _scan(source_id)
+
+    kept = repository.get_item(item.id)
+    assert (kept.title, kept.year, kept.identity_source, kept.identity_state, kept.tmdb_id) == (
+        "Chosen Title", "1999", "user", "identified", "603")
+    assert kept.file_size == 2222 and kept.ffprobe_cache is None
+
+
+def test_an_emptied_folder_is_covered_by_the_empty_walk_rule_and_the_message_says_what_to_do(library):
+    session, source_id, library_id, root = library
+    path = video(root / "Film.2001.mkv")
+    _scan(source_id)
+    path.unlink()
+    (result,) = _scan(source_id)
+    assert result.status == "root_missing" and result.deleted == 0
+    assert "remove the library" in result.message

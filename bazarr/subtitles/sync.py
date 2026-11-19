@@ -355,6 +355,8 @@ def sync_subtitles(video_path,
                    publication_guard=None,
                    return_job_id=False,
                    source=None):
+    if source is not None and context is not None:
+        raise ValueError('A source item cannot be combined with a sports context')
     try:
         if context is not None:
             if validate is None or publication_guard is None:

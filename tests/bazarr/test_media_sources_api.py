@@ -1,5 +1,6 @@
 """The first routes: create a folder source with a library, scan it, list its items and search one."""
 import pytest
+import sqlalchemy as sa
 from flask import Flask
 
 from media_source_helpers import add_profile, video
@@ -160,3 +161,107 @@ def test_the_swagger_document_lists_the_routes_and_the_job_response(api):
     assert {"/system/media-sources", "/system/media-sources/{source_id}/scan", "/sources/items",
             "/sources/items/{item_id}/search"} <= set(spec["paths"])
     assert {"202", "404"} <= set(spec["paths"]["/system/media-sources/{source_id}/scan"]["post"]["responses"])
+
+
+# Enabled flags and overlapping folders
+
+def _scanned(api):
+    from media_sources import scanner
+
+    created = _create(api).json
+    video(api.movies / "Film.2001.mkv")
+    scanner.run_scan(created["id"])
+    (item,) = api.client.get(ITEMS, headers=HEADERS).json["data"]
+    return created, item
+
+
+def _disable(api, table):
+    from media_sources import repository
+    api.db.execute(sa.update(table).values(enabled=0))
+    return repository
+
+
+@pytest.mark.parametrize("which", ["source", "library"])
+def test_a_disabled_source_or_library_is_not_scanned_or_searched_through_the_api(api, which):
+    from media_sources import repository
+
+    created, item = _scanned(api)
+    _disable(api, repository.Sources if which == "source" else repository.Libraries)
+    api.queued.clear()
+
+    scan = api.client.post(f"{SOURCES}/{created['id']}/scan", headers=HEADERS)
+    search = api.client.post(f"{ITEMS}/{item['id']}/search", headers=HEADERS)
+
+    assert scan.status_code == 409
+    assert scan.json["error"] == "disabled"
+    assert ("disabled" if which == "source" else "no enabled library") in scan.json["message"]
+    assert search.status_code == 409 and "disabled" in search.json["message"]
+    assert api.queued == []
+    # Its items stay listed.
+    assert api.client.get(ITEMS, headers=HEADERS).json["total"] == 1
+
+
+@pytest.mark.parametrize("which", ["source", "library"])
+def test_a_search_job_queued_before_the_flag_changed_does_nothing(api, monkeypatch, which):
+    from media_sources import repository, service
+
+    created, item = _scanned(api)
+    _disable(api, repository.Sources if which == "source" else repository.Libraries)
+    progress = []
+    monkeypatch.setattr(service.jobs_queue, "update_job_progress", lambda **kwargs: progress.append(kwargs))
+    monkeypatch.setattr(service, "get_providers", lambda: pytest.fail("a provider was asked"))
+    assert service.search_source_item(item["id"], job_id=4) is None
+    assert "disabled" in progress[-1]["progress_message"]
+
+
+def test_a_library_over_a_folder_another_library_has_or_nests_with_is_refused(api, tmp_path):
+    assert _create(api).status_code == 201
+    inner = api.movies / "Inner"
+    inner.mkdir()
+    outer = tmp_path
+    for number, path in enumerate((api.movies, inner, outer, str(api.movies) + "/", str(inner) + "/../Inner")):
+        response = _create(api, name=f"Other {number}", library={"path": str(path), "content_kind": "movie"})
+        assert response.status_code == 409, path
+        assert response.json["error"] == "overlap"
+        assert "Local movies" in response.json["message"] and str(api.movies) in response.json["message"]
+    from media_sources import repository
+    assert len(repository.list_sources()) == 1
+    # A sibling is fine.
+    sibling = tmp_path / "Movies2"
+    sibling.mkdir()
+    assert _create(api, name="Sibling", library={"path": str(sibling), "content_kind": "movie"}).status_code == 201
+
+
+def test_the_path_is_stored_normalised(api):
+    created = _create(api, library={"path": str(api.movies) + "/", "content_kind": "movie"}).json
+    assert created["libraries"][0]["locator"] == str(api.movies)
+
+
+def test_a_name_taken_between_the_check_and_the_insert_is_a_conflict_not_a_server_error(api, monkeypatch):
+    from media_sources import service
+
+    assert _create(api).status_code == 201
+    other = api.tmp_path / "Other"
+    other.mkdir()
+    real, calls = service.repository.name_taken, []
+
+    def stale_then_real(name, target=None):
+        # The first look happens before the other request lands; the look after the failed insert sees it.
+        calls.append(name)
+        return False if len(calls) == 1 else real(name, target)
+
+    monkeypatch.setattr(service.repository, "name_taken", stale_then_real)
+    response = _create(api, library={"path": str(other), "content_kind": "movie"})
+    assert response.status_code == 409 and "already exists" in response.json["message"]
+
+
+@pytest.mark.parametrize("change", [{"enabled": "false"}, {"enabled": 0},
+                                    {"library": {"path": "{movies}", "content_kind": "movie", "profile_id": 0}},
+                                    {"library": {"path": "{movies}", "content_kind": "movie", "profile_id": "1"}},
+                                    {"library": {"path": "{movies}", "content_kind": "movie", "profile_id": False}},
+                                    {"library": {"path": "/tmp/bad\u0000path", "content_kind": "movie"}}])
+def test_malformed_values_are_refused_with_a_400(api, change):
+    change = {key: ({**value, "path": value["path"].format(movies=api.movies)} if isinstance(value, dict) else value)
+              for key, value in change.items()}
+    response = _create(api, **change)
+    assert response.status_code == 400

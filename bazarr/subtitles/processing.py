@@ -527,7 +527,7 @@ def process_subtitle(subtitle, media_type, audio_language, path, max_score, is_u
         subtitle_path=downloaded_path,
         media_path=path,
         language=downloaded_language,
-        media_type=media_type
+        media_type=publication_type
     )
 
     if media_type != 'sports' and source is None:

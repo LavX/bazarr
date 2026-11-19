@@ -10,6 +10,8 @@ import ast
 import logging
 import os
 
+import sqlalchemy as sa
+
 from subliminal_patch import core, search_external_subtitles
 
 from app.config import settings
@@ -19,14 +21,47 @@ from languages.get_languages import alpha2_from_alpha3, get_language_set
 from subtitles.adaptive_searching import is_search_given_up
 from subtitles.indexer.utils import (add_combined_outputs, add_sync_engine_outputs, get_external_subtitles_path,
                                      guess_external_subtitles, subtitle_language_with_combined_modifier, subtitle_language_with_sync_modifier)
-from subtitles.tools.subsync_engines import subtitle_write_locks
+from subtitles.tools.subsync_engines import SyncOutputOwnerIndex, _normalized_media_stem, subtitle_write_locks
 from utilities.helper import get_subtitle_destination_folder, get_target_folder
 
 from . import repository
+from .db import handle
 
 
-def list_external_subtitles(path, previous=None):
-    """``[[language, subtitle path, size], ...]`` for the subtitle files beside ``path``."""
+class SourceOutputOwnerIndex(SyncOutputOwnerIndex):
+    """Who owns a generated subtitle in a shared subtitle folder, answered from the source tables only.
+
+    The base index reads the arr and Sportarr tables, which a source never does. Here the owners are the source
+    items, each claiming its own folder and, with a custom subtitle folder, that folder too.
+    """
+
+    @staticmethod
+    def _load_owners():
+        custom_folder = get_subtitle_destination_folder()
+        subfolder = settings.general.subfolder
+        absolute_folder = os.path.normcase(os.path.realpath(custom_folder)) if subfolder == 'absolute' else None
+        owners = {}
+        for row in handle().execute(sa.select(repository.Items.c.path)).all():
+            mapped = os.path.normcase(os.path.realpath(row.path))
+            folders = {os.path.dirname(mapped)}
+            if absolute_folder:
+                folders.add(absolute_folder)
+            elif subfolder == 'relative' and custom_folder:
+                folders.add(os.path.normcase(os.path.realpath(os.path.join(os.path.dirname(mapped),
+                                                                         custom_folder))))
+            stem = _normalized_media_stem(mapped)
+            for folder in folders:
+                owners.setdefault((folder, stem), set()).add(mapped)
+        return owners
+
+
+def list_external_subtitles(path, previous=None, ownership_index=None):
+    """``[[language, subtitle path, size], ...]`` for the subtitle files beside ``path``.
+
+    ``ownership_index`` is shared across one scan; without one a fresh source index is made, so the arr tables
+    are never consulted."""
+    if ownership_index is None:
+        ownership_index = SourceOutputOwnerIndex()
     actual = []
     destination = os.path.join(get_target_folder(path, create=False) or os.path.dirname(path), '.destination')
     with subtitle_write_locks(path, destination):
@@ -44,7 +79,8 @@ def list_external_subtitles(path, previous=None):
                 full_dest_folder_path = dest_folder
             elif settings.general.subfolder == "relative":
                 full_dest_folder_path = os.path.join(os.path.dirname(path), dest_folder)
-        subtitles = add_sync_engine_outputs(full_dest_folder_path, subtitles, video_path=path)
+        subtitles = add_sync_engine_outputs(full_dest_folder_path, subtitles, video_path=path,
+                                            ownership_index=ownership_index)
         subtitles = add_combined_outputs(full_dest_folder_path, subtitles, video_filename=os.path.basename(path))
         subtitles = guess_external_subtitles(full_dest_folder_path, subtitles, "movie", previously_indexed,
                                              path_reverse=lambda subtitle_path: subtitle_path)
@@ -163,7 +199,7 @@ def effective_profile_id(item, group=None, library=None):
     return None
 
 
-def index_item(item_id, target=None):
+def index_item(item_id, target=None, ownership_index=None):
     """Rebuild the subtitle listing and the missing languages of one item and store them by id.
 
     Returns the listing, or None when the item or its file is gone.
@@ -177,7 +213,7 @@ def index_item(item_id, target=None):
         return None
     try:
         previous = ast.literal_eval(item.subtitles) if item.subtitles else []
-        listing = list_external_subtitles(item.path, previous)
+        listing = list_external_subtitles(item.path, previous, ownership_index)
     except Exception:
         logging.exception('BAZARR unable to index external subtitles for this file %s', item.path)
         return None

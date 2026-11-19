@@ -5,6 +5,7 @@ Every function takes a ``target``: a session, or the connection of a ``source_tr
 the application's session. Nothing here touches an arr or Sportarr table.
 """
 import logging
+import os
 from datetime import datetime
 
 import sqlalchemy as sa
@@ -163,9 +164,9 @@ def count_items(*, source_id=None, library_id=None, kind=None, target=None):
 
 
 def library_item_paths(library_id, target=None):
-    """Every item of a library with what the rescan test compares: ``(id, path, file_size, file_mtime_ns)``."""
+    """Every item of a library with what the rescan test compares: ``(id, path, file_size, file_mtime_ns, identity_source)``."""
     return _target(target).execute(
-        sa.select(Items.c.id, Items.c.path, Items.c.file_size, Items.c.file_mtime_ns)
+        sa.select(Items.c.id, Items.c.path, Items.c.file_size, Items.c.file_mtime_ns, Items.c.identity_source)
         .where(Items.c.library_id == library_id)).all()
 
 
@@ -241,3 +242,55 @@ def blacklist_pairs(item_kind, target=None):
     """The ``(provider, subs_id)`` pairs the source pool of one item kind must skip."""
     return [(row.provider, row.subs_id) for row in _target(target).execute(
         sa.select(Blacklist.c.provider, Blacklist.c.subs_id).where(Blacklist.c.item_kind == item_kind)).all()]
+
+
+# Enabled flags, overlap and holders
+
+def item_state(item_id, target=None):
+    """``(item row, library enabled, source enabled, library, source)`` of an item, or None."""
+    row = _target(target).execute(
+        sa.select(Items.c.id, Items.c.title, Libraries.c.enabled.label('library_enabled'),
+                  Sources.c.enabled.label('source_enabled'), Sources.c.name.label('source_name'))
+        .select_from(Items.join(Libraries, Items.c.library_id == Libraries.c.id)
+                     .join(Sources, Items.c.source_id == Sources.c.id))
+        .where(Items.c.id == item_id)).first()
+    return row
+
+
+def _normal(path):
+    return os.path.normcase(os.path.normpath(path))
+
+
+def _inside(path, parent):
+    return path == parent or path.startswith(parent.rstrip(os.sep) + os.sep)
+
+
+def overlapping_root(path, target=None):
+    """The ``(source name, root path)`` of a library root that is inside ``path`` or contains it, or None."""
+    wanted = _normal(path)
+    rows = _target(target).execute(
+        sa.select(Roots.c.local_path, Sources.c.name)
+        .select_from(Roots.join(Libraries, Roots.c.library_id == Libraries.c.id)
+                     .join(Sources, Libraries.c.source_id == Sources.c.id))).all()
+    for row in rows:
+        existing = _normal(row.local_path)
+        if _inside(wanted, existing) or _inside(existing, wanted):
+            return row.name, row.local_path
+    return None
+
+
+def holders_of(paths, library_id, target=None):
+    """``{path: (source name, held by an enabled library of an enabled source)}`` for the paths another library
+    already holds. One item per file: a file another library holds is not inserted again."""
+    held = {}
+    paths = list(paths)
+    for start in range(0, len(paths), 500):
+        rows = _target(target).execute(
+            sa.select(Items.c.path, Sources.c.name, Libraries.c.enabled.label('library_enabled'),
+                      Sources.c.enabled.label('source_enabled'))
+            .select_from(Items.join(Libraries, Items.c.library_id == Libraries.c.id)
+                         .join(Sources, Items.c.source_id == Sources.c.id))
+            .where(Items.c.path.in_(paths[start:start + 500]), Items.c.library_id != library_id)).all()
+        for row in rows:
+            held[row.path] = (row.name, bool(row.library_enabled and row.source_enabled))
+    return held

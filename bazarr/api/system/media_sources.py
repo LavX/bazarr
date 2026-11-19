@@ -32,7 +32,7 @@ class MediaSourcesList(Resource):
         try:
             source_id = service.create_source(_body())
         except SourceError as error:
-            return {"error": "invalid", "message": str(error)}, error.status
+            return {"error": error.code, "message": str(error)}, error.status
         return service.describe_source(source_id), 201
 
 
@@ -41,8 +41,12 @@ class MediaSourceScan(Resource):
     @authenticate
     @api_ns_system_media_sources.response(202, 'The scan was queued as a job')
     @api_ns_system_media_sources.response(404, 'No such source')
+    @api_ns_system_media_sources.response(409, 'The source or its library is disabled')
     def post(self, source_id):
         """Queue a scan of every enabled library of the source"""
         if service.describe_source(source_id) is None:
             return {"error": "not_found"}, 404
-        return queued_job_response(service.queue_scan(source_id) or None), 202
+        try:
+            return queued_job_response(service.queue_scan(source_id) or None), 202
+        except SourceError as error:
+            return {"error": error.code, "message": str(error)}, error.status
