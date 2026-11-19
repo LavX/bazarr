@@ -42,6 +42,8 @@ from subzero.modification.markup import unwrap_entry
 REPO = Path(__file__).resolve().parents[2]
 # The reference: origin/development's Remove HI implementation, vendored and frozen.
 REFERENCE_LIBS = Path(__file__).resolve().parent / "fixtures" / "hi_reference"
+# Recorded for provenance only: the test checks the pinned hashes below, not the SHA. The
+# hashes prove the files are unchanged since they were vendored.
 REFERENCE_SOURCE_SHA = "3dc435b8f4f6aadbe3cae9236b12b0e4acf9ce01"
 # SHA-256 of each vendored file, as recorded when it was copied. A test checks them, so an
 # edit to the reference shows up as a failure rather than as a silent change of the gate.
@@ -71,7 +73,7 @@ ROUTES = ("content", "file")
 MODS = (["remove_HI"], ["remove_HI(keep_lyrics=1)"])
 # Production runs Remove HI next to the other line mods (bazarr/subtitles/tools/mods.py).
 COMBINED_MODS = (["OCR_fixes", "common", "remove_HI"], ["OCR_fixes", "common", "remove_HI(keep_lyrics=1)"])
-MIN_PLAIN_CUES = 300
+EXPECTED_PLAIN_CUES = 378  # real cues: 350 generated, 12 in the caps file, 16 in the source blobs
 MIN_TAGGED_COMPARISONS = 3000
 
 
@@ -140,11 +142,16 @@ def _balanced(out, name):
 # The runner loads the reference package from its own directory in a separate interpreter,
 # so the reference never shares a module name with the package under test.
 _DEV_RUNNER = r'''
-import json, os, sys, tempfile
+import json, os, sys
 from pathlib import Path
 sys.path.insert(0, sys.argv[1])
 from subzero.language import Language
 from subzero.modification.main import SubtitleModifications
+import subzero
+# Refuse to run against anything but the vendored reference, so a current-vs-current
+# comparison can never pass.
+if not os.path.realpath(subzero.__file__).startswith(os.path.realpath(sys.argv[1])):
+    raise SystemExit("subzero was imported from %s, not from %s" % (subzero.__file__, sys.argv[1]))
 
 def run(route, srt, mods, workdir):
     sm = SubtitleModifications()
@@ -167,7 +174,7 @@ def safe(route, srt, mods, workdir):
         return {"error": "%s: %s" % (type(exc).__name__, exc)}
 
 jobs = json.load(sys.stdin)
-workdir = tempfile.mkdtemp()
+workdir = sys.argv[2]
 out = [[safe(route, srt, mods, workdir) for route in ("content", "file")] for srt, mods in jobs]
 json.dump(out, sys.stdout)
 '''
@@ -191,10 +198,14 @@ def test_vendored_reference_is_unchanged():
     assert all(path.exists() for path in (REFERENCE_LIBS / rel for rel in recorded))
 
 
-def _development_outputs(libs, jobs):
+def _development_outputs(libs, workdir, jobs):
     env = dict(os.environ, PYTHONDONTWRITEBYTECODE="1")
-    proc = subprocess.run([sys.executable, "-c", _DEV_RUNNER, str(libs)],
-                          input=json.dumps(jobs), capture_output=True, text=True, check=True, env=env)
+    try:
+        proc = subprocess.run([sys.executable, "-c", _DEV_RUNNER, str(libs), str(workdir)],
+                              input=json.dumps(jobs), capture_output=True, text=True, check=True,
+                              env=env, timeout=600)
+    except subprocess.CalledProcessError as exc:
+        raise AssertionError("the development runner failed:\n%s" % exc.stderr) from exc
     return json.loads(proc.stdout)
 
 
@@ -277,9 +288,22 @@ def _srt_from_cues(cue_lines_list):
 _TIMESTAMP = re.compile(r"^\d{2}:\d{2}:\d{2},\d{3} --> \d{2}:\d{2}:\d{2},\d{3}$", re.MULTILINE)
 
 
+_SRT_BLOCK = re.compile(r"^\d+\n\d{2}:\d{2}:\d{2},\d{3} --> \d{2}:\d{2}:\d{2},\d{3}\n", re.MULTILINE)
+_PLACEHOLDER = re.compile(r"%\d*[sdr]|\{\}|\{:")
+
+
 def _is_real_srt(text):
-    """A timestamped SRT with no format placeholders in it."""
-    return bool(_TIMESTAMP.search(text)) and not re.search(r"%\d*[sdr]|\{:", text)
+    """A timestamped SRT block (index, timestamp, text) with no format placeholder in it."""
+    return bool(_SRT_BLOCK.search(text)) and not _PLACEHOLDER.search(text)
+
+
+def _parse_srt(text):
+    """[(index, timestamp, [text lines])] for an SRT string the way the gate writes them."""
+    events = []
+    for block in text.strip().split("\n\n"):
+        lines = block.split("\n")
+        events.append((lines[0], lines[1], lines[2:]))
+    return events
 
 
 def _is_plain(srt):
@@ -309,7 +333,7 @@ _UNKNOWN_FILE = _srt_from_cues(
     [["<font color=\"#ffff00\">WE ARE GOING NOW THE PLAN IS ON</font> [door creaks]"] for _ in range(12)]
     + [["OPEN THE DOOR"] for _ in range(12)])
 
-PLAIN_SRTS = ([_srt_from_cues(cue) for cue in _plain_cues()] + [_CAPS_FILE] + _source_srts())
+PLAIN_SRTS = ([_srt_from_cues([cue]) for cue in _plain_cues()] + [_CAPS_FILE] + _source_srts())
 
 
 def _cue_count(srt):
@@ -317,13 +341,26 @@ def _cue_count(srt):
 
 
 # --- the plain gate ----------------------------------------------------------
+def test_generated_cues_parse_back_to_themselves():
+    # A malformed corpus must never pass silently: each generated cue has to come back out
+    # of its SRT as exactly one event, with the lines it was built from.
+    for lines in _plain_cues():
+        events = _parse_srt(_srt_from_cues([lines]))
+        assert len(events) == 1, lines
+        assert events[0][2] == lines, lines
+
+
 def test_plain_corpus_is_byte_identical_to_development(development_libs, tmp_path):
     assert all(_is_real_srt(srt) and _is_plain(srt) for srt in PLAIN_SRTS)
     compared = sum(_cue_count(srt) for srt in PLAIN_SRTS)
-    assert compared >= MIN_PLAIN_CUES, "only %d real cues in the corpus" % compared
+    assert compared == EXPECTED_PLAIN_CUES, "the corpus has %d real cues, expected %d" % (compared, EXPECTED_PLAIN_CUES)
+    # The reference must really remove a cue that is removable, or the comparison below
+    # proves nothing about removals.
+    known = _development_outputs(development_libs, tmp_path, [(_pair_srt(["♪ la la la ♪"]), ["remove_HI"])])
+    assert "♪" not in _visible(known[0][0]) and "Hallo." in _visible(known[0][0])
     jobs = [(srt, mods) for srt in PLAIN_SRTS for mods in MODS + COMBINED_MODS[:1]]
     jobs += [(srt, COMBINED_MODS[1]) for srt in PLAIN_SRTS[:50]]
-    dev = _development_outputs(development_libs, jobs)
+    dev = _development_outputs(development_libs, tmp_path, jobs)
     current = _current_outputs(jobs, tmp_path)
     _assert_all_loaded(dev, jobs, "development")
     _assert_all_loaded(current, jobs, "current")
@@ -339,7 +376,7 @@ def test_plain_corpus_is_byte_identical_to_development(development_libs, tmp_pat
 def test_unknown_markup_is_left_to_development(development_libs, tmp_path):
     jobs = [(_pair_srt(lines), mods) for lines in _UNKNOWN_CUES for mods in MODS + COMBINED_MODS[:1]]
     jobs += [(_UNKNOWN_FILE, mods) for mods in MODS]
-    dev = _development_outputs(development_libs, jobs)
+    dev = _development_outputs(development_libs, tmp_path, jobs)
     current = _current_outputs(jobs, tmp_path)
     _assert_all_loaded(dev, jobs, "development")
     _assert_all_loaded(current, jobs, "current")
@@ -416,12 +453,18 @@ def _replace_cue_text(out, new_lines):
     return "\n".join(lines[:index + 1] + new_lines + lines[end:])
 
 
-def _candidates(wrappers, dev_text):
+def _candidates(cue_lines, wrappers, dev_text):
     """Every way the surviving lines of a cue can carry their input lines' tags, in order.
     Development only removes lines and changes their text, so each output line is the
-    development text of one line wrapped in the tags of that same input line."""
-    for positions in combinations(range(len(wrappers)), len(dev_text)):
-        yield [wrappers[k][0] + text + wrappers[k][1] for text, k in zip(dev_text, positions)]
+    development text of one input line wrapped in that input line's tags. A text that is
+    still found inside an input line can only come from one of those lines."""
+    allowed = []
+    for text in dev_text:
+        holders = [k for k, line in enumerate(cue_lines) if text in line]
+        allowed.append(holders or list(range(len(cue_lines))))
+    for positions in combinations(range(len(cue_lines)), len(dev_text)):
+        if all(position in allowed[j] for j, position in enumerate(positions)):
+            yield [wrappers[k][0] + text + wrappers[k][1] for text, k in zip(dev_text, positions)]
 
 
 def _tagged_comparison(cue_lines, rotation, mods, dev_pair, cur_pair):
@@ -437,7 +480,7 @@ def _tagged_comparison(cue_lines, rotation, mods, dev_pair, cur_pair):
                 expected = [dev_out]
             else:
                 expected = [_replace_cue_text(dev_out, candidate)
-                            for candidate in _candidates(wrappers, dev_text)]
+                            for candidate in _candidates(cue_lines, wrappers, dev_text)]
             assert cur_out in expected, "%s\nactual:\n%s\nexpected one of:\n%s" % (
                 label, cur_out, "\n---\n".join(expected))
             exact_count += 1
@@ -454,7 +497,7 @@ def test_tagged_corpus_matches_development_exactly(development_libs, tmp_path):
     plain_keys = sorted({(tuple(lines), tuple(mods)) for lines, _r, mods in specs})
     plain_jobs = [(_pair_srt(list(lines)), list(mods)) for lines, mods in plain_keys]
     tagged_jobs = [(_pair_srt(lines, rotation), mods) for lines, rotation, mods in specs]
-    dev = dict(zip(plain_keys, _development_outputs(development_libs, plain_jobs)))
+    dev = dict(zip(plain_keys, _development_outputs(development_libs, tmp_path, plain_jobs)))
     current = _current_outputs(tagged_jobs, tmp_path)
     _assert_all_loaded(list(dev.values()), plain_jobs, "development")
     _assert_all_loaded(current, tagged_jobs, "current")
@@ -471,7 +514,7 @@ def test_all_caps_wrapped_file_matches_development_plain(development_libs, tmp_p
     plain = _CAPS_FILE.replace(" [door creaks]", "")
     tagged = _WRAPPED_CAPS_FILE
     jobs = [(plain, ["remove_HI"]), (tagged, ["remove_HI"])]
-    dev = _development_outputs(development_libs, jobs)
+    dev = _development_outputs(development_libs, tmp_path, jobs)
     current = _current_outputs(jobs, tmp_path)
     _assert_all_loaded(dev, jobs, "development")
     _assert_all_loaded(current, jobs, "current")
@@ -496,7 +539,7 @@ def test_dialogue_table_survives_tagged_and_plain(development_libs, tmp_path):
         cases.append((line, _pair_srt([line])))
         cases.extend((line, _pair_srt([line], rotation)) for rotation in range(len(WRAPPERS)))
     plain_jobs = [(_pair_srt([line]), ["remove_HI"]) for line in DIALOGUE_TABLE]
-    plain_dev = _development_outputs(development_libs, plain_jobs)
+    plain_dev = _development_outputs(development_libs, tmp_path, plain_jobs)
     for line, dev_pair in zip(DIALOGUE_TABLE, plain_dev):
         assert line in _visible(dev_pair[0]), "development removes %r in plain form" % line
     jobs = [(srt, ["remove_HI"]) for _line, srt in cases]
@@ -534,6 +577,17 @@ def test_wrapped_bracket_line_is_removed_whole(cue, render):
     assert "<i" not in out
     assert "</i>" not in out
     assert "Hallo." in out
+
+
+def test_content_route_keeps_only_the_wrapped_dialogue_line():
+    # Content route only: the file route cannot write bold back (see _expected_wrapper).
+    # The bracket line goes, and its tags go with it. The dialogue line keeps its own tags.
+    sm = SubtitleModifications()
+    assert sm.load(content=_cue("<i>[door creaks]</i>\n<b>Hello there.</b>"), language=Language("eng"),
+                   mods=["remove_HI"])
+    sm.modify("remove_HI")
+    events = _parse_srt(sm.f.to_string("srt"))
+    assert events[0][2] == ["<b>Hello there.</b>"]
 
 
 def test_keep_lyrics_keeps_wrapped_lyric(render):
@@ -593,7 +647,7 @@ def test_tagged_multiline_cue_with_declined_markup_keeps_dialogue(cue, dialogue,
 
 def test_declined_bracket_across_lines_keeps_dialogue_on_content_route():
     # Content route only. On the file route the SSA form of this cue is removed whole by
-    # development's full-bracket rule, the same as its plain form (ticket 602).
+    # development's full-bracket rule, the same as its plain form.
     srt = _cue("<i>[door creaks]\nI know you're in there (knocking)</i>")
     sm = SubtitleModifications()
     assert sm.load(content=srt, language=Language("eng"), mods=["remove_HI"])
@@ -629,10 +683,23 @@ def test_detect_uppercase_rejects_lowercase_dialogue(tmp_path):
 
 
 def test_detect_uppercase_does_not_count_wrapped_markup_letters():
-    # Wrapped lines are plain text to the count, so the letters of <font color=...> do not count.
+    # Wrapped lines are plain text to the count in a Remove HI run, so the letters of
+    # <font color=...> do not count. Checked through modify(), the real path.
     sm = SubtitleModifications()
-    assert sm.load(content=_WRAPPED_CAPS_FILE, language=Language("eng"))
-    assert sm.detect_uppercase() is True
+    assert sm.load(content=_WRAPPED_CAPS_FILE, language=Language("eng"), mods=["remove_HI"])
+    sm.modify("remove_HI")
+    assert sm.mostly_uppercase is True
+
+
+def test_wrapped_caps_file_without_remove_hi_matches_development(development_libs, tmp_path):
+    # Without Remove HI the markup is not unwrapped, so uppercase detection counts it as
+    # development does, and the output is development's.
+    jobs = [(_WRAPPED_CAPS_FILE, ["fix_uppercase"]), (_WRAPPED_CAPS_FILE, ["common"])]
+    dev = _development_outputs(development_libs, tmp_path, jobs)
+    current = _current_outputs(jobs, tmp_path)
+    _assert_all_loaded(dev, jobs, "development")
+    _assert_all_loaded(current, jobs, "current")
+    assert dev == current
 
 
 def test_case_detection_names_select_development_processors_in_order():
@@ -647,6 +714,12 @@ def test_case_detection_names_select_development_processors_in_order():
 
 
 # --- the markup layer on its own ------------------------------------------------
+def test_unwrap_entry_reads_quoted_attributes_with_a_greater_than_sign():
+    wrapped = unwrap_entry('<font title="a>b">Hello</font>')
+    assert wrapped.plain == "Hello"
+    assert wrapped.rewrap(["Hello"], [0]) == ['<font title="a>b">Hello</font>']
+
+
 @pytest.mark.parametrize("text, plain, opens, closes", [
     ("<i>♪ MTV ♪</i>", "♪ MTV ♪", ["<i>"], ["</i>"]),
     ("{\\i1}♪ MTV ♪{\\i0}", "♪ MTV ♪", ["{\\i1}"], ["{\\i0}"]),

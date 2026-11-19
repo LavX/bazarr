@@ -10,7 +10,8 @@ markup is not understood here, and the cue reaches the rules exactly as it alway
 import re
 
 _HTML_NAMES = ("i", "b", "u", "font")
-_HTML_OPEN = re.compile(r"<(i|b|u|font)(?:\s[^>]*)?>", re.IGNORECASE)
+# Attributes may hold quoted values with a > in them, as in <font title="a>b">.
+_HTML_OPEN = re.compile(r"""<(i|b|u|font)(?:\s(?:"[^"]*"|'[^']*'|[^>"'])*)?>""", re.IGNORECASE)
 _SSA_OPEN = re.compile(r"\{\\([iusb])1\}")
 # Any tag or override that the layer does not take apart.
 _ANY_MARKUP = re.compile(r"<|\{\\")
@@ -40,8 +41,6 @@ def _unwrap_line(line):
     """(plain, opening tags, closing tags) for one line, or None when its markup is not
     simple pairs around the whole line."""
     if "<" not in line and "{\\" not in line:
-        return line, "", ""
-    if not line.strip():
         return line, "", ""
     stripped = line.strip()
     lead = line[:len(line) - len(line.lstrip())]

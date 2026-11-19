@@ -196,7 +196,10 @@ class SubtitleModifications(object):
 
         return line_mods, non_line_mods, used_mods
 
-    def detect_uppercase(self):
+    def detect_uppercase(self, unwrap_markup=False):
+            """Whether the subtitle is mostly uppercase. With unwrap_markup (a Remove HI run),
+            whole-line markup the layer accepts is counted as plain text; anything else is
+            counted exactly as before."""
             MAXIMUM_ENTRIES = 50
             MINIMUM_UPPERCASE_PERCENTAGE = 90
             MINIMUM_UPPERCASE_COUNT = 100
@@ -213,7 +216,7 @@ class SubtitleModifications(object):
                 # skip HI bracket entries, those might actually be lowercase
                 sub = sub.strip()
                 # Markup the layer does not take apart is counted exactly as development counts it.
-                wrapped = unwrap_entry(sub)
+                wrapped = unwrap_entry(sub) if unwrap_markup else None
                 if wrapped is not None:
                     sub = wrapped.plain.strip()
                 for processor in detection:
@@ -238,7 +241,8 @@ class SubtitleModifications(object):
     def modify(self, *mods):
         new_entries = []
         start = time.time()
-        self.mostly_uppercase = self.detect_uppercase()
+        identifiers = [SubtitleModifications.parse_identifier(mod)[0] for mod in mods]
+        self.mostly_uppercase = self.detect_uppercase(unwrap_markup="remove_HI" in identifiers)
 
         if self.mostly_uppercase and self.debug:
             logger.debug("Mostly-uppercase subtitle found")
