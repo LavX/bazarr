@@ -228,6 +228,13 @@ export const MarketplacePanel: FunctionComponent<MarketplacePanelProps> = ({
     [install, runGated],
   );
 
+  // The record Bazarr+ keeps of the entry's source, which says what the check of its signature came to.
+  const sourceOf = useCallback(
+    (entry: ProviderHubCatalogEntry) =>
+      catalog?.sources.find((item) => item.id === entry.source),
+    [catalog?.sources],
+  );
+
   const marketplaceCards = useMemo(
     () => marketplaceEntries.filter(matchesFilters),
     [marketplaceEntries, matchesFilters],
@@ -268,6 +275,7 @@ export const MarketplacePanel: FunctionComponent<MarketplacePanelProps> = ({
           testProvider.isPending && testProvider.variables === entry.provider_id
         }
         isLocal={isLocal}
+        source={isLocal ? undefined : sourceOf(entry)}
       />
     ),
     [
@@ -279,6 +287,7 @@ export const MarketplacePanel: FunctionComponent<MarketplacePanelProps> = ({
       uninstall,
       repair,
       runGated,
+      sourceOf,
     ],
   );
 
