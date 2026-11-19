@@ -940,6 +940,293 @@ class TableSportsLeaguesRootfolder(Base):
         return {column.name: getattr(self, column.name) for column in self.__table__.columns}
 
 
+class TableMediaSources(Base):
+    """A configured origin of library items that is not an arr: a set of local folders, or one Jellyfin or
+    Emby server. Its libraries say what it supplies; its items live in ``table_source_items``."""
+    __tablename__ = 'media_sources'
+    __table_args__ = (
+        CheckConstraint("kind IN ('folder', 'jellyfin', 'emby')", name='ck_media_sources_kind'),
+        CheckConstraint('enabled IN (0, 1)', name='ck_media_sources_enabled'),
+        CheckConstraint("(kind = 'folder' AND media_server_instance_id IS NULL) "
+                        "OR (kind IN ('jellyfin', 'emby') AND media_server_instance_id IS NOT NULL)",
+                        name='ck_media_sources_server'),
+        Index('ux_media_sources_name', 'name', unique=True),
+    )
+
+    id = mapped_column(Integer, primary_key=True, autoincrement=True)
+    kind = mapped_column(Text, nullable=False)
+    name = mapped_column(Text, nullable=False)
+    enabled = mapped_column(Integer, nullable=False, default=1, server_default='1')
+    # The connection a server source reuses (its URL and key, never its path mappings). Text, like
+    # media_server_instances.id, which is a UUID string.
+    media_server_instance_id = mapped_column(Text, ForeignKey('media_server_instances.id', ondelete='CASCADE'))
+    scan_frequency_hours = mapped_column(Integer, nullable=False, default=12, server_default='12')
+    last_scan_started_at = mapped_column(DateTime)
+    last_scan_finished_at = mapped_column(DateTime)
+    last_scan_status = mapped_column(Text)
+    created_at = mapped_column(DateTime, nullable=False, default=datetime.now)
+    updated_at = mapped_column(DateTime, nullable=False, default=datetime.now)
+
+
+class TableMediaSourceLibraries(Base):
+    """One folder (folder kind) or one server library (server kinds) of a source, of a single content kind."""
+    __tablename__ = 'media_source_libraries'
+    __table_args__ = (
+        CheckConstraint("content_kind IN ('movie', 'series', 'sports')", name='ck_media_source_libraries_content_kind'),
+        CheckConstraint('enabled IN (0, 1)', name='ck_media_source_libraries_enabled'),
+        Index('ux_media_source_libraries_locator', 'source_id', 'locator', unique=True),
+    )
+
+    id = mapped_column(Integer, primary_key=True, autoincrement=True)
+    source_id = mapped_column(Integer, ForeignKey('media_sources.id', ondelete='CASCADE'), nullable=False)
+    content_kind = mapped_column(Text, nullable=False)
+    # Folder kind: the Bazarr-visible absolute path. Server kinds: the server's library id.
+    locator = mapped_column(Text, nullable=False)
+    name = mapped_column(Text)
+    profile_id = mapped_column(Integer, ForeignKey('table_languages_profiles.profileId', ondelete='SET NULL'),
+                               index=True)
+    enabled = mapped_column(Integer, nullable=False, default=1, server_default='1')
+    last_scan_status = mapped_column(Text)
+    last_scan_message = mapped_column(Text)
+    created_at = mapped_column(DateTime, nullable=False, default=datetime.now)
+    updated_at = mapped_column(DateTime, nullable=False, default=datetime.now)
+
+
+class TableMediaSourceLibraryRoots(Base):
+    """Where a library's files are. A server library can have several locations."""
+    __tablename__ = 'media_source_library_roots'
+    __table_args__ = (
+        Index('ux_media_source_library_roots_local', 'library_id', 'local_path', unique=True),
+    )
+
+    id = mapped_column(Integer, primary_key=True, autoincrement=True)
+    library_id = mapped_column(Integer, ForeignKey('media_source_libraries.id', ondelete='CASCADE'),
+                               nullable=False)
+    # The location as the server reports it; NULL for a folder library.
+    server_path = mapped_column(Text)
+    # The same location as Bazarr+ sees it; for a folder library, equal to the library's locator.
+    local_path = mapped_column(Text, nullable=False)
+    # The root directory's st_dev at the last scan, as an unsigned decimal string.
+    last_dev = mapped_column(Text)
+
+
+class TableSourceGroups(Base):
+    """The parent of episodes or events: a show (series library) or a league (sports library)."""
+    __tablename__ = 'table_source_groups'
+    __table_args__ = (
+        CheckConstraint("kind IN ('show', 'league')", name='ck_source_groups_kind'),
+        CheckConstraint("identity_source IN ('filename', 'tmdb', 'media_server', 'user')",
+                        name='ck_source_groups_identity_source'),
+        CheckConstraint("identity_state IN ('identified', 'parsed', 'ambiguous', 'unmatched')",
+                        name='ck_source_groups_identity_state'),
+        CheckConstraint('monitored IN (0, 1)', name='ck_source_groups_monitored'),
+        CheckConstraint('identify_pending IN (0, 1)', name='ck_source_groups_identify_pending'),
+        Index('ux_source_groups_key', 'library_id', 'group_key', unique=True),
+        Index('ix_source_groups_source_id', 'source_id'),
+    )
+
+    id = mapped_column(Integer, primary_key=True, autoincrement=True)
+    source_id = mapped_column(Integer, ForeignKey('media_sources.id', ondelete='CASCADE'), nullable=False)
+    library_id = mapped_column(Integer, ForeignKey('media_source_libraries.id', ondelete='CASCADE'),
+                               nullable=False)
+    kind = mapped_column(Text, nullable=False)
+    # The show or league directory path, or the server's series id.
+    group_key = mapped_column(Text, nullable=False)
+    # st_dev and st_ino of the group directory at the last scan, unsigned decimal strings (folder kind).
+    dir_dev = mapped_column(Text)
+    dir_ino = mapped_column(Text)
+    resolution_note = mapped_column(Text)
+    # The server's series item id; NULL for folders and for leagues.
+    external_id = mapped_column(Text)
+    title = mapped_column(Text, nullable=False)
+    sort_title = mapped_column(Text, nullable=False)
+    parsed_title = mapped_column(Text)
+    year = mapped_column(Text)
+    # The show's own ids, never an episode's. tmdb_id is Text like table_movies.tmdbId.
+    tvdb_id = mapped_column(Integer)
+    tmdb_id = mapped_column(Text)
+    imdb_id = mapped_column(Text)
+    poster = mapped_column(Text)
+    identity_source = mapped_column(Text, nullable=False)
+    identity_state = mapped_column(Text, nullable=False)
+    identity_candidates = mapped_column(Text)
+    profile_id = mapped_column(Integer, ForeignKey('table_languages_profiles.profileId', ondelete='SET NULL'),
+                               index=True)
+    monitored = mapped_column(Integer, nullable=False, default=1, server_default='1')
+    identify_pending = mapped_column(Integer, nullable=False, default=0, server_default='0')
+    created_at = mapped_column(DateTime, nullable=False, default=datetime.now)
+    updated_at = mapped_column(DateTime, nullable=False, default=datetime.now)
+
+
+class TableSourceItems(Base):
+    """One video file a source supplies: a movie, an episode or a sports event."""
+    __tablename__ = 'table_source_items'
+    __table_args__ = (
+        CheckConstraint("kind IN ('movie', 'episode', 'sports_event')", name='ck_source_items_kind'),
+        CheckConstraint("(kind = 'movie' AND group_id IS NULL) "
+                        "OR (kind IN ('episode', 'sports_event') AND group_id IS NOT NULL)",
+                        name='ck_source_items_parent'),
+        CheckConstraint("identity_source IN ('filename', 'tmdb', 'media_server', 'user')",
+                        name='ck_source_items_identity_source'),
+        CheckConstraint("identity_state IN ('identified', 'parsed', 'ambiguous', 'unmatched')",
+                        name='ck_source_items_identity_state'),
+        CheckConstraint('monitored IN (0, 1)', name='ck_source_items_monitored'),
+        CheckConstraint('arr_shadow IN (0, 1)', name='ck_source_items_arr_shadow'),
+        CheckConstraint('server_missing IN (0, 1)', name='ck_source_items_server_missing'),
+        CheckConstraint('identify_pending IN (0, 1)', name='ck_source_items_identify_pending'),
+        CheckConstraint("shadow_arr_table IN ('movie', 'episode', 'sports_event')",
+                        name='ck_source_items_shadow_arr_table'),
+        CheckConstraint("shadow_rung IN ('path', 'inode', 'attributes')", name='ck_source_items_shadow_rung'),
+        Index('ux_source_items_path', 'path', unique=True),
+        # Not unique: device numbers of network mounts can change across remounts. The inode leads because a
+        # lookup after a device change compares it alone.
+        Index('ix_source_items_file_identity', 'file_ino', 'file_dev'),
+        Index('ix_source_items_source_id', 'source_id'),
+        Index('ix_source_items_library_id', 'library_id'),
+        Index('ix_source_items_group_id', 'group_id'),
+        Index('ix_source_items_kind', 'kind'),
+        Index('ix_source_items_file_size', 'file_size'),
+        # Same shape as ix_table_movies_wanted: the wanted job walks it.
+        Index('ix_source_items_wanted', 'id',
+              sqlite_where=text("missing_subtitles IS NOT NULL AND missing_subtitles != '[]'"),
+              postgresql_where=text("missing_subtitles IS NOT NULL AND missing_subtitles != '[]'")),
+    )
+
+    id = mapped_column(Integer, primary_key=True, autoincrement=True)
+    source_id = mapped_column(Integer, ForeignKey('media_sources.id', ondelete='CASCADE'), nullable=False)
+    library_id = mapped_column(Integer, ForeignKey('media_source_libraries.id', ondelete='CASCADE'),
+                               nullable=False)
+    group_id = mapped_column(Integer, ForeignKey('table_source_groups.id', ondelete='CASCADE'))
+    kind = mapped_column(Text, nullable=False)
+    # Bazarr-visible, as found. A floor: one item per physical file is decided by the same-file rules.
+    path = mapped_column(Text, nullable=False)
+    # st_dev and st_ino as unsigned decimal strings. Both are unsigned 64-bit, and a filesystem that hashes
+    # inodes returns values above 2**63 - 1, which a signed integer column would refuse. They are only
+    # compared for equality, so text is exact on both dialects.
+    file_dev = mapped_column(Text)
+    file_ino = mapped_column(Text)
+    last_seen_at = mapped_column(DateTime)
+    missing_scans = mapped_column(Integer, nullable=False, default=0, server_default='0')
+    server_missing = mapped_column(Integer, nullable=False, default=0, server_default='0')
+    title = mapped_column(Text, nullable=False)
+    sort_title = mapped_column(Text, nullable=False)
+    parsed_title = mapped_column(Text)
+    # For a sports event, the season year, or the provider year when the event has no date.
+    year = mapped_column(Text)
+    episode_title = mapped_column(Text)
+    # Episode: season and episode number. Sports: season and round.
+    season = mapped_column(Integer)
+    episode = mapped_column(Integer)
+    part_number = mapped_column(Integer, nullable=False, default=0, server_default='0')
+    part_name = mapped_column(Text)
+    # Sports only, ISO YYYY-MM-DD.
+    event_date = mapped_column(Text)
+    # The item's own ids: a movie's, or an episode's episode-level ids. Show ids live on the group.
+    imdb_id = mapped_column(Text)
+    tmdb_id = mapped_column(Text)
+    tvdb_id = mapped_column(Integer)
+    # The server item id (server kinds); NULL for folders.
+    external_id = mapped_column(Text)
+    identity_source = mapped_column(Text, nullable=False)
+    identity_state = mapped_column(Text, nullable=False)
+    identity_candidates = mapped_column(Text)
+    scene_name = mapped_column(Text)
+    file_size = mapped_column(BigInteger)
+    file_mtime_ns = mapped_column(BigInteger)
+    ffprobe_cache = mapped_column(LargeBinary)
+    audio_language = mapped_column(Text)
+    audio_codec = mapped_column(Text)
+    video_codec = mapped_column(Text)
+    resolution = mapped_column(Text)
+    format = mapped_column(Text)
+    subtitles = mapped_column(Text)
+    missing_subtitles = mapped_column(Text)
+    failed_attempts = mapped_column(Text)
+    profile_id = mapped_column(Integer, ForeignKey('table_languages_profiles.profileId', ondelete='SET NULL'),
+                               index=True)
+    monitored = mapped_column(Integer, nullable=False, default=1, server_default='1')
+    # An arr row of an enabled owner holds the same file; the arr side manages it.
+    arr_shadow = mapped_column(Integer, nullable=False, default=0, server_default='0')
+    shadow_instance_id = mapped_column(Integer, ForeignKey('arr_instances.id', ondelete='SET NULL'))
+    shadow_owner = mapped_column(Text)
+    # The arr row that set the shadow. No foreign key: it points into one of three tables.
+    shadow_arr_table = mapped_column(Text)
+    shadow_arr_row_id = mapped_column(Integer)
+    # What that row held when it matched: its mapped path and its arr file id.
+    shadow_arr_path = mapped_column(Text)
+    shadow_arr_file_id = mapped_column(Integer)
+    shadow_rung = mapped_column(Text)
+    identify_pending = mapped_column(Integer, nullable=False, default=0, server_default='0')
+    created_at = mapped_column(DateTime, nullable=False, default=datetime.now)
+    updated_at = mapped_column(DateTime, nullable=False, default=datetime.now)
+    indexed_at = mapped_column(DateTime)
+
+
+class TableSourceHistory(Base):
+    """The history of a source item. The snapshots keep the row meaningful after its item or its source is
+    gone, which sets the two links to NULL."""
+    __tablename__ = 'table_source_history'
+    __table_args__ = (
+        CheckConstraint("item_kind IN ('movie', 'episode', 'sports_event')",
+                        name='ck_table_source_history_item_kind'),
+        CheckConstraint('ai_translated IN (0, 1)', name='ck_table_source_history_ai_translated'),
+        Index('ix_table_source_history_video_path_language_timestamp', 'video_path', 'language', 'timestamp'),
+        Index('ix_table_source_history_timestamp', 'timestamp'),
+        Index('ix_table_source_history_events', 'timestamp',
+              sqlite_where=text('action != 7'), postgresql_where=text('action != 7')),
+        Index('ix_table_source_history_upgraded_from_id', 'upgradedFromId'),
+        Index('ix_table_source_history_item_id', 'item_id'),
+        Index('ix_table_source_history_kind_timestamp', 'item_kind', 'timestamp'),
+    )
+
+    id = mapped_column(Integer, primary_key=True, autoincrement=True)
+    item_id = mapped_column(Integer, ForeignKey('table_source_items.id', ondelete='SET NULL'))
+    source_id = mapped_column(Integer, ForeignKey('media_sources.id', ondelete='SET NULL'))
+    item_kind = mapped_column(Text, nullable=False)
+    item_title = mapped_column(Text)
+    group_title = mapped_column(Text)
+    source_name = mapped_column(Text)
+    action = mapped_column(Integer, nullable=False)
+    description = mapped_column(Text, nullable=False)
+    language = mapped_column(Text)
+    provider = mapped_column(Text)
+    ai_translated = mapped_column(Integer)
+    score = mapped_column(Integer)
+    score_out_of = mapped_column(Integer)
+    subs_id = mapped_column(Text)
+    subtitles_path = mapped_column(Text)
+    timestamp = mapped_column(DateTime, nullable=False, default=datetime.now)
+    video_path = mapped_column(Text)
+    matched = mapped_column(Text)
+    not_matched = mapped_column(Text)
+    upgradedFromId = mapped_column(Integer, ForeignKey('table_source_history.id'))
+
+
+class TableSourceBlacklist(Base):
+    """A subtitle release excluded for a source item. SET NULL for the same reason as the history: the source
+    pool loads every pair of its kind, so a moved file keeps its exclusions."""
+    __tablename__ = 'table_source_blacklist'
+    __table_args__ = (
+        CheckConstraint("item_kind IN ('movie', 'episode', 'sports_event')",
+                        name='ck_table_source_blacklist_item_kind'),
+        Index('ix_table_source_blacklist_item_id', 'item_id'),
+        Index('ix_table_source_blacklist_subs_id', 'subs_id'),
+    )
+
+    id = mapped_column(Integer, primary_key=True, autoincrement=True)
+    item_id = mapped_column(Integer, ForeignKey('table_source_items.id', ondelete='SET NULL'))
+    source_id = mapped_column(Integer, ForeignKey('media_sources.id', ondelete='SET NULL'))
+    item_kind = mapped_column(Text, nullable=False)
+    video_path = mapped_column(Text)
+    item_title = mapped_column(Text)
+    group_title = mapped_column(Text)
+    source_name = mapped_column(Text)
+    provider = mapped_column(Text)
+    subs_id = mapped_column(Text)
+    language = mapped_column(Text)
+    timestamp = mapped_column(DateTime, default=datetime.now)
+
+
 class TableProviderHubState(Base):
     """The Plugin Hub state as one versioned JSON document.
 
