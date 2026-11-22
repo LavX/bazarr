@@ -303,8 +303,6 @@ def _wanted_movie(movie, providers_list, job_id=None, translation_gate=True):
 
         if result:
             found_any = True
-            if isinstance(result, tuple) and len(result):
-                result = result[0]
             store_subtitles_movie(movie.path, path_mappings.path_replace_instance(movie.path, arr_instance_id, 'movie'), arr_instance_id=arr_instance_id)
             history_log_movie(1, movie.radarrId, result, arr_instance_id=arr_instance_id)
             event_stream(type='movie-wanted', action='delete', payload=movie.radarrId)

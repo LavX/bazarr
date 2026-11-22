@@ -514,6 +514,64 @@ def test_successful_sync_without_history_does_not_log_error(monkeypatch, tmp_pat
     assert 'BAZARR unable to sync subtitles' not in caplog.text
 
 
+@pytest.fixture
+def successful_sync_inputs(monkeypatch, tmp_path, schema_session, languages_loaded):
+    from app import database as db_module
+    from subtitles.tools.subsyncer import SubSyncer
+
+    monkeypatch.setattr(db_module, 'database', schema_session)
+
+    def align(self, engine, output_path, video_path, no_fix_framerate):
+        _write(output_path, 'aligned')
+        return {'offset_seconds': 1.5}
+
+    monkeypatch.setattr(SubSyncer, '_run_external_engine', align)
+    subtitle = tmp_path / 'Movie.en.srt'
+    video = tmp_path / 'Movie.mkv'
+    _write(subtitle, 'original')
+    video.touch()
+    return dict(video_path=str(video), srt_path=str(subtitle), srt_lang='en', hi=False, forced=False,
+                force_sync=True, output_mode='keep_all', enabled_engines=['alass'])
+
+
+@pytest.mark.parametrize('arr_instance_id, radarr_id', [(None, None), (7, None), (7, 42)])
+def test_sync_history_requires_a_media_id(successful_sync_inputs, schema_session, monkeypatch, caplog,
+                                         arr_instance_id, radarr_id):
+    from app.database import TableHistoryMovie
+    from radarr import history
+    from subtitles.tools.subsyncer import SubSyncer
+
+    monkeypatch.setattr(history, 'database', schema_session)
+    monkeypatch.setattr(history, 'event_stream', lambda **kwargs: None)
+
+    result = SubSyncer().sync(**successful_sync_inputs, max_offset_seconds='60', no_fix_framerate=True, gss=True,
+                              arr_instance_id=arr_instance_id, radarr_id=radarr_id)
+
+    assert result.success
+    assert 'skipping movie history insert' not in caplog.text
+    rows = schema_session.query(TableHistoryMovie).all()
+    assert [(row.action, row.arr_instance_id, row.radarrId) for row in rows] == (
+        [] if radarr_id is None else [(5, 7, 42)])
+
+
+@pytest.mark.parametrize('with_callback', [False, True])
+def test_ownerless_keep_all_reports_missing_indexer_or_uses_the_callback(successful_sync_inputs, caplog,
+                                                                       with_callback):
+    from subtitles.sync import sync_subtitles
+
+    original = pathlib.Path(successful_sync_inputs['srt_path'])
+    generated = original.with_name('Movie.en.alass.srt')
+    indexed = []
+    callback = (lambda: indexed.append(generated.read_text(encoding='utf-8'))) if with_callback else None
+
+    assert sync_subtitles(**successful_sync_inputs, percent_score=0, track_job_progress=False,
+                          callback=callback) is True
+    assert generated.read_text(encoding='utf-8') == 'aligned'
+    assert original.read_text(encoding='utf-8') == 'original'
+    assert indexed == (['aligned'] if with_callback else [])
+    assert ('provide an indexing callback' in caplog.text) is not with_callback
+
+
 def test_sync_subtitles_queues_manual_sync_as_progress_job(mocker):
     from subtitles import sync as sync_module
 

@@ -715,7 +715,7 @@ class SubSyncer:
 
         if not self.sync_result.success:
             logging.error(f'BAZARR unable to sync subtitles: {self.srtin}')  # noqa: G004
-        elif write_history:
+        elif write_history and (source is not None or sonarr_episode_id or radarr_id):
             for success_result in self.sync_result.successful_results:
                 self._log_sync_history(
                     success_result=success_result,

@@ -561,8 +561,6 @@ def save_sports_subtitle(
                 cancel=cancel,
                 publication_guard=publication_guard,
             )
-            if isinstance(result, tuple):
-                result = result[0]
             if not result or not os.path.isfile(saved[0].storage_path):
                 raise OSError("Sports subtitle processing did not leave a saved file")
             outcome.result = result

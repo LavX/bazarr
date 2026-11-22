@@ -256,8 +256,6 @@ def episode_download_subtitles(no, job_id=None, job_sub_function=False, provider
                                              fallback_allowed=fallback_allowed,
                                              arr_instance_id=arr_instance_id):
                 if result:
-                    if isinstance(result, tuple) and len(result):
-                        result = result[0]
                     store_subtitles(episode.path,
                                     path_mappings.path_replace_instance(episode.path, episode.arr_instance_id,
                                                                         'series'),
@@ -343,8 +341,6 @@ def episode_download_specific_subtitles(sonarr_series_id, sonarr_episode_id, lan
                                          job_id=job_id, arr_instance_id=arr_instance_id))
         if isinstance(result, list) and len(result):
             result = result[0]
-            if isinstance(result, tuple) and len(result):
-                result = result[0]
             history_log(1, sonarr_series_id, sonarr_episode_id, result, arr_instance_id=arr_instance_id)
             send_notifications(sonarr_series_id, sonarr_episode_id, result.message,
                                arr_instance_id=arr_instance_id)

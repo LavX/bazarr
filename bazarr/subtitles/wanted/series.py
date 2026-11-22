@@ -316,8 +316,6 @@ def _wanted_episode(episode, providers_list, job_id=None, translation_gate=True)
                                      arr_instance_id=arr_instance_id):
         if result:
             found_any = True
-            if isinstance(result, tuple) and len(result):
-                result = result[0]
             store_subtitles(episode.path, path_mappings.path_replace_instance(episode.path, arr_instance_id, 'episode'), arr_instance_id=arr_instance_id)
             history_log(1, episode.sonarrSeriesId, episode.sonarrEpisodeId, result,
                         arr_instance_id=arr_instance_id)
