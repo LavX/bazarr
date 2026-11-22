@@ -149,6 +149,13 @@ def binding_report(installation, settings=None) -> list[dict[str, Any]]:
     return [resolve(capability, installation, settings).as_dict() for capability in declared]
 
 
+def ready_url_fields(installation, fields: set[str], settings=None) -> set[str]:
+    """Which of these configuration fields can be filled by a service lease."""
+    delivery = get_kind(kind_of(installation)).capability_delivery
+    return {key for capability, (key, shape) in delivery.items()
+            if shape == DELIVERY_URL and key in fields and resolve(capability, installation, settings).ready}
+
+
 def deliver(config: dict, properties: dict, installation, settings) -> None:
     """Reserve the key of each ``url`` capability in the plugin's configuration.
 
@@ -176,17 +183,23 @@ def deliver(config: dict, properties: dict, installation, settings) -> None:
         config[key] = ""
 
 
-def live_row(provider_id) -> dict | None:
-    """The stored record of an installation that is in force right now, or None.
-
-    A catalog refresh can withdraw an installation that is running, and a release that is revoked, held back or
-    removed is in force no longer, so this is asked at the time of use and never remembered. An unreadable
-    record, or none, is no installation.
-    """
+def _read_installations() -> dict[str, Any]:
     try:
         from . import state
 
-        row = (state.load_state().get("installations") or {}).get(str(provider_id))
+        installations = state.load_state().get("installations")
+        return installations if isinstance(installations, dict) else {}
+    except Exception as error:
+        logger.warning("Could not read the plugin installations (%s)", type(error).__name__)
+        return {}
+
+
+def live_row(provider_id, *, installations: Mapping[str, Any] | None = None) -> dict | None:
+    """The installation in force, from a fresh read or the snapshot held by one provider call."""
+    try:
+        if installations is None:
+            installations = _read_installations()
+        row = installations.get(str(provider_id))
     except Exception:
         logger.exception("Could not read the record of %s", provider_id)
         return None
@@ -230,7 +243,8 @@ def host_call_handlers(installation) -> dict[str, Callable[[dict, float, threadi
     return handlers
 
 
-def open_lease(capability: str, installation, settings=None, *, owner: str) -> leases.Lease | None:
+def open_lease(capability: str, installation, settings=None, *, owner: str,
+               installations: Mapping[str, Any] | None = None) -> leases.Lease | None:
     """A lease on the service that provides ``capability``, for one holder, or None. Never raises.
 
     The same rules as ``resolve``: the plugin must be one the host may hand the capability to, an address the user
@@ -247,7 +261,7 @@ def open_lease(capability: str, installation, settings=None, *, owner: str) -> l
             if url:
                 service_health.note_use(capability, url)
                 return leases.DirectLease(capability, owner, url, source)
-            return leases.open_managed(capability, owner)
+            return leases.open_managed(capability, owner, installations=installations)
     except Exception as error:
         logger.warning("Could not lease %s (%s)", capability, type(error).__name__)
     return None
@@ -280,7 +294,7 @@ class CallLeases:
         self._leases: dict[str, leases.Lease | None] = {}
         self._lock = threading.Lock()
         self._closed = False
-        self._installation = None
+        self._installations: dict[str, Any] | None = None
 
     @classmethod
     def for_provider(cls, provider_id: str, manifest, owner: str, settings=None) -> "CallLeases":
@@ -307,21 +321,21 @@ class CallLeases:
                 return None
             if capability in self._leases:
                 return self._leases[capability]
-        if not _offered(capability, self._settings):
-            # Nothing is typed and nothing managed is running: no lease, and no state is read to find that out.
-            with self._lock:
-                self._leases.setdefault(capability, None)
-            return None
-        if self._installation is None:
-            row = live_row(self._provider_id)
-            # A release that is not in force gets nothing. What the plugin declares is what the release being run
-            # says, and whether it is trusted is what the host's record says now.
-            self._installation = (
-                {"provider_id": self._provider_id, "manifest": self._manifest, "trusted": row.get("trusted") is True}
-                if row is not None else False)
+            if not _offered(capability, self._settings):
+                # No typed address or registered service: no lease and no state read.
+                self._leases[capability] = None
+                return None
+            if self._installations is None:
+                # Read once for both the provider and the managed service it may lease.
+                self._installations = _read_installations()
+            installations = self._installations
+        row = live_row(self._provider_id, installations=installations)
+        # Use the declarations of the release being run and the trust from the current snapshot.
         lease = None
-        if self._installation:
-            lease = open_lease(capability, self._installation, self._settings, owner=self._owner)
+        if row is not None:
+            installation = {
+                "provider_id": self._provider_id, "manifest": self._manifest, "trusted": row.get("trusted") is True}
+            lease = open_lease(capability, installation, self._settings, owner=self._owner, installations=installations)
         with self._lock:
             if self._closed or capability in self._leases:
                 if lease is not None:
@@ -361,5 +375,6 @@ class CallLeases:
             self._closed = True
             held = [lease for lease in self._leases.values() if lease is not None]
             self._leases = {}
+            self._installations = None
         for lease in held:
             lease.close()

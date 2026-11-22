@@ -28,7 +28,7 @@ import logging
 import threading
 
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Any, Callable, Mapping
 from urllib.parse import unquote, urlsplit
 
 from secret_store.scrub import add_runtime_secret_values
@@ -240,7 +240,7 @@ def unregister_managed(service_id: str) -> ManagedService | None:
         return _MANAGED.pop(str(service_id), None)
 
 
-def managed_service_for(capability: str) -> ManagedService | None:
+def managed_service_for(capability: str, *, installations: Mapping[str, Any] | None = None) -> ManagedService | None:
     """The managed service that provides ``capability`` and belongs to a plugin that is live, or None.
 
     A service whose plugin is switched off, removed, revoked or held back is not offered even while its entry is
@@ -249,7 +249,7 @@ def managed_service_for(capability: str) -> ManagedService | None:
     with _MANAGED_LOCK:
         candidates = [_MANAGED[key] for key in sorted(_MANAGED) if capability in _MANAGED[key].capabilities]
     for service in candidates:
-        if _service_live(service.service_id):
+        if _service_live(service.service_id, installations=installations):
             return service
     return None
 
@@ -260,21 +260,21 @@ def has_managed(capability: str) -> bool:
         return any(capability in service.capabilities for service in _MANAGED.values())
 
 
-def _service_live(service_id: str) -> bool:
+def _service_live(service_id: str, *, installations: Mapping[str, Any] | None = None) -> bool:
     try:
         from . import closure
         from .capabilities import live_row
 
-        row = live_row(service_id)
+        row = live_row(service_id, installations=installations)
         return row is not None and closure.is_on(row)
     except Exception as error:
         logger.warning("Could not tell whether service %s is live (%s)", service_id, type(error).__name__)
         return False
 
 
-def open_managed(capability: str, owner: str) -> ManagedLease | None:
+def open_managed(capability: str, owner: str, *, installations: Mapping[str, Any] | None = None) -> ManagedLease | None:
     """A lease on a managed service that provides ``capability``, or None when there is none that is ready."""
-    service = managed_service_for(capability)
+    service = managed_service_for(capability, installations=installations)
     if service is None:
         return None
     try:

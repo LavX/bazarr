@@ -13,7 +13,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from provider_hub import capabilities, endpoints, leases, service_health
+from provider_hub import capabilities, endpoints, leases, service_health, state
 from provider_hub.kinds import SERVICE, get_kind, kind_for_api, known_kinds
 from provider_hub.kinds.service import SERVICE_KIND_API
 from provider_hub.manifest import ManifestValidationError
@@ -37,6 +37,7 @@ WAIT = 10
 @pytest.fixture(autouse=True)
 def _clean(monkeypatch):
     monkeypatch.delenv(endpoints.FLARESOLVERR_ENV, raising=False)
+    monkeypatch.setattr(service_health, "_checks", lambda: {})
     service_health.forget()
     yield
     # No test leaves a lease, a managed service or a health check behind for the next one.
@@ -68,7 +69,7 @@ def _manifest(properties=None, **extra):
 def _live(monkeypatch, row="trusted"):
     """What the host's record says about the plugin now. ``None`` is a release that is not in force."""
     value = {"trusted": True} if row == "trusted" else row
-    monkeypatch.setattr(capabilities, "live_row", lambda provider_id: value)
+    monkeypatch.setattr(state, "load_state", lambda: {"installations": {"alpha": value}})
 
 
 _DEFAULT = object()
@@ -285,8 +286,8 @@ def _managed(service_id="flaresolverr", *, ready=True, stop=None):
 def _service_row(monkeypatch, service_id="flaresolverr", **row):
     """The record of a service that is in force, and of the provider that calls it (trusted, as alpha)."""
     value = {"provider_id": service_id, "kind": SERVICE, "enabled": True, **row}
-    monkeypatch.setattr(capabilities, "live_row",
-                        lambda provider_id: value if provider_id == service_id else {"trusted": True})
+    monkeypatch.setattr(state, "load_state",
+                        lambda: {"installations": {"alpha": {"trusted": True}, service_id: value}})
     return value
 
 
@@ -318,11 +319,9 @@ class TestManagedBinding:
     @pytest.mark.parametrize("row", [None, {"revoked": True}, {"blocked": True}, {"enabled": False}])
     def test_a_service_that_is_not_in_force_is_not_offered(self, monkeypatch, row):
         if row is None:
-            monkeypatch.setattr(capabilities, "live_row", lambda provider_id: None)
+            monkeypatch.setattr(state, "load_state", lambda: {"installations": {}})
         else:
             _service_row(monkeypatch, **row)
-            if "revoked" in row or "blocked" in row:
-                monkeypatch.setattr(capabilities, "live_row", lambda provider_id: None)
         front = _managed()
 
         assert leases.managed_service_for(CAPABILITY) is None
@@ -437,7 +436,8 @@ class TestRemoteBinding:
 
         assert "topsecretpw" not in held and "solver.lan" not in held
 
-    def test_using_the_service_asks_again_in_the_background_when_the_answer_is_old(self):
+    def test_using_the_service_asks_again_in_the_background_when_the_answer_is_old(self, monkeypatch):
+        monkeypatch.setattr(service_health, "_checks", lambda: {CAPABILITY: endpoints.check_flaresolverr_address})
         server = FakeFlareSolverr()
         try:
             lease = capabilities.open_lease(CAPABILITY, _installation(trusted=True), _settings(server.address), owner="a")
@@ -455,6 +455,7 @@ class TestRemoteBinding:
             server.stop()
 
     def test_an_answer_that_has_gone_stale_is_asked_for_again(self, monkeypatch):
+        monkeypatch.setattr(service_health, "_checks", lambda: {CAPABILITY: endpoints.check_flaresolverr_address})
         server = FakeFlareSolverr()
         try:
             service_health.record(CAPABILITY, server.address, {"ok": False, "code": "unreachable"})
@@ -545,8 +546,35 @@ class TestCallLeases:
 
         assert (first, scope.config({FIELD: ""})[FIELD]) == ("http://front-a/l/t/v1", "http://front-b/l/t/v1")
 
+    def test_one_state_read_covers_the_provider_and_managed_service_for_a_call(self, monkeypatch):
+        reads = []
+        revoked = False
+
+        def load_state():
+            reads.append(True)
+            return {"installations": {
+                "alpha": {"trusted": True},
+                "flaresolverr": {"kind": SERVICE, "enabled": True, "revoked": revoked},
+            }}
+
+        monkeypatch.setattr(state, "load_state", load_state)
+        _managed()
+        config = {FIELD: ""}
+        scope = _scope(settings=_settings(""))
+
+        assert scope.config(config)[FIELD] == "http://front.internal/l/tok1/v1"
+        assert scope.config(config)[FIELD] == "http://front.internal/l/tok1/v1"
+        assert len(reads) == 1
+        scope.close()
+
+        revoked = True
+        next_scope = _scope(settings=_settings(""))
+        assert next_scope.config(config) is config
+        assert len(reads) == 2
+        next_scope.close()
+
     def test_a_provider_with_no_field_or_no_manifest_pays_for_nothing(self, monkeypatch):
-        monkeypatch.setattr(capabilities, "live_row", lambda provider_id: pytest.fail("no state may be read"))
+        monkeypatch.setattr(state, "load_state", lambda: pytest.fail("no state may be read"))
 
         for manifest in (None, SimpleNamespace(raw=None), _manifest(properties={"apikey": {}}),
                          SimpleNamespace(raw={"config_schema": []})):
@@ -556,7 +584,7 @@ class TestCallLeases:
             scope.close()
 
     def test_with_nothing_typed_and_nothing_managed_no_state_is_read(self, monkeypatch):
-        monkeypatch.setattr(capabilities, "live_row", lambda provider_id: pytest.fail("no state may be read"))
+        monkeypatch.setattr(state, "load_state", lambda: pytest.fail("no state may be read"))
         scope = _scope(settings=_settings(""))
         config = {FIELD: ""}
 
@@ -619,10 +647,13 @@ class FakeWorker:
         self.configs.append(dict(request["config"]))
         self.entered.set()
         if self.gate is not None:
-            while not self.gate.is_set():
+            for _ in range(WAIT * 100):
+                if self.gate.wait(0.01):
+                    break
                 if self.cancelled.is_set():
                     raise RuntimeError("worker closed stdout")
-                time.sleep(0.01)
+            else:
+                raise TimeoutError("fake worker gate was not released")
         return SimpleNamespace(payload={"candidates": []}, events=[], status_generation=None,
                                status_configuration_generation=None)
 
@@ -734,7 +765,7 @@ class TestProviderCall:
         assert leases.open_count() == 0
 
     def test_a_provider_that_needs_no_service_is_called_as_before(self, monkeypatch):
-        monkeypatch.setattr(capabilities, "live_row", lambda provider_id: pytest.fail("no state may be read"))
+        monkeypatch.setattr(state, "load_state", lambda: pytest.fail("no state may be read"))
         worker = FakeWorker()
         proxy = _proxy_class(manifest=_manifest(properties={"apikey": {}}))(worker_client=worker, apikey="k")
 

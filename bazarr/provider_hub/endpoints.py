@@ -4,8 +4,9 @@
 One address per capability, kept in the ``endpoints`` settings section under
 ``<capability, dots as underscores>_url``. FlareSolverr is the first one: a
 plugin that can solve its Cloudflare challenges through FlareSolverr reads its
-own ``flaresolverr_url``, and when that is empty the host fills it from here
-(``capabilities.deliver``).
+own ``flaresolverr_url``. If it is empty and an address is set here, the host
+hands it to the plugin for the duration of the call through a lease
+(``capabilities.CallLeases``).
 
 Nothing in this module adopts an address by itself. A FlareSolverr container
 that answers on its usual sibling name is reported as a hint, and the setting

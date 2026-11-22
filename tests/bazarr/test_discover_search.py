@@ -1531,6 +1531,33 @@ def test_a_provider_that_never_searched_for_want_of_setup_is_not_complete_covera
     assert len(response["results"]) == 1
 
 
+@pytest.mark.parametrize(("url", "config", "expected"), [
+    ("http://solver.lan:8191", {"flaresolverr_url": "", "apikey": "key"}, "empty"),
+    ("http://solver.lan:8191", {"flaresolverr_url": "", "apikey": ""}, "setup_required"),
+    ("", {"flaresolverr_url": "", "apikey": "key"}, "setup_required"),
+    ("", {"flaresolverr_url": "http://own:8191", "apikey": "key"}, "empty"),
+])
+def test_required_service_url_coverage(authenticated_client, providers, monkeypatch, url, config, expected):
+    from provider_hub import endpoints
+    from subliminal_patch.extensions import provider_registry
+
+    name = providers.add("discover_service_user")
+    schema = {"required": ["flaresolverr_url", "apikey"],
+              "properties": {"flaresolverr_url": {"type": "string"}, "apikey": {"type": "string"}}}
+    monkeypatch.setattr(provider_registry[name], "manifest", SimpleNamespace(config_schema=schema), raising=False)
+    monkeypatch.setattr(endpoints, "flaresolverr_url_source", lambda settings=None: (url, "setting"))
+    providers.pool.provider_configs[name] = dict(config)
+
+    response = post(authenticated_client, {
+        "media_type": "movie", "imdb_id": "tt0133093", "language": "eng"}).json
+
+    outcome = response["coverage"]["providers"][0]
+    assert outcome["status"] == expected
+    if expected == "setup_required":
+        assert outcome["reason"] == "missing_configuration"
+    assert providers.pool.provider_configs[name] == config
+
+
 def _fake_clock(monkeypatch, module, start=0.0):
     """Replace a module's time source with one that only moves when told.
 
