@@ -271,6 +271,52 @@ describe("TranslationForm and the manual pick", () => {
     ]);
   });
 
+  it.each([
+    ["ai_translator", "OpenAI compatible, usable-model", "Google Translate"],
+    ["google_translate", "Google Translate", "OpenAI compatible, usable-model"],
+  ])(
+    "clears a manual pick when %s is being removed",
+    async (id, pick, other) => {
+      const user = userEvent.setup();
+      settings();
+      translatorStatus(true, { available: true, reason: "" });
+      let removing = false;
+      server.use(
+        http.get("/api/plugins/installations", () =>
+          HttpResponse.json({
+            data: [
+              {
+                provider_id: id,
+                kind: "translator",
+                state: removing ? "removed" : "active",
+                active_version: "1.0.0",
+                needs_restart: false,
+              },
+            ],
+          }),
+        ),
+      );
+      customRender(<TranslationForm selections={selection} />);
+
+      const picker = await screen.findByRole("combobox", {
+        name: "Translate with",
+      });
+      await stateLoaded();
+      await choose(user, "Translate with", pick);
+      expect(picker).toHaveValue(pick);
+
+      removing = true;
+      await queryClient.invalidateQueries({
+        queryKey: [QueryKeys.Plugins, "installations"],
+      });
+      await waitFor(() => expect(picker).toHaveValue("Automatic"));
+      expect(await optionsOf(user, "Translate with")).toEqual([
+        "Automatic",
+        other,
+      ]);
+    },
+  );
+
   it("names the selected engine rather than the old setting while the new translator is on", async () => {
     settings();
     translatorStatus(true, { available: true, reason: "" });
@@ -404,9 +450,15 @@ describe("TranslationForm and the manual pick", () => {
     ).not.toBeInTheDocument();
   });
 
-  it("shows no picker and never asks for the page's state while the new translator is off", async () => {
+  it("shows no picker and skips translation and installation reads while the new translator is off", async () => {
     settings();
     const asked = translatorStatus(false, { available: true, reason: "" });
+    server.use(
+      http.get("/api/plugins/installations", () => {
+        asked.push("installations");
+        return HttpResponse.json({ data: [] });
+      }),
+    );
     customRender(<TranslationForm selections={selection} />);
 
     expect(

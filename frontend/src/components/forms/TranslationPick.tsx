@@ -5,6 +5,7 @@ import {
   useTranslationState,
 } from "@/apis/hooks/translation";
 import { pickableChoices, type PickChoice } from "@/pages/Translation/model";
+import { useRestartAware } from "@/pages/Translation/useEngineInstall";
 
 /** The value of the choice that picks nothing: the selected engine, with its fallback. */
 const AUTOMATIC = "automatic";
@@ -40,10 +41,11 @@ export interface ManualPick {
  */
 export function useManualPick(): ManualPick {
   const runtime = useTranslationRuntime();
-  const state = useTranslationState(runtime);
+  const { data } = useTranslationState(runtime);
+  const { state } = useRestartAware(data, runtime);
   const choices = useMemo(
-    () => (runtime && state.data ? pickableChoices(state.data) : []),
-    [runtime, state.data],
+    () => (runtime && state ? pickableChoices(state) : []),
+    [runtime, state],
   );
   const [key, setKey] = useState<string | null>(null);
   // A pick that was removed, turned off or lost its key while the form was open is no longer a pick.

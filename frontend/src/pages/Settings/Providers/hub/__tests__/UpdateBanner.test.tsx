@@ -59,4 +59,66 @@ describe("UpdateBanner restart prompt", () => {
       ),
     ).toBeInTheDocument();
   });
+
+  it("uses the plural for several removals that could not be stopped live", () => {
+    render([
+      row({ state: "removed", needs_restart: true }),
+      row({ provider_id: "another", state: "removed", needs_restart: true }),
+    ]);
+    expect(
+      screen.getByText(
+        "2 Provider Hub changes are staged. Restart Bazarr+ to apply them.",
+      ),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        "These plugins could not be stopped while Bazarr+ runs, so their removals finish after a restart.",
+      ),
+    ).toBeInTheDocument();
+  });
+
+  it.each([
+    [1, "1 plugin"],
+    [2, "2 plugins"],
+  ])(
+    "counts %s staged removals alongside staged installs and updates",
+    (count, plugins) => {
+      render([
+        row({
+          provider_id: "install",
+          state: "staged",
+          active_version: null,
+          needs_restart: true,
+        }),
+        row({
+          provider_id: "update",
+          state: "staged",
+          staged_version: "2.0.0",
+          needs_restart: true,
+        }),
+        row({
+          provider_id: "live-removal",
+          state: "removed",
+          needs_restart: false,
+        }),
+        ...Array.from({ length: count }, (_, i) =>
+          row({
+            provider_id: `removal-${i}`,
+            state: "removed",
+            needs_restart: true,
+          }),
+        ),
+      ]);
+      expect(
+        screen.getByText(
+          `${count + 2} Provider Hub changes are staged. Restart Bazarr+ to apply them.`,
+        ),
+      ).toBeInTheDocument();
+      expect(
+        screen.getByText(
+          `A restart applies staged installs and updates and finishes removing ${plugins} that could not be stopped while Bazarr+ runs.`,
+        ),
+      ).toBeInTheDocument();
+    },
+  );
 });

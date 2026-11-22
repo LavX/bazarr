@@ -54,8 +54,8 @@ export const UpdateBanner: FunctionComponent<UpdateBannerProps> = ({
         : removals === n
           ? n === 1
             ? "This plugin could not be stopped while Bazarr+ runs, so its removal finishes after a restart."
-            : "These plugins could not be stopped while Bazarr+ runs, so their removal finishes after a restart."
-          : "Staged installs and updates finish after a restart, and so does the removal of a plugin that could not be stopped while Bazarr+ runs.";
+            : "These plugins could not be stopped while Bazarr+ runs, so their removals finish after a restart."
+          : `A restart applies staged installs and updates and finishes removing ${removals === 1 ? "1 plugin" : `${removals} plugins`} that could not be stopped while Bazarr+ runs.`;
     return (
       <div
         className={clsx(styles.banner, styles["banner-warning"])}

@@ -172,6 +172,9 @@ const EnginePanel: FunctionComponent<EnginePanelProps> = ({
     "fallback_engine" in pointers.chosen
       ? (pointers.chosen.fallback_engine ?? null)
       : state.fallback_engine;
+  const fallbackChoices = engines.filter(
+    (item) => !item.removing && item.id !== chosen,
+  );
   const toId = (value: string | null) =>
     value === null || value === NONE ? null : Number(value);
 
@@ -210,7 +213,7 @@ const EnginePanel: FunctionComponent<EnginePanelProps> = ({
             {engine.plugin?.version && (
               <span className={styles.version}>v{engine.plugin.version}</span>
             )}
-            {engine.plugin?.update_version && (
+            {!engine.removing && engine.plugin?.update_version && (
               <Link
                 className={styles.chip}
                 to="/plugin-hub?tab=updates"
@@ -350,14 +353,16 @@ const EnginePanel: FunctionComponent<EnginePanelProps> = ({
         description="Takes a job the engine declines. Most set-ups need none."
         data={[
           { value: NONE, label: "None" },
-          ...engines
-            .filter((item) => item.id !== chosen)
-            .map((item) => ({
-              value: String(item.id),
-              label: `${engineName(item)}${item.official ? " (Official)" : ""}`,
-            })),
+          ...fallbackChoices.map((item) => ({
+            value: String(item.id),
+            label: `${engineName(item)}${item.official ? " (Official)" : ""}`,
+          })),
         ]}
-        value={fallback === null ? NONE : String(fallback)}
+        value={
+          fallbackChoices.some((item) => item.id === fallback)
+            ? String(fallback)
+            : NONE
+        }
         allowDeselect={false}
         onChange={(next) => pointers.choose({ fallback_engine: toId(next) })}
       />

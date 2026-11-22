@@ -2474,6 +2474,61 @@ describe("Translation page, an engine installed and waiting for a restart", () =
     expect(screen.queryByText(/waiting for a restart/)).not.toBeInTheDocument();
   });
 
+  it("removes an engine from the fallback choices as it is being removed", async () => {
+    installedEngine(true);
+    state = {
+      ...state,
+      engine: 2,
+      fallback_engine: 1,
+      instances: [...state.instances, lingarr()],
+    };
+    waitingFor({ state: "removed", needs_restart: false });
+    const user = userEvent.setup();
+    const group = await showPage();
+    await within(group).findByText("Removing");
+
+    const input = screen.getByRole("combobox", { name: "Fallback engine" });
+    await user.click(input);
+    const listbox = screen
+      .getAllByRole("listbox", { hidden: true })
+      .find(
+        (box) => box.getAttribute("id") === input.getAttribute("aria-controls"),
+      )!;
+    expect(
+      within(listbox).queryByRole("option", {
+        name: "AI Subtitle Translator (Official)",
+        hidden: true,
+      }),
+    ).not.toBeInTheDocument();
+    expect(
+      within(listbox).getByRole("option", { name: "Lingarr", hidden: true }),
+    ).toBeInTheDocument();
+    expect(input).toHaveValue("None");
+  });
+
+  it("hides an available update while the engine is being removed", async () => {
+    state = {
+      ...state,
+      instances: [
+        second,
+        engine({
+          plugin: {
+            name: "AI Subtitle Translator",
+            version: "2.2.0",
+            active: true,
+            update_version: "2.3.0",
+          },
+        }),
+      ],
+    };
+    waitingFor({ state: "removed", needs_restart: false });
+    const group = await showPage();
+    await within(group).findByText("Removing");
+    expect(
+      within(group).queryByRole("link", { name: "Update available" }),
+    ).not.toBeInTheDocument();
+  });
+
   it("keeps the repair hint for a plugin the server does not say is waiting", async () => {
     state = {
       ...state,
