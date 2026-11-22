@@ -7,18 +7,18 @@ walks both through the entries one catalog source lists and through what is alre
 answers three things: the plugins that would be installed with it (dependencies first, the plugin
 last), what is already there and satisfies a need, and what does not resolve.
 
-A capability no plugin provides anywhere is not a plugin's to supply: it names a host capability
-(``host.ffmpeg.v1``) or an address or instance the user configures. Those are listed as external and
-never block, because this module cannot tell whether the host has them. Binding them is not done here.
+Host capabilities and configured external bindings satisfy requirements before looking for plugin
+suppliers. A capability no plugin provides anywhere is also listed as external.
 
-The functions read the state document and take what depends on the running host (is an entry usable
-here?) as a callback, so this module imports nothing from the service.
+The resolver takes catalog compatibility as a callback, so this module imports nothing from the
+service.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import Any, Callable, Iterable
 
+from .capabilities import has_external_binding
 from .manifest import ManifestValidationError
 from .plugin_manifest import HOST_CAPABILITY_PREFIX, PluginManifest, parse_plugin_manifest
 from .compatibility import select_entry
@@ -175,7 +175,7 @@ def resolve_closure(
                 return
             visit(candidate, "extends", len(visiting))
             return
-        if capability.startswith(HOST_CAPABILITY_PREFIX):
+        if capability.startswith(HOST_CAPABILITY_PREFIX) or has_external_binding(owner, capability):
             closure.external.append(capability)
             return
         switched_off = []
@@ -535,8 +535,8 @@ def unmet_needs(installations: dict[str, Any], enabled: dict[str, bool] | None =
     """For each installation whose active release relies on a plugin that is not running, what is missing.
 
     Judged on the set that actually activated and is switched on. The plugin it extends must be that
-    plugin, running and providing the capability. A capability it once had an installed supplier for is met
-    by any running supplier of it, not only the one recorded, and is unmet only when none runs. A plugin
+    plugin, running and providing the capability. A requirement with a recorded supplier is met by a
+    configured external binding or any running supplier of that capability. A plugin
     that is itself unmet is not running, so what relies on it is unmet too, and a plugin that is switched
     off supplies nothing (it is still judged, so switching it on cannot start it unmet). A plugin whose
     environment is flagged as needing repair, or whose active release the catalog revoked, does not run
@@ -574,7 +574,7 @@ def unmet_needs(installations: dict[str, Any], enabled: dict[str, bool] | None =
                 if parent is None or plugin.extends.capability not in parent.provides:
                     missing.append(f"{parent_id} ({plugin.extends.capability})")
             for capability, recorded in sorted((rows[pid].get("supplied_by") or {}).items()):
-                if capability not in plugin.requires:
+                if capability not in plugin.requires or has_external_binding(plugin, capability):
                     continue
                 if not any(capability in parsed[sid].provides for sid in suppliers if sid != pid):
                     missing.append(f"{recorded} ({capability})")

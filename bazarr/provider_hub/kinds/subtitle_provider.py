@@ -228,8 +228,7 @@ def apply_settings_overlay(provider_configs: dict[str, dict[str, Any]], settings
                 value = section.get(key) if hasattr(section, "get") else getattr(section, key, None)
                 if value not in (None, "", [], {}):
                     config[key] = value
-            # Last, so only an address still empty after the stored config, the
-            # schema defaults and the plugin's own section are merged is filled.
+            # Reserve any still-empty service field here. The worker gets the leased address per call.
             deliver(config, properties, installation, settings)
             provider_configs[installation.provider_id] = config
     except Exception:

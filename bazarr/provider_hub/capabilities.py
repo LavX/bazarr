@@ -26,6 +26,7 @@ from typing import Any, Callable, Mapping
 
 from . import endpoints, leases, service_health
 from .kinds import SUBTITLE_PROVIDER, get_kind, kind_of
+from .plugin_manifest import PluginManifest
 
 logger = logging.getLogger(__name__)
 
@@ -154,6 +155,28 @@ def ready_url_fields(installation, fields: set[str], settings=None) -> set[str]:
     delivery = get_kind(kind_of(installation)).capability_delivery
     return {key for capability, (key, shape) in delivery.items()
             if shape == DELIVERY_URL and key in fields and resolve(capability, installation, settings).ready}
+
+
+def _provider_url_fields(raw: dict) -> list[tuple[str, str]]:
+    schema = raw.get("config_schema")
+    properties = schema.get("properties") if isinstance(schema, dict) else None
+    if not isinstance(properties, dict):
+        return []
+    delivery = get_kind(SUBTITLE_PROVIDER).capability_delivery
+    return [(capability, key) for capability, (key, shape) in delivery.items()
+            if shape == DELIVERY_URL and key in properties]
+
+
+def has_external_binding(plugin: PluginManifest, capability: str) -> bool:
+    """Whether a configured external address can supply this provider's requirement."""
+    if plugin.kind != SUBTITLE_PROVIDER or capability != FLARESOLVERR or capability not in plugin.requires:
+        return False
+    try:
+        return (any(needed == capability for needed, _ in _provider_url_fields(plugin.raw))
+                and bool(endpoints.flaresolverr_url_source()[0]))
+    except Exception as error:
+        logger.warning("Could not read the external binding for %s (%s)", capability, type(error).__name__)
+        return False
 
 
 def deliver(config: dict, properties: dict, installation, settings) -> None:
@@ -303,16 +326,10 @@ class CallLeases:
         raw = getattr(manifest, "raw", None)
         if not isinstance(raw, dict):
             return cls(provider_id, {}, [], owner, settings)
-        schema = raw.get("config_schema")
-        properties = schema.get("properties") if isinstance(schema, dict) else None
-        if not isinstance(properties, dict):
-            return cls(provider_id, raw, [], owner, settings)
         try:
-            delivery = get_kind(SUBTITLE_PROVIDER).capability_delivery
+            wanted = _provider_url_fields(raw)
         except Exception:
             return cls(provider_id, raw, [], owner, settings)
-        wanted = [(capability, key) for capability, (key, shape) in delivery.items()
-                  if shape == DELIVERY_URL and key in properties]
         return cls(provider_id, raw, wanted, owner, settings)
 
     def _lease_for(self, capability: str) -> leases.Lease | None:

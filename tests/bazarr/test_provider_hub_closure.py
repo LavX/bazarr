@@ -2,7 +2,7 @@
 """What a plugin needs, resolved at selection, and what cannot be removed or switched off under it."""
 import pytest
 
-from plugin_platform_helpers import service_manifest, verified_official_source, write_state
+from plugin_platform_helpers import oci_runtime, provider_manifest_v2, service_manifest, verified_official_source, write_state
 
 PARENT_CAPABILITY = "demo_parent.backend.v1"
 
@@ -110,6 +110,78 @@ def test_a_capability_only_an_incompatible_plugin_provides_does_not_resolve(tmp_
     _world(tmp_path, monkeypatch, [helper, _manifest("user", requires=["translit.v1"])])
 
     assert "no plugin this Bazarr+ can install provides" in _closure("user").refusal
+
+
+@pytest.mark.parametrize("address, capability, declares_field, expected", [
+    ("http://127.0.0.1:8191", "flaresolverr.v1", True, True),
+    ("", "flaresolverr.v1", True, False),
+    ("http://127.0.0.1:8191", "flaresolverr.v2", True, False),
+    ("http://127.0.0.1:8191", "flaresolverr.v1", False, False),
+])
+def test_install_and_update_use_a_matching_external_service(
+        tmp_path, monkeypatch, address, capability, declares_field, expected):
+    from app.config import settings
+    from provider_hub import endpoints, service, state
+    from provider_hub.kinds.service import SERVICE_KIND_API
+    from provider_hub.runtime.oci import ENABLE_ENV
+
+    monkeypatch.delenv(ENABLE_ENV, raising=False)
+    monkeypatch.delenv(endpoints.FLARESOLVERR_ENV, raising=False)
+    monkeypatch.setitem(settings.endpoints, endpoints.FLARESOLVERR_SETTING_KEY, address)
+    assert endpoints.flaresolverr_url_source()[0] == address
+
+    managed = service_manifest("managed_fixture", kind="service", kind_api=SERVICE_KIND_API,
+                               provides=[capability], **oci_runtime())
+    old = provider_manifest_v2("consumer_fixture")
+    new = provider_manifest_v2("consumer_fixture", "2.0.0", requires=[capability])
+    if declares_field:
+        new["config_schema"]["properties"][endpoints.FLARESOLVERR_PROVIDER_FIELD] = {"type": "string"}
+    _world(tmp_path, monkeypatch, [managed, old, new])
+
+    staged = []
+
+    def stage(manifest, **kwargs):
+        staged.append((manifest["id"], manifest["version"]))
+        return manifest
+
+    monkeypatch.setattr(service, "stage_install", stage)
+    if expected:
+        summary = service.install_consent("official", "consumer_fixture", "2.0.0", catalog_list="plugins")
+        assert summary["external_requirements"] == [capability]
+        service.install_catalog_entry("official", "consumer_fixture", "2.0.0", consent_digest=summary["digest"])
+        assert staged == [("consumer_fixture", "2.0.0")]
+    else:
+        with pytest.raises(service.ProviderHubInstallError, match="no plugin this Bazarr\\+ can install provides"):
+            service.install_catalog_entry("official", "consumer_fixture", "2.0.0")
+        assert staged == []
+
+    state.mutate_state(lambda data: data["installations"].update(
+        _installed(old, source_bound=True, source_id="official", catalog_list="plugins")))
+    assert service.offered_update_version("consumer_fixture") == ("2.0.0" if expected else None)
+    if expected:
+        staged.clear()
+        service.apply_update("consumer_fixture")
+        assert staged == [("consumer_fixture", "2.0.0")]
+
+
+def test_a_recorded_disabled_service_can_be_replaced_by_the_configured_address(monkeypatch):
+    from app.config import settings
+    from provider_hub import closure, endpoints
+    from provider_hub.kinds.service import SERVICE_KIND_API
+
+    capability = endpoints.FLARESOLVERR_CAPABILITY
+    managed = service_manifest("managed_fixture", kind="service", kind_api=SERVICE_KIND_API,
+                               provides=[capability], **oci_runtime())
+    consumer = provider_manifest_v2("consumer_fixture", requires=[capability])
+    consumer["config_schema"]["properties"][endpoints.FLARESOLVERR_PROVIDER_FIELD] = {"type": "string"}
+    rows = {**_installed(managed, enabled=False), **_installed(consumer, supplied_by={capability: managed["id"]})}
+    monkeypatch.delenv(endpoints.FLARESOLVERR_ENV, raising=False)
+    monkeypatch.setitem(settings.endpoints, endpoints.FLARESOLVERR_SETTING_KEY, "http://127.0.0.1:8191")
+
+    assert closure.unmet_needs(rows) == {}
+
+    monkeypatch.setitem(settings.endpoints, endpoints.FLARESOLVERR_SETTING_KEY, "")
+    assert closure.unmet_needs(rows) == {"consumer_fixture": ["managed_fixture (flaresolverr.v1)"]}
 
 
 def test_a_plugin_cycle_does_not_resolve(tmp_path, monkeypatch, service_kind):
