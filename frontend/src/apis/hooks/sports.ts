@@ -11,12 +11,21 @@ import sports, {
 } from "@/apis/raw/sports";
 import { isSameRun } from "@/utilities/jobs";
 import { useArrKindAvailability } from "./arrInstances";
+import { useSourceAvailability } from "./mediaSources";
 import { useSystemJobs } from "./system";
 
-// Kept as its own name because most of this module calls it, but the rule it
-// encodes is not specific to sports: see useArrKindAvailability.
 export function useSportsAvailability() {
-  return useArrKindAvailability("sportarr");
+  const arr = useArrKindAvailability("sportarr");
+  const { availability, isLoading } = useSourceAvailability();
+  const sources = availability?.sports;
+  const enabled = arr.enabled || sources?.browsable === true;
+  return {
+    instances: arr.enabled ? arr.instances : [],
+    enabled,
+    activity: enabled || sources?.retained === true,
+    searchable: arr.enabled || sources?.searchable === true,
+    isLoading: arr.isLoading || isLoading,
+  };
 }
 // A league in the shape the shared ItemView table expects, so Sports renders
 // through the same component as Series and Movies instead of a bespoke grid.
@@ -316,7 +325,7 @@ function useSportsActivityPagination<T extends object>(
   fetchAll = false,
   keySignatures: unknown[] = [],
 ) {
-  const { enabled, instances } = useSportsAvailability();
+  const { activity, instances } = useSportsAvailability();
   const ownerKnown =
     filters.owner === undefined ||
     instances.some((instance) => instance.id === filters.owner);
@@ -342,7 +351,7 @@ function useSportsActivityPagination<T extends object>(
     },
     false,
     fetchAll,
-    enabled && ownerKnown,
+    activity && ownerKnown,
   );
 }
 

@@ -378,6 +378,51 @@ def test_a_source_is_listed_read_edited_and_removed(api):
     assert len(api.refreshes) >= 4
 
 
+@pytest.mark.parametrize("content_kind,item_kind", [("movie", "movie"), ("series", "episode"),
+                                                     ("sports", "sports_event")])
+def test_navigation_availability_keeps_browsing_and_searching_separate(api, content_kind, item_kind):
+    from app.config import get_settings
+    from media_sources import repository
+
+    assert get_settings()["media_sources"]["visible"] is False
+    hidden = {"browsable": False, "searchable": False, "retained": False}
+
+    def availability():
+        response = api.client.get(SOURCES + "?availability=1", headers=HEADERS)
+        assert response.status_code == 200
+        all_kinds = response.json["availability"]
+        assert all_kinds.keys() == {"movie", "series", "sports"}
+        assert all(value == hidden for kind, value in all_kinds.items() if kind != content_kind)
+        return all_kinds[content_kind]
+
+    assert availability() == hidden
+    source = _create(api).json
+    source_id = source["id"]
+    library_id = source["libraries"][0]["id"]
+    api.db.execute(sa.update(repository.Libraries).where(repository.Libraries.c.id == library_id)
+                   .values(content_kind=content_kind))
+    assert availability() == {**hidden, "browsable": True, "searchable": True}
+
+    source_url = f"{SOURCES}/{source_id}"
+    library_url = f"{source_url}/libraries/{library_id}"
+    assert api.client.patch(library_url, json={"enabled": False}, headers=HEADERS).status_code == 200
+    assert availability() == {**hidden, "browsable": True}
+    assert api.client.patch(library_url, json={"enabled": True}, headers=HEADERS).status_code == 200
+    assert api.client.patch(source_url, json={"enabled": False}, headers=HEADERS).status_code == 200
+    assert availability() == {**hidden, "browsable": True}
+
+    api.db.execute(sa.insert(repository.History).values(
+        source_id=source_id, item_kind=item_kind, action=1, description="Downloaded"))
+    api.db.execute(sa.insert(repository.Blacklist).values(source_id=source_id, item_kind=item_kind))
+    assert api.client.delete(source_url, headers=HEADERS).status_code == 204
+    assert availability() == {**hidden, "retained": True}
+
+    api.db.execute(sa.delete(repository.History))
+    assert availability() == {**hidden, "retained": True}
+    api.db.execute(sa.delete(repository.Blacklist))
+    assert availability() == hidden
+
+
 def test_a_library_is_added_edited_and_removed_and_its_path_cannot_change(api):
     from media_sources import repository
 

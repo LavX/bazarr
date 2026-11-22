@@ -363,6 +363,15 @@ def blacklist_pairs(item_kind, target=None):
         sa.select(Blacklist.c.provider, Blacklist.c.subs_id).where(Blacklist.c.item_kind == item_kind)).all()]
 
 
+def retained_activity_by_kind(target=None):
+    """History and blacklist rows can outlive both the source and its library."""
+    by_kind = {'movie': 'movie', 'series': 'episode', 'sports': 'sports_event'}
+    checks = [sa.or_(sa.exists().where(History.c.item_kind == item_kind),
+                     sa.exists().where(Blacklist.c.item_kind == item_kind)).label(content_kind)
+              for content_kind, item_kind in by_kind.items()]
+    return _target(target).execute(sa.select(*checks)).mappings().one()
+
+
 # Enabled flags, overlap and holders
 
 def item_state(item_id, target=None):

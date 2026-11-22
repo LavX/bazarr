@@ -74,7 +74,7 @@ const SportsPlayCell = ({
 );
 
 const SportsHistoryView: FunctionComponent = () => {
-  const { enabled, isLoading } = useSportsAvailability();
+  const { activity, isLoading } = useSportsAvailability();
   const [params] = useSearchParams();
   const owner = params.get("instance")
     ? Number(params.get("instance"))
@@ -247,7 +247,7 @@ const SportsHistoryView: FunctionComponent = () => {
   );
 
   if (isLoading) return null;
-  if (!enabled) {
+  if (!activity) {
     return (
       <Container px={0} fluid>
         <Text p="md">

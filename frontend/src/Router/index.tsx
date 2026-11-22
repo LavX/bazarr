@@ -22,7 +22,7 @@ import {
   faTrophy,
 } from "@fortawesome/free-solid-svg-icons";
 import { useBadges } from "@/apis/hooks";
-import { useEnabledStatus } from "@/apis/hooks/site";
+import { useMediaNavigation } from "@/apis/hooks/site";
 import { useTranslationRuntime } from "@/apis/hooks/translation";
 import App from "@/App";
 import { Lazy } from "@/components/async";
@@ -78,7 +78,16 @@ const SubtitleEditorPage = lazy(
 
 export function useRoutes(): CustomRouteObject[] {
   const { data } = useBadges();
-  const { sonarr, radarr, sportarr } = useEnabledStatus();
+  const {
+    series,
+    movies,
+    sports,
+    seriesActivity,
+    movieActivity,
+    sportsActivity,
+    seriesHistory,
+    movieHistory,
+  } = useMediaNavigation();
   // The Translation page exists only while the v2 translation runtime is on.
   const translationRuntime = useTranslationRuntime();
 
@@ -103,7 +112,7 @@ export function useRoutes(): CustomRouteObject[] {
             name: "My series",
             path: "series",
             badge: data?.sonarr_signalr,
-            hidden: !sonarr,
+            hidden: !series,
             children: [
               {
                 index: true,
@@ -120,7 +129,7 @@ export function useRoutes(): CustomRouteObject[] {
             name: "My movies",
             path: "movies",
             badge: data?.radarr_signalr,
-            hidden: !radarr,
+            hidden: !movies,
             children: [
               {
                 index: true,
@@ -141,7 +150,7 @@ export function useRoutes(): CustomRouteObject[] {
             // along and the nav never showed it, so there was no way to see at
             // a glance whether Bazarr was still connected to Sportarr.
             badge: data?.sportarr_sse,
-            hidden: !sportarr,
+            hidden: !sports,
             children: [
               { index: true, element: <Sports /> },
               { path: ":id", element: <SportsEvents /> },
@@ -151,24 +160,24 @@ export function useRoutes(): CustomRouteObject[] {
             icon: faClock,
             name: "History",
             path: "history",
-            hidden: !sonarr && !radarr && !sportarr,
+            hidden: !seriesHistory && !movieHistory && !sportsActivity,
             children: [
               {
                 path: "sports",
                 name: "Sports",
-                hidden: !sportarr,
+                hidden: !sportsActivity,
                 element: <SportsHistoryView></SportsHistoryView>,
               },
               {
                 path: "series",
                 name: "Episodes",
-                hidden: !sonarr,
+                hidden: !seriesHistory,
                 element: <SeriesHistoryView></SeriesHistoryView>,
               },
               {
                 path: "movies",
                 name: "Movies",
-                hidden: !radarr,
+                hidden: !movieHistory,
                 element: <MoviesHistoryView></MoviesHistoryView>,
               },
               {
@@ -183,12 +192,12 @@ export function useRoutes(): CustomRouteObject[] {
             icon: faExclamationTriangle,
             name: "Missing",
             path: "wanted",
-            hidden: !sonarr && !radarr && !sportarr,
+            hidden: !seriesActivity && !movieActivity && !sportsActivity,
             children: [
               {
                 path: "sports",
                 name: "Sports",
-                hidden: !sportarr,
+                hidden: !sportsActivity,
                 badge: data?.sports,
                 element: <WantedSportsView></WantedSportsView>,
               },
@@ -196,14 +205,14 @@ export function useRoutes(): CustomRouteObject[] {
                 name: "Episodes",
                 path: "series",
                 badge: data?.episodes,
-                hidden: !sonarr,
+                hidden: !seriesActivity,
                 element: <WantedSeriesView></WantedSeriesView>,
               },
               {
                 name: "Movies",
                 path: "movies",
                 badge: data?.movies,
-                hidden: !radarr,
+                hidden: !movieActivity,
                 element: <WantedMoviesView></WantedMoviesView>,
               },
             ],
@@ -212,24 +221,24 @@ export function useRoutes(): CustomRouteObject[] {
             icon: faFileExcel,
             name: "Excluded",
             path: "blacklist",
-            hidden: !sonarr && !radarr && !sportarr,
+            hidden: !seriesActivity && !movieActivity && !sportsActivity,
             children: [
               {
                 path: "sports",
                 name: "Sports",
-                hidden: !sportarr,
+                hidden: !sportsActivity,
                 element: <BlacklistSportsView></BlacklistSportsView>,
               },
               {
                 path: "series",
                 name: "Episodes",
-                hidden: !sonarr,
+                hidden: !seriesActivity,
                 element: <BlacklistSeriesView></BlacklistSeriesView>,
               },
               {
                 path: "movies",
                 name: "Movies",
-                hidden: !radarr,
+                hidden: !movieActivity,
                 element: <BlacklistMoviesView></BlacklistMoviesView>,
               },
             ],
@@ -484,9 +493,14 @@ export function useRoutes(): CustomRouteObject[] {
       data?.sportarr_sse,
       data?.announcements,
       data?.status,
-      radarr,
-      sonarr,
-      sportarr,
+      series,
+      movies,
+      sports,
+      seriesActivity,
+      movieActivity,
+      sportsActivity,
+      seriesHistory,
+      movieHistory,
       translationRuntime,
     ],
   );

@@ -86,7 +86,7 @@ const MissingLanguages: FunctionComponent<{ row: SportsWantedRow }> = ({
 };
 
 const WantedSportsView: FunctionComponent = () => {
-  const { enabled, isLoading } = useSportsAvailability();
+  const { activity, isLoading } = useSportsAvailability();
   const [params] = useSearchParams();
   const owner = params.get("instance")
     ? Number(params.get("instance"))
@@ -314,7 +314,7 @@ const WantedSportsView: FunctionComponent = () => {
   }, [owner, instanceIds, batch]);
 
   if (isLoading) return null;
-  if (!enabled) {
+  if (!activity) {
     return (
       <Container px={0} fluid>
         <Text p="md">

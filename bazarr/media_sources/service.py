@@ -143,6 +143,19 @@ def list_sources(session=None):
     return [describe_source(source.id, session) for source in repository.list_sources(session)]
 
 
+def source_availability(sources, session=None):
+    retained = repository.retained_activity_by_kind(session)
+    by_kind = {kind: {'browsable': False, 'searchable': False, 'retained': retained[kind]}
+               for kind in repository.CONTENT_KINDS}
+    for source in sources:
+        for library in source['libraries']:
+            kind = by_kind[library['content_kind']]
+            kind['browsable'] = True
+            if source['enabled'] and library['enabled']:
+                kind['searchable'] = True
+    return by_kind
+
+
 def validate_path(payload, session=None):
     """What the Connections page shows next to a folder before it is added."""
     content_kind = payload.get('content_kind') or 'movie'

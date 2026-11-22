@@ -1,3 +1,4 @@
+import { useSourceAvailability } from "./mediaSources";
 import { useSystemSettings, useSystemStatus } from ".";
 
 export function useEnabledStatus() {
@@ -7,6 +8,24 @@ export function useEnabledStatus() {
     sportarr: data?.general?.use_sportarr ?? false,
     sonarr: data?.general?.use_sonarr ?? false,
     radarr: data?.general?.use_radarr ?? false,
+  };
+}
+
+export function useMediaNavigation() {
+  const { sonarr, radarr, sportarr } = useEnabledStatus();
+  const { availability } = useSourceAvailability();
+  const series = sonarr || availability?.series.browsable === true;
+  const movies = radarr || availability?.movie.browsable === true;
+  const sports = sportarr || availability?.sports.browsable === true;
+  return {
+    series,
+    movies,
+    sports,
+    seriesActivity: series || availability?.series.retained === true,
+    movieActivity: movies || availability?.movie.retained === true,
+    sportsActivity: sports || availability?.sports.retained === true,
+    seriesHistory: sonarr,
+    movieHistory: radarr,
   };
 }
 
