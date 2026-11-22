@@ -18,7 +18,8 @@ import configparser
 import yaml
 import platform
 
-from urllib.parse import quote_plus, urlsplit
+from urllib.parse import quote_plus
+from provider_hub.endpoints import FLARESOLVERR_SETTING_PATH, normalize_endpoint_url
 from utilities.binaries import BinaryNotFound, get_binary
 from literals import (EXIT_VALIDATION_ERROR, LOG_BACKUP_COUNT_DEFAULT, LOG_BACKUP_COUNT_MAX, LOG_BACKUP_COUNT_MIN,
                       LOG_MAX_FILE_SIZE_MB_DEFAULT, LOG_MAX_FILE_SIZE_MB_MAX, LOG_MAX_FILE_SIZE_MB_MIN)
@@ -54,17 +55,10 @@ def validate_ip_address(ip_string):
         return False
 
 def validate_endpoint_url(value):
-    # An empty address clears the setting; anything else must be a plain
-    # http(s) URL with a host, the only kind the services behind it accept.
+    # An empty address clears the setting. Nonempty addresses follow the runtime URL rules.
     if value in (None, ''):
         return True
-    if not isinstance(value, str) or value != value.strip():
-        return False
-    try:
-        parts = urlsplit(value)
-        return parts.scheme in ('http', 'https') and bool(parts.hostname)
-    except ValueError:
-        return False
+    return bool(normalize_endpoint_url(value)) and value == value.strip()
 
 
 def is_not_bool(value):
@@ -932,8 +926,8 @@ validators = [
     # Host-wide service addresses handed to Provider Hub plugins. One key per
     # capability, named <capability with dots as underscores>_url, so the
     # settings save and every validator keep their two-level shape.
-    Validator('endpoints.flaresolverr_v1_url', default='', is_type_of=str, cast=str,
-              condition=validate_endpoint_url),
+    Validator(FLARESOLVERR_SETTING_PATH, default='', is_type_of=str, cast=str, condition=validate_endpoint_url,
+              messages={'condition': 'Invalid FlareSolverr address. Use HTTP or HTTPS with a host and a valid port if specified.'}),
     Validator('discover.locale', default='en-US'),
     Validator('general.metadata_language', default=''),
 ]
@@ -1023,13 +1017,15 @@ while failed_validator:
         failed_validator = False
     except ValidationError as e:
         current_validator_details = e.details[0][0]
-        logging.error(f"Validator failed for {current_validator_details.names[0]}: {e}")  # noqa: G004
+        setting_name = current_validator_details.names[0]
+        logging.error(f"Validator failed for {setting_name}: {e}")  # noqa: G004
         if hasattr(current_validator_details, 'default') and current_validator_details.default is not empty:
-            old_value = settings.get(current_validator_details.names[0], 'undefined')
-            settings[current_validator_details.names[0]] = current_validator_details.default
-            logging.warning(f"VALIDATOR RESET: {current_validator_details.names[0]} from '{old_value}' to '{current_validator_details.default}'")  # noqa: G004
+            # An endpoint URL can contain credentials even when it fails validation.
+            old_value = '[redacted]' if setting_name == FLARESOLVERR_SETTING_PATH else settings.get(setting_name, 'undefined')
+            settings[setting_name] = current_validator_details.default
+            logging.warning(f"VALIDATOR RESET: {setting_name} from '{old_value}' to '{current_validator_details.default}'")  # noqa: G004
         else:
-            logging.critical(f"Value for {current_validator_details.names[0]} doesn't pass validation and there's no "  # noqa: G004
+            logging.critical(f"Value for {setting_name} doesn't pass validation and there's no "  # noqa: G004
                              f"default value. This issue must be reported to and fixed by the development team. "
                              f"Bazarr won't work until it's been fixed.")
             stop_bazarr(EXIT_VALIDATION_ERROR)

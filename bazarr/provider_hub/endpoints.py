@@ -58,14 +58,16 @@ def normalize_endpoint_url(value) -> str:
     if not isinstance(value, str):
         return ""
     text = value.strip()
-    if not text:
+    # urlsplit removes these characters before parsing, which can hide a malformed port.
+    if not text or any(char in text for char in "\r\n\t"):
         return ""
     try:
         parts = urlsplit(text)
         host = parts.hostname
+        port = parts.port
     except ValueError:
         return ""
-    if parts.scheme not in ("http", "https") or not host:
+    if parts.scheme not in ("http", "https") or not host or port == 0:
         return ""
     return text
 

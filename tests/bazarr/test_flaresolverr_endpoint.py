@@ -71,9 +71,20 @@ class TestResolution:
         assert endpoints.flaresolverr_url_source(_settings("")) == ("", "none")
         assert endpoints.flaresolverr_url_source({}) == ("", "none")
 
-    @pytest.mark.parametrize("bad", ["solver:8191", "ftp://solver", "http://", "   ", None, 5])
+    @pytest.mark.parametrize("bad", [
+        "solver:8191", "ftp://solver", "http://", "   ", None, 5,
+        "http://solver:bad", "http://solver:65536", "http://solver:-1", "http://solver:0",
+        "http://solver:81\n91", "http://solver:81\t91", "http://[::1",
+    ])
     def test_an_unusable_address_is_ignored(self, bad):
         assert endpoints.flaresolverr_url_source(_settings(bad)) == ("", "none")
+
+    def test_bad_ports_in_the_setting_and_environment_are_ignored(self, monkeypatch):
+        monkeypatch.setenv(endpoints.FLARESOLVERR_ENV, "http://from-env:65536")
+        assert endpoints.flaresolverr_url_source(_settings("http://solver:bad")) == ("", "none")
+
+        monkeypatch.setenv(endpoints.FLARESOLVERR_ENV, "https://[::1]:8443/path")
+        assert endpoints.flaresolverr_url_source(_settings("http://solver:bad")) == ("https://[::1]:8443/path", "env")
 
 
 class TestFill:
@@ -223,11 +234,17 @@ class TestValidator:
             return False
         return True
 
-    @pytest.mark.parametrize("value", ["", "http://flaresolverr:8191", "https://solver.lan/path"])
+    @pytest.mark.parametrize("value", [
+        "", "http://flaresolverr:8191", "https://solver.lan/path", "https://[::1]:65535/path",
+        "http://fixture:placeholder@[::1]:8191",
+    ])
     def test_accepts_empty_and_http_addresses(self, value):
         assert self._check(value)
 
-    @pytest.mark.parametrize("value", ["solver:8191", "ftp://solver", "http://", " http://solver:8191"])
+    @pytest.mark.parametrize("value", [
+        "solver:8191", "ftp://solver", "http://", " http://solver:8191",
+        "http://solver:bad", "http://solver:65536", "http://solver:-1", "http://solver:0", "http://[::1",
+    ])
     def test_refuses_anything_else(self, value):
         assert not self._check(value)
 
@@ -296,6 +313,18 @@ class TestSave:
         env.config.save_settings([(endpoints.FLARESOLVERR_FORM_KEY, [f"  {GLOBAL_URL} \n"])])
 
         assert env.settings.endpoints.flaresolverr_v1_url == GLOBAL_URL
+
+    def test_refusing_a_bad_port_does_not_echo_the_address_or_save_it(self, env):
+        from dynaconf.validator import ValidationError
+
+        validator = next(item for item in env.config.validators if endpoints.FLARESOLVERR_SETTING_PATH in item.names)
+        env.settings.validators.register(validator)
+        with pytest.raises(ValidationError, match="Invalid FlareSolverr address") as error:
+            env.config.save_settings([(endpoints.FLARESOLVERR_FORM_KEY, ["http://fixture:placeholder@solver:bad"])])
+
+        assert "fixture" not in str(error.value) and "placeholder" not in str(error.value)
+        assert env.settings.endpoints.flaresolverr_v1_url == ""
+        assert env.events == []
 
     def test_an_unrelated_save_does_not_reset_the_pool(self, env):
         env.config.save_settings([("settings-general-page_size", ["77"])])
