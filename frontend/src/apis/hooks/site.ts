@@ -24,8 +24,9 @@ export function useMediaNavigation() {
     seriesActivity: series || availability?.series.retained === true,
     movieActivity: movies || availability?.movie.retained === true,
     sportsActivity: sports || availability?.sports.retained === true,
-    seriesHistory: sonarr,
-    movieHistory: radarr,
+    sonarr,
+    radarr,
+    sportarr,
   };
 }
 

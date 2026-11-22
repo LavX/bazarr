@@ -7,6 +7,7 @@ import { useSportsAvailability } from "@/apis/hooks/sports";
 import queryClient from "@/apis/queries";
 import { QueryKeys } from "@/apis/queries/keys";
 import type { SourceAvailability } from "@/apis/raw/mediaSources";
+import { makeInstance } from "@/pages/Settings/Connections/__tests__/fixtures";
 import { useRoutes } from "@/Router";
 import type { CustomRouteObject } from "@/Router/type";
 import { customRender, screen, waitFor } from "@/tests";
@@ -68,7 +69,9 @@ it.each([
           media_sources: { visible },
         }),
       ),
-      http.get("/api/system/arr-instances", () => HttpResponse.json([])),
+      http.get("/api/system/arr-instances", () =>
+        HttpResponse.json([makeInstance({ kind: arr, enabled: true })]),
+      ),
       http.get("/api/system/status", () => HttpResponse.json({ data: {} })),
       http.get("/api/system/media-sources", () => {
         list();
@@ -162,5 +165,79 @@ it.each([
     expect(screen.getByText(`Missing / ${activity}`)).toBeInTheDocument();
     expect(screen.getByText(`Excluded / ${activity}`)).toBeInTheDocument();
     expect(screen.getByText(`History / ${activity}`)).toBeInTheDocument();
+  },
+);
+
+function MediaPage({ group, path }: { group: string; path?: string }) {
+  // eslint-disable-next-line testing-library/no-node-access -- route metadata, not a DOM node.
+  const routes: CustomRouteObject[] = useRoutes()[0].children ?? [];
+  const top = routes.find((route) => route.path === group);
+  // eslint-disable-next-line testing-library/no-node-access -- nested route metadata.
+  const children: CustomRouteObject[] = top?.children ?? [];
+  const page = children.find((route) =>
+    path ? route.path === path : route.index,
+  );
+  return page?.element;
+}
+
+it.each([
+  ["series", undefined, "sonarr", "/api/series"],
+  ["movies", undefined, "radarr", "/api/movies"],
+  ["sports", undefined, "sportarr", "/api/sports/leagues"],
+  ["wanted", "series", "sonarr", "/api/episodes/wanted"],
+  ["wanted", "movies", "radarr", "/api/movies/wanted"],
+  ["wanted", "sports", "sportarr", "/api/sports/wanted"],
+  ["blacklist", "series", "sonarr", "/api/episodes/blacklist"],
+  ["blacklist", "movies", "radarr", "/api/movies/blacklist"],
+  ["blacklist", "sports", "sportarr", "/api/sports/blacklist"],
+  ["history", "sports", "sportarr", "/api/sports/history"],
+] as const)(
+  "opens %s %s for folders without calling inactive %s",
+  async (group, path, arr, endpoint) => {
+    const requests = vi.fn();
+    server.use(
+      http.get("/api/system/settings", () =>
+        HttpResponse.json({
+          general: { [`use_${arr}`]: false },
+          media_sources: { visible: true },
+        }),
+      ),
+      http.get("/api/system/arr-instances", () =>
+        HttpResponse.json([makeInstance({ kind: arr, enabled: true })]),
+      ),
+      http.get("/api/system/status", () => HttpResponse.json({ data: {} })),
+      http.get("/api/system/media-sources", () => {
+        const state = path ? RETAINED : ENABLED;
+        return HttpResponse.json({
+          data: [],
+          availability: { series: state, movie: state, sports: state },
+        });
+      }),
+      http.get("/api/badges", () =>
+        HttpResponse.json({ episodes: 9, movies: 9, sports: 9 }),
+      ),
+      http.get("/api/subtitles/upgradable", () => {
+        requests("upgradable");
+        return HttpResponse.json({ movies: [], series: [], sports: [] });
+      }),
+      http.all(endpoint, ({ request }) => {
+        requests(request.method);
+        return HttpResponse.json({
+          data: [{ id: 72, title: "Inactive Arr title" }],
+          total: 1,
+        });
+      }),
+    );
+    customRender(<MediaPage group={group} path={path} />);
+    expect(
+      await screen.findByRole("link", { name: "Connections" }),
+    ).toHaveAttribute("href", "/settings/connections#folders");
+    expect(screen.queryByText("Inactive Arr title")).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", {
+        name: /remove all|search all|sync leagues/i,
+      }),
+    ).not.toBeInTheDocument();
+    expect(requests).not.toHaveBeenCalled();
   },
 );

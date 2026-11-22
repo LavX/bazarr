@@ -64,6 +64,7 @@ import WantedMoviesView from "@/pages/Wanted/Movies";
 import WantedSeriesView from "@/pages/Wanted/Series";
 import WantedSportsView from "@/pages/Wanted/Sports";
 import { Environment } from "@/utilities";
+import ArrMediaRoute from "./ArrMediaRoute";
 import Redirector from "./Redirector";
 import { RouterNames } from "./RouterNames";
 import TranslationGate from "./TranslationGate";
@@ -85,8 +86,9 @@ export function useRoutes(): CustomRouteObject[] {
     seriesActivity,
     movieActivity,
     sportsActivity,
-    seriesHistory,
-    movieHistory,
+    sonarr,
+    radarr,
+    sportarr,
   } = useMediaNavigation();
   // The Translation page exists only while the v2 translation runtime is on.
   const translationRuntime = useTranslationRuntime();
@@ -111,16 +113,24 @@ export function useRoutes(): CustomRouteObject[] {
             icon: faPlay,
             name: "My series",
             path: "series",
-            badge: data?.sonarr_signalr,
+            badge: sonarr ? data?.sonarr_signalr : undefined,
             hidden: !series,
             children: [
               {
                 index: true,
-                element: <SeriesView></SeriesView>,
+                element: (
+                  <ArrMediaRoute kind="sonarr">
+                    <SeriesView />
+                  </ArrMediaRoute>
+                ),
               },
               {
                 path: ":id",
-                element: <Episodes></Episodes>,
+                element: (
+                  <ArrMediaRoute kind="sonarr">
+                    <Episodes />
+                  </ArrMediaRoute>
+                ),
               },
             ],
           },
@@ -128,16 +138,24 @@ export function useRoutes(): CustomRouteObject[] {
             icon: faFilm,
             name: "My movies",
             path: "movies",
-            badge: data?.radarr_signalr,
+            badge: radarr ? data?.radarr_signalr : undefined,
             hidden: !movies,
             children: [
               {
                 index: true,
-                element: <MovieView></MovieView>,
+                element: (
+                  <ArrMediaRoute kind="radarr">
+                    <MovieView />
+                  </ArrMediaRoute>
+                ),
               },
               {
                 path: ":id",
-                element: <MovieDetailView></MovieDetailView>,
+                element: (
+                  <ArrMediaRoute kind="radarr">
+                    <MovieDetailView />
+                  </ArrMediaRoute>
+                ),
               },
             ],
           },
@@ -149,7 +167,7 @@ export function useRoutes(): CustomRouteObject[] {
             // badges on Series and Movies. The endpoint has reported it all
             // along and the nav never showed it, so there was no way to see at
             // a glance whether Bazarr was still connected to Sportarr.
-            badge: data?.sportarr_sse,
+            badge: sportarr ? data?.sportarr_sse : undefined,
             hidden: !sports,
             children: [
               { index: true, element: <Sports /> },
@@ -160,7 +178,7 @@ export function useRoutes(): CustomRouteObject[] {
             icon: faClock,
             name: "History",
             path: "history",
-            hidden: !seriesHistory && !movieHistory && !sportsActivity,
+            hidden: !sonarr && !radarr && !sportsActivity,
             children: [
               {
                 path: "sports",
@@ -171,14 +189,22 @@ export function useRoutes(): CustomRouteObject[] {
               {
                 path: "series",
                 name: "Episodes",
-                hidden: !seriesHistory,
-                element: <SeriesHistoryView></SeriesHistoryView>,
+                hidden: !sonarr,
+                element: (
+                  <ArrMediaRoute kind="sonarr">
+                    <SeriesHistoryView />
+                  </ArrMediaRoute>
+                ),
               },
               {
                 path: "movies",
                 name: "Movies",
-                hidden: !movieHistory,
-                element: <MoviesHistoryView></MoviesHistoryView>,
+                hidden: !radarr,
+                element: (
+                  <ArrMediaRoute kind="radarr">
+                    <MoviesHistoryView />
+                  </ArrMediaRoute>
+                ),
               },
               {
                 // Statistics lived here through 2.6, so old bookmarks point at it.
@@ -198,22 +224,30 @@ export function useRoutes(): CustomRouteObject[] {
                 path: "sports",
                 name: "Sports",
                 hidden: !sportsActivity,
-                badge: data?.sports,
+                badge: sportarr ? data?.sports : undefined,
                 element: <WantedSportsView></WantedSportsView>,
               },
               {
                 name: "Episodes",
                 path: "series",
-                badge: data?.episodes,
+                badge: sonarr ? data?.episodes : undefined,
                 hidden: !seriesActivity,
-                element: <WantedSeriesView></WantedSeriesView>,
+                element: (
+                  <ArrMediaRoute kind="sonarr">
+                    <WantedSeriesView />
+                  </ArrMediaRoute>
+                ),
               },
               {
                 name: "Movies",
                 path: "movies",
-                badge: data?.movies,
+                badge: radarr ? data?.movies : undefined,
                 hidden: !movieActivity,
-                element: <WantedMoviesView></WantedMoviesView>,
+                element: (
+                  <ArrMediaRoute kind="radarr">
+                    <WantedMoviesView />
+                  </ArrMediaRoute>
+                ),
               },
             ],
           },
@@ -233,13 +267,21 @@ export function useRoutes(): CustomRouteObject[] {
                 path: "series",
                 name: "Episodes",
                 hidden: !seriesActivity,
-                element: <BlacklistSeriesView></BlacklistSeriesView>,
+                element: (
+                  <ArrMediaRoute kind="sonarr">
+                    <BlacklistSeriesView />
+                  </ArrMediaRoute>
+                ),
               },
               {
                 path: "movies",
                 name: "Movies",
                 hidden: !movieActivity,
-                element: <BlacklistMoviesView></BlacklistMoviesView>,
+                element: (
+                  <ArrMediaRoute kind="radarr">
+                    <BlacklistMoviesView />
+                  </ArrMediaRoute>
+                ),
               },
             ],
           },
@@ -499,8 +541,9 @@ export function useRoutes(): CustomRouteObject[] {
       seriesActivity,
       movieActivity,
       sportsActivity,
-      seriesHistory,
-      movieHistory,
+      sonarr,
+      radarr,
+      sportarr,
       translationRuntime,
     ],
   );

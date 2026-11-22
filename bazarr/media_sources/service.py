@@ -140,7 +140,8 @@ def create_source(payload, session=None):
 
 
 def list_sources(session=None):
-    return [describe_source(source.id, session) for source in repository.list_sources(session)]
+    return [description for source in repository.list_sources(session)
+            if (description := describe_source(source.id, session)) is not None]
 
 
 def source_availability(sources, session=None):

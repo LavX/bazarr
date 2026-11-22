@@ -24,6 +24,7 @@ import Language from "@/components/bazarr/Language";
 import { WantedItem } from "@/components/forms/MassTranslateForm";
 import { SportsSearchModal } from "@/components/modals/SportsSearchModal";
 import { useModals } from "@/modules/modals";
+import FolderMediaNotice from "@/pages/views/FolderMediaNotice";
 import WantedView from "@/pages/views/WantedView";
 import { BuildKey } from "@/utilities";
 import { buildSubtitleLanguageKey } from "@/utilities/subtitles";
@@ -86,7 +87,7 @@ const MissingLanguages: FunctionComponent<{ row: SportsWantedRow }> = ({
 };
 
 const WantedSportsView: FunctionComponent = () => {
-  const { activity, isLoading } = useSportsAvailability();
+  const { activity, arrEnabled, isLoading } = useSportsAvailability();
   const [params] = useSearchParams();
   const owner = params.get("instance")
     ? Number(params.get("instance"))
@@ -314,7 +315,8 @@ const WantedSportsView: FunctionComponent = () => {
   }, [owner, instanceIds, batch]);
 
   if (isLoading) return null;
-  if (!activity) {
+  if (!arrEnabled && activity) return <FolderMediaNotice />;
+  if (!arrEnabled) {
     return (
       <Container px={0} fluid>
         <Text p="md">

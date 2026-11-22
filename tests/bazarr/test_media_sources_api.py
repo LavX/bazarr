@@ -423,6 +423,29 @@ def test_navigation_availability_keeps_browsing_and_searching_separate(api, cont
     assert availability() == hidden
 
 
+def test_list_omits_a_source_removed_after_it_was_enumerated(api, monkeypatch):
+    from media_sources import repository
+
+    created = _create(api).json
+    source_id = created["id"]
+    api.db.execute(sa.insert(repository.History).values(
+        source_id=source_id, item_kind="movie", action=1, description="Downloaded"))
+    list_sources = repository.list_sources
+
+    def remove_after_list(target=None):
+        sources = list_sources(target)
+        repository.delete_source(source_id, target)
+        return sources
+
+    monkeypatch.setattr(repository, "list_sources", remove_after_list)
+    response = api.client.get(SOURCES + "?availability=1", headers=HEADERS)
+    assert response.status_code == 200
+    assert response.json["data"] == []
+    assert response.json["availability"]["movie"] == {
+        "browsable": False, "searchable": False, "retained": True,
+    }
+
+
 def test_a_library_is_added_edited_and_removed_and_its_path_cannot_change(api):
     from media_sources import repository
 

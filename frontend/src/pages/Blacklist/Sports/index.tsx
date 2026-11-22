@@ -26,6 +26,7 @@ import MutateAction from "@/components/async/MutateAction";
 import { InstanceBadge } from "@/components/bazarr";
 import Language from "@/components/bazarr/Language";
 import TextPopover from "@/components/TextPopover";
+import FolderMediaNotice from "@/pages/views/FolderMediaNotice";
 import SportsActivityFilters from "@/pages/views/SportsActivityFilters";
 
 // Built as its own page on the shared paginated table, like the Series and
@@ -33,7 +34,7 @@ import SportsActivityFilters from "@/pages/views/SportsActivityFilters";
 // Wanted and History, so it inherited their columns and none of the paging or
 // styling the other two exclusion pages have.
 const BlacklistSportsView: FunctionComponent = () => {
-  const { activity, isLoading } = useSportsAvailability();
+  const { activity, arrEnabled, isLoading } = useSportsAvailability();
   const [params] = useSearchParams();
   const owner = params.get("instance")
     ? Number(params.get("instance"))
@@ -164,7 +165,8 @@ const BlacklistSportsView: FunctionComponent = () => {
   useDocumentTitle(`Sports Excluded - ${useInstanceName()}`);
 
   if (isLoading) return null;
-  if (!activity) {
+  if (!arrEnabled && activity) return <FolderMediaNotice />;
+  if (!arrEnabled) {
     return (
       <Container px={0} fluid>
         <Text p="md">
