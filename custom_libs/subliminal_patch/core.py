@@ -31,6 +31,7 @@ from concurrent.futures import as_completed
 from .extensions import provider_registry
 from .exceptions import APIThrottled, MustGetBlacklisted, SubtitleCandidateRejected
 from .score import compute_score, MAX_SCORES
+from subliminal.exceptions import GuessingError
 from subliminal.video import VIDEO_EXTENSIONS, Video, Episode, Movie
 from subliminal.core import ProviderPool, ThreadPoolExecutor, check_video
 
@@ -2028,7 +2029,8 @@ if is_windows_special_path:
     SZAsyncProviderPool = SZProviderPool
 
 
-def scan_video(path, dont_use_actual_file=False, hints=None, providers=None, skip_hashing=False, hash_from=None):
+def scan_video(path, dont_use_actual_file=False, hints=None, providers=None, skip_hashing=False,
+               hash_from=None, fallback_guess=None):
     """Scan a video from a `path`.
 
     patch:
@@ -2062,7 +2064,12 @@ def scan_video(path, dont_use_actual_file=False, hints=None, providers=None, ski
     guessed_result = guessit(path, options=hints)
 
     logger.debug('GuessIt found: %s', json.dumps(guessed_result, cls=GuessitEncoder, indent=4, ensure_ascii=False))
-    video = Video.fromguess(path, guessed_result)
+    try:
+        video = Video.fromguess(path, guessed_result)
+    except GuessingError:
+        if fallback_guess is None:
+            raise
+        video = Video.fromguess(path, {**fallback_guess, **guessed_result})
     video.hints = hints  # ?
 
     if dont_use_actual_file and not hash_from:

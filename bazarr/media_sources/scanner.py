@@ -352,7 +352,7 @@ def _scan_library(source, library, cancel, session, shadow_context) -> LibrarySc
             continue
         repository.record_root_device(root.id, root_snapshot[root.local_path].dev, session)
 
-    _identify_pending(library, session)
+    _identify_pending(source, kind, library, decisions, cancel, session)
     _refresh_shadows(library.id, decisions, inserted, set(result.item_ids), session, shadow_context)
 
     # The subtitle listing is rebuilt for every item on every scan, whether or not its video changed. One
@@ -373,7 +373,9 @@ def _write_library(library, decisions, plan, group_identities, group_for_dir, gr
     if plan is not None and not plan.writes_nothing:
         with source_transaction(session) as connection:
             def update_group(group_id, connection, **values):
-                repository.update_group(group_id, connection, owner_library_id=library.id, **values)
+                identity_fields = group_identities.get(group_id, {}).keys() & values.keys()
+                repository.update_group(group_id, connection, owner_library_id=library.id,
+                                        protect_user=identity_fields, **values)
 
             group_rules.apply_plan(plan, connection, update_group, group_identities)
         for group_id in plan.reidentify:
@@ -629,7 +631,7 @@ def _group_state(group_id, groups, session):
 
 def _identified(library, found, group_id, groups, session):
     state = _group_state(group_id, groups, session) if group_id is not None else 'parsed'
-    return identify.identify_item(library.content_kind, found.path, found.group_key, state)
+    return identify.identify_item(library.content_kind, found.path, found.group_key, state, found.hints)
 
 
 def _group_of(found, group_for_dir):
@@ -727,7 +729,9 @@ def _write_final_path(library, entry, grouped, decisions, connection, releases):
         # Release the occupied path only in the transaction that makes the incoming item its new owner.
         displaced = _delete_owned(decisions.admission_displaced.get(found.path), connection)
         values.update(source_id=library.source_id, library_id=library.id)
-    updated = repository.update_item(row.id, connection, owner_library_id=row.library_id, **values)
+    protected = (identified.keys() & values.keys()) - {'scene_name'}
+    updated = repository.update_item(row.id, connection, owner_library_id=row.library_id,
+                                     protect_user=protected, **values)
     if handover:
         if not updated:
             raise _ForeignClaimChanged
@@ -762,8 +766,9 @@ def _write_path_only(library, decisions, groups, result, session, cancel, outer_
     def update(connection, row, found, identified):
         values = _item_values(found, identified, keep_identity=row.identity_source == 'user')
         # The file changed: its codec cache described the old content.
+        protected = (identified.keys() & values.keys()) - {'scene_name'}
         return repository.update_item(row.id, connection, owner_library_id=row.library_id, ffprobe_cache=None,
-                                      **values)
+                                      protect_user=protected, **values)
 
     local = [entry for entry in pending if entry[1].path not in decisions.foreign_to_close]
     for batch in _chunks(local):
@@ -865,23 +870,66 @@ def _insert_batch(batch, library, item_kind, group_for_dir, groups, result, sess
     result.deleted += sum(deleted)
 
 
-def _identify_pending(library, session):
-    """Every item and group whose last lookup could not be answered is asked again, on every scan."""
-    for row in repository.pending_items(library.id, session):
-        if row.identity_source == 'user':
-            repository.update_item(row.id, session, owner_library_id=library.id, identify_pending=0)
+def _identify_pending(source, kind, library, decisions, cancel, session):
+    """Apply new hints and confirm pending filename identities after the scanner commits its writes."""
+    # Hints can arrive or change while the file's size, name and mtime stay the same.
+    for row, found in decisions.unchanged:
+        if found.hints is None or row.identity_source == 'user':
             continue
+        if cancel is not None:
+            cancel()
         group = repository.get_group(row.group_id, session) if row.group_id is not None else None
-        values = identify.identify_item(library.content_kind, row.path, group.group_key if group else None,
-                                        group.identity_state if group else 'parsed')
-        values.pop('scene_name', None)
-        repository.update_item(row.id, session, owner_library_id=library.id, **values)
-    for group in repository.pending_groups(library.id, session):
-        if group.identity_source != 'user':
-            repository.update_group(group.id, session, owner_library_id=library.id,
-                                    **identify.identify_group(group.group_key))
+        values = identify.identify_item(library.content_kind, row.path, found.group_key,
+                                        group.identity_state if group else 'parsed', found.hints)
+        if values['identity_source'] != 'media_server':
+            values = {'external_id': found.hints.external_id} if found.hints.external_id else {}
+        if values:
+            repository.update_item(row.id, session, owner_library_id=library.id, only_automatic=True, **values)
+
+    if library.content_kind == 'movie':
+        for row in repository.pending_movies(library.id, session):
+            if cancel is not None:
+                cancel()
+            if row.identity_source == 'user':
+                repository.update_item(row.id, session, owner_library_id=library.id, identify_pending=0)
+                continue
+            values = identify.identify_item('movie', row.path)
+            values.pop('scene_name', None)
+            values.pop('external_id', None)
+            values.update(identify.confirm_title(values['parsed_title'], values['year'], 'movie'))
+            repository.update_item(row.id, session, owner_library_id=library.id, only_automatic=True, **values)
+        return
+    if library.content_kind != 'series':
+        return
+
+    for group in repository.library_groups(library.id, session):
+        if cancel is not None:
+            cancel()
+        if group.identity_source == 'user':
+            continue
+        lookup = getattr(kind, 'series_identity', None)
+        hints = lookup(source, group.group_key) if lookup else None
+        if identify.has_provider_id(hints):
+            values = identify.group_hints(group, hints)
+        elif group.identify_pending or (group.identity_source == 'filename' and not group.parsed_title):
+            directory_key = getattr(kind, 'groups_are_directories', True)
+            if group.parsed_title and directory_key:
+                values = identify.confirm_title(group.parsed_title, group.year, 'show')
+            else:
+                paths = repository.group_episode_paths(group.id, session)
+                values = identify.identify_group(group.group_key, paths, directory_key=directory_key)
+                values.pop('external_id', None)
+                values.update(identify.confirm_title(values['parsed_title'], values['year'], 'show'))
         else:
-            repository.update_group(group.id, session, owner_library_id=library.id, identify_pending=0)
+            values = {}
+        if hints and hints.external_id:
+            values['external_id'] = hints.external_id
+        changes = {key: value for key, value in values.items() if getattr(group, key) != value}
+        if changes:
+            repository.update_group(group.id, session, owner_library_id=library.id, only_automatic=True, **changes)
+
+    with source_transaction(session) as connection:
+        repository.sync_episode_identities(connection, library_id=library.id)
 
 
 def _refresh_shadows(library_id, decisions, inserted, written_ids, session, context):

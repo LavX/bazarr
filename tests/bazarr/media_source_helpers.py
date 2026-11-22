@@ -64,6 +64,12 @@ def source_db(backend, tmp_path, monkeypatch):
     """A scoped session on a fresh database built from the live ORM metadata, installed as the
     application's ``database`` for the modules that look it up at call time."""
     from app import database as db
+    from discover import metadata
+
+    # Source scans use TMDB. Other suites exercise storage and scanning with
+    # deterministic no-match responses; the identification suite supplies its own fixtures.
+    monkeypatch.setattr(metadata, 'search_movies', lambda query, **kwargs: {'data': {'status': 'available', 'items': []}})
+    monkeypatch.setattr(metadata, 'search_shows', lambda query, **kwargs: {'data': {'status': 'available', 'items': []}})
 
     engine, cleanup = make_engine(backend, tmp_path)
     db.Base.metadata.create_all(engine)

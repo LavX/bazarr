@@ -18,10 +18,12 @@ from media_source_helpers import BIG, SOURCE_TABLES, add_group, add_item, add_so
 VERSIONS = Path(__file__).parents[2] / "migrations" / "versions"
 REVISION = "b4d1f7a39c25"
 PREVIOUS = "c3e8a1f5b972"
+POSTERS = "1f4c2a6b8d03"
 
 
-def _migration():
-    spec = importlib.util.spec_from_file_location("media_sources_migration", VERSIONS / "b4d1f7a39c25_media_sources.py")
+def _migration(revision=REVISION):
+    path, = VERSIONS.glob(f"{revision}_*.py")
+    spec = importlib.util.spec_from_file_location("media_sources_migration", path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
@@ -83,7 +85,8 @@ def _shape(engine):
 def test_the_revision_follows_the_previous_head_and_is_the_one_head():
     parent_of, heads = _heads()
     assert parent_of[REVISION] == (PREVIOUS,)
-    assert heads == {REVISION}, f"expected the media source revision to be the single head, found {sorted(heads)}"
+    assert parent_of[POSTERS] == (REVISION,)
+    assert heads == {POSTERS}, f"expected the media source poster revision to be the single head, found {sorted(heads)}"
     migration = _migration()
     assert (migration.revision, migration.down_revision) == (REVISION, PREVIOUS)
 
@@ -100,6 +103,7 @@ def test_the_migration_builds_what_the_models_build(backend, tmp_path):
         _models_without_the_source_tables(db.Base.metadata, migrated_engine)
         assert not set(SOURCE_TABLES) & set(sa.inspect(migrated_engine).get_table_names())
         _run(migrated_engine, _migration().upgrade)
+        _run(migrated_engine, _migration(POSTERS).upgrade)
         built, migrated = _shape(model_engine), _shape(migrated_engine)
         for name in SOURCE_TABLES:
             for part in ("columns", "indexes", "foreign_keys", "checks", "primary"):
@@ -118,11 +122,14 @@ def test_the_migration_is_a_no_op_where_the_tables_exist_and_downgrades_cleanly(
         before = _shape(engine)
         _run(engine, _migration().upgrade)
         assert _shape(engine) == before
+        _run(engine, _migration(POSTERS).downgrade)
+        assert "poster" not in _shape(engine)["table_source_items"]["columns"]
         _run(engine, _migration().downgrade)
         assert not set(SOURCE_TABLES) & set(sa.inspect(engine).get_table_names())
         # What the previous revision owns is untouched.
         assert {"table_movies", "arr_instances", "media_server_instances"} <= set(sa.inspect(engine).get_table_names())
         _run(engine, _migration().upgrade)
+        _run(engine, _migration(POSTERS).upgrade)
         assert _shape(engine) == before
     finally:
         cleanup()
@@ -177,7 +184,7 @@ REQUIRED_COLUMNS = {
     "table_source_items": {"id", "source_id", "library_id", "group_id", "kind", "path", "file_dev", "file_ino",
                            "last_seen_at", "missing_scans", "server_missing", "title", "sort_title",
                            "parsed_title", "year", "episode_title", "season", "episode", "part_number",
-                           "part_name", "event_date", "imdb_id", "tmdb_id", "tvdb_id", "external_id",
+                           "part_name", "event_date", "imdb_id", "tmdb_id", "tvdb_id", "poster", "external_id",
                            "identity_source", "identity_state", "identity_candidates", "scene_name", "file_size",
                            "file_mtime_ns", "ffprobe_cache", "audio_language", "audio_codec", "video_codec",
                            "resolution", "format", "subtitles", "missing_subtitles", "failed_attempts",

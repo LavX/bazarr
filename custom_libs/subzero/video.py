@@ -56,10 +56,11 @@ def set_existing_languages(video, video_info, external_subtitles=False, embedded
             video.subtitle_languages.add(language)
 
 
-def parse_video(fn, hints, skip_hashing=False, dry_run=False, providers=None, hash_from=None):
+def parse_video(fn, hints, skip_hashing=False, dry_run=False, providers=None, hash_from=None,
+                fallback_guess=None):
     logger.debug("Parsing video: %s, hints: %s", os.path.basename(fn), hints)
     return scan_video(fn, hints=hints, dont_use_actual_file=dry_run, providers=providers,
-                      skip_hashing=skip_hashing, hash_from=hash_from)
+                      skip_hashing=skip_hashing, hash_from=hash_from, fallback_guess=fallback_guess)
 
 
 def refine_video(video, no_refining=False, refiner_settings=None):
