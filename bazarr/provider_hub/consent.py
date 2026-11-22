@@ -21,6 +21,7 @@ import json
 from typing import Any, Callable, Mapping
 
 from .closure import Closure, Member, installed_plugins
+from .kinds import SUBTITLE_PROVIDER
 from .plugin_manifest import ARCHIVE, OCI, PluginManifest
 
 DIGEST_PREFIX = "sha256:"
@@ -29,9 +30,16 @@ DECLARED = "declared"
 _FILESYSTEM_PERMISSIONS = frozenset({"media_read", "data_dir"})
 
 
-def permission_mark(permission: str, sandbox: Mapping[str, Any] | None) -> str:
+def permission_mark(permission: str, sandbox: Mapping[str, Any] | None, *, kind: str) -> str:
     """``enforced`` when the worker sandbox of this host enforces what the permission names, else ``declared``."""
     sandbox = sandbox or {}
+    if kind == SUBTITLE_PROVIDER:
+        # The provider profile confines folders, but leaves outbound connections open apart from its own host ports.
+        providers = sandbox.get("providers") or {}
+        if (permission in _FILESYSTEM_PERMISSIONS and providers.get("enabled") is not False
+                and providers.get("state") == ENFORCED):
+            return ENFORCED
+        return DECLARED
     if not sandbox.get("workers_sandboxed"):
         return DECLARED
     if permission == "network":
@@ -96,8 +104,14 @@ def install_summary(
     binaries: list[dict[str, str]] = []
     for member in closure.members:
         plugin = member.plugin
-        marked = [{"name": name, "mark": permission_mark(name, sandbox)} for name in plugin.permissions]
-        permissions.update({item["name"]: item["mark"] for item in marked})
+        marked = [{"name": name, "mark": permission_mark(name, sandbox, kind=plugin.kind)}
+                  for name in plugin.permissions]
+        # A closure-wide mark is enforced only when every member asking for the permission is held to it.
+        for item in marked:
+            if item["mark"] == DECLARED:
+                permissions[item["name"]] = DECLARED
+            else:
+                permissions.setdefault(item["name"], ENFORCED)
         destinations.update(plugin.all_endpoints)
         for binary in _binaries(plugin):
             if binary not in binaries:
@@ -178,7 +192,7 @@ def update_delta(
             "name": member.plugin.name,
             "version": member.plugin.version,
             "kind": member.plugin.kind,
-            "permissions": [{"name": name, "mark": permission_mark(name, sandbox)}
+            "permissions": [{"name": name, "mark": permission_mark(name, sandbox, kind=member.plugin.kind)}
                             for name in member.plugin.permissions],
             "destinations": list(member.plugin.all_endpoints),
             "binaries": _binaries(member.plugin),
@@ -188,7 +202,8 @@ def update_delta(
     added = {
         "destinations": added_destinations,
         "destination_fields": added_fields,
-        "permissions": [{"name": name, "mark": permission_mark(name, sandbox)} for name in added_permissions],
+        "permissions": [{"name": name, "mark": permission_mark(name, sandbox, kind=new.kind)}
+                        for name in added_permissions],
         "binaries": added_binaries,
         "plugins": added_plugins,
     }

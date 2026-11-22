@@ -20,6 +20,7 @@ interface UpdateCardProps {
   latest?: ProviderHubCatalogEntry | null;
   onApply: (id: string) => void;
   isApplying?: boolean;
+  disabled?: boolean;
 }
 
 function stagedTargetLabel(provider: ProviderHubInstallation) {
@@ -32,6 +33,7 @@ export const UpdateCard: FunctionComponent<UpdateCardProps> = ({
   latest,
   onApply,
   isApplying,
+  disabled,
 }) => {
   const targetVersion = isAwaitingRestart(provider)
     ? stagedTargetLabel(provider)
@@ -106,6 +108,7 @@ export const UpdateCard: FunctionComponent<UpdateCardProps> = ({
               size="xs"
               variant="light"
               loading={isApplying}
+              disabled={disabled}
               onClick={() => onApply(provider.provider_id)}
               leftSection={<FontAwesomeIcon icon={faRotate} />}
             >
