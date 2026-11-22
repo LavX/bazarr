@@ -365,7 +365,40 @@ def test_external_engine_failure_includes_stderr(monkeypatch, tmp_path):
     syncer.reference = '/tmp/video.mkv'
 
     with pytest.raises(RuntimeError, match='missing pkg_resources'):
-        syncer._run_external_engine('alass', tmp_path / 'Movie.en.alass.srt', '/tmp/video.mkv')
+        syncer._run_external_engine('alass', tmp_path / 'Movie.en.alass.srt', '/tmp/video.mkv', True)
+
+
+@pytest.mark.parametrize('no_fix_framerate', [False, True])
+def test_sync_passes_framerate_setting_to_alass(monkeypatch, tmp_path, schema_session, no_fix_framerate):
+    from app import database as db_module
+    from subtitles.tools.subsyncer import SubSyncer
+
+    monkeypatch.setattr(db_module, 'database', schema_session)
+    monkeypatch.setattr('subtitles.tools.subsyncer.shutil.which', lambda executable: '/usr/bin/alass')
+    monkeypatch.setattr(SubSyncer, '_alass_environment', lambda self: {})
+    commands = []
+
+    def run(command, **kwargs):
+        commands.append(command)
+        _write(pathlib.Path(command[3]), 'synced')
+        return subprocess.CompletedProcess(command, 0, stdout='', stderr='')
+
+    monkeypatch.setattr('subtitles.tools.subsyncer.subprocess.run', run)
+    subtitle = tmp_path / 'Movie.en.srt'
+    video = tmp_path / 'Movie.mkv'
+    _write(subtitle, 'original')
+    video.touch()
+
+    result = SubSyncer().sync(
+        video_path=str(video), srt_path=str(subtitle), srt_lang='en', hi=False, forced=False,
+        max_offset_seconds='60', no_fix_framerate=no_fix_framerate, gss=False,
+        force_sync=True, output_mode='keep_all', enabled_engines=['alass'], write_history=False,
+    )
+
+    assert result.success
+    assert len(commands) == 1
+    assert commands[0][:3] == ['/usr/bin/alass', str(video), str(subtitle)]
+    assert commands[0][4:] == (['-g'] if no_fix_framerate else [])
 
 
 def test_autosubsync_engine_uses_python_api_without_multiprocessing(monkeypatch, tmp_path):
@@ -392,7 +425,7 @@ def test_autosubsync_engine_uses_python_api_without_multiprocessing(monkeypatch,
     syncer.srtin = str(subtitle)
     syncer.reference = '/tmp/video.mkv'
 
-    result = syncer._run_external_engine('autosubsync', output, '/tmp/video.mkv')
+    result = syncer._run_external_engine('autosubsync', output, '/tmp/video.mkv', True)
 
     assert calls == {
         'reference': '/tmp/video.mkv',

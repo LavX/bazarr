@@ -436,7 +436,7 @@ def test_editor_preview_returns_each_enabled_engine_result(upload_flow, mutation
     flow = upload_flow
     monkeypatch.setattr(settings.subsync, 'enabled_engines', ['ffsubsync', 'alass'])
 
-    def external(self, engine, output_path, video_path):
+    def external(self, engine, output_path, video_path, no_fix_framerate):
         output_path.write_text('1\n00:00:05,000 --> 00:00:06,000\nAligned by ' + engine + '\n')
         return {'offset_seconds': 0, 'framerate_scale_factor': 1}
 

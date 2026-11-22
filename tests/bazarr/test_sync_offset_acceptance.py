@@ -198,7 +198,7 @@ def test_offset_beyond_the_maximum_is_rejected_and_the_next_engine_runs(monkeypa
         return {'retval': 0, 'sync_was_successful': True, 'offset_seconds': -200.0,
                 'framerate_scale_factor': 1.0}
 
-    def fake_external(self, engine, output_path, video_path):
+    def fake_external(self, engine, output_path, video_path, no_fix_framerate):
         calls.append(engine)
         _write(output_path, f'{engine} result')
         return {'returncode': 0}

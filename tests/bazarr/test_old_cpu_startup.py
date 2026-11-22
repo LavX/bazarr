@@ -433,7 +433,7 @@ def test_sync_runs_only_the_usable_engines(cpu_without_sse42, monkeypatch, tmp_p
 
     ran = []
 
-    def fake_external(self, engine, output_path, video_path):
+    def fake_external(self, engine, output_path, video_path, no_fix_framerate):
         ran.append(engine)
         _write(output_path, 'synced')
         return {}
