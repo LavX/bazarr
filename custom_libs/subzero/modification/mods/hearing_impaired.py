@@ -84,7 +84,7 @@ class MusicEntryProcessor(NReProcessor):
     subtitle convention and are removed earlier by HI_brackets.
     See https://github.com/LavX/bazarr/issues/225
     """
-    def process(self, content, debug=False, keep_lyrics=None, line_scoped=False, **kwargs):
+    def process(self, content, debug=False, keep_lyrics=None, line_scoped=False, entry=None, **kwargs):
         if keep_lyrics:
             text = content or ""
             # Only music-note lines are in this processor's scope; leave anything
@@ -98,11 +98,13 @@ class MusicEntryProcessor(NReProcessor):
             # letters/digits (e.g. {\i1}) are not counted as content.
             stripped = _OVERRIDE_TAG_RE.sub('', text)
             return content if _HI_CONTENT_RE.search(stripped) else ""
+        if entry is None:
+            return content
         if line_scoped and not _LINE_MUSIC_MARK_RE.search(content):
             # A line exposed by removing alignment needs a lyric mark of its own.
             # Legacy # and * matches would mistake ordinary dialogue for music.
             return content
-        return super(MusicEntryProcessor, self).process(content, debug=debug, **kwargs)
+        return super(MusicEntryProcessor, self).process(content, debug=debug, entry=entry, **kwargs)
 
 
 class HearingImpaired(SubtitleTextModification):

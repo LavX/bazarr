@@ -323,6 +323,7 @@ class SubtitleModifications(object):
 
             original_entry = wrapped.entry_for_rules if wrapped is not None else None
             entry_for_rules = original_entry if original_entry is not None else t
+            opaque_multiline = original_entry is not None and len(line_split) > 1
             # Normalizing an alignment tag must not let a rule cross from one
             # marked line into separate dialogue.
             line_scoped = (wrapped is not None and bool(wrapped.alignment) and original_entry is None
@@ -384,11 +385,14 @@ class SubtitleModifications(object):
                 if skip_line:
                     continue
 
+                # A trailing music note cannot define the scope of lyrics
+                # when some of the aligned cue's markup is opaque.
+                last_rule_entry = None if opaque_multiline else rule_entry
                 for identifier, args in last_procs_mods:
                     mod = self.initialized_mods[identifier]
 
                     try:
-                        line = mod.modify(line.strip(), entry=rule_entry, debug=self.debug, parent=self,
+                        line = mod.modify(line.strip(), entry=last_rule_entry, debug=self.debug, parent=self,
                                           index=index, procs=["last_process"], line_scoped=line_scoped, **args)
                     except EmptyEntryError:
                         if self.debug:

@@ -711,6 +711,14 @@ def test_aligned_multiline_hi_cannot_remove_separate_speech(lines, mods, render)
     assert "Hallo." in output
 
 
+@pytest.mark.parametrize("mods", MODS)
+def test_aligned_notes_surrounding_inline_dialogue_remove_only_the_notes(mods, render):
+    dialogue = "Do <i>not</i> leave."
+    output = render(_pair_srt([r"{\an8}♪", dialogue, "♪"]), mods)
+    assert _cue_text(output) == [dialogue]
+    assert "Hallo." in output
+
+
 def test_default_srt_alignment_policy_matches_reference(development_libs, tmp_path):
     jobs = [(_pair_srt([r"{\an8}Hello there."]), ["remove_HI"])]
     reference = _development_outputs(development_libs, tmp_path, jobs)
