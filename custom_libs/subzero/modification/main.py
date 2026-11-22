@@ -8,8 +8,8 @@ import logging
 import time
 
 from .mods import EMPTY_TAG_PROCESSOR
-from .mods.hearing_impaired import has_whole_cue_hi_span
-from .markup import unwrap_entry
+from .mods.hearing_impaired import has_spanning_lyric_marks, is_bracketed_cue
+from .markup import LINE_BREAK, unwrap_entry, visible_style_text
 from .exc import EmptyEntryError
 from .registry import registry
 from subzero.language import Language
@@ -316,18 +316,21 @@ class SubtitleModifications(object):
                     logger.debug(u"Skipping empty line: %s", index)
                 continue
 
-            line_split = t.split(r"\N")
+            line_split = t.split(LINE_BREAK)
             if len(line_split) > 10:  # Badly parsed subtitle
                 logger.error("Skipping %d lines for %s mod", len(line_split), mods)
                 continue
 
             original_entry = wrapped.entry_for_rules if wrapped is not None else None
             entry_for_rules = original_entry if original_entry is not None else t
-            opaque_multiline = original_entry is not None and len(line_split) > 1
-            # Normalizing an alignment tag must not let a rule cross from one
-            # marked line into separate dialogue.
-            line_scoped = (wrapped is not None and bool(wrapped.alignment) and original_entry is None
-                           and len(line_split) > 1 and not has_whole_cue_hi_span(t))
+            aligned_multiline = wrapped is not None and bool(wrapped.alignment) and len(line_split) > 1
+            bracket_line_scoped = aligned_multiline and original_entry is None and not is_bracketed_cue(t)
+            music_lines = None
+            if aligned_multiline:
+                music_lines = line_split if original_entry is None else [visible_style_text(line) for line in line_split]
+            spanning_lyrics = music_lines is not None and has_spanning_lyric_marks(music_lines)
+            music_line_scoped = music_lines is not None and not spanning_lyrics
+            music_entry = LINE_BREAK.join(music_lines) if spanning_lyrics else entry_for_rules
             skip_entry = False
             origins = []
             for line_no, line in enumerate(line_split):
@@ -351,7 +354,7 @@ class SubtitleModifications(object):
                     end_tag = line[-5:]
                     line = line[:-5]
 
-                rule_entry = line.strip() if line_scoped else entry_for_rules
+                rule_entry = line.strip() if bracket_line_scoped else entry_for_rules
                 last_procs_mods = []
 
                 # fixme: this double loop is ugly
@@ -365,7 +368,7 @@ class SubtitleModifications(object):
                     except EmptyEntryError:
                         if self.debug:
                             logger.debug(u"%d: %s: %r -> ''", index, identifier, rule_entry)
-                        skip_entry, skip_line = not line_scoped, line_scoped
+                        skip_entry, skip_line = not bracket_line_scoped, bracket_line_scoped
                         break
 
                     if not line:
@@ -385,19 +388,17 @@ class SubtitleModifications(object):
                 if skip_line:
                     continue
 
-                # A trailing music note cannot define the scope of lyrics
-                # when some of the aligned cue's markup is opaque.
-                last_rule_entry = None if opaque_multiline else rule_entry
+                last_rule_entry = music_lines[line_no] if music_line_scoped else music_entry
                 for identifier, args in last_procs_mods:
                     mod = self.initialized_mods[identifier]
 
                     try:
                         line = mod.modify(line.strip(), entry=last_rule_entry, debug=self.debug, parent=self,
-                                          index=index, procs=["last_process"], line_scoped=line_scoped, **args)
+                                          index=index, procs=["last_process"], line_scoped=music_line_scoped, **args)
                     except EmptyEntryError:
                         if self.debug:
-                            logger.debug(u"%d: %s: %r -> ''", index, identifier, rule_entry)
-                        skip_entry, skip_line = not line_scoped, line_scoped
+                            logger.debug(u"%d: %s: %r -> ''", index, identifier, last_rule_entry)
+                        skip_entry, skip_line = not music_line_scoped, music_line_scoped
                         break
 
                     if not line:

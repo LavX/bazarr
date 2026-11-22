@@ -681,7 +681,7 @@ def test_default_srt_rendering_preserves_dialogue_without_alignment_override(dia
     (["♪ When the night has come", "And the land is dark"], ["And the land is dark"]),
     (["♪ We can sing ♪ in the morning", "we can dance through the night", "and we can do it all again ♪"], None),
     (["Look at the keypad.", "#1 is the top button."], ["Look at the keypad.", "#1 is the top button."]),
-    (["♪ Some lyrics ♪", "Do <i>not</i> leave."], ["♪ Some lyrics ♪", "Do <i>not</i> leave."]),
+    (["♪ Some lyrics ♪", "Do <i>not</i> leave."], ["Do <i>not</i> leave."]),
     (["<i>♪ Some lyrics ♪</i>", "<i>Do not leave.</i>"], ["<i>Do not leave.</i>"]),
     (["OPEN THE DOOR", "Do <i>not</i> leave."], ["OPEN THE DOOR", "Do <i>not</i> leave."]),
     (["- OPEN THE DOOR", "Do <i>not</i> leave."], ["- OPEN THE DOOR", "Do <i>not</i> leave."]),
@@ -711,11 +711,28 @@ def test_aligned_multiline_hi_cannot_remove_separate_speech(lines, mods, render)
     assert "Hallo." in output
 
 
-@pytest.mark.parametrize("mods", MODS)
-def test_aligned_notes_surrounding_inline_dialogue_remove_only_the_notes(mods, render):
-    dialogue = "Do <i>not</i> leave."
-    output = render(_pair_srt([r"{\an8}♪", dialogue, "♪"]), mods)
-    assert _cue_text(output) == [dialogue]
+@pytest.mark.parametrize("lines, word, default_lines, kept_lines", [
+    pytest.param(["♪ First song ♫", "Please stay here.", "♪ Next song ♪"], "stay", (1,), (0, 1, 2),
+                 id="separate-lyrics"),
+    pytest.param(["♪ First song ♫", "Please stay here.", "Next song ♪"], "stay", (1,), (0, 1, 2),
+                 id="first-line-complete"),
+    pytest.param(["♪ First song", "Please stay here.", "♪ Next song ♪"], "stay", (1,), (0, 1, 2),
+                 id="last-line-complete"),
+    pytest.param(["♪ We can sing tonight", "and dance till dawn ♪"], "sing", (), (0, 1), id="spanning-notes"),
+    pytest.param(["♪", "Do not leave.", "♪"], "not", (1,), (1,), id="bare-notes"),
+    pytest.param(["* We can sing tonight", "and dance all night *"], "sing", (), (0, 1), id="spanning-stars"),
+    pytest.param(["# We can sing tonight", "and dance all night #"], "sing", (), (0, 1), id="spanning-hashes"),
+])
+@pytest.mark.parametrize("inline", [False, True], ids=["plain", "inline-style"])
+@pytest.mark.parametrize("keep_lyrics", [False, True], ids=["remove-lyrics", "keep-lyrics"])
+def test_aligned_lyrics_respect_visible_marker_boundaries(lines, word, default_lines, kept_lines,
+                                                        inline, keep_lyrics, render):
+    if inline:
+        lines = [line.replace(word, f"<i>{word}</i>") for line in lines]
+    expected = [lines[i] for i in (kept_lines if keep_lyrics else default_lines)]
+    mods = MODS[1] if keep_lyrics else MODS[0]
+    output = render(_pair_srt([r"{\an8}" + lines[0], *lines[1:]]), mods)
+    assert _cue_text(output) == (expected or None)
     assert "Hallo." in output
 
 

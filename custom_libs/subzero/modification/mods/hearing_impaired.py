@@ -37,9 +37,9 @@ class CapsCueProcessor(NReProcessor):
 # as real content rather than pure decoration.
 _HI_CONTENT_RE = re.compile(r'[^\W_]', re.UNICODE)
 _MUSIC_SYMBOL_RE = re.compile(r'[*#¶♫♪]')
-_LYRIC_MARK = r"[¶♫♪]"
-_MUSIC_PREFIX_RE = re.compile(rf"[-\s>~]*{_LYRIC_MARK}+")
-_LINE_MUSIC_MARK_RE = re.compile(rf"^[-\s>~]*{_LYRIC_MARK}|{_LYRIC_MARK}[)\]]?$")
+_LYRIC_NOTES = frozenset("¶♫♪")
+_LYRIC_START_RE = re.compile(r"^[-\s>~]*([¶♫♪]+|[*#](?=\s))")
+_LYRIC_END_RE = re.compile(r"([¶♫♪]+|(?<=\s)[*#])[)\]]?$")
 _BRACKET_SPAN = r"(?:-[ \t]*)?(?:\[[^\[\]]+\]|\([^()]+\))"
 _BRACKET_GAP = rf"(?:[ \t]|{re.escape(LINE_BREAK)})*"
 _BRACKETED_CUE_RE = re.compile(rf"{_BRACKET_GAP}{_BRACKET_SPAN}(?:{_BRACKET_GAP}{_BRACKET_SPAN})*{_BRACKET_GAP}")
@@ -48,22 +48,28 @@ _BRACKETED_CUE_RE = re.compile(rf"{_BRACKET_GAP}{_BRACKET_SPAN}(?:{_BRACKET_GAP}
 _OVERRIDE_TAG_RE = re.compile(r'\{[^}]*\}')
 
 
-def has_whole_cue_hi_span(entry):
-    """Whether brackets or paired lyric marks enclose an understood aligned cue."""
-    if _BRACKETED_CUE_RE.fullmatch(entry):
-        return True
+def is_bracketed_cue(entry):
+    return _BRACKETED_CUE_RE.fullmatch(entry) is not None
 
-    first_line, _, remaining = entry.partition(LINE_BREAK)
-    marker = _MUSIC_PREFIX_RE.match(first_line)
-    if marker is None:
+
+def _lyric_boundaries(line):
+    line = line.strip()
+    start = _LYRIC_START_RE.match(line)
+    end = _LYRIC_END_RE.search(line)
+    return (start.group(1)[-1] if start else None, end.group(1)[-1] if end else None)
+
+
+def has_spanning_lyric_marks(lines):
+    """Whether one marker pair spans the cue's visible lines."""
+    if any(line is None for line in lines):
         return False
-    opening_mark = marker.group()[-1]
-    first_lyric = first_line[marker.end():].rstrip()
-    last_line = remaining.rsplit(LINE_BREAK, 1)[-1].rstrip()
-    return (_HI_CONTENT_RE.search(first_lyric) is not None
-            and not first_lyric.endswith(opening_mark)
-            and last_line.endswith(opening_mark)
-            and _HI_CONTENT_RE.search(last_line) is not None)
+    opening, first_end = _lyric_boundaries(lines[0])
+    last_start, closing = _lyric_boundaries(lines[-1])
+    return (opening is not None and opening == closing
+            and first_end is None and last_start is None
+            and _HI_CONTENT_RE.search(lines[0]) is not None
+            and _HI_CONTENT_RE.search(lines[-1]) is not None
+            and not any(all(_lyric_boundaries(line)) for line in lines[1:-1]))
 
 
 class MusicEntryProcessor(NReProcessor):
@@ -100,9 +106,12 @@ class MusicEntryProcessor(NReProcessor):
             return content if _HI_CONTENT_RE.search(stripped) else ""
         if entry is None:
             return content
-        if line_scoped and not _LINE_MUSIC_MARK_RE.search(content):
-            # A line exposed by removing alignment needs a lyric mark of its own.
-            # Legacy # and * matches would mistake ordinary dialogue for music.
+        if line_scoped:
+            opening, closing = _lyric_boundaries(entry)
+            marked = opening in _LYRIC_NOTES or closing in _LYRIC_NOTES or (opening and opening == closing)
+            # Use visible text only to decide whether to remove the whole line.
+            if marked and self.pattern.fullmatch(entry):
+                return ""
             return content
         return super(MusicEntryProcessor, self).process(content, debug=debug, entry=entry, **kwargs)
 

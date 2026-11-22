@@ -64,6 +64,27 @@ def _style_name(match):
     return (html.lower(), None) if html else (None, ssa)
 
 
+def visible_style_text(line):
+    """Text for inspection when all style tags on a line form known pairs."""
+    styles, parts = [], []
+    offset = 0
+    while marker := _ANY_MARKUP.search(line, offset):
+        start = marker.start()
+        parts.append(line[offset:start])
+        if closing := _STYLE_CLOSE.match(line, start):
+            if not styles or styles.pop() != _style_name(closing):
+                return None
+            offset = closing.end()
+        elif opening := _opening_tag(line, start):
+            styles.append(_style_name(opening))
+            offset = opening.end()
+        else:
+            return None
+    if styles:
+        return None
+    return "".join(parts) + line[offset:]
+
+
 def _unwrap_leading_label(text):
     """Recognize complete style pairs around a potential speaker label."""
     styles = []
