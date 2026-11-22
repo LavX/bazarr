@@ -669,28 +669,56 @@ def test_scoped_worker_does_not_launch_after_close_during_policy_preparation(hos
     assert worker.process is None
 
 
-def test_scoped_launch_publishes_the_handle_before_start_resumes(host, client, monkeypatch):
+def test_scoped_launch_publishes_the_handle_before_concurrent_cancellation(host, client, monkeypatch):
+    import threading
+
     probe = SandboxProbe(abi=3, verified=True)
     monkeypatch.setattr("provider_hub.sandbox.probe_sandbox", lambda: probe)
     worker, grant = client(), _standalone_file(host)
     launched = object()
     cut = []
+    launching, finish_launch, cancel_waiting = threading.Event(), threading.Event(), threading.Event()
+    lock = worker._launch_lock
+
+    class ObservedLock:
+        def __enter__(self):
+            if threading.current_thread() is cancel:
+                cancel_waiting.set()
+            return lock.__enter__()
+
+        def __exit__(self, *exc):
+            return lock.__exit__(*exc)
 
     def launch(*args, **kwargs):
-        assert worker._launch_lock.locked()
+        assert lock.locked()
+        launching.set()
+        assert finish_launch.wait(5)
         return launched
 
     def kill():
-        assert not worker._launch_lock.locked()
+        assert not lock.locked()
         cut.append(worker.process)
 
     monkeypatch.setattr(worker_module, "provider_spec", lambda *args, **kwargs: object())
     monkeypatch.setattr("provider_hub.sandbox.spawn_worker", launch)
     monkeypatch.setattr(worker, "_has_exited", lambda process: bool(cut))
     monkeypatch.setattr(worker, "_kill_worker", kill)
+    monkeypatch.setattr(worker, "_launch_lock", ObservedLock())
+    cancel = threading.Thread(target=worker.cancel, daemon=True)
+    start = threading.Thread(target=worker._spawn, args=({},), kwargs={"source_media": grant}, daemon=True)
 
-    assert worker._spawn({}, source_media=grant) is launched
-    worker.cancel()
+    start.start()
+    try:
+        assert launching.wait(5)
+        cancel.start()
+        assert cancel_waiting.wait(5)
+        assert not cut
+    finally:
+        finish_launch.set()
+        start.join(5)
+        if cancel.ident is not None:
+            cancel.join(5)
+    assert not start.is_alive() and not cancel.is_alive()
     assert cut == [launched]
 
 
@@ -709,6 +737,30 @@ def test_unavailable_scoped_archive_selector_keeps_its_item_exclusion(monkeypatc
     monkeypatch.setattr(worker, "_has_exited", observe_exit)
     error = worker_module.WorkerCancelled if cancelled else worker_module.SourceMediaRefused
     with pytest.raises(error, match="before archive selection"):
+        worker._request_locked("select_archive_member", {}, 1.0, process=worker.process)
+
+
+@pytest.mark.parametrize("phase", ["entry", "pre_write"])
+@pytest.mark.parametrize("cancelled", [False, True])
+def test_stopped_scoped_archive_selector_skips_only_its_item(monkeypatch, phase, cancelled):
+    worker = ProviderWorkerClient(["fixture"])
+    worker.process = object()
+
+    def close():
+        worker._closed = True
+        worker._cancelled = cancelled
+
+    if phase == "entry":
+        close()
+    else:
+        def observe_live_worker(process):
+            close()
+            return False
+
+        monkeypatch.setattr(worker, "_has_exited", observe_live_worker)
+
+    error = worker_module.WorkerCancelled if cancelled else worker_module.SourceMediaRefused
+    with pytest.raises(error, match="worker client is stopped"):
         worker._request_locked("select_archive_member", {}, 1.0, process=worker.process)
 
 

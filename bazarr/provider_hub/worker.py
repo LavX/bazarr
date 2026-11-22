@@ -646,9 +646,11 @@ class ProviderWorkerClient:
         self._sandbox_failed_open = False
         self._sandbox_layout: ProviderLayout | None = None
 
-    def _closed_worker_error(self, message):
+    def _closed_worker_error(self, message, *, bound_selector=False):
         if getattr(self, "_cancelled", False):
             return WorkerCancelled(message)
+        if bound_selector:
+            return SourceMediaRefused(message)
         return WorkerError(message)
 
     def start(self, *, source_media: SourceMediaFile | None = None) -> bool:
@@ -1630,14 +1632,11 @@ class ProviderWorkerClient:
 
     def _request_locked(self, op, payload, timeout, *, source_media=None, process=None) -> WorkerResult:
         if getattr(self, "_closed", False) and op != "shutdown":
-            raise self._closed_worker_error("worker client is stopped")
+            raise self._closed_worker_error("worker client is stopped", bound_selector=process is not None)
         # A bound archive selector may speak only to the worker that downloaded
         # its archive. It cannot launch or fall back to a different process.
         if process is not None and (self.process is not process or self._has_exited(process)):
-            message = "the source media worker closed before archive selection"
-            if self._cancelled:
-                raise WorkerCancelled(message)
-            raise SourceMediaRefused(message)
+            raise self._closed_worker_error("the source media worker closed before archive selection", bound_selector=True)
         if op == "shutdown" and not (self.process is not None and not self._has_exited(self.process)):
             raise WorkerError("worker is not running")
         request_id = str(uuid.uuid4())
@@ -1657,7 +1656,7 @@ class ProviderWorkerClient:
         for attempt in (0, 1):
             worker_started = process is None and self.start(**launch_options) is True
             if (source_media is not None or process is not None) and self._closed:
-                raise self._closed_worker_error("worker client is stopped")
+                raise self._closed_worker_error("worker client is stopped", bound_selector=process is not None)
             provider_id = getattr(self, "provider_id", None)
             status_generation = runtime_status.generation(provider_id) if provider_id is not None else None
             status_configuration_generation = (
