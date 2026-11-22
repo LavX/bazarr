@@ -231,7 +231,7 @@ def _embedded_listing(data):
 
 
 def _file_version(item):
-    return item.path, item.file_ino, item.file_size, item.file_mtime_ns
+    return item.path, item.file_dev, item.file_ino, item.file_size, item.file_mtime_ns
 
 
 def _file_signature(stat):

@@ -6,6 +6,7 @@ import os
 import shutil
 import subprocess
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from datetime import timedelta
 from threading import Event
 from unittest.mock import Mock
@@ -456,9 +457,9 @@ def test_no_source_means_no_source_recalculation(source_db, refresh_queue, monke
     recalc.assert_not_called()
 
 
-@pytest.mark.parametrize("probe_succeeds", [True, False])
+@pytest.mark.parametrize("scenario", ["reuse", "restore", "recover"])
 def test_search_refreshes_replacement_tracks_before_a_scan(
-    source_db, tmp_path, probe, offline_movies, monkeypatch, probe_succeeds,
+    source_db, tmp_path, probe, offline_movies, monkeypatch, scenario,
 ):
     from media_sources import analysis, repository, scanner, service
     from subtitles import download
@@ -475,6 +476,7 @@ def test_search_refreshes_replacement_tracks_before_a_scan(
     replace_preserving_size_and_mtime(path)
     fresh = metadata(audio="deu")
     fresh["ffprobe"]["subtitle"] = []
+    probe_succeeds = scenario == "reuse"
     probe.return_value = fresh if probe_succeeds else None
     requested = Mock(return_value=iter(()))
     monkeypatch.setattr(service, "get_providers", lambda: ["fixture"])
@@ -500,15 +502,45 @@ def test_search_refreshes_replacement_tracks_before_a_scan(
         assert ast.literal_eval(admitted.audio_language) == ["German", None]
         assert probe.call_count == 2
     else:
-        # The replacement's external-only index cannot now satisfy the original.
-        os.replace(original, path)
+        # A stamp-only listing can be stale after restoration, and a recovered
+        # probe may discover previously unknown tracks on the replacement.
+        if scenario == "restore":
+            os.replace(original, path)
         probe.return_value = metadata()
         service.search_source_item(before.id, job_id=2)
         restored = repository.get_item(before.id)
         assert ast.literal_eval(restored.missing_subtitles) == []
-        assert restored.ffprobe_cache == before.ffprobe_cache
+        assert analysis.cached_metadata(restored, path.stat())["ffprobe"] == metadata()["ffprobe"]
         assert probe.call_count == 3
         requested.assert_called_once()
+
+
+def test_an_index_in_flight_cannot_replace_the_cache_admitted_after_a_remount(
+    source_db, tmp_path, probe, offline_movies, monkeypatch,
+):
+    from media_sources import analysis, identity, indexer, repository, scanner
+
+    owner, library, root = add_source(source_db, tmp_path)
+    stamped_video(root / "Movie.2001.mkv")
+    scanner.run_scan(owner, library)
+    (before,) = repository.list_items(library_id=library)
+    stamp = identity.stored_content_stamp(before)
+    new_device = str(int(stamp[0]) + 1)
+    cache = analysis.stamp_index(analysis.read_metadata(before.ffprobe_cache), (new_device, *stamp[1:]))
+    transaction = indexer.source_transaction
+
+    @contextmanager
+    def admit_remount_before_lock(target):
+        repository.update_item(before.id, target, file_dev=new_device, ffprobe_cache=cache)
+        with transaction(target) as connection:
+            yield connection
+
+    monkeypatch.setattr(indexer, "source_transaction", admit_remount_before_lock)
+    assert indexer.index_item(before.id) is None
+    after = repository.get_item(before.id)
+    assert after.file_dev == new_device and after.ffprobe_cache == cache
+    assert (after.indexed_at, after.subtitles, after.audio_language) == (
+        before.indexed_at, before.subtitles, before.audio_language)
 
 
 def test_handover_of_a_replaced_file_discards_its_previous_tracks(source_db, tmp_path, probe, offline_movies):

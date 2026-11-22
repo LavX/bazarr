@@ -38,10 +38,10 @@ def index_matches_file(item, stat):
     """Does the stored subtitle index describe the current file?
 
     A search can analyze a replacement before the scanner records its file identity.
-    Use the probe stamp when present and the admitted file stamp for external-only indexes.
+    A stamp without streams records a failed probe. Try it again on the next search.
     """
     if item.ffprobe_cache is not None:
-        return bool(cached_metadata(item, stat))
+        return bool(streams(cached_metadata(item, stat)))
     return _matches_admission(item, stat)
 
 
