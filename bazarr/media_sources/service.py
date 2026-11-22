@@ -17,6 +17,7 @@ from app.jobs_queue import JobFailed, jobs_queue
 from subtitles.indexer.missing_refresh import queue_missing_subtitles_recalculation
 
 from . import identity, paths, repository
+from .analysis import index_matches_file, local_stat
 from .context import SourceItemGone, resolve_item
 from .db import source_transaction
 from .history import history_log_source
@@ -234,8 +235,9 @@ def update_library(source_id, library_id, payload, session=None):
             raise SourceError('name must be text')
         values['name'] = payload['name']
     if values:
-        repository.update_library(library_id, session, **values)
-        if 'profile_id' in values and values['profile_id'] != library.profile_id:
+        if not repository.update_library(library_id, session, **values):
+            raise SourceError('No such library', 404, 'not_found')
+        if 'profile_id' in values:
             queue_missing_subtitles_recalculation(source_scope={'library_id': library_id})
         if 'enabled' in values:
             refresh_tasks()
@@ -414,17 +416,29 @@ def search_source_item(item_id, job_id=None):
         jobs_queue.update_job_progress(job_id=job_id, progress_value='max',
                                        progress_message='No language profile: nothing to search for')
         return None
-    if not os.path.exists(context.path):
-        raise JobFailed(f"The file is missing: {context.path}", reason='missing_file')
-
     item = repository.get_item(item_id)
-    if item is not None and item.missing_subtitles is None:
-        # Indexing for this item is incomplete, so it is done again.
-        index_item(item_id)
-        item = repository.get_item(item_id)
     if item is None:
-        # Deleted between resolving it and reading it.
         raise JobFailed('The item no longer exists', reason='not_found')
+    stat = local_stat(item.path)
+    if stat is None:
+        raise JobFailed(f"The file is missing: {item.path}", reason='missing_file')
+    if item.path != context.path:
+        raise JobFailed('The source file moved while the search was starting. Try again.', reason='conflict')
+    if item.missing_subtitles is None or not index_matches_file(item, stat):
+        # The scanner still owns admission and re-identification. Refresh the tracks
+        # and wanted languages of the file at this path for the immediate search.
+        if index_item(item_id) is None:
+            raise JobFailed('The source subtitle index could not be refreshed. Try again.', reason='conflict')
+        item = repository.get_item(item_id)
+        if item is None:
+            raise JobFailed('The item no longer exists', reason='not_found')
+        try:
+            refreshed = resolve_item(item_id)
+        except SourceItemGone as error:
+            raise JobFailed('The item no longer exists', reason='not_found') from error
+        if refreshed.path != context.path or item.path != context.path:
+            raise JobFailed('The source file moved while the search was starting. Try again.', reason='conflict')
+        context = refreshed
     languages = _missing_languages(item)
     jobs_queue.update_job_progress(job_id=job_id, progress_max=len(languages), progress_message=context.title)
     if not languages:

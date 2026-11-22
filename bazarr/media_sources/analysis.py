@@ -8,6 +8,12 @@ from app.config import settings
 from utilities import video_analyzer
 from utilities.binaries import BinaryNotFound
 
+from .identity import FileStat, file_content_stamp, stored_content_stamp, unsigned
+
+
+UNKNOWN_STREAM_COLUMNS = dict(ffprobe_cache=None, audio_language=None, audio_codec=None, video_codec=None,
+                              resolution=None)
+
 
 def read_metadata(blob):
     if blob is not None:
@@ -21,9 +27,21 @@ def read_metadata(blob):
 
 
 def _content_stamp(stat):
-    # The scanner invalidates replacements and preserves the cache for a recognized
-    # rename or remount. Neither the path nor the device number belongs in this stamp.
-    return stat.st_size, stat.st_mtime_ns
+    return file_content_stamp(FileStat(unsigned(stat.st_dev), unsigned(stat.st_ino), stat.st_size, stat.st_mtime_ns))
+
+
+def index_matches_file(item, stat, data=None):
+    """Does the stored subtitle index describe the current file?
+
+    A search can analyze a replacement before the scanner records its file identity.
+    Use the probe stamp when present and the admitted file stamp for external-only indexes.
+    """
+    data = read_metadata(item.ffprobe_cache) if data is None else data
+    stamp = data.get('source_file')
+    if stamp is not None:
+        return stamp == _content_stamp(stat)
+    admitted = stored_content_stamp(item)
+    return all(recorded is None or recorded == actual for recorded, actual in zip(admitted, _content_stamp(stat)))
 
 
 def cached_metadata(item, stat):

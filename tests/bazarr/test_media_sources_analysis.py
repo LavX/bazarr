@@ -2,9 +2,12 @@
 
 import ast
 import json
+import os
 import shutil
 import subprocess
+from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
+from threading import Event
 from unittest.mock import Mock
 
 import pytest
@@ -20,7 +23,7 @@ def metadata(*, codec="H.264", audio="eng"):
         "duration": timedelta(seconds=43),
         "subtitle": [
             {"language": "fra", "format": "SRT", "name": "French Forced"},
-            {"language": "spa", "format": "ASS", "name": "Spanish SDH", "hearing_impaired": True},
+            {"language": "hun", "format": "ASS", "name": "Hungarian SDH", "hearing_impaired": True},
             {"language": "hun", "format": "SRT", "name": "Commentary"},
         ],
     }, "mediainfo": {}}
@@ -40,12 +43,13 @@ def probe(monkeypatch, languages_loaded):
     return probe
 
 
-def test_probe_and_profile_filter_use_the_same_tracks(source_db, tmp_path, probe):
+def test_probe_and_profile_filter_use_the_same_tracks(source_db, tmp_path, probe, monkeypatch):
+    from app.config import settings
     from media_sources import indexer, repository
     from app.database import TableLanguagesProfiles, update_profile_id_list
 
     profile = add_profile(source_db, [
-        ("en", "False", "False"), ("fr", "True", "False"), ("es", "False", "False"),
+        ("en", "False", "False"), ("fr", "True", "False"), ("hu", "False", "False"),
         ("de", "False", "False"), ("ja", "False", "False")])
     items = json.loads(source_db.execute(sa.select(TableLanguagesProfiles.items)).scalar_one())
     items[0]["audio_exclude"] = "True"
@@ -59,20 +63,39 @@ def test_probe_and_profile_filter_use_the_same_tracks(source_db, tmp_path, probe
 
     assert indexer.index_item(item_id) == [["fr:forced", None, None, "srt", "French Forced"]]
     row = repository.get_item(item_id)
-    assert ast.literal_eval(row.missing_subtitles) == ["es"]
+    assert ast.literal_eval(row.missing_subtitles) == ["hu"]
     assert ast.literal_eval(row.audio_language) == ["English", None]
     assert (row.video_codec, row.audio_codec, row.resolution) == ("H.264", "AAC", "720p")
     assert row.ffprobe_cache
-    indexer.index_item(item_id)
+    monkeypatch.setattr(settings.general, "ignore_ass_subs", False)
+    assert indexer.index_item(item_id) == [
+        ["fr:forced", None, None, "srt", "French Forced"],
+        ["hu:hi", None, None, "ass", "Hungarian SDH"],
+    ]
+    assert ast.literal_eval(repository.get_item(item_id).missing_subtitles) == []
     probe.assert_called_once()
 
 
-def test_replacement_reprobes_and_a_rename_keeps_the_cache(source_db, tmp_path, probe, monkeypatch):
+@pytest.fixture
+def offline_movies(monkeypatch):
     from discover import metadata as discover_metadata
-    from media_sources import repository, scanner
 
     monkeypatch.setattr(discover_metadata, "search_movies",
                         lambda *_args, **_kwargs: {"data": {"status": "available", "items": []}})
+
+
+def replace_preserving_size_and_mtime(path):
+    old = path.stat()
+    replacement = path.with_suffix(".replacement")
+    replacement.write_bytes(b"1" * old.st_size)
+    os.utime(replacement, ns=(old.st_atime_ns, old.st_mtime_ns))
+    os.replace(replacement, path)
+    assert path.stat().st_ino != old.st_ino
+
+
+def test_replacement_reprobes_and_a_rename_keeps_the_cache(source_db, tmp_path, probe, offline_movies):
+    from media_sources import repository, scanner
+
     source_id, library_id, root = add_source(source_db, tmp_path)
     path = stamped_video(root / "Film.2001.mkv")
     scanner.run_scan(source_id, library_id)
@@ -87,11 +110,12 @@ def test_replacement_reprobes_and_a_rename_keeps_the_cache(source_db, tmp_path, 
     assert renamed.ffprobe_cache == before.ffprobe_cache
     probe.assert_called_once()
 
-    stamped_video(moved, size=before.file_size)
+    replace_preserving_size_and_mtime(moved)
     probe.return_value = metadata(codec="H.265", audio="deu")
     scanner.run_scan(source_id, library_id)
     replaced = repository.get_item(before.id)
     assert replaced.ffprobe_cache != before.ffprobe_cache
+    assert replaced.file_mtime_ns == before.file_mtime_ns and replaced.file_size == before.file_size
     assert replaced.video_codec == "H.265"
     assert ast.literal_eval(replaced.audio_language) == ["German", None]
     assert probe.call_count == 2
@@ -131,6 +155,7 @@ def test_an_arr_movie_and_a_source_movie_have_the_same_scored_fields(source_db, 
     from app.database import TableMovies
     from media_sources import indexer
     from media_sources.context import resolve_item
+    from provider_hub.protocol import language_from_payload, video_to_payload
     from subtitles import utils
     from subtitles.refiners import database as db_refiner, ffprobe
 
@@ -160,6 +185,10 @@ def test_an_arr_movie_and_a_source_movie_have_the_same_scored_fields(source_db, 
     assert {field: getattr(source, field) for field in fields} == {field: getattr(arr, field) for field in fields}
     assert source.tmdb_id == int(arr.tmdb_id) == 21
     assert source.audio_languages == {"eng"}
+    arr_payload = json.loads(json.dumps(video_to_payload(arr)))
+    source_payload = json.loads(json.dumps(video_to_payload(source)))
+    assert {key: source_payload[key] for key in fields} == {key: arr_payload[key] for key in fields}
+    assert [language_from_payload(language).alpha3 for language in source_payload["audio_languages"]] == ["eng"]
 
 
 def test_sports_runs_no_registered_refiner_and_episodes_get_group_ids(source_db, tmp_path, probe, monkeypatch):
@@ -200,6 +229,10 @@ def test_sports_runs_no_registered_refiner_and_episodes_get_group_ids(source_db,
 def test_real_probe_caches_streams_and_embedded_track_title(source_db, tmp_path, monkeypatch, languages_loaded):
     from app.config import settings
     from media_sources import analysis, indexer, repository
+    from media_sources.context import resolve_item
+    from provider_hub.protocol import video_to_payload
+    from provider_hub.worker import _json_default
+    from subtitles.utils import get_video
 
     monkeypatch.setattr(settings.general, "embedded_subtitles_parser", "ffprobe")
     monkeypatch.setattr(settings.general, "use_embedded_subs", True)
@@ -220,6 +253,10 @@ def test_real_probe_caches_streams_and_embedded_track_title(source_db, tmp_path,
     assert ast.literal_eval(row.audio_language) == ["English"]
     assert row.audio_codec and row.video_codec and row.resolution
     assert analysis.read_metadata(row.ffprobe_cache)["ffprobe"]["duration"] == timedelta(seconds=1)
+    video = get_video(str(path), "Local", "None", source=resolve_item(item_id))
+    payload = json.loads(json.dumps(video_to_payload(video), default=_json_default))
+    assert payload["duration"] == 1.0 and payload["fps"] == 25.0
+    assert [language["alpha3"] for language in payload["audio_languages"]] == ["eng"]
 
 
 @pytest.fixture
@@ -247,7 +284,7 @@ def test_settings_and_profile_saves_refresh_the_stored_listing_without_a_scan(
     source_db, tmp_path, probe, refresh_queue, monkeypatch,
 ):
     import sys
-    from app.config import settings
+    from app import config
     from media_sources import indexer, repository
     from subtitles.indexer import missing_refresh
     from test_settings_profile_deletion import _profile_payload, _settings_endpoint
@@ -256,6 +293,8 @@ def test_settings_and_profile_saves_refresh_the_stored_listing_without_a_scan(
     source_id, library_id, root = add_source(source_db, tmp_path, profile_id=profile)
     path = stamped_video(root / "Local.2001.mkv")
     item_id = add_item(source_db, source_id, library_id, path)
+    monkeypatch.setattr(config.settings.general, "default_und_embedded_subtitles_lang", "")
+    probe.return_value["ffprobe"]["subtitle"].append({"format": "SRT", "name": "Untitled"})
     indexer.index_item(item_id)
     before = repository.get_item(item_id)
     assert ast.literal_eval(before.missing_subtitles) == ["en"]
@@ -267,14 +306,12 @@ def test_settings_and_profile_saves_refresh_the_stored_listing_without_a_scan(
                         missing_refresh.queue_missing_subtitles_recalculation)
     monkeypatch.setattr(endpoint, "clear_failed_translations", lambda: None)
 
-    def save_options(fields):
-        values = dict(fields)
-        if "settings-general-use_embedded_subs" in values:
-            settings.general.use_embedded_subs = values["settings-general-use_embedded_subs"] == ["true"]
-
-    monkeypatch.setattr(endpoint, "save_settings", save_options)
+    monkeypatch.setattr(config, "write_config", lambda: True)
+    monkeypatch.setattr(config, "validate_log_regex", lambda: None)
+    monkeypatch.setattr(config.settings.validators, "validate", lambda: None)
     assert post_settings({"settings-general-use_embedded_subs": "false"}) == ("", 204)
-    assert run_next_refresh(refresh_queue) == {}
+    assert run_next_refresh(refresh_queue) is None
+    assert not refresh_queue.jobs_pending_queue
     row = repository.get_item(item_id)
     assert ast.literal_eval(row.missing_subtitles) == ["en", "fr:forced"]
     assert ast.literal_eval(row.subtitles) == []
@@ -287,12 +324,22 @@ def test_settings_and_profile_saves_refresh_the_stored_listing_without_a_scan(
     assert ast.literal_eval(row.missing_subtitles) == ["fr:forced"]
 
     assert post_settings({"settings-general-use_embedded_subs": "true"}) == ("", 204)
-    assert run_next_refresh(refresh_queue) == {}
+    assert run_next_refresh(refresh_queue) is None
+    assert not refresh_queue.jobs_pending_queue
     row = repository.get_item(item_id)
     assert ast.literal_eval(row.missing_subtitles) == []
     assert row.subtitles == before.subtitles
     assert row.ffprobe_cache == before.ffprobe_cache and row.indexed_at == before.indexed_at
     probe.assert_called_once()
+
+    notification = json.dumps({"name": "Fixture", "enabled": True, "url": "disabled://fixture"})
+    assert post_settings({"notifications-providers": notification}) == ("", 204)
+    assert not refresh_queue.jobs_pending_queue
+
+    assert post_settings({"settings-general-default_und_embedded_subtitles_lang": "hu"}) == ("", 204)
+    assert run_next_refresh(refresh_queue) == {}
+    assert ["hu", None, None, "srt", "Untitled"] in ast.literal_eval(repository.get_item(item_id).subtitles)
+    assert not refresh_queue.jobs_pending_queue
 
 
 def test_library_and_group_profile_changes_scope_the_same_refresh(
@@ -359,3 +406,133 @@ def test_no_source_means_no_source_recalculation(source_db, refresh_queue, monke
     missing_refresh.queue_missing_subtitles_recalculation()
     run_next_refresh(refresh_queue)
     recalc.assert_not_called()
+
+
+@pytest.mark.parametrize("probe_succeeds", [True, False])
+def test_search_refreshes_replacement_tracks_before_a_scan(
+    source_db, tmp_path, probe, offline_movies, monkeypatch, probe_succeeds,
+):
+    from media_sources import repository, scanner, service
+    from subtitles import download
+
+    profile = add_profile(source_db, [("fr", "True", "False")])
+    source_id, library_id, root = add_source(source_db, tmp_path, profile_id=profile)
+    path = stamped_video(root / "Film.2001.mkv")
+    scanner.run_scan(source_id, library_id)
+    (before,) = repository.list_items(library_id=library_id)
+    assert ast.literal_eval(before.missing_subtitles) == []
+
+    replace_preserving_size_and_mtime(path)
+    fresh = metadata(audio="deu")
+    fresh["ffprobe"]["subtitle"] = []
+    probe.return_value = fresh if probe_succeeds else None
+    requested = Mock(return_value=iter(()))
+    monkeypatch.setattr(service, "get_providers", lambda: ["fixture"])
+    monkeypatch.setattr(service.jobs_queue, "update_job_progress", lambda **_: None)
+    monkeypatch.setattr(download, "generate_subtitles", requested)
+    service.search_source_item(before.id, job_id=1)
+
+    requested.assert_called_once()
+    assert requested.call_args.args[1] == [("fr", "False", "True")]
+    assert requested.call_args.args[2] == ("German" if probe_succeeds else "None")
+    after = repository.get_item(before.id)
+    assert after.file_ino == before.file_ino
+    assert ast.literal_eval(after.subtitles) == []
+    assert bool(after.ffprobe_cache) is probe_succeeds
+
+
+def test_handover_of_a_replaced_file_discards_its_previous_tracks(source_db, tmp_path, probe, offline_movies):
+    from media_sources import indexer, repository, scanner
+
+    profile = add_profile(source_db, [("fr", "True", "False")])
+    source_id, library_id, root = add_source(source_db, tmp_path, profile_id=profile)
+    path = stamped_video(root / "Film.2001.mkv")
+    scanner.run_scan(source_id, library_id)
+    (before,) = repository.list_items(library_id=library_id)
+    assert ast.literal_eval(before.missing_subtitles) == []
+    assert before.ffprobe_cache
+    repository.update_library(library_id, source_db, enabled=0)
+    receiving_source = repository.create_source(kind="folder", name="Receiving", target=source_db)
+    receiving_library = repository.create_library(
+        source_id=receiving_source, content_kind="movie", locator=str(root), profile_id=profile,
+        target=source_db)
+
+    replace_preserving_size_and_mtime(path)
+    probe.return_value = None
+    (scan,) = scanner.run_scan(receiving_source, receiving_library)
+    assert scan.handed_over == 1
+    after = repository.get_item(before.id)
+    assert after.library_id == receiving_library
+    assert after.ffprobe_cache is None and after.audio_language is None
+    assert ast.literal_eval(after.missing_subtitles) == ["fr:forced"]
+
+    indexer.recalculate_missing_subtitles(library_id=receiving_library)
+    after_refresh = repository.get_item(before.id)
+    assert ast.literal_eval(after_refresh.subtitles) == []
+    assert ast.literal_eval(after_refresh.missing_subtitles) == ["fr:forced"]
+
+
+def test_new_subtitle_index_survives_an_overlapping_scanner_index(source_db, tmp_path, probe, monkeypatch):
+    from media_sources import indexer, repository
+    from subtitles.tools.subsync_engines import subtitle_write_locks
+    from subzero.language import Language
+
+    source_id, library_id, root = add_source(source_db, tmp_path)
+    path = stamped_video(root / "Film.2001.mkv")
+    item_id = add_item(source_db, source_id, library_id, path)
+    sidecar = root / "Film.2001.en.srt"
+    monkeypatch.setattr(indexer, "get_language_set", lambda: {Language("eng")})
+    scanner_probing, output_probing = Event(), Event()
+    release_scan, release_output = Event(), Event()
+
+    def wait_for_writes(*args, **kwargs):
+        if not scanner_probing.is_set():
+            scanner_probing.set()
+            assert release_scan.wait(5)
+        else:
+            output_probing.set()
+            assert release_output.wait(5)
+        return metadata()
+
+    probe.side_effect = wait_for_writes
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        try:
+            scan = executor.submit(indexer.index_item, item_id)
+            assert scanner_probing.wait(5)
+            with subtitle_write_locks(str(path), str(sidecar)):
+                sidecar.write_text("1\n00:00:00,000 --> 00:00:01,000\nEnglish\n")
+            output = executor.submit(indexer.index_item, item_id)
+            assert output_probing.wait(5)
+            release_scan.set()
+            assert scan.result(timeout=5) is not None
+            release_output.set()
+            assert output.result(timeout=5) is not None
+        finally:
+            release_scan.set()
+            release_output.set()
+    assert [entry[1] for entry in ast.literal_eval(repository.get_item(item_id).subtitles) if entry[1]] == [
+        str(sidecar)]
+
+
+def test_overlapping_library_edits_recalculate_the_final_profile(
+    source_db, tmp_path, probe, refresh_queue, monkeypatch,
+):
+    from media_sources import indexer, repository, service
+
+    original = add_profile(source_db, [("en", "False", "False")])
+    intervening = add_profile(source_db, [("de", "False", "False")], profile_id=2)
+    owner, library_id, root = add_source(source_db, tmp_path, profile_id=original)
+    item_id = add_item(source_db, owner, library_id, stamped_video(root / "Movie.2001.mkv"))
+    indexer.index_item(item_id)
+    update = repository.update_library
+
+    def concurrent_write(lib_id, target=None, **values):
+        update(lib_id, target, profile_id=intervening)
+        indexer.recalculate_missing_subtitles(library_id=lib_id)
+        assert ast.literal_eval(repository.get_item(item_id).missing_subtitles) == ["de"]
+        return update(lib_id, target, **values)
+
+    monkeypatch.setattr(repository, "update_library", concurrent_write)
+    service.update_library(owner, library_id, {"profile_id": original})
+    assert run_next_refresh(refresh_queue) == {"library_id": library_id}
+    assert ast.literal_eval(repository.get_item(item_id).missing_subtitles) == ["en"]

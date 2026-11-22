@@ -182,12 +182,9 @@ def _best_effort(action, *args):
         return False
 
 
-def _queue_recalculation(profiles_saved):
-    """Queue missing-subtitle recalculation for the saved profiles or source settings."""
-    if profiles_saved:
-        return queue_missing_subtitles_recalculation() is not None
-    from media_sources.repository import has_sources
-    return not has_sources() or queue_missing_subtitles_recalculation(source_scope={}) is not None
+def _queue_recalculation():
+    """Queue the library-wide missing subtitles recalculation and return whether it was queued."""
+    return queue_missing_subtitles_recalculation() is not None
 
 
 def _after_settings_rows(enabled_languages, profiles):
@@ -207,7 +204,8 @@ def _after_settings_rows(enabled_languages, profiles):
     # and report a save that went through as "Save failed". After the
     # settings, so the job reads the arr toggles this same save may have
     # changed. The response does not wait for it.
-    done.append(_best_effort(_queue_recalculation, profiles is not None))
+    if profiles is not None:
+        done.append(_best_effort(_queue_recalculation))
 
     # Other open pages reload the settings, as they do after any written save.
     done.append(_best_effort(event_stream, "settings"))

@@ -2643,8 +2643,10 @@ def _record_save_side_effects(monkeypatch, fail=None):
     by `fail` raises once it has been recorded.
     """
     from app import config
+    from media_sources import repository
 
     effects = []
+    monkeypatch.setattr(repository, "has_sources", lambda: False)
 
     def record(effect):
         effects.append(effect)

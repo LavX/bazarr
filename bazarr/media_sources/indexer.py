@@ -28,7 +28,8 @@ from utilities.helper import get_subtitle_destination_folder, get_target_folder
 from utilities.video_analyzer import audio_languages_from_metadata, embedded_subtitles_from_metadata
 
 from . import repository
-from .analysis import local_stat, probe_item, read_metadata, streams
+from .analysis import (cached_metadata, index_matches_file, local_stat, probe_item, read_metadata, streams,
+                       UNKNOWN_STREAM_COLUMNS)
 from .db import handle, source_transaction
 
 
@@ -62,32 +63,30 @@ class SourceOutputOwnerIndex(SyncOutputOwnerIndex):
 def list_external_subtitles(path, previous=None, ownership_index=None):
     """``[[language, subtitle path, size], ...]`` for the subtitle files beside ``path``.
 
-    ``ownership_index`` is shared across one scan; without one a fresh source index is made, so the arr tables
-    are never consulted."""
+    The caller holds the subtitle write locks. A scan shares ``ownership_index`` across its items; a call
+    without one builds its own source index."""
     if ownership_index is None:
         ownership_index = SourceOutputOwnerIndex()
     actual = []
-    destination = os.path.join(get_target_folder(path, create=False) or os.path.dirname(path), '.destination')
-    with subtitle_write_locks(path, destination):
-        dest_folder = get_subtitle_destination_folder()
-        core.CUSTOM_PATHS = [dest_folder] if dest_folder else []
+    dest_folder = get_subtitle_destination_folder()
+    core.CUSTOM_PATHS = [dest_folder] if dest_folder else []
 
-        previously_indexed = [entry for entry in (previous or [])
-                              if len(entry) == 3 and entry[1] and os.path.isfile(entry[1])
-                              and os.stat(entry[1]).st_size == entry[2]]
-        subtitles = search_external_subtitles(path, languages=get_language_set(),
-                                              only_one=settings.general.single_language)
-        full_dest_folder_path = os.path.dirname(path)
-        if dest_folder:
-            if settings.general.subfolder == "absolute":
-                full_dest_folder_path = dest_folder
-            elif settings.general.subfolder == "relative":
-                full_dest_folder_path = os.path.join(os.path.dirname(path), dest_folder)
-        subtitles = add_sync_engine_outputs(full_dest_folder_path, subtitles, video_path=path,
-                                            ownership_index=ownership_index)
-        subtitles = add_combined_outputs(full_dest_folder_path, subtitles, video_filename=os.path.basename(path))
-        subtitles = guess_external_subtitles(full_dest_folder_path, subtitles, "movie", previously_indexed,
-                                             path_reverse=lambda subtitle_path: subtitle_path)
+    previously_indexed = [entry for entry in (previous or [])
+                          if len(entry) == 3 and entry[1] and os.path.isfile(entry[1])
+                          and os.stat(entry[1]).st_size == entry[2]]
+    subtitles = search_external_subtitles(path, languages=get_language_set(),
+                                          only_one=settings.general.single_language)
+    full_dest_folder_path = os.path.dirname(path)
+    if dest_folder:
+        if settings.general.subfolder == "absolute":
+            full_dest_folder_path = dest_folder
+        elif settings.general.subfolder == "relative":
+            full_dest_folder_path = os.path.join(os.path.dirname(path), dest_folder)
+    subtitles = add_sync_engine_outputs(full_dest_folder_path, subtitles, video_path=path,
+                                        ownership_index=ownership_index)
+    subtitles = add_combined_outputs(full_dest_folder_path, subtitles, video_filename=os.path.basename(path))
+    subtitles = guess_external_subtitles(full_dest_folder_path, subtitles, "movie", previously_indexed,
+                                         path_reverse=lambda subtitle_path: subtitle_path)
 
     for subtitle, language in subtitles.items():
         valid_language = False
@@ -233,7 +232,7 @@ def _embedded_listing(data):
 
 
 def _file_version(item):
-    return item.path, item.file_ino, item.file_size, item.file_mtime_ns, item.indexed_at
+    return item.path, item.file_ino, item.file_size, item.file_mtime_ns
 
 
 def _file_signature(stat):
@@ -243,10 +242,7 @@ def _file_signature(stat):
 
 
 def index_item(item_id, target=None, ownership_index=None):
-    """Rebuild the subtitle listing and the missing languages of one item and store them by id.
-
-    Returns the listing, or None when the item or its file is gone.
-    """
+    """Analyze the source file and rebuild its subtitle listing. None means the index could not be written."""
     item = repository.get_item(item_id, target)
     if item is None:
         logging.info('BAZARR source item %s no longer exists; its subtitles were not indexed', item_id)
@@ -255,41 +251,53 @@ def index_item(item_id, target=None, ownership_index=None):
     if stat is None:
         logging.debug("BAZARR this file doesn't seem to exist or isn't accessible: %s", item.path)
         return None
-    if item.file_mtime_ns is not None and (item.file_size, item.file_mtime_ns) != (stat.st_size, stat.st_mtime_ns):
-        logging.warning('BAZARR source file changed since its scan: %s', item.path)
-        return None
-    try:
-        previous = ast.literal_eval(item.subtitles) if item.subtitles else []
-        external = list_external_subtitles(item.path, previous, ownership_index)
-    except Exception:
-        logging.exception('BAZARR unable to index external subtitles for this file %s', item.path)
-        return None
 
     data, blob = probe_item(item, stat)
-    if _file_signature(local_stat(item.path)) != _file_signature(stat):
-        logging.warning('BAZARR source file changed during analysis: %s', item.path)
-        return None
-
-    with source_transaction(target) as connection:
-        # A scan can overlap a settings or profile refresh. Resolve the profile while
-        # holding the same item lock as the refresh, after the slow file reads.
-        current = repository.get_item(item_id, connection, for_update=True)
-        if current is None or _file_version(current) != _file_version(item):
-            logging.warning('BAZARR source item %s changed during indexing', item_id)
+    destination = os.path.join(get_target_folder(item.path, create=False) or os.path.dirname(item.path), '.destination')
+    with subtitle_write_locks(item.path, destination):
+        if _file_signature(local_stat(item.path)) != _file_signature(stat):
+            logging.warning('BAZARR source file changed during analysis: %s', item.path)
             return None
-        listing = _embedded_listing(data) + external
-        values = {}
-        audio_language = current.audio_language
-        if blob is not None:
-            parsed = streams(data)
-            video_track = (parsed.get('video') or [{}])[0]
-            audio_track = (parsed.get('audio') or [{}])[0]
-            audio_language = str(audio_languages_from_metadata(data, current.path))
-            values = dict(ffprobe_cache=blob, audio_language=audio_language, audio_codec=audio_track.get('codec'),
-                          video_codec=video_track.get('codec'), resolution=video_track.get('resolution'))
-        missing = _missing(current, listing, audio_language, connection)
-        repository.write_item_index(item_id, str(listing), str(missing), connection, **values)
-        return listing
+        # Probe before taking the lock. Hold the lock from reading sidecars through
+        # committing their listing, so an older scan cannot erase a newly saved output.
+        latest = repository.get_item(item_id, target)
+        if latest is None or _file_version(latest) != _file_version(item):
+            return None
+        try:
+            previous = ast.literal_eval(latest.subtitles) if latest.subtitles else []
+            external = list_external_subtitles(item.path, previous, ownership_index)
+        except Exception:
+            logging.exception('BAZARR unable to index external subtitles for this file %s', item.path)
+            return None
+        if _file_signature(local_stat(item.path)) != _file_signature(stat):
+            logging.warning('BAZARR source file changed while reading its subtitles: %s', item.path)
+            return None
+
+        with source_transaction(target) as connection:
+            current = repository.get_item(item_id, connection, for_update=True)
+            if current is None or _file_version(current) != _file_version(item):
+                logging.warning('BAZARR source item %s changed during indexing', item_id)
+                return None
+            if blob is None and current.ffprobe_cache != item.ffprobe_cache:
+                data = cached_metadata(current, stat)
+            listing = _embedded_listing(data) + external
+            values = {}
+            audio_language = current.audio_language
+            if blob is not None:
+                parsed = streams(data)
+                video_track = (parsed.get('video') or [{}])[0]
+                audio_track = (parsed.get('audio') or [{}])[0]
+                audio_language = str(audio_languages_from_metadata(data, current.path))
+                values = dict(ffprobe_cache=blob, audio_language=audio_language, audio_codec=audio_track.get('codec'),
+                              video_codec=video_track.get('codec'), resolution=video_track.get('resolution'))
+            elif not index_matches_file(current, stat):
+                # A failed probe of a replacement says nothing about its tracks.
+                audio_language = None
+                values = UNKNOWN_STREAM_COLUMNS
+            missing = _missing(current, listing, audio_language, connection)
+            if repository.write_item_index(item_id, str(listing), str(missing), connection, **values):
+                return listing
+    return None
 
 
 def recalculate_missing_subtitles(*, library_id=None, group_id=None, cancel=None):

@@ -21,6 +21,7 @@ from app.jobs_queue import JobCancelled, JobFailed, jobs_queue
 
 from . import groups as group_rules
 from . import identify, identity, repository
+from .analysis import UNKNOWN_STREAM_COLUMNS
 from .db import source_transaction
 from .indexer import SourceOutputOwnerIndex, index_item
 from .kinds import UnknownSourceKind, get_kind
@@ -31,6 +32,7 @@ BATCH_SIZE = 500
 MAX_PATH_BYTES = 2600
 # A scan that started this long ago and never finished is taken for a crashed one, not a running one.
 STALE_SCAN_HOURS = 6
+INVALIDATED_FILE_INDEX = UNKNOWN_STREAM_COLUMNS | dict(subtitles=None, missing_subtitles=None, indexed_at=None)
 
 
 @dataclass
@@ -657,6 +659,9 @@ def _write_unchanged(decisions, group_for_dir, grouped, result, session, cancel)
         with source_transaction(session) as connection:
             for row, found in batch:
                 values = dict(last_seen_at=datetime.now(), file_dev=found.dev, file_ino=found.ino)
+                # Matching can retain the row at a path even when it now holds another file.
+                if identity.stored_content_stamp(row) != identity.file_content_stamp(found):
+                    values.update(INVALIDATED_FILE_INDEX)
                 group_id = None if decisions.conservative else _group_of(found, group_for_dir)
                 if grouped and group_id is not None and row.group_id != group_id:
                     values['group_id'] = group_id
@@ -753,6 +758,8 @@ def _write_final_path(library, entry, grouped, decisions, connection, releases):
         # Release the occupied path only in the transaction that makes the incoming item its new owner.
         displaced = _delete_owned(decisions.admission_displaced.get(found.path), connection)
         values.update(source_id=library.source_id, library_id=library.id)
+        if identity.stored_content_stamp(row) != identity.file_content_stamp(found):
+            values.update(INVALIDATED_FILE_INDEX)
     protected = (identified.keys() & values.keys()) - {'scene_name'}
     updated = _update_scanned_item(row, connection, protect_user=protected, **values)
     if handover:
@@ -790,8 +797,7 @@ def _write_path_only(library, decisions, result, session, cancel, outer_releases
         values = _item_values(found, identified, keep_identity=row.identity_source == 'user')
         protected = (identified.keys() & values.keys()) - {'scene_name'}
         # The cached streams and subtitle index describe the previous file.
-        values.update(ffprobe_cache=None, audio_language=None, audio_codec=None, video_codec=None, resolution=None,
-                      subtitles=None, missing_subtitles=None, indexed_at=None)
+        values.update(INVALIDATED_FILE_INDEX)
         return _update_scanned_item(row, connection, protect_user=protected, **values)
 
     local = [entry for entry in pending if entry[1].path not in decisions.foreign_to_close]

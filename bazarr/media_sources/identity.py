@@ -23,6 +23,15 @@ def unsigned(value):
     return str(value & 0xFFFFFFFFFFFFFFFF)
 
 
+def file_content_stamp(file_stat):
+    """Identity of the file content, kept across a rename or device renumbering."""
+    return file_stat.ino, file_stat.size, file_stat.mtime_ns
+
+
+def stored_content_stamp(row):
+    return row.file_ino, row.file_size, row.file_mtime_ns
+
+
 def stat_file(path):
     """``FileStat`` of a file, or None when it cannot be read. The one place a file is statted to decide whether
     two paths are the same file, so that a test can count the stats."""
