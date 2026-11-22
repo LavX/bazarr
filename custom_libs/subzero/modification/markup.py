@@ -8,10 +8,16 @@ styles on surviving text and keeps leading SSA alignment on the surviving cue.
 import re
 
 # Attributes may hold quoted values with a > in them, as in <font title="a>b">.
-_STYLE_OPEN = re.compile(r"""<[ \t]*(?i:(i|b|u|s|font))(?:[ \t]+(?:"[^"]*"|'[^']*'|[^<>"'])*)?>|\{\\([iusb])1\}""")
+# Require complete attribute assignments and disallow a new tag inside a value.
+_STYLE_OPEN = re.compile(
+    r"<[ \t]*(?i:(i|b|u|s|font))"
+    r"""(?:[ \t]+[a-zA-Z_:][a-zA-Z0-9_.:-]*[ \t]*=[ \t]*(?:"[^"<]*"|'[^'<]*'|[^ \t<>"'=`]+))*"""
+    r"[ \t]*>|\{\\([iusb])1\}"
+)
 _STYLE_CLOSE = re.compile(r"<[ \t]*/[ \t]*(?i:(i|b|u|s|font))[ \t]*>|\{\\([iusb])0\}")
 _STYLE_CLOSE_AT_END = re.compile(r"(?:%s)$" % _STYLE_CLOSE.pattern)
 _SSA_ALIGNMENT = re.compile(r"\{\\an[1-9]\}")
+_SPEAKER_PREFIX = re.compile(r"[ \t]*(?:-[ \t]*)?")
 # Any tag or override that the layer does not take apart.
 _ANY_MARKUP = re.compile(r"<|\{\\")
 
@@ -59,7 +65,8 @@ def _style_name(match):
 def _unwrap_leading_label(text):
     """Recognize complete style pairs around a potential speaker label."""
     styles = []
-    offset = 0
+    offset = _SPEAKER_PREFIX.match(text).end()
+    prefix = text[:offset]
     while opening := _opening_tag(text, offset):
         styles.append(_style_name(opening))
         offset = opening.end()
@@ -67,18 +74,22 @@ def _unwrap_leading_label(text):
     if not styles or close_start is None:
         return None
     label = text[offset:close_start.start()]
-    if not label.endswith(":"):
-        return None
     offset = close_start.start()
     for style in reversed(styles):
         closing = _STYLE_CLOSE.match(text, offset)
         if not closing or _style_name(closing) != style:
             return None
         offset = closing.end()
+    if not label.endswith(":"):
+        if text[offset:offset + 1] != ":":
+            return None
+        label += ":"
+        offset += 1
     suffix = text[offset:]
     if _ANY_MARKUP.search(suffix):
         return None
-    return label + suffix, (label, text[:offset])
+    plain = prefix + label
+    return plain + suffix, (plain.lstrip(), text[:offset])
 
 
 def _unwrap_line(line):
@@ -121,9 +132,8 @@ def unwrap_entry(text):
     for line in lines:
         unwrapped = _unwrap_line(line)
         if unwrapped is None:
-            if alignment:
-                # Alignment applies to the cue even when some of its styles are opaque.
-                return EntryMarkup(body, [""] * len(lines), [""] * len(lines), [None] * len(lines), alignment)
+            # Keep the original cue intact for the entry-wide rules if we cannot
+            # interpret all its markup.
             return None
         plain, open_tags, close_tags, label = unwrapped
         plain_lines.append(plain)

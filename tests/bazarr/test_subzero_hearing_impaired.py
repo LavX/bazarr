@@ -582,6 +582,8 @@ def test_wrapped_bracket_line_is_removed_whole(cue, render):
 
 @pytest.mark.parametrize("plain, styled, expected", [
     ("JOHN: Where is it?", "<i>JOHN:</i> Where is it?", ["Where is it?"]),
+    ("- JOHN: Hello.", "- <i>JOHN:</i> Hello.", ["Hello."]),
+    ("JOHN: Hello.", "<i>JOHN</i>: Hello.", ["Hello."]),
     ("John: We can go.", "<b><i>John:</i></b> We can go.", ["We can go."]),
     ("WOMAN: Hello.", "<s>WOMAN:</s> Hello.", ["Hello."]),
     ("[sighs] WOMAN: Hello.", "<s>[sighs] WOMAN: Hello.</s>", ["Hello."]),
@@ -650,6 +652,31 @@ def test_positioning_is_kept_when_the_first_line_is_removed(route, tmp_path):
     assert _cue_text(sm.f.to_string("srt", keep_ssa_tags=True)) == [r"{\an8}Hello there."]
 
 
+def test_default_srt_rendering_preserves_dialogue_without_alignment_override(render):
+    # The SRT writer omits SSA alignment by default. The mod only owns removal
+    # of the HI line, while serializers that support the override can retain it.
+    output = render(_pair_srt([r"{\an8}LAUGHING", "Hello there."]), ["remove_HI"])
+    assert _cue_text(output) == ["Hello there."]
+
+
+def test_default_srt_alignment_policy_matches_reference(development_libs, tmp_path):
+    jobs = [(_pair_srt([r"{\an8}Hello there."]), ["remove_HI"])]
+    reference = _development_outputs(development_libs, tmp_path, jobs)
+    current = _current_outputs(jobs, tmp_path)
+    _assert_all_loaded(reference, jobs, "development")
+    _assert_all_loaded(current, jobs, "current")
+    assert reference == current
+    assert all(_cue_text(output) == ["Hello there."] for output in current[0])
+
+
+def test_malformed_html_attributes_cannot_hide_dialogue(render):
+    cue = '<s title=">I heard it.<s title=" broken=>LAUGHING</s>'
+    output = render(_pair_srt([cue]), ["remove_HI"])
+    lines = _cue_text(output)
+    assert lines is not None
+    assert "I heard it." in " ".join(lines)
+
+
 def test_content_route_keeps_only_the_wrapped_dialogue_line():
     # Content route only: the file route cannot write bold back (see _expected_wrapper).
     # The bracket line goes, and its tags go with it. The dialogue line keeps its own tags.
@@ -708,6 +735,7 @@ def test_remove_hi_keeps_tagged_text_with_hash(cue, line, render):
 @pytest.mark.parametrize("cue, dialogue", [
     ("<i>♪ Music ♪\n<font color=\"#ffffff\">Hello there.</font></i>", "Hello there."),
     ("<i>♪ Music ♪\nWe're #1!</i>", "We're #1!"),
+    ("{\\an8}♪ Some lyrics ♪\nDo <i>not</i> leave.", "Do not leave."),
 ])
 def test_tagged_multiline_cue_with_declined_markup_keeps_dialogue(cue, dialogue, render):
     # These cues are not whole-line wraps, so they reach development's rules unchanged.
