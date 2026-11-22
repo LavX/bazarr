@@ -17,11 +17,13 @@ def registry():
     from provider_hub import registry as hub_registry
     from subliminal_patch.extensions import provider_registry
 
-    before = dict(provider_registry.providers)
+    before = {name: provider_registry[name] for name in provider_registry}
     withdrawn = set(hub_registry._WITHDRAWN_PROVIDER_IDS)
     yield provider_registry
-    provider_registry.providers.clear()
-    provider_registry.providers.update(before)
+    for name in provider_registry:
+        provider_registry.unregister(name)
+    for name, provider_class in before.items():
+        provider_registry.register(name, provider_class)
     hub_registry._WITHDRAWN_PROVIDER_IDS.clear()
     hub_registry._WITHDRAWN_PROVIDER_IDS.update(withdrawn)
 

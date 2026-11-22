@@ -30,7 +30,9 @@ from .state import active_installations, blocked_installations, provider_hub_dir
 from . import leases, runtime_status
 from .env_registry import env_dir_of
 from .venv import hold_environment, validated_bundle_path, validated_interpreter
-from .worker import ProviderWorkerClient, release_when_gone, RequestNotAdmitted, WorkerBusy, WorkerError, worker_command
+from .worker import (
+    ProviderWorkerClient, RequestNotAdmitted, WorkerBusy, WorkerCancelled, WorkerError, release_when_gone, worker_command,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -195,7 +197,7 @@ class HubProxyProvider(Provider):
         What it yields is the call's service leases: the request's configuration comes from ``call.config`` and the
         leases are given back when the call ends, whatever way it ends.
         """
-        from subliminal_patch.core import ProviderRetiredError
+        from subliminal_patch.core import ProviderCallInterruptedError, ProviderRetiredError
 
         with _PROXY_LOCK:
             if self._retired:
@@ -207,6 +209,8 @@ class HubProxyProvider(Provider):
         try:
             call = self._call_leases()
             yield call
+        except WorkerCancelled as error:
+            raise ProviderCallInterruptedError(self.provider_name) from error
         finally:
             if call is not None:
                 call.close()
@@ -666,20 +670,19 @@ def unregister_provider_class(provider_id: str) -> Unregistered:
     left as it is. A search that already holds the class it looked up goes on with it: the pools drop their
     instances separately (``retire_provider_instances``).
     """
-    with _REGISTRY_GUARD:
+    with _REGISTRY_GUARD, provider_registry.lock:
         current = provider_registry[provider_id]
-        removed = current is not None and issubclass(current, HubProxyProvider) and provider_registry.unregister(
-            provider_id, expected=current) is not None
         built_in = _SHADOWED_BUILT_INS.pop(provider_id, None)
-        restored = False
-        if removed:
-            _REGISTERED_PROVIDER_HUB_IDS.discard(provider_id)
-            if built_in is not None and provider_registry[provider_id] is None:
-                provider_registry.register(provider_id, built_in)
-                restored = True
-            else:
-                _WITHDRAWN_PROVIDER_IDS.add(provider_id)
-        return Unregistered(removed=removed, restored_built_in=restored)
+        if current is None or not issubclass(current, HubProxyProvider):
+            return Unregistered()
+
+        _REGISTERED_PROVIDER_HUB_IDS.discard(provider_id)
+        if built_in is not None:
+            provider_registry.register(provider_id, built_in)
+        else:
+            provider_registry.unregister(provider_id, expected=current)
+            _WITHDRAWN_PROVIDER_IDS.add(provider_id)
+        return Unregistered(removed=True, restored_built_in=built_in is not None)
 
 
 def is_withdrawn(provider_id: str) -> bool:
@@ -739,13 +742,7 @@ def _retire_built_in_instances(provider_id: str, live_provider_pools) -> None:
     bump_provider_generation(provider_id)
     for pool in live_provider_pools():
         try:
-            stale = pool.detach_provider(provider_id, lambda cached: not isinstance(cached, HubProxyProvider))
-            if stale is not None:
-                try:
-                    stale.terminate()
-                except Exception:
-                    logger.exception("Provider Hub: could not end a built-in %s made before its pools were released",
-                                     provider_id)
+            pool.retire_built_in(provider_id)
         except Exception:
             logger.exception("Provider Hub: could not retire a built-in %s of a pool", provider_id)
 

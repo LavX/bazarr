@@ -18,7 +18,7 @@ import uuid
 from dataclasses import dataclass
 from decimal import Decimal
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from . import WORKER_ABI_VERSION
 from . import runtime_status
@@ -56,6 +56,7 @@ _STDOUT_QUEUE_MAX_CHUNKS = 64
 # Queued by the reader thread when a response line exceeds the cap, so the
 # consumer kills the worker at the transport layer instead of assembling it.
 _OVERSIZE_RESPONSE = object()
+_CANCELLED_EOF = object()
 
 
 class _BoundedChunks:
@@ -134,6 +135,10 @@ class WorkerError(RuntimeError):
         self.retryable = retryable
         self.remote_traceback = remote_traceback
         self.remote_errno = remote_errno
+
+
+class WorkerCancelled(WorkerError):
+    """The host cancelled this worker and interrupted the request transport."""
 
 
 class RequestNotAdmitted(Exception):
@@ -599,6 +604,8 @@ class ProviderWorkerClient:
         # Set by stop(): a retired client admits no gated request, so a waiter
         # cannot respawn its worker with the configuration that was replaced.
         self._closed = False
+        self._cancelled = False
+        self._cut_process = None
         self._stdout_queue: _BoundedChunks | None = None
         self._stdout_thread: threading.Thread | None = None
         self._stderr_thread: threading.Thread | None = None
@@ -606,6 +613,11 @@ class ProviderWorkerClient:
         # without it from then on. ``_sandbox_layout`` is set while the live worker is sandboxed.
         self._sandbox_failed_open = False
         self._sandbox_layout: ProviderLayout | None = None
+
+    def _closed_worker_error(self, message):
+        if getattr(self, "_cancelled", False):
+            return WorkerCancelled(message)
+        return WorkerError(message)
 
     def start(self) -> bool:
         if self.process:
@@ -619,7 +631,7 @@ class ProviderWorkerClient:
         if getattr(self, "_closed", False):
             # Stopped or cancelled: nothing starts on this client again. A request that passed its own check just
             # before a cancel reaches here, and must not respawn the worker the cancel killed.
-            raise WorkerError("worker client is stopped")
+            raise self._closed_worker_error("worker client is stopped")
 
         before_start = getattr(self, "_before_start", None)
         if before_start is not None:
@@ -653,9 +665,11 @@ class ProviderWorkerClient:
         with _GROUPS_LOCK:
             self._groups = [*self._live_groups(), self.process.pid]
         self._stdout_queue = _BoundedChunks()
+        client_ref = weakref.ref(self)
+        process = self.process
         self._stdout_thread = threading.Thread(
             target=self._enqueue_stdout,
-            args=(self.process, self._stdout_queue),
+            args=(process, self._stdout_queue, lambda: getattr(client_ref(), "_cut_process", None) is process),
             daemon=True,
         )
         self._stdout_thread.start()
@@ -836,11 +850,13 @@ class ProviderWorkerClient:
         return None
 
     @staticmethod
-    def _enqueue_stdout(process: subprocess.Popen, stdout_queue: _BoundedChunks) -> None:
+    def _enqueue_stdout(process: subprocess.Popen, stdout_queue: _BoundedChunks,
+                        cancelled: Callable[[], bool] | None = None) -> None:
         stdout = process.stdout
         if stdout is None:
             stdout_queue.put(None)
             return
+        eof = None
         try:
             # Read in bounded chunks (readline(size) stops at a newline or after
             # ``size`` chars) and track the current line's length, so an oversized
@@ -850,6 +866,10 @@ class ProviderWorkerClient:
             while True:
                 chunk = stdout.readline(_READ_CHUNK_CHARS)
                 if not chunk:
+                    # Freeze the cause where stdout closes. The request can
+                    # consume this marker after a later cancellation.
+                    if cancelled is not None and cancelled():
+                        eof = _CANCELLED_EOF
                     break
                 line_len += len(chunk)
                 if line_len > _MAX_RESPONSE_LINE_BYTES:
@@ -864,7 +884,7 @@ class ProviderWorkerClient:
                 if chunk.endswith("\n"):
                     line_len = 0
         finally:
-            stdout_queue.put(None)
+            stdout_queue.put(eof)
 
     @staticmethod
     def _drain_stderr(process: subprocess.Popen) -> None:
@@ -1218,6 +1238,8 @@ class ProviderWorkerClient:
                 chunk = stdout_queue.get(timeout=remaining)
             except queue.Empty:
                 continue
+            if chunk is _CANCELLED_EOF:
+                raise WorkerCancelled("worker closed stdout")
             if chunk is None:
                 return "".join(chunks)
             if chunk is _OVERSIZE_RESPONSE:
@@ -1245,19 +1267,26 @@ class ProviderWorkerClient:
         ``stop`` asks the worker to shut down through the same lock a request holds, so it waits for the request
         to end. This is for a release that must not run another second (a revoked one): the client is closed, so
         nothing is sent or respawned on it, and the process and everything it started are killed. The request in
-        flight fails as a worker that closed its output. Never starts a process and never raises.
+        flight reports cancellation when the host can attribute the interruption to the cut.
+        Never starts a process and never raises.
         """
+        self._cancelled = True
         self._closed = True
         self._host_calls = {}
         latch = getattr(self, "_outcome_latch", None)
         if latch is not None:
             latch.set()
+        process = self.process
         try:
+            # A directly observed worker must still be alive when the cut
+            # starts. A live launcher can already be cleaning up an exited
+            # child, so its liveness cannot explain the worker's pipe failure.
+            if process is not None and not self._is_launcher(process) and not self._has_exited(process):
+                self._cut_process = process
             self._kill_worker()
         except Exception:
             logger.warning("Provider Hub: could not kill the worker of %s", self.provider_id, exc_info=True)
             return
-        process = self.process
         if process is not None and self._has_exited(process):
             self._deregister()
         elif process is not None:
@@ -1327,14 +1356,15 @@ class ProviderWorkerClient:
         ends the write. The request's lock is therefore never held for longer than that wait.
         """
         process = self.process
-        failures: list[BaseException] = []
+        failures: list[tuple[BaseException, bool]] = []
 
         def write():
             try:
                 process.stdin.write(text)
                 process.stdin.flush()
             except BaseException as error:  # reported by the caller
-                failures.append(error)
+                cut = isinstance(error, BrokenPipeError) and getattr(self, "_cut_process", None) is process
+                failures.append((error, cut))
 
         thread = threading.Thread(target=write, name="provider-host-reply", daemon=True)
         thread.start()
@@ -1344,7 +1374,9 @@ class ProviderWorkerClient:
             thread.join(5.0)
             raise WorkerError("worker did not read the host's answer to its call")
         if failures:
-            raise WorkerError("worker closed while the host answered its call") from failures[0]
+            error, cut = failures[0]
+            error_type = WorkerCancelled if cut else WorkerError
+            raise error_type("worker closed while the host answered its call") from error
 
     def _answer_host_call(self, call: dict, deadline: float) -> dict:
         """Run one call and shape the outcome. Never raises, and says nothing the plugin may not see."""
@@ -1499,7 +1531,7 @@ class ProviderWorkerClient:
                 # Once stopped, a client starts nothing: a request that was
                 # already on its way (an archive member selection inside a
                 # download) fails instead of respawning the worker.
-                raise WorkerError("worker client is stopped")
+                raise self._closed_worker_error("worker client is stopped")
             if op == "shutdown" and not (self.process is not None and not self._has_exited(self.process)):
                 # Stopping a worker never starts one: a process that ended
                 # between the caller's check and this request has nothing left
@@ -1528,7 +1560,9 @@ class ProviderWorkerClient:
                 try:
                     self.process.stdin.write(encoded)
                     self.process.stdin.flush()
-                except OSError:
+                except OSError as error:
+                    if isinstance(error, BrokenPipeError) and getattr(self, "_cut_process", None) is self.process:
+                        raise WorkerCancelled("worker closed stdin") from error
                     if attempt == 0 and self._opened_after_apply_failure():
                         continue
                     raise

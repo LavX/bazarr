@@ -34,7 +34,8 @@ from secret_store.scrub import mask_credential_refusal
 
 from . import catalog_view, legacy_engines
 from .destinations import DestinationError, DestinationSchema, effective_destinations, normalize_destination
-from .field_schema import (ValidatedValues, field_visible, is_finite_number, is_secret_field, validate_draft)
+from .field_schema import (ValidatedValues, connection_constraint_errors, field_visible, is_finite_number,
+                           is_secret_field, validate_draft)
 from .host_fields import (HOST_FIELDS, HOST_KEYS, MODEL_KEY, PRICE_KEYS, host_default, host_definitions, host_of,
                           validate_owner)
 from .store import (CONNECTION, INSTANCE, OFFICIAL_ENGINE_PLUGIN_ID, StaleRevisionError as StoreStale,
@@ -1334,6 +1335,8 @@ class TranslatorSettingsService:
         # ``contents`` are the stored secrets that stay as they are, so their content is checked too.
         validated = validate_owner(schema.fields, values, stored, host, contents)
         errors = dict(validated.errors)
+        if not errors and scope == "connection":
+            errors.update(connection_constraint_errors(schema.fields, {**validated.settings, **(host or {})}))
         if not errors and self._validator is not None:
             merged = {**validated.settings, **validated.secrets}
             try:
