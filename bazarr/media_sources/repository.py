@@ -272,7 +272,8 @@ def foreign_candidates(inodes, paths, library_id, target=None):
 
 def pending_movies(library_id, target=None):
     return _target(target).execute(
-        sa.select(Items.c.id, Items.c.identity_source, Items.c.parsed_title, Items.c.title, Items.c.year)
+        sa.select(Items.c.id, Items.c.identity_source, Items.c.parsed_title, Items.c.title, Items.c.year,
+                  Items.c.path, Items.c.scene_name, Items.c.identity_state)
         .where(Items.c.library_id == library_id, Items.c.kind == 'movie', Items.c.identify_pending == 1)).all()
 
 
@@ -293,13 +294,18 @@ def group_episode_paths(group_id, target=None):
         sa.select(Items.c.path).where(Items.c.group_id == group_id, Items.c.kind == 'episode')).scalars().all()
 
 
+def lock_show_groups(connection, group_ids):
+    """Lock shows before writing or removing any of their episodes."""
+    statement = sa.select(Groups.c.id, Groups.c.group_key).where(Groups.c.id.in_(group_ids))
+    return dict(connection.execute(statement.order_by(Groups.c.id).with_for_update(key_share=True)).all())
+
+
 def write_episode_identity(connection, group_id, save, *, previous_group_id=None, group_key=None):
     """Lock the affected shows, then save and refresh the episode before commit."""
     group_ids = {group_id}
     if previous_group_id is not None:
         group_ids.add(previous_group_id)
-    statement = sa.select(Groups.c.id, Groups.c.group_key).where(Groups.c.id.in_(group_ids))
-    shows = dict(connection.execute(statement.order_by(Groups.c.id).with_for_update(key_share=True)).all())
+    shows = lock_show_groups(connection, group_ids)
     if group_id not in shows or (group_key is not None and shows[group_id] != group_key):
         return None
     item_id = save()

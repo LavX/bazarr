@@ -734,7 +734,12 @@ class _GroupedAdmissionRefused(Exception):
 
 
 def _delete_owned(row, connection):
-    return repository.delete_items([row.id], connection, owner_library_id=row.library_id) if row else 0
+    if row is None:
+        return 0
+    if row.kind == 'episode':
+        # A concurrent show correction locks the show before its episodes.
+        repository.lock_show_groups(connection, (row.group_id,))
+    return repository.delete_items([row.id], connection, owner_library_id=row.library_id)
 
 
 def _write_final_path(library, entry, grouped, decisions, connection, releases):
@@ -928,7 +933,14 @@ def _identify_pending(source, kind, library, decisions, cancel, session):
             if row.identity_source == 'user':
                 repository.update_item(row.id, session, owner_library_id=library.id, identify_pending=0)
                 continue
-            values = identify.confirm_title(row.parsed_title, row.year, 'movie')
+            values = {}
+            if (row.scene_name is None and row.identity_source == 'filename' and row.identity_state == 'unmatched'
+                    and (row.parsed_title is None or row.year is None)):
+                parsed = identify.identify_item('movie', row.path)
+                values = {field: parsed[field] for field in
+                          ('title', 'sort_title', 'parsed_title', 'year', 'scene_name', 'identity_state')}
+            values.update(identify.confirm_title(values.get('parsed_title', row.parsed_title),
+                                                 values.get('year', row.year), 'movie'))
             if row.parsed_title and row.title != row.parsed_title and 'title' not in values:
                 values.update(title=row.parsed_title, sort_title=row.parsed_title.lower())
             if values != {'identify_pending': 1}:

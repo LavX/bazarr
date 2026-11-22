@@ -427,14 +427,13 @@ def test_real_world_episode_names_have_safe_search_coordinates(source_db, tmp_pa
             for name, path in paths.items()} == names
 
 
-def test_upgrade_repairs_legacy_coordinates_without_promoting_multi_episode_files(source_db, tmp_path, metadata,
-                                                                                 client):
+@pytest.fixture
+def development_upgrade(source_db):
     from types import SimpleNamespace
 
     import flask_migrate
     from alembic.migration import MigrationContext
     from app.database import metadata as models, migrations_directory
-    from media_source_helpers import add_group, add_item
     from test_media_sources_schema import POSTERS, PREVIOUS, REVISION, _migration, _run
 
     engine = source_db.get_bind()
@@ -450,20 +449,37 @@ def test_upgrade_repairs_legacy_coordinates_without_promoting_multi_episode_file
     with engine.connect() as connection:
         assert MigrationContext.configure(connection).get_current_revision() == REVISION
 
+    def upgrade():
+        with migration_app.app_context():
+            flask_migrate.upgrade(directory=migrations_directory)
+        with engine.connect() as connection:
+            assert MigrationContext.configure(connection).get_current_revision() == POSTERS
+
+    return upgrade
+
+
+def _legacy_item(source_db, lib, path, **values):
+    from media_source_helpers import add_item
+
+    stat = path.stat()
+    values.setdefault('scene_name', path.stem)
+    return add_item(source_db, lib.source_id, lib.library_id, path,
+                    file_dev=str(stat.st_dev), file_ino=str(stat.st_ino), file_size=stat.st_size,
+                    file_mtime_ns=stat.st_mtime_ns, **values)
+
+
+def test_upgrade_repairs_legacy_coordinates_without_promoting_multi_episode_files(source_db, tmp_path, metadata,
+                                                                                 client, development_upgrade):
+    from media_source_helpers import add_group
+
     lib = Lib(source_db, tmp_path)
     multi = stamped_video(lib.root / "Show" / "Show.S01E01-E03.mkv")
     single = stamped_video(lib.root / "Show" / "Show.S01E04.mkv")
     group_id = add_group(source_db, lib.source_id, lib.library_id, key=str(multi.parent))
     for path, number in ((multi, 1), (single, 4)):
-        stat = path.stat()
-        add_item(source_db, lib.source_id, lib.library_id, path, kind='episode', group_id=group_id,
-                 identity_state='unmatched', season=1, episode=number, scene_name=path.stem,
-                 file_dev=str(stat.st_dev), file_ino=str(stat.st_ino), file_size=stat.st_size,
-                 file_mtime_ns=stat.st_mtime_ns)
-    with migration_app.app_context():
-        flask_migrate.upgrade(directory=migrations_directory)
-    with engine.connect() as connection:
-        assert MigrationContext.configure(connection).get_current_revision() == POSTERS
+        _legacy_item(source_db, lib, path, kind='episode', group_id=group_id, identity_state='unmatched',
+                     season=1, episode=number)
+    development_upgrade()
 
     before = lib.items()
     assert (before[str(multi)].season, before[str(multi)].episode) == (None, None)
@@ -767,3 +783,136 @@ def test_manual_source_job_hashes_scores_and_saves_a_shooter_result(source_db, t
     scores = DEFAULT_SCORES['episode']
     assert saved.item_id == item.id and saved.provider == 'shooter'
     assert saved.score == scores['hash'] + scores['hearing_impaired']
+
+
+def test_upgrade_seeds_existing_episode_pending_flags_during_a_tmdb_outage(source_db, tmp_path, metadata,
+                                                                          development_upgrade):
+    from media_source_helpers import add_group
+
+    _, shows, _, _ = metadata
+    lib = Lib(source_db, tmp_path)
+    located = stamped_video(lib.root / 'Destination' / 'Destination.S01E01.mkv')
+    manual = stamped_video(lib.root / 'Destination' / 'Destination.S01E02.mkv')
+    group_id = add_group(source_db, lib.source_id, lib.library_id, title='Destination', key=str(located.parent),
+                         parsed_title='Destination')
+    _legacy_item(source_db, lib, located, kind='episode', group_id=group_id, season=1, episode=1)
+    _legacy_item(source_db, lib, manual, kind='episode', group_id=group_id, season=1, episode=2,
+                 identity_source='user', identity_state='identified')
+    shows['Destination'] = response(status='unavailable')
+
+    development_upgrade()
+    assert lib.group('Destination').identify_pending == lib.items()[str(located)].identify_pending == 1
+    for _ in range(2):
+        assert lib.scan().unchanged == 2
+        rows = lib.items()
+        assert lib.group('Destination').identify_pending == rows[str(located)].identify_pending == 1
+        assert rows[str(manual)].identify_pending == 0
+
+
+def test_upgrade_reparses_legacy_encoded_movie_and_preserves_saved_movie_data(source_db, tmp_path, metadata,
+                                                                              development_upgrade):
+    _, _, _, queried = metadata
+    lib = Lib(source_db, tmp_path, content_kind='movie')
+    encoded = stamped_video(lib.root / 'Alien%20%281979%29%20%5B1080p%5D.mkv')
+    saved = stamped_video(lib.root / 'Movie.Release.Label.2010.mkv')
+    manual = stamped_video(lib.root / 'Also%20Encoded%20%282019%29.mkv')
+    _legacy_item(source_db, lib, encoded, title=encoded.stem, parsed_title=encoded.stem, identity_state='unmatched')
+    _legacy_item(source_db, lib, saved, title='Saved Movie', parsed_title='Saved Movie', year='2010', scene_name=None)
+    _legacy_item(source_db, lib, manual, title='User Override', parsed_title=manual.stem, year='2018',
+                 identity_source='user', identity_state='identified', imdb_id='tt0000100')
+
+    development_upgrade()
+    assert lib.scan().unchanged == 3
+    items = lib.items()
+    assert (items[str(encoded)].title, items[str(encoded)].year, items[str(encoded)].identity_state) == (
+        'Alien', '1979', 'parsed')
+    assert items[str(encoded)].identify_pending == 0
+    assert (items[str(saved)].title, items[str(saved)].year, items[str(saved)].scene_name) == (
+        'Saved Movie', '2010', None)
+    row = items[str(manual)]
+    assert (row.title, row.year, row.identity_source, row.imdb_id, row.scene_name) == (
+        'User Override', '2018', 'user', 'tt0000100', manual.stem)
+    assert set(queried) == {('movie', 'Alien'), ('movie', 'Saved Movie')}
+
+
+def test_pg_handover_takes_the_show_lock_before_deleting_its_displaced_episode(source_db, backend, tmp_path,
+                                                                             metadata, monkeypatch):
+    if backend != 'postgresql':
+        pytest.skip('PostgreSQL is needed to observe row lock ordering')
+
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Event
+    from time import monotonic, sleep
+
+    import sqlalchemy as sa
+
+    from media_sources import repository, scanner
+    from media_sources.db import source_transaction
+
+    _, shows, _, _ = metadata
+    lib = Lib(source_db, tmp_path)
+    other = Lib(source_db, tmp_path, name='Other', folder='Other')
+    destination, _ = lib.show('Destination', count=2)
+    (incoming,) = other.show('Incoming', count=1)
+    other.show('Keeps', count=1)
+    shows['Destination'] = response(items=[title(701, 'Destination', 2014), title(702, 'Destination', 2021)])
+    lib.scan()
+    other.scan()
+    group = lib.group('Destination')
+    displaced_id = lib.items()[str(destination)].id
+    incoming_id = other.items()[str(incoming)].id
+    assert group.identity_state == 'ambiguous'
+    incoming.replace(destination)
+
+    ready, proceed, entered, deleted = Event(), Event(), Event(), Event()
+    scan_pids = []
+    write, move, remove = scanner._write_repathed, scanner._write_final_path, repository.delete_items
+
+    def pause_after_group_planning(*args, **kwargs):
+        ready.set()
+        assert proceed.wait(10)
+        return write(*args, **kwargs)
+
+    def remember_handover_connection(library, entry, grouped, decisions, connection, releases):
+        scan_pids.append(connection.exec_driver_sql('select pg_backend_pid()').scalar_one())
+        entered.set()
+        return move(library, entry, grouped, decisions, connection, releases)
+
+    def remember_displaced_delete(item_ids, *args, **kwargs):
+        result = remove(item_ids, *args, **kwargs)
+        if displaced_id in item_ids:
+            deleted.set()
+        return result
+
+    def scan():
+        try:
+            return lib.scan()
+        finally:
+            source_db.remove()
+
+    monkeypatch.setattr(scanner, '_write_repathed', pause_after_group_planning)
+    monkeypatch.setattr(scanner, '_write_final_path', remember_handover_connection)
+    monkeypatch.setattr(repository, 'delete_items', remember_displaced_delete)
+    with ThreadPoolExecutor(max_workers=1) as workers:
+        future = workers.submit(scan)
+        try:
+            assert ready.wait(10)
+            with source_transaction(source_db) as correction:
+                assert repository.get_group(group.id, correction, for_update=True) is not None
+                proceed.set()
+                assert entered.wait(10)
+                deadline = monotonic() + 5
+                while not correction.execute(sa.text('select pg_blocking_pids(:pid)'),
+                                             {'pid': scan_pids[0]}).scalar_one():
+                    assert monotonic() < deadline, 'handover never waited for the destination show lock'
+                    sleep(0.01)
+                assert not deleted.is_set(), 'handover took the displaced episode lock first'
+                repository.update_show_identity(group.id, correction, title='Corrected', sort_title='corrected',
+                                                identity_source='user', identity_state='identified')
+        finally:
+            proceed.set()
+        result = future.result(timeout=10)
+    row = lib.items()[str(destination)]
+    assert result.handed_over == 1 and row.id == incoming_id and row.group_id == group.id
+    assert lib.group('Destination').identity_source == 'user'
+    assert row.identity_state == 'parsed'
