@@ -147,7 +147,4 @@ def unwrap_entry(text):
         labels.append(label)
     if not (alignment or any(opens) or any(labels)):
         return None
-    # Removing alignment can expose a leading music mark to a rule that removes
-    # the whole cue. Keep that rule's input unchanged when other lines may be dialogue.
-    entry_for_rules = text if alignment and len(lines) > 1 else None
-    return EntryMarkup(LINE_BREAK.join(plain_lines), opens, closes, labels, alignment, entry_for_rules)
+    return EntryMarkup(LINE_BREAK.join(plain_lines), opens, closes, labels, alignment)

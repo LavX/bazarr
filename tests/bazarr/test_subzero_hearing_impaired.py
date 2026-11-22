@@ -640,10 +640,16 @@ def test_caps_dialogue_is_kept_in_mostly_uppercase_subtitle(opening, closing, re
 
 
 @pytest.mark.parametrize("route", ROUTES)
-@pytest.mark.parametrize("dialogue", ["Hello there.", "Do <i>not</i> leave."])
+@pytest.mark.parametrize("first_line, dialogue, keep_first_line", [
+    ("LAUGHING", "Hello there.", False),
+    ("LAUGHING", "Do <i>not</i> leave.", False),
+    ("OPEN THE DOOR", "Do <i>not</i> leave.", True),
+    ("- OPEN THE DOOR", "Do <i>not</i> leave.", True),
+])
 @pytest.mark.parametrize("alignment", [r"{\an1}", r"{\an8}"])
-def test_positioning_is_kept_when_the_first_line_is_removed(route, dialogue, alignment, tmp_path):
-    srt = _pair_srt([alignment + "LAUGHING", dialogue])
+def test_positioning_is_kept_on_the_first_surviving_line(route, first_line, dialogue, keep_first_line,
+                                                        alignment, tmp_path):
+    srt = _pair_srt([alignment + first_line, dialogue])
     sm = SubtitleModifications()
     if route == "content":
         assert sm.load(content=srt, language=Language("eng"), mods=["remove_HI"])
@@ -654,7 +660,8 @@ def test_positioning_is_kept_when_the_first_line_is_removed(route, dialogue, ali
     sm.modify("remove_HI")
     if route == "file":
         dialogue = dialogue.replace("<i>", r"{\i1}").replace("</i>", r"{\i0}")
-    assert _cue_text(sm.f.to_string("srt", keep_ssa_tags=True)) == [alignment + dialogue]
+    expected = [alignment + first_line, dialogue] if keep_first_line else [alignment + dialogue]
+    assert _cue_text(sm.f.to_string("srt", keep_ssa_tags=True)) == expected
 
 
 @pytest.mark.parametrize("dialogue", ["Hello there.", "Do <i>not</i> leave."])
@@ -664,6 +671,23 @@ def test_default_srt_rendering_preserves_dialogue_without_alignment_override(dia
     # of the HI line, while serializers that support the override can retain it.
     output = render(_pair_srt([alignment + "LAUGHING", dialogue]), ["remove_HI"])
     assert _cue_text(output) == [dialogue]
+
+
+@pytest.mark.parametrize("lines, expected", [
+    (["(door creaks)", "(footsteps)"], None),
+    (["<i>(door creaks)</i>", "<i>(footsteps)</i>"], None),
+    (["♪ When the night has come", "And the land is dark"], None),
+    (["♪ Some lyrics ♪", "Do <i>not</i> leave."], ["♪ Some lyrics ♪", "Do <i>not</i> leave."]),
+    (["<i>♪ Some lyrics ♪</i>", "<i>Do not leave.</i>"], ["<i>Do not leave.</i>"]),
+    (["OPEN THE DOOR", "Do <i>not</i> leave."], ["OPEN THE DOOR", "Do <i>not</i> leave."]),
+    (["- OPEN THE DOOR", "Do <i>not</i> leave."], ["- OPEN THE DOOR", "Do <i>not</i> leave."]),
+    (["- <i>JOHN:</i> Hello.", "Do not leave."], ["Hello.", "Do not leave."]),
+])
+def test_aligned_multiline_cues_remove_only_supported_hi_content(lines, expected, render):
+    srt = _pair_srt([r"{\an8}" + lines[0], *lines[1:]])
+    output = render(srt, ["remove_HI"])
+    assert _cue_text(output) == expected
+    assert "Hallo." in output
 
 
 def test_default_srt_alignment_policy_matches_reference(development_libs, tmp_path):

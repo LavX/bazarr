@@ -4,6 +4,7 @@ from __future__ import unicode_literals
 import re
 
 from subzero.language import Language
+from subzero.modification.markup import LINE_BREAK
 from subzero.modification.mods import SubtitleTextModification, empty_line_post_processors, TAG
 from subzero.modification.exc import EmptyEntryError
 from subzero.modification.processors.re_processor import NReProcessor
@@ -21,6 +22,15 @@ class FullBracketEntryProcessor(NReProcessor):
             if not rep_content.strip():
                 raise EmptyEntryError()
         return content
+
+
+class CapsCueProcessor(NReProcessor):
+    def process(self, content, debug=False, protect_caps_dialogue=False, **kwargs):
+        # When only alignment could be understood, keep ambiguous caps speech
+        # on the newly exposed first line. Standalone cues still use the HI rule.
+        if protect_caps_dialogue and len(content.split()) > 1:
+            return content
+        return super(CapsCueProcessor, self).process(content, debug=debug, **kwargs)
 
 
 # Any alphanumeric content (letters incl. non-Latin/CJK, or digits) marks a line
@@ -50,7 +60,7 @@ class MusicEntryProcessor(NReProcessor):
     subtitle convention and are removed earlier by HI_brackets.
     See https://github.com/LavX/bazarr/issues/225
     """
-    def process(self, content, debug=False, keep_lyrics=None, **kwargs):
+    def process(self, content, debug=False, keep_lyrics=None, aligned=False, entry=None, **kwargs):
         if keep_lyrics:
             text = content or ""
             # Only music-note lines are in this processor's scope; leave anything
@@ -64,7 +74,14 @@ class MusicEntryProcessor(NReProcessor):
             # letters/digits (e.g. {\i1}) are not counted as content.
             stripped = _OVERRIDE_TAG_RE.sub('', text)
             return content if _HI_CONTENT_RE.search(stripped) else ""
-        return super(MusicEntryProcessor, self).process(content, debug=debug, **kwargs)
+        if aligned and entry and LINE_BREAK in entry:
+            first_line = entry.split(LINE_BREAK, 1)[0].strip("- \t>~")
+            if (len(first_line) > 1 and first_line[0] == first_line[-1]
+                    and _MUSIC_SYMBOL_RE.match(first_line)):
+                # The first lyric line closes its own marker. Applying the
+                # entry-wide rule here would also erase any following speech.
+                return self.pattern.sub(self.replace_with, content)
+        return super(MusicEntryProcessor, self).process(content, debug=debug, entry=entry, **kwargs)
 
 
 class HearingImpaired(SubtitleTextModification):
@@ -120,7 +137,7 @@ class HearingImpaired(SubtitleTextModification):
         #             name="HI_brackets_special"),
 
         # all caps line (at least 4 consecutive uppercase chars,only remove if line matches common HI cues, otherwise keep)
-        NReProcessor(
+        CapsCueProcessor(
             re.compile(r'(?u)(^(?=.*[A-ZÀ-Ž&+]{4,})[A-ZÀ-Ž-_\s&+]+$)'),
             lambda m: "" if any(
                 cue in m.group(1)
@@ -140,8 +157,8 @@ class HearingImpaired(SubtitleTextModification):
         # NReProcessor(re.compile(r'(?u)^\s*-\s*'), "", name="HI_starting_dash"),
 
         # all caps at start before new sentence
-        NReProcessor(re.compile(r'(?u)^(?=[A-ZÀ-Ž]{4,})[A-ZÀ-Ž-_\s]+\s([A-ZÀ-Ž][a-zà-ž].+)'), r"\1",
-                     name="HI_starting_upper_then_sentence", supported=lambda p: not p.mostly_uppercase),
+        CapsCueProcessor(re.compile(r'(?u)^(?=[A-ZÀ-Ž]{4,})[A-ZÀ-Ž-_\s]+\s([A-ZÀ-Ž][a-zà-ž].+)'), r"\1",
+                         name="HI_starting_upper_then_sentence", supported=lambda p: not p.mostly_uppercase),
 
         # remove normal and Japanese parentheses only for Japanese subtitles
         NReProcessor(re.compile(r'(?u)（.+）|\(.+\)'), "",

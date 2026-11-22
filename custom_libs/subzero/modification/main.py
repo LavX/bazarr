@@ -320,7 +320,9 @@ class SubtitleModifications(object):
                 logger.error("Skipping %d lines for %s mod", len(line_split), mods)
                 continue
 
-            entry_for_rules = wrapped.entry_for_rules if wrapped is not None and wrapped.entry_for_rules else t
+            original_entry = wrapped.entry_for_rules if wrapped is not None else None
+            entry_for_rules = original_entry if original_entry is not None else t
+            aligned = wrapped is not None and bool(wrapped.alignment)
             skip_entry = False
             origins = []
             for line_no, line in enumerate(line_split):
@@ -352,7 +354,7 @@ class SubtitleModifications(object):
 
                     try:
                         line = mod.modify(line.strip(), entry=entry_for_rules, debug=self.debug, parent=self,
-                                          index=index,
+                                          index=index, protect_caps_dialogue=original_entry is not None and line_no == 0,
                                           **args)
                     except EmptyEntryError:
                         if self.debug:
@@ -382,7 +384,7 @@ class SubtitleModifications(object):
 
                     try:
                         line = mod.modify(line.strip(), entry=entry_for_rules, debug=self.debug, parent=self,
-                                          index=index, procs=["last_process"], **args)
+                                          index=index, procs=["last_process"], aligned=aligned, **args)
                     except EmptyEntryError:
                         if self.debug:
                             logger.debug(u"%d: %s: %r -> ''", index, identifier, t)
