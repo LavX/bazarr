@@ -484,16 +484,16 @@ def _is_provider_runner(command, env) -> bool:
 def provider_spec(layout: ProviderLayout, command, cwd, env, *, source_media: SourceMediaFile | None = None):
     """The launch specification of one provider worker: the softer provider profile.
 
-    Filesystem: an allowlist. Read-only for the system paths, the interpreter and its libraries, the
-    plugin's bundle and environment, the programs on ``PATH``, Arr roots and any approved source file;
-    read-write for the plugin's own data and temp folders. Everything else is denied: the configuration folder
-    (``config.yaml`` and the database), the backup folder, home folders and other services' data.
-    No port allowlist (only Bazarr+'s own ports are refused, where the kernel can), no file-size or
-    process-count limit and no metadata filter, so ``ffmpeg`` can write large temporary files and run
-    its threads.
+    The ordinary worker can read Arr roots and programs on ``PATH``. A scoped worker receives its
+    runtime paths, individual media tools and one source file, with the metadata filter enabled.
+    Both can write to their own data and temp folders. The configuration, database and backups
+    remain protected. The limits allow ffmpeg to write large temporary files and run its threads.
     """
     from .sandbox import capabilities
-    from .provider_roots import backup_folders, binary_folders, media_root_folders, own_ports, program_folders
+    from .provider_roots import (
+        backup_folders, binary_folders, media_root_folders, own_ports, program_folders, source_file_is_shielded,
+        source_tool_paths,
+    )
     from .runtime.environment import worker_environment
     from .sandbox.policy import (
         PROVIDER_EXTRA_READ_PATHS,
@@ -512,28 +512,47 @@ def provider_spec(layout: ProviderLayout, command, cwd, env, *, source_media: So
         os.chmod(folder, 0o700)
     backups = backup_folders()
     shields = [layout.config_dir, *backups]
-    source_paths = provider_tree_grants([source_media.path], shields) if source_media is not None else ()
     managed_binaries = layout.config_dir / "managed" / "bin"
+    secrets = _secret_files(layout.config_dir)
+    source_paths = ()
+    if source_media is None:
+        runtime_paths = (managed_binaries, *provider_tree_grants(
+            [*program_folders(), *binary_folders(), *media_root_folders()], shields))
+    else:
+        if source_file_is_shielded(source_media.path, shields, secrets):
+            raise PolicyError("the source media file is in a protected location")
+        source_paths = (source_media.path,)
+        managed = managed_binaries.resolve()
+        runtime_paths = tuple(tool for tool in source_tool_paths(layout.config_dir)
+                              if not source_file_is_shielded(
+                                  tool, backups if tool.is_relative_to(managed) else shields, secrets))
     policy = SandboxPolicy.for_interpreter(
         layout.interpreter,
         read_only=[
             layout.bundle,
             layout.runner,
-            managed_binaries,
             *PROVIDER_EXTRA_READ_PATHS,
-            *provider_tree_grants([*program_folders(), *binary_folders(), *media_root_folders()], shields),
+            *runtime_paths,
         ],
         read_files=source_paths,
         read_write=[data, temp],
         # The folders, and the files in them: a file that is a link into a granted tree is refused too.
-        protected_paths=[layout.config_dir / "config", layout.config_dir / "db", *backups, *_secret_files(layout.config_dir)],
+        protected_paths=[layout.config_dir / "config", layout.config_dir / "db", *backups, *secrets],
         # Bazarr+'s own API answers on these ports (the one the server bound, --port, the setting). Where
         # the kernel has network rules (ABI 4 and above) the worker cannot connect to them; every other
         # TCP connection stays open. MPTCP sockets, which those rules do not cover, are refused by the filter.
         deny_connect_ports=own_ports(),
     )
-    if source_paths and policy.identities.get(str(source_media.path)) != source_media.identity:
-        raise PolicyError("the source media file changed while preparing its read grant")
+    if source_media is not None:
+        if policy.identities.get(str(source_media.path)) != source_media.identity:
+            raise PolicyError("the source media file changed while preparing its read grant")
+        root_info = source_media.root.stat()
+        media_identities = {source_media.identity, (root_info.st_dev, root_info.st_ino)}
+        for grant in (*policy.read_only, *policy.read_write):
+            runtime = Path(grant)
+            if (policy.identities.get(grant) in media_identities or source_media.root.is_relative_to(runtime)
+                    or runtime.is_relative_to(source_media.root)):
+                raise PolicyError("the source media library overlaps a provider runtime location")
     environment = worker_environment(
         "subtitle_provider",
         home=data,
@@ -549,9 +568,9 @@ def provider_spec(layout: ProviderLayout, command, cwd, env, *, source_media: So
         env=environment,
         policy=policy,
         limits=PROVIDER_LIMITS,
-        seccomp=False,
+        seccomp=source_media is not None,
         block_mptcp=True,
-        require_capabilities=capabilities.supported(),
+        require_capabilities=source_media is not None or capabilities.supported(),
     )
 
 
@@ -693,6 +712,10 @@ class ProviderWorkerClient:
             except Exception as error:
                 self._blocked(f"the ruleset could not be prepared: {error}")
                 raise WorkerError(f"the sandbox could not be prepared, so the provider was not started: {error}") from error
+        if source_media is not None:
+            cause = "source media requires the enforcing Provider Hub sandbox"
+            self._blocked(cause)
+            raise WorkerError(cause)
         return subprocess.Popen(
             self.command,
             cwd=self.cwd,
@@ -706,7 +729,7 @@ class ProviderWorkerClient:
 
     def _sandbox_profile(self, *, source_media: SourceMediaFile | None = None):
         """A callable that starts the sandboxed worker, or None when this start is unsandboxed."""
-        if getattr(self, "_sandbox_failed_open", False):
+        if source_media is None and getattr(self, "_sandbox_failed_open", False):
             return None
         provider_id = getattr(self, "provider_id", None)
         layout = provider_layout(self.command, self.cwd, self.env, provider_id)
@@ -725,13 +748,19 @@ class ProviderWorkerClient:
         if not provider_profile_enabled():
             return None
         from .sandbox import PROVIDER_MIN_ABI, note_provider_unsandboxed, probe_sandbox, spawn_worker
+        from .sandbox.spawn import MIN_ENFORCED_ABI
 
         probe = probe_sandbox()
-        if not probe.enforces(PROVIDER_MIN_ABI) and not probe.absent:
+        minimum_abi = MIN_ENFORCED_ABI if source_media is not None else PROVIDER_MIN_ABI
+        if not probe.enforces(minimum_abi) and not probe.absent:
             # A host check that failed or did not finish may have hit a passing condition. It is asked
             # again, at most once a minute, before a provider is refused on its word.
             probe = _probe_again(probe)
-        if not probe.enforces(PROVIDER_MIN_ABI):
+        if not probe.enforces(minimum_abi):
+            if source_media is not None:
+                cause = "source media requires verified Landlock ABI 3 or later"
+                self._blocked(cause)
+                raise WorkerError(cause)
             if probe.absent:
                 # The kernel genuinely has no Landlock: nothing can be applied, and the provider runs without it.
                 note_provider_unsandboxed(layout.key, probe.reason or "this host has no Landlock")
@@ -752,7 +781,8 @@ class ProviderWorkerClient:
             process = spawn_worker(
                 spec,
                 probe=probe,
-                minimum_abi=PROVIDER_MIN_ABI,
+                minimum_abi=minimum_abi,
+                require_sandbox=source_media is not None,
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
@@ -782,7 +812,7 @@ class ProviderWorkerClient:
         self._sandbox_layout = None
         note_provider_blocked(self._notice_key(), cause)
 
-    def _opened_after_apply_failure(self) -> bool:
+    def _opened_after_apply_failure(self, *, allow_fallback=True) -> bool:
         """After a worker that said nothing: handle a launcher report that the ruleset was not applied.
 
         Only a report that the ruleset failed to apply before the worker ran counts; a report about
@@ -807,7 +837,7 @@ class ProviderWorkerClient:
             return False
         self._kill_tree(process, 5.0)
         match = _ERRNO_IN_MESSAGE.search(cause)
-        if match and int(match.group(1)) in _KERNEL_CANNOT_APPLY:
+        if allow_fallback and match and int(match.group(1)) in _KERNEL_CANNOT_APPLY:
             self._fail_open(f"the kernel could not apply the ruleset: {cause}")
             return True
         self._blocked(f"the ruleset could not be applied: {cause}")
@@ -1480,7 +1510,8 @@ class ProviderWorkerClient:
         self._deregister()
 
     def request(self, op: str, payload: dict[str, Any] | None = None, timeout: float = 30.0,
-                admit=None, *, source_media: Callable[[], SourceMediaFile | None] | None = None) -> WorkerResult:
+                admit=None, *, source_media: Callable[[], SourceMediaFile | None] | None = None,
+                consume_source_reply=None) -> WorkerResult:
         """Send one request and read its reply.
 
         With ``admit``, a callable answering whether the provider may still be
@@ -1490,8 +1521,54 @@ class ProviderWorkerClient:
         member selection rely on.
 
         ``source_media`` is a host-only lookup after admission. A worker with that
-        grant serves one request, then ends before the next request gets the lock.
+        grant ends before the next request gets the lock. A download can consume
+        its content and select an archive member on the same worker before that.
         """
+        if admit is None:
+            self._lock.acquire()
+        else:
+            self._acquire_gated(timeout, admit)
+        grant = None
+        try:
+            if getattr(self, "_closed", False) and op != "shutdown":
+                raise WorkerError("worker client is stopped")
+            if source_media is not None:
+                authorized = source_media()
+                if authorized is None:
+                    reply = {"candidates": []} if op == "search" else {"empty": True}
+                    result = WorkerResult(ok=True, payload=reply, events=[])
+                    if consume_source_reply is not None:
+                        consume_source_reply(result, None)
+                    return result
+                # A warm worker has a different ruleset. Retire it before
+                # starting a launcher that can read only this source file.
+                self._end_worker_for_source_scope()
+                grant = authorized
+            result = self._request_locked(op, payload, timeout, source_media=grant)
+            if consume_source_reply is not None:
+                process = self.process
+
+                def select_member(payload, timeout):
+                    return self._request_locked("select_archive_member", payload, timeout, process=process)
+
+                consume_source_reply(result, select_member)
+            return result
+        finally:
+            try:
+                if grant is not None:
+                    self._end_worker_for_source_scope()
+            finally:
+                self._lock.release()
+
+    def _request_locked(self, op, payload, timeout, *, source_media=None, process=None) -> WorkerResult:
+        # A bound archive selector may speak only to the worker that downloaded
+        # its archive. It cannot launch or fall back to a different process.
+        if process is not None and (self.process is not process or self._has_exited(process)):
+            raise WorkerError("the source media worker closed before archive selection")
+        if getattr(self, "_closed", False) and op != "shutdown":
+            raise WorkerError("worker client is stopped")
+        if op == "shutdown" and not (self.process is not None and not self._has_exited(self.process)):
+            raise WorkerError("worker is not running")
         request_id = str(uuid.uuid4())
         message = {
             "abi": WORKER_ABI_VERSION,
@@ -1501,77 +1578,35 @@ class ProviderWorkerClient:
             "payload": payload or {},
         }
 
-        if admit is None:
-            self._lock.acquire()
-        else:
-            self._acquire_gated(timeout, admit)
-        launch_options = {}
-        try:
-            # Startup and the freshness stamp live under the request lock:
-            # outside it, the sweep can acquire the lock after start() returns,
-            # read the old timestamp, and kill the worker this request is
-            # about to write to.
-            if getattr(self, "_closed", False) and op != "shutdown":
-                # Once stopped, a client starts nothing: a request that was
-                # already on its way (an archive member selection inside a
-                # download) fails instead of respawning the worker.
-                raise WorkerError("worker client is stopped")
-            if op == "shutdown" and not (self.process is not None and not self._has_exited(self.process)):
-                # Stopping a worker never starts one: a process that ended
-                # between the caller's check and this request has nothing left
-                # to shut down.
-                raise WorkerError("worker is not running")
-            if source_media is not None and not self._sandbox_failed_open:
-                from .sandbox import probe_sandbox, provider_profile_enabled
-
-                if provider_profile_enabled() and not probe_sandbox().absent and (grant := source_media()) is not None:
-                    # Landlock grants live for the process. A warm worker has the
-                    # previous ruleset, so prepare a fresh one for this file.
-                    self._end_worker_for_source_scope()
-                    launch_options["source_media"] = grant
-            encoded = json.dumps(message, separators=(",", ":"), default=_json_default) + "\n"
-            # A second pass only happens when the sandbox ruleset could not be applied to the
-            # worker just started: the provider then runs without it (see ``_fail_open``).
-            for attempt in (0, 1):
-                worker_started = self.start(**launch_options) is True
-                provider_id = getattr(self, "provider_id", None)
-                status_generation = (
-                    runtime_status.generation(provider_id)
-                    if provider_id is not None
-                    else None
-                )
-                status_configuration_generation = (
-                    runtime_status.configuration_generation(provider_id)
-                    if provider_id is not None
-                    else None
-                )
-                self.last_used = time.monotonic()
-                if self.process is None or self.process.stdin is None or self.process.stdout is None:
-                    raise WorkerError("worker process did not start")
-
-                try:
-                    self.process.stdin.write(encoded)
-                    self.process.stdin.flush()
-                except OSError:
-                    if attempt == 0 and self._opened_after_apply_failure():
-                        continue
-                    raise
-                line = self._read_reply(request_id, timeout)
-                if not line and attempt == 0 and self._opened_after_apply_failure():
-                    continue
-                break
-            self._sandboxed_answer(line)
-            # Stamped on the way out as well as the way in. A single request may
-            # legitimately run for hours (transcription is allowed up to the 24
-            # hour ceiling), and a worker judged only on when its request
-            # STARTED would read as idle for almost all of that.
+        encoded = json.dumps(message, separators=(",", ":"), default=_json_default) + "\n"
+        launch_options = {"source_media": source_media} if source_media is not None else {}
+        fallback = {"allow_fallback": False} if source_media is not None else {}
+        # Only an ordinary request may retry if the kernel cannot apply its
+        # ruleset. Source media is never sent to an unsandboxed worker.
+        for attempt in (0, 1):
+            worker_started = process is None and self.start(**launch_options) is True
+            provider_id = getattr(self, "provider_id", None)
+            status_generation = runtime_status.generation(provider_id) if provider_id is not None else None
+            status_configuration_generation = (
+                runtime_status.configuration_generation(provider_id) if provider_id is not None else None
+            )
             self.last_used = time.monotonic()
-        finally:
+            if self.process is None or self.process.stdin is None or self.process.stdout is None:
+                raise WorkerError("worker process did not start")
             try:
-                if launch_options and self._sandbox_layout is not None:
-                    self._end_worker_for_source_scope()
-            finally:
-                self._lock.release()
+                self.process.stdin.write(encoded)
+                self.process.stdin.flush()
+            except OSError:
+                if process is None and attempt == 0 and self._opened_after_apply_failure(**fallback):
+                    continue
+                raise
+            line = self._read_reply(request_id, timeout)
+            if not line and process is None and attempt == 0 and self._opened_after_apply_failure(**fallback):
+                continue
+            break
+        self._sandboxed_answer(line)
+        # A long request is fresh as it finishes, regardless of when it started.
+        self.last_used = time.monotonic()
 
         if not line:
             raise WorkerError("worker closed stdout")

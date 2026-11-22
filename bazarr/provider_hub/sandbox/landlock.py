@@ -355,9 +355,10 @@ def _add_path_rule(ruleset_fd: int, grant: Grant, rights: int, handled_fs: int, 
     if fd is None:
         return False
     try:
-        mode = os.fstat(fd).st_mode
-        if regular_file and not stat_module.S_ISREG(mode):
-            raise LandlockError(errno.EINVAL, "read-file grant is not a regular file: %s" % path)
+        info = os.fstat(fd)
+        mode = info.st_mode
+        if regular_file and (not stat_module.S_ISREG(mode) or info.st_nlink != 1):
+            raise LandlockError(errno.EINVAL, "read-file grant is not a regular file with one link: %s" % path)
         allowed = rights & handled_fs
         if not stat_module.S_ISDIR(mode):
             allowed &= FILE_RIGHTS

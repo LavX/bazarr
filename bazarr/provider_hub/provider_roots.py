@@ -2,9 +2,9 @@
 """Where a subtitle provider worker may read: the media library and the folders it runs programs from.
 
 The provider sandbox profile is an allowlist. Besides the system paths, the interpreter and the plugin's
-own bundle, a worker is given the Arr media root folders and the directories on ``PATH`` (``ffmpeg`` and
-``ffprobe`` are found there). An eligible provider can also read the one source movie or episode it is asked
-to process. The configuration folder, the backup folder and other services' data stay out of reach.
+own bundle, an ordinary worker is given the Arr media roots and the directories on ``PATH``.
+An eligible provider processing a source item gets a separate profile with just that media file and its
+runtime. The configuration folder, the backup folder and other services' data stay out of reach.
 """
 from __future__ import annotations
 
@@ -66,6 +66,7 @@ def media_root_folders() -> list[str]:
 class SourceMediaFile:
     path: Path
     identity: tuple[int, int]
+    root: Path
 
 
 def source_media_file(context) -> SourceMediaFile | None:
@@ -86,7 +87,7 @@ def source_media_file(context) -> SourceMediaFile | None:
         info = real.lstat()
     except (OSError, ValueError):
         return None
-    if not stat.S_ISREG(info.st_mode):
+    if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
         return None
     for root in map(Path, roots):
         if not root.is_absolute() or root == Path(root.anchor) or not path.is_relative_to(root):
@@ -96,8 +97,46 @@ def source_media_file(context) -> SourceMediaFile | None:
         except (OSError, ValueError):
             continue
         if local != Path(local.anchor) and real != local and real.is_relative_to(local) and local.is_dir():
-            return SourceMediaFile(real, (info.st_dev, info.st_ino))
+            return SourceMediaFile(real, (info.st_dev, info.st_ino), local)
     return None
+
+
+def source_tool_paths(config_dir: Path) -> list[Path]:
+    """Existing media tools by exact file, including Bazarr's managed downloads."""
+    from utilities.binaries import legacy_binaries_dir
+
+    roots = (config_dir / "managed" / "bin", Path(legacy_binaries_dir()))
+    found: dict[Path, None] = {}
+    for name in ("ffmpeg", "ffprobe", "mediainfo"):
+        command = shutil.which(name)
+        if command:
+            found[Path(command).resolve()] = None
+        for root in roots:
+            canonical_root = root.resolve()
+            for path in root.glob(f"*/*/*/{name}"):
+                real = path.resolve()
+                if path.is_file() and real.is_relative_to(canonical_root):
+                    found[real] = None
+    return list(found)
+
+
+def source_file_is_shielded(path: Path, shields: list[Path], protected_files: list[Path]) -> bool:
+    """Exclude protected paths and the same objects reached through another mount."""
+    def identity(item):
+        try:
+            info = item.stat()
+        except OSError:
+            return None
+        return info.st_dev, info.st_ino
+
+    for shield in shields:
+        if path.is_relative_to(shield.resolve()):
+            return True
+    shield_ids = {key for shield in shields if (key := identity(shield)) is not None}
+    file_id = identity(path)
+    return (any(identity(parent) in shield_ids for parent in path.parents)
+            or file_id is None
+            or any(identity(protected) == file_id for protected in protected_files))
 
 
 def program_folders(path_value: str | None = None) -> list[str]:

@@ -45,8 +45,11 @@ REAL_AUTHENTICATION_OFF = _provider_roots.authentication_off
 REAL_MEDIA_ROOT_FOLDERS = _provider_roots.media_root_folders
 
 PROVIDER_SOURCE = '''
+import base64
+import io
 import os
 import subprocess
+import zipfile
 
 
 def _try(action):
@@ -61,6 +64,8 @@ def _try(action):
 class Fixture:
     def search(self, video, languages, config):
         op = config["op"]
+        if op == "catalog":
+            return [{"id": "catalog-fixture", "language": {"alpha3": "eng"}, "provider_payload": {}}]
         if op == "read":
             return [{"result": _try(lambda: open(config["path"], encoding="utf-8").read())}]
         if op == "write":
@@ -81,8 +86,10 @@ class Fixture:
             mode = _try(lambda: open(path, "r+").close())
             return [{"id": "source-fixture", "language": {"alpha3": "eng"}, "provider_payload": {
                 "path": path, "write": mode, "sibling": _try(lambda: read(config["sibling"])),
+                "arr": _try(lambda: read(config["arr"])),
                 "backup": _try(lambda: read(config["backup"])),
                 "exec": _try(lambda: subprocess.run([path], check=True).returncode),
+                "truncate": _try(lambda: os.truncate(path, os.path.getsize(path))),
             }}]
         if op == "list":
             return [{"result": _try(lambda: sorted(os.listdir(config["path"])))}]
@@ -125,7 +132,20 @@ class Fixture:
 
     def download(self, provider_payload, language, config):
         with open(provider_payload["path"], encoding="utf-8") as handle:
-            return handle.read().encode()
+            self.source_bytes = handle.read().encode()
+        if config.get("archive"):
+            data = io.BytesIO()
+            with zipfile.ZipFile(data, "w") as archive:
+                archive.writestr("other.en.srt", b"other")
+                archive.writestr("selected.en.srt", self.source_bytes)
+            return {"archive_b64": base64.b64encode(data.getvalue()).decode(), "select_member": True}
+        return self.source_bytes
+
+    def select_archive_member(self, provider_payload, language, members, config):
+        with open(provider_payload["path"], "rb") as handle:
+            if handle.read() != self.source_bytes:
+                raise ValueError("the selector needs its download and source file")
+        return {"decision": "pin", "member": "selected.en.srt"}
 '''
 
 STUB = '''#!{python}
@@ -303,26 +323,37 @@ def test_source_search_and_download_get_one_read_only_file_per_request(host, cli
     Embedded.manifest = manifest
     worker = client()
     proxy = Embedded(worker_client=worker, op="source", sibling=str(sibling),
-                     backup=str(host["backups"] / "backup.txt"))
+                     arr=str(host["media"] / "film.mkv"), backup=str(host["backups"] / "backup.txt"))
 
     # The ordinary worker is already running, with only the Arr profile.
     assert _ask(worker, op="read", path=str(movie_path))["result"] == "denied"
+    assert _ask(worker, op="read", path=str(host["media"] / "film.mkv"))["result"] == "film"
     ordinary_process = worker.process
 
     [subtitle] = proxy.list_subtitles(video, [])
     assert subtitle.provider_payload == {
         "path": str(movie_path), "write": "denied", "exec": "denied", "sibling": "denied", "backup": "denied",
+        "arr": "denied", "truncate": "denied",
     }
     assert ordinary_process.poll() is not None
     assert worker.process.poll() is not None
     assert worker.launcher_cleanup_state() == "confirmed"
 
-    # The normal pool carries this host-only context from the video to the candidate.
-    subtitle.source_context = video.source_context
+    assert subtitle.source_context is video.source_context
+    assert proxy.download_subtitle(subtitle)
+    assert subtitle.content == media_bytes
+    assert worker.process.poll() is not None
+    proxy.config["archive"] = True
     assert proxy.download_subtitle(subtitle)
     assert subtitle.content == media_bytes
     assert worker.process.poll() is not None
     assert _ask(worker, op="read", path=str(movie_path))["result"] == "denied"
+
+    alias = root / "Duplicate.mkv"
+    alias.hardlink_to(movie_path)
+    assert proxy.list_subtitles(video, []) == []
+    alias.unlink()
+    assert len(proxy.list_subtitles(video, [])) == 1
 
     # A backup subfolder inside an approved library is still excluded.
     nested_backups = root / "backups"
@@ -333,8 +364,18 @@ def test_source_search_and_download_get_one_read_only_file_per_request(host, cli
     nested_video = Movie(str(nested_path), "Film")
     nested_video.source_context = resolve_item(nested_id, source_db)
     monkeypatch.setattr(_provider_roots, "backup_folders", lambda: [host["backups"], nested_backups])
-    assert proxy.list_subtitles(nested_video, []) == []
+    with pytest.raises(worker_module.WorkerError, match="protected location"):
+        proxy.list_subtitles(nested_video, [])
 
+    # Even with a context gathered earlier, admission reads today's owner flags.
+    def admit():
+        repository.update_library(library_id, source_db, enabled=0)
+        return True
+
+    proxy.admit = admit
+    assert proxy.list_subtitles(video, []) == []
+    proxy.outcome_recorded()
+    proxy.admit = None
     repository.update_library(library_id, source_db, enabled=0)
     assert proxy.list_subtitles(video, []) == []
     repository.update_library(library_id, source_db, enabled=1)
@@ -382,6 +423,21 @@ def test_standalone_media_needs_current_provider_permission(schema, declared, cu
     assert CatalogProvider()._source_media(object()) is (grant if allowed else None)
 
 
+def test_source_search_without_a_local_media_permission_uses_the_ordinary_worker(client, monkeypatch):
+    from provider_hub.registry import HubProxyProvider
+    from subliminal.video import Movie
+
+    monkeypatch.setattr("provider_hub.sandbox.provider_profile_enabled", lambda: False)
+    worker = client()
+    proxy = HubProxyProvider(worker_client=worker, op="catalog")
+    video = Movie("Movie.mkv", "Movie")
+    video.source_context = object()
+
+    [subtitle] = proxy.list_subtitles(video, [])
+    assert subtitle.id.endswith(":catalog-fixture")
+    assert worker.process.poll() is None
+
+
 def test_a_provider_worker_keeps_its_bundle_readable_and_its_own_folders_writable(host, client):
     _enforcing_kernel()
     worker = client()
@@ -392,7 +448,7 @@ def test_a_provider_worker_keeps_its_bundle_readable_and_its_own_folders_writabl
     assert temp == host["config"] / "provider_hub" / "run" / "fixture" / "tmp"
     assert _ask(worker, op="write", path=str(home / "state.json"))["result"] == "written"
     assert _ask(worker, op="write", path=str(temp / "scratch"))["result"] == "written"
-    assert _ask(worker, op="read", path=str(host["bundle"] / "fixture_provider.py"))["result"].startswith("\nimport os")
+    assert _ask(worker, op="read", path=str(host["bundle"] / "fixture_provider.py"))["result"] == PROVIDER_SOURCE
     # The folders beside its own stay shut.
     assert _ask(worker, op="write", path=str(host["config"] / "provider_hub" / "state.json"))["result"] == "denied"
     assert environment["PATH"] == os.environ["PATH"]
@@ -410,6 +466,47 @@ def test_a_stub_ffmpeg_can_write_a_large_temporary_file_and_change_its_mode(host
 
 
 # ------------------------------------------------------------------------------------- failing open
+def _standalone_file(host):
+    root = host["root"] / "standalone"
+    root.mkdir()
+    path = root / "Film.mkv"
+    path.write_text("fixture movie", encoding="utf-8")
+    info = path.stat()
+    return _provider_roots.SourceMediaFile(path, (info.st_dev, info.st_ino), root)
+
+
+@pytest.mark.parametrize(("enabled", "probe", "reason"), [
+    (False, SandboxProbe(abi=10, verified=True), "enforcing Provider Hub sandbox"),
+    (True, SandboxProbe(abi=0, verified=False, absent=True), "verified Landlock ABI 3"),
+    (True, SandboxProbe(abi=2, verified=False, reads_verified=True), "verified Landlock ABI 3"),
+])
+def test_source_read_cannot_start_without_full_enforcement(host, client, monkeypatch, enabled, probe, reason):
+    monkeypatch.setattr("provider_hub.sandbox.provider_profile_enabled", lambda: enabled)
+    monkeypatch.setattr("provider_hub.sandbox.probe_sandbox", lambda *args, **kwargs: probe)
+    worker, grant = client(), _standalone_file(host)
+
+    with pytest.raises(worker_module.WorkerError, match=reason):
+        worker.request("search", {"config": {"op": "read", "path": str(grant.path)}}, source_media=lambda: grant)
+
+    assert worker.process is None
+    assert worker._sandbox_failed_open is False
+
+
+def test_source_read_never_retries_without_a_failed_ruleset(host, client, monkeypatch):
+    _enforcing_kernel()
+    # A deliberately impossible ABI makes the local launcher refuse its own ruleset.
+    probe = SandboxProbe(abi=99, verified=True)
+    monkeypatch.setattr("provider_hub.sandbox.probe_sandbox", lambda *args, **kwargs: probe)
+    worker, grant = client(), _standalone_file(host)
+
+    with pytest.raises(worker_module.WorkerError, match="sandbox could not be applied"):
+        worker.request("search", {"config": {"op": "read", "path": str(grant.path)}}, source_media=lambda: grant)
+
+    assert worker.process.poll() is not None
+    assert worker._sandbox_failed_open is False
+    assert worker.launcher_cleanup_state() == "confirmed"
+
+
 def test_without_landlock_the_provider_still_starts_and_the_status_carries_a_notice(host, client, monkeypatch):
     probe = SandboxProbe(abi=0, verified=False, absent=True, reason="Landlock is not available in this kernel")
     monkeypatch.setattr("provider_hub.sandbox.probe_sandbox", lambda *a, **k: probe)
@@ -1423,6 +1520,7 @@ def test_the_limitations_name_the_unix_socket_and_signal_gaps_of_older_kernels()
     assert "pathname UNIX sockets" in old and "signal other processes" in old
     assert "pathname UNIX sockets" not in new and "signal other processes" not in new
     assert "root folders of Sonarr, Radarr and Sportarr" in new
+    assert "one hard link on verified Landlock ABI 3 or later" in new
 
 
 # ------------------------------------------------------------------------ the host check, again

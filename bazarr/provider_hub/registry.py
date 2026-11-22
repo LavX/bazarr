@@ -260,39 +260,51 @@ class HubProxyProvider(Provider):
         if recorded is not None:
             recorded()
 
+    def _source_media_permission(self):
+        """The manifest schema through which this release can request local media."""
+        manifest = getattr(self.__class__, "manifest", None)
+        if manifest is None:
+            return None
+        if (manifest.schema_version == 1 and self.provider_name == "embeddedsubtitles"
+                and manifest.source_repo.casefold() == OFFICIAL_CATALOG_REPO.casefold()):
+            return 1
+        if manifest.schema_version == 2 and "media_read" in (manifest.raw.get("permissions") or ()):
+            return 2
+        return None
+
     def _source_media(self, context):
         """Resolve the live installation's permission before looking up the source file."""
         from .capabilities import live_row
         from .provider_roots import source_media_file
 
-        manifest = getattr(self.__class__, "manifest", None)
-        if manifest is None:
+        permission = self._source_media_permission()
+        if permission is None:
             return None
-        legacy_embedded = (manifest.schema_version == 1 and self.provider_name == "embeddedsubtitles"
-                           and manifest.source_repo.casefold() == OFFICIAL_CATALOG_REPO.casefold())
-        declared = manifest.schema_version == 2 and "media_read" in (manifest.raw.get("permissions") or ())
-        if not (legacy_embedded or declared):
-            return None
+        manifest = self.__class__.manifest
         row = live_row(self.provider_name)
         active_manifest = row.get("manifest") if row else None
         if not isinstance(active_manifest, dict) or row.get("enabled") is False:
             return None
         if str(active_manifest.get("bundle_sha256", "")).lower() != manifest.bundle_sha256:
             return None
-        if legacy_embedded and (row.get("origin") != "catalog" or row.get("source_id") != OFFICIAL_CATALOG_SOURCE_ID
+        if permission == 1 and (row.get("origin") != "catalog" or row.get("source_id") != OFFICIAL_CATALOG_SOURCE_ID
                                 or not can_shadow_built_in_provider(self.provider_name, row.get("trusted") is True)):
             return None
-        if declared:
+        if permission == 2:
             permissions = active_manifest.get("permissions")
             if not isinstance(permissions, list) or "media_read" not in permissions:
                 return None
         return source_media_file(context)
 
-    def _gated_request(self, op, request, timeout, *, source_context=None):
+    def _gated_request(self, op, request, timeout, *, source_context=None, consume_source_reply=None):
         # The worker cannot raise what the pool catches, so its two refusals
         # are translated here. Imported late: some suites stub subliminal_patch.
         # Source authorization is resolved after the request gets its turn.
-        options = {"source_media": lambda: self._source_media(source_context)} if source_context is not None else {}
+        options = {}
+        if source_context is not None and self._source_media_permission() is not None:
+            options["source_media"] = lambda: self._source_media(source_context)
+            if consume_source_reply is not None:
+                options["consume_source_reply"] = consume_source_reply
         if self.admit is None:
             return self._worker().request(op, request, timeout=timeout, **options)
         try:
@@ -431,6 +443,7 @@ class HubProxyProvider(Provider):
         subtitles = []
         for item in result.payload.get("candidates", []):
             subtitle = candidate_from_worker(self.provider_name, item)
+            subtitle.source_context = getattr(video, "source_context", None)
             # Request context belongs to this candidate, separate from provider
             # display metadata and opaque payloads used for scoring and download.
             subtitle._requested_archive_context = {
@@ -459,16 +472,8 @@ class HubProxyProvider(Provider):
             "language": language_to_payload(subtitle.language),
             "config": call.config(self.config) if call is not None else self.config,
         }
-        result = self._gated_request("download", request, timeout,
-                                     source_context=getattr(subtitle, "source_context", None))
-        _consume_runtime_events(
-            self.provider_name,
-            result,
-            status_generation,
-            status_configuration_generation,
-        )
 
-        def _select_member_cb(members):
+        def build_selector_payload(members):
             context = getattr(subtitle, "_requested_archive_context", {})
             selector_payload = {
                 "provider": self.provider_name,
@@ -483,13 +488,26 @@ class HubProxyProvider(Provider):
                 selector_payload["absolute_episode"] = context["absolute_episode"]
             elif hasattr(subtitle, "absolute_episode"):
                 selector_payload["absolute_episode"] = subtitle.absolute_episode
-            response = self._worker().select_archive_member(
-                selector_payload,
-                timeout=timeout,
-            )
-            return response.payload
+            return selector_payload
 
-        worker_download_to_content(subtitle, result.payload, select_member_cb=_select_member_cb)
+        def consume(result, select_member):
+            _consume_runtime_events(
+                self.provider_name,
+                result,
+                status_generation,
+                status_configuration_generation,
+            )
+            worker_download_to_content(
+                subtitle, result.payload,
+                select_member_cb=lambda members: select_member(build_selector_payload(members), timeout=timeout).payload,
+            )
+
+        source_context = getattr(subtitle, "source_context", None)
+        if source_context is not None and self._source_media_permission() is not None:
+            self._gated_request("download", request, timeout, source_context=source_context, consume_source_reply=consume)
+        else:
+            result = self._gated_request("download", request, timeout)
+            consume(result, lambda payload, timeout: self._worker().select_archive_member(payload, timeout=timeout))
         return True
 
 
