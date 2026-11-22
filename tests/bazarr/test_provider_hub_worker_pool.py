@@ -1878,6 +1878,103 @@ def test_a_pid_reused_during_sampling_is_not_counted_as_worker_memory(monkeypatc
 
 
 @needs_smaps
+def test_the_sampler_uses_the_identity_saved_at_worker_start(make_pool, monkeypatch):
+    runtime = StubProcessRuntime()
+    runtime.process.pid = os.getpid()
+    pool = make_pool()
+    pool.register(WorkerDefinition("tr", kind="daemon", memory_limit_bytes=4 * GIB,
+                                   runtime=lambda *args: runtime))
+    pool.warm("tr")
+    slot = pool._entries["tr"].slot
+    previous_bytes = slot.memory_bytes
+    runtime._process_mark = b"1"  # the old worker's stamp, before its PID was reused
+    monkeypatch.setattr(pool_module, "_read_kb", lambda *args, **kwargs: {"Pss": 3 * GIB})
+    pool._sample(slot)
+    runtime.process.returncode = 0
+    assert slot.memory_bytes == previous_bytes
+
+
+@needs_smaps
+@pytest.mark.parametrize("persistent", [False, True], ids=["clears", "persists"])
+@pytest.mark.parametrize("record", ["maps", "fd"])
+def test_an_interrupted_proc_read_of_a_live_child_is_retried_once(sleeper, monkeypatch, record, persistent):
+    attempts = 0
+    real_open = open
+    real_listdir = os.listdir
+    path = "/proc/%d/%s" % (sleeper.pid, record)
+
+    def should_interrupt():
+        nonlocal attempts
+        attempts += 1
+        return attempts == 1 or persistent
+
+    class InterruptedMaps(BytesIO):
+        def readline(self, size=-1):
+            line = super().readline(size)
+            if not line:
+                raise ProcessLookupError(3, "No such process")
+            return line
+
+    def open_maps(name, *args, **kwargs):
+        if name == path and should_interrupt():
+            return InterruptedMaps(b"7f0000000000-7f0000001000 rw-p 00000000 00:00 0 [heap]\n")
+        return real_open(name, *args, **kwargs)
+
+    def list_fds(name):
+        if name == path and should_interrupt():
+            raise FileNotFoundError(2, "No such file or directory")
+        return real_listdir(name)
+
+    if record == "maps":
+        monkeypatch.setattr("builtins.open", open_maps)
+    else:
+        monkeypatch.setattr(os, "listdir", list_fds)
+    sample = read_process_tree_memory(os.getpid())
+    assert attempts == 2
+    assert sleeper.poll() is None
+    assert sample is not None and sample.truncated is persistent
+
+
+@needs_smaps
+@pytest.mark.parametrize("changes_again", [False, True], ids=["adopted", "keeps-changing"])
+def test_a_newly_adopted_descendant_is_measured_or_fails_closed(sleeper, monkeypatch, changes_again):
+    root = os.getpid()
+    real_children = pool_module._children_of
+    # The first root listing preceded adoption. A second change during the retry must fail closed.
+    listings = iter([[], [sleeper.pid], [sleeper.pid], [] if changes_again else [sleeper.pid]])
+
+    def children(pid, budget=None):
+        if pid == root:
+            return next(listings), False
+        return real_children(pid, budget)
+
+    monkeypatch.setattr(pool_module, "_children_of", children)
+    sample = read_process_tree_memory(root)
+    assert sample is not None and sample.truncated is changes_again
+    if not changes_again:
+        assert sample.processes == 2
+
+
+@needs_smaps
+def test_a_final_identity_read_that_crosses_the_deadline_makes_the_sample_incomplete(monkeypatch):
+    real_identity = pool_module._proc_identity
+    reads = 0
+
+    def read_identity(pid, budget):
+        nonlocal reads
+        identity = real_identity(pid, budget)
+        reads += 1
+        if reads == 2:
+            budget.deadline = 0
+        return identity
+
+    monkeypatch.setattr(pool_module, "_proc_identity", read_identity)
+    sample = read_process_tree_memory(os.getpid())
+    assert reads == 2
+    assert sample is not None and sample.truncated
+
+
+@needs_smaps
 def test_a_live_descendant_whose_memory_cannot_be_read_makes_the_sample_incomplete(monkeypatch):
     child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
     real = pool_module._read_kb
