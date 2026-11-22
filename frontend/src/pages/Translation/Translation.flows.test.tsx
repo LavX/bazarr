@@ -18,6 +18,7 @@ import type {
 import {
   connection,
   engine,
+  engineInstallations,
   inputsHolding,
   job,
   lingarr,
@@ -81,6 +82,9 @@ beforeEach(() => {
   };
   server.use(
     http.get("/api/translation/state", () => HttpResponse.json(state)),
+    http.get("/api/plugins/installations", () =>
+      HttpResponse.json({ data: engineInstallations(state.instances) }),
+    ),
     http.get("/api/translation/history", () =>
       HttpResponse.json({ data: [], total: 0 }),
     ),
@@ -1811,16 +1815,6 @@ describe("Translation page, an engine picked while it waits as the fallback", ()
     let first = true;
     state = { ...state, engine: 2, fallback_engine: null };
     server.use(
-      http.get("/api/plugins/installations", () =>
-        HttpResponse.json({
-          data: state.instances.map((item) => ({
-            provider_id: item.plugin_id,
-            kind: "translator",
-            state: "active",
-            active_version: item.plugin_version,
-          })),
-        }),
-      ),
       http.put("/api/translation/pointers", async ({ request }) => {
         const body = (await request.json()) as {
           engine?: number | null;
@@ -2248,6 +2242,7 @@ describe("Translation page, an engine installed and waiting for a restart", () =
       http.get("/api/plugins/installations", () =>
         HttpResponse.json({
           data: [
+            ...engineInstallations([second]),
             {
               provider_id: "ai_translator",
               kind: "translator",
@@ -2270,7 +2265,12 @@ describe("Translation page, an engine installed and waiting for a restart", () =
     server.use(
       http.get("/api/plugins/installations", () =>
         HttpResponse.json({
-          data: [{ provider_id: "ai_translator", kind: "translator", ...row }],
+          data: [
+            ...engineInstallations(state.instances).filter(
+              (item) => item.provider_id !== "ai_translator",
+            ),
+            { provider_id: "ai_translator", kind: "translator", ...row },
+          ],
         }),
       ),
     );
@@ -2485,14 +2485,24 @@ describe("Translation page, an engine installed and waiting for a restart", () =
     expect(screen.queryByText(/waiting for a restart/)).not.toBeInTheDocument();
   });
 
-  it("keeps a removing engine out of the fallback choices after its installation disappears", async () => {
-    installedEngine(true);
+  it("keeps a removed engine unavailable after its installation disappears and Translation state stays cached", async () => {
+    let stateReads = 0;
     state = {
       ...state,
       engine: 2,
       fallback_engine: 1,
-      instances: [...state.instances, lingarr()],
+      instances: [
+        second,
+        lingarr(),
+        engine({ plugin: { ...engine().plugin!, update_version: "2.3.0" } }),
+      ],
     };
+    server.use(
+      http.get("/api/translation/state", () => {
+        stateReads++;
+        return HttpResponse.json(state);
+      }),
+    );
     waitingFor({ state: "removed", needs_restart: false });
     const user = userEvent.setup();
     const group = await showPage();
@@ -2518,7 +2528,7 @@ describe("Translation page, an engine installed and waiting for a restart", () =
 
     server.use(
       http.get("/api/plugins/installations", () =>
-        HttpResponse.json({ data: [] }),
+        HttpResponse.json({ data: engineInstallations([second]) }),
       ),
     );
     // The installation poll sees the completed uninstall. Translation state is still cached.
@@ -2538,9 +2548,29 @@ describe("Translation page, an engine installed and waiting for a restart", () =
       within(listbox).getByRole("option", { name: "Lingarr", hidden: true }),
     ).toBeInTheDocument();
     expect(input).toHaveValue("None");
+    expect(within(group).getByText("Plugin not running")).toBeVisible();
+    expect(
+      within(group).getByText(/Repair or reinstall it in the Plugin Hub/),
+    ).toBeVisible();
+    expect(
+      within(group).getByRole("radio", { name: /AI Subtitle Translator/ }),
+    ).toBeDisabled();
+    expect(
+      within(group).queryByRole("link", { name: "Update available" }),
+    ).not.toBeInTheDocument();
+    expect(
+      within(group).queryByRole("button", {
+        name: "Set up AI Subtitle Translator",
+      }),
+    ).not.toBeInTheDocument();
+    expect(within(group).getByRole("radio", { name: /Lingarr/ })).toBeEnabled();
+    expect(
+      within(group).getByRole("radio", { name: "Google Translate" }),
+    ).toBeEnabled();
+    expect(stateReads).toBe(1);
   });
 
-  it("hides an available update while the engine is being removed", async () => {
+  it("disables an open engine setup when removal finishes", async () => {
     state = {
       ...state,
       instances: [
@@ -2560,6 +2590,25 @@ describe("Translation page, an engine installed and waiting for a restart", () =
     await within(group).findByText("Removing");
     expect(
       within(group).queryByRole("link", { name: "Update available" }),
+    ).not.toBeInTheDocument();
+
+    server.use(
+      http.get("/api/plugins/installations", () =>
+        HttpResponse.json({ data: engineInstallations([second]) }),
+      ),
+    );
+    await queryClient.invalidateQueries({
+      queryKey: [QueryKeys.Plugins, "installations"],
+    });
+    await within(group).findByText("Plugin not running");
+    expect(
+      screen.getByLabelText("Turn AI Subtitle Translator on or off"),
+    ).toBeDisabled();
+    expect(
+      screen.queryByRole("heading", { name: "Back ends" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("heading", { name: "Engine settings" }),
     ).not.toBeInTheDocument();
   });
 

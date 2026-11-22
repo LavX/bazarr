@@ -53,11 +53,10 @@ const LoadingPage: FunctionComponent = () => (
 
 const EngineTab: FunctionComponent<{
   state: TranslationState;
-  installedEnginePlugins: ReadonlySet<string> | undefined;
   canTest: boolean;
   /** The engine whose set-up the tab starts on, when the first-run panel named one. */
   startOn: number | null;
-}> = ({ state, installedEnginePlugins, canTest, startOn }) => {
+}> = ({ state, canTest, startOn }) => {
   const engines = orderedEngines(state.instances);
   // The engine whose set-up is shown: the one the user opened, else the selected one, else the first.
   const [opened, setOpened] = useState<number | null>(startOn);
@@ -68,12 +67,7 @@ const EngineTab: FunctionComponent<{
     null;
   return (
     <div className={styles.layout}>
-      <EnginePanel
-        state={state}
-        installedEnginePlugins={installedEnginePlugins}
-        openId={open?.id ?? null}
-        onOpen={setOpened}
-      />
+      <EnginePanel state={state} openId={open?.id ?? null} onOpen={setOpened} />
       {open ? (
         // Every engine's set-up stays mounted and only the open one shows, so a draft typed for one
         // engine is still there after a look at another.
@@ -108,11 +102,7 @@ const TranslationView: FunctionComponent = () => {
     refetch,
     isFetching,
   } = useTranslationState();
-  const {
-    state: data,
-    waiting,
-    installedEnginePlugins,
-  } = useRestartAware(loaded);
+  const { state: data, waiting } = useRestartAware(loaded);
   // The server says what it can do beyond the settings. Nothing is asked of, or shown for, a route it
   // does not list.
   const can = (capability: TranslationCapability) =>
@@ -236,12 +226,7 @@ const TranslationView: FunctionComponent = () => {
           </Tabs.Tab>
         </Tabs.List>
         <Tabs.Panel value="engine" pt="lg">
-          <EngineTab
-            state={data}
-            installedEnginePlugins={installedEnginePlugins}
-            canTest={can("test")}
-            startOn={startOn}
-          />
+          <EngineTab state={data} canTest={can("test")} startOn={startOn} />
         </Tabs.Panel>
         <Tabs.Panel value="defaults" pt="lg">
           <DefaultsPanel summary={can("limits") ? summary.data : undefined} />

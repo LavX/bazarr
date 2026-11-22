@@ -286,7 +286,10 @@ const TranslationStep: FC<WizardStepProps> = ({ onNext, onBack }) => {
           </section>
 
           <section className={styles.startOption}>
-            {googleInstalled ? (
+            {googleInstalled &&
+            (googleInstalled.plugin !== null ||
+              googleInstalled.removing ||
+              !googleOffer) ? (
               readyEngine(googleInstalled)
             ) : (
               <>

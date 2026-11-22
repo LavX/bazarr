@@ -20,6 +20,7 @@ import {
   backendLabel,
   engineName,
   engineStatus,
+  engineUnavailable,
   hasBackends,
   orderedEngines,
   working,
@@ -145,7 +146,6 @@ function engineLine(engine: TranslationEngine): string {
 
 export interface EnginePanelProps {
   state: TranslationState;
-  installedEnginePlugins: ReadonlySet<string> | undefined;
   /** The engine whose set-up is shown beside the list. */
   openId: number | null;
   onOpen: (id: number) => void;
@@ -154,7 +154,6 @@ export interface EnginePanelProps {
 /** Which engine translates, which one takes over when it declines, and what can be installed. */
 const EnginePanel: FunctionComponent<EnginePanelProps> = ({
   state,
-  installedEnginePlugins,
   openId,
   onOpen,
 }) => {
@@ -175,25 +174,21 @@ const EnginePanel: FunctionComponent<EnginePanelProps> = ({
       ? (pointers.chosen.fallback_engine ?? null)
       : state.fallback_engine;
   const fallbackChoices = engines.filter(
-    (item) =>
-      !item.removing &&
-      item.id !== chosen &&
-      (item.legacy ||
-        (item.plugin !== null &&
-          (installedEnginePlugins?.has(item.plugin_id) ?? true))),
+    (item) => item.id !== chosen && !engineUnavailable(item),
   );
   const toId = (value: string | null) =>
     value === null || value === NONE ? null : Number(value);
 
   const installed = (engine: TranslationEngine) => {
     const status = engineStatus(engine);
+    const unavailable = engineUnavailable(engine);
     const id = `${group}-${engine.id}`;
     return (
       <div
         key={engine.id}
         className={styles.engineCard}
         data-checked={chosen === engine.id}
-        data-unavailable={engine.removing ? "true" : undefined}
+        data-unavailable={unavailable ? "true" : undefined}
       >
         <input
           type="radio"
@@ -201,7 +196,7 @@ const EnginePanel: FunctionComponent<EnginePanelProps> = ({
           id={id}
           name={group}
           checked={chosen === engine.id}
-          disabled={engine.removing}
+          disabled={unavailable}
           aria-describedby={`${id}-text`}
           onChange={() => pointers.choose({ engine: engine.id })}
         />
@@ -220,7 +215,7 @@ const EnginePanel: FunctionComponent<EnginePanelProps> = ({
             {engine.plugin?.version && (
               <span className={styles.version}>v{engine.plugin.version}</span>
             )}
-            {!engine.removing && engine.plugin?.update_version && (
+            {!unavailable && engine.plugin?.update_version && (
               <Link
                 className={styles.chip}
                 to="/plugin-hub?tab=updates"
@@ -230,7 +225,7 @@ const EnginePanel: FunctionComponent<EnginePanelProps> = ({
                 Update available
               </Link>
             )}
-            {openId !== engine.id && !engine.removing && (
+            {openId !== engine.id && !unavailable && (
               <Button
                 size="compact-xs"
                 variant="subtle"

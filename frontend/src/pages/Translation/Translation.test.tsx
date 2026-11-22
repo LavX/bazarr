@@ -14,6 +14,7 @@ import type {
 import {
   connection,
   engine,
+  engineInstallations,
   inputsHolding,
   job,
   lingarr,
@@ -43,6 +44,9 @@ beforeEach(() => {
   };
   server.use(
     http.get("/api/translation/state", () => HttpResponse.json(state)),
+    http.get("/api/plugins/installations", () =>
+      HttpResponse.json({ data: engineInstallations(state.instances) }),
+    ),
     // The state lists no capabilities, so the page must not ask for any of these.
     http.get("/api/translation/summary", () => {
       record("get", "summary", null);

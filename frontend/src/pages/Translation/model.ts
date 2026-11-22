@@ -131,10 +131,16 @@ export function pickableChoices(
   return [...backEnds, ...engines];
 }
 
+/** Whether the engine's plugin is missing or on its way out. */
+export const engineUnavailable = (engine: TranslationEngine) =>
+  engine.removing === true ||
+  engine.awaiting_restart === "removal" ||
+  (!engine.legacy && engine.plugin === null);
+
 /** Whether there is something to run: an engine's plugin, or Bazarr+ itself for an engine it runs. */
 export const canRun = (engine: TranslationEngine) =>
-  engine.legacy === true ||
-  (engine.plugin?.active === true && engine.removing !== true);
+  !engineUnavailable(engine) &&
+  (engine.legacy === true || engine.plugin?.active === true);
 
 export interface Status {
   tone: Tone;

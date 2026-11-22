@@ -2,10 +2,13 @@
 import userEvent from "@testing-library/user-event";
 import { http, HttpResponse } from "msw";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import queryClient from "@/apis/queries";
+import { QueryKeys } from "@/apis/queries/keys";
 import { plainSummary } from "@/components/plugin-consent/fixtures";
 import {
   connection,
   engine,
+  engineInstallations,
   inputsHolding,
   lingarr,
   second,
@@ -82,6 +85,9 @@ function aiEngine(patch: Partial<TranslationEngine> = {}) {
 function serve(state: TranslationState) {
   server.use(
     http.get("/api/translation/state", () => HttpResponse.json(state)),
+    http.get("/api/plugins/installations", () =>
+      HttpResponse.json({ data: engineInstallations(state.instances) }),
+    ),
     http.post(
       "/api/translation/engines/:id/connections",
       async ({ request }) => {
@@ -412,7 +418,7 @@ describe("TranslationStep", () => {
             },
           }),
         ],
-        available_engines: [{ ...GOOGLE_OFFER }],
+        available_engines: [OFFICIAL_OFFER, GOOGLE_OFFER],
       }),
     );
     server.use(
@@ -441,6 +447,24 @@ describe("TranslationStep", () => {
     expect(screen.queryByText("Plugin not running")).not.toBeInTheDocument();
     expect(screen.queryByText(/waiting for a restart/)).not.toBeInTheDocument();
     expect(screen.queryByLabelText("OpenRouter key")).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Install AI Subtitle Translator" }),
+    ).not.toBeInTheDocument();
+
+    server.use(
+      http.get("/api/plugins/installations", () =>
+        HttpResponse.json({ data: [] }),
+      ),
+    );
+    await queryClient.invalidateQueries({
+      queryKey: [QueryKeys.Plugins, "installations"],
+    });
+
+    expect(await screen.findByText("Plugin not running")).toBeVisible();
+    expect(screen.queryByLabelText("OpenRouter key")).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Install AI Subtitle Translator" }),
+    ).toBeEnabled();
   });
 
   it.each([
@@ -502,6 +526,25 @@ describe("TranslationStep", () => {
     ]);
     expect(
       screen.queryByRole("button", { name: "Install Google Translate" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("keeps the catalog's Google Translate install action when saved engine data remains", async () => {
+    serve(
+      firstRun({
+        instances: [
+          aiEngine(),
+          { ...second, plugin: null, schema: null, configured: false },
+        ],
+      }),
+    );
+    customRender(<TranslationStep onNext={onNext} />);
+
+    expect(
+      await screen.findByRole("button", { name: "Install Google Translate" }),
+    ).toBeEnabled();
+    expect(
+      screen.queryByRole("button", { name: "Use Google Translate" }),
     ).not.toBeInTheDocument();
   });
 

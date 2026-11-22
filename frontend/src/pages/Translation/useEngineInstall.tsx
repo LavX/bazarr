@@ -70,16 +70,12 @@ export function useEngineInstall(
 }
 
 /**
- * The state with each engine whose plugin the server says waits on a restart marked as such, so a
- * finished install reads as "pending restart" and not as a plugin that is broken. The mark comes from the
- * plugin's `needs_restart` and nothing else. `waiting` is how many translator plugins wait on a restart,
- * for the banner, whether or not an engine of theirs is still listed.
- * `installedEnginePlugins` comes from the same lookup and stays undefined until that lookup has data.
+ * Apply the latest installation state to the settings snapshot, which may be older. Count staged
+ * changes from the installations, including those with no engine left in the settings snapshot.
  */
 export function useRestartAware(state: TranslationState | undefined): {
   state: TranslationState | undefined;
   waiting: number;
-  installedEnginePlugins: ReadonlySet<string> | undefined;
 } {
   const installations = usePluginInstallations();
   // What the restart will do to each plugin that waits on one, read from the installation: a removal is
@@ -94,7 +90,7 @@ export function useRestartAware(state: TranslationState | undefined): {
       if (!TRANSLATION_KINDS.has(kind)) {
         continue;
       }
-      if (kind === "translator" && item.state !== "removed") {
+      if (kind === "translator") {
         installedEnginePlugins?.add(item.provider_id);
       }
       if (isRemoving(item)) {
@@ -114,8 +110,8 @@ export function useRestartAware(state: TranslationState | undefined): {
     return { ids: changes, removing, installedEnginePlugins };
   }, [installations.data]);
   return useMemo(() => {
-    if (!state || (ids.size === 0 && removing.size === 0)) {
-      return { state, waiting: ids.size, installedEnginePlugins };
+    if (!state || !installedEnginePlugins) {
+      return { state, waiting: ids.size };
     }
     const mark = <T extends { plugin_id: string }>(engine: T): T => {
       const change = ids.get(engine.plugin_id);
@@ -123,9 +119,18 @@ export function useRestartAware(state: TranslationState | undefined): {
     };
     const instances = state.instances.map((engine) => {
       const marked = mark(engine);
-      return removing.has(engine.plugin_id)
-        ? { ...marked, removing: true }
-        : marked;
+      if (engine.legacy) return marked;
+      if (removing.has(engine.plugin_id)) return { ...marked, removing: true };
+      if (installedEnginePlugins.has(engine.plugin_id)) return marked;
+      // Match the missing-plugin state that a fresh Translation response would report.
+      // Keep the engine instance and its saved connections for a possible reinstall.
+      return {
+        ...marked,
+        plugin: null,
+        schema: null,
+        configured: false,
+        official: false,
+      };
     });
     const available = state.available_engines?.map(mark);
     return {
@@ -137,7 +142,6 @@ export function useRestartAware(state: TranslationState | undefined): {
       // Counted from the installations, not from the engines the page lists: a removal that deleted its
       // data has no engine left, and a plugin whose release is still active is in neither list.
       waiting: ids.size,
-      installedEnginePlugins,
     };
   }, [state, ids, removing, installedEnginePlugins]);
 }
