@@ -55,6 +55,9 @@ def is_bracketed_cue(entry):
 
 def _lyric_boundaries(line):
     line = line.strip()
+    # On a marker-only line there are no words to separate from the markers.
+    if line and not _MUSIC_SYMBOL_RE.sub("", line).strip():
+        return line[0], line[-1]
     start = _LYRIC_START_RE.match(line)
     end = _LYRIC_END_RE.search(line)
     return (start.group(1)[-1] if start else None, end.group(1)[-1] if end else None)

@@ -774,6 +774,20 @@ def test_legacy_marks_with_styled_punctuation_do_not_enclose_speech(mods, render
     assert "Hallo." in output
 
 
+@pytest.mark.parametrize("mods", MODS)
+@pytest.mark.parametrize("mark", ["#", "*"])
+@pytest.mark.parametrize("styled", [False, True], ids=["plain", "styled"])
+def test_standalone_legacy_mark_breaks_an_aligned_lyric_span(mark, styled, mods, render):
+    first = f"{mark} Press one for English."
+    last = f"To repeat this menu, press {mark}"
+    middle = f"{mark} <i> </i>" if styled else mark
+    output = render(_pair_srt([r"{\an8}" + first, middle, last]), mods)
+    lines = _cue_text(output)
+    assert lines is not None
+    assert lines[0] == first
+    assert lines[-1] == last
+
+
 def test_default_srt_alignment_policy_matches_reference(development_libs, tmp_path):
     jobs = [(_pair_srt([r"{\an8}Hello there."]), ["remove_HI"])]
     reference = _development_outputs(development_libs, tmp_path, jobs)
