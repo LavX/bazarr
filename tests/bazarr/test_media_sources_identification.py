@@ -216,6 +216,7 @@ def test_manual_search_still_builds_an_unmatched_episode_video(source_db, tmp_pa
 
     from subliminal_patch import core
     from subliminal_patch.providers.legendasdivx import LegendasdivxProvider
+    from subliminal_patch.providers.shooter import ShooterProvider
     from subzero.language import Language
 
     monkeypatch.setattr(LegendasdivxProvider, 'initialize', lambda self: None)
@@ -227,18 +228,31 @@ def test_manual_search_still_builds_an_unmatched_episode_video(source_db, tmp_pa
             file_searches.append(video.original_path)
             return []
 
-    monkeypatch.setattr(core, 'provider_registry',
-                        {'legendasdivx': LegendasdivxProvider, 'embeddedsubtitles': FileProvider})
+    monkeypatch.setattr(ShooterProvider, 'initialize', lambda self: None)
+    monkeypatch.setattr(ShooterProvider, 'terminate', lambda self: None)
+    monkeypatch.setattr(ShooterProvider, 'query', lambda self, language, filename, hash:
+                        [self.subtitle_class(language, hash, 'https://example.invalid/hash-result')])
+    libraries = {'legendasdivx': LegendasdivxProvider, 'embeddedsubtitles': FileProvider, 'shooter': ShooterProvider}
+    monkeypatch.setattr(core, 'provider_registry', libraries)
     configuration = {provider: {'username': None, 'password': None}
                      for provider in ('legendasdivx', 'embeddedsubtitles')}
     failures = []
-    with core.SZProviderPool(list(configuration), configuration,
+    with core.SZProviderPool(list(libraries), configuration,
                              throttle_callback=lambda *args, **kwargs: failures.append(args)) as pool:
         result = pool.list_subtitles_provider('legendasdivx', video, {Language('por')}, detailed=True)
         assert (result.status, result.reason) == ('skipped', 'unsupported_media')
         assert not pool.discarded_providers
         file_result = pool.list_subtitles_provider('embeddedsubtitles', video, {Language('por')}, detailed=True)
         assert file_result.status == 'empty'
+
+        absent_hash = pool.list_subtitles_provider('shooter', video, {Language('eng')}, detailed=True)
+        assert absent_hash.status == 'skipped'
+        video.hashes['shooter'] = 'fixture-video-hash'
+        hashed_result = pool.list_subtitles_provider('shooter', video, {Language('eng')}, detailed=True)
+        assert hashed_result.status == 'success'
+        (subtitle,) = hashed_result.subtitles
+        matches = subtitle.get_matches(video)
+        assert core.SZProviderPool._episode_candidate_is_valid(subtitle, matches, matches)
     assert not failures
     assert file_searches == [str(path)]
 
@@ -406,20 +420,41 @@ def test_real_world_episode_names_have_safe_search_coordinates(source_db, tmp_pa
 
 def test_upgrade_repairs_legacy_coordinates_without_promoting_multi_episode_files(source_db, tmp_path, metadata,
                                                                                  client):
-    from media_sources import repository
-    from test_media_sources_schema import POSTERS, _migration, _run
+    from types import SimpleNamespace
+
+    import flask_migrate
+    from alembic.migration import MigrationContext
+    from app.database import metadata as models, migrations_directory
+    from media_source_helpers import add_group, add_item
+    from test_media_sources_schema import POSTERS, PREVIOUS, REVISION, _migration, _run
+
+    engine = source_db.get_bind()
+    # Recreate the sources schema at the actual released development revision
+    # through the same Alembic environment that startup calls.
+    _run(engine, _migration(REVISION).downgrade)
+    migration_app = Flask(__name__)
+    db = SimpleNamespace(get_engine=lambda: engine, metadata=models)
+    flask_migrate.Migrate(migration_app, db, render_as_batch=True)
+    with migration_app.app_context():
+        flask_migrate.stamp(directory=migrations_directory, revision=PREVIOUS)
+        flask_migrate.upgrade(directory=migrations_directory, revision=REVISION)
+    with engine.connect() as connection:
+        assert MigrationContext.configure(connection).get_current_revision() == REVISION
 
     lib = Lib(source_db, tmp_path)
     multi = stamped_video(lib.root / "Show" / "Show.S01E01-E03.mkv")
     single = stamped_video(lib.root / "Show" / "Show.S01E04.mkv")
-    lib.scan()
-    items = lib.items()
-    group_id = lib.group("Show").id
-    engine = source_db.get_bind()
-    _run(engine, _migration(POSTERS).downgrade)
-    repository.update_item(items[str(multi)].id, source_db, identity_state="unmatched", season=1, episode=1)
-    repository.update_item(items[str(single)].id, source_db, identity_state="unmatched", season=1, episode=4)
-    _run(engine, _migration(POSTERS).upgrade)
+    group_id = add_group(source_db, lib.source_id, lib.library_id, key=str(multi.parent))
+    for path, number in ((multi, 1), (single, 4)):
+        stat = path.stat()
+        add_item(source_db, lib.source_id, lib.library_id, path, kind='episode', group_id=group_id,
+                 identity_state='unmatched', season=1, episode=number, scene_name=path.stem,
+                 file_dev=str(stat.st_dev), file_ino=str(stat.st_ino), file_size=stat.st_size,
+                 file_mtime_ns=stat.st_mtime_ns)
+    with migration_app.app_context():
+        flask_migrate.upgrade(directory=migrations_directory)
+    with engine.connect() as connection:
+        assert MigrationContext.configure(connection).get_current_revision() == POSTERS
 
     before = lib.items()
     assert (before[str(multi)].season, before[str(multi)].episode) == (None, None)
@@ -492,3 +527,93 @@ def test_overlapping_candidate_submissions_return_the_same_saved_override(source
     first = client.patch(url, json=body, headers=HEADERS)
     assert first.status_code == overlap[0].status_code == 200
     assert first.json == overlap[0].json
+
+
+def test_reparse_uses_committed_group_override_even_if_scan_is_cancelled(source_db, tmp_path, metadata, client,
+                                                                       monkeypatch):
+    from app.jobs_queue import JobCancelled
+    from media_sources import identify, repository, scanner
+
+    lib = Lib(source_db, tmp_path)
+    path = stamped_video(lib.root / "Show" / "Show.S01E05.mkv")
+    lib.scan()
+    group = lib.group("Show")
+    item = lib.items()[str(path)]
+    repository.update_group(group.id, source_db, identity_state='unmatched')
+    repository.update_item(item.id, source_db, identity_state='unmatched', season=None, episode=None,
+                           scene_name=None, identify_pending=1)
+    parse = identify.identify_item
+    update = repository.update_item
+    restored = False
+
+    def correct_during_parse(*args, **kwargs):
+        changed = client.patch(f"/api/sources/groups/{group.id}", json={"title": "User Show"}, headers=HEADERS)
+        assert changed.status_code == 200
+        return parse(*args, **kwargs)
+
+    def observe(*args, **kwargs):
+        nonlocal restored
+        result = update(*args, **kwargs)
+        restored = restored or kwargs.get('episode') == 5
+        return result
+
+    def cancel():
+        if restored:
+            raise JobCancelled()
+
+    monkeypatch.setattr(identify, 'identify_item', correct_during_parse)
+    monkeypatch.setattr(repository, 'update_item', observe)
+    with pytest.raises(JobCancelled):
+        scanner.run_scan(lib.source_id, lib.library_id, cancel=cancel)
+    row = lib.items()[str(path)]
+    assert (lib.group("Show").identity_state, row.identity_state, row.season, row.episode) == (
+        'identified', 'parsed', 1, 5)
+
+
+def test_cancelling_after_folder_rename_keeps_show_and_episode_states_aligned(source_db, tmp_path, metadata,
+                                                                             monkeypatch):
+    from app.jobs_queue import JobCancelled
+    from media_sources import repository, scanner
+
+    _, shows, _, _ = metadata
+    lib = Lib(source_db, tmp_path)
+    path = stamped_video(lib.root / "Ambiguous" / "Ambiguous.S01E01.mkv")
+    shows["Ambiguous"] = response(items=[title(501, "Ambiguous", 2013), title(502, "Ambiguous", 2020)])
+    lib.scan()
+    assert lib.items()[str(path)].identity_state == 'ambiguous'
+    os.rename(path.parent, lib.root / "Renamed Show")
+    update = repository.update_group
+    group_written = False
+
+    def observe(*args, **kwargs):
+        nonlocal group_written
+        result = update(*args, **kwargs)
+        group_written = group_written or kwargs.get('identity_state') == 'parsed'
+        return result
+
+    def cancel():
+        if group_written:
+            raise JobCancelled()
+
+    monkeypatch.setattr(repository, 'update_group', observe)
+    with pytest.raises(JobCancelled):
+        scanner.run_scan(lib.source_id, lib.library_id, cancel=cancel)
+    group = lib.group("Renamed Show")
+    (episode,) = lib.items().values()
+    assert (group.identity_state, episode.identity_state) == ('parsed', 'parsed')
+
+
+def test_a_pending_show_does_not_reparse_an_unchanged_multi_episode_file(source_db, tmp_path, metadata, monkeypatch):
+    from media_sources import identify
+
+    _, shows, _, _ = metadata
+    lib = Lib(source_db, tmp_path)
+    path = stamped_video(lib.root / "Show" / "Show.S01E01E02.mkv")
+    shows["Show"] = response(status="unavailable")
+    lib.scan()
+    assert lib.items()[str(path)].identify_pending
+
+    monkeypatch.setattr(identify, 'identify_item', lambda *args: pytest.fail('unchanged filename was reparsed'))
+    assert lib.scan().unchanged == 1
+    row = lib.items()[str(path)]
+    assert (row.identity_state, row.identify_pending, row.episode) == ('unmatched', 1, None)

@@ -588,6 +588,18 @@ def _hub_candidate_fails_forced_hi(subtitle, hearing_impaired):
             and subtitle.hearing_impaired is not True)
 
 
+def _accepts_unlocated_episode(provider, provider_class, video):
+    required_hash = getattr(provider_class, 'required_hash', None)
+    if required_hash:
+        return bool(video.hashes.get(required_hash))
+    if getattr(provider_class, 'hub_proxy', False):
+        return False
+    # The legacy Shooter adapter does not declare its hash requirement.
+    if provider == 'shooter':
+        return bool(video.hashes.get(provider))
+    return provider in ('embeddedsubtitles', 'whisperai')
+
+
 def _hub_search_languages(provider_class, languages):
     """Return the languages to request from a provider.
 
@@ -1079,10 +1091,10 @@ class SZProviderPool(ProviderPool):
             return finish(None, "skipped", "provider_excluded")
 
         # A source episode can be present without a single season/episode pair.
-        # Only the file-based providers can use that input safely.
+        # Providers that search from the file or its hash can still list results.
         if (isinstance(video, Episode) and getattr(video, 'source_context', None) is not None
                 and (video.season is None or video.episode is None)
-                and provider not in ('embeddedsubtitles', 'whisperai')):
+                and not _accepts_unlocated_episode(provider, provider_class, video)):
             logger.info('Skipping provider %r: source episode has no unique season and episode', provider)
             return finish([], "skipped", "unsupported_media")
 

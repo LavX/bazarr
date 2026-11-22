@@ -378,6 +378,8 @@ def _write_library(library, decisions, plan, group_identities, group_for_dir, gr
                                         protect_user=identity_fields, **values)
 
             group_rules.apply_plan(plan, connection, update_group, group_identities)
+            for group_id in sorted(plan.reidentify):
+                repository.sync_episode_identities(connection, group_id=group_id)
         for group_id in plan.reidentify:
             groups.pop(group_id, None)
 
@@ -870,6 +872,23 @@ def _insert_batch(batch, library, item_kind, group_for_dir, groups, result, sess
     result.deleted += sum(deleted)
 
 
+def _reparse_episode(row, library_id, session):
+    values = identify.identify_item('series', row.path, row.group_key)
+    values.pop('external_id', None)
+    # Parsing runs outside the transaction. The show may have been corrected
+    # while it ran, so derive the final episode state from the locked parent.
+    with source_transaction(session) as connection:
+        group = repository.get_group(row.group_id, connection, for_update=True)
+        if group is None or group.group_key != row.group_key:
+            return
+        current = repository.get_item(row.id, connection, for_update=True)
+        if (current is None or current.group_id != row.group_id or current.path != row.path
+                or current.scene_name is not None):
+            return
+        if repository.update_item(row.id, connection, owner_library_id=library_id, only_automatic=True, **values):
+            repository.sync_episode_identities(connection, item_id=row.id)
+
+
 def _identify_pending(source, kind, library, decisions, cancel, session):
     """Apply new hints and confirm pending filename identities after the scanner commits its writes."""
     # Hints can arrive or change while the file's size, name and mtime stay the same.
@@ -905,9 +924,7 @@ def _identify_pending(source, kind, library, decisions, cancel, session):
     for row in repository.pending_episode_parses(library.id, session):
         if cancel is not None:
             cancel()
-        values = identify.identify_item('series', row.path, row.group_key, row.group_state)
-        values.pop('external_id', None)
-        repository.update_item(row.id, session, owner_library_id=library.id, only_automatic=True, **values)
+        _reparse_episode(row, library.id, session)
 
     for group in repository.library_groups(library.id, session):
         if cancel is not None:

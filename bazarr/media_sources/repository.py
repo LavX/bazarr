@@ -278,12 +278,12 @@ def pending_movies(library_id, target=None):
 
 def _episode_needs_reparse():
     return sa.and_(Items.c.identity_source == 'filename', Items.c.identity_state == 'unmatched',
-                   Items.c.season.is_(None), Items.c.episode.is_(None), Items.c.identify_pending == 1)
+                   Items.c.scene_name.is_(None), Items.c.identify_pending == 1)
 
 
 def pending_episode_parses(library_id, target=None):
     return _target(target).execute(
-        sa.select(Items.c.id, Items.c.path, Groups.c.group_key, Groups.c.identity_state.label('group_state'))
+        sa.select(Items.c.id, Items.c.path, Items.c.group_id, Groups.c.group_key)
         .select_from(Items.join(Groups, Items.c.group_id == Groups.c.id))
         .where(Items.c.library_id == library_id, Items.c.kind == 'episode', _episode_needs_reparse())).all()
 
