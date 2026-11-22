@@ -24,12 +24,12 @@ def unsigned(value):
 
 
 def file_content_stamp(file_stat):
-    """Identity of the file content, kept across a rename or device renumbering."""
-    return file_stat.ino, file_stat.size, file_stat.mtime_ns
+    """Physical file identity and content attributes, independent of its path."""
+    return file_stat.dev, file_stat.ino, file_stat.size, file_stat.mtime_ns
 
 
 def stored_content_stamp(row):
-    return row.file_ino, row.file_size, row.file_mtime_ns
+    return row.file_dev, row.file_ino, row.file_size, row.file_mtime_ns
 
 
 def stat_file(path):

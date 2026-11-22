@@ -30,18 +30,34 @@ def _content_stamp(stat):
     return file_content_stamp(FileStat(unsigned(stat.st_dev), unsigned(stat.st_ino), stat.st_size, stat.st_mtime_ns))
 
 
-def index_matches_file(item, stat, data=None):
+def stamp_index(data, stamp):
+    return pickle.dumps(data | {'source_file': stamp}, pickle.HIGHEST_PROTOCOL)
+
+
+def index_matches_file(item, stat):
     """Does the stored subtitle index describe the current file?
 
     A search can analyze a replacement before the scanner records its file identity.
     Use the probe stamp when present and the admitted file stamp for external-only indexes.
     """
-    data = read_metadata(item.ffprobe_cache) if data is None else data
-    stamp = data.get('source_file')
-    if stamp is not None:
-        return stamp == _content_stamp(stat)
+    if item.ffprobe_cache is not None:
+        return bool(cached_metadata(item, stat))
+    return _matches_admission(item, stat)
+
+
+def _matches_admission(item, stat):
     admitted = stored_content_stamp(item)
     return all(recorded is None or recorded == actual for recorded, actual in zip(admitted, _content_stamp(stat)))
+
+
+def failed_probe_values(item, stat):
+    """Record the file of a new external-only listing when it differs from the admitted file."""
+    stamp = _content_stamp(stat)
+    if not _matches_admission(item, stat):
+        return UNKNOWN_STREAM_COLUMNS | {'ffprobe_cache': stamp_index({}, stamp)}
+    if read_metadata(item.ffprobe_cache).get('source_file') not in (None, stamp):
+        return UNKNOWN_STREAM_COLUMNS
+    return {}
 
 
 def cached_metadata(item, stat):
@@ -66,8 +82,7 @@ def probe_item(item, stat):
         return cached, None
     if not data or not data.get(parser):
         return cached, None
-    data = data | {'source_file': _content_stamp(stat)}
-    return data, pickle.dumps(data, pickle.HIGHEST_PROTOCOL)
+    return data, stamp_index(data, _content_stamp(stat))
 
 
 def local_stat(path):

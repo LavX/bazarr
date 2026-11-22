@@ -28,8 +28,7 @@ from utilities.helper import get_subtitle_destination_folder, get_target_folder
 from utilities.video_analyzer import audio_languages_from_metadata, embedded_subtitles_from_metadata
 
 from . import repository
-from .analysis import (cached_metadata, index_matches_file, local_stat, probe_item, read_metadata, streams,
-                       UNKNOWN_STREAM_COLUMNS)
+from .analysis import cached_metadata, failed_probe_values, local_stat, probe_item, read_metadata, streams
 from .db import handle, source_transaction
 
 
@@ -290,10 +289,9 @@ def index_item(item_id, target=None, ownership_index=None):
                 audio_language = str(audio_languages_from_metadata(data, current.path))
                 values = dict(ffprobe_cache=blob, audio_language=audio_language, audio_codec=audio_track.get('codec'),
                               video_codec=video_track.get('codec'), resolution=video_track.get('resolution'))
-            elif not index_matches_file(current, stat):
-                # A failed probe of a replacement says nothing about its tracks.
-                audio_language = None
-                values = UNKNOWN_STREAM_COLUMNS
+            elif not streams(data):
+                values = failed_probe_values(current, stat)
+                audio_language = values.get('audio_language', audio_language)
             missing = _missing(current, listing, audio_language, connection)
             if repository.write_item_index(item_id, str(listing), str(missing), connection, **values):
                 return listing

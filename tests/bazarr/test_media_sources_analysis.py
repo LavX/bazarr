@@ -133,6 +133,43 @@ def test_replacement_reprobes_and_a_rename_keeps_the_cache(source_db, tmp_path, 
     assert repository.get_item(before.id).video_codec == "AV1"
 
 
+def test_a_remount_reuses_only_cache_tied_to_the_admitted_file(
+    source_db, tmp_path, probe, offline_movies, monkeypatch,
+):
+    from media_sources import analysis, identity, repository, scanner, service
+
+    profile = add_profile(source_db, [("fr", "True", "False")])
+    source_id, library_id, root = add_source(source_db, tmp_path, profile_id=profile)
+    path = stamped_video(root / "Film.2001.mkv")
+    scanner.run_scan(source_id, library_id)
+    (item,) = repository.list_items(library_id=library_id)
+    before = identity.stored_content_stamp(item)
+    previous_device = str(int(before[0]) + 1)
+    previous_inode = str(int(before[1]) + 1)
+    previous = (previous_device, previous_inode, *before[2:])
+    cached = analysis.read_metadata(item.ffprobe_cache)
+    repository.update_item(item.id, source_db, file_dev=previous_device, file_ino=previous_inode,
+                           ffprobe_cache=analysis.stamp_index(cached, previous))
+    (library_root,) = repository.get_roots(library_id)
+    repository.record_root_device(library_root.id, previous_device, source_db)
+    probe.return_value = None
+
+    (result,) = scanner.run_scan(source_id, library_id)
+    assert result.unchanged == 1 and result.inserted == 0
+    after = repository.get_item(item.id)
+    assert identity.stored_content_stamp(after) == before
+    assert analysis.cached_metadata(after, path.stat()) == cached
+    probe.assert_called_once()
+
+    # An old blob can stay through admission, but a search needs fresh tracks.
+    repository.update_item(item.id, source_db, ffprobe_cache=b"legacy probe")
+    probe.return_value = metadata()
+    monkeypatch.setattr(service.jobs_queue, "update_job_progress", lambda **_: None)
+    service.search_source_item(item.id, job_id=1)
+    assert probe.call_count == 2
+    assert analysis.cached_metadata(repository.get_item(item.id), path.stat()) == cached
+
+
 def test_index_drops_a_probe_if_the_file_changes_during_analysis(source_db, tmp_path, probe):
     from media_sources import indexer, repository
 
@@ -341,6 +378,17 @@ def test_settings_and_profile_saves_refresh_the_stored_listing_without_a_scan(
     assert ["hu", None, None, "srt", "Untitled"] in ast.literal_eval(repository.get_item(item_id).subtitles)
     assert not refresh_queue.jobs_pending_queue
 
+    def refuse(*_args, **_kwargs):
+        raise RuntimeError("Queue unavailable")
+
+    monkeypatch.setattr(refresh_queue, "feed_jobs_pending_queue", refuse)
+    body, status = post_settings({"settings-general-default_und_embedded_subtitles_lang": "fr"})
+    assert status == 503 and body["code"] == "settings_refresh_failed"
+    assert config.settings.general.default_und_embedded_subtitles_lang == "fr"
+    body, status = post_settings({"settings-general-use_embedded_subs": "false"})
+    assert status == 503 and body["code"] == "settings_refresh_failed"
+    assert config.settings.general.use_embedded_subs is False
+
 
 def test_library_and_group_profile_changes_scope_the_same_refresh(
     source_db, tmp_path, probe, refresh_queue, monkeypatch,
@@ -412,7 +460,7 @@ def test_no_source_means_no_source_recalculation(source_db, refresh_queue, monke
 def test_search_refreshes_replacement_tracks_before_a_scan(
     source_db, tmp_path, probe, offline_movies, monkeypatch, probe_succeeds,
 ):
-    from media_sources import repository, scanner, service
+    from media_sources import analysis, repository, scanner, service
     from subtitles import download
 
     profile = add_profile(source_db, [("fr", "True", "False")])
@@ -422,6 +470,8 @@ def test_search_refreshes_replacement_tracks_before_a_scan(
     (before,) = repository.list_items(library_id=library_id)
     assert ast.literal_eval(before.missing_subtitles) == []
 
+    original = root / ".original"
+    os.link(path, original)
     replace_preserving_size_and_mtime(path)
     fresh = metadata(audio="deu")
     fresh["ffprobe"]["subtitle"] = []
@@ -438,7 +488,27 @@ def test_search_refreshes_replacement_tracks_before_a_scan(
     after = repository.get_item(before.id)
     assert after.file_ino == before.file_ino
     assert ast.literal_eval(after.subtitles) == []
-    assert bool(after.ffprobe_cache) is probe_succeeds
+    assert bool(analysis.streams(analysis.read_metadata(after.ffprobe_cache))) is probe_succeeds
+
+    if probe_succeeds:
+        # The scan admits the replacement without discarding the search's good probe.
+        probe.return_value = None
+        scanner.run_scan(source_id, library_id)
+        admitted = repository.get_item(before.id)
+        assert admitted.file_ino != before.file_ino
+        assert admitted.ffprobe_cache == after.ffprobe_cache
+        assert ast.literal_eval(admitted.audio_language) == ["German", None]
+        assert probe.call_count == 2
+    else:
+        # The replacement's external-only index cannot now satisfy the original.
+        os.replace(original, path)
+        probe.return_value = metadata()
+        service.search_source_item(before.id, job_id=2)
+        restored = repository.get_item(before.id)
+        assert ast.literal_eval(restored.missing_subtitles) == []
+        assert restored.ffprobe_cache == before.ffprobe_cache
+        assert probe.call_count == 3
+        requested.assert_called_once()
 
 
 def test_handover_of_a_replaced_file_discards_its_previous_tracks(source_db, tmp_path, probe, offline_movies):
@@ -474,7 +544,7 @@ def test_handover_of_a_replaced_file_discards_its_previous_tracks(source_db, tmp
 
 def test_new_subtitle_index_survives_an_overlapping_scanner_index(source_db, tmp_path, probe, monkeypatch):
     from media_sources import indexer, repository
-    from subtitles.tools.subsync_engines import subtitle_write_locks
+    from subtitles.tools.subsync_engines import subtitle_write_lock, subtitle_write_locks
     from subzero.language import Language
 
     source_id, library_id, root = add_source(source_db, tmp_path)
@@ -484,6 +554,8 @@ def test_new_subtitle_index_survives_an_overlapping_scanner_index(source_db, tmp
     monkeypatch.setattr(indexer, "get_language_set", lambda: {Language("eng")})
     scanner_probing, output_probing = Event(), Event()
     release_scan, release_output = Event(), Event()
+    scanner_publishing, allow_publish = Event(), Event()
+    write = repository.write_item_index
 
     def wait_for_writes(*args, **kwargs):
         if not scanner_probing.is_set():
@@ -495,6 +567,15 @@ def test_new_subtitle_index_survives_an_overlapping_scanner_index(source_db, tmp
         return metadata()
 
     probe.side_effect = wait_for_writes
+
+    def observe_publish(*args, **kwargs):
+        if not scanner_publishing.is_set():
+            scanner_publishing.set()
+            assert allow_publish.wait(5)
+        return write(*args, **kwargs)
+
+    monkeypatch.setattr(repository, "write_item_index", observe_publish)
+    sidecar_lock = subtitle_write_lock(str(path), str(root))
     with ThreadPoolExecutor(max_workers=2) as executor:
         try:
             scan = executor.submit(indexer.index_item, item_id)
@@ -504,12 +585,19 @@ def test_new_subtitle_index_survives_an_overlapping_scanner_index(source_db, tmp
             output = executor.submit(indexer.index_item, item_id)
             assert output_probing.wait(5)
             release_scan.set()
+            assert scanner_publishing.wait(5)
+            acquired = sidecar_lock.lock.acquire(blocking=False)
+            if acquired:
+                sidecar_lock.lock.release()
+            assert not acquired, "The scanner must hold the subtitle lock through publication"
+            allow_publish.set()
             assert scan.result(timeout=5) is not None
             release_output.set()
             assert output.result(timeout=5) is not None
         finally:
             release_scan.set()
             release_output.set()
+            allow_publish.set()
     assert [entry[1] for entry in ast.literal_eval(repository.get_item(item_id).subtitles) if entry[1]] == [
         str(sidecar)]
 
