@@ -145,6 +145,7 @@ function engineLine(engine: TranslationEngine): string {
 
 export interface EnginePanelProps {
   state: TranslationState;
+  installedEnginePlugins: ReadonlySet<string> | undefined;
   /** The engine whose set-up is shown beside the list. */
   openId: number | null;
   onOpen: (id: number) => void;
@@ -153,6 +154,7 @@ export interface EnginePanelProps {
 /** Which engine translates, which one takes over when it declines, and what can be installed. */
 const EnginePanel: FunctionComponent<EnginePanelProps> = ({
   state,
+  installedEnginePlugins,
   openId,
   onOpen,
 }) => {
@@ -176,7 +178,9 @@ const EnginePanel: FunctionComponent<EnginePanelProps> = ({
     (item) =>
       !item.removing &&
       item.id !== chosen &&
-      (item.legacy || item.plugin !== null),
+      (item.legacy ||
+        (item.plugin !== null &&
+          (installedEnginePlugins?.has(item.plugin_id) ?? true))),
   );
   const toId = (value: string | null) =>
     value === null || value === NONE ? null : Number(value);

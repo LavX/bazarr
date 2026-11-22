@@ -74,54 +74,48 @@ export function useEngineInstall(
  * finished install reads as "pending restart" and not as a plugin that is broken. The mark comes from the
  * plugin's `needs_restart` and nothing else. `waiting` is how many translator plugins wait on a restart,
  * for the banner, whether or not an engine of theirs is still listed.
+ * `installedEnginePlugins` comes from the same lookup and stays undefined until that lookup has data.
  */
 export function useRestartAware(state: TranslationState | undefined): {
   state: TranslationState | undefined;
   waiting: number;
+  installedEnginePlugins: ReadonlySet<string> | undefined;
 } {
   const installations = usePluginInstallations();
   // What the restart will do to each plugin that waits on one, read from the installation: a removal is
   // staged as a removed row, an update as a staged release beside an active one, an install as a staged
   // release with nothing active.
-  const ids = useMemo(() => {
+  const { ids, removing, installedEnginePlugins } = useMemo(() => {
     const changes = new Map<string, RestartChange>();
+    const removing = new Set<string>();
+    const installedEnginePlugins = installations.data && new Set<string>();
     for (const item of installations.data ?? []) {
-      if (
-        item.needs_restart !== true ||
-        !TRANSLATION_KINDS.has(installationKind(item))
-      ) {
+      const kind = installationKind(item);
+      if (!TRANSLATION_KINDS.has(kind)) {
         continue;
       }
-      changes.set(
-        item.provider_id,
-        item.state === "removed"
-          ? "removal"
-          : item.active_version
-            ? "update"
-            : "install",
-      );
+      if (kind === "translator" && item.state !== "removed") {
+        installedEnginePlugins?.add(item.provider_id);
+      }
+      if (isRemoving(item)) {
+        removing.add(item.provider_id);
+      }
+      if (item.needs_restart === true) {
+        changes.set(
+          item.provider_id,
+          item.state === "removed"
+            ? "removal"
+            : item.active_version
+              ? "update"
+              : "install",
+        );
+      }
     }
-    return changes;
+    return { ids: changes, removing, installedEnginePlugins };
   }, [installations.data]);
-  // The translator plugins being removed while Bazarr+ runs: no restart waits on them, and the row goes by itself.
-  const removing = useMemo(
-    () =>
-      new Set(
-        (installations.data ?? [])
-          .filter(
-            (item) =>
-              isRemoving(item) && TRANSLATION_KINDS.has(installationKind(item)),
-          )
-          .map((item) => item.provider_id),
-      ),
-    [installations.data],
-  );
   return useMemo(() => {
-    if (ids.size === 0 && removing.size === 0) {
-      return { state, waiting: 0 };
-    }
-    if (!state) {
-      return { state, waiting: ids.size };
+    if (!state || (ids.size === 0 && removing.size === 0)) {
+      return { state, waiting: ids.size, installedEnginePlugins };
     }
     const mark = <T extends { plugin_id: string }>(engine: T): T => {
       const change = ids.get(engine.plugin_id);
@@ -143,6 +137,7 @@ export function useRestartAware(state: TranslationState | undefined): {
       // Counted from the installations, not from the engines the page lists: a removal that deleted its
       // data has no engine left, and a plugin whose release is still active is in neither list.
       waiting: ids.size,
+      installedEnginePlugins,
     };
-  }, [state, ids, removing]);
+  }, [state, ids, removing, installedEnginePlugins]);
 }

@@ -3,6 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { http, HttpResponse } from "msw";
 import { beforeEach, describe, expect, it } from "vitest";
 import queryClient from "@/apis/queries";
+import { QueryKeys } from "@/apis/queries/keys";
 import { plainSummary } from "@/components/plugin-consent/fixtures";
 import {
   forgetPasswordConfirmation,
@@ -1810,6 +1811,16 @@ describe("Translation page, an engine picked while it waits as the fallback", ()
     let first = true;
     state = { ...state, engine: 2, fallback_engine: null };
     server.use(
+      http.get("/api/plugins/installations", () =>
+        HttpResponse.json({
+          data: state.instances.map((item) => ({
+            provider_id: item.plugin_id,
+            kind: "translator",
+            state: "active",
+            active_version: item.plugin_version,
+          })),
+        }),
+      ),
       http.put("/api/translation/pointers", async ({ request }) => {
         const body = (await request.json()) as {
           engine?: number | null;
@@ -2474,7 +2485,7 @@ describe("Translation page, an engine installed and waiting for a restart", () =
     expect(screen.queryByText(/waiting for a restart/)).not.toBeInTheDocument();
   });
 
-  it("removes an engine from the fallback choices as it is being removed", async () => {
+  it("keeps a removing engine out of the fallback choices after its installation disappears", async () => {
     installedEngine(true);
     state = {
       ...state,
@@ -2505,22 +2516,18 @@ describe("Translation page, an engine installed and waiting for a restart", () =
     ).toBeInTheDocument();
     expect(input).toHaveValue("None");
 
-    state = {
-      ...state,
-      fallback_engine: null,
-      instances: [
-        second,
-        lingarr(),
-        engine({ plugin: null, configured: false }),
-      ],
-    };
     server.use(
       http.get("/api/plugins/installations", () =>
         HttpResponse.json({ data: [] }),
       ),
     );
-    await queryClient.invalidateQueries();
-    await within(group).findByText("Plugin not running");
+    // The installation poll sees the completed uninstall. Translation state is still cached.
+    await queryClient.invalidateQueries({
+      queryKey: [QueryKeys.Plugins, "installations"],
+    });
+    await waitFor(() =>
+      expect(within(group).queryByText("Removing")).not.toBeInTheDocument(),
+    );
     expect(
       within(listbox).queryByRole("option", {
         name: /AI Subtitle Translator/,
