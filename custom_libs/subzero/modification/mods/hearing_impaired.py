@@ -38,6 +38,7 @@ class CapsCueProcessor(NReProcessor):
 _HI_CONTENT_RE = re.compile(r'[^\W_]', re.UNICODE)
 _MUSIC_SYMBOL_RE = re.compile(r'[*#¶♫♪]')
 _LYRIC_NOTES = frozenset("¶♫♪")
+_LEGACY_LYRIC_MARKS = frozenset("*#")
 _LYRIC_START_RE = re.compile(r"^[-\s>~]*([¶♫♪]+|[*#](?=\s))")
 _LYRIC_END_RE = re.compile(r"([¶♫♪]+|(?<=\s)[*#])[)\]]?$")
 _BRACKET_SPAN = r"(?:-[ \t]*)?(?:\[[^\[\]]+\]|\([^()]+\))"
@@ -59,17 +60,27 @@ def _lyric_boundaries(line):
     return (start.group(1)[-1] if start else None, end.group(1)[-1] if end else None)
 
 
-def has_spanning_lyric_marks(lines):
-    """Whether one marker pair spans the cue's visible lines."""
+def _has_spanning_lyric_marks(lines, marks):
     if any(line is None for line in lines):
         return False
     opening, first_end = _lyric_boundaries(lines[0])
     last_start, closing = _lyric_boundaries(lines[-1])
-    return (opening is not None and opening == closing
+    return (opening in marks and opening == closing
             and first_end is None and last_start is None
             and _HI_CONTENT_RE.search(lines[0]) is not None
             and _HI_CONTENT_RE.search(lines[-1]) is not None
-            and not any(all(_lyric_boundaries(line)) for line in lines[1:-1]))
+            and not any(any(_lyric_boundaries(line)) for line in lines[1:-1]))
+
+
+def spanning_lyric_entry(visible_lines, source_entry, alignment):
+    if _has_spanning_lyric_marks(visible_lines, _LYRIC_NOTES):
+        return LINE_BREAK.join(visible_lines)
+    # An asterisk or hash exposed by unwrapping styles may be spoken content.
+    # Verify legacy boundaries in the source and use the existing raw match.
+    source_lines = source_entry.removeprefix(alignment).split(LINE_BREAK)
+    if _has_spanning_lyric_marks(source_lines, _LEGACY_LYRIC_MARKS):
+        return source_entry
+    return None
 
 
 class MusicEntryProcessor(NReProcessor):
@@ -108,7 +119,7 @@ class MusicEntryProcessor(NReProcessor):
             return content
         if line_scoped:
             opening, closing = _lyric_boundaries(entry)
-            marked = opening in _LYRIC_NOTES or closing in _LYRIC_NOTES or (opening and opening == closing)
+            marked = opening in _LYRIC_NOTES or closing in _LYRIC_NOTES
             # Use visible text only to decide whether to remove the whole line.
             if marked and self.pattern.fullmatch(entry):
                 return ""

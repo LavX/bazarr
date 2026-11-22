@@ -736,6 +736,25 @@ def test_aligned_lyrics_respect_visible_marker_boundaries(lines, word, default_l
     assert "Hallo." in output
 
 
+@pytest.mark.parametrize("mods", MODS)
+def test_aligned_lyrics_do_not_join_separate_spans_over_dialogue(mods, render):
+    lines = ["♪ I will wait for you", "Until morning ♪", "Please stay here.",
+             "♪ The sun will rise", "And we will be free <i>♪</i>"]
+    expected = lines if mods == MODS[1] else ["Please stay here."]
+    output = render(_pair_srt([r"{\an8}" + lines[0], *lines[1:]]), mods)
+    assert _cue_text(output) == expected
+    assert "Hallo." in output
+
+
+@pytest.mark.parametrize("mods", MODS)
+@pytest.mark.parametrize("key", ["*", "#"])
+def test_alignment_and_inline_styles_cannot_turn_a_keypad_key_into_a_lyric(key, mods, render):
+    lines = [f"{key} To repeat this menu,", f"press <i>{key}</i>"]
+    output = render(_pair_srt([r"{\an8}" + lines[0], lines[1]]), mods)
+    assert _cue_text(output) == lines
+    assert "Hallo." in output
+
+
 def test_default_srt_alignment_policy_matches_reference(development_libs, tmp_path):
     jobs = [(_pair_srt([r"{\an8}Hello there."]), ["remove_HI"])]
     reference = _development_outputs(development_libs, tmp_path, jobs)

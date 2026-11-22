@@ -8,7 +8,7 @@ import logging
 import time
 
 from .mods import EMPTY_TAG_PROCESSOR
-from .mods.hearing_impaired import has_spanning_lyric_marks, is_bracketed_cue
+from .mods.hearing_impaired import is_bracketed_cue, spanning_lyric_entry
 from .markup import LINE_BREAK, unwrap_entry, visible_style_text
 from .exc import EmptyEntryError
 from .registry import registry
@@ -303,7 +303,8 @@ class SubtitleModifications(object):
             start_tags = []
             end_tags = []
 
-            t = entry.text.strip()
+            source_entry = entry.text.strip()
+            t = source_entry
             # Markup layer (Remove HI runs only): the rules see the plain text of a cue whose
             # markup is simple, and each surviving line gets its own tags back.
             wrapped = None
@@ -326,11 +327,12 @@ class SubtitleModifications(object):
             aligned_multiline = wrapped is not None and bool(wrapped.alignment) and len(line_split) > 1
             bracket_line_scoped = aligned_multiline and original_entry is None and not is_bracketed_cue(t)
             music_lines = None
+            spanning_entry = None
             if aligned_multiline:
                 music_lines = line_split if original_entry is None else [visible_style_text(line) for line in line_split]
-            spanning_lyrics = music_lines is not None and has_spanning_lyric_marks(music_lines)
-            music_line_scoped = music_lines is not None and not spanning_lyrics
-            music_entry = LINE_BREAK.join(music_lines) if spanning_lyrics else entry_for_rules
+                spanning_entry = spanning_lyric_entry(music_lines, source_entry, wrapped.alignment)
+            music_line_scoped = aligned_multiline and spanning_entry is None
+            music_entry = spanning_entry if spanning_entry is not None else entry_for_rules
             skip_entry = False
             origins = []
             for line_no, line in enumerate(line_split):
