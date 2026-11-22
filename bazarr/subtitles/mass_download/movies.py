@@ -112,8 +112,6 @@ def movies_download_subtitles(no, job_id=None, job_sub_function=False, arr_insta
                                              job_id=job_id,
                                              arr_instance_id=arr_instance_id):
                 if result:
-                    if isinstance(result, tuple) and len(result):
-                        result = result[0]
                     store_subtitles_movie(movie.path, moviePath, arr_instance_id=arr_instance_id)
                     history_log_movie(1, no, result, arr_instance_id=arr_instance_id)
                     send_notifications_movie(no, result.message, arr_instance_id=arr_instance_id)
@@ -185,8 +183,6 @@ def movie_download_specific_subtitles(radarr_id, language, hi, forced, job_id=No
                                          job_id=job_id, arr_instance_id=arr_instance_id))
         if isinstance(result, list) and len(result):
             result = result[0]
-            if isinstance(result, tuple) and len(result):
-                result = result[0]
             history_log_movie(1, radarr_id, result, arr_instance_id=arr_instance_id)
             send_notifications_movie(radarr_id, result.message, arr_instance_id=arr_instance_id)
             store_subtitles_movie(result.path, moviePath, arr_instance_id=arr_instance_id)

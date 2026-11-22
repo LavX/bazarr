@@ -214,8 +214,6 @@ def search_source_item(item_id, job_id=None):
                                          job_id=job_id, source=context):
             if not result:
                 continue
-            if isinstance(result, tuple) and len(result):
-                result = result[0]
             index_item(item_id)
             history_log_source(1, context, result)
             downloaded += 1

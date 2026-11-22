@@ -258,6 +258,10 @@ def _index_keep_all_outputs(video_path, sonarr_series_id=None, sonarr_episode_id
 
         store_subtitles_movie(path_mappings.path_replace_reverse_instance(video_path, arr_instance_id, 'movie'), video_path, arr_instance_id=arr_instance_id)
         event_stream(type='movie', payload=radarr_id)
+        return
+
+    logging.warning('BAZARR cannot index synchronized subtitles for %s because there is no media owner. '
+                    'To index these outputs, provide an indexing callback.', video_path)
 
 
 def _record_sports_sync(subsync, sync_result, context, publication_guard, versions, srt_lang, hi, forced):
@@ -365,6 +369,7 @@ def sync_subtitles(video_path,
                    publication_guard=None,
                    return_job_id=False,
                    source=None):
+    """Synchronize a subtitle. For keep-all output without a media owner, pass an indexing callback."""
     if source is not None and context is not None:
         raise ValueError('A source item cannot be combined with a sports context')
     try:
@@ -507,9 +512,10 @@ def sync_subtitles(video_path,
                     if context is not None:
                         _record_sports_sync(subsync, sync_result, context, publication_guard,
                                            published_versions, srt_lang, hi, forced)
-                    if callback and source_version is None:
-                        callback()
-                    elif not callback and context is None and getattr(sync_result, 'output_mode', None) == OUTPUT_MODE_KEEP_ALL:
+                    if callback:
+                        if source_version is None:
+                            callback()
+                    elif context is None and getattr(sync_result, 'output_mode', None) == OUTPUT_MODE_KEEP_ALL:
                         _index_keep_all_outputs(
                             video_path,
                             sonarr_series_id=sonarr_series_id,
