@@ -45,11 +45,15 @@ hub_registry.register_active_provider_classes = register_provider
 
 import init
 from app.config import settings
+from app.startup import prepare_database_and_plugins
+from flask import Flask
+
+registration_ok = prepare_database_and_plugins(Flask(__name__))
 
 print("__RESULT__" + json.dumps({
     "enabled": list(settings.general.enabled_providers),
     "disabled": list(settings.general.disabled_providers),
-    "registration_ok": init.provider_hub_registration_ok,
+    "registration_ok": registration_ok,
 }))
 '''
 

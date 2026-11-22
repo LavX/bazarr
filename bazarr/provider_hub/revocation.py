@@ -221,6 +221,25 @@ def effective(*copies: Mapping[str, ChannelList]) -> dict[str, ChannelList]:
     return merged
 
 
+def stored_lists(state: Mapping[str, Any]) -> dict[str, ChannelList]:
+    """The lists this host accepted from fetched catalogs."""
+    from .state import OFFICIAL_CATALOG_SOURCE_ID
+
+    official = (state.get("catalog_sources") or {}).get(OFFICIAL_CATALOG_SOURCE_ID)
+    return effective(from_source(official), read_mirror())
+
+
+def runtime_entries(state: Mapping[str, Any] | None = None) -> tuple[Revocation, ...]:
+    """Apply the newest verified policy of each channel, including the image."""
+    from .floor import baked_revocation_lists
+
+    if state is None:
+        from .state import load_state
+
+        state = load_state()
+    return entries_of(effective(stored_lists(state), baked_revocation_lists()))
+
+
 def entries_of(lists: Mapping[str, ChannelList]) -> tuple[Revocation, ...]:
     """What the host enforces: the union of the channels' entries."""
     seen: dict[Revocation, None] = {}

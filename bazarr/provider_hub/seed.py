@@ -23,7 +23,7 @@ from typing import Any
 from . import revocation
 from .bundle import BundleValidationError, verify_bundle_tree
 from .bundled_wheels import verified_wheels_dir
-from .compatibility import AVAILABLE_RUNTIMES, HostFacts, evaluate, evaluate_runtime, host_platform
+from .compatibility import AVAILABLE_RUNTIMES, HostFacts, current_host, evaluate, evaluate_runtime, host_platform
 from .kinds.translator import TranslatorKind
 from .manifest import (
     BUNDLE_MANIFEST_FILE,
@@ -354,7 +354,8 @@ def _seed_release(snapshot, index: dict[str, Any], entry: dict[str, Any], raw: d
 
 
 def _seed_releases(
-    plugin_id: str, exact_version: str | None = None, requested: dict[str, Any] | None = None,
+    plugin_id: str, revocations: tuple[revocation.Revocation, ...],
+    exact_version: str | None = None, requested: dict[str, Any] | None = None,
 ) -> Iterable[Release]:
     from .floor import FloorError, _usable_floor
 
@@ -365,7 +366,6 @@ def _seed_releases(
         index = _index(snapshot)
         signed = snapshot.signed_catalog()
         document = signed if signed is not None else snapshot.catalog()
-        revocations = revocation.parse(signed.get(revocation.FIELD_NAME)) if signed is not None else ()
         manifests = {
             raw["version"]: (raw, plugin)
             for raw, plugin in _catalog_manifests(document, snapshot.repo, snapshot.commit, signed=signed is not None)
@@ -394,6 +394,21 @@ def _seed_releases(
             logger.warning("The catalog runtime seed for %s %s is not used: %s", plugin_id, raw["version"], error)
 
 
+def _runtime_refusal(raw: dict[str, Any], revocations: tuple[revocation.Revocation, ...]) -> str | None:
+    """Check rules that apply equally to config and image releases."""
+    try:
+        plugin = parse_plugin_manifest(raw)
+    except ManifestValidationError as error:
+        return str(error)
+    if revocation.lookup(revocations, plugin.plugin_id, plugin.version) is not None:
+        return "the release was revoked by the official catalog"
+    # Config may hold an OCI service. Only image releases are confined to the
+    # Python worker runtime supplied by the seed builder.
+    host = _seed_host() if (plugin.artifact, plugin.process) in AVAILABLE_RUNTIMES else current_host()
+    compatible, reason = evaluate_runtime(plugin, host)
+    return None if compatible else reason
+
+
 def select_release(
     config_root: Path,
     plugin_id: str,
@@ -406,11 +421,15 @@ def select_release(
 
     from .env_registry import _adoptable
 
+    revocations = revocation.runtime_entries()
     config = None
     if config_candidate is not None:
         manifest, bundle_path, python_path = config_candidate
         if manifest.provider_id == plugin_id and (requested is None or _same_manifest(manifest.raw, requested)):
             try:
+                refusal = _runtime_refusal(manifest.raw, revocations)
+                if refusal:
+                    raise SeedError(refusal)
                 bundle = validated_bundle_path(config_root, bundle_path)
                 interpreter = validated_interpreter(config_root, python_path)
                 if (bundle is not None and interpreter is not None and interpreter.is_file()
@@ -421,7 +440,7 @@ def select_release(
                 logger.warning("The config release for %s is not usable: %s", plugin_id, error)
     if config is not None and usable is not None and not usable(config):
         config = None
-    seeded = _seed_releases(plugin_id, requested=requested)
+    seeded = _seed_releases(plugin_id, revocations, requested=requested)
     seed = next((release for release in seeded if usable is None or usable(release)), None)
     if config is not None and (seed is None or version_key(config.manifest.version) >= version_key(seed.manifest.version)):
         return config
@@ -441,6 +460,11 @@ def resolve_paths(
     """
     bundle = validated_bundle_path(config_root, bundle_path)
     interpreter = validated_interpreter(config_root, python_path)
+    revocations = revocation.runtime_entries()
+    refusal = _runtime_refusal(manifest, revocations)
+    if refusal:
+        logger.warning("The runtime for %s is not used: %s", manifest_provider_id(manifest), refusal)
+        return None
     if bundle is not None and interpreter is not None:
         return bundle, interpreter
     if has_parent_reference(bundle_path) or has_parent_reference(python_path):
@@ -449,7 +473,7 @@ def resolve_paths(
     version = manifest.get("version")
     if not plugin_id or not isinstance(version, str):
         return None
-    for release in _seed_releases(plugin_id, version):
+    for release in _seed_releases(plugin_id, revocations, version):
         if (_same_manifest(manifest, release.manifest.raw)
                 and Path(bundle_path) == release.bundle and Path(python_path) == release.interpreter):
             return release.bundle, release.interpreter

@@ -44,10 +44,9 @@ else:
     # there's missing embedded packages after a commit
     check_if_new_update(startup=True)
 
-from app.database import (System, database, update, migrate_db, create_db_revision, upgrade_languages_profile_values,  # noqa: E402
-                          fix_languages_profiles_with_duplicate_ids)
+from app.database import System, database, update, create_db_revision  # noqa: E402
 from app.notifier import update_notifier  # noqa: E402
-from provider_hub.service import activate_staged_installations  # noqa: E402
+from app.startup import prepare_database_and_plugins  # noqa: E402
 from languages.get_languages import load_language_in_db  # noqa: E402
 from app.jobs_queue import jobs_queue  # noqa: E402
 from app.signalr_client import start_sonarr_signalr, start_radarr_signalr  # noqa: E402
@@ -60,30 +59,7 @@ if args.create_db_revision:
     create_db_revision(app)
     stop_bazarr(EXIT_NORMAL)
 else:
-    migrate_db(app)
-    try:
-        # The first start after an upgrade has no translation runtime tables until now.
-        if getattr(settings.translator, "runtime_v2", False) is True:
-            from subtitles.tools.translate.runtime import run_startup_tasks
-            run_startup_tasks()
-    except Exception:  # pragma: no cover - must not prevent startup
-        logging.exception("Unable to start the translation runtime after the migrations")
-    upgrade_languages_profile_values()
-    fix_languages_profiles_with_duplicate_ids()
-    try:
-        if getattr(settings.translator, "runtime_v2", False) is True:
-            from subtitles.tools.translate.runtime.startup import start_google_from_seed
-            start_google_from_seed()
-    except Exception:  # pragma: no cover - the engine must not prevent startup
-        logging.exception("Unable to start the seeded Google Translate engine")
-    activate_staged_installations()
-    try:
-        # A removal staged in the last run is finished by now: clear what the removed translators left.
-        if getattr(settings.translator, "runtime_v2", False) is True:
-            from subtitles.tools.translate.runtime import worker_binding
-            worker_binding.sweep_removed_plugins()
-    except Exception:  # pragma: no cover - must not prevent startup
-        logging.exception("Unable to clear the folders of removed translators")
+    prepare_database_and_plugins(app)
 
 # Mark the workers this run starts, then end the leftovers of a previous run.
 # The mark goes first so nothing this run starts can be mistaken for a

@@ -43,6 +43,7 @@ import stat
 import threading
 
 from dataclasses import dataclass
+from functools import cached_property
 from pathlib import Path
 from typing import Any
 
@@ -156,6 +157,16 @@ class Floor:
     def signed_catalog(self) -> dict[str, Any] | None:
         """The verified signed catalog, parsed afresh, or None when the snapshot has none that verified."""
         return json.loads(self.signed_bytes) if self.signed_bytes is not None else None
+
+    @cached_property
+    def release_revocations(self) -> dict[str, revocation.ChannelList]:
+        """The verified list with its channel and signed sequence number."""
+        document = self.signed_catalog()
+        if document is None:
+            return {}
+        return {self.branch: revocation.ChannelList(
+            document["signed_version"], revocation.parse(document.get(revocation.FIELD_NAME)),
+        )}
 
     def read(self, path: str) -> bytes:
         """The bytes of one snapshot file, checked against floor.json first."""
@@ -366,6 +377,12 @@ def seed_candidate(source: dict[str, Any], entries: dict[str, Any]) -> tuple[dic
         return {key: signed[key] for key in keys if key in signed}, floor.commit
     document = floor.catalog()
     return {key: value for key, value in document.items() if key != "plugins"}, floor.commit
+
+
+def baked_revocation_lists() -> dict[str, revocation.ChannelList]:
+    """Read the image's verified policy without touching the fetched feed ledger."""
+    snapshot = _usable_floor()
+    return snapshot.release_revocations if snapshot is not None else {}
 
 
 def signed_context(source: dict[str, Any]) -> dict[str, Any] | None:

@@ -3438,14 +3438,13 @@ def _source_may_carry_new_kinds(state: dict[str, Any], source_id: str | None) ->
 
 def _revocation_lists(state: dict[str, Any]) -> dict[str, revocation.ChannelList]:
     """The lists this host holds, by channel: of the database copy and the file copy, the newer one."""
-    official = (state.get("catalog_sources") or {}).get(OFFICIAL_CATALOG_SOURCE_ID)
-    return revocation.effective(revocation.from_source(official), revocation.read_mirror())
+    return revocation.stored_lists(state)
 
 
 def _revocations(state: dict[str, Any]) -> tuple[revocation.Revocation, ...]:
     """What the official catalog has revoked, as this host last verified it: every channel's list together.
     Nothing verified means none."""
-    return revocation.entries_of(_revocation_lists(state))
+    return revocation.runtime_entries(state)
 
 
 def _revocations_stale(state: dict[str, Any], channels: Iterable[str] = revocation.CHANNELS) -> list[str]:
@@ -3505,10 +3504,6 @@ def _install_refusal(
             document = floor.signed_context(source)
             if document is None and kind != SUBTITLE_PROVIDER:
                 return "the bundled plugin catalog no longer verifies"
-            if document is not None:
-                revoked = revocation.lookup(revocation.parse(document.get(revocation.FIELD_NAME)), provider_id, version)
-                if revoked is not None:
-                    return _revocation_text(revocation.refusal, revoked, name or provider_id, version, "installed")
         return _supply_refusal(state)
     return None
 
