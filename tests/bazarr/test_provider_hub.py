@@ -7246,7 +7246,7 @@ def test_pool_drops_subtitles_whose_language_is_not_a_language_object(monkeypatc
         def list_subtitles(self, video, languages):
             return [bad, good]
 
-    monkeypatch.setitem(extensions.provider_registry.providers, "fakeguard", FakeGuardProvider)
+    monkeypatch.setitem(extensions.provider_registry, "fakeguard", FakeGuardProvider)
 
     pool = SZProviderPool(providers=["fakeguard"])
     pool.initialized_providers["fakeguard"] = FakeGuardProvider()
@@ -7299,7 +7299,7 @@ def _hi_listing_pool(monkeypatch, candidate, *, listed_languages=None, provider_
     # Manifests cannot express a hearing-impaired variant, so a test that needs one lists it directly.
     if listed_languages is not None:
         provider_class.languages = listed_languages
-    monkeypatch.setitem(extensions.provider_registry.providers, provider_id, provider_class)
+    monkeypatch.setitem(extensions.provider_registry, provider_id, provider_class)
     pool = SZProviderPool(providers=[provider_id])
     pool.initialized_providers[provider_id] = provider_class()
     return pool, worker
@@ -7349,7 +7349,7 @@ def test_hi_request_stays_unsupported_for_native_provider_without_hi_variant(mon
             calls.append(languages)
             return []
 
-    monkeypatch.setitem(extensions.provider_registry.providers, "fakenative", FakeNativeProvider)
+    monkeypatch.setitem(extensions.provider_registry, "fakenative", FakeNativeProvider)
     pool = SZProviderPool(providers=["fakenative"])
     pool.initialized_providers["fakenative"] = FakeNativeProvider()
     movie = Movie("/media/example.mkv", "Example Movie", year=2024)

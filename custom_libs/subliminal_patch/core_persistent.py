@@ -584,8 +584,10 @@ def list_all_subtitles_parallel(videos, languages, pool_instance,
 
             futures: Dict[Future, str] = {}
             start_times: Dict[Future, float] = {}
+            # Health needs the detailed status too: a skipped search (including
+            # an interrupted release) says nothing about the provider's health.
+            options = {"detailed": True} if on_outcome is not None or on_result is not None else {}
             for p in providers:
-                options = {"detailed": True} if on_outcome is not None else {}
                 fut = _safe_submit(executor,
                                    pool_instance.list_subtitles_provider,
                                    p, video, languages, **options)

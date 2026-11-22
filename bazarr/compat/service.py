@@ -139,7 +139,7 @@ def _get_compat_pool(*, restore_available=False):
                 configs = get_providers_auth()
                 for name in missing:
                     try:
-                        _compat_pool.adopt_provider(name, configs.get(name, {}))
+                        _compat_pool.adopt_provider(name, configs)
                     except KeyError:
                         # Registration or the pool's adoption gate can change
                         # after the availability snapshot. Coverage reports it.

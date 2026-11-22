@@ -102,7 +102,7 @@ def world(tmp_path, monkeypatch):
     from subliminal_patch.extensions import provider_registry
 
     monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(tmp_path / "state.json"))
-    before = dict(provider_registry.providers)
+    before = {name: provider_registry[name] for name in provider_registry}
     hub_ids = set(registry._REGISTERED_PROVIDER_HUB_IDS)
     shadowed = dict(registry._SHADOWED_BUILT_INS)
     withdrawn = set(registry._WITHDRAWN_PROVIDER_IDS)
@@ -143,8 +143,10 @@ def world(tmp_path, monkeypatch):
     try:
         assert detach.wait_idle(WAIT)
     finally:
-        provider_registry.providers.clear()
-        provider_registry.providers.update(before)
+        for name in provider_registry:
+            provider_registry.unregister(name)
+        for name, provider_class in before.items():
+            provider_registry.register(name, provider_class)
         registry._REGISTERED_PROVIDER_HUB_IDS.clear()
         registry._REGISTERED_PROVIDER_HUB_IDS.update(hub_ids)
         registry._SHADOWED_BUILT_INS.clear()
@@ -281,16 +283,16 @@ def test_a_download_in_flight_across_a_removal_finishes_and_the_next_one_is_refu
     assert again.skip_reason == "provider_excluded"
 
 
-def _subtitle():
+def _subtitle(name=PLUGIN):
     from subzero.language import Language
     from subliminal_patch.subtitle import Subtitle
 
     class Downloadable(Subtitle):
-        provider_name = PLUGIN
+        provider_name = name
 
         def __init__(self):
             super().__init__(Language("eng"))
-            self.provider_name = PLUGIN
+            self.provider_name = name
             self.page_link = None
 
         @property
@@ -1448,6 +1450,81 @@ def test_a_snapshot_read_before_the_plugin_left_is_dropped_even_before_the_pools
     assert "request_delay_ms" not in pool.provider_configs.get(BUILT_IN, {})
 
 
+@pytest.mark.parametrize("enabled", [True, False])
+def test_a_settings_merge_rechecks_the_owner_after_another_update(world, monkeypatch, enabled):
+    from provider_hub import registry
+    from subliminal_patch import core
+
+    _plugin_over_built_in(world, monkeypatch)
+    first = "other_built_in"
+    world.registry.register(first, _credentialed_built_in(first))
+    names = [first, BUILT_IN] if enabled else [first]
+    pool = world.pool(*names)
+    pool.provider_configs[first] = {"password": "old"}
+    pool.provider_configs[BUILT_IN] = {"request_delay_ms": 5}
+    stale = core.ConfigSnapshot({first: {"password": "changed"}, BUILT_IN: {"request_delay_ms": 10}})
+    stale.ownership = world.registry.ownership_generations()
+    monkeypatch.setattr("app.get_providers.get_providers_auth", lambda: {BUILT_IN: {"password": "own"}})
+    entered, resume = threading.Event(), threading.Event()
+    retire = pool.retire_provider
+
+    def pause_first_restart(name, *args, **kwargs):
+        if name == first:
+            entered.set()
+            assert resume.wait(WAIT)
+        return retire(name, *args, **kwargs)
+
+    monkeypatch.setattr(pool, "retire_provider", pause_first_restart)
+    thread, outcome = _in_thread(pool.provider_configs.update, stale)
+    try:
+        assert entered.wait(WAIT)
+        assert registry.unregister_provider_class(BUILT_IN).restored_built_in
+        registry.release_provider_id(BUILT_IN)
+        fresh = core.ConfigSnapshot({BUILT_IN: {"password": "new"}})
+        fresh.ownership = world.registry.ownership_generations()
+        pool.provider_configs.update(fresh)
+    finally:
+        resume.set()
+        thread.join(WAIT)
+
+    assert outcome == {"value": None}
+    assert pool.provider_configs[first] == {"password": "changed"}
+    assert pool.provider_configs[BUILT_IN] == {"password": "new"}
+
+
+def test_a_settings_restart_started_by_the_plugin_leaves_the_restored_built_in_alone(world, monkeypatch):
+    from provider_hub import registry
+    from subliminal_patch import core
+
+    _plugin_over_built_in(world, monkeypatch)
+    pool = world.pool(BUILT_IN)
+    pool.provider_configs[BUILT_IN] = {"request_delay_ms": 5}
+    stale = core.ConfigSnapshot({BUILT_IN: {"request_delay_ms": 10}})
+    stale.ownership = world.registry.ownership_generations()
+    monkeypatch.setattr("app.get_providers.get_providers_auth", lambda: {BUILT_IN: {}})
+    entered, resume = threading.Event(), threading.Event()
+    retire = pool.retire_provider
+
+    def pause_restart(name, *args, **kwargs):
+        entered.set()
+        assert resume.wait(WAIT)
+        return retire(name, *args, **kwargs)
+
+    monkeypatch.setattr(pool, "retire_provider", pause_restart)
+    thread, result = _in_thread(pool.provider_configs.update, stale)
+    try:
+        assert entered.wait(WAIT)
+        assert registry.unregister_provider_class(BUILT_IN).restored_built_in
+        registry.release_provider_id(BUILT_IN)
+        restored = pool[BUILT_IN]
+    finally:
+        resume.set()
+        thread.join(WAIT)
+
+    assert result == {"value": None}
+    assert pool[BUILT_IN] is restored
+
+
 def test_a_snapshot_that_carries_no_stamp_is_merged_whole(world):
     from subliminal_patch import core
 
@@ -1478,6 +1555,17 @@ def test_the_registry_counts_a_handover_between_a_plugin_and_a_built_in_and_noth
     assert world.registry.ownership_generations()["swapped"] == start + 2
 
 
+def test_deleting_a_plugin_from_the_registry_moves_its_ownership_stamp(world):
+    world.run()
+    stamp = world.registry.ownership_generations()[PLUGIN]
+
+    del world.registry[PLUGIN]
+
+    assert world.registry.ownership_generations()[PLUGIN] == stamp + 1
+    with pytest.raises(KeyError):
+        del world.registry[PLUGIN]
+
+
 def test_a_built_in_built_in_the_window_before_the_pools_are_released_is_retired_and_rebuilt_clean(world, monkeypatch):
     """The class swap and the release of the pools are two steps. A pool that builds the restored built-in between
     them holds an instance made from the plugin's configuration: it is retired right after the release, and the next
@@ -1506,7 +1594,7 @@ def test_a_built_in_built_in_the_window_before_the_pools_are_released_is_retired
         def __init__(self, **config):
             self.config = config
 
-    world.registry.providers[BUILT_IN] = plugin  # put the plugin back so remove swaps it once more
+    world.registry.register(BUILT_IN, plugin)  # put the plugin back so remove swaps it once more
     registry._SHADOWED_BUILT_INS[BUILT_IN] = Takes
     monkeypatch.setattr(registry, "release_provider_id", release_after_a_build)
 
@@ -1517,6 +1605,136 @@ def test_a_built_in_built_in_the_window_before_the_pools_are_released_is_retired
     # The instance made in the window is gone from the pool; the next one is built from the built-in's own settings.
     assert pool.initialized_providers.get(BUILT_IN) is not built[0]
     assert pool[BUILT_IN].config == {"password": "own"}
+
+
+def test_the_release_window_built_in_finishes_before_its_replacement_initializes(world, monkeypatch):
+    from provider_hub import registry
+
+    built_in, _ = _plugin_over_built_in(world, monkeypatch)
+    pool = world.pool(BUILT_IN)
+    entered, resume, terminated = threading.Event(), threading.Event(), threading.Event()
+    replacement_waiting = threading.Event()
+    wait = pool._built_in_retirement_ended.wait
+
+    def note_waiting(*args):
+        replacement_waiting.set()
+        return wait(*args)
+
+    monkeypatch.setattr(pool._built_in_retirement_ended, "wait", note_waiting)
+
+    class Searching(built_in):
+        def __init__(self, **config):
+            self.config = config
+
+        def initialize(self):
+            if self.config == {"password": "own"}:
+                assert terminated.is_set()
+
+        def list_subtitles(self, video, languages):
+            entered.set()
+            assert resume.wait(WAIT)
+            assert not terminated.is_set()
+            return []
+
+        def terminate(self):
+            if "request_delay_ms" in self.config:
+                terminated.set()
+
+    registry._SHADOWED_BUILT_INS[BUILT_IN] = Searching
+    pool.provider_configs[BUILT_IN] = {"request_delay_ms": 5}
+    assert registry.unregister_provider_class(BUILT_IN).restored_built_in
+    old = pool[BUILT_IN]
+    thread, outcome = _in_thread(_search, pool, BUILT_IN)
+    replacement = None
+    try:
+        assert entered.wait(WAIT)
+        monkeypatch.setattr("app.get_providers.get_providers_auth", lambda: {BUILT_IN: {"password": "own"}})
+        registry.release_provider_id(BUILT_IN)
+
+        assert not terminated.is_set()
+        replacement, built = _in_thread(pool.__getitem__, BUILT_IN)
+        assert replacement_waiting.wait(WAIT)
+    finally:
+        resume.set()
+        thread.join(WAIT)
+        if replacement is not None:
+            replacement.join(WAIT)
+
+    assert outcome["value"].status == "empty"
+    clean = built["value"]
+    assert clean is not old and clean.config == {"password": "own"}
+
+
+@pytest.mark.parametrize("detailed", [True, False])
+def test_a_cut_search_does_not_mark_the_restored_built_in_as_failed(world, monkeypatch, detailed):
+    from app import get_providers
+    from provider_hub import detach, service
+    from subzero.language import Language
+    from subliminal_patch.core_persistent import list_all_subtitles_parallel
+    from subliminal_patch.provider_health import ProviderHealthTracker
+
+    _plugin_over_built_in(world, monkeypatch)
+    gate, started = threading.Event(), threading.Event()
+    _, worker = world.run(BUILT_IN, gate=gate, started=started)
+    pool = world.pool(BUILT_IN)
+    monkeypatch.setattr(detach, "REMOVE_GRACE_SECONDS", 0.01)
+    monkeypatch.setattr(get_providers, "get_providers_auth", lambda: {BUILT_IN: {}})
+    monkeypatch.setattr(get_providers, "tp", {})
+    monkeypatch.setattr(get_providers, "event_stream", lambda **kwargs: None)
+    pool.throttle_callback = lambda name, error, **kw: get_providers.provider_throttle(name, error, wait=False, **kw)
+    health = ProviderHealthTracker()
+    monkeypatch.setattr("subliminal_patch.provider_health.get_tracker", lambda: health)
+    outcomes = []
+    on_outcome = (lambda result, elapsed: outcomes.append(result)) if detailed else None
+    video = _movie()
+    thread, result = _in_thread(list_all_subtitles_parallel, [video], {Language("eng")}, pool,
+                                on_result=health.record, on_outcome=on_outcome)
+    try:
+        assert started.wait(WAIT)
+        service.remove_installation(BUILT_IN)
+        thread.join(WAIT)
+        assert detach.wait_idle(WAIT)
+    finally:
+        gate.set()
+        thread.join(WAIT)
+
+    assert worker.cancels == 1
+    assert result["value"].get(video, []) == []
+    assert BUILT_IN not in get_providers.tp
+    assert BUILT_IN not in health.snapshot()
+    assert BUILT_IN not in pool.discarded_providers
+    assert world.row(BUILT_IN) is None
+    if detailed:
+        assert [(result.status, result.reason) for result in outcomes] == [("skipped", "provider_excluded")]
+
+
+def test_a_cut_download_does_not_throttle_or_discard_the_restored_built_in(world, monkeypatch):
+    from provider_hub import detach, service
+
+    _plugin_over_built_in(world, monkeypatch)
+    gate, started = threading.Event(), threading.Event()
+    _, worker = world.run(BUILT_IN, gate=gate, started=started)
+    pool = world.pool(BUILT_IN)
+    subtitle = _subtitle(BUILT_IN)
+    errors = []
+    pool.throttle_callback = lambda name, error, **kwargs: errors.append(error)
+    monkeypatch.setattr(detach, "REMOVE_GRACE_SECONDS", 0.01)
+    monkeypatch.setattr("app.get_providers.get_providers_auth", lambda: {BUILT_IN: {}})
+
+    thread, result = _in_thread(pool.download_subtitle, subtitle)
+    try:
+        assert started.wait(WAIT)
+        service.remove_installation(BUILT_IN)
+        thread.join(WAIT)
+        assert detach.wait_idle(WAIT)
+    finally:
+        gate.set()
+        thread.join(WAIT)
+
+    assert worker.cancels == 1
+    assert result == {"value": False}
+    assert subtitle.skip_reason == "provider_excluded"
+    assert errors == [] and BUILT_IN not in pool.discarded_providers
 
 
 def test_the_refusal_of_a_detached_plugins_candidate_logs_from_a_realistic_subtitle_too(world, caplog):

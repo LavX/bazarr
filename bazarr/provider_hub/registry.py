@@ -129,6 +129,8 @@ class HubProxyProvider(Provider):
     #: proxy admits no new operation and never starts a worker.
     _retired = False
     _active_operations = 0
+    #: Set before a forced stop so an interrupted call does not report a provider failure.
+    _cut = False
     #: Set by whichever path stops this proxy's worker first, so only one does.
     _stopping = False
 
@@ -172,7 +174,7 @@ class HubProxyProvider(Provider):
         instance. When the last admitted call of a retired proxy ends, the worker
         it may have started is stopped before the hold is released.
         """
-        from subliminal_patch.core import ProviderRetiredError
+        from subliminal_patch.core import ProviderCallInterruptedError, ProviderRetiredError
 
         with _PROXY_LOCK:
             if self._retired:
@@ -182,6 +184,12 @@ class HubProxyProvider(Provider):
             self._active_operations += 1
         try:
             yield
+        except Exception as error:
+            with _PROXY_LOCK:
+                cut = self._cut
+            if cut:
+                raise ProviderCallInterruptedError(self.provider_name) from error
+            raise
         finally:
             with _PROXY_LOCK:
                 self._active_operations -= 1
@@ -626,20 +634,19 @@ def unregister_provider_class(provider_id: str) -> Unregistered:
     left as it is. A search that already holds the class it looked up goes on with it: the pools drop their
     instances separately (``retire_provider_instances``).
     """
-    with _REGISTRY_GUARD:
+    with _REGISTRY_GUARD, provider_registry.lock:
         current = provider_registry[provider_id]
-        removed = current is not None and issubclass(current, HubProxyProvider) and provider_registry.unregister(
-            provider_id, expected=current) is not None
         built_in = _SHADOWED_BUILT_INS.pop(provider_id, None)
-        restored = False
-        if removed:
-            _REGISTERED_PROVIDER_HUB_IDS.discard(provider_id)
-            if built_in is not None and provider_registry[provider_id] is None:
-                provider_registry.register(provider_id, built_in)
-                restored = True
-            else:
-                _WITHDRAWN_PROVIDER_IDS.add(provider_id)
-        return Unregistered(removed=removed, restored_built_in=restored)
+        if current is None or not issubclass(current, HubProxyProvider):
+            return Unregistered()
+
+        _REGISTERED_PROVIDER_HUB_IDS.discard(provider_id)
+        if built_in is not None:
+            provider_registry.register(provider_id, built_in)
+        else:
+            provider_registry.unregister(provider_id, expected=current)
+            _WITHDRAWN_PROVIDER_IDS.add(provider_id)
+        return Unregistered(removed=True, restored_built_in=built_in is not None)
 
 
 def is_withdrawn(provider_id: str) -> bool:
@@ -699,13 +706,7 @@ def _retire_built_in_instances(provider_id: str, live_provider_pools) -> None:
     bump_provider_generation(provider_id)
     for pool in live_provider_pools():
         try:
-            stale = pool.detach_provider(provider_id, lambda cached: not isinstance(cached, HubProxyProvider))
-            if stale is not None:
-                try:
-                    stale.terminate()
-                except Exception:
-                    logger.exception("Provider Hub: could not end a built-in %s made before its pools were released",
-                                     provider_id)
+            pool.retire_built_in(provider_id)
         except Exception:
             logger.exception("Provider Hub: could not retire a built-in %s of a pool", provider_id)
 
@@ -797,6 +798,8 @@ def _drain_instance(instance, release, grace: float | None = None) -> None:
                        getattr(instance, "provider_name", "?"), grace)
         if callable(cancel):
             try:
+                with _PROXY_LOCK:
+                    instance._cut = True
                 cancel()
             except Exception:
                 logger.exception("Provider Hub: could not cut the calls of %s", getattr(instance, "provider_name", "?"))

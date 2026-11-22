@@ -36,7 +36,7 @@ def test_pool_restoration_is_opt_in_lazy_and_preserves_discards(monkeypatch):
 
     names = ["discover_restore", "discover_discard"]
     for name in names:
-        monkeypatch.setitem(provider_registry.providers, name, HubProxyProvider)
+        monkeypatch.setitem(provider_registry, name, HubProxyProvider)
     available = []
     monkeypatch.setattr(service, "_compat_pool", None)
     # The pool now carries the same adoption gate the library pool does, and
@@ -59,6 +59,37 @@ def test_pool_restoration_is_opt_in_lazy_and_preserves_discards(monkeypatch):
     assert pool.discarded_providers == {names[1]}
 
 
+def test_compat_adoption_preserves_the_settings_ownership_stamp(monkeypatch):
+    from provider_hub.registry import HubProxyProvider
+    from subliminal_patch.core import ConfigSnapshot
+    from subliminal_patch.extensions import provider_registry
+
+    name = "compat_adopt_changed_owner"
+    monkeypatch.setitem(provider_registry, name, HubProxyProvider)
+    snapshot = ConfigSnapshot({name: {"plugin_token": "stale"}})
+    snapshot.ownership = provider_registry.ownership_generations()
+    available = []
+    monkeypatch.setattr(service, "_compat_pool", None)
+    monkeypatch.setattr(service, "get_providers_sorted", lambda: list(available))
+    monkeypatch.setattr(service, "provider_is_usable", lambda name: True)
+    monkeypatch.setattr(service, "get_provider_language_hook", lambda: None)
+    monkeypatch.setattr(service, "get_providers_auth", lambda: {})
+    pool = service._get_compat_pool()
+    available.append(name)
+
+    def read_config():
+        provider_registry.register(name, type("RestoredBuiltIn", (), {}))
+        pool.forget_provider_config(name, {"password": "own"})
+        return snapshot
+
+    monkeypatch.setattr(service, "get_providers_auth", read_config)
+
+    assert service._get_compat_pool(restore_available=True) is pool
+    assert pool.providers == [name]
+    assert pool.initialized_providers == {}
+    assert pool.provider_configs[name] == {"password": "own"}
+
+
 def _fixture_provider(monkeypatch, name, error):
     """Register a catalog-shaped provider whose search raises ``error``."""
     from provider_hub.registry import HubProxyProvider
@@ -71,7 +102,7 @@ def _fixture_provider(monkeypatch, name, error):
     cls = type(f"{name}FixtureProvider", (HubProxyProvider,),
                {"provider_name": name, "languages": {Language("eng")},
                 "list_subtitles": list_subtitles})
-    monkeypatch.setitem(provider_registry.providers, name, cls)
+    monkeypatch.setitem(provider_registry, name, cls)
     return name
 
 
@@ -192,7 +223,7 @@ def test_a_throttled_pool_member_is_not_searched_again_while_the_backoff_runs(mo
     cls = type("StillAskedFixtureProvider", (HubProxyProvider,),
                {"provider_name": name, "languages": {Language("eng")},
                 "list_subtitles": lambda self, video, languages: asked.append(video) or []})
-    monkeypatch.setitem(provider_registry.providers, name, cls)
+    monkeypatch.setitem(provider_registry, name, cls)
     pool = _isolated_compat_pool(monkeypatch, tmp_path, [name])
     monkeypatch.setattr(settings.compat_endpoint, "serve_local_subs", False)
     monkeypatch.setattr(service, "_build_video",
@@ -228,7 +259,7 @@ def test_the_throttled_provider_really_stops_receiving_requests(monkeypatch, tmp
     cls = type("RealFanoutFixtureProvider", (HubProxyProvider,),
                {"provider_name": name, "languages": {Language("eng")},
                 "list_subtitles": lambda self, video, languages: asked.append(video) or []})
-    monkeypatch.setitem(provider_registry.providers, name, cls)
+    monkeypatch.setitem(provider_registry, name, cls)
     _isolated_compat_pool(monkeypatch, tmp_path, [name])
     monkeypatch.setattr(settings.compat_endpoint, "serve_local_subs", False)
     monkeypatch.setattr(service, "_build_video",
@@ -276,7 +307,7 @@ def test_a_search_in_flight_cannot_re_throttle_credentials_that_were_just_correc
     cls = type("SupersededFixtureProvider", (HubProxyProvider,),
                {"provider_name": name, "languages": {Language("eng")},
                 "list_subtitles": list_subtitles})
-    monkeypatch.setitem(provider_registry.providers, name, cls)
+    monkeypatch.setitem(provider_registry, name, cls)
     _isolated_compat_pool(monkeypatch, tmp_path, [name])
     monkeypatch.setattr(settings.compat_endpoint, "serve_local_subs", False)
     monkeypatch.setattr(service, "_build_video",
@@ -316,7 +347,7 @@ def test_a_pool_rebuilt_during_a_backoff_asks_the_provider_again_once_it_lifts(m
     cls = type("ColdRebuildFixtureProvider", (HubProxyProvider,),
                {"provider_name": name, "languages": {Language("eng")},
                 "list_subtitles": lambda self, video, languages: asked.append(video) or []})
-    monkeypatch.setitem(provider_registry.providers, name, cls)
+    monkeypatch.setitem(provider_registry, name, cls)
     _isolated_compat_pool(monkeypatch, tmp_path, [name])
     # Production derives the constructor's provider list from the throttle
     # table, which is the whole reason a rebuilt pool can come up short.

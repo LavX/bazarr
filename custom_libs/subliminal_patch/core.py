@@ -17,6 +17,7 @@ import itertools
 import rarfile
 import requests
 
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 from functools import partial
 from os import scandir
@@ -284,70 +285,55 @@ class _ProviderConfigs(dict):
         super().__init__(*args, **kwargs)
         self._pool = pool
 
-    def update(self, items):
+    @staticmethod
+    def _stale(name, items):
         stamp = getattr(items, 'ownership', None)
-        counts = getattr(provider_registry, 'ownership_generations', None)
-        if stamp is not None and counts is not None:
-            current = counts()
-            stale = {key for key in items if stamp.get(key, 0) != current.get(key, 0)
-                     and provider_registry[key] is not None and not getattr(provider_registry[key], 'hub_proxy', False)}
-            if stale:
-                logger.debug('Not merging settings read before %s changed hands', sorted(stale))
-                items = {key: value for key, value in items.items() if key not in stale}
+        if stamp is not None and provider_registry.ownership_generation(name) != stamp.get(name, 0):
+            logger.debug('Not merging settings read before %s changed hands', name)
+            return True
+        return False
+
+    def update(self, items):
         updated = set()
-        # Restart providers with new configs
-        for key, val in items.items():
-            # Don't restart providers that are not enabled
-            if key not in self._pool.providers:
+        for name, config in items.items():
+            # Check ownership and write together. A restart can do network work,
+            # so it runs after both locks have been released.
+            with getattr(provider_registry, 'lock', nullcontext()), self._pool._store_lock:
+                if self._stale(name, items):
+                    continue
+                current = self.get(name)
+                restart = name in self._pool.providers and current is not None and current != config
+                if restart:
+                    cached = self._pool.initialized_providers.get(name)
+                    current.update(config)
+                    # Refuse an instance that started building with the old settings.
+                    bump_provider_generation(name)
+                else:
+                    _nested_update(self, {name: config})
+            if not restart:
                 continue
 
-            # key: provider's name; val: config dict
-            registered_val = self.get(key)
-
-            if registered_val is None or registered_val == val:
+            updated.add(name)
+            logger.debug("Config changed. Restarting provider: %s", name)
+            # Tear down before rebuilding: EmbeddedSubtitles removes a cache
+            # directory its replacement needs to create, and a Hub proxy owns
+            # a worker that dropping a reference cannot stop.
+            # A handover or another settings save may already have replaced it.
+            self._pool.retire_provider(name, accept=lambda instance: instance is cached)
+            if self._stale(name, items):
                 continue
-
-            updated.add(key)
-
-            # The new dict might be a partial dict
-            registered_val.update(val)
-
-            logger.debug("Config changed. Restarting provider: %s", key)
-
-            # An instance that is being built right now read the old settings.
-            # The change is made above, so a build that starts after this sees
-            # the new ones; this makes the pool refuse the one already running,
-            # which would otherwise be stored and then skipped by every later
-            # update, since the stored config already matches.
-            bump_provider_generation(key)
-
-            # Tear the old instance down before building its replacement.
-            # Dropping the reference releases nothing it owns, and a Provider
-            # Hub provider owns a worker process and the threads pumping its
-            # stdio, so a settings save that touched a config used to leak one
-            # for the life of the process. Order matters as much as the call
-            # does: EmbeddedSubtitles.terminate() removes a cache directory
-            # every instance of it shares, so tearing the old one down last
-            # would delete what the replacement had just created.
-            self._pool.retire_provider(key)
 
             try:
-                self._pool._build_and_install(key, lambda: registered_val)
+                self._pool._build_and_install(name, lambda: self.get(name, {}))
             except Exception as error:
-                # Nothing is installed. The pool initializes on next access, so
-                # a provider that is merely unreachable right now comes back on
-                # its own, with the new config rather than the one the user
-                # just changed away from.
-                self._pool._notify_throttle(key, error)
+                # Nothing is installed. The next access retries initialization
+                # with the current settings.
+                self._pool._notify_throttle(name, error)
 
         if updated:
             logger.debug("Providers with config updates: %s", updated)
         else:
             logger.debug("No provider config updates")
-
-        _nested_update(self, items)
-
-        return None
 
 
 class _Banlist:
@@ -462,6 +448,10 @@ class ProviderRetiredError(Exception):
     the call reached its worker. Nothing was sent: the caller asks the pool for
     the current instance and calls that one. Never a provider failure, so it
     records no backoff and no discard."""
+
+
+class ProviderCallInterruptedError(Exception):
+    """The host stopped a release while it was serving this operation."""
 
 
 class ListingStopped(Exception):
@@ -657,6 +647,10 @@ class SZProviderPool(ProviderPool):
         #: either seen by a detach that follows or checked against a replacement
         #: that came first.
         self._store_lock = threading.RLock()
+        # Operation counts and pending cleanup for detached built-ins, by instance.
+        self._active_built_in_calls = {}
+        self._retiring_built_ins = set()
+        self._built_in_retirement_ended = threading.Condition(self._store_lock)
 
         #: One lock per provider name, held while an instance of it is built, so
         #: two lookups that arrive together build one instance between them.
@@ -774,7 +768,7 @@ class SZProviderPool(ProviderPool):
     def __exit__(self, exc_type, exc_value, traceback):
         self.terminate()
 
-    def adopt_provider(self, name, provider_config=None):
+    def adopt_provider(self, name, provider_configs=None):
         """Adopt an eligible member without initializing it or clearing discards."""
         if name not in self.providers:
             # A download can name a provider the pool was not built with, for
@@ -797,11 +791,18 @@ class SZProviderPool(ProviderPool):
                 raise ProviderExcludedError(name)
             if self.adoption_gate is not None and not self.adoption_gate(name):
                 raise ProviderExcludedError(name)
-            if provider_config is not None:
-                # Restore the current complete configuration, including removed
-                # options, without initializing outside the bounded search.
-                self.provider_configs[name] = dict(provider_config)
-            self.providers.append(name)
+            with getattr(provider_registry, 'lock', nullcontext()), self._store_lock:
+                if name not in provider_registry:
+                    raise KeyError(name)
+                if name in self.discarded_providers:
+                    raise ProviderExcludedError(name)
+                if name in self.providers:
+                    return
+                if provider_configs is not None and not self.provider_configs._stale(name, provider_configs):
+                    # Replace the complete configuration so removed options are
+                    # dropped, while leaving initialization to the bounded search.
+                    self.provider_configs[name] = dict(provider_configs.get(name, {}))
+                self.providers.append(name)
 
     def __getitem__(self, name):
         self.adopt_provider(name)
@@ -826,7 +827,26 @@ class SZProviderPool(ProviderPool):
         def attempt(instance):
             if invoked is not None:
                 invoked.append(instance)
-            return call(instance)
+            if getattr(instance, 'hub_proxy', False):
+                return call(instance)
+
+            token = id(instance)
+            with self._store_lock:
+                if self.initialized_providers.get(name) is not instance:
+                    raise ProviderRetiredError(name)
+                calls = self._active_built_in_calls
+                calls[token] = calls.get(token, 0) + 1
+            try:
+                return call(instance)
+            finally:
+                terminate = False
+                with self._store_lock:
+                    calls[token] -= 1
+                    if calls[token] == 0:
+                        del calls[token]
+                        terminate = name in self._retiring_built_ins
+                if terminate:
+                    self._finish_built_in_retirement(name, instance)
 
         try:
             return attempt(provider)
@@ -859,7 +879,10 @@ class SZProviderPool(ProviderPool):
         """
         with self._build_lock(name):
             while True:
-                with self._store_lock:
+                with self._built_in_retirement_ended:
+                    # Some built-ins delete a shared cache when terminated.
+                    # Let the detached instance finish cleanup before building a replacement.
+                    self._built_in_retirement_ended.wait_for(lambda: name not in self._retiring_built_ins)
                     stored = self.initialized_providers.get(name)
                 if stored is not None:
                     return stored
@@ -969,10 +992,10 @@ class SZProviderPool(ProviderPool):
         with self._store_lock:
             self.provider_configs.pop(name, None)
             if config is not None:
-                dict.__setitem__(self.provider_configs, name, dict(config))
+                self.provider_configs[name] = dict(config)
             self.discarded_providers.discard(name)
 
-    def retire_provider(self, name):
+    def retire_provider(self, name, accept=None):
         """Terminate an initialized provider without throttling its name.
 
         Teardown failures are logged rather than routed to throttle_callback:
@@ -980,10 +1003,31 @@ class SZProviderPool(ProviderPool):
         and the instance being discarded misbehaving on its way out is no
         reason to do that to the one replacing it.
         """
-        provider = self.detach_provider(name)
-        if provider is None:
-            return
+        provider = self.detach_provider(name, accept)
+        if provider is not None:
+            self._terminate_provider(name, provider)
 
+    def retire_built_in(self, name):
+        """Detach a built-in and terminate it once its admitted calls finish."""
+        with self._store_lock:
+            provider = self.detach_provider(name, lambda cached: not getattr(cached, 'hub_proxy', False))
+            if provider is None:
+                return
+            self._retiring_built_ins.add(name)
+            if id(provider) in self._active_built_in_calls:
+                return
+        self._finish_built_in_retirement(name, provider)
+
+    def _finish_built_in_retirement(self, name, provider):
+        try:
+            self._terminate_provider(name, provider)
+        finally:
+            with self._built_in_retirement_ended:
+                self._retiring_built_ins.remove(name)
+                self._built_in_retirement_ended.notify_all()
+
+    @staticmethod
+    def _terminate_provider(name, provider):
         try:
             logger.info('Terminating provider %s', name)
             provider.terminate()
@@ -1194,6 +1238,9 @@ class SZProviderPool(ProviderPool):
                         'waited for its turn; not searching it', provider)
             discard()
             return finish(None, "skipped", "provider_excluded")
+
+        except ProviderCallInterruptedError:
+            return finish([], "skipped", "provider_excluded")
 
         except ProviderBusyError:
             # A healthy provider serving other searches: no backoff, no
@@ -1516,6 +1563,10 @@ class SZProviderPool(ProviderPool):
                         self.post_download_hook(subtitle)
 
                     break
+                except ProviderCallInterruptedError:
+                    subtitle.skip_reason = 'provider_excluded'
+                    return False
+
                 except ProviderExcludedError:
                     # Refused by the worker once the request got its turn.
                     logger.info('Provider %r was excluded (throttled or discarded) while its request '
