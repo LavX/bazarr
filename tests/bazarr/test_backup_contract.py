@@ -1503,3 +1503,114 @@ def test_a_failed_plugin_restore_keeps_the_pending_input_and_all_original_folder
     assert pending.is_dir()
     assert (datadir.release_path(root, "alpha", "a" * 32) / "sample").read_text() == "alpha original"
     assert (datadir.release_path(root, "beta", "b" * 32) / "sample").read_text() == "beta original"
+
+
+def test_plugin_restore_retries_the_handoff_without_restoring_sqlite_twice(
+        backup_env, monkeypatch, tmp_path, service_kind):
+    import sqlalchemy as sa
+
+    from plugin_platform_helpers import service_manifest
+    from provider_hub import datadir, state, state_store
+
+    monkeypatch.setattr(backup_env.settings.postgresql, "enabled", False)
+    root = tmp_path / "provider_hub"
+    state_path = root / "state.json"
+    monkeypatch.delenv("BAZARR_PROVIDER_HUB_STATE", raising=False)
+    monkeypatch.setattr(state, "_default_state_file", lambda: state_path)
+    monkeypatch.setattr(state_store, "legacy_state_path", lambda: state_path)
+    database = backup_env.config_dir / "db" / "bazarr.db"
+    engine = sa.create_engine(f"sqlite:///{database}", poolclass=sa.pool.NullPool, isolation_level="AUTOCOMMIT")
+    state_store.use_engine(engine)
+
+    key = "a" * 32
+    folder = datadir.release_path(root, "exampleservice", key)
+    folder.mkdir(parents=True)
+    (folder / "sample").write_text("backup content")
+    try:
+        inventory = state.load_state()
+        inventory["installations"]["exampleservice"] = {
+            "state": "active", "kind": service_kind.name, "active_version": "1.0.0",
+            "active_data_key": key, "manifest": service_manifest(permissions=["data_dir"]),
+        }
+        state.save_state(inventory)
+        assert backup_env.module.backup_to_zip(job_id=1)
+        [archive] = _archives(backup_env)
+        (folder / "sample").write_text("written after backup")
+        assert backup_env.module.prepare_restore(archive)
+        inventory = state.load_state()
+        inventory["installations"].clear()
+        state.save_state(inventory)
+        engine.dispose()
+
+        restores = []
+        restore_database = backup_env.module._restore_database
+
+        def restore_once(source, destination):
+            restores.append(True)
+            return restore_database(source, destination)
+
+        monkeypatch.setattr(backup_env.module, "_restore_database", restore_once)
+        with monkeypatch.context() as interrupted:
+            def exit_after_handoff():
+                raise SystemExit(41)
+
+            interrupted.setattr(backup_env.module, "_clear_restore_directory", exit_after_handoff)
+            with pytest.raises(SystemExit):
+                backup_env.module.restore_from_backup()
+        assert (backup_env.restore_dir / "pending_plugin_data").is_dir()
+        assert not (backup_env.restore_dir / datadir.ARCHIVE_DIR).exists()
+        assert (folder / "sample").read_text() == "written after backup"
+
+        assert backup_env.module.restore_from_backup()
+        assert restores == [True]
+        assert state.load_state()["installations"]["exampleservice"]["active_data_key"] == key
+        backup_env.module.apply_pending_plugin_restore()
+        assert (folder / "sample").read_text() == "backup content"
+        assert not (backup_env.restore_dir / "pending_plugin_data").exists()
+    finally:
+        state_store.reset()
+        engine.dispose()
+
+
+def test_a_failed_rollback_rename_leaves_the_original_for_the_next_start(backup_env, monkeypatch, tmp_path):
+    import gc
+    import json
+
+    from pathlib import Path
+
+    from plugin_platform_helpers import service_manifest
+    from provider_hub import datadir
+
+    root = tmp_path / "provider_hub"
+    plugin_id, key = "alpha", "a" * 32
+    target = datadir.release_path(root, plugin_id, key)
+    target.mkdir(parents=True)
+    saved = target / "sample"
+    saved.write_text("original")
+    source = backup_env.restore_dir / "pending_plugin_data" / plugin_id / key
+    source.mkdir(parents=True)
+    (source / "sample").write_text("backup")
+    state_path = root / "state.json"
+    state_path.write_text(json.dumps({"installations": {plugin_id: {
+        "active_version": "1.0.0", "active_data_key": key,
+        "manifest": service_manifest(plugin_id, permissions=["data_dir"])}}}))
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(state_path))
+
+    path_rename = Path.rename
+    with monkeypatch.context() as failure:
+        def fail_replacements(path, destination):
+            if destination == target and path.name in {"new", "old"}:
+                raise OSError("simulated disk failure")
+            return path_rename(path, destination)
+
+        failure.setattr(Path, "rename", fail_replacements)
+        backup_env.module.apply_pending_plugin_restore()
+    assert backup_env.stops == [backup_env.module.EXIT_RESTORE_ERROR]
+    gc.collect()
+    journal = target.parent / f".restore-data-{target.name}"
+    assert (journal / "old" / "sample").read_text() == "original"
+
+    backup_env.module.apply_pending_plugin_restore()
+    assert saved.read_text() == "backup"
+    assert not journal.exists()
+    assert not source.exists()

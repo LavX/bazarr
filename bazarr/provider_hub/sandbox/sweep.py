@@ -401,7 +401,7 @@ def _scan(instance: str, deadline: float, result: SweepResult) -> "tuple[dict[in
         except PermissionError:
             result.unreadable += 1
             continue
-        if value is None:
+        if value is None or value == spawn.owner_marker():
             continue
         parsed = _parse_marker(value)
         if parsed is None or parsed[0] != instance:
@@ -662,6 +662,8 @@ def sweep_leftovers(
         if result.ended:
             logger.warning("Provider Hub: ended %d plugin session(s) left by a previous run", result.ended)
     except Exception:
+        result.supported = False
+        result.reason = "the leftover process sweep could not finish"
         logger.exception("Provider Hub: the leftover process sweep failed")
     return result
 

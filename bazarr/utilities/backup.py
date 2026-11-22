@@ -40,6 +40,8 @@ POSTGRES_ARCHIVE_NAME = 'bazarr_postgres.dump'
 # deletes it, and the operator still has the extracted file to retry from.
 POSTGRES_FAILED_ARCHIVE_NAME = f'{POSTGRES_ARCHIVE_NAME}.failed'
 _PLUGIN_RESTORE_PENDING = "pending_plugin_data"
+_RESTORE_HANDOFF = ".database_restore_complete"
+_APPLIED_PLUGIN_DATA = ".applied_plugin_data"
 
 # pg_restore keeps going past an error and reports how many it ignored, and it
 # exits non-zero when it did. One error class is benign: a dump written by a
@@ -455,6 +457,8 @@ def _validate_backup_filename(filename):
 def _safe_extract(zip_obj, dest_path):
     """Extract a ZIP archive while rejecting entries that escape `dest_path`."""
     dest_real = os.path.realpath(dest_path)
+    internal = tuple(os.path.join(dest_real, name) for name in (
+        _PLUGIN_RESTORE_PENDING, _RESTORE_HANDOFF, _RESTORE_HANDOFF + ".tmp", _APPLIED_PLUGIN_DATA))
     for member in zip_obj.namelist():
         if member.startswith(datadir.ARCHIVE_DIR + "/"):
             parts = member.rstrip("/").split("/")
@@ -462,8 +466,7 @@ def _safe_extract(zip_obj, dest_path):
                     or any(part in ("", ".", "..") or PureWindowsPath(part).drive for part in parts)):
                 raise BadZipFile(f'Unsafe path in backup archive: {member}')
         member_real = os.path.realpath(os.path.join(dest_real, member))
-        pending = os.path.join(dest_real, _PLUGIN_RESTORE_PENDING)
-        if member_real == pending or member_real.startswith(pending + os.sep):
+        if any(member_real == path or member_real.startswith(path + os.sep) for path in internal):
             raise BadZipFile('Backup archive contains an internal restore path')
         if member_real != dest_real and not member_real.startswith(dest_real + os.sep):
             raise BadZipFile(f'Unsafe path in backup archive: {member}')
@@ -675,6 +678,10 @@ def _prepare_restored_configuration(source_path, staged_path):
 
 
 def restore_from_backup():
+    restore = Path(get_restore_path())
+    handoff = restore / _RESTORE_HANDOFF
+    if handoff.is_file():
+        return _finish_database_restore(restore, handoff)
     failed_dump_path = os.path.join(get_restore_path(), POSTGRES_FAILED_ARCHIVE_NAME)
     if os.path.isfile(failed_dump_path):
         _refuse_start_after_failed_restore(failed_dump_path)
@@ -803,27 +810,50 @@ def restore_from_backup():
 
     from provider_hub.state import provider_hub_dir
 
-    restore = Path(get_restore_path())
     extracted = restore / datadir.ARCHIVE_DIR
     try:
         secret_paths.restore_backup_history(restore / secret_paths.HISTORY_ARCHIVE, provider_hub_dir())
     except (OSError, ValueError, AttributeError):
         logging.exception('The plugin field history from the backup could not be restored.')
     try:
-        pending = restore / _PLUGIN_RESTORE_PENDING
-        datadir.remove(pending)
-        if extracted.exists() or extracted.is_symlink():
-            extracted.rename(pending)
-        if (restore / datadir.OMISSIONS_ARCHIVE).is_file():
-            logging.warning('Some release data was omitted when this backup was taken. Its folders will be left as they are.')
+        staging = restore / (_RESTORE_HANDOFF + ".tmp")
+        staging.write_text("data" if extracted.exists() else "no-data", encoding="ascii")
+        staging.rename(handoff)
     except OSError:
-        logging.exception('The database and configuration were restored, but plugin data could not be staged.')
+        logging.exception('Could not record the completed database restore. The extracted backup is kept.')
         stop_bazarr(EXIT_RESTORE_ERROR)
         return False
-    _clear_restore_directory()
+    return _finish_database_restore(restore, handoff)
 
+
+def _finish_database_restore(restore, handoff):
+    """Finish moving staged data after the database and configuration are in place."""
+    extracted = restore / datadir.ARCHIVE_DIR
+    pending = restore / _PLUGIN_RESTORE_PENDING
+    try:
+        dataset = handoff.read_text(encoding="ascii")
+        if dataset == "data":
+            if extracted.is_dir():
+                datadir.remove(pending)
+                extracted.rename(pending)
+            elif not pending.is_dir():
+                raise OSError("The plugin data staged for restore is missing")
+        elif dataset == "no-data":
+            datadir.remove(pending)
+        else:
+            raise OSError("The database restore marker could not be read")
+        if (restore / datadir.OMISSIONS_ARCHIVE).is_file():
+            logging.warning('Some release data was omitted when this backup was taken. Its folders will be left as they are.')
+        _clear_restore_directory()
+        if any((restore / name).exists() for name in (
+                'config.yaml', 'config.ini', SQLITE_ARCHIVE_NAME, POSTGRES_ARCHIVE_NAME)):
+            raise OSError("The staged database or configuration could not be cleared")
+        handoff.unlink()
+    except (OSError, UnicodeError):
+        logging.exception('The database and configuration are restored. Bazarr will retry the remaining restore steps.')
+        stop_bazarr(EXIT_RESTORE_ERROR)
+        return False
     logging.info('Database and configuration restored. Bazarr will restart before applying plugin data.')
-
     from app.server import webserver
     if webserver is not None:
         webserver.close_all()
@@ -838,13 +868,19 @@ def apply_pending_plugin_restore():
         return
     from provider_hub.state import provider_hub_dir
 
+    applied = pending.with_name(_APPLIED_PLUGIN_DATA)
     try:
         datadir.restore_backup(pending, provider_hub_dir())
-        datadir.remove(pending)
+        datadir.remove(applied)
+        pending.rename(applied)
     except Exception:
         logging.exception('Plugin data restore failed. The staged data remains available and Bazarr will retry it at startup.')
         stop_bazarr(EXIT_RESTORE_ERROR)
         return
+    try:
+        datadir.remove(applied)
+    except OSError:
+        logging.warning('Could not clear the completed plugin data restore.', exc_info=True)
     logging.info('Plugin data restored successfully.')
 
 

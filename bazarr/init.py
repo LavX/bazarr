@@ -64,6 +64,13 @@ log_cpu_check()
 # What reading the configuration changed in what was stored. It was found before there was a log to say it in.
 log_startup_notices()
 
+# Mark workers started during initialization as well as those started after it.
+try:
+    from provider_hub.sandbox import sweep as sandbox_sweep
+    sandbox_sweep.configure_owner(args.config_dir)
+except Exception:
+    logging.exception("BAZARR cannot mark this run's plugin workers")
+
 # restore backup if required. A restore that leaves the database unfit to run
 # on (pg_restore failing partway, or the restored configuration not going in)
 # stops the start from inside, and so does a dump parked by an earlier failure.

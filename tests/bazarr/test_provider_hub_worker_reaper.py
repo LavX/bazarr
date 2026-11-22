@@ -403,3 +403,27 @@ def test_a_survivor_whose_process_dies_later_is_released(group_signals):
     assert client.stop_if_idle(idle_seconds=60, grace_seconds=0.01) is False
     assert client not in worker_mod._unreaped_survivors, (
         'a dead survivor stayed pinned in the strong set')
+
+
+def test_an_exited_provider_worker_stays_registered_until_its_cleanup_is_confirmed(monkeypatch, tmp_path):
+    import sys
+
+    from provider_hub.worker import ProviderWorkerClient, live_workers
+
+    plugin_id = "pending_cleanup_fixture"
+    client = ProviderWorkerClient([sys.executable, "-c", "pass"], provider_id=plugin_id,
+                                  env={"BAZARR_PLUGIN_DATA_DIR": str(tmp_path / "data")})
+    cleanup = ["pending"]
+    monkeypatch.setattr(client, "launcher_cleanup_state", lambda: cleanup[0])
+    assert client.start()
+    client.process.wait(timeout=5)
+
+    assert client in live_workers(plugin_id)
+    assert not client.stop_if_idle(0)
+    assert client in live_workers(plugin_id)
+    client.cancel()
+    assert client in live_workers(plugin_id)
+
+    cleanup[0] = "confirmed"
+    client.stop_if_idle(0)
+    assert live_workers(plugin_id) == []

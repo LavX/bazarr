@@ -1882,3 +1882,98 @@ def test_unreadable_historical_exclusions_omit_that_release_data(data_release, t
     with ZipFile(archive_path) as archive:
         assert json.loads(archive.read(datadir.OMISSIONS_ARCHIVE)) == [f"exampleservice/{old.name}"]
         assert not any(name.startswith("plugin_data/") for name in archive.namelist())
+
+
+def test_boot_waits_for_the_previous_workers_before_finishing_uninstall(data_release, service_kind, monkeypatch):
+    from provider_hub import detach, worker
+    from provider_hub.kinds import DETACH_LIVE
+    from provider_hub.sandbox import sweep
+    from provider_hub.state import load_state
+
+    service, _, old = data_release
+    service_kind.detach_policy = DETACH_LIVE
+    client = object()
+    monkeypatch.setattr(detach, "snapshot_workers", lambda provider_id: [client])
+    monkeypatch.setattr(detach, "stop_stragglers", lambda clients, cut: None)
+    monkeypatch.setattr(worker, "_client_gone", lambda checked, budget: False)
+    assert service.remove_installation("exampleservice", keep_data=False)
+    assert detach.wait_idle()
+    assert old.exists()
+
+    outcomes = [sweep.SweptSession(1, (), "survivors")]
+    monkeypatch.setattr(detach, "snapshot_workers", lambda provider_id: [])
+    monkeypatch.setattr(sweep, "sweep_leftovers", lambda config: sweep.SweepResult(sessions=outcomes))
+    service.activate_staged_installations()
+    assert old.exists()
+    assert load_state()["installations"]["exampleservice"]["pending_restart"]
+
+    outcomes[:] = [sweep.SweptSession(1, (), "ended")]
+    service.activate_staged_installations()
+    assert "exampleservice" not in load_state()["installations"]
+    assert not old.exists()
+
+
+def test_legacy_provider_keep_leaves_data_in_the_home_used_on_reinstall(staged, monkeypatch):
+    from provider_hub import datadir, service
+    from provider_hub.detach import wait_idle
+    from provider_hub.kinds import SUBTITLE_PROVIDER, get_kind
+    from provider_hub.sandbox import sweep
+    from provider_hub.state import load_state, provider_hub_dir
+
+    root = provider_hub_dir()
+    legacy = datadir.legacy_data_path(root, "alpha")
+    legacy.mkdir(parents=True)
+    (legacy / "settings").write_text("preserved settings")
+    monkeypatch.setattr(sweep, "sweep_leftovers", lambda config: sweep.SweepResult())
+    assert service.remove_installation("alpha")
+    assert wait_idle()
+    assert "alpha" not in load_state()["installations"]
+    assert (legacy / "settings").read_text() == "preserved settings"
+
+    monkeypatch.setattr(service.PluginEnvironment, "install",
+                        lambda self, *args, **kwargs: Path(_python("alpha")).parent.parent)
+    kind = get_kind(SUBTITLE_PROVIDER)
+    validation = kind.validate_manifest(_release_manifest("alpha", "1.2.0"), True)
+    service._stage_validated(validation, True, "catalog", "official",
+                             lambda manifest, deadline: Path(_bundle(manifest.provider_id, manifest.version)))
+    assert service.activate_staged_installations() == ["alpha"]
+    assert (legacy / "settings").read_text() == "preserved settings"
+
+
+def test_legacy_rollback_refuses_to_replace_a_working_release_without_its_data(staged):
+    from plugin_platform_helpers import provider_manifest_v2
+    from provider_hub import service
+    from provider_hub.state import load_state
+
+    old_manifest = provider_manifest_v2("alpha", "1.0.0", permissions=["data_dir"])
+    _seed(alpha=_row("alpha", active="1.0.0", manifest=old_manifest))
+    _seed(alpha=_row("alpha", active="2.0.0"))
+
+    assert service.rollback_release("alpha").outcome == service.ACTIVATION_WAITING
+    assert not service.activate_staged_installations()
+    row = load_state()["installations"]["alpha"]
+    assert row["active_version"] == "2.0.0"
+    assert "data folder is missing" in row["last_error"]
+
+
+def test_a_failed_restage_clears_the_stage_it_replaced(data_release, service_kind, monkeypatch):
+    from provider_hub import datadir
+    from provider_hub.state import load_state, provider_hub_dir
+
+    service, new, _ = data_release
+    validation = service_kind.validate_manifest(new, True)
+    def stage(manifest, deadline):
+        return Path(_bundle(manifest.provider_id, manifest.version))
+
+    service._stage_validated(validation, True, "catalog", "official", stage)
+    key = load_state()["installations"]["exampleservice"]["staged_data_key"]
+    folder = datadir.release_path(provider_hub_dir(), "exampleservice", key)
+    assert folder.is_dir()
+
+    def fail(*args, **kwargs):
+        raise ValueError("sample check failed")
+
+    monkeypatch.setattr(service_kind, "smoke_test", fail)
+    with pytest.raises(service.ProviderHubInstallError, match="sample check failed"):
+        service._stage_validated(validation, True, "catalog", "official", stage)
+    assert not folder.exists()

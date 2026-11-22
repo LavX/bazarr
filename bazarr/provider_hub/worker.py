@@ -708,6 +708,10 @@ class ProviderWorkerClient:
             except Exception as error:
                 self._blocked(f"the ruleset could not be prepared: {error}")
                 raise WorkerError(f"the sandbox could not be prepared, so the provider was not started: {error}") from error
+        from .sandbox.spawn import OWNER_VARIABLE, owner_marker
+
+        if marker := owner_marker():
+            env = {**env, OWNER_VARIABLE: marker}
         return subprocess.Popen(
             self.command,
             cwd=self.cwd,
@@ -902,10 +906,22 @@ class ProviderWorkerClient:
         except Exception:
             pass
 
-    def _deregister(self) -> None:
+    def _deregister(self) -> bool:
+        # A provider's child processes can still have its data files open.
+        # Keep the client visible to the next backup, removal and idle sweep.
+        process = getattr(self, "process", None)
+        env = getattr(self, "env", None) or {}
+        writes_data = getattr(self, "provider_id", None) and (
+            env.get("BAZARR_PLUGIN_DATA_DIR") or _is_provider_runner(getattr(self, "command", ()), env))
+        if writes_data and not _client_gone(self, 0):
+            self._retain_survivor()
+            return False
         with _live_clients_lock:
+            if getattr(self, "process", None) is not process:
+                return False
             _live_clients.discard(self)
             _unreaped_survivors.discard(self)
+        return True
 
     def _retain_survivor(self) -> None:
         with _live_clients_lock:
@@ -1017,9 +1033,9 @@ class ProviderWorkerClient:
                 kept.append(launcher)
                 state = "pending" if state != "unconfirmed" else state
                 continue
-            if launcher.returncode is None:
-                launcher.poll()
             try:
+                if launcher.returncode is None:
+                    launcher.poll()
                 said_complete = launcher.returncode is not None and launcher.returncode >= 0 and (
                     launcher.launcher_cleanup() == "complete"
                 )
@@ -1153,8 +1169,7 @@ class ProviderWorkerClient:
             self._retain_survivor()
             return False
 
-        self._deregister()
-        return True
+        return self._deregister()
 
     def stop(self, grace_seconds: float = 5.0) -> None:
         # Closed first, on every path, then the latch is set so that a gated
@@ -1285,6 +1300,8 @@ class ProviderWorkerClient:
                 self._cut_process = process
             self._kill_worker()
         except Exception:
+            if process is not None:
+                self._retain_survivor()
             logger.warning("Provider Hub: could not kill the worker of %s", self.provider_id, exc_info=True)
             return
         if process is not None and self._has_exited(process):

@@ -2127,6 +2127,7 @@ def _redact_installation(installation: dict[str, Any]) -> dict[str, Any]:
     redacted.pop("active_data_key", None)
     _clear_staged_data(redacted)
     redacted.pop("delete_release_data", None)
+    redacted.pop("data_worker_cleanup_pending", None)
     provider_id = redacted.get("provider_id")
     if provider_id:
         # enabled_providers in config.yaml is the source of truth; the stored
@@ -3746,6 +3747,7 @@ def _staged_installation(
         "active_path": existing.get("active_path"),
         **({"active_data_key": existing["active_data_key"]} if existing.get("active_data_key") else {}),
         **({"delete_release_data": True} if existing.get("delete_release_data") else {}),
+        **({"data_worker_cleanup_pending": True} if existing.get("data_worker_cleanup_pending") else {}),
         "python_path": existing.get("python_path"),
         "staged_path": str(bundle_path),
         "staged_python_path": str(staged_python_path),
@@ -3970,16 +3972,18 @@ def _stage_validated(
                 release_pins()
                 env_registry.discard_if_unused(provider_hub_dir(), env_path)
 
-            def record_failed_install(state: dict[str, Any]) -> dict[str, Any]:
+            def record_failed_install(state: dict[str, Any]) -> tuple[Any, dict[str, Any]]:
                 installations = state.setdefault("installations", {})
                 current = installations.get(validated.provider_id, existing)
                 installation = _failed_installation(
                     validated, current, install_error, source_trusted, origin, source_id, catalog_list, state
                 )
                 installations[validated.provider_id] = installation
-                return dict(installation)
+                return current, dict(installation)
 
-            mutate_state(record_failed_install)
+            with datadir.release_lock:
+                previous, failed = mutate_state(record_failed_install)
+                _discard_superseded_data(validated.provider_id, previous, failed.get("staged_data_key"))
             raise ProviderHubInstallError(str(install_error)) from install_error
 
         before_staging: dict[str, Any] = {}
@@ -4051,16 +4055,8 @@ def _stage_validated(
             # The saved settings may have come back with the kept data, so the row is read again before the
             # required fields are judged.
             installation = dict((load_state().get("installations") or {}).get(validated.provider_id) or installation)
-        abandoned = before_staging.get("row")
-        old_key = abandoned.get("staged_data_key") if isinstance(abandoned, dict) else None
-        if (old_key and old_key not in (data_key, abandoned.get("active_data_key"))
-                and not abandoned.get("staged_data_rollback")):
-            with datadir.release_lock:
-                try:
-                    datadir.remove(datadir.release_path(provider_hub_dir(), validated.provider_id, old_key))
-                except (OSError, datadir.DataFolderError):
-                    logging.getLogger(__name__).warning("Could not clear superseded staged data for %s",
-                                                        validated.provider_id, exc_info=True)
+        with datadir.release_lock:
+            _discard_superseded_data(validated.provider_id, before_staging.get("row"), data_key)
         missing_required = missing_required_fields(installation) if is_fresh else []
         if is_fresh and not get_kind(validated.kind).on_installed(
                 validated.provider_id, missing_required=missing_required):
@@ -4087,6 +4083,19 @@ def _stage_validated(
                 )
         job.update(message=message)
         return _redact_installation(installation)
+
+
+def _discard_superseded_data(plugin_id: str, previous, keep_key: str | None) -> None:
+    if not isinstance(previous, dict):
+        return
+    old_key = previous.get("staged_data_key")
+    if (old_key and old_key not in (keep_key, previous.get("active_data_key"))
+            and not previous.get("staged_data_rollback")):
+        try:
+            datadir.remove(datadir.release_path(provider_hub_dir(), plugin_id, old_key))
+        except (OSError, datadir.DataFolderError):
+            logging.getLogger(__name__).warning("Could not clear superseded staged data for %s",
+                                                plugin_id, exc_info=True)
 
 
 def _undo_staging(provider_id: str, previous: Any) -> None:
@@ -5064,12 +5073,12 @@ def _prepare_activation_data(plugin_id, row, active_data, files) -> tuple[str | 
         previous = (datadir.release_path(root, plugin_id, recorded_key) if recorded_key
                     else datadir.legacy_path(root, plugin_id, manifest))
         if previous is None:
-            return recorded_key, None
+            raise datadir.DataFolderError("The previous release data folder was never recorded")
         # A failed smoke test must leave the previous release usable on a later attempt.
         parent = datadir.plugin_root(root, plugin_id)
         parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         testing = Path(files.enter_context(tempfile.TemporaryDirectory(dir=parent))) / "rollback"
-        if datadir.copy_folder(previous, testing) is None and recorded_key:
+        if datadir.copy_folder(previous, testing) is None:
             raise datadir.DataFolderError("The previous release data folder is missing")
         return recorded_key, testing
 
@@ -5181,6 +5190,7 @@ def activate_release(provider_id: str, *, at_boot: bool = False) -> Activation:
                 row.pop("active_data_key", None)
             _clear_staged_data(row)
             row.pop("delete_release_data", None)
+            row.pop("data_worker_cleanup_pending", None)
             row.pop("previous_catalog_list", None)
             row["manifest"] = manifest.raw
             row["supplied_by"] = row.pop("staged_supplied_by", None) or {}
@@ -5439,6 +5449,7 @@ def activate_staged_installations() -> list[str]:
                                             exc_info=True)
     state = load_state()
     activated = []
+    previous_stopped = None
     try:
         for provider_id, installation in list((state.get("installations") or {}).items()):
             if not isinstance(installation, dict):
@@ -5448,9 +5459,19 @@ def activate_staged_installations() -> list[str]:
                 continue
             # One plugin that cannot be handled never keeps the others from starting.
             try:
+                if installation.get("data_worker_cleanup_pending") and _has_removable_data(provider_id, installation):
+                    from .worker import _client_gone
+
+                    if previous_stopped is None:
+                        previous_stopped = _previous_workers_stopped()
+                    if not previous_stopped or not all(
+                            _client_gone(client, 0) for client in detach.snapshot_workers(provider_id)):
+                        logging.getLogger(__name__).warning(
+                            "Keeping %s data in place until its previous workers are confirmed stopped", provider_id)
+                        continue
                 if removal:
-                    _finish_removal(provider_id)
-                    state["installations"].pop(provider_id, None)
+                    if _finish_removal(provider_id):
+                        state["installations"].pop(provider_id, None)
                 elif activate_release(provider_id, at_boot=True).activated:
                     activated.append(provider_id)
             except Exception:
@@ -5773,6 +5794,8 @@ def remove_installation(provider_id: str, *, ignoring_dependents: frozenset[str]
             # detached right after, and the row goes once its calls are done. The row stays marked removed until
             # then, so a process that ends first finishes the removal at its next start.
             item["pending_restart"] = not live_removal
+            if live_removal:
+                item["data_worker_cleanup_pending"] = True
             item["staged_version"] = None
             item["staged_path"] = None
             item["staged_python_path"] = None
@@ -5840,10 +5863,7 @@ def _detach_removed(provider_id: str, kind_name: str) -> bool:
             clients = list({id(client): client for client in (*workers, *detach.snapshot_workers(provider_id))}.values())
             detach.stop_stragglers(clients, cut=True)
             try:
-                root = provider_hub_dir()
-                has_data = (row.get("active_data_key") or datadir.plugin_root(root, provider_id).exists()
-                            or datadir.legacy_data_path(root, provider_id).exists())
-                if has_data and not all(_client_gone(client, 0) for client in clients):
+                if _has_removable_data(provider_id, row) and not all(_client_gone(client, 0) for client in clients):
                     _defer_removal(provider_id)
                     return
                 removed = _drop_removed_row(provider_id)
@@ -5867,9 +5887,27 @@ def _defer_removal(provider_id: str) -> None:
         row = (state.get("installations") or {}).get(provider_id)
         if isinstance(row, dict) and row.get("state") == "removed":
             row["pending_restart"] = True
+            row["data_worker_cleanup_pending"] = True
             row["last_error"] = "Restart Bazarr+ to finish removing the plugin's data."
 
     mutate_state(mark)
+
+def _has_removable_data(provider_id: str, installation) -> bool:
+    root = provider_hub_dir()
+    return bool(installation.get("active_data_key") or datadir.plugin_root(root, provider_id).exists()
+                or (kind_of(installation) in {SUBTITLE_PROVIDER, TRANSLATOR}
+                    and datadir.legacy_data_path(root, provider_id).exists()))
+
+
+def _previous_workers_stopped() -> bool:
+    """A deferred data removal still needs proof after the app has restarted."""
+    from .sandbox.sweep import sweep_leftovers
+
+    result = sweep_leftovers(provider_hub_dir().parent)
+    return (result.supported and not result.truncated
+            and all(session.outcome == "ended" for session in result.sessions))
+
+
 
 def _settle_release_data(provider_id: str, installation, keep_data: bool) -> None:
     root = provider_hub_dir()
@@ -5881,15 +5919,19 @@ def _settle_release_data(provider_id: str, installation, keep_data: bool) -> Non
         if legacy is not None:
             datadir.remove(legacy)
         return
-    active = _active_data_path(provider_id, installation) or legacy
+    # Legacy workers find their HOME at the same path on reinstall, including
+    # packages that predate the data_dir permission.
+    active = _active_data_path(provider_id, installation) if installation.get("active_data_key") else None
     kept = folder / "kept"
     if (installation.get("active_version") and active is not None
             and active.is_dir() and not active.is_symlink() and not active.is_junction()):
         folder.mkdir(parents=True, exist_ok=True, mode=0o700)
         datadir.remove(kept)
         active.rename(kept)
-        if legacy is not None and active != legacy:
+        if legacy is not None:
             datadir.remove(legacy)
+    elif installation.get("active_version") and legacy is not None and legacy.is_dir():
+        datadir.remove(kept)
     if folder.is_dir():
         for child in folder.iterdir():
             if child != kept and not child.name.startswith(".copy-"):

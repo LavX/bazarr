@@ -414,53 +414,76 @@ def write_backup(archive) -> None:
         archive.writestr(OMISSIONS_ARCHIVE, json.dumps(omissions))
 
 
+def _checked_directory(path: Path) -> bool:
+    if path.is_symlink() or path.is_junction() or (path.exists() and not path.is_dir()):
+        raise DataFolderError("A plugin restore path is not a regular directory")
+    return path.is_dir()
+
+
+def _recover_restore_folder(target: Path, stage: Path) -> None:
+    """Restore the original before clearing the journal for an unfinished swap."""
+    if not _checked_directory(stage):
+        return
+    old, replacement = stage / "old", stage / "new"
+    if _checked_directory(old):
+        if _checked_directory(target):
+            if _checked_directory(replacement):
+                raise DataFolderError("Both an original and an unexpected destination are present")
+            target.rename(replacement)
+        old.rename(target)
+    elif (stage / "absent").is_file() and not _checked_directory(replacement) and _checked_directory(target):
+        target.rename(replacement)
+    remove(stage)
+
+
 def restore_backup(source: Path, root: Path) -> None:
     """Restore a staged backup against the DB inventory opened on this boot."""
-    if not source.exists() and not source.is_symlink():
+    if not _checked_directory(source):
         return
-    if not source.is_dir() or source.is_symlink() or source.is_junction():
-        raise DataFolderError("The staged plugin data is not a regular directory")
     document, previous = _release_inventory()
     wanted = {(plugin_id, key) for plugin_id, key, *_ in _release_folders(document, previous)}
+    # This marker is written only after every swap. Until then the original
+    # trees live beside their destinations, including if Bazarr exits midway.
+    committed = source / ".applied"
+    folders = []
+    for plugin in sorted(source.iterdir()):
+        if plugin == committed:
+            continue
+        if not _checked_directory(plugin):
+            raise DataFolderError("The backup's plugin directory is missing")
+        for folder in sorted(plugin.iterdir()):
+            if (plugin.name, folder.name) not in wanted:
+                raise DataFolderError("The backup contains a data folder outside the restored release inventory")
+            if not _checked_directory(folder):
+                raise DataFolderError("A data folder in the backup is missing")
+            target = archive_folder(root, plugin.name, folder.name)
+            folders.append((folder, target, target.parent / (".restore-data-" + target.name)))
 
-    prepared = []
-    replaced = []
-    with contextlib.ExitStack() as stages:
-        for plugin in sorted(source.iterdir()):
-            if not plugin.is_dir() or plugin.is_symlink() or plugin.is_junction():
-                raise DataFolderError("The backup's plugin directory is not a regular directory")
-            for folder in sorted(plugin.iterdir()):
-                if (plugin.name, folder.name) not in wanted:
-                    raise DataFolderError("The backup contains a data folder outside the restored release inventory")
-                target = archive_folder(root, plugin.name, folder.name)
+    if not committed.is_file():
+        for _, target, stage in folders:
+            _recover_restore_folder(target, stage)
+        try:
+            for folder, target, stage in folders:
                 target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-                stage = Path(stages.enter_context(tempfile.TemporaryDirectory(
-                    prefix=".restore-data-", dir=target.parent)))
+                stage.mkdir(mode=0o700)
                 replacement = stage / "new"
                 replacement.mkdir(mode=0o700)
                 if _transfer(folder, replacement, backup=True) is None:
-                    raise DataFolderError(f"The staged data folder for {plugin.name} is missing")
-                # Keep the original beside the replacement. The cleanup
-                # callback runs only after the original is no longer needed.
-                prepared.append((target, replacement, stage / "old"))
-        try:
-            for target, replacement, old in prepared:
-                if target.exists() or target.is_symlink() or target.is_junction():
-                    if not target.is_dir() or target.is_symlink() or target.is_junction():
-                        raise DataFolderError("The destination for plugin data is not a regular directory")
-                    target.rename(old)
-                replaced.append((target, replacement, old))
-                replacement.rename(target)
+                    raise DataFolderError("A data folder in the backup is missing")
+                if not _checked_directory(target):
+                    (stage / "absent").touch()
+            for _, target, stage in folders:
+                if _checked_directory(target):
+                    target.rename(stage / "old")
+                (stage / "new").rename(target)
+            committed.touch(exist_ok=False)
         except BaseException:
-            for target, replacement, old in reversed(replaced):
+            for _, target, stage in reversed(folders):
                 try:
-                    if target.exists():
-                        target.rename(replacement)
-                    if old.exists():
-                        old.rename(target)
-                except OSError:
-                    # The caller keeps the archive and retries at startup.
-                    # Retain any original that could not be put back.
-                    stages.pop_all()
-                    logger.exception("Could not put the original plugin folder back at %s", target)
+                    _recover_restore_folder(target, stage)
+                except (OSError, DataFolderError):
+                    logger.exception("Could not put the original plugin folder back at %s; kept in %s", target, stage)
             raise
+    for _, _, stage in folders:
+        if _checked_directory(stage):
+            remove(stage)
