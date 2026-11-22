@@ -15,6 +15,8 @@ import server from "@/tests/mocks/node";
 import {
   choose,
   optionsOf,
+  PICK_INSTALLATIONS,
+  refreshPickInstallations,
   stateLoaded,
   translatorStatus,
 } from "./pickFixtures";
@@ -272,29 +274,30 @@ describe("TranslationForm and the manual pick", () => {
   });
 
   it.each([
-    ["ai_translator", "OpenAI compatible, usable-model", "Google Translate"],
-    ["google_translate", "Google Translate", "OpenAI compatible, usable-model"],
+    [
+      "ai_translator",
+      "OpenAI compatible, usable-model",
+      "Google Translate",
+      true,
+    ],
+    [
+      "google_translate",
+      "Google Translate",
+      "OpenAI compatible, usable-model",
+      false,
+    ],
   ])(
-    "clears a manual pick when %s is being removed",
-    async (id, pick, other) => {
+    "clears a manual pick when %s disappears and does not restore it on reinstall",
+    async (id, pick, other, observeRemoval) => {
       const user = userEvent.setup();
       settings();
       translatorStatus(true, { available: true, reason: "" });
-      let removing = false;
+      let sent: Record<string, FormDataEntryValue> | undefined;
       server.use(
-        http.get("/api/plugins/installations", () =>
-          HttpResponse.json({
-            data: [
-              {
-                provider_id: id,
-                kind: "translator",
-                state: removing ? "removed" : "active",
-                active_version: "1.0.0",
-                needs_restart: false,
-              },
-            ],
-          }),
-        ),
+        http.patch("/api/subtitles", async ({ request }) => {
+          sent = Object.fromEntries((await request.formData()).entries());
+          return HttpResponse.json({ job_id: 3 }, { status: 202 });
+        }),
       );
       customRender(<TranslationForm selections={selection} />);
 
@@ -305,15 +308,42 @@ describe("TranslationForm and the manual pick", () => {
       await choose(user, "Translate with", pick);
       expect(picker).toHaveValue(pick);
 
-      removing = true;
-      await queryClient.invalidateQueries({
-        queryKey: [QueryKeys.Plugins, "installations"],
-      });
+      if (observeRemoval) {
+        await refreshPickInstallations(
+          PICK_INSTALLATIONS.map((item) =>
+            item.provider_id === id
+              ? { ...item, state: "removed", needs_restart: false }
+              : item,
+          ),
+        );
+        await waitFor(() => expect(picker).toHaveValue("Automatic"));
+      }
+      await refreshPickInstallations(
+        PICK_INSTALLATIONS.filter((item) => item.provider_id !== id),
+      );
       await waitFor(() => expect(picker).toHaveValue("Automatic"));
       expect(await optionsOf(user, "Translate with")).toEqual([
         "Automatic",
         other,
       ]);
+      await user.keyboard("{Escape}");
+
+      await refreshPickInstallations(PICK_INSTALLATIONS);
+      expect(await optionsOf(user, "Translate with")).toHaveLength(3);
+      expect(picker).toHaveValue("Automatic");
+      await user.keyboard("{Escape}");
+      await languagesLoaded();
+      const language = screen
+        .getAllByRole("combobox")
+        .find((item) => item !== picker)!;
+      await user.type(language, "Hung");
+      await user.click(
+        await screen.findByRole("option", { name: "Hungarian", hidden: true }),
+      );
+      await user.click(screen.getByRole("button", { name: "Start" }));
+      await waitFor(() => expect(sent).toMatchObject({ language: "hu" }));
+      expect(sent).not.toHaveProperty("engine_id");
+      expect(sent).not.toHaveProperty("connection_id");
     },
   );
 

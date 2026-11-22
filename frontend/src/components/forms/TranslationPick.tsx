@@ -1,11 +1,11 @@
 import { FunctionComponent, useMemo, useState } from "react";
 import { Select } from "@mantine/core";
+import { usePluginInstallations } from "@/apis/hooks/plugins";
 import {
   useTranslationRuntime,
   useTranslationState,
 } from "@/apis/hooks/translation";
 import { pickableChoices, type PickChoice } from "@/pages/Translation/model";
-import { useRestartAware } from "@/pages/Translation/useEngineInstall";
 
 /** The value of the choice that picks nothing: the selected engine, with its fallback. */
 const AUTOMATIC = "automatic";
@@ -42,14 +42,25 @@ export interface ManualPick {
 export function useManualPick(): ManualPick {
   const runtime = useTranslationRuntime();
   const { data } = useTranslationState(runtime);
-  const { state } = useRestartAware(data, runtime);
-  const choices = useMemo(
-    () => (runtime && state ? pickableChoices(state) : []),
-    [runtime, state],
-  );
+  const { data: installations } = usePluginInstallations(undefined, runtime);
+  const choices = useMemo(() => {
+    if (!runtime || !data) return [];
+    // The installation list can lose a row before the Translation state catches up.
+    const installed =
+      installations &&
+      new Set(
+        installations
+          .filter((item) => item.active_version && item.state !== "removed")
+          .map((item) => item.provider_id),
+      );
+    return pickableChoices(data, installed);
+  }, [runtime, data, installations]);
   const [key, setKey] = useState<string | null>(null);
-  // A pick that was removed, turned off or lost its key while the form was open is no longer a pick.
   const picked = choices.find((item) => item.key === key) ?? null;
+  // If a choice comes back later, the user must pick it again.
+  if (key !== null && picked === null) {
+    setKey(null);
+  }
   const fields: PickFields =
     picked?.connectionId !== undefined
       ? { connection_id: picked.connectionId }

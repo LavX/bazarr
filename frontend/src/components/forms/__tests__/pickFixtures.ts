@@ -5,6 +5,7 @@ import { http, HttpResponse } from "msw";
 import { expect } from "vitest";
 import queryClient from "@/apis/queries";
 import { QueryKeys } from "@/apis/queries/keys";
+import type { PluginInstallation } from "@/apis/raw/plugins";
 import { connection, engine, second } from "@/pages/Translation/fixtures";
 import server from "@/tests/mocks/node";
 import type { TranslationState } from "@/types/translation";
@@ -32,6 +33,27 @@ export const PICK_STATE: TranslationState = {
   ],
 };
 
+export const PICK_INSTALLATIONS: PluginInstallation[] =
+  PICK_STATE.instances.map((item) => ({
+    provider_id: item.plugin_id,
+    kind: "translator",
+    state: "active",
+    active_version: item.plugin_version,
+  }));
+
+export async function refreshPickInstallations(
+  installations: PluginInstallation[],
+) {
+  server.use(
+    http.get("/api/plugins/installations", () =>
+      HttpResponse.json({ data: installations }),
+    ),
+  );
+  await queryClient.invalidateQueries({
+    queryKey: [QueryKeys.Plugins, "installations"],
+  });
+}
+
 /** The status of a server with the new translator on (or off), and the state it answers with. */
 export function translatorStatus(
   runtime: boolean,
@@ -53,6 +75,9 @@ export function translatorStatus(
       asked.push("state");
       return HttpResponse.json(state);
     }),
+    http.get("/api/plugins/installations", () =>
+      HttpResponse.json({ data: PICK_INSTALLATIONS }),
+    ),
   );
   return asked;
 }
@@ -93,11 +118,20 @@ export async function optionsOf(user: UserEvent, label: string) {
     .map((item) => item.textContent);
 }
 
-/** Waits for the Translation page's state, which the pick lists its back ends from. */
+/** Waits for both the Translation state and the installation list the picker uses. */
 export async function stateLoaded() {
   await waitFor(() =>
     expect(
       queryClient.getQueryState([QueryKeys.Translation, "state"])?.status,
+    ).toBe("success"),
+  );
+  await waitFor(() =>
+    expect(
+      queryClient.getQueryState([
+        QueryKeys.Plugins,
+        "installations",
+        QueryKeys.All,
+      ])?.status,
     ).toBe("success"),
   );
 }

@@ -75,14 +75,11 @@ export function useEngineInstall(
  * plugin's `needs_restart` and nothing else. `waiting` is how many translator plugins wait on a restart,
  * for the banner, whether or not an engine of theirs is still listed.
  */
-export function useRestartAware(
-  state: TranslationState | undefined,
-  enabled = true,
-): {
+export function useRestartAware(state: TranslationState | undefined): {
   state: TranslationState | undefined;
   waiting: number;
 } {
-  const installations = usePluginInstallations(undefined, enabled);
+  const installations = usePluginInstallations();
   // What the restart will do to each plugin that waits on one, read from the installation: a removal is
   // staged as a removed row, an update as a staged release beside an active one, an install as a staged
   // release with nothing active.

@@ -89,17 +89,30 @@ export const ENGINES_GROUP = "Engines";
  * held back or off is not offered rather than offered and refused. An engine that has back ends is picked
  * through them, and a legacy engine is set up and used where it always was.
  */
-export function pickableChoices(state: TranslationState): PickChoice[] {
+export function pickableChoices(
+  state: TranslationState,
+  installed?: ReadonlySet<string>,
+): PickChoice[] {
+  const present = (pluginId: string) => installed?.has(pluginId) ?? true;
   const running = orderedEngines(state.instances)
-    .filter((engine) => engine.enabled && !engine.awaiting_secrets)
+    .filter(
+      (engine) =>
+        engine.enabled &&
+        !engine.awaiting_secrets &&
+        (engine.legacy || present(engine.plugin_id)),
+    )
     .filter(canRun);
   const backEnds = running.flatMap((engine) =>
-    engine.connections.filter(working).map((item) => ({
-      key: `connection:${item.id}`,
-      connectionId: item.id,
-      label: backendName(engine, item),
-      engine: engineName(engine),
-    })),
+    engine.connections
+      .filter(
+        (item) => working(item) && (!item.plugin_id || present(item.plugin_id)),
+      )
+      .map((item) => ({
+        key: `connection:${item.id}`,
+        connectionId: item.id,
+        label: backendName(engine, item),
+        engine: engineName(engine),
+      })),
   );
   const engines = running
     .filter(

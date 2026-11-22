@@ -2504,6 +2504,33 @@ describe("Translation page, an engine installed and waiting for a restart", () =
       within(listbox).getByRole("option", { name: "Lingarr", hidden: true }),
     ).toBeInTheDocument();
     expect(input).toHaveValue("None");
+
+    state = {
+      ...state,
+      fallback_engine: null,
+      instances: [
+        second,
+        lingarr(),
+        engine({ plugin: null, configured: false }),
+      ],
+    };
+    server.use(
+      http.get("/api/plugins/installations", () =>
+        HttpResponse.json({ data: [] }),
+      ),
+    );
+    await queryClient.invalidateQueries();
+    await within(group).findByText("Plugin not running");
+    expect(
+      within(listbox).queryByRole("option", {
+        name: /AI Subtitle Translator/,
+        hidden: true,
+      }),
+    ).not.toBeInTheDocument();
+    expect(
+      within(listbox).getByRole("option", { name: "Lingarr", hidden: true }),
+    ).toBeInTheDocument();
+    expect(input).toHaveValue("None");
   });
 
   it("hides an available update while the engine is being removed", async () => {

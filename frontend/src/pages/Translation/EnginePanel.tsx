@@ -173,7 +173,10 @@ const EnginePanel: FunctionComponent<EnginePanelProps> = ({
       ? (pointers.chosen.fallback_engine ?? null)
       : state.fallback_engine;
   const fallbackChoices = engines.filter(
-    (item) => !item.removing && item.id !== chosen,
+    (item) =>
+      !item.removing &&
+      item.id !== chosen &&
+      (item.legacy || item.plugin !== null),
   );
   const toId = (value: string | null) =>
     value === null || value === NONE ? null : Number(value);
