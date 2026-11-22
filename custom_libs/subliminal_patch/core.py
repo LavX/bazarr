@@ -451,7 +451,7 @@ class ProviderRetiredError(Exception):
 
 
 class ProviderCallInterruptedError(Exception):
-    """The host stopped a release while it was serving this operation."""
+    """The host refused or interrupted an operation across provider retirement."""
 
 
 class ListingStopped(Exception):
@@ -489,7 +489,12 @@ def _source_kwargs(carrier):
     return {} if context is None else {'source_context': context}
 
 
+_provider_attempt_observer = contextvars.ContextVar('provider_attempt_observer', default=None)
+
+
 def _provider_owner(name, instance=None):
+    if instance is not None and hasattr(instance, '_registry_owner'):
+        return instance._registry_owner
     owner = getattr(provider_registry, 'owner', None)
     if owner is None:
         return None
@@ -838,8 +843,12 @@ class SZProviderPool(ProviderPool):
         so the caller can acknowledge the right worker and scope the outcome.
         """
         def attempt(instance):
+            owner = _provider_owner(name, instance)
             if invoked is not None:
-                invoked.append((instance, _provider_owner(name, instance)))
+                invoked.append((instance, owner))
+            observe = _provider_attempt_observer.get()
+            if observe is not None:
+                observe(name, owner)
             if getattr(instance, 'hub_proxy', False):
                 return call(instance)
 
@@ -904,10 +913,12 @@ class SZProviderPool(ProviderPool):
                 generation = provider_generation(name)
                 # Looked up once. A plugin detached while Bazarr+ runs leaves the registry, and a name with no
                 # class is excluded (the quiet answer), never a call on None.
-                provider_class = provider_registry[name]
+                owner = _provider_owner(name)
+                provider_class = owner[0] if owner is not None else provider_registry[name]
                 if provider_class is None:
                     raise ProviderExcludedError(name)
                 provider = provider_class(**config())
+                provider._registry_owner = owner
                 provider.initialize()
                 if self._install_provider(name, provider, generation):
                     return provider
@@ -1115,14 +1126,17 @@ class SZProviderPool(ProviderPool):
         :type video: :class:`~subliminal.video.Video`
         :param languages: languages to search for.
         :type languages: set of :class:`~babelfish.language.Language`
-        :param bool discard_on_failure: the listing loops discard a provider
-            that returns None. With this set it is discarded here, before the
-            outcome is reported to the provider, so a request queued behind
-            this one already sees the discard when it rechecks admission.
+        :param bool discard_on_failure: discard the failed provider before
+            acknowledging its outcome, so queued calls see the discard.
         :return: found subtitles.
         :rtype: list of :class:`~subliminal.subtitle.Subtitle` or None
 
         """
+        observe = _provider_attempt_observer.get()
+        if observe is not None:
+            observe(provider, None)
+        invoked = []
+
         def finish(subtitles=None, status="empty", reason=None):
             if detailed:
                 return ProviderSearchResult(provider, subtitles or [], status, reason)
@@ -1147,6 +1161,7 @@ class SZProviderPool(ProviderPool):
         provider_class = owner[0] if owner is not None else provider_registry[provider]
         if provider_class is None:
             logger.info('Skipping provider %r: it is no longer registered', provider)
+            discard()
             return finish(None, "skipped", "provider_excluded")
 
         # check video validity
@@ -1190,9 +1205,6 @@ class SZProviderPool(ProviderPool):
             self.provider_progress_callback(provider)
 
         initialized_provider = None
-        # Every instance the call was tried on; the last one is the one that
-        # was admitted, and the one whose outcome is reported below.
-        invoked = []
         try:
             try:
                 initialized_provider = self[provider]
@@ -1337,7 +1349,6 @@ class SZProviderPool(ProviderPool):
                 logger.debug('Skipping discarded provider %r', name)
                 continue
 
-            owner = _provider_owner(name)
             # list subtitles
             try:
                 provider_subtitles = self.list_subtitles_provider(name, video, languages, discard_on_failure=True)
@@ -1345,13 +1356,8 @@ class SZProviderPool(ProviderPool):
                 logger.exception("Unexpected language reverse error in %s, skipping", name)
                 continue
 
-            if provider_subtitles is None:
-                logger.info('Discarding provider %s', name)
-                self._discard_provider(name, owner)
-                continue
-
-            # add the subtitles
-            subtitles.extend(provider_subtitles)
+            if provider_subtitles is not None:
+                subtitles.extend(provider_subtitles)
 
         return subtitles
 
@@ -1449,18 +1455,12 @@ class SZProviderPool(ProviderPool):
                 logger.debug('Skipping discarded provider %r', name)
                 continue
 
-            owner = _provider_owner(name)
             # Search this provider
             if cancel is None:
                 provider_subtitles = SZProviderPool.list_subtitles_provider(self, name, video, languages,
                                                                             discard_on_failure=True)
             else:
                 provider_subtitles = self._list_provider_stoppable(name, video, languages, cancel)
-
-            if provider_subtitles is None:
-                logger.info('Discarding provider %s', name)
-                self._discard_provider(name, owner)
-                continue
 
             if not provider_subtitles:
                 continue
@@ -1535,7 +1535,8 @@ class SZProviderPool(ProviderPool):
         # refused quietly, not handed over to fail and be recorded against a provider that did nothing wrong.
         owner = _provider_owner(subtitle.provider_name)
         registered = owner[0] if owner is not None else provider_registry[subtitle.provider_name]
-        if getattr(subtitle, 'hub_proxy', False) and registered is not None and not getattr(
+        plugin_candidate = getattr(subtitle, 'hub_proxy', False)
+        if plugin_candidate and registered is not None and not getattr(
                 registered, 'hub_proxy', False):
             # Plain fields only: a log line must never raise, and the repr of a subtitle reads attributes a
             # candidate may not have.
@@ -1543,6 +1544,13 @@ class SZProviderPool(ProviderPool):
                         subtitle.provider_name, getattr(subtitle, 'id', None))
             subtitle.skip_reason = 'provider_excluded'
             return False
+
+        def download_from(instance):
+            # Both the initial lookup and the retry of a retired instance may
+            # have reached the built-in after the registry check above.
+            if plugin_candidate and not getattr(instance, 'hub_proxy', False):
+                raise ProviderCallInterruptedError(subtitle.provider_name)
+            return instance.download_subtitle(subtitle)
 
         logger.info('Downloading subtitle %r', subtitle)
         tries = 0
@@ -1591,8 +1599,7 @@ class SZProviderPool(ProviderPool):
                         subtitle.skip_reason = 'provider_excluded'
                         return False
                     self._call_current(
-                        subtitle.provider_name, initialized_provider,
-                        lambda current: current.download_subtitle(subtitle), invoked,
+                        subtitle.provider_name, initialized_provider, download_from, invoked,
                     )
                     if self.post_download_hook:
                         self.post_download_hook(subtitle)
@@ -2025,13 +2032,17 @@ class SZAsyncProviderPool(SZProviderPool):
 
     def list_subtitles_provider(self, provider, video, languages, detailed=False, discard_on_failure=False):
         provider_subtitles = None
+        owner = _provider_owner(provider) if discard_on_failure else None
         try:
             if detailed:
-                return super().list_subtitles_provider(provider, video, languages, detailed=True)
+                return super().list_subtitles_provider(provider, video, languages, detailed=True,
+                                                       discard_on_failure=discard_on_failure)
             provider_subtitles = super().list_subtitles_provider(provider, video, languages,
                                                                  discard_on_failure=discard_on_failure)
         except LanguageReverseError:
             logger.exception("Unexpected language reverse error in %s, skipping", provider)
+            if discard_on_failure:
+                self._discard_provider(provider, owner)
             if detailed:
                 return ProviderSearchResult(provider, status="error", reason="language_conversion")
 
@@ -2042,21 +2053,14 @@ class SZAsyncProviderPool(SZProviderPool):
             return super(SZAsyncProviderPool, self).list_subtitles(video, languages)
 
         subtitles = []
-        owners = {name: _provider_owner(name) for name in self.providers}
 
         with ThreadPoolExecutor(self.max_workers) as executor:
-            for provider, provider_subtitles in executor.map(partial(self.list_subtitles_provider,
+            for _, provider_subtitles in executor.map(partial(self.list_subtitles_provider,
                                                                      discard_on_failure=True), self.providers,
                                                              itertools.repeat(video, len(self.providers)),
                                                              itertools.repeat(languages, len(self.providers))):
-                # discard provider that failed
-                if provider_subtitles is None:
-                    logger.info('Discarding provider %s', provider)
-                    self._discard_provider(provider, owners.get(provider))
-                    continue
-
-                # add subtitles
-                subtitles.extend(provider_subtitles)
+                if provider_subtitles is not None:
+                    subtitles.extend(provider_subtitles)
 
         return subtitles
 

@@ -517,7 +517,7 @@ def list_all_subtitles_parallel(videos, languages, pool_instance,
         if on_outcome is not None:
             on_outcome(result, latency_ms)
 
-    from .core import ProviderSearchResult, provider_search_failure
+    from .core import ProviderSearchResult, _provider_attempt_observer, provider_search_failure
     from .extensions import provider_registry
 
     if on_outcome is not None:
@@ -565,15 +565,26 @@ def list_all_subtitles_parallel(videos, languages, pool_instance,
             futures: Dict[Future, str] = {}
             start_times: Dict[Future, float] = {}
             owners = {}
+            attempted = {}
             # Health needs the detailed status too: a skipped search (including
             # an interrupted release) says nothing about the provider's health.
             options = {"detailed": True} if on_outcome is not None or on_result is not None else {}
+            def search_provider(name, video, languages, attempts=attempted, **options):
+                def observe(provider, owner):
+                    if provider == name:
+                        attempts[name] = owner
+
+                token = _provider_attempt_observer.set(observe)
+                try:
+                    return pool_instance.list_subtitles_provider(name, video, languages, **options)
+                finally:
+                    _provider_attempt_observer.reset(token)
+
+            search = search_provider if on_result is not None else pool_instance.list_subtitles_provider
             for p in providers:
                 if on_result is not None:
                     owners[p] = provider_registry.owner(p)
-                fut = _safe_submit(executor,
-                                   pool_instance.list_subtitles_provider,
-                                   p, video, languages, **options)
+                fut = _safe_submit(executor, search, p, video, languages, **options)
                 futures[fut] = p
                 start_times[fut] = time.monotonic()
 
@@ -586,7 +597,11 @@ def list_all_subtitles_parallel(videos, languages, pool_instance,
                         # A detached call still has an outcome for its caller,
                         # but it cannot change the health of the new owner.
                         with provider_registry.lock:
-                            if provider_registry.owner(name) == owners[name]:
+                            owner = attempted.get(name)
+                            if outcome == "abandoned" and name in attempted and owner is None:
+                                # The search reached the pool but had yet to call a provider.
+                                return
+                            if provider_registry.owner(name) == (owner or owners[name]):
                                 on_result(name, outcome, int(latency_s * 1000))
                     except Exception:
                         logger.debug("on_result callback raised", exc_info=True)

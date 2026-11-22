@@ -1284,6 +1284,7 @@ def test_a_built_in_that_takes_its_id_back_inherits_no_throttle_or_discard_the_p
     pool = world.pool(BUILT_IN)
     pool.discarded_providers.add(BUILT_IN)
     get_providers.tp[BUILT_IN] = ("ConfigurationError", dt.datetime.now() + dt.timedelta(hours=12), "12 hours")
+    monkeypatch.setattr(get_providers, "throttle_count", {BUILT_IN: {"count": 4, "time": dt.datetime.now()}})
     tracker = get_tracker()
     for _ in range(10):
         tracker.record(BUILT_IN, "exception")
@@ -1294,6 +1295,7 @@ def test_a_built_in_that_takes_its_id_back_inherits_no_throttle_or_discard_the_p
         assert detach.wait_idle(WAIT)
 
         assert BUILT_IN not in get_providers.tp and not get_providers.provider_is_throttled(BUILT_IN)
+        assert BUILT_IN not in get_providers.throttle_count
         assert not tracker.is_discarded(BUILT_IN) and BUILT_IN not in pool.discarded_providers
     finally:
         get_providers.tp.pop(BUILT_IN, None)
@@ -1804,14 +1806,125 @@ def test_an_independent_failure_during_cut_is_visible_without_throttling_the_new
     assert BUILT_IN not in pool.discarded_providers
 
 
-def test_a_throttle_write_rechecks_ownership_after_classifying_the_error(world, monkeypatch):
+@pytest.mark.parametrize("listing", ["fanout", "fanout-abandoned", "prioritized", "sequential", "async"])
+def test_a_search_of_a_still_cached_plugin_does_not_charge_the_current_built_in(world, monkeypatch, listing):
+    from provider_hub import detach, registry, service
+    from provider_hub.worker import WorkerError
+    from subzero.language import Language
+    from subliminal_patch.core import SZAsyncProviderPool
+    from subliminal_patch.core_persistent import list_all_subtitles_parallel
+    from subliminal_patch.provider_health import ProviderHealthTracker
+
+    built_in, plugin = _plugin_over_built_in(world, monkeypatch)
+    errors, outcomes, abandoned = [], [], []
+    started, finish = threading.Event(), threading.Event()
+    health = ProviderHealthTracker()
+    monkeypatch.setattr("subliminal_patch.provider_health.get_tracker", lambda: health)
+    monkeypatch.setattr("app.get_providers.get_providers_auth", lambda: {BUILT_IN: {}})
+
+    def fail(self, video, languages):
+        errors.append(self)
+        if listing == "fanout-abandoned":
+            started.set()
+            assert finish.wait(WAIT)
+        raise WorkerError("cached plugin failed")
+
+    def expire_after_attempt(futures, timeout):
+        assert started.wait(WAIT)
+        abandoned.extend(futures)
+        raise TimeoutError
+
+    if listing == "fanout-abandoned":
+        monkeypatch.setattr("subliminal_patch.core_persistent.as_completed", expire_after_attempt)
+
+    monkeypatch.setattr(plugin, "list_subtitles", fail)
+    pool = SZAsyncProviderPool(providers=[BUILT_IN]) if listing == "async" else world.pool(BUILT_IN)
+    old = pool[BUILT_IN]
+    retire = registry.retire_provider_instances
+
+    def search_before_retirement(name, *args, **kwargs):
+        assert world.registry[BUILT_IN] is built_in
+        assert pool.initialized_providers[BUILT_IN] is old
+        video, languages = _movie(), {Language("eng")}
+        if listing.startswith("fanout"):
+            try:
+                list_all_subtitles_parallel([video], languages, pool, on_result=health.record,
+                                            on_outcome=lambda outcome, elapsed: outcomes.append(outcome))
+            finally:
+                finish.set()
+            for future in abandoned:
+                assert future.result(timeout=WAIT).status == "error"
+        elif listing == "prioritized":
+            assert pool.list_subtitles_prioritized(video, languages) == []
+        else:
+            assert pool.list_subtitles(video, languages) == []
+        return retire(name, *args, **kwargs)
+
+    monkeypatch.setattr(registry, "retire_provider_instances", search_before_retirement)
+    service.remove_installation(BUILT_IN)
+
+    assert detach.wait_idle(WAIT)
+    assert errors == [old]
+    if listing.startswith("fanout"):
+        expected = "error" if listing == "fanout" else "abandoned"
+        assert [outcome.status for outcome in outcomes] == [expected]
+    assert BUILT_IN not in health.snapshot()
+    assert BUILT_IN not in pool.discarded_providers
+
+
+@pytest.mark.parametrize("during_retry", [False, True], ids=["before-lookup", "before-retry"])
+def test_a_plugin_candidate_never_reaches_a_built_in_restored_during_download(world, monkeypatch, during_retry):
+    from provider_hub import detach, registry, service
+    from provider_hub.protocol import HubWorkerSubtitle
+    from subzero.language import Language
+    from subliminal_patch.core import ProviderRetiredError
+
+    built_in, plugin = _plugin_over_built_in(world, monkeypatch)
+    asked = []
+
+    class Downloading(built_in):
+        def download_subtitle(self, subtitle):
+            asked.append(subtitle)
+            raise AttributeError("a plugin candidate has no built-in download link")
+
+    registry._SHADOWED_BUILT_INS[BUILT_IN] = Downloading
+    pool = world.pool(BUILT_IN)
+    monkeypatch.setattr("app.get_providers.get_providers_auth", lambda: {BUILT_IN: {}})
+    pool[BUILT_IN]
+
+    def remove():
+        service.remove_installation(BUILT_IN)
+        assert detach.wait_idle(WAIT)
+
+    if during_retry:
+        def lost_worker(self, subtitle):
+            remove()
+            raise ProviderRetiredError(BUILT_IN)
+
+        monkeypatch.setattr(plugin, "download_subtitle", lost_worker)
+    else:
+        pool.pre_download_hook = lambda subtitle: remove()
+
+    subtitle = HubWorkerSubtitle(BUILT_IN, BUILT_IN, "candidate", Language("eng"), {})
+    assert pool.download_subtitle(subtitle) is False
+    assert world.registry[BUILT_IN] is Downloading
+    assert asked == []
+    assert subtitle.skip_reason == "provider_excluded"
+    assert BUILT_IN not in pool.discarded_providers
+
+
+@pytest.mark.parametrize("counted", [False, True])
+def test_a_throttle_write_rechecks_ownership_after_classifying_the_error(world, monkeypatch, counted):
     from app import get_providers
     from provider_hub import detach, service
     from provider_hub.worker import WorkerError
+    from subliminal_patch.exceptions import APIThrottled
 
     _, plugin = _plugin_over_built_in(world, monkeypatch)
 
     def fail(self, video, languages):
+        if counted:
+            raise APIThrottled(retry_after=1)
         raise WorkerError("provider failed")
 
     monkeypatch.setattr(plugin, "list_subtitles", fail)
@@ -1819,6 +1932,7 @@ def test_a_throttle_write_rechecks_ownership_after_classifying_the_error(world, 
     pool.throttle_callback = get_providers.provider_throttle
     monkeypatch.setattr(get_providers, "get_providers_auth", lambda: {BUILT_IN: {}})
     monkeypatch.setattr(get_providers, "tp", {})
+    monkeypatch.setattr(get_providers, "throttle_count", {})
     monkeypatch.setattr(get_providers, "set_throttled_providers", lambda data: None)
     monkeypatch.setattr(get_providers, "event_stream", lambda **kwargs: None)
     monkeypatch.setattr(get_providers.settings.general, "enabled_providers", [BUILT_IN])
@@ -1840,11 +1954,12 @@ def test_a_throttle_write_rechecks_ownership_after_classifying_the_error(world, 
         write.set()
         thread.join(WAIT)
 
-    assert result["value"].status == "error"
+    assert result["value"].status == ("cooldown" if counted else "error")
     assert BUILT_IN not in get_providers.tp
+    assert BUILT_IN not in get_providers.throttle_count
 
 
-@pytest.mark.parametrize("cancel_timing", ["never", "before_eof", "after_eof"])
+@pytest.mark.parametrize("cancel_timing", ["never", "before_eof", "after_eof", "exited_before_eof"])
 def test_worker_eof_keeps_its_cause_until_the_request_consumes_it(monkeypatch, cancel_timing):
     from io import StringIO
     from types import SimpleNamespace
@@ -1852,6 +1967,7 @@ def test_worker_eof_keeps_its_cause_until_the_request_consumes_it(monkeypatch, c
     from provider_hub import worker
 
     close_stdout, queued_eof, consume_eof = threading.Event(), threading.Event(), threading.Event()
+    exited = threading.Event()
 
     class Pipe:
         def readline(self, size):
@@ -1869,14 +1985,23 @@ def test_worker_eof_keeps_its_cause_until_the_request_consumes_it(monkeypatch, c
     process = SimpleNamespace(stdin=StringIO(), stdout=Pipe(), stderr=None, pid=8888)
     monkeypatch.setattr(worker, "_BoundedChunks", ReplyQueue)
     monkeypatch.setattr(client, "_spawn", lambda env: process)
-    monkeypatch.setattr(client, "_has_exited", lambda process: True)
-    monkeypatch.setattr(client, "_kill_worker", close_stdout.set)
+
+    def kill():
+        exited.set()
+        close_stdout.set()
+
+    monkeypatch.setattr(client, "_has_exited", lambda process: exited.is_set())
+    monkeypatch.setattr(client, "_kill_worker", kill)
     thread, result = _in_thread(client.request, "search")
     try:
         assert _wait_for(lambda: client.process is process)
         if cancel_timing == "before_eof":
             client.cancel()
+        elif cancel_timing == "exited_before_eof":
+            exited.set()
+            client.cancel()
         else:
+            exited.set()
             close_stdout.set()
         assert queued_eof.wait(WAIT)
         if cancel_timing == "after_eof":

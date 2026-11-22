@@ -603,6 +603,7 @@ class ProviderWorkerClient:
         # cannot respawn its worker with the configuration that was replaced.
         self._closed = False
         self._cancelled = False
+        self._cut_process = None
         self._stdout_queue: _BoundedChunks | None = None
         self._stdout_thread: threading.Thread | None = None
         self._stderr_thread: threading.Thread | None = None
@@ -657,9 +658,10 @@ class ProviderWorkerClient:
             self._groups = [*self._live_groups(), self.process.pid]
         self._stdout_queue = _BoundedChunks()
         client_ref = weakref.ref(self)
+        process = self.process
         self._stdout_thread = threading.Thread(
             target=self._enqueue_stdout,
-            args=(self.process, self._stdout_queue, lambda: getattr(client_ref(), "_cancelled", False)),
+            args=(process, self._stdout_queue, lambda: getattr(client_ref(), "_cut_process", None) is process),
             daemon=True,
         )
         self._stdout_thread.start()
@@ -1265,12 +1267,17 @@ class ProviderWorkerClient:
         latch = getattr(self, "_outcome_latch", None)
         if latch is not None:
             latch.set()
+        process = self.process
         try:
+            # The transport attributes EOF to cancellation only for a process
+            # observed alive when the cut begins. An exit already visible here
+            # remains a worker failure even if the reader has not queued EOF.
+            if process is not None and not self._has_exited(process):
+                self._cut_process = process
             self._kill_worker()
         except Exception:
             logger.warning("Provider Hub: could not kill the worker of %s", self.provider_id, exc_info=True)
             return
-        process = self.process
         if process is not None and self._has_exited(process):
             self._deregister()
         elif process is not None:
@@ -1359,8 +1366,8 @@ class ProviderWorkerClient:
         if failures:
             error = failures[0]
             message = "worker closed while the host answered its call"
-            if isinstance(error, BrokenPipeError):
-                raise self._closed_worker_error(message) from error
+            if isinstance(error, BrokenPipeError) and getattr(self, "_cut_process", None) is process:
+                raise WorkerCancelled(message) from error
             raise WorkerError(message) from error
 
     def _answer_host_call(self, call: dict, deadline: float) -> dict:
@@ -1537,7 +1544,7 @@ class ProviderWorkerClient:
                     self.process.stdin.write(encoded)
                     self.process.stdin.flush()
                 except OSError as error:
-                    if isinstance(error, BrokenPipeError) and getattr(self, "_cancelled", False):
+                    if isinstance(error, BrokenPipeError) and getattr(self, "_cut_process", None) is self.process:
                         raise WorkerCancelled("worker closed stdin") from error
                     if attempt == 0 and self._opened_after_apply_failure():
                         continue
