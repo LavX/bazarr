@@ -3007,6 +3007,9 @@ def _save_settings(settings_items, native_configuration=None, *, strict_metadata
     sonarr_changed = False
     radarr_changed = False
     sportarr_changed = False
+    shadow_refresh_kinds = []
+    master_toggles_before = {arr_kind: bool(getattr(settings.general, f'use_{arr_kind}', False))
+                             for arr_kind in ('sonarr', 'radarr', 'sportarr')}
     plex_account_changed = False
     update_path_map = False
     configure_proxy = False
@@ -3241,6 +3244,10 @@ def _save_settings(settings_items, native_configuration=None, *, strict_metadata
         # a restart or an unrelated instance edit happened to refresh them.
         if key == 'settings-general-use_sportarr':
             sportarr_changed = True
+
+        # A master toggle decides which arr instances own files, so the source items they shadow are judged again.
+        if key in ('settings-general-use_sonarr', 'settings-general-use_radarr', 'settings-general-use_sportarr'):
+            shadow_refresh_kinds.append(key.rsplit('use_', 1)[1])
 
         if key in ['settings-general-path_mappings', 'settings-general-path_mappings_movie',
                    'settings-general-path_mappings_sports']:
@@ -3643,6 +3650,12 @@ def _save_settings(settings_items, native_configuration=None, *, strict_metadata
                 from .event_handler import event_stream
                 scheduler.update_configurable_tasks()
                 event_stream(type='task')
+
+        for shadow_kind in shadow_refresh_kinds:
+            if bool(getattr(settings.general, f'use_{shadow_kind}', False)) != master_toggles_before[shadow_kind]:
+                with follow_ups.step():
+                    from media_sources.shadows import queue_shadow_refresh
+                    queue_shadow_refresh(shadow_kind)
 
         if sonarr_changed:
             # Restart every Sonarr SignalR client and re-fan-out (#156).

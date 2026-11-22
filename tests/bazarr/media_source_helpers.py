@@ -126,6 +126,84 @@ def video(path, size=1000):
     return path
 
 
+@pytest.fixture
+def pristine_media_source_modules():
+    """A test that replaces ``app.database`` or re-imports a media source module leaves them as it found them.
+
+    ``monkeypatch`` puts the ``sys.modules`` entries back, but an import also sets the module as an attribute of
+    its package, and nothing restores that: the next ``from media_sources import repository`` would get the copy
+    bound to the stub. So the entries and the package attributes are snapshotted and restored together, and the
+    modules first imported inside the window are dropped."""
+    import sys
+
+    def mine(name):
+        return name == "app.database" or name == "media_sources" or name.startswith("media_sources.")
+
+    before = {name: module for name, module in sys.modules.items() if mine(name)}
+    try:
+        yield
+    finally:
+        for name in [name for name in sys.modules if mine(name) and name not in before]:
+            del sys.modules[name]
+        sys.modules.update(before)
+        for name, module in before.items():
+            if "." in name:
+                parent, child = name.rsplit(".", 1)
+                if parent in sys.modules:
+                    setattr(sys.modules[parent], child, module)
+
+
+_stamp = [0]
+
+
+def stamped_video(path, size=None):
+    """A video whose size and modification time no other stamped video shares, so that "the same file" and "a
+    different file" are decided by identity and not by two files that happen to look alike."""
+    _stamp[0] += 1
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(b"\0" * (size or 1000 + _stamp[0]))
+    stamp = 1_700_000_000_000_000_000 + _stamp[0] * 1_000_000_007
+    os.utime(path, ns=(stamp, stamp))
+    return path
+
+
+class Lib:
+    """A series library over a temporary folder, with the few operations the scan tests need."""
+
+    def __init__(self, session, tmp_path, name="TV", folder="TV", content_kind="series"):
+        self.session = session
+        self.source_id, self.library_id, self.root = add_source(session, tmp_path, name=name, folder=folder,
+                                                                content_kind=content_kind)
+
+    def show(self, name, count=3, prefix=None, base=None):
+        prefix = prefix or name
+        return [stamped_video(self.root / name / f"{prefix} - S01E{number:02d}.mkv")
+                for number in range(1, count + 1)]
+
+    def scan(self):
+        from media_sources.scanner import run_scan
+        (result,) = run_scan(self.source_id, self.library_id)
+        return result
+
+    def groups(self):
+        from media_sources import repository
+        return {row.group_key: row for row in repository.library_groups(self.library_id)}
+
+    def group(self, name):
+        return self.groups()[str(self.root / name)]
+
+    def items(self):
+        from media_sources import repository
+        return {row.path: row for row in repository.list_items(library_id=self.library_id, limit=1000)}
+
+    def path(self, *parts):
+        return str(self.root.joinpath(*parts))
+
+    def set_group(self, name, **values):
+        from media_sources import repository
+        repository.update_group(self.group(name).id, self.session, **values)
+
+
 def table_counts(session, names):
     return {name: session.execute(sa.text(f'SELECT count(*) FROM "{name}"')).scalar_one() for name in names}
 

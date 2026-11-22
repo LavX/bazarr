@@ -14,6 +14,7 @@ from app.database import (TableMediaSourceLibraries, TableMediaSourceLibraryRoot
                           TableSourceBlacklist, TableSourceGroups, TableSourceHistory, TableSourceItems)
 
 from .db import handle
+from .identity import SHADOW_COLUMNS
 
 ITEM_KINDS = ('movie', 'episode', 'sports_event')
 # The kind of group each kind of item belongs to. A movie has none.
@@ -116,6 +117,32 @@ def record_root_device(root_id, device, target=None):
     _target(target).execute(sa.update(Roots).where(Roots.c.id == root_id).values(last_dev=device))
 
 
+def update_source(source_id, target=None, **values):
+    values['updated_at'] = datetime.now()
+    return _target(target).execute(sa.update(Sources).where(Sources.c.id == source_id).values(**values)).rowcount
+
+
+def update_library(library_id, target=None, **values):
+    values['updated_at'] = datetime.now()
+    return _target(target).execute(sa.update(Libraries).where(Libraries.c.id == library_id).values(**values)).rowcount
+
+
+def delete_library(library_id, target=None):
+    """Delete a library. Its roots, groups and items go (cascade); their history and blacklist rows stay, with
+    their links set to NULL."""
+    _target(target).execute(sa.delete(Libraries).where(Libraries.c.id == library_id))
+
+
+def replace_roots(library_id, roots, target=None):
+    """Replace a library's roots with ``[(server_path, local_path)]``. A root whose local path is kept keeps its
+    recorded device."""
+    kept = {row.local_path: row.last_dev for row in get_roots(library_id, target)}
+    _target(target).execute(sa.delete(Roots).where(Roots.c.library_id == library_id))
+    for server_path, local_path in roots:
+        _insert(target, Roots, dict(library_id=library_id, server_path=server_path, local_path=local_path,
+                                    last_dev=kept.get(local_path)))
+
+
 def delete_source(source_id, target=None):
     """Delete a source. Its libraries, roots, groups and items go with it (cascade); its history and blacklist
     rows stay, with their links set to NULL."""
@@ -126,6 +153,31 @@ def delete_source(source_id, target=None):
 
 def get_group(group_id, target=None):
     return _target(target).execute(sa.select(Groups).where(Groups.c.id == group_id)).first()
+
+
+def library_groups(library_id, target=None):
+    return _target(target).execute(
+        sa.select(Groups).where(Groups.c.library_id == library_id).order_by(Groups.c.id)).all()
+
+
+def update_group(group_id, target=None, *, owner_library_id=None, **values):
+    values['updated_at'] = datetime.now()
+    statement = sa.update(Groups).where(Groups.c.id == group_id)
+    if owner_library_id is not None:
+        statement = statement.where(Groups.c.library_id == owner_library_id)
+    return _target(target).execute(statement.values(**values)).rowcount
+
+
+def delete_empty_groups(group_ids, target=None, *, owner_library_id=None):
+    """Delete the groups among ``group_ids`` that hold no item. Returns how many were deleted."""
+    group_ids = list(group_ids)
+    if not group_ids:
+        return 0
+    held = sa.select(Items.c.id).where(Items.c.group_id == Groups.c.id).exists()
+    statement = sa.delete(Groups).where(Groups.c.id.in_(group_ids), ~held)
+    if owner_library_id is not None:
+        statement = statement.where(Groups.c.library_id == owner_library_id)
+    return _target(target).execute(statement).rowcount
 
 
 def create_group(*, source_id, library_id, kind, group_key, title, identity_source='filename',
@@ -170,11 +222,59 @@ def count_items(*, source_id=None, library_id=None, kind=None, target=None):
     return _target(target).execute(statement).scalar_one()
 
 
-def library_item_paths(library_id, target=None):
-    """Every item of a library with what the rescan test compares: ``(id, path, file_size, file_mtime_ns, identity_source)``."""
+_MATCH_COLUMNS = ('id', 'path', 'kind', 'group_id', 'source_id', 'library_id', 'file_dev', 'file_ino', 'file_size',
+                  'file_mtime_ns', 'identity_source')
+
+
+def library_items(library_id, target=None):
+    """Every item of a library with what matching a discovered file compares. Not the whole row: the codec cache
+    of a large library is megabytes the scan has no use for."""
     return _target(target).execute(
-        sa.select(Items.c.id, Items.c.path, Items.c.file_size, Items.c.file_mtime_ns, Items.c.identity_source)
-        .where(Items.c.library_id == library_id)).all()
+        sa.select(*(Items.c[name] for name in _MATCH_COLUMNS)).where(Items.c.library_id == library_id)).all()
+
+
+def foreign_candidates(inodes, paths, library_id, target=None):
+    """Items of other libraries, of any source, that may be the same file as a discovered one: the ones whose
+    stored inode is among ``inodes`` or whose path is among ``paths``. Each comes with its library's content
+    kind and the enabled state of its library and source, and its source's name."""
+    inodes, paths = list(inodes), list(paths)
+    seen = {}
+    for start in range(0, max(len(inodes), len(paths)), 500):
+        condition = sa.or_(Items.c.file_ino.in_(inodes[start:start + 500]),
+                           Items.c.path.in_(paths[start:start + 500]))
+        for row in _target(target).execute(
+                sa.select(*(Items.c[name] for name in _MATCH_COLUMNS),
+                          Libraries.c.content_kind, Libraries.c.enabled.label('library_enabled'),
+                          Sources.c.enabled.label('source_enabled'), Sources.c.name.label('source_name'))
+                .select_from(Items.join(Libraries, Items.c.library_id == Libraries.c.id)
+                             .join(Sources, Items.c.source_id == Sources.c.id))
+                .where(Items.c.library_id != library_id, condition)).all():
+            seen[row.id] = row
+    return list(seen.values())
+
+
+def pending_items(library_id, target=None):
+    """The items of a library whose last identification could not be answered."""
+    return _target(target).execute(
+        sa.select(Items.c.id, Items.c.path, Items.c.group_id, Items.c.identity_source)
+        .where(Items.c.library_id == library_id, Items.c.identify_pending == 1)).all()
+
+
+def pending_groups(library_id, target=None):
+    return _target(target).execute(
+        sa.select(Groups.c.id, Groups.c.group_key, Groups.c.identity_source)
+        .where(Groups.c.library_id == library_id, Groups.c.identify_pending == 1)).all()
+
+
+def shadow_state(item_ids, target=None):
+    """Each item's id, path, library and the columns of its arr shadow."""
+    item_ids = list(item_ids)
+    rows = []
+    for start in range(0, len(item_ids), 500):
+        rows.extend(_target(target).execute(
+            sa.select(Items.c.id, Items.c.path, Items.c.library_id, *(Items.c[name] for name in SHADOW_COLUMNS))
+            .where(Items.c.id.in_(item_ids[start:start + 500]))).all())
+    return rows
 
 
 def _check_parent(target, kind, group_id):
@@ -204,17 +304,25 @@ def insert_item(target=None, **values):
     return _insert(target, Items, values)
 
 
-def update_item(item_id, target=None, **values):
+def update_item(item_id, target=None, *, owner_library_id=None, **values):
     values['updated_at'] = datetime.now()
-    return _target(target).execute(sa.update(Items).where(Items.c.id == item_id).values(**values)).rowcount
+    statement = sa.update(Items).where(Items.c.id == item_id)
+    if owner_library_id is not None:
+        statement = statement.where(Items.c.library_id == owner_library_id)
+    return _target(target).execute(statement.values(**values)).rowcount
 
 
-def delete_items(item_ids, target=None):
+def delete_items(item_ids, target=None, *, owner_library_id=None):
     """Delete items. Their history and blacklist rows stay, with ``item_id`` set to NULL."""
     item_ids = list(item_ids)
-    if item_ids:
-        _target(target).execute(sa.delete(Items).where(Items.c.id.in_(item_ids)))
-    return len(item_ids)
+    deleted = 0
+    # In batches: SQLite refuses an IN list of more than 32,766 values.
+    for start in range(0, len(item_ids), 500):
+        statement = sa.delete(Items).where(Items.c.id.in_(item_ids[start:start + 500]))
+        if owner_library_id is not None:
+            statement = statement.where(Items.c.library_id == owner_library_id)
+        deleted += _target(target).execute(statement).rowcount
+    return deleted
 
 
 def write_item_index(item_id, subtitles, missing_subtitles, target=None):
@@ -295,40 +403,24 @@ def _inside(path, parent):
     return path == parent or path.startswith(parent.rstrip(os.sep) + os.sep)
 
 
-def overlapping_root(path, target=None):
+def overlapping_root(path, target=None, exclude_library_id=None):
     """The ``(source name, root path)`` of a library root that is inside ``path`` or contains it, or None.
 
     Compared by the spelling, by the real path (a symlink to a root is that root) and by device and inode (a bind
-    mount of a root is that root, whatever its path)."""
+    mount of a root is that root, whatever its path). The roots of ``exclude_library_id`` do not count: a library
+    does not overlap itself."""
     wanted = [_normal(path), os.path.normcase(os.path.realpath(path))]
     identity = folder_identity(path)
     rows = _target(target).execute(
-        sa.select(Roots.c.local_path, Sources.c.name)
+        sa.select(Roots.c.local_path, Roots.c.library_id, Sources.c.name)
         .select_from(Roots.join(Libraries, Roots.c.library_id == Libraries.c.id)
                      .join(Sources, Libraries.c.source_id == Sources.c.id))).all()
     for row in rows:
+        if exclude_library_id is not None and row.library_id == exclude_library_id:
+            continue
         existing = {_normal(row.local_path), os.path.normcase(os.path.realpath(row.local_path))}
         if any(_inside(one, other) or _inside(other, one) for one in wanted for other in existing):
             return row.name, row.local_path
         if identity is not None and folder_identity(row.local_path) == identity:
             return row.name, row.local_path
     return None
-
-
-def holders_of(paths, library_id, target=None):
-    # Held by path only. Matching a file to a row of another library by device and inode, so that a hardlink, a
-    # symlinked file or a second mount of one folder is one item too, belongs to the scanner's same-file rules.
-    """``{path: (source name, held by an enabled library of an enabled source)}`` for the paths another library
-    already holds. One item per file: a file another library holds is not inserted again."""
-    held = {}
-    paths = list(paths)
-    for start in range(0, len(paths), 500):
-        rows = _target(target).execute(
-            sa.select(Items.c.path, Sources.c.name, Libraries.c.enabled.label('library_enabled'),
-                      Sources.c.enabled.label('source_enabled'))
-            .select_from(Items.join(Libraries, Items.c.library_id == Libraries.c.id)
-                         .join(Sources, Items.c.source_id == Sources.c.id))
-            .where(Items.c.path.in_(paths[start:start + 500]), Items.c.library_id != library_id)).all()
-        for row in rows:
-            held[row.path] = (row.name, bool(row.library_enabled and row.source_enabled))
-    return held

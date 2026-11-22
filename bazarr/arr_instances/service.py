@@ -130,6 +130,7 @@ def refresh_runtime(kind, instance_id=None, removed=False):
     # so the next read reflects the edit (#227). Cheap and kind-agnostic, so do
     # it before the kind guard returns.
     from .resolution import clear_media_defaults_cache, clear_subtitle_settings_cache
+    _queue_shadow_refresh(kind)
     clear_subtitle_settings_cache()
     # Same for the per-instance default language profile: an edited override
     # must take effect on the next sync, not on the next restart.
@@ -749,9 +750,21 @@ def _subtitle_job_running(row):
     return False
 
 
+def _queue_shadow_refresh(kind):
+    """Tell the media sources an arr instance changed, so the files it shadows are judged again. Best effort and
+    after the change committed: nothing here may fail the request."""
+    try:
+        from media_sources.shadows import queue_shadow_refresh
+        queue_shadow_refresh(kind)
+    except Exception:
+        logging.exception("BAZARR failed to queue a media source shadow refresh after a %s instance change", kind)
+
+
 def after_instance_deleted(session, kind, removed_library=False):
-    """Follow a committed Sonarr or Radarr instance delete. Best effort: the
-    delete is already committed, so nothing here may fail the request."""
+    """Follow a committed instance delete. Best effort: the delete is already
+    committed, so nothing here may fail the request."""
+    # Above the Sonarr and Radarr guard: a Sportarr delete clears shadows too.
+    _queue_shadow_refresh(kind)
     if kind not in ("sonarr", "radarr"):
         return
     if removed_library:

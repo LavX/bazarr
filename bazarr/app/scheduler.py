@@ -185,6 +185,7 @@ class Scheduler:
         self.__upgrade_subtitles_task()
         self.__mass_sync_task()
         self.__provider_hub_update_task()
+        self.__media_sources_task()
         self.__randomize_interval_task()
         self.__automatic_backup()
         if args.no_tasks:
@@ -309,6 +310,14 @@ class Scheduler:
                     id=f'update_movies_{inst.id}', name=f'Sync with Radarr ({inst.name})',
                     replace_existing=True,
                     kwargs=dict(arr_instance_id=inst.id, wait_for_completion=True))
+
+    def __media_sources_task(self):
+        # A media source problem must never stop the rest of the schedule from being rebuilt.
+        try:
+            from media_sources.schedule import configure_source_jobs
+            configure_source_jobs(self.aps_scheduler, database)
+        except Exception:
+            logging.exception("BAZARR could not configure the media source scan task")
 
     def __sportarr_update_task(self):
         from sportarr.scheduler import configure_sports_jobs
