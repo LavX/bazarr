@@ -15,7 +15,7 @@ from app.logger import configure_logging
 from utilities.binaries import get_binary, BinaryNotFound
 from utilities.package import package_info_path, read_package_info
 from utilities.path_mappings import path_mappings
-from utilities.backup import restore_from_backup
+from utilities.backup import apply_pending_plugin_restore, restore_from_backup
 
 from app.database import init_db
 
@@ -67,7 +67,8 @@ log_startup_notices()
 # restore backup if required. A restore that leaves the database unfit to run
 # on (pg_restore failing partway, or the restored configuration not going in)
 # stops the start from inside, and so does a dump parked by an earlier failure.
-restore_from_backup()
+if not restore_from_backup():
+    apply_pending_plugin_restore()
 
 
 # change default base_url to ''

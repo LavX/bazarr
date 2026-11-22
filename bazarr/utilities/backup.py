@@ -16,7 +16,7 @@ from zipfile import ZipFile, BadZipFile, ZIP_DEFLATED
 from glob import glob
 from pathlib import Path, PureWindowsPath
 
-from provider_hub import datadir
+from provider_hub import datadir, secret_paths
 
 from app.get_args import args
 from app.config import settings
@@ -39,6 +39,7 @@ POSTGRES_ARCHIVE_NAME = 'bazarr_postgres.dump'
 # everything restore looks for, so the next start neither applies it nor
 # deletes it, and the operator still has the extracted file to retry from.
 POSTGRES_FAILED_ARCHIVE_NAME = f'{POSTGRES_ARCHIVE_NAME}.failed'
+_PLUGIN_RESTORE_PENDING = "pending_plugin_data"
 
 # pg_restore keeps going past an error and reports how many it ignored, and it
 # exits non-zero when it did. One error class is benign: a dump written by a
@@ -415,7 +416,7 @@ def _clear_restore_directory():
     failed restore becomes a restore loop.
     """
     for name in ('config.yaml', 'config.ini', SQLITE_ARCHIVE_NAME, POSTGRES_ARCHIVE_NAME,
-                 POSTGRES_FAILED_ARCHIVE_NAME):
+                 POSTGRES_FAILED_ARCHIVE_NAME, secret_paths.HISTORY_ARCHIVE, datadir.OMISSIONS_ARCHIVE):
         _delete_file(os.path.join(get_restore_path(), name))
     try:
         datadir.remove(Path(get_restore_path()) / datadir.ARCHIVE_DIR)
@@ -461,6 +462,9 @@ def _safe_extract(zip_obj, dest_path):
                     or any(part in ("", ".", "..") or PureWindowsPath(part).drive for part in parts)):
                 raise BadZipFile(f'Unsafe path in backup archive: {member}')
         member_real = os.path.realpath(os.path.join(dest_real, member))
+        pending = os.path.join(dest_real, _PLUGIN_RESTORE_PENDING)
+        if member_real == pending or member_real.startswith(pending + os.sep):
+            raise BadZipFile('Backup archive contains an internal restore path')
         if member_real != dest_real and not member_real.startswith(dest_real + os.sep):
             raise BadZipFile(f'Unsafe path in backup archive: {member}')
     zip_obj.extractall(path=dest_path)
@@ -799,19 +803,49 @@ def restore_from_backup():
 
     from provider_hub.state import provider_hub_dir
 
+    restore = Path(get_restore_path())
+    extracted = restore / datadir.ARCHIVE_DIR
     try:
-        datadir.restore_backup(Path(get_restore_path()) / datadir.ARCHIVE_DIR, provider_hub_dir())
+        secret_paths.restore_backup_history(restore / secret_paths.HISTORY_ARCHIVE, provider_hub_dir())
+    except (OSError, ValueError, AttributeError):
+        logging.exception('The plugin field history from the backup could not be restored.')
+    try:
+        pending = restore / _PLUGIN_RESTORE_PENDING
+        datadir.remove(pending)
+        if extracted.exists() or extracted.is_symlink():
+            extracted.rename(pending)
+        if (restore / datadir.OMISSIONS_ARCHIVE).is_file():
+            logging.warning('Some release data was omitted when this backup was taken. Its folders will be left as they are.')
     except OSError:
-        logging.exception('The database and configuration were restored, but plugin data could not be restored.')
-
+        logging.exception('The database and configuration were restored, but plugin data could not be staged.')
+        stop_bazarr(EXIT_RESTORE_ERROR)
+        return False
     _clear_restore_directory()
 
-    logging.info('Backup restored successfully. Bazarr will restart.')
+    logging.info('Database and configuration restored. Bazarr will restart before applying plugin data.')
+
     from app.server import webserver
     if webserver is not None:
         webserver.close_all()
     restart_bazarr()
     return True
+
+
+def apply_pending_plugin_restore():
+    """Complete the backup restore using the database opened from the restored config."""
+    pending = Path(get_restore_path()) / _PLUGIN_RESTORE_PENDING
+    if not pending.exists() and not pending.is_symlink():
+        return
+    from provider_hub.state import provider_hub_dir
+
+    try:
+        datadir.restore_backup(pending, provider_hub_dir())
+        datadir.remove(pending)
+    except Exception:
+        logging.exception('Plugin data restore failed. The staged data remains available and Bazarr will retry it at startup.')
+        stop_bazarr(EXIT_RESTORE_ERROR)
+        return
+    logging.info('Plugin data restored successfully.')
 
 
 def prepare_restore(filename):

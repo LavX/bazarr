@@ -675,7 +675,7 @@ def _scan_leftover_plugin_keys(settings_obj, state, provider_hub_dir):
     installations = state.get("installations") if isinstance(state, dict) else None
     if not isinstance(installations, dict):
         installations = {}
-    from provider_hub.secret_paths import archived_manifests
+    from provider_hub.secret_paths import archived_manifests, protected_history
 
     discovered = set()
     for section, values in sections.items():
@@ -696,7 +696,9 @@ def _scan_leftover_plugin_keys(settings_obj, state, provider_hub_dir):
                 # a list, a dict, or nothing at all.
                 continue
             if held is None:
-                historical = archived_manifests(provider_hub_dir, section) if provider_hub_dir is not None else []
+                historical = list(protected_history(state, section))
+                if provider_hub_dir is not None:
+                    historical.extend(archived_manifests(provider_hub_dir, section))
                 held = [*_held_manifests(state, provider_hub_dir, section, installation), *historical]
             if any(key.lower() in {f.lower() for f in _manifest_secret_fields(manifest)}
                    for manifest in held):

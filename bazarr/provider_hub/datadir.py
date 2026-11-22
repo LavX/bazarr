@@ -3,8 +3,10 @@ from __future__ import annotations
 
 import contextlib
 import hashlib
+import json
 import logging
 import os
+import posixpath
 import re
 import shutil
 import stat
@@ -15,6 +17,7 @@ from functools import wraps
 from pathlib import Path, PurePosixPath, PureWindowsPath
 
 ARCHIVE_DIR = "plugin_data"
+OMISSIONS_ARCHIVE = "plugin_data_omitted.json"
 QUIESCE_TIMEOUT = 15 * 60
 # Keep an archive's database snapshot and data folders on the same side of an activation or removal.
 release_lock = threading.RLock()
@@ -51,7 +54,7 @@ def release_path(root: Path, plugin_id: str, key: str) -> Path:
     return plugin_root(root, plugin_id) / key
 
 
-def _legacy_data(root: Path, plugin_id: str) -> Path:
+def legacy_data_path(root: Path, plugin_id: str) -> Path:
     if not _PLUGIN_ID.fullmatch(plugin_id):
         raise DataFolderError("Invalid plugin id for a data folder")
     parent = root / "run" / plugin_id
@@ -62,18 +65,30 @@ def _legacy_data(root: Path, plugin_id: str) -> Path:
 
 def legacy_path(root: Path, plugin_id: str, manifest) -> Path | None:
     if declared(manifest) and manifest.get("kind") in {"translator", "subtitle_provider"}:
-        return _legacy_data(root, plugin_id)
+        return legacy_data_path(root, plugin_id)
     return None
 
 
-def _check_link(root: Path, relative: Path, link: str) -> None:
+def _portable_link(root: Path, relative: Path, link: str) -> str:
     destination = PurePosixPath(link)
     if destination.is_absolute() or PureWindowsPath(link).drive or "\\" in link:
         raise DataFolderError(f"{relative} links outside the data folder")
-    target = relative.parent / destination
+    # A portable relative link cannot traverse above the root even
+    # temporarily. Resolve the existing tree as well, since intervening
+    # directory links affect how the path is interpreted.
+    depth = len(relative.parent.parts)
+    for part in destination.parts:
+        if part == "..":
+            depth -= 1
+            if depth < 0:
+                raise DataFolderError(f"{relative} links outside the data folder")
+        else:
+            depth += 1
     try:
-        if not (root / target).resolve().is_relative_to(root.resolve()):
+        target = (root / relative.parent / destination).resolve()
+        if not target.is_relative_to(root.resolve()):
             raise DataFolderError(f"{relative} links outside the data folder")
+        return posixpath.relpath(target.relative_to(root.resolve()).as_posix(), relative.parent.as_posix())
     except (OSError, RuntimeError) as error:
         raise DataFolderError(f"Cannot resolve data folder link {relative}") from error
 
@@ -129,10 +144,10 @@ def _transfer(source: Path, target: Path | None, *, backup: bool = False, exclud
                     if backup:
                         continue
                     link = os.readlink(path_to_open, dir_fd=fd)
-                    _check_link(source, child, link)
+                    portable = _portable_link(source, child, link)
                     if out is not None:
-                        out.symlink_to(link)
-                    record(b"L", child, os.fsencode(link))
+                        out.symlink_to(portable)
+                    record(b"L", child, os.fsencode(portable))
                 elif stat.S_ISDIR(entry.st_mode):
                     if out is not None:
                         out.mkdir(mode=0o700)
@@ -298,92 +313,154 @@ def login_paths(manifest) -> tuple[tuple[str, ...], ...] | None:
 
 def archive_folder(root: Path, plugin_id: str, key: str) -> Path:
     if key == "legacy":
-        return _legacy_data(root, plugin_id)
+        return legacy_data_path(root, plugin_id)
     return release_path(root, plugin_id, key)
+
+
+def _release_inventory():
+    from . import releases, secret_paths, state, state_store
+
+    document = state.load_state_strict()
+    history = dict(document.get(secret_paths.HISTORY_FIELD, {}))
+    document[secret_paths.HISTORY_FIELD] = {plugin: list(records) for plugin, records in history.items()}
+    previous = {}
+    if not state._uses_file(None):
+        for row in state_store.list_releases(states=(releases.RETIRED, releases.DRAINING)):
+            secret_paths.remember_manifest(document, row.plugin_id, row.manifest)
+            if row.state == releases.RETIRED:
+                held = previous.get(row.plugin_id)
+                if held is None or (row.ended_seq or 0, row.id) > (held.ended_seq or 0, held.id):
+                    previous[row.plugin_id] = row
+    return document, previous
+
+
+def _release_folders(document, previous):
+    for plugin_id, row in (document.get("installations") or {}).items():
+        if (not isinstance(row, dict) or row.get("state") == "removed"
+                or not _PLUGIN_ID.fullmatch(plugin_id)):
+            continue
+        candidates = []
+        if row.get("active_version"):
+            candidates.append((row.get("active_data_key"), row.get("manifest"), True))
+        if row.get("staged_data_rollback") and row.get("staged_version"):
+            candidates.append((row.get("staged_data_key"), row.get("staged_manifest"), False))
+        elif prior := previous.get(plugin_id):
+            candidates.append((prior.data_key, prior.manifest, False))
+        seen = set()
+        for key, manifest, active in candidates:
+            if (not key and declared(manifest) and manifest.get("kind") in {"translator", "subtitle_provider"}):
+                key = "legacy"
+            if not isinstance(key, str) or (key != "legacy" and not _DATA_KEY.fullmatch(key)) or key in seen:
+                continue
+            seen.add(key)
+            yield plugin_id, key, active, row, [item[1] for item in candidates]
+
+
+def _login_exclusions(document, root, plugin_id, candidates):
+    from . import secret_paths
+
+    historical = secret_paths.archived_manifests(root, plugin_id, strict=True)
+    rules = [login_paths(manifest) for manifest in (
+        *candidates, *historical, *secret_paths.protected_history(document, plugin_id))]
+    if None in rules:
+        raise DataFolderError("its sign-in paths could not be read")
+    return tuple(path for group in rules for path in group)
 
 
 def write_backup(archive) -> None:
     """Add active and previous folders using the same release inventory as the database snapshot."""
-    from . import releases, secret_paths, state, state_store
+    from . import secret_paths, state
     from .kinds import get_kind, kind_of
 
     if state.database_held():
         return
     root = state.provider_hub_dir()
-    if not (root / "data").exists() and not (root / "run").exists():
+    if not root.is_dir():
         return
     try:
-        installations = state.load_state_strict().get("installations") or {}
-        previous = {}
-        if not state._uses_file(None):
-            for row in state_store.list_releases(states=(releases.RETIRED,)):
-                held = previous.get(row.plugin_id)
-                if held is None or (row.ended_seq or 0, row.id) > (held.ended_seq or 0, held.id):
-                    previous[row.plugin_id] = row
+        document, previous = _release_inventory()
     except Exception:
         logger.warning("Could not read the release inventory for the plugin data backup", exc_info=True)
+        archive.writestr(OMISSIONS_ARCHIVE, "[]")
         return
+    secret_paths.write_backup_history(archive, root, document)
+    omissions = []
     with tempfile.TemporaryDirectory(prefix=".backup-data-", dir=root) as temporary:
-        for plugin_id, row in installations.items():
-            if (not isinstance(row, dict) or row.get("state") == "removed"
-                    or not _PLUGIN_ID.fullmatch(plugin_id)):
+        for plugin_id, key, active, row, candidates in _release_folders(document, previous):
+            snapshot = Path(temporary) / "snapshot"
+            name = f"{ARCHIVE_DIR}/{plugin_id}/{key}"
+            try:
+                source = archive_folder(root, plugin_id, key)
+                excluded = _login_exclusions(document, root, plugin_id, candidates)
+                idle = (quiesced(plugin_id, get_kind(kind_of(row)).settle_data, QUIESCE_TIMEOUT)
+                        if active and source.exists() else contextlib.nullcontext(True))
+                with idle as settled:
+                    if not settled:
+                        raise DataFolderError("it was still busy")
+                    if copy_folder(source, snapshot, backup=True, excluded=excluded) is None:
+                        raise DataFolderError("the data folder was missing")
+            except Exception as error:
+                logger.warning("Leaving %s release data out of the backup: %s", plugin_id, error)
+                omissions.append(f"{plugin_id}/{key}")
+                remove(snapshot)
                 continue
-            candidates = []
-            if row.get("active_version"):
-                candidates.append((row.get("active_data_key"), row.get("manifest"), True))
-            if prior := previous.get(plugin_id):
-                candidates.append((prior.data_key, prior.manifest, False))
-            # A staged copy can carry paths an earlier version used for sign-in.
-            # They stay private even after the current manifest drops those paths.
-            historical = secret_paths.archived_manifests(root, plugin_id)
-            rules = [login_paths(manifest) for _, manifest, _ in candidates]
-            rules.extend(login_paths(manifest) for manifest in historical)
-            excluded = None if None in rules else tuple(path for group in rules for path in group)
-            seen = set()
-            for key, manifest, active in candidates:
-                if (not key and declared(manifest)
-                        and manifest.get("kind") in {"translator", "subtitle_provider"}):
-                    key = "legacy"
-                if not isinstance(key, str) or (key != "legacy" and not _DATA_KEY.fullmatch(key)) or key in seen:
-                    continue
-                seen.add(key)
-                snapshot = Path(temporary) / "snapshot"
-                name = f"{ARCHIVE_DIR}/{plugin_id}/{key}"
-                try:
-                    source = archive_folder(root, plugin_id, key)
-                    if excluded is None:
-                        raise DataFolderError("its sign-in paths could not be read")
-                    idle = (quiesced(plugin_id, get_kind(kind_of(row)).settle_data, QUIESCE_TIMEOUT)
-                            if active and source.exists()
-                            else contextlib.nullcontext(True))
-                    with idle as settled:
-                        if not settled:
-                            raise DataFolderError("it was still busy")
-                        copy_folder(source, snapshot, backup=True, excluded=excluded)
-                except Exception as error:
-                    logger.warning("Leaving %s release data out of the backup: %s", plugin_id, error)
-                    # Restore an empty folder, even if the target host already has a folder of this release.
-                    archive.writestr(f"{name}/", b"")
-                    continue
-                try:
-                    archive.write(snapshot, name)
-                    for path in sorted(snapshot.rglob("*")):
-                        archive.write(path, f"{name}/{path.relative_to(snapshot).as_posix()}")
-                finally:
-                    remove(snapshot)
+            try:
+                archive.write(snapshot, name)
+                for path in sorted(snapshot.rglob("*")):
+                    archive.write(path, f"{name}/{path.relative_to(snapshot).as_posix()}")
+            finally:
+                remove(snapshot)
+    if omissions:
+        archive.writestr(OMISSIONS_ARCHIVE, json.dumps(omissions))
 
 
 def restore_backup(source: Path, root: Path) -> None:
-    if not source.is_dir() or source.is_symlink() or source.is_junction():
+    """Restore a staged backup against the DB inventory opened on this boot."""
+    if not source.exists() and not source.is_symlink():
         return
-    for plugin in source.iterdir():
-        if not plugin.is_dir() or plugin.is_symlink() or plugin.is_junction():
-            continue
-        for folder in plugin.iterdir():
-            try:
+    if not source.is_dir() or source.is_symlink() or source.is_junction():
+        raise DataFolderError("The staged plugin data is not a regular directory")
+    document, previous = _release_inventory()
+    wanted = {(plugin_id, key) for plugin_id, key, *_ in _release_folders(document, previous)}
+
+    prepared = []
+    replaced = []
+    with contextlib.ExitStack() as stages:
+        for plugin in sorted(source.iterdir()):
+            if not plugin.is_dir() or plugin.is_symlink() or plugin.is_junction():
+                raise DataFolderError("The backup's plugin directory is not a regular directory")
+            for folder in sorted(plugin.iterdir()):
+                if (plugin.name, folder.name) not in wanted:
+                    raise DataFolderError("The backup contains a data folder outside the restored release inventory")
                 target = archive_folder(root, plugin.name, folder.name)
-                copy_folder(folder, target, backup=True)
-                if not any(target.iterdir()):
-                    logger.info("Restored an empty data folder for %s", plugin.name)
-            except (OSError, DataFolderError):
-                logger.warning("Could not restore the data folder of %s", plugin.name, exc_info=True)
+                target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+                stage = Path(stages.enter_context(tempfile.TemporaryDirectory(
+                    prefix=".restore-data-", dir=target.parent)))
+                replacement = stage / "new"
+                replacement.mkdir(mode=0o700)
+                if _transfer(folder, replacement, backup=True) is None:
+                    raise DataFolderError(f"The staged data folder for {plugin.name} is missing")
+                # Keep the original beside the replacement. The cleanup
+                # callback runs only after the original is no longer needed.
+                prepared.append((target, replacement, stage / "old"))
+        try:
+            for target, replacement, old in prepared:
+                if target.exists() or target.is_symlink() or target.is_junction():
+                    if not target.is_dir() or target.is_symlink() or target.is_junction():
+                        raise DataFolderError("The destination for plugin data is not a regular directory")
+                    target.rename(old)
+                replaced.append((target, replacement, old))
+                replacement.rename(target)
+        except BaseException:
+            for target, replacement, old in reversed(replaced):
+                try:
+                    if target.exists():
+                        target.rename(replacement)
+                    if old.exists():
+                        old.rename(target)
+                except OSError:
+                    # The caller keeps the archive and retries at startup.
+                    # Retain any original that could not be put back.
+                    stages.pop_all()
+                    logger.exception("Could not put the original plugin folder back at %s", target)
+            raise

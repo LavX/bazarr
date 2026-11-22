@@ -504,7 +504,7 @@ def _make_provider_class(manifest, worker_client=None, installation=None):
         data = (datadir.release_path(provider_hub_dir(), manifest.provider_id, data_key) if data_key
                 else datadir.legacy_path(provider_hub_dir(), manifest.provider_id, manifest.raw))
         if data is not None:
-            attrs["worker_data_env"] = {"BAZARR_PLUGIN_DATA_DIR": str(data), "HOME": str(data)}
+            attrs["worker_data_env"] = {"BAZARR_PLUGIN_DATA_DIR": str(data)}
         if installation.active_path:
             bundle = validated_bundle_path(provider_hub_dir(), installation.active_path)
             if bundle is None:

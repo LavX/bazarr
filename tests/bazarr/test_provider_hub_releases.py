@@ -1763,3 +1763,122 @@ def test_reinstall_only_stages_data_kept_by_its_own_source(data_release, service
     else:
         assert not data.exists()
         assert not (staged.parent / "kept").exists()
+
+
+def test_a_portable_copy_keeps_an_internal_nested_link_on_its_own_tree(tmp_path):
+    from provider_hub import datadir
+
+    source, target = tmp_path / "source", tmp_path / "target"
+    (source / "nest").mkdir(parents=True)
+    (source / "value").write_text("previous")
+    (source / "nest" / "reference").symlink_to("../value")
+    datadir.copy_folder(source, target)
+
+    (target / "value").write_text("staged")
+    assert (target / "nest" / "reference").read_text() == "staged"
+    assert (source / "nest" / "reference").read_text() == "previous"
+
+
+def test_pruning_preserves_the_oldest_releases_sign_in_exclusions(hub):
+    from provider_hub import datadir, secret_paths, state_store
+    from provider_hub.state import load_state
+
+    first = _row("alpha", active="1.0.0")
+    first["manifest"]["login"] = {"paths": ["session/v1"]}
+    first["manifest"]["config_schema"] = {
+        "properties": {"region": {"type": "string", "default": "some-value"}},
+    }
+    _seed(alpha=first)
+    _seed(alpha=_row("alpha", active="2.0.0"))
+    _seed(alpha=_row("alpha", active="3.0.0"))
+
+    assert {release.version for release in state_store.list_releases("alpha")} == {"2.0.0", "3.0.0"}
+    [history] = secret_paths.protected_history(load_state(), "alpha")
+    assert ("session", "v1") in datadir.login_paths(history)
+    assert history["config_schema"]["properties"] == {"region": {}}
+
+
+def test_a_pending_restart_rollback_keeps_its_data_in_the_archive(data_release, service_kind, tmp_path):
+    from zipfile import ZipFile
+
+    from provider_hub import datadir
+    from provider_hub.kinds import ATTACH_ON_RESTART
+
+    service, new, old = data_release
+    service._stage_validated(service_kind.validate_manifest(new, True), True, "catalog", "official",
+                             lambda manifest, deadline: Path(_bundle(manifest.provider_id, manifest.version)))
+    assert service.activate_release("exampleservice").activated
+    service_kind.attach_policy = ATTACH_ON_RESTART
+
+    assert service.rollback_release("exampleservice").outcome == service.ACTIVATION_WAITING
+    path = tmp_path / "data.zip"
+    with ZipFile(path, "w") as archive:
+        datadir.write_backup(archive)
+    with ZipFile(path) as archive:
+        assert archive.read(f"plugin_data/exampleservice/{old.name}/settings") == b"from v1"
+
+
+def test_kept_legacy_data_is_available_after_a_failed_reinstall(data_release):
+    from provider_hub import datadir
+    from provider_hub.state import provider_hub_dir
+
+    service, _, _ = data_release
+    legacy = datadir.legacy_data_path(provider_hub_dir(), "alpha")
+    legacy.mkdir(parents=True)
+    manifest = {"schema_version": 2, "permissions": ["data_dir"], "kind": "subtitle_provider"}
+    kept = {"source_id": "official", "origin": "catalog", "kind": "subtitle_provider"}
+    failed = {"state": "failed", "source_id": "official", "origin": "catalog"}
+
+    assert service._stage_data_source("alpha", failed, kept, "official", "subtitle_provider",
+                                      "catalog", manifest) == legacy
+
+
+def test_delete_also_clears_the_legacy_provider_data(staged):
+    from provider_hub import datadir, service
+    from provider_hub.detach import wait_idle
+    from provider_hub.state import provider_hub_dir
+
+    legacy = datadir.legacy_data_path(provider_hub_dir(), "alpha")
+    legacy.mkdir(parents=True)
+    (legacy / "settings").write_text("synthetic")
+    service.remove_installation("alpha", keep_data=False)
+    assert wait_idle()
+    assert not legacy.exists()
+
+
+def test_live_uninstall_waits_for_actual_worker_exit_before_moving_data(data_release, service_kind, monkeypatch):
+    from provider_hub import detach, worker
+    from provider_hub.kinds import DETACH_LIVE
+    from provider_hub.state import load_state
+
+    service, _, old = data_release
+    service_kind.detach_policy = DETACH_LIVE
+    client = object()
+    monkeypatch.setattr(detach, "snapshot_workers", lambda provider_id: [client])
+    monkeypatch.setattr(detach, "stop_stragglers", lambda clients, cut: None)
+    monkeypatch.setattr(worker, "_client_gone", lambda client, budget: False)
+
+    assert service.remove_installation("exampleservice", keep_data=False)
+    assert detach.wait_idle()
+    row = load_state()["installations"]["exampleservice"]
+    assert row["state"] == "removed" and row["pending_restart"]
+    assert (old / "settings").read_text() == "from v1"
+
+
+def test_unreadable_historical_exclusions_omit_that_release_data(data_release, tmp_path):
+    import json
+    from zipfile import ZipFile
+
+    from provider_hub import datadir
+    from provider_hub.state import provider_hub_dir
+
+    _, _, old = data_release
+    folder = provider_hub_dir() / "manifests" / "exampleservice"
+    folder.mkdir(parents=True)
+    (folder / "older.json").write_text("unreadable test metadata")
+    archive_path = tmp_path / "data.zip"
+    with ZipFile(archive_path, "w") as archive:
+        datadir.write_backup(archive)
+    with ZipFile(archive_path) as archive:
+        assert json.loads(archive.read(datadir.OMISSIONS_ARCHIVE)) == [f"exampleservice/{old.name}"]
+        assert not any(name.startswith("plugin_data/") for name in archive.namelist())

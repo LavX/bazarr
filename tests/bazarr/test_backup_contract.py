@@ -1383,7 +1383,6 @@ def test_backup_and_restore_exclude_release_sign_in_paths(backup_env, monkeypatc
     monkeypatch.setattr(state_store, "list_releases", lambda **kwargs: [
         releases.Release(1, "exampleservice", "1.0.0", "retired", manifest=previous_manifest, data_key=prior_key)])
     from provider_hub import state
-    real_uses_file = state._uses_file
     # The current installation is a local fixture. Return a retired release
     # from the same snapshot seam the SQL store supplies in production.
     monkeypatch.setattr(datadir, "QUIESCE_TIMEOUT", 0.01)
@@ -1416,9 +1415,91 @@ def test_backup_and_restore_exclude_release_sign_in_paths(backup_env, monkeypatc
 
     (active / "saved").write_text("new data after backup")
     assert backup_env.module.prepare_restore(archive)
-    monkeypatch.setattr(state, "_uses_file", real_uses_file)
     assert backup_env.module.restore_from_backup()
+    assert (active / "saved").read_text() == "new data after backup"
+    backup_env.module.apply_pending_plugin_restore()
     assert (active / "saved").read_text() == "current"
     assert (previous / "saved").read_text() == "previous"
     assert not (active / "connection" / "session" / "token").exists()
     assert not (backup_env.restore_dir / "plugin_data").exists()
+
+
+@pytest.mark.parametrize("busy", [True, False])
+def test_restore_distinguishes_an_omitted_data_folder_from_an_empty_one(
+        backup_env, monkeypatch, tmp_path, service_kind, busy):
+    import json
+
+    from plugin_platform_helpers import service_manifest
+    from provider_hub import datadir
+
+    monkeypatch.setattr(backup_env.settings.postgresql, 'enabled', False)
+    monkeypatch.setattr(service_kind, "settle_data", lambda plugin_id, timeout: not busy)
+    root = tmp_path / "provider_hub"
+    key = "a" * 32
+    folder = datadir.release_path(root, "exampleservice", key)
+    folder.mkdir(parents=True)
+    state_path = root / "state.json"
+    state_path.write_text(json.dumps({"installations": {"exampleservice": {
+        "active_version": "2.0.0", "active_data_key": key, "kind": service_kind.name,
+        "manifest": service_manifest(permissions=["data_dir"])}}}))
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(state_path))
+
+    assert backup_env.module.backup_to_zip(job_id=1)
+    [archive] = _archives(backup_env)
+    with zipfile.ZipFile(backup_env.backup_dir / archive) as zip_file:
+        if busy:
+            assert json.loads(zip_file.read(datadir.OMISSIONS_ARCHIVE)) == [f"exampleservice/{key}"]
+            assert not any(name.startswith("plugin_data/") for name in zip_file.namelist())
+        else:
+            assert f"plugin_data/exampleservice/{key}/" in zip_file.namelist()
+            assert datadir.OMISSIONS_ARCHIVE not in zip_file.namelist()
+
+    after = folder / "saved"
+    after.write_text("written after the backup")
+    assert backup_env.module.prepare_restore(archive)
+    assert backup_env.module.restore_from_backup()
+    backup_env.module.apply_pending_plugin_restore()
+    assert not backup_env.stops
+    assert after.exists() is busy
+
+
+@pytest.mark.parametrize("unrecognized", [True, False])
+def test_a_failed_plugin_restore_keeps_the_pending_input_and_all_original_folders(
+        backup_env, monkeypatch, tmp_path, unrecognized):
+    import json
+
+    from pathlib import Path
+
+    from plugin_platform_helpers import service_manifest
+    from provider_hub import datadir
+
+    root = tmp_path / "provider_hub"
+    root.mkdir()
+    state_path = root / "state.json"
+    inventory = {}
+    pending = backup_env.restore_dir / "pending_plugin_data"
+    original_rename = Path.rename
+    for plugin_id, key in (("alpha", "a" * 32), ("beta", "b" * 32)):
+        inventory[plugin_id] = {"active_version": "1.0.0", "active_data_key": key,
+                                "manifest": service_manifest(plugin_id, permissions=["data_dir"])}
+        target = datadir.release_path(root, plugin_id, key)
+        target.mkdir(parents=True)
+        (target / "sample").write_text(f"{plugin_id} original")
+        source = pending / plugin_id / ("c" * 32 if plugin_id == "beta" and unrecognized else key)
+        source.mkdir(parents=True)
+        (source / "sample").write_text(f"{plugin_id} backup")
+    state_path.write_text(json.dumps({"installations": inventory}))
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(state_path))
+
+    def rename(path, target):
+        if path.name == "new" and target.name == "b" * 32:
+            raise OSError("simulated folder replacement failure")
+        return original_rename(path, target)
+
+    if not unrecognized:
+        monkeypatch.setattr(Path, "rename", rename)
+    backup_env.module.apply_pending_plugin_restore()
+    assert backup_env.stops == [backup_env.module.EXIT_RESTORE_ERROR]
+    assert pending.is_dir()
+    assert (datadir.release_path(root, "alpha", "a" * 32) / "sample").read_text() == "alpha original"
+    assert (datadir.release_path(root, "beta", "b" * 32) / "sample").read_text() == "beta original"

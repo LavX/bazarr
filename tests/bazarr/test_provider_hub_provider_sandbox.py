@@ -1394,3 +1394,18 @@ def test_when_the_childs_capability_drop_fails_and_the_spec_requires_it_the_star
     with pytest.raises(worker_module.WorkerError, match="was not started"):
         _ask(worker, op="read", path=str(host["media"] / "film.mkv"))
     assert worker._sandbox_failed_open is False
+
+
+def test_provider_release_data_gets_a_private_home_under_the_profile(host):
+    from provider_hub.datadir import release_path
+
+    layout = host["layout"]
+    data = release_path(layout.hub_dir, "fixture", "a" * 32)
+    spec = worker_module.provider_spec(
+        layout, worker_command(sys.executable, RUNNER), host["bundle"],
+        {"BAZARR_PLUGIN_DATA_DIR": str(data), "HOME": str(data)},
+    )
+    assert spec.env["HOME"] == str(data)
+    assert spec.env["BAZARR_PLUGIN_DATA_DIR"] == str(data)
+    assert str(data) in spec.policy.read_write
+    assert str(data.parent) not in spec.policy.read_write

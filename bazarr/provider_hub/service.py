@@ -31,8 +31,8 @@ from secret_store.registry import SECRET_DESCRIPTOR_KEY as SECRET_DESCRIPTORS_KE
 from secret_store.scrub import mask_credential_refusal, scrub_job_secrets, scrub_text
 
 from .manifest import ManifestValidationError, manifest_provider_id, validate_manifest
-from .kinds import (ATTACH_LIVE, ATTACH_ON_RESTART, DETACH_LIVE, SUBTITLE_PROVIDER, UnknownKindError, catalog_kind_of, get_kind, kind_for_api,
-                    kind_of, known_kinds)
+from .kinds import (ATTACH_LIVE, ATTACH_ON_RESTART, DETACH_LIVE, SUBTITLE_PROVIDER, TRANSLATOR, UnknownKindError,
+                    catalog_kind_of, get_kind, kind_for_api, kind_of, known_kinds)
 from .kinds import subtitle_provider as provider_kind
 from . import catalog_feed, closure, consent, datadir, detach, dev_source, floor, releases, revocation, secret_paths
 from .bundle import verify_bundle_tree
@@ -2930,7 +2930,7 @@ def test_provider_connection(provider_id: str) -> dict[str, Any] | None:
         target_kind="provider",
         target_id=provider_id,
         target_name=target_name,
-    ) as job:
+    ) as job, contextlib.ExitStack() as probe_files:
         if provider.get("pending_restart") or provider.get("state") != "active":
             job.update(
                 message="Restart Bazarr+ before testing this staged plugin",
@@ -2990,6 +2990,7 @@ def test_provider_connection(provider_id: str) -> dict[str, Any] | None:
             _remove_bundle_runtime_artifacts(bundle_path)
             verify_bundle_tree(manifest, bundle_path)
 
+            data = probe_files.enter_context(_probe_release_data(provider_id, provider))
             runner = Path(__file__).with_name("worker_runner.py")
             client = ProviderWorkerClient(
                 worker_command(interpreter, runner),
@@ -2997,6 +2998,7 @@ def test_provider_connection(provider_id: str) -> dict[str, Any] | None:
                 env={
                     "BAZARR_PROVIDER_HUB_BUNDLE": str(bundle_path),
                     "BAZARR_PROVIDER_HUB_MANIFEST": json.dumps(manifest.raw),
+                    **({"BAZARR_PLUGIN_DATA_DIR": str(data)} if data is not None else {}),
                 },
             )
             try:
@@ -3575,7 +3577,7 @@ def _smoke_validate_worker(manifest, bundle_path: Path, python_path: Path, timeo
             env={
                 "BAZARR_PROVIDER_HUB_BUNDLE": str(bundle_path),
                 "BAZARR_PROVIDER_HUB_MANIFEST": json.dumps(manifest.raw),
-                **({"BAZARR_PLUGIN_DATA_DIR": str(data_dir), "HOME": str(data_dir)} if data_dir is not None else {}),
+                **({"BAZARR_PLUGIN_DATA_DIR": str(data_dir)} if data_dir is not None else {}),
             },
         )
         client.request("health", {}, timeout=timeout)
@@ -3709,7 +3711,7 @@ def _stage_data_source(plugin_id, row, kept, source_id, kind, origin, manifest) 
         path = datadir.plugin_root(provider_hub_dir(), plugin_id) / "kept"
         if path.exists():
             return path
-        return datadir.legacy_path(provider_hub_dir(), plugin_id, manifest) if not row else None
+        return datadir.legacy_path(provider_hub_dir(), plugin_id, manifest)
     return None
 
 
@@ -4049,6 +4051,16 @@ def _stage_validated(
             # The saved settings may have come back with the kept data, so the row is read again before the
             # required fields are judged.
             installation = dict((load_state().get("installations") or {}).get(validated.provider_id) or installation)
+        abandoned = before_staging.get("row")
+        old_key = abandoned.get("staged_data_key") if isinstance(abandoned, dict) else None
+        if (old_key and old_key not in (data_key, abandoned.get("active_data_key"))
+                and not abandoned.get("staged_data_rollback")):
+            with datadir.release_lock:
+                try:
+                    datadir.remove(datadir.release_path(provider_hub_dir(), validated.provider_id, old_key))
+                except (OSError, datadir.DataFolderError):
+                    logging.getLogger(__name__).warning("Could not clear superseded staged data for %s",
+                                                        validated.provider_id, exc_info=True)
         missing_required = missing_required_fields(installation) if is_fresh else []
         if is_fresh and not get_kind(validated.kind).on_installed(
                 validated.provider_id, missing_required=missing_required):
@@ -5057,7 +5069,8 @@ def _prepare_activation_data(plugin_id, row, active_data, files) -> tuple[str | 
         parent = datadir.plugin_root(root, plugin_id)
         parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         testing = Path(files.enter_context(tempfile.TemporaryDirectory(dir=parent))) / "rollback"
-        datadir.copy_folder(previous, testing)
+        if datadir.copy_folder(previous, testing) is None and recorded_key:
+            raise datadir.DataFolderError("The previous release data folder is missing")
         return recorded_key, testing
 
     key = recorded_key or uuid.uuid4().hex
@@ -5189,10 +5202,13 @@ def activate_release(provider_id: str, *, at_boot: bool = False) -> Activation:
         if not mutate_state(promote):
             job.update(message=f"Activation of '{target_name}' v{target_version} skipped: it changed meanwhile")
             return Activation(provider_id, ACTIVATION_SKIPPED, target_version, previous_version)
-        if active_data is not None and installation.get("delete_release_data"):
+        if installation.get("delete_release_data"):
             try:
-                datadir.remove(active_data)
-            except OSError:
+                if active_data is not None:
+                    datadir.remove(active_data)
+                if kind_of(installation) in {SUBTITLE_PROVIDER, TRANSLATOR}:
+                    datadir.remove(datadir.legacy_data_path(provider_hub_dir(), provider_id))
+            except (OSError, datadir.DataFolderError):
                 logging.getLogger(__name__).warning("Could not delete the removed data of %s", provider_id,
                                                     exc_info=True)
         if isinstance(previous_manifest, dict):
@@ -5480,6 +5496,25 @@ def _retire_stale_draining() -> None:
         state_store.retire_draining()
 
 
+@contextlib.contextmanager
+def _probe_release_data(plugin_id: str, row, *, staged: bool = False):
+    """Give an environment or connection probe an isolated copy of the relevant data."""
+    manifest = row.get("staged_manifest" if staged else "manifest")
+    if not datadir.declared(manifest):
+        yield None
+        return
+    root = provider_hub_dir()
+    key = row.get("staged_data_key" if staged else "active_data_key")
+    source = (datadir.release_path(root, plugin_id, key) if key
+              else datadir.legacy_path(root, plugin_id, manifest))
+    parent = datadir.plugin_root(root, plugin_id)
+    parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix=".probe-", dir=parent) as temporary:
+        target = Path(temporary) / "data"
+        datadir.copy_folder(source, target)
+        yield target
+
+
 def reconcile_plugin_environments() -> dict[str, list[str]]:
     """Boot step: adopt the environments installations already use.
 
@@ -5492,11 +5527,14 @@ def reconcile_plugin_environments() -> dict[str, list[str]]:
         # Each kind validates its own manifests; the subtitle provider kind delegates to the provider validator.
         return get_kind(kind_of(row)).validate_manifest(raw, bool(row.get("trusted", False)))
 
-    def probe(validated, bundle_path: Path, python_path: Path) -> None:
-        get_kind(kind_of(validated)).smoke_test(validated, bundle_path, python_path)
+    def probe_data(validated, bundle_path: Path, python_path: Path, row, staged: bool) -> None:
+        with _probe_release_data(validated.provider_id, row, staged=staged) as folder:
+            get_kind(kind_of(validated)).smoke_test(
+                validated, bundle_path, python_path,
+                **({"data_dir": folder} if folder is not None else {}))
 
     return env_registry.reconcile_environments(
-        validate=validate, probe=probe, verify_bundle=_verify_bundle_for_run
+        validate=validate, probe_data=probe_data, verify_bundle=_verify_bundle_for_run
     )
 
 
@@ -5562,7 +5600,9 @@ def _repair_environment(provider_id: str, checkpoint=None) -> dict[str, Any]:
                 validated, rebuild=True, **_bundled_wheels_argument(validated, bundle_path))
             python_path = python_executable(env_path)
             step("Checking that the plugin starts")
-            kind.smoke_test(validated, bundle_path, python_path)
+            with _probe_release_data(provider_id, row) as data:
+                kind.smoke_test(validated, bundle_path, python_path,
+                                **({"data_dir": data} if data is not None else {}))
             # A stop pressed during the check ends the repair here, before the
             # installation is pointed at the new environment.
             step("Recording the repair")
@@ -5785,48 +5825,75 @@ def _detach_removed(provider_id: str, kind_name: str) -> bool:
         logging.getLogger(__name__).exception(
             "Provider Hub: could not stop %s live; its removal finishes at the next restart", provider_id)
 
-        def ask(state: dict[str, Any]) -> None:
-            row = (state.get("installations") or {}).get(provider_id)
-            if isinstance(row, dict) and row.get("state") == "removed":
-                row["pending_restart"] = True
-
-        mutate_state(ask)
+        _defer_removal(provider_id)
         return False
 
     def finish() -> None:
-        # The workers it had when it was detached go, whatever release they were started for.
-        detach.stop_stragglers(workers, cut=True)
-        if _drop_removed_row(provider_id):
+        from .worker import _client_gone
+
+        # Only finish the same removal. A reinstall can take over the slot
+        # before the preceding release finishes draining.
+        with datadir.release_lock:
+            row = (load_state().get("installations") or {}).get(provider_id)
+            if not isinstance(row, dict) or row.get("state") != "removed":
+                return
+            clients = list({id(client): client for client in (*workers, *detach.snapshot_workers(provider_id))}.values())
+            detach.stop_stragglers(clients, cut=True)
             try:
-                get_kind(kind_name).removal_finished(provider_id)
-            except Exception:
-                logging.getLogger(__name__).warning("Provider Hub: the step after removing %s failed", provider_id,
-                                                    exc_info=True)
+                root = provider_hub_dir()
+                has_data = (row.get("active_data_key") or datadir.plugin_root(root, provider_id).exists()
+                            or datadir.legacy_data_path(root, provider_id).exists())
+                if has_data and not all(_client_gone(client, 0) for client in clients):
+                    _defer_removal(provider_id)
+                    return
+                removed = _drop_removed_row(provider_id)
+            except (OSError, datadir.DataFolderError):
+                logging.getLogger(__name__).warning("Could not finish the removal of %s", provider_id, exc_info=True)
+                _defer_removal(provider_id)
+                return
+            if removed:
+                try:
+                    get_kind(kind_name).removal_finished(provider_id)
+                except Exception:
+                    logging.getLogger(__name__).warning("Provider Hub: the step after removing %s failed", provider_id,
+                                                        exc_info=True)
 
     detach.when_drained(drains, finish, name=provider_id)
     return True
 
 
+def _defer_removal(provider_id: str) -> None:
+    def mark(state: dict[str, Any]) -> None:
+        row = (state.get("installations") or {}).get(provider_id)
+        if isinstance(row, dict) and row.get("state") == "removed":
+            row["pending_restart"] = True
+            row["last_error"] = "Restart Bazarr+ to finish removing the plugin's data."
+
+    mutate_state(mark)
+
 def _settle_release_data(provider_id: str, installation, keep_data: bool) -> None:
-    try:
-        folder = datadir.plugin_root(provider_hub_dir(), provider_id)
-    except datadir.DataFolderError:
-        if installation.get("active_data_key"):
-            raise
-        return
-    if not folder.is_dir():
-        return
+    root = provider_hub_dir()
+    folder = datadir.plugin_root(root, provider_id)
+    legacy = (datadir.legacy_data_path(root, provider_id)
+              if kind_of(installation) in {SUBTITLE_PROVIDER, TRANSLATOR} else None)
     if not keep_data:
         datadir.remove(folder)
+        if legacy is not None:
+            datadir.remove(legacy)
         return
-    active = _active_data_path(provider_id, installation)
+    active = _active_data_path(provider_id, installation) or legacy
     kept = folder / "kept"
-    if active is not None and active.is_dir() and not active.is_symlink() and not active.is_junction():
+    if (installation.get("active_version") and active is not None
+            and active.is_dir() and not active.is_symlink() and not active.is_junction()):
+        folder.mkdir(parents=True, exist_ok=True, mode=0o700)
         datadir.remove(kept)
         active.rename(kept)
-    for child in folder.iterdir():
-        if child != kept and not child.name.startswith(".copy-"):
-            datadir.remove(child)
+        if legacy is not None and active != legacy:
+            datadir.remove(legacy)
+    if folder.is_dir():
+        for child in folder.iterdir():
+            if child != kept and not child.name.startswith(".copy-"):
+                datadir.remove(child)
 
 
 @datadir.serialized
@@ -5874,7 +5941,8 @@ def claim_kept_data(provider_id: str, source_id: str | None, kind: str, origin: 
     The record stays until a removal rewrites it, and only the copy of the settings is dropped once they are put
     back. An install that fails after this therefore leaves the data owned by the source it was kept for.
     """
-    entry = (load_state().get("kept_data") or {}).get(provider_id)
+    state = load_state()
+    entry = (state.get("kept_data") or {}).get(provider_id)
     if not isinstance(entry, dict):
         return False
     # An upload takes back what an upload kept, and nothing a catalog source kept. A row that says nothing of its
@@ -5894,8 +5962,13 @@ def claim_kept_data(provider_id: str, source_id: str | None, kind: str, origin: 
         get_kind(kind).kept_data_reclaimed(provider_id)
         return True
     try:
-        get_kind(str(entry.get("kind"))).discard_kept_data(provider_id)
-        datadir.remove(datadir.plugin_root(provider_hub_dir(), provider_id) / "kept")
+        old_kind = entry.get("kind")
+        get_kind(str(old_kind)).discard_kept_data(provider_id)
+        root = provider_hub_dir()
+        datadir.remove(datadir.plugin_root(root, provider_id) / "kept")
+        row = (state.get("installations") or {}).get(provider_id) or {}
+        if old_kind in {SUBTITLE_PROVIDER, TRANSLATOR} and not row.get("active_version"):
+            datadir.remove(datadir.legacy_data_path(root, provider_id))
     except Exception as error:
         # The data stays, with its record, and the install is refused: going on would hand it to a package it
         # was not kept for.

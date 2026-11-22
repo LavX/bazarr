@@ -504,6 +504,8 @@ def provider_spec(layout: ProviderLayout, command, cwd, env):
     base = layout.hub_dir / "run" / layout.key
     data, temp = Path((env or {}).get("BAZARR_PLUGIN_DATA_DIR") or base / "data"), base / "tmp"
     for folder in (base, data, temp):
+        if folder.is_symlink() or folder.is_junction():
+            raise WorkerError("A worker folder is a link")
         folder.mkdir(parents=True, exist_ok=True, mode=0o700)
         # The worker can change the mode of its own folders; the next start puts it back.
         os.chmod(folder, 0o700)
@@ -531,7 +533,7 @@ def provider_spec(layout: ProviderLayout, command, cwd, env):
         "subtitle_provider",
         home=data,
         tmpdir=temp,
-        extra={key: value for key, value in (env or {}).items() if key != "PATH"},
+        extra={key: value for key, value in (env or {}).items() if key not in {"HOME", "PATH"}},
     )
     # The host's own search path stays: the plugins find ffmpeg and ffprobe through it.
     environment["PATH"] = os.environ.get("PATH") or environment["PATH"]
@@ -635,6 +637,7 @@ class ProviderWorkerClient:
             if folder.is_symlink() or folder.is_junction():
                 raise WorkerError("The plugin data folder is a link")
             folder.mkdir(mode=0o700, parents=True, exist_ok=True)
+            env["HOME"] = data_dir
 
         self.last_used = time.monotonic()
         self.process = self._spawn(env)

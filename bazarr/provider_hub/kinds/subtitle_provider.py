@@ -396,15 +396,14 @@ class SubtitleProviderKind(Kind):
     def settle_data(self, plugin_id: str, timeout: float) -> bool:
         import time
 
-        from provider_hub.worker import live_workers
+        from provider_hub.worker import _client_gone, live_workers
 
         deadline = time.monotonic() + timeout
         for client in live_workers(plugin_id):
             # Admission has closed and requests have drained. The idle stop
             # permits the existing client to start again when admission opens.
             client.stop_if_idle(0, grace_seconds=min(1.0, max(0.0, deadline - time.monotonic())))
-            if (client.launcher_cleanup_state() != "confirmed"
-                    or not client.group_gone(ceiling=max(0.0, deadline - time.monotonic()))):
+            if not _client_gone(client, max(0.0, deadline - time.monotonic())):
                 return False
         return True
 

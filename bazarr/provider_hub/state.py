@@ -519,9 +519,9 @@ def _database_step(compute: Callable[[], dict[str, Any]], mutate: Callable[[dict
     plugin the document listed before the write and does not list after it, so what a damaged document lost
     stays in the tables until it is discarded on purpose.
     """
-    from . import state_store
+    from . import secret_paths, state_store
     data = compute()
-    rows = state_store.read_release_rows()
+    rows = state_store.read_release_rows(include_history=True)
     if not whole:
         data = releases.compose(data, rows)
     if whole:
@@ -533,6 +533,15 @@ def _database_step(compute: Callable[[], dict[str, Any]], mutate: Callable[[dict
         with _editing("database", data):
             result = mutate(data)
     stored, plan = releases.split(data, rows, previously_listed=listed)
+    if plan.deletes:
+        removed = set(plan.deletes)
+        for row in rows:
+            ran = row["state"] in {releases.ACTIVE, releases.RETIRED, releases.DRAINING} or row.get("retired_at")
+            if row["id"] in removed and ran:
+                release = releases.release_of(row)
+                secret_paths.remember_manifest(data, release.plugin_id, release.manifest)
+        if secret_paths.HISTORY_FIELD in data:
+            stored[secret_paths.HISTORY_FIELD] = data[secret_paths.HISTORY_FIELD]
     written.append(data)
     return json.dumps(stored, sort_keys=True), result, state_store.StepExtra(plan, data)
 
