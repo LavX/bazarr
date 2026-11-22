@@ -48,7 +48,7 @@ def _provider_class(name, worker, *, gate=None, started=None, record=None):
     """A plugin class whose calls wait on ``gate`` (or are cut), recording each one that ran to its end."""
     from subzero.language import Language
     from provider_hub.registry import HubProxyProvider
-    from provider_hub.worker import WorkerError
+    from provider_hub.worker import WorkerCancelled
 
     def wait_for_gate():
         if started is not None:
@@ -57,7 +57,7 @@ def _provider_class(name, worker, *, gate=None, started=None, record=None):
             return
         while not gate.is_set():
             if worker.killed.is_set():
-                raise WorkerError("worker closed stdout")
+                raise WorkerCancelled("worker closed stdout")
             time.sleep(0.01)
 
     class Plugin(HubProxyProvider):
@@ -102,7 +102,7 @@ def world(tmp_path, monkeypatch):
     from subliminal_patch.extensions import provider_registry
 
     monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(tmp_path / "state.json"))
-    before = dict(provider_registry.providers)
+    before = {name: provider_registry[name] for name in provider_registry}
     hub_ids = set(registry._REGISTERED_PROVIDER_HUB_IDS)
     shadowed = dict(registry._SHADOWED_BUILT_INS)
     withdrawn = set(registry._WITHDRAWN_PROVIDER_IDS)
@@ -143,8 +143,10 @@ def world(tmp_path, monkeypatch):
     try:
         assert detach.wait_idle(WAIT)
     finally:
-        provider_registry.providers.clear()
-        provider_registry.providers.update(before)
+        for name in provider_registry:
+            provider_registry.unregister(name)
+        for name, provider_class in before.items():
+            provider_registry.register(name, provider_class)
         registry._REGISTERED_PROVIDER_HUB_IDS.clear()
         registry._REGISTERED_PROVIDER_HUB_IDS.update(hub_ids)
         registry._SHADOWED_BUILT_INS.clear()
@@ -281,16 +283,16 @@ def test_a_download_in_flight_across_a_removal_finishes_and_the_next_one_is_refu
     assert again.skip_reason == "provider_excluded"
 
 
-def _subtitle():
+def _subtitle(name=PLUGIN):
     from subzero.language import Language
     from subliminal_patch.subtitle import Subtitle
 
     class Downloadable(Subtitle):
-        provider_name = PLUGIN
+        provider_name = name
 
         def __init__(self):
             super().__init__(Language("eng"))
-            self.provider_name = PLUGIN
+            self.provider_name = name
             self.page_link = None
 
         @property
@@ -1282,6 +1284,7 @@ def test_a_built_in_that_takes_its_id_back_inherits_no_throttle_or_discard_the_p
     pool = world.pool(BUILT_IN)
     pool.discarded_providers.add(BUILT_IN)
     get_providers.tp[BUILT_IN] = ("ConfigurationError", dt.datetime.now() + dt.timedelta(hours=12), "12 hours")
+    monkeypatch.setattr(get_providers, "throttle_count", {BUILT_IN: {"count": 4, "time": dt.datetime.now()}})
     tracker = get_tracker()
     for _ in range(10):
         tracker.record(BUILT_IN, "exception")
@@ -1292,6 +1295,7 @@ def test_a_built_in_that_takes_its_id_back_inherits_no_throttle_or_discard_the_p
         assert detach.wait_idle(WAIT)
 
         assert BUILT_IN not in get_providers.tp and not get_providers.provider_is_throttled(BUILT_IN)
+        assert BUILT_IN not in get_providers.throttle_count
         assert not tracker.is_discarded(BUILT_IN) and BUILT_IN not in pool.discarded_providers
     finally:
         get_providers.tp.pop(BUILT_IN, None)
@@ -1448,6 +1452,81 @@ def test_a_snapshot_read_before_the_plugin_left_is_dropped_even_before_the_pools
     assert "request_delay_ms" not in pool.provider_configs.get(BUILT_IN, {})
 
 
+@pytest.mark.parametrize("enabled", [True, False])
+def test_a_settings_merge_rechecks_the_owner_after_another_update(world, monkeypatch, enabled):
+    from provider_hub import registry
+    from subliminal_patch import core
+
+    _plugin_over_built_in(world, monkeypatch)
+    first = "other_built_in"
+    world.registry.register(first, _credentialed_built_in(first))
+    names = [first, BUILT_IN] if enabled else [first]
+    pool = world.pool(*names)
+    pool.provider_configs[first] = {"password": "old"}
+    pool.provider_configs[BUILT_IN] = {"request_delay_ms": 5}
+    stale = core.ConfigSnapshot({first: {"password": "changed"}, BUILT_IN: {"request_delay_ms": 10}})
+    stale.ownership = world.registry.ownership_generations()
+    monkeypatch.setattr("app.get_providers.get_providers_auth", lambda: {BUILT_IN: {"password": "own"}})
+    entered, resume = threading.Event(), threading.Event()
+    retire = pool.retire_provider
+
+    def pause_first_restart(name, *args, **kwargs):
+        if name == first:
+            entered.set()
+            assert resume.wait(WAIT)
+        return retire(name, *args, **kwargs)
+
+    monkeypatch.setattr(pool, "retire_provider", pause_first_restart)
+    thread, outcome = _in_thread(pool.provider_configs.update, stale)
+    try:
+        assert entered.wait(WAIT)
+        assert registry.unregister_provider_class(BUILT_IN).restored_built_in
+        registry.release_provider_id(BUILT_IN)
+        fresh = core.ConfigSnapshot({BUILT_IN: {"password": "new"}})
+        fresh.ownership = world.registry.ownership_generations()
+        pool.provider_configs.update(fresh)
+    finally:
+        resume.set()
+        thread.join(WAIT)
+
+    assert outcome == {"value": None}
+    assert pool.provider_configs[first] == {"password": "changed"}
+    assert pool.provider_configs[BUILT_IN] == {"password": "new"}
+
+
+def test_a_settings_restart_started_by_the_plugin_leaves_the_restored_built_in_alone(world, monkeypatch):
+    from provider_hub import registry
+    from subliminal_patch import core
+
+    _plugin_over_built_in(world, monkeypatch)
+    pool = world.pool(BUILT_IN)
+    pool.provider_configs[BUILT_IN] = {"request_delay_ms": 5}
+    stale = core.ConfigSnapshot({BUILT_IN: {"request_delay_ms": 10}})
+    stale.ownership = world.registry.ownership_generations()
+    monkeypatch.setattr("app.get_providers.get_providers_auth", lambda: {BUILT_IN: {}})
+    entered, resume = threading.Event(), threading.Event()
+    retire = pool.retire_provider
+
+    def pause_restart(name, *args, **kwargs):
+        entered.set()
+        assert resume.wait(WAIT)
+        return retire(name, *args, **kwargs)
+
+    monkeypatch.setattr(pool, "retire_provider", pause_restart)
+    thread, result = _in_thread(pool.provider_configs.update, stale)
+    try:
+        assert entered.wait(WAIT)
+        assert registry.unregister_provider_class(BUILT_IN).restored_built_in
+        registry.release_provider_id(BUILT_IN)
+        restored = pool[BUILT_IN]
+    finally:
+        resume.set()
+        thread.join(WAIT)
+
+    assert result == {"value": None}
+    assert pool[BUILT_IN] is restored
+
+
 def test_a_snapshot_that_carries_no_stamp_is_merged_whole(world):
     from subliminal_patch import core
 
@@ -1478,6 +1557,17 @@ def test_the_registry_counts_a_handover_between_a_plugin_and_a_built_in_and_noth
     assert world.registry.ownership_generations()["swapped"] == start + 2
 
 
+def test_deleting_a_plugin_from_the_registry_moves_its_ownership_stamp(world):
+    world.run()
+    stamp = world.registry.ownership_generations()[PLUGIN]
+
+    del world.registry[PLUGIN]
+
+    assert world.registry.ownership_generations()[PLUGIN] == stamp + 1
+    with pytest.raises(KeyError):
+        del world.registry[PLUGIN]
+
+
 def test_a_built_in_built_in_the_window_before_the_pools_are_released_is_retired_and_rebuilt_clean(world, monkeypatch):
     """The class swap and the release of the pools are two steps. A pool that builds the restored built-in between
     them holds an instance made from the plugin's configuration: it is retired right after the release, and the next
@@ -1506,7 +1596,7 @@ def test_a_built_in_built_in_the_window_before_the_pools_are_released_is_retired
         def __init__(self, **config):
             self.config = config
 
-    world.registry.providers[BUILT_IN] = plugin  # put the plugin back so remove swaps it once more
+    world.registry.register(BUILT_IN, plugin)  # put the plugin back so remove swaps it once more
     registry._SHADOWED_BUILT_INS[BUILT_IN] = Takes
     monkeypatch.setattr(registry, "release_provider_id", release_after_a_build)
 
@@ -1517,6 +1607,559 @@ def test_a_built_in_built_in_the_window_before_the_pools_are_released_is_retired
     # The instance made in the window is gone from the pool; the next one is built from the built-in's own settings.
     assert pool.initialized_providers.get(BUILT_IN) is not built[0]
     assert pool[BUILT_IN].config == {"password": "own"}
+
+
+def test_the_release_window_built_in_finishes_before_its_replacement_initializes(world, monkeypatch):
+    from provider_hub import registry
+
+    built_in, _ = _plugin_over_built_in(world, monkeypatch)
+    pool = world.pool(BUILT_IN)
+    entered, resume, terminated = threading.Event(), threading.Event(), threading.Event()
+    replacement_waiting = threading.Event()
+    wait = pool._built_in_retirement_ended.wait
+
+    def note_waiting(*args):
+        replacement_waiting.set()
+        return wait(*args)
+
+    monkeypatch.setattr(pool._built_in_retirement_ended, "wait", note_waiting)
+
+    class Searching(built_in):
+        def __init__(self, **config):
+            self.config = config
+
+        def initialize(self):
+            if self.config == {"password": "own"}:
+                assert terminated.is_set()
+
+        def list_subtitles(self, video, languages):
+            entered.set()
+            assert resume.wait(WAIT)
+            assert not terminated.is_set()
+            return []
+
+        def terminate(self):
+            if "request_delay_ms" in self.config:
+                terminated.set()
+
+    registry._SHADOWED_BUILT_INS[BUILT_IN] = Searching
+    pool.provider_configs[BUILT_IN] = {"request_delay_ms": 5}
+    assert registry.unregister_provider_class(BUILT_IN).restored_built_in
+    old = pool[BUILT_IN]
+    thread, outcome = _in_thread(_search, pool, BUILT_IN)
+    replacement = None
+    try:
+        assert entered.wait(WAIT)
+        monkeypatch.setattr("app.get_providers.get_providers_auth", lambda: {BUILT_IN: {"password": "own"}})
+        registry.release_provider_id(BUILT_IN)
+
+        assert not terminated.is_set()
+        replacement, built = _in_thread(pool.__getitem__, BUILT_IN)
+        assert replacement_waiting.wait(WAIT)
+    finally:
+        resume.set()
+        thread.join(WAIT)
+        if replacement is not None:
+            replacement.join(WAIT)
+
+    assert outcome["value"].status == "empty"
+    clean = built["value"]
+    assert clean is not old and clean.config == {"password": "own"}
+
+
+def test_an_older_call_cannot_end_a_newer_instances_retirement(world, monkeypatch):
+    from provider_hub import registry
+
+    first_started, second_started = threading.Event(), threading.Event()
+    first_done, second_done = threading.Event(), threading.Event()
+    replacement_waiting = threading.Event()
+    terminated = []
+    built_in = _built_in_class(BUILT_IN)
+
+    class Searching(built_in):
+        def __init__(self, password):
+            self.password = password
+
+        def initialize(self):
+            if self.password == "own":
+                assert "second" in terminated
+
+        def list_subtitles(self, video, languages):
+            started, done = {"first": (first_started, first_done), "second": (second_started, second_done)}[self.password]
+            started.set()
+            assert done.wait(WAIT)
+            return []
+
+        def terminate(self):
+            terminated.append(self.password)
+
+    world.registry.register(BUILT_IN, Searching)
+    pool = world.pool(BUILT_IN)
+    pool.provider_configs[BUILT_IN] = {"password": "first"}
+    monkeypatch.setattr("app.get_providers.get_providers_auth", lambda: {BUILT_IN: {"password": "own"}})
+    wait = pool._built_in_retirement_ended.wait
+
+    def note_waiting(*args):
+        replacement_waiting.set()
+        return wait(*args)
+
+    monkeypatch.setattr(pool._built_in_retirement_ended, "wait", note_waiting)
+    first, first_result = _in_thread(_search, pool, BUILT_IN)
+    second = replacement = None
+    try:
+        assert first_started.wait(WAIT)
+        pool.provider_configs.update({BUILT_IN: {"password": "second"}})
+        assert terminated == ["first"]
+        second, second_result = _in_thread(_search, pool, BUILT_IN)
+        assert second_started.wait(WAIT)
+        registry.release_provider_id(BUILT_IN)
+        replacement, built = _in_thread(pool.__getitem__, BUILT_IN)
+        assert replacement_waiting.wait(WAIT)
+
+        first_done.set()
+        first.join(WAIT)
+
+        assert first_result["value"].status == "empty"
+        assert terminated == ["first"]
+    finally:
+        first_done.set()
+        second_done.set()
+        first.join(WAIT)
+        if second is not None:
+            second.join(WAIT)
+        if replacement is not None:
+            replacement.join(WAIT)
+
+    assert second_result["value"].status == "empty"
+    assert terminated == ["first", "second"]
+    assert built["value"].password == "own"
+
+
+@pytest.mark.parametrize("download", [False, True], ids=["provider-response", "payload-validation"])
+def test_an_independent_failure_during_cut_is_visible_without_throttling_the_new_owner(world, monkeypatch, download):
+    from app import get_providers
+    from provider_hub import detach, service
+    from provider_hub.protocol import HubWorkerSubtitle, WorkerProtocolError
+    from provider_hub.registry import HubProxyProvider
+    from provider_hub.worker import WorkerResult, _raise_worker_error
+    from subzero.language import Language
+    from subliminal_patch.core_persistent import list_all_subtitles_parallel
+    from subliminal_patch.provider_health import ProviderHealthTracker
+
+    started = threading.Event()
+    outcomes = []
+    health = ProviderHealthTracker()
+    monkeypatch.setattr("subliminal_patch.provider_health.get_tracker", lambda: health)
+
+    class RespondingWorker(FakeWorker):
+        def request(self, op, payload, **kwargs):
+            started.set()
+            assert self.killed.wait(WAIT)
+            if op == "download":
+                return WorkerResult(ok=True, payload={}, events=[])
+            _raise_worker_error({"code": "provider", "class_name": "RuntimeError", "message": "provider failed"})
+
+    worker = RespondingWorker()
+
+    class Plugin(HubProxyProvider):
+        provider_name = BUILT_IN
+        languages = {Language("eng")}
+
+        def __init__(self):
+            super().__init__(worker_client=worker)
+
+    built_in, _ = _plugin_over_built_in(world, monkeypatch)
+    world.registry.register(BUILT_IN, Plugin)
+    pool = world.pool(BUILT_IN)
+    pool.throttle_callback = get_providers.provider_throttle
+    monkeypatch.setattr(detach, "REMOVE_GRACE_SECONDS", 0.01)
+    monkeypatch.setattr(get_providers, "get_providers_auth", lambda: {BUILT_IN: {}})
+    monkeypatch.setattr(get_providers, "tp", {})
+    monkeypatch.setattr(get_providers, "set_throttled_providers", lambda data: None)
+    monkeypatch.setattr(get_providers, "event_stream", lambda **kwargs: None)
+    monkeypatch.setattr(get_providers.settings.general, "enabled_providers", [BUILT_IN])
+    subtitle = HubWorkerSubtitle(BUILT_IN, BUILT_IN, "candidate", Language("eng"), {})
+    if download:
+        thread, result = _in_thread(pool.download_subtitle, subtitle)
+    else:
+        thread, result = _in_thread(list_all_subtitles_parallel, [_movie()], {Language("eng")}, pool,
+                                    on_result=health.record, on_outcome=lambda outcome, elapsed: outcomes.append(outcome))
+
+    try:
+        assert started.wait(WAIT)
+        service.remove_installation(BUILT_IN)
+        thread.join(WAIT)
+        assert detach.wait_idle(WAIT)
+    finally:
+        worker.killed.set()
+        thread.join(WAIT)
+
+    assert worker.cancels == 1
+    assert world.registry[BUILT_IN] is built_in
+    if download:
+        assert result == {"value": False}
+        assert isinstance(subtitle.download_error, WorkerProtocolError)
+    else:
+        assert [(result.status, result.reason) for result in outcomes] == [("error", "error")]
+    assert BUILT_IN not in get_providers.tp
+    assert BUILT_IN not in health.snapshot()
+    assert BUILT_IN not in pool.discarded_providers
+
+
+@pytest.mark.parametrize("listing", ["fanout", "fanout-abandoned", "prioritized", "sequential", "async"])
+def test_a_search_of_a_still_cached_plugin_does_not_charge_the_current_built_in(world, monkeypatch, listing):
+    from provider_hub import detach, registry, service
+    from provider_hub.worker import WorkerError
+    from subzero.language import Language
+    from subliminal_patch.core import SZAsyncProviderPool
+    from subliminal_patch.core_persistent import list_all_subtitles_parallel
+    from subliminal_patch.provider_health import ProviderHealthTracker
+
+    built_in, plugin = _plugin_over_built_in(world, monkeypatch)
+    errors, outcomes, abandoned = [], [], []
+    started, finish = threading.Event(), threading.Event()
+    health = ProviderHealthTracker()
+    monkeypatch.setattr("subliminal_patch.provider_health.get_tracker", lambda: health)
+    monkeypatch.setattr("app.get_providers.get_providers_auth", lambda: {BUILT_IN: {}})
+
+    def fail(self, video, languages):
+        errors.append(self)
+        if listing == "fanout-abandoned":
+            started.set()
+            assert finish.wait(WAIT)
+        raise WorkerError("cached plugin failed")
+
+    def expire_after_attempt(futures, timeout):
+        assert started.wait(WAIT)
+        abandoned.extend(futures)
+        raise TimeoutError
+
+    if listing == "fanout-abandoned":
+        monkeypatch.setattr("subliminal_patch.core_persistent.as_completed", expire_after_attempt)
+
+    monkeypatch.setattr(plugin, "list_subtitles", fail)
+    pool = SZAsyncProviderPool(providers=[BUILT_IN]) if listing == "async" else world.pool(BUILT_IN)
+    old = pool[BUILT_IN]
+    retire = registry.retire_provider_instances
+
+    def search_before_retirement(name, *args, **kwargs):
+        assert world.registry[BUILT_IN] is built_in
+        assert pool.initialized_providers[BUILT_IN] is old
+        video, languages = _movie(), {Language("eng")}
+        if listing.startswith("fanout"):
+            try:
+                list_all_subtitles_parallel([video], languages, pool, on_result=health.record,
+                                            on_outcome=lambda outcome, elapsed: outcomes.append(outcome))
+            finally:
+                finish.set()
+            for future in abandoned:
+                assert future.result(timeout=WAIT).status == "error"
+        elif listing == "prioritized":
+            assert pool.list_subtitles_prioritized(video, languages) == []
+        else:
+            assert pool.list_subtitles(video, languages) == []
+        return retire(name, *args, **kwargs)
+
+    monkeypatch.setattr(registry, "retire_provider_instances", search_before_retirement)
+    service.remove_installation(BUILT_IN)
+
+    assert detach.wait_idle(WAIT)
+    assert errors == [old]
+    if listing.startswith("fanout"):
+        expected = "error" if listing == "fanout" else "abandoned"
+        assert [outcome.status for outcome in outcomes] == [expected]
+    assert BUILT_IN not in health.snapshot()
+    assert BUILT_IN not in pool.discarded_providers
+
+
+@pytest.mark.parametrize("during_retry", [False, True], ids=["before-lookup", "before-retry"])
+def test_a_plugin_candidate_never_reaches_a_built_in_restored_during_download(world, monkeypatch, during_retry):
+    from provider_hub import detach, registry, service
+    from provider_hub.protocol import HubWorkerSubtitle
+    from subzero.language import Language
+    from subliminal_patch.core import ProviderRetiredError
+
+    built_in, plugin = _plugin_over_built_in(world, monkeypatch)
+    asked = []
+
+    class Downloading(built_in):
+        def download_subtitle(self, subtitle):
+            asked.append(subtitle)
+            raise AttributeError("a plugin candidate has no built-in download link")
+
+    registry._SHADOWED_BUILT_INS[BUILT_IN] = Downloading
+    pool = world.pool(BUILT_IN)
+    monkeypatch.setattr("app.get_providers.get_providers_auth", lambda: {BUILT_IN: {}})
+    pool[BUILT_IN]
+
+    def remove():
+        service.remove_installation(BUILT_IN)
+        assert detach.wait_idle(WAIT)
+
+    if during_retry:
+        def lost_worker(self, subtitle):
+            remove()
+            raise ProviderRetiredError(BUILT_IN)
+
+        monkeypatch.setattr(plugin, "download_subtitle", lost_worker)
+    else:
+        pool.pre_download_hook = lambda subtitle: remove()
+
+    subtitle = HubWorkerSubtitle(BUILT_IN, BUILT_IN, "candidate", Language("eng"), {})
+    assert pool.download_subtitle(subtitle) is False
+    assert world.registry[BUILT_IN] is Downloading
+    assert asked == []
+    assert subtitle.skip_reason == "provider_excluded"
+    assert BUILT_IN not in pool.discarded_providers
+
+
+@pytest.mark.parametrize("counted", [False, True])
+def test_a_throttle_write_rechecks_ownership_after_classifying_the_error(world, monkeypatch, counted):
+    from app import get_providers
+    from provider_hub import detach, service
+    from provider_hub.worker import WorkerError
+    from subliminal_patch.exceptions import APIThrottled
+
+    _, plugin = _plugin_over_built_in(world, monkeypatch)
+
+    def fail(self, video, languages):
+        if counted:
+            raise APIThrottled(retry_after=1)
+        raise WorkerError("provider failed")
+
+    monkeypatch.setattr(plugin, "list_subtitles", fail)
+    pool = world.pool(BUILT_IN)
+    pool.throttle_callback = get_providers.provider_throttle
+    monkeypatch.setattr(get_providers, "get_providers_auth", lambda: {BUILT_IN: {}})
+    monkeypatch.setattr(get_providers, "tp", {})
+    monkeypatch.setattr(get_providers, "throttle_count", {})
+    monkeypatch.setattr(get_providers, "set_throttled_providers", lambda data: None)
+    monkeypatch.setattr(get_providers, "event_stream", lambda **kwargs: None)
+    monkeypatch.setattr(get_providers.settings.general, "enabled_providers", [BUILT_IN])
+    classifying, write = threading.Event(), threading.Event()
+    throttle_map = get_providers.provider_throttle_map
+
+    def pause_before_write():
+        classifying.set()
+        assert write.wait(WAIT)
+        return throttle_map()
+
+    monkeypatch.setattr(get_providers, "provider_throttle_map", pause_before_write)
+    thread, result = _in_thread(_search, pool, BUILT_IN)
+    try:
+        assert classifying.wait(WAIT)
+        service.remove_installation(BUILT_IN)
+        assert detach.wait_idle(WAIT)
+    finally:
+        write.set()
+        thread.join(WAIT)
+
+    assert result["value"].status == ("cooldown" if counted else "error")
+    assert BUILT_IN not in get_providers.tp
+    assert BUILT_IN not in get_providers.throttle_count
+
+
+@pytest.mark.parametrize("cancel_timing", [
+    "never", "before_eof", "after_eof", "exited_before_eof", "launcher_cleanup", "launcher_cut",
+])
+def test_worker_eof_keeps_its_cause_until_the_request_consumes_it(monkeypatch, cancel_timing):
+    from io import StringIO
+    from types import SimpleNamespace
+
+    from provider_hub import sandbox, worker
+
+    close_stdout, queued_eof, consume_eof = threading.Event(), threading.Event(), threading.Event()
+    exited = threading.Event()
+    child_exited = threading.Event()
+    killed_live_child = []
+    supervised = cancel_timing.startswith("launcher")
+
+    class Pipe:
+        def readline(self, size):
+            assert close_stdout.wait(WAIT)
+            return ""
+
+    class ReplyQueue(worker._BoundedChunks):
+        def get(self, *args, **kwargs):
+            chunk = super().get(*args, **kwargs)
+            queued_eof.set()
+            assert consume_eof.wait(WAIT)
+            return chunk
+
+    class Launcher(SimpleNamespace):
+        def poll(self):
+            return 1 if exited.is_set() else None
+
+    client = worker.ProviderWorkerClient(["fake"], provider_id=PLUGIN)
+    process_type = Launcher if supervised else SimpleNamespace
+    process = process_type(stdin=StringIO(), stdout=Pipe(), stderr=None, pid=8888)
+    monkeypatch.setattr(sandbox, "LauncherProcess", Launcher)
+    monkeypatch.setattr(worker, "_BoundedChunks", ReplyQueue)
+    monkeypatch.setattr(client, "_spawn", lambda env: process)
+
+    def kill():
+        if supervised:
+            killed_live_child.append(not child_exited.is_set())
+            child_exited.set()
+        exited.set()
+        close_stdout.set()
+
+    monkeypatch.setattr(client, "_has_exited", lambda process: exited.is_set())
+    monkeypatch.setattr(client, "_kill_worker", kill)
+    thread, result = _in_thread(client.request, "search")
+    try:
+        assert _wait_for(lambda: client.process is process)
+        if cancel_timing == "before_eof":
+            client.cancel()
+        elif cancel_timing in ("exited_before_eof", "launcher_cleanup", "launcher_cut"):
+            if cancel_timing == "exited_before_eof":
+                exited.set()
+            if cancel_timing == "launcher_cleanup":
+                child_exited.set()
+            # In launcher_cleanup the child has already exited while its
+            # supervisor is still alive, and the reader has not queued EOF.
+            # The host sees the same supervisor state in launcher_cut.
+            client.cancel()
+        else:
+            exited.set()
+            close_stdout.set()
+        assert queued_eof.wait(WAIT)
+        if cancel_timing == "after_eof":
+            client.cancel()
+    finally:
+        close_stdout.set()
+        consume_eof.set()
+        thread.join(WAIT)
+
+    error_type = worker.WorkerCancelled if cancel_timing == "before_eof" else worker.WorkerError
+    assert type(result["error"]) is error_type
+    if supervised:
+        assert killed_live_child == [cancel_timing == "launcher_cut"]
+        # An operation that reaches an explicitly closed client does have
+        # affirmative evidence that the host refused to send it.
+        with pytest.raises(worker.WorkerCancelled):
+            client.request("search")
+
+
+@pytest.mark.parametrize("cut_first", [False, True], ids=["failed-before-cut", "failed-during-cut"])
+@pytest.mark.parametrize("supervised", [False, True], ids=["direct", "launcher"])
+def test_the_host_reply_writer_preserves_the_cancellation_state_it_observed(monkeypatch, cut_first, supervised):
+    from types import SimpleNamespace
+
+    from provider_hub import sandbox, worker
+
+    client = worker.ProviderWorkerClient(["fake"], provider_id=PLUGIN)
+    exited = False
+
+    class Pipe:
+        def write(self, text):
+            if cut_first:
+                client.cancel()
+            raise BrokenPipeError("the worker's input closed")
+
+    class ReplyThread:
+        def __init__(self, *, target, **kwargs):
+            self.write = target
+
+        def start(self):
+            self.write()
+
+        def join(self, timeout):
+            if not cut_first:
+                client.cancel()
+
+        def is_alive(self):
+            return False
+
+    def kill():
+        nonlocal exited
+        exited = True
+
+    class Launcher(SimpleNamespace):
+        pass
+
+    process_type = Launcher if supervised else SimpleNamespace
+    client.process = process_type(stdin=Pipe(), poll=lambda: 1 if exited else None)
+    monkeypatch.setattr(sandbox, "LauncherProcess", Launcher)
+    monkeypatch.setattr(client, "_kill_worker", kill)
+    monkeypatch.setattr(worker, "threading", SimpleNamespace(Thread=ReplyThread))
+    expected = worker.WorkerCancelled if cut_first and not supervised else worker.WorkerError
+    with pytest.raises(expected) as failure:
+        client._send_reply("answer", time.monotonic() + WAIT)
+    assert type(failure.value) is expected
+    assert isinstance(failure.value.__cause__, BrokenPipeError)
+
+
+@pytest.mark.parametrize("detailed", [True, False])
+def test_a_cut_search_does_not_mark_the_restored_built_in_as_failed(world, monkeypatch, detailed):
+    from app import get_providers
+    from provider_hub import detach, service
+    from subzero.language import Language
+    from subliminal_patch.core_persistent import list_all_subtitles_parallel
+    from subliminal_patch.provider_health import ProviderHealthTracker
+
+    _plugin_over_built_in(world, monkeypatch)
+    gate, started = threading.Event(), threading.Event()
+    _, worker = world.run(BUILT_IN, gate=gate, started=started)
+    pool = world.pool(BUILT_IN)
+    monkeypatch.setattr(detach, "REMOVE_GRACE_SECONDS", 0.01)
+    monkeypatch.setattr(get_providers, "get_providers_auth", lambda: {BUILT_IN: {}})
+    monkeypatch.setattr(get_providers, "tp", {})
+    monkeypatch.setattr(get_providers, "event_stream", lambda **kwargs: None)
+    pool.throttle_callback = lambda name, error, **kw: get_providers.provider_throttle(name, error, wait=False, **kw)
+    health = ProviderHealthTracker()
+    monkeypatch.setattr("subliminal_patch.provider_health.get_tracker", lambda: health)
+    outcomes = []
+    on_outcome = (lambda result, elapsed: outcomes.append(result)) if detailed else None
+    video = _movie()
+    thread, result = _in_thread(list_all_subtitles_parallel, [video], {Language("eng")}, pool,
+                                on_result=health.record, on_outcome=on_outcome)
+    try:
+        assert started.wait(WAIT)
+        service.remove_installation(BUILT_IN)
+        thread.join(WAIT)
+        assert detach.wait_idle(WAIT)
+    finally:
+        gate.set()
+        thread.join(WAIT)
+
+    assert worker.cancels == 1
+    assert result["value"].get(video, []) == []
+    assert BUILT_IN not in get_providers.tp
+    assert BUILT_IN not in health.snapshot()
+    assert BUILT_IN not in pool.discarded_providers
+    assert world.row(BUILT_IN) is None
+    if detailed:
+        assert [(result.status, result.reason) for result in outcomes] == [("skipped", "provider_excluded")]
+
+
+def test_a_cut_download_does_not_throttle_or_discard_the_restored_built_in(world, monkeypatch):
+    from provider_hub import detach, service
+
+    _plugin_over_built_in(world, monkeypatch)
+    gate, started = threading.Event(), threading.Event()
+    _, worker = world.run(BUILT_IN, gate=gate, started=started)
+    pool = world.pool(BUILT_IN)
+    subtitle = _subtitle(BUILT_IN)
+    errors = []
+    pool.throttle_callback = lambda name, error, **kwargs: errors.append(error)
+    monkeypatch.setattr(detach, "REMOVE_GRACE_SECONDS", 0.01)
+    monkeypatch.setattr("app.get_providers.get_providers_auth", lambda: {BUILT_IN: {}})
+
+    thread, result = _in_thread(pool.download_subtitle, subtitle)
+    try:
+        assert started.wait(WAIT)
+        service.remove_installation(BUILT_IN)
+        thread.join(WAIT)
+        assert detach.wait_idle(WAIT)
+    finally:
+        gate.set()
+        thread.join(WAIT)
+
+    assert worker.cancels == 1
+    assert result == {"value": False}
+    assert subtitle.skip_reason == "provider_excluded"
+    assert errors == [] and BUILT_IN not in pool.discarded_providers
 
 
 def test_the_refusal_of_a_detached_plugins_candidate_logs_from_a_realistic_subtitle_too(world, caplog):

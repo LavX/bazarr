@@ -70,32 +70,11 @@ def _list_with_outcomes(pool, video, languages, cancel, on_outcome):
     return subtitles
 
 
-class _OutcomeListingPool:
-    """Keep failure discards ahead of the provider's outcome acknowledgement."""
-
-    def __init__(self, pool):
-        self.pool = pool
-
-    def __getattr__(self, name):
-        return getattr(self.pool, name)
-
-    def __getitem__(self, name):
-        return self.pool[name]
-
-    def _notify_throttle(self, name, error, **context):
-        recorded = self.pool._notify_throttle(name, error, **context)
-        # The detailed return in the core listing precedes its legacy discard.
-        # Record it here, before finally releases a waiting worker request,
-        # even when the caller has already cancelled its wait for this result.
-        self.pool.discarded_providers.add(name)
-        return recorded
-
-
 def _list_provider_with_outcome(pool, name, video, languages, cancel):
     from .core import LISTING_STOP_POLL_SECONDS, ListingStopped, SZProviderPool
 
     def ask():
-        return SZProviderPool.list_subtitles_provider(_OutcomeListingPool(pool), name, video, languages,
+        return SZProviderPool.list_subtitles_provider(pool, name, video, languages,
                                                      detailed=True, discard_on_failure=True)
 
     if cancel is None:
@@ -489,7 +468,7 @@ def list_all_subtitles_parallel(videos, languages, pool_instance,
         wall is enforced by cpython itself, not by a per-iteration check.
       - On wall expiry, any future that finished before the wall but was
         not yet yielded is harvested (no results dropped); futures still
-        running are reported as "abandoned" via on_result and registered
+        running are reported as "abandoned" via on_outcome and registered
         in the module-level abandoned set so they remain observable.
       - A future still queued when the wall fires is cancelled and
         reported as "not_started". It never reached a worker, so it made
@@ -517,7 +496,9 @@ def list_all_subtitles_parallel(videos, languages, pool_instance,
       wall_timeout: hard budget for the whole fanout, in seconds.
       exclude_providers: iterable of provider names to skip entirely.
       on_result: optional callable ``(name, outcome, latency_ms) -> None``
-        invoked exactly once per non-excluded provider. Outcomes:
+        reports health when there is an outcome for the current owner.
+        Skipped searches and abandonment before a provider is called have no
+        health outcome. Outcomes:
         ``"ok"`` (returned within per_provider_timeout),
         ``"slow"`` (returned, but over threshold),
         ``"exception"`` (raised),
@@ -538,7 +519,8 @@ def list_all_subtitles_parallel(videos, languages, pool_instance,
         if on_outcome is not None:
             on_outcome(result, latency_ms)
 
-    from .core import ProviderSearchResult, provider_search_failure
+    from .core import ProviderSearchResult, _provider_attempt_observer, provider_search_failure
+    from .extensions import provider_registry
 
     if on_outcome is not None:
         for name in pool_instance.providers:
@@ -584,11 +566,27 @@ def list_all_subtitles_parallel(videos, languages, pool_instance,
 
             futures: Dict[Future, str] = {}
             start_times: Dict[Future, float] = {}
+            owners = {}
+            attempted = {}
+            # Health needs the detailed status too: a skipped search (including
+            # an interrupted release) says nothing about the provider's health.
+            options = {"detailed": True} if on_outcome is not None or on_result is not None else {}
+            def search_provider(name, video, languages, attempts=attempted, **options):
+                def observe(provider, owner):
+                    if provider == name:
+                        attempts[name] = owner
+
+                token = _provider_attempt_observer.set(observe)
+                try:
+                    return pool_instance.list_subtitles_provider(name, video, languages, **options)
+                finally:
+                    _provider_attempt_observer.reset(token)
+
+            search = search_provider if on_result is not None else pool_instance.list_subtitles_provider
             for p in providers:
-                options = {"detailed": True} if on_outcome is not None else {}
-                fut = _safe_submit(executor,
-                                   pool_instance.list_subtitles_provider,
-                                   p, video, languages, **options)
+                if on_result is not None:
+                    owners[p] = provider_registry.owner(p)
+                fut = _safe_submit(executor, search, p, video, languages, **options)
                 futures[fut] = p
                 start_times[fut] = time.monotonic()
 
@@ -598,7 +596,15 @@ def list_all_subtitles_parallel(videos, languages, pool_instance,
             def _emit(name, outcome, latency_s):
                 if on_result is not None:
                     try:
-                        on_result(name, outcome, int(latency_s * 1000))
+                        # A detached call still has an outcome for its caller,
+                        # but it cannot change the health of the new owner.
+                        with provider_registry.lock:
+                            owner = attempted.get(name)
+                            if outcome == "abandoned" and name in attempted and owner is None:
+                                # The search reached the pool but had yet to call a provider.
+                                return
+                            if provider_registry.owner(name) == (owner or owners[name]):
+                                on_result(name, outcome, int(latency_s * 1000))
                     except Exception:
                         logger.debug("on_result callback raised", exc_info=True)
 

@@ -48,7 +48,7 @@ def test_detailed_real_pool_preserves_provider_outcome(monkeypatch, kind, expect
                 raise failures[kind]
             return []
 
-    monkeypatch.setitem(provider_registry.providers, "discover_outcome", FixtureProvider)
+    monkeypatch.setitem(provider_registry, "discover_outcome", FixtureProvider)
     pool = SZAsyncProviderPool(providers=["discover_outcome"], provider_configs={})
     outcomes = []
     list_all_subtitles_parallel(
@@ -128,7 +128,7 @@ def test_on_result_callback_fired_for_every_provider():
     fast_sub = MagicMock(provider_name="fast", language=MagicMock())
     slow_sub = MagicMock(provider_name="slow_success", language=MagicMock())
 
-    def list_fn(provider, video, languages):
+    def list_fn(provider, video, languages, *, detailed=False):
         if provider == "fast":
             return [fast_sub]
         if provider == "slow_success":
@@ -166,7 +166,7 @@ def test_provider_exception_recorded_as_exception():
     pool.discarded_providers = set()
     ok_sub = MagicMock(provider_name="ok", language=MagicMock())
 
-    def list_fn(provider, video, languages):
+    def list_fn(provider, video, languages, *, detailed=False):
         if provider == "boom":
             raise RuntimeError("provider exploded")
         return [ok_sub]
@@ -198,7 +198,7 @@ def test_excluded_providers_are_skipped_entirely():
 
     invocations = []
 
-    def list_fn(provider, video, languages):
+    def list_fn(provider, video, languages, *, detailed=False):
         invocations.append(provider)
         return []
 
@@ -333,7 +333,7 @@ def test_detailed_wall_timeout_does_not_accept_late_provider_rows(monkeypatch):
             finished.set()
             return []
 
-    monkeypatch.setitem(provider_registry.providers, "discover_slow", SlowProvider)
+    monkeypatch.setitem(provider_registry, "discover_slow", SlowProvider)
     pool = SZAsyncProviderPool(providers=["discover_slow"], provider_configs={})
     outcomes = []
     try:
