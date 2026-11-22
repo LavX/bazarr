@@ -5,6 +5,77 @@ import pytest
 from plugin_platform_helpers import archive_runtime, oci_runtime, provider_manifest_v2, service_manifest
 
 
+@pytest.mark.parametrize("conditional,choices,scope", [
+    (None, ["auto"], "connection"),
+    ({"key": "missing", "equals": "auto"}, ["auto"], "connection"),
+    ({"key": "mode", "equals": "unknown"}, ["auto"], "connection"),
+    ({"key": "mode", "equals": ""}, ["auto", ""], "connection"),
+    ({"key": "mode", "equals": "auto"}, ["auto", None], "connection"),
+    ({"key": "mode", "equals": "auto"}, ["auto", {"value": "manual", "label": []}], "connection"),
+    ({"key": "mode", "equals": "auto"}, ["auto", {"value": "auto"}], "connection"),
+    ({"key": "mode", "equals": "auto"}, ["auto"], "engine"),
+])
+def test_invalid_forbidden_if_conditions_are_refused_before_settings_validation(conditional, choices, scope):
+    from provider_hub.manifest import ManifestValidationError
+    from provider_hub.plugin_manifest import parse_plugin_manifest
+
+    fields = [{"key": "mode", "type": "choice", "choices": choices},
+              {"key": "selection", "type": "list", "forbidden_if": conditional}]
+    settings = {"fields": fields} if scope == "engine" else {
+        "fields": [], "backend_types": {"sample": {"fields": fields}}}
+    manifest = service_manifest("sample", kind="translator", kind_api="bazarr.translator.v1",
+                                settings_version=1, settings=settings)
+    with pytest.raises(ManifestValidationError, match="forbidden_if"):
+        parse_plugin_manifest(manifest)
+
+
+def test_a_reorder_only_field_cannot_declare_forbidden_if():
+    from provider_hub.manifest import ManifestValidationError
+    from provider_hub.plugin_manifest import parse_plugin_manifest
+
+    fields = [{"key": "mode", "type": "choice", "choices": ["auto"]},
+              {"key": "selection", "type": "orderable_list", "items": ["sample"],
+               "forbidden_if": {"key": "mode", "equals": "auto"}}]
+    manifest = service_manifest("sample", kind="translator", kind_api="bazarr.translator.v1", settings_version=1,
+                                settings={"fields": [], "backend_types": {"sample": {"fields": fields}}})
+    with pytest.raises(ManifestValidationError, match="forbidden_if"):
+        parse_plugin_manifest(manifest)
+
+
+@pytest.mark.parametrize("attrs,clearable", [
+    ({}, True),
+    ({"required": False, "default": None, "max_items": 20, "min": None, "choices": []}, True),
+    ({"required": None, "default": [], "min": 0, "min_items": 0, "minItems": 0, "max_items": 0, "items": []}, True),
+    ({"required": True}, False),
+    ({"default": ["fixed"]}, False),
+    ({"default": ""}, False),
+    ({"min": 1}, False),
+    ({"min_items": 1}, False),
+    ({"minItems": 1}, False),
+    ({"max_items": -1}, False),
+    ({"const": ["fixed"]}, False),
+    ({"enum": [["fixed"]]}, False),
+    ({"items": ["fixed"]}, False),
+    ({"choices": ["fixed"]}, False),
+])
+def test_forbidden_if_requires_a_list_that_can_be_cleared(attrs, clearable):
+    from provider_hub.manifest import ManifestValidationError
+    from provider_hub.plugin_manifest import parse_plugin_manifest
+
+    target = {"key": "selection", "type": "list", "forbidden_if": {"key": "mode", "equals": "auto"}, **attrs}
+    fields = [{"key": "mode", "type": "choice", "choices": ["auto"]}, target]
+    manifest = service_manifest("sample", kind="translator", kind_api="bazarr.translator.v1", settings_version=1,
+                                settings={"fields": [], "backend_types": {"sample": {"fields": fields}}})
+    if clearable:
+        assert dict(parse_plugin_manifest(manifest).backend_fields)["sample"][1] == target
+    else:
+        with pytest.raises(ManifestValidationError, match="forbidden_if.*clearable"):
+            parse_plugin_manifest(manifest)
+
+    del target["forbidden_if"]
+    assert dict(parse_plugin_manifest(manifest).backend_fields)["sample"][1] == target
+
+
 @pytest.mark.parametrize("lower,higher", [
     ("2.8.0-alpha", "2.8.0-alpha.1"),
     ("2.8.0-alpha.1", "2.8.0-alpha.beta"),

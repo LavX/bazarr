@@ -65,6 +65,7 @@ def world(monkeypatch, schema_session):
     store = TranslatorStore(schema_session, pointers=MemoryPointers(), plugin_active=lambda pid: pid in plugins)
     validations = []
     sources = []
+    production_service = module.get_service
     monkeypatch.setattr(module, "get_service", lambda: TranslatorSettingsService(
         store, plugin_lookup=plugins.get, plugin_validator=lambda *args: validations.append(args) or {},
         options_source=(lambda *args: sources[0](*args)) if sources else None))
@@ -88,6 +89,21 @@ def world(monkeypatch, schema_session):
     w = World()
     w.client, w.store, w.instance, w.plugins, w.runtime, w.validations = client, store, instance, plugins, runtime, validations
     w.sources = sources
+
+    def use_production_service():
+        from app import database
+        from subtitles.tools.translate.runtime import settings_service, workers
+
+        class NoWorker:
+            def call(self, *_args, **_kwargs):
+                pytest.fail("saving settings must not call a worker")
+
+        monkeypatch.setattr(database, "database", schema_session)
+        monkeypatch.setattr(settings_service, "installed_plugin", plugins.get)
+        monkeypatch.setattr(module, "get_service", production_service)
+        monkeypatch.setattr(workers, "_port", NoWorker())
+
+    w.use_production_service = use_production_service
 
     def call(method, path, body=None, current=True):
         """Send a request. A save carries the revision the caller loaded, unless ``current`` is False."""
@@ -276,6 +292,99 @@ def test_a_pointer_request_that_fails_on_one_part_saves_neither(world, monkeypat
 def _new_connection(world, **body):
     body.setdefault("backend_type", "openrouter")
     return world.call("post", f"engines/{world.instance.id}/connections", body)
+
+
+def test_connection_saves_enforce_declared_routing_rules_offline(world):
+    from subtitles.tools.translate.runtime.destinations import DestinationSchema
+    from subtitles.tools.translate.runtime.field_schema import validate_draft
+    from subtitles.tools.translate.runtime.plugin_update import bring_up_to_date
+
+    fields = world.plugins[PLUGIN].manifest["settings"]["backend_types"]["openrouter"]["fields"]
+    fields.extend([
+        {"key": "routing", "type": "choice", "choices": ["default", "smartfast"]},
+        {"key": "provider_order", "type": "list", "max_items": 20,
+         "forbidden_if": {"key": "routing", "equals": "smartfast"}},
+    ])
+    world.use_production_service()
+    order = [f"provider-{item}" for item in range(20)]
+    error = {"provider_order": "must be empty when routing is smartfast"}
+    refused = _new_connection(world, values={"api_key": SECRET, "routing": "smartfast", "provider_order": [SECRET]})
+    assert refused.status_code == 400 and refused.json["field_errors"] == error
+    assert SECRET not in _everything_said(world)
+    assert world.store.list_connections(world.instance.id) == []
+
+    created = _new_connection(world, values={"api_key": SECRET, "routing": "default", "provider_order": order,
+                                             "model": "vendor/model", "price_input_per_million": 0.5})
+    assert created.status_code == 201, created.json
+    saved = created.json["connection"]
+    connection_id = saved["id"]
+    path = f"connections/{connection_id}"
+    owner = ("connection", connection_id)
+    destinations = frozenset({"https://openrouter.ai:443"})
+
+    too_long = world.call("patch", path, {"values": {"provider_order": order + ["another"]}})
+    assert too_long.status_code == 400
+    assert too_long.json["field_errors"] == {"provider_order": "must hold at most 20 entries"}
+    refused = world.call("patch", path, {"values": {"routing": "smartfast", "model": SECRET, "api_key": KEYS[1]}})
+    assert refused.status_code == 400 and refused.json["field_errors"] == error
+    assert not any(secret in _everything_said(world) for secret in (SECRET, KEYS[1]))
+    assert world.store.get_connection(connection_id).revision == saved["revision"]
+    assert world.store.secrets_for_request(owner, destinations) == {"api_key": SECRET}
+
+    fast = world.call("patch", path, {"values": {"routing": "smartfast", "provider_order": []}})
+    assert fast.status_code == 200 and not fast.json["connection"]["values"].get("provider_order")
+    manual = world.call("patch", path, {"values": {"routing": "default", "provider_order": order}})
+    assert manual.status_code == 200, manual.json
+    values = manual.json["connection"]["values"]
+    assert (values["provider_order"], values["model"], values["price_input_per_million"]) == (order, "vendor/model", 0.5)
+    assert world.store.secrets_for_request(owner, destinations) == {"api_key": SECRET}
+
+    # An unfinished draft can still load options, and a release with a new constraint keeps an
+    # existing connection enabled. A subsequent enable request checks the saved values.
+    conflict = {"routing": "smartfast", "provider_order": order}
+    assert validate_draft(fields, conflict) == {}
+    world.store.update_connection(connection_id, schema=DestinationSchema(tuple(fields), tuple(destinations)),
+                                  settings=conflict)
+    updated_manifest = {**world.plugins[PLUGIN].manifest, "version": "2.3.0"}
+    assert bring_up_to_date(world.store, PLUGIN, updated_manifest) is None
+    assert world.store.get_connection(connection_id).enabled
+    assert world.store.settings_of(world.store.get_connection(connection_id)) == conflict
+    disabled = world.call("patch", path, {"enabled": False})
+    assert disabled.status_code == 200, disabled.json
+    refused = world.call("patch", path, {"enabled": True})
+    assert refused.status_code == 400 and refused.json["field_errors"] == error
+    assert world.store.get_connection(connection_id).revision == disabled.json["connection"]["revision"]
+    assert world.store.secrets_for_request(owner, destinations) == {"api_key": SECRET}
+
+
+@pytest.mark.parametrize("scope", ["engine", "connection"])
+def test_connection_save_rechecks_the_revision_of_its_validated_settings(world, monkeypatch, scope):
+    from subtitles.tools.translate.runtime.destinations import DestinationSchema
+
+    created = _new_connection(world, values={"api_key": SECRET, "model": "vendor/original"})
+    connection_id = created.json["connection"]["id"]
+    world.use_production_service()
+    schema = DestinationSchema(endpoints=("https://openrouter.ai:443",))
+    persist_key = TranslatorSettingsService._make_key_durable
+
+    def save_while_request_is_being_prepared(validated):
+        persist_key(validated)
+        if scope == "engine":
+            world.store.save_instance_settings(world.instance.id, {"concurrency": 2}, schema=DestinationSchema())
+        else:
+            world.store.update_connection(connection_id, schema=schema, model="vendor/concurrent")
+
+    monkeypatch.setattr(TranslatorSettingsService, "_make_key_durable", staticmethod(save_while_request_is_being_prepared))
+    result = world.call("patch", f"connections/{connection_id}",
+                        {"values": {"model": "vendor/proposed", "api_key": KEYS[0]}})
+    stored = world.store.get_connection(connection_id)
+    secrets = world.store.secrets_for_request(("connection", connection_id), frozenset(schema.endpoints))
+    if scope == "engine":
+        assert result.status_code == 200, result.json
+        assert stored.model == "vendor/proposed" and secrets == {"api_key": KEYS[0]}
+    else:
+        assert result.status_code == 409 and result.json["error"] == "stale_revision"
+        assert stored.model == "vendor/concurrent" and secrets == {"api_key": SECRET}
 
 
 def test_a_connection_is_created_listed_edited_reordered_and_deleted(world):
