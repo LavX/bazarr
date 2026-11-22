@@ -1361,3 +1361,64 @@ def test_a_backup_follows_the_same_precedence_for_a_url(backup_env, monkeypatch)
 
     assert (connection['username'], connection['password'], connection['host'], connection['port'],
             connection['database']) == ('url_user', 'url_password', 'env.host', 6543, 'url_database')
+
+
+def test_backup_and_restore_exclude_release_sign_in_paths(backup_env, monkeypatch, tmp_path):
+    import json
+
+    from plugin_platform_helpers import service_manifest
+    from provider_hub import datadir, releases, state_store
+
+    monkeypatch.setattr(backup_env.settings.postgresql, 'enabled', False)
+    root = tmp_path / "provider_hub"
+    root.mkdir()
+    key, prior_key = "a" * 32, "b" * 32
+    manifest = service_manifest(permissions=["data_dir"])
+    previous_manifest = service_manifest(permissions=["data_dir", "interactive_login"],
+                                         login={"paths": ["session/token"]})
+    state_path = root / "state.json"
+    state_path.write_text(json.dumps({"installations": {"exampleservice": {
+        "active_version": "2.0.0", "active_data_key": key, "manifest": manifest}}}), encoding="utf-8")
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(state_path))
+    monkeypatch.setattr(state_store, "list_releases", lambda **kwargs: [
+        releases.Release(1, "exampleservice", "1.0.0", "retired", manifest=previous_manifest, data_key=prior_key)])
+    from provider_hub import state
+    real_uses_file = state._uses_file
+    # The current installation is a local fixture. Return a retired release
+    # from the same snapshot seam the SQL store supplies in production.
+    monkeypatch.setattr(datadir, "QUIESCE_TIMEOUT", 0.01)
+    monkeypatch.setattr(state, "database_held", lambda: False)
+    monkeypatch.setattr(state, "load_state_strict", lambda: state._normalized_state(json.loads(state_path.read_text())))
+    monkeypatch.setattr(state, "_uses_file", lambda path: False)
+    from provider_hub.kinds import get_kind
+    monkeypatch.setattr("provider_hub.kinds.get_kind",
+                        lambda name: SimpleNamespace(settle_data=lambda plugin_id, timeout: True)
+                        if name == manifest["kind"] else get_kind(name))
+    active = datadir.release_path(root, "exampleservice", key)
+    previous = datadir.release_path(root, "exampleservice", prior_key)
+    for folder, value in ((active, "current"), (previous, "previous")):
+        session = folder / "connection" / "session"
+        session.mkdir(parents=True)
+        (session / "token").write_text("synthetic sign-in")
+        (session / "token-wal").write_text("synthetic sign-in journal")
+        (folder / "saved").write_text(value)
+        (folder / "alias").symlink_to("connection/session/token")
+
+    assert backup_env.module.backup_to_zip(job_id=1)
+    [archive] = _archives(backup_env)
+    with zipfile.ZipFile(backup_env.backup_dir / archive) as zip_file:
+        expected = {
+            f"plugin_data/exampleservice/{key}/saved": b"current",
+            f"plugin_data/exampleservice/{prior_key}/saved": b"previous",
+        }
+        assert {name: zip_file.read(name) for name in zip_file.namelist()
+                if name.startswith("plugin_data/") and not name.endswith("/")} == expected
+
+    (active / "saved").write_text("new data after backup")
+    assert backup_env.module.prepare_restore(archive)
+    monkeypatch.setattr(state, "_uses_file", real_uses_file)
+    assert backup_env.module.restore_from_backup()
+    assert (active / "saved").read_text() == "current"
+    assert (previous / "saved").read_text() == "previous"
+    assert not (active / "connection" / "session" / "token").exists()
+    assert not (backup_env.restore_dir / "plugin_data").exists()

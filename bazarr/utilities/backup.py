@@ -14,6 +14,9 @@ from contextlib import closing
 from datetime import datetime, timedelta, timezone
 from zipfile import ZipFile, BadZipFile, ZIP_DEFLATED
 from glob import glob
+from pathlib import Path, PureWindowsPath
+
+from provider_hub import datadir
 
 from app.get_args import args
 from app.config import settings
@@ -414,6 +417,10 @@ def _clear_restore_directory():
     for name in ('config.yaml', 'config.ini', SQLITE_ARCHIVE_NAME, POSTGRES_ARCHIVE_NAME,
                  POSTGRES_FAILED_ARCHIVE_NAME):
         _delete_file(os.path.join(get_restore_path(), name))
+    try:
+        datadir.remove(Path(get_restore_path()) / datadir.ARCHIVE_DIR)
+    except OSError:
+        logging.warning('Could not clear the staged plugin data from the restore directory.', exc_info=True)
 
 
 def _backup_prerequisites_met():
@@ -448,6 +455,11 @@ def _safe_extract(zip_obj, dest_path):
     """Extract a ZIP archive while rejecting entries that escape `dest_path`."""
     dest_real = os.path.realpath(dest_path)
     for member in zip_obj.namelist():
+        if member.startswith(datadir.ARCHIVE_DIR + "/"):
+            parts = member.rstrip("/").split("/")
+            if (len(parts) < 3 or "\\" in member
+                    or any(part in ("", ".", "..") or PureWindowsPath(part).drive for part in parts)):
+                raise BadZipFile(f'Unsafe path in backup archive: {member}')
         member_real = os.path.realpath(os.path.join(dest_real, member))
         if member_real != dest_real and not member_real.startswith(dest_real + os.sep):
             raise BadZipFile(f'Unsafe path in backup archive: {member}')
@@ -497,6 +509,11 @@ def backup_to_zip(job_id=None, wait_for_completion=False):
                                          wait_for_completion=wait_for_completion)
         return True
 
+    with datadir.release_lock:
+        return _write_backup(job_id)
+
+
+def _write_backup(job_id):
     now = datetime.now()
     database_backup_file = None
     now_string = now.strftime("%Y.%m.%d_%H.%M.%S")
@@ -541,6 +558,7 @@ def backup_to_zip(job_id=None, wait_for_completion=False):
         with ZipFile(backup_file_path, 'w', compression=ZIP_DEFLATED, compresslevel=9) as backupZip:
             backupZip.write(database_backup_file, _database_archive_name())
             backupZip.write(config_file, 'config.yaml')
+            datadir.write_backup(backupZip)
     except Exception:
         # Half an archive is worse than none: it lists as a backup and refuses
         # to restore.
@@ -779,6 +797,13 @@ def restore_from_backup():
         stop_bazarr(EXIT_RESTORE_ERROR)
         return False
 
+    from provider_hub.state import provider_hub_dir
+
+    try:
+        datadir.restore_backup(Path(get_restore_path()) / datadir.ARCHIVE_DIR, provider_hub_dir())
+    except OSError:
+        logging.exception('The database and configuration were restored, but plugin data could not be restored.')
+
     _clear_restore_directory()
 
     logging.info('Backup restored successfully. Bazarr will restart.')
@@ -803,6 +828,7 @@ def prepare_restore(filename):
         logging.exception(f'Unable to copy backup archive to {dest_zip_file_path}')  # noqa: G004
     else:
         try:
+            datadir.remove(Path(get_restore_path()) / datadir.ARCHIVE_DIR)
             with ZipFile(dest_zip_file_path, 'r') as zipObj:
                 _safe_extract(zipObj, get_restore_path())
         except (BadZipFile, OSError):

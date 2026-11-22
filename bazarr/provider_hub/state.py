@@ -51,6 +51,7 @@ class ProviderHubInstallation:
     source_id: str | None = None
     kind: str = SUBTITLE_PROVIDER
     needs_repair: bool = False
+    active_data_key: str | None = None
 
 
 def official_catalog_source() -> dict[str, Any]:
@@ -880,7 +881,7 @@ def _installation_from_row(provider_id: str, item: dict[str, Any],
         origin=str(item.get("origin") or "catalog"),
         source_id=item.get("source_id"),
         kind=kind_of(item),
-        needs_repair=bool(item.get("needs_repair", False)),
+        needs_repair=bool(item.get("needs_repair", False)), active_data_key=item.get("active_data_key"),
     )
 
 

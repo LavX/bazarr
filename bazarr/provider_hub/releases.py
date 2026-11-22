@@ -145,6 +145,8 @@ _ACTIVE_KEYS = ("active_version", "active_path", "python_path", "manifest", "sup
 _STAGED_KEYS = ("staged_version", "staged_path", "staged_python_path", "staged_manifest", "staged_supplied_by")
 # Recorded in ``fields`` when the row's map of bindings was null and not empty.
 NULL_BINDINGS = "supplied_by:null"
+# The existing per-release field metadata also carries the opaque data folder key.
+_DATA_KEY = "data:"
 # What each key after the version is, in order, for the ``fields`` column.
 _FIELD_NAMES = ("path", "python_path", "manifest", "supplied_by", "activated_at")
 
@@ -182,6 +184,7 @@ class Release:
     ended_seq: int | None = None
     source_id: str | None = None
     origin: str | None = None
+    data_key: str | None = None
 
 
 def release_of(row: dict[str, Any]) -> Release:
@@ -192,8 +195,13 @@ def release_of(row: dict[str, Any]) -> Release:
         manifest=_loads(row.get("manifest")), supplied_by=dict(row.get("supplied_by") or {}),
         error=row.get("error"), created_at=row.get("created_at"), activated_at=row.get("activated_at"),
         retired_at=row.get("retired_at"), ended_seq=row.get("ended_seq"), source_id=row.get("source_id"),
-        origin=row.get("origin"),
+        origin=row.get("origin"), data_key=_data_key(row),
     )
+
+
+def _data_key(row: dict[str, Any]) -> str | None:
+    return next((marker[len(_DATA_KEY):] for marker in json.loads(row.get("fields") or "[]")
+                 if isinstance(marker, str) and marker.startswith(_DATA_KEY)), None)
 
 
 def _loads(text: Any) -> dict[str, Any] | None:
@@ -227,6 +235,7 @@ class _Slot:
     manifest: dict[str, Any] | None
     supplied_by: dict[str, str]
     activated_at: str | None
+    data_key: str | None
     # The names (``_FIELD_NAMES``) of the fields the installation row carried.
     present: list[str]
 
@@ -243,7 +252,8 @@ def _slot(row: dict[str, Any], keys: tuple[str, ...], with_activation: bool) -> 
         return None
     path, python, manifest, supplied = (row.get(key) for key in keys[1:5])
     activated = row.get(keys[5]) if with_activation else None
-    if not (_optional_text(path) and _optional_text(python) and _optional_text(activated)
+    data_key = row.get("active_data_key" if with_activation else "staged_data_key")
+    if not (_optional_text(data_key) and _optional_text(path) and _optional_text(python) and _optional_text(activated)
             and (manifest is None or isinstance(manifest, dict)) and _bindings_ok(supplied)):
         return None
     names = _FIELD_NAMES if with_activation else _FIELD_NAMES[:4]
@@ -251,7 +261,9 @@ def _slot(row: dict[str, Any], keys: tuple[str, ...], with_activation: bool) -> 
     if "supplied_by" in present and supplied is None:
         # A null map and an empty one are different values of the row: the null is remembered.
         present.append(NULL_BINDINGS)
-    return _Slot(version, path, python, manifest, dict(supplied or {}), activated, present)
+    if data_key:
+        present.append(_DATA_KEY + data_key)
+    return _Slot(version, path, python, manifest, dict(supplied or {}), activated, data_key, present)
 
 
 @functools.lru_cache(maxsize=1024)
@@ -306,7 +318,8 @@ def compose(data: dict[str, Any], rows: list[dict[str, Any]]) -> "StateDocument"
     # damaged document lost): they are kept until discarded on purpose, and so are their files.
     document.retained_releases = tuple(
         {"plugin_id": release["plugin_id"], "version": release["version"], "state": release["state"],
-         "bundle_path": release.get("bundle_path"), "python_path": release.get("python_path")}
+         "bundle_path": release.get("bundle_path"), "python_path": release.get("python_path"),
+         "data_key": _data_key(release)}
         for release in rows
         if release["state"] in (RETIRED, DRAINING) or release["plugin_id"] not in listed)
     if not isinstance(installations, dict) or not rows:
@@ -324,6 +337,11 @@ def compose(data: dict[str, Any], rows: list[dict[str, Any]]) -> "StateDocument"
             if release is None:
                 continue
             installation[keys[0]] = release["version"]
+            data_field = "active_data_key" if state == ACTIVE else "staged_data_key"
+            if data_key := _data_key(release):
+                installation[data_field] = data_key
+            else:
+                installation.pop(data_field, None)
             recorded = release.get("fields")
             names = _FIELD_NAMES if state == ACTIVE else _FIELD_NAMES[:4]
             present = set(json.loads(recorded)) if recorded else set(names)
@@ -357,7 +375,8 @@ class Plan:
 
 
 def _matches(release: dict[str, Any], slot: _Slot) -> bool:
-    return release["version"] == slot.version and release.get("bundle_path") == slot.bundle_path
+    return (release["version"] == slot.version and release.get("bundle_path") == slot.bundle_path
+            and _data_key(release) == slot.data_key)
 
 
 def split(data: dict[str, Any], rows: list[dict[str, Any]], *, now: str | None = None,
@@ -463,9 +482,11 @@ def split(data: dict[str, Any], rows: list[dict[str, Any]], *, now: str | None =
                     plan.deletes.append(release["id"])
         # The slots that did not become releases keep their fields in the document.
         if active is not None:
+            row.pop("active_data_key", None)
             for key in _ACTIVE_KEYS:
                 row.pop(key, None)
         if staged is not None:
+            row.pop("staged_data_key", None)
             for key in _STAGED_KEYS:
                 row.pop(key, None)
         stored_rows[plugin_id] = row

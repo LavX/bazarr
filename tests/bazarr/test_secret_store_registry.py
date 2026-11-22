@@ -1573,3 +1573,19 @@ def test_a_failed_scan_with_an_unresolvable_hub_directory_still_runs_the_fallbac
     persisted = json.loads(state_path.read_text(encoding="utf-8"))["plugin_secret_paths"]
     assert "ghostplugin.api_token" in persisted
     assert "sonarr.apikey" not in persisted
+
+
+def test_activated_manifest_keeps_plain_and_secret_leftovers_classified(
+        tmp_path, monkeypatch, plugin_secret_registry):
+    from provider_hub.secret_paths import archive_manifest
+
+    state_path = _write_hub_state(tmp_path, {"installations": {}})
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(state_path))
+    manifest = _hub_manifest("ghosthub", secret_fields=("api_token",))
+    manifest.update(version="1.0.0", bundle_sha256="a" * 64)
+    manifest.setdefault("config_schema", {}).setdefault("properties", {}).update(region={"type": "string"})
+    archive_manifest(state_path.parent, "ghosthub", manifest)
+    plugin_secret_registry.load_plugin_secret_paths(
+        _ScanSettings({"ghosthub": {"api_token": "synthetic token", "region": "synthetic region"}}))
+    assert plugin_secret_registry.is_plugin_secret("ghosthub.api_token")
+    assert not plugin_secret_registry.is_plugin_secret("ghosthub.region")

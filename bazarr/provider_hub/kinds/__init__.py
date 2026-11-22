@@ -143,7 +143,7 @@ class Kind:
         raise ManifestValidationError(f"this Bazarr+ does not install {self.name} plugins")
 
     def smoke_test(self, validated: "ValidatedManifest", bundle_path, python_path,
-                   timeout: float | None = None) -> None:
+                   timeout: float | None = None, *, data_dir=None) -> None:
         """Start the staged plugin once to prove it loads. The default has nothing to start.
 
         The core calls this hook when it stages a release, activates a staged release, repairs an
@@ -151,6 +151,11 @@ class Kind:
         that runs on a time budget has left for the check. The subtitle provider kind runs the worker
         health check; a kind with nothing to start keeps this version.
         """
+
+
+    def settle_data(self, plugin_id: str, timeout: float) -> bool:
+        """Wait for the plugin's workers to stop writing to its active data folder."""
+        return True
 
 
 _KINDS: dict[str, Kind] = {}

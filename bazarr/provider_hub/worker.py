@@ -502,7 +502,7 @@ def provider_spec(layout: ProviderLayout, command, cwd, env):
     )
 
     base = layout.hub_dir / "run" / layout.key
-    data, temp = base / "data", base / "tmp"
+    data, temp = Path((env or {}).get("BAZARR_PLUGIN_DATA_DIR") or base / "data"), base / "tmp"
     for folder in (base, data, temp):
         folder.mkdir(parents=True, exist_ok=True, mode=0o700)
         # The worker can change the mode of its own folders; the next start puts it back.
@@ -630,6 +630,11 @@ class ProviderWorkerClient:
         }
         if self.env:
             env.update(self.env)
+        if data_dir := env.get("BAZARR_PLUGIN_DATA_DIR"):
+            folder = Path(data_dir)
+            if folder.is_symlink() or folder.is_junction():
+                raise WorkerError("The plugin data folder is a link")
+            folder.mkdir(mode=0o700, parents=True, exist_ok=True)
 
         self.last_used = time.monotonic()
         self.process = self._spawn(env)
@@ -1460,6 +1465,15 @@ class ProviderWorkerClient:
         queues on the lock as it always has, which shutdown and the archive
         member selection rely on.
         """
+        if (op != "shutdown" and getattr(self, "provider_id", None)
+                and (self.env or {}).get("BAZARR_PLUGIN_DATA_DIR")):
+            from .datadir import dispatch
+
+            with dispatch(self.provider_id):
+                return self._request(op, payload, timeout, admit)
+        return self._request(op, payload, timeout, admit)
+
+    def _request(self, op, payload, timeout, admit) -> WorkerResult:
         request_id = str(uuid.uuid4())
         message = {
             "abi": WORKER_ABI_VERSION,
