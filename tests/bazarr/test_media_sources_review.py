@@ -2,10 +2,13 @@
 root guards, the guards on another library's rows, one scan per library at a time, and the small edges."""
 import os
 import shutil
+from concurrent.futures import ThreadPoolExecutor
+from threading import Event
 from types import SimpleNamespace
 
 import pytest
 import sqlalchemy as sa
+from sqlalchemy.exc import IntegrityError
 
 from media_source_helpers import Lib, add_profile, add_source, stamped_video
 
@@ -248,6 +251,243 @@ def test_a_movie_row_whose_file_really_moved_is_still_closed(source_db, tmp_path
     assert str(original) not in movies.items() and len(movies.items()) == 1
 
 
+def test_a_deferred_handover_preserves_the_row_at_the_destination_path(movies, tmp_path):
+    from media_sources import repository
+
+    other = Lib(movies.session, tmp_path, name="Other", folder="Other", content_kind="movie")
+    original = stamped_video(other.root / "Moving.2001.mkv")
+    destination = stamped_video(movies.root / "Replacement.2002.mkv")
+    other.scan()
+    movies.scan()
+    original_row = other.items()[str(original)]
+    destination_row = movies.items()[str(destination)]
+    repository.update_item(destination_row.id, movies.session, monitored=0)
+    destination.unlink()
+    os.link(original, destination)
+    other.root.rename(tmp_path / "Other.away")
+
+    result = movies.scan()
+
+    assert (result.deleted, result.handed_over, result.held) == (0, 0, 1)
+    assert repository.get_item(original_row.id).path == str(original)
+    kept = movies.items()[str(destination)]
+    assert (kept.id, kept.monitored) == (destination_row.id, 0)
+
+
+def test_a_rejected_handover_keeps_the_holder_and_the_displaced_destination_row(movies, tmp_path, monkeypatch):
+    from media_sources import repository
+
+    other = Lib(movies.session, tmp_path, name="Other", folder="Other", content_kind="movie")
+    original = stamped_video(other.root / "Moving.2001.mkv")
+    stamped_video(other.root / "Kept.2002.mkv")
+    destination = stamped_video(movies.root / "Replacement.2003.mkv")
+    other.scan()
+    movies.scan()
+    original_row = other.items()[str(original)]
+    destination_row = movies.items()[str(destination)]
+    original.replace(destination)
+    real_update = repository.update_item
+
+    def reject_handover(item_id, target=None, **values):
+        if item_id == original_row.id and values.get("library_id") == movies.library_id:
+            raise IntegrityError(None, None, ValueError("move refused"))
+        return real_update(item_id, target, **values)
+
+    monkeypatch.setattr(repository, "update_item", reject_handover)
+
+    result = movies.scan()
+
+    assert (result.deleted, result.handed_over, result.deferred) == (0, 0, 1)
+    assert other.items()[str(original)].id == original_row.id
+    assert movies.items()[str(destination)].id == destination_row.id
+
+
+def test_a_rejected_insert_keeps_the_foreign_row(source_db, tmp_path, monkeypatch):
+    from media_sources import repository
+
+    movies, tv, original = _movie_hardlinked_into_a_series_library(source_db, tmp_path)
+    original_row = movies.items()[str(original)]
+    original.unlink()
+    real_insert = repository.insert_item
+
+    def reject_episode(target=None, **values):
+        if values["library_id"] == tv.library_id:
+            raise IntegrityError(None, None, ValueError("insert refused"))
+        return real_insert(target, **values)
+
+    monkeypatch.setattr(repository, "insert_item", reject_episode)
+
+    result = tv.scan()
+
+    assert (result.deleted, result.inserted, result.skipped) == (0, 0, 1)
+    assert movies.items()[str(original)].id == original_row.id
+
+
+@pytest.mark.parametrize("obstruction", ["empty", "permission"])
+def test_a_foreign_row_waits_when_its_library_cannot_complete_a_nonempty_walk(
+        source_db, tmp_path, monkeypatch, obstruction):
+    movies, tv, original = _movie_hardlinked_into_a_series_library(source_db, tmp_path)
+    row = movies.items()[str(original)]
+    if obstruction == "empty":
+        movies.root.rename(tmp_path / "Movies.away")
+        movies.root.mkdir()
+    else:
+        original.unlink()
+        (movies.root / "Locked").mkdir()
+        _unreadable(monkeypatch, "Locked")
+
+    result = tv.scan()
+
+    assert (result.inserted, result.deleted, result.held) == (0, 0, 1)
+    assert movies.items()[str(original)].id == row.id
+    assert tv.items() == {} and tv.groups() == {}
+
+
+def test_a_destination_remount_does_not_match_a_foreign_rows_inode_on_another_device(movies, tmp_path):
+    from media_sources import repository
+
+    other = Lib(movies.session, tmp_path, name="Other", folder="Other", content_kind="movie")
+    original = stamped_video(other.root / "Original.2001.mkv")
+    kept = stamped_video(movies.root / "Kept.2001.mkv")
+    other.scan()
+    movies.scan()
+    row = other.items()[str(original)]
+    copy = movies.root / "Copy.2001.mkv"
+    shutil.copy2(original, copy)
+    # The other filesystem stores the same inode number for a copy with identical size and timestamps.
+    dev = str(copy.stat().st_dev + 1)
+    repository.update_item(row.id, movies.session, file_dev=dev, file_ino=str(copy.stat().st_ino))
+    movies.session.execute(sa.update(repository.Roots).where(repository.Roots.c.library_id == movies.library_id)
+                           .values(last_dev=dev))
+    original.unlink()
+    stamped_video(other.root / "Other.2002.mkv")
+
+    result = movies.scan()
+
+    assert (result.inserted, result.handed_over, result.deleted) == (1, 0, 0)
+    assert set(movies.items()) == {str(copy), str(kept)}
+    assert other.items()[str(original)].id == row.id
+
+
+@pytest.mark.parametrize("replacement", ["vanished", "same-device", "inaccessible"])
+def test_a_root_that_changes_after_its_walk_keeps_items_and_empty_groups(lib, tmp_path, monkeypatch, replacement):
+    from media_sources.kinds.folder import FolderKind
+
+    _groups_without_items(lib)
+    (lib.root / "Keeps" / "Keeps - S01E01.mkv").unlink()
+    lib.scan()
+    before = {row.id: row.group_key for row in lib.groups().values()}
+    items = {path: row.id for path, row in lib.items().items()}
+    enumerate_folder = FolderKind.enumerate
+    real_access = os.access
+    changed = False
+
+    def enumerate_then_change(self, source, library, cancel):
+        nonlocal changed
+        listing = enumerate_folder(self, source, library, cancel)
+        observed = listing.files
+
+        def files():
+            nonlocal changed
+            yield from observed
+            changed = True
+            if replacement != "inaccessible":
+                lib.root.rename(tmp_path / "TV.away")
+                if replacement == "same-device":
+                    lib.root.mkdir()
+
+        listing.files = files()
+        return listing
+
+    monkeypatch.setattr(FolderKind, "enumerate", enumerate_then_change)
+    if replacement == "inaccessible":
+        monkeypatch.setattr(os, "access", lambda path, mode: (False if changed and path == str(lib.root)
+                                                             else real_access(path, mode)))
+
+    result = lib.scan()
+
+    assert result.status == "root_missing" and result.deleted == 0
+    assert {row.id: row.group_key for row in lib.groups().values()} == before
+    assert {path: row.id for path, row in lib.items().items()} == items
+    assert lib.group("Keeps").monitored == 0
+
+
+def test_a_nested_directory_replaced_during_the_walk_cannot_vouch_for_the_old_view(lib, tmp_path, monkeypatch):
+    _groups_without_items(lib)
+    (lib.root / "Keeps" / "Keeps - S01E01.mkv").unlink()
+    lib.scan()
+    before = {row.id: row.group_key for row in lib.groups().values()}
+    real_scandir = os.scandir
+    changed = False
+
+    def replace_earlier_directory(path):
+        nonlocal changed
+        if str(path) == lib.path("Other") and not changed:
+            changed = True
+            (lib.root / "Keeps").rename(tmp_path / "Keeps.away")
+        return real_scandir(path)
+
+    monkeypatch.setattr(os, "scandir", replace_earlier_directory)
+
+    result = lib.scan()
+
+    assert result.status == "root_missing"
+    assert {row.id: row.group_key for row in lib.groups().values()} == before
+
+
+def test_the_previous_owner_cannot_delete_an_item_during_handover(lib, tmp_path, monkeypatch):
+    from media_sources import scanner
+
+    other = Lib(lib.session, tmp_path, name="Other", folder="Other")
+    (moving,) = lib.show("Moving", count=1)
+    lib.show("Stays", count=1)
+    lib.scan()
+    old_id = lib.items()[str(moving)].id
+    lib.set_group("Moving", monitored=0)
+    moving.parent.rename(other.root / "Moving")
+    handover_ready, let_handover_finish = Event(), Event()
+    previous_started, previous_decided, let_previous_finish = Event(), Event(), Event()
+    write, decide = scanner._write_repathed, scanner._decide
+
+    def write_repathed(library, *args):
+        if library.id == other.library_id:
+            handover_ready.set()
+            assert let_handover_finish.wait(10)
+        return write(library, *args)
+
+    def decide_deletion(*args):
+        decisions = decide(*args)
+        if not handover_ready.is_set() or decisions.repathed:
+            return decisions
+        previous_decided.set()
+        assert let_previous_finish.wait(10)
+        return decisions
+
+    def scan_previous():
+        previous_started.set()
+        return lib.scan()
+
+    monkeypatch.setattr(scanner, "_write_repathed", write_repathed)
+    monkeypatch.setattr(scanner, "_decide", decide_deletion)
+    with ThreadPoolExecutor(max_workers=2) as workers:
+        destination = workers.submit(other.scan)
+        assert handover_ready.wait(10)
+        previous = workers.submit(scan_previous)
+        try:
+            assert previous_started.wait(10)
+            previous_decided.wait(0.5)
+            let_handover_finish.set()
+            assert destination.result(timeout=10).handed_over == 1
+        finally:
+            let_handover_finish.set()
+            let_previous_finish.set()
+        assert previous.result(timeout=10).deleted == 0
+
+    new_group = other.group("Moving")
+    (item,) = other.items().values()
+    assert (item.id, item.group_id, new_group.monitored) == (old_id, new_group.id, 0)
+
+
 # 4. Isolation (see the no-change file for the stub import itself)
 
 def test_the_package_still_holds_the_real_repository():
@@ -276,10 +516,12 @@ def test_two_scans_of_one_library_do_not_run_at_once(movies):
 def test_a_scan_that_fails_releases_its_library_lock(movies, monkeypatch):
     from media_sources import scanner
 
-    monkeypatch.setattr(scanner, "_roots_readable", lambda roots: 1 / 0)
+    monkeypatch.setattr(scanner, "_root_snapshot", lambda roots: 1 / 0)
     with pytest.raises(ZeroDivisionError):
         movies.scan()
-    assert scanner.library_lock(movies.library_id).acquire(blocking=False)
+    lock = scanner.library_lock(movies.library_id)
+    assert lock.acquire(blocking=False)
+    lock.release()
 
 
 def test_a_renamed_show_folder_gives_its_episodes_the_new_names_state(lib):

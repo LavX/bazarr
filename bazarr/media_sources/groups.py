@@ -14,6 +14,7 @@ import logging
 import os
 from collections import namedtuple
 from dataclasses import dataclass, field
+from stat import S_ISDIR
 
 from .identity import unsigned
 
@@ -31,7 +32,7 @@ def stat_directory(path):
         return DirState('absent' if error.errno in (errno.ENOENT, errno.ENOTDIR) else 'unreadable', None, None)
     except ValueError:
         return DirState('absent', None, None)
-    if not os.path.isdir(path):
+    if not S_ISDIR(info.st_mode):
         return DirState('absent', None, None)
     return DirState('dir', unsigned(info.st_dev), unsigned(info.st_ino))
 
@@ -66,7 +67,7 @@ class GroupPlan:
         return not (self.stay or self.move or self.gone or self.notes)
 
 
-def plan_groups(groups, held_dirs, new_content, dir_state, *, dev_changed=False):
+def plan_groups(groups, held_dirs, new_content, dir_state, *, dev_changed=False, protected=()):
     """Decide each group's fate.
 
     ``groups``: the library's group rows. ``held_dirs``: group id -> the directory of each of its held items.
@@ -84,7 +85,7 @@ def plan_groups(groups, held_dirs, new_content, dir_state, *, dev_changed=False)
     claims = {}  # directory -> [(group id, 'stay' | 'move')]
     undecided = []
     for group in ordered:
-        if state(group.group_key).status == 'unreadable':
+        if group.id in protected or state(group.group_key).status == 'unreadable':
             plan.untouched.add(group.id)
             claims.setdefault(group.group_key, []).append((group.id, 'stay'))
             continue

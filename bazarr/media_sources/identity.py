@@ -117,7 +117,7 @@ class Matching:
     #: ``(holder, found)``: a row of another library whose file is at ``found`` now, or an alias of a disabled
     #: holder's file; the row moves here under the handover procedure.
     handovers: list = field(default_factory=list)
-    #: Rows of another library that cannot follow the file (another content kind): closed.
+    #: ``(holder, found)``: a row of another content kind closes when the destination is written.
     closed_foreign: list = field(default_factory=list)
     #: ``(found, holder)``: another library's row that would have been closed or have followed the file, but
     #: whose library cannot vouch for it right now (unmounted, remounted, or its path cannot be read). Nothing is
@@ -134,6 +134,8 @@ class Matching:
     unmatched: list = field(default_factory=list)
     #: The unmatched rows whose path now holds a file another row claimed: the path was reused.
     displaced: list = field(default_factory=list)
+    #: Unmatched rows whose path was claimed but nothing in this library can take it this scan.
+    protected: list = field(default_factory=list)
 
     @property
     def identity_matched(self):
@@ -157,8 +159,7 @@ def match_library(found_files, rows, *, ignore_dev, foreign_lookup, library_cont
     order, so the answer does not depend on the order the walk produced the files in.
 
     ``foreign_vouched(holder)`` says whether the holder's own library can vouch for the row being closed or moved
-    away from it: its roots readable, its device unchanged, its path really gone. Without it the row is left to
-    that library's own next scan."""
+    away from it. Without it the row is left to that library's own next scan."""
     result = Matching()
     found_files = sorted(found_files, key=lambda found: found.path)
     rows = sorted(rows, key=lambda row: row.id)
@@ -197,14 +198,14 @@ def match_library(found_files, rows, *, ignore_dev, foreign_lookup, library_cont
     unclaimed = [found for found in found_files if found.path not in claimed]
     if unclaimed:
         holders = foreign_lookup([found.ino for found in unclaimed], [found.path for found in unclaimed])
-        holders_by_inode, holders_by_path = defaultdict(list), {}
+        holders_by_file, holders_by_path = defaultdict(list), {}
         for holder in holders:
-            holders_by_inode[holder.file_ino].append(holder)
+            holders_by_file[holder.file_dev, holder.file_ino].append(holder)
             holders_by_path[holder.path] = holder
         used = set()
         for found in unclaimed:
-            candidates = {holder.id: holder for holder in holders_by_inode.get(found.ino, ()) if holder.id not in used
-                          and identity_holds(holder, found, ignore_dev(found))}
+            candidates = {holder.id: holder for holder in holders_by_file.get((found.dev, found.ino), ())
+                          if holder.id not in used and identity_holds(holder, found)}
             at_path = holders_by_path.get(found.path)
             if at_path is not None and at_path.id not in used:
                 candidates[at_path.id] = at_path
@@ -232,7 +233,7 @@ def match_library(found_files, rows, *, ignore_dev, foreign_lookup, library_cont
                 result.handovers.append((holder, found))
             else:
                 # It cannot carry the row into another kind of library: the row is closed, the file is new here.
-                result.closed_foreign.append(holder)
+                result.closed_foreign.append((holder, found))
 
     # Pass 2, path. A row no identity claimed, whose path holds a file nothing claimed: the content changed.
     for row in rows:
@@ -244,11 +245,15 @@ def match_library(found_files, rows, *, ignore_dev, foreign_lookup, library_cont
             matched_rows.add(row.id)
             result.path_only.append((row, found))
 
+    replacement_paths = {found.path for _, found in result.moved + result.handovers}
     for row in rows:
         if row.id not in matched_rows:
-            result.unmatched.append(row)
-            if row.path in claimed:
+            if row.path in replacement_paths:
                 result.displaced.append(row)
+            elif row.path in claimed:
+                result.protected.append(row)
+            else:
+                result.unmatched.append(row)
 
     # Pass 3: whatever is left is new.
     result.new = [found for found in found_files if found.path not in claimed]

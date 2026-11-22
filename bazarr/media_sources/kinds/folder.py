@@ -1,5 +1,6 @@
 # coding=utf-8
 """The folder kind: a library is a directory Bazarr+ can read, and the listing is a walk of it."""
+import errno
 import logging
 import os
 import re
@@ -7,6 +8,7 @@ from typing import Callable, Optional
 
 from subliminal_patch.core import VIDEO_EXTENSIONS
 
+from ..groups import DirState, stat_directory
 from ..identity import unsigned
 from . import DiscoveredFile, IdentityHints, Listing, Problem, SourceHealth
 
@@ -85,18 +87,22 @@ class FolderKind:
         In a series or sports library each first-level directory is a show or league: the files below it carry
         its path as their group key, and a video file directly in the root has no group and is only counted."""
         seen = set()
-        pending = [(root, None)]
+        pending = [(root, None, stat_directory(root))]
+        directories = {}
         readable = True
         while pending:
             if cancel is not None:
                 cancel()
-            directory, group_key = pending.pop()
+            directory, group_key, state = pending.pop()
             try:
                 entries = sorted(os.scandir(directory), key=lambda entry: entry.name)
             except OSError as error:
                 listing.problems.append(f"Cannot read {directory}: {error.strerror or error}")
                 readable = False
+                if error.errno in (errno.ENOENT, errno.ENOTDIR):
+                    listing.unstable = True
                 continue
+            directories[directory] = state
             subdirectories = []
             with_files = []
             for entry in entries:
@@ -104,13 +110,17 @@ class FolderKind:
                     # A directory symlink is not followed; a file symlink is.
                     if entry.is_dir(follow_symlinks=False):
                         if not is_skipped_directory(entry.name):
+                            info = entry.stat(follow_symlinks=False)
+                            state = DirState('dir', unsigned(info.st_dev), unsigned(info.st_ino))
                             subdirectories.append((entry.path, entry.path if grouped and group_key is None
-                                                   else group_key))
+                                                   else group_key, state))
                     elif is_video_file(entry.name) and not is_skipped_file(entry.name):
                         with_files.append(entry)
                 except OSError as error:
                     listing.problems.append(f"Cannot read {entry.path}: {error.strerror or error}")
                     readable = False
+                    if error.errno in (errno.ENOENT, errno.ENOTDIR):
+                        listing.unstable = True
             for entry in with_files:
                 if grouped and group_key is None:
                     listing.ungrouped += 1
@@ -135,7 +145,13 @@ class FolderKind:
                 yield DiscoveredFile(path=entry.path, size=info.st_size, mtime_ns=info.st_mtime_ns,
                                      dev=unsigned(info.st_dev), ino=unsigned(info.st_ino), group_key=group_key)
             pending.extend(reversed(subdirectories))
-        listing.complete = readable
+        # DirEntry and the videos yielded above describe the filesystem at traversal time. Verify the directory
+        # identities again so a bare mount point or a same-device replacement cannot validate that old view.
+        for directory, state in directories.items():
+            if stat_directory(directory) != state or not os.access(directory, os.R_OK | os.X_OK):
+                listing.unstable = True
+                break
+        listing.complete = readable and not listing.unstable
 
     def health(self, source):
         return SourceHealth(ok=True)

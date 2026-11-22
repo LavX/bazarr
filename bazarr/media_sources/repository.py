@@ -160,18 +160,24 @@ def library_groups(library_id, target=None):
         sa.select(Groups).where(Groups.c.library_id == library_id).order_by(Groups.c.id)).all()
 
 
-def update_group(group_id, target=None, **values):
+def update_group(group_id, target=None, *, owner_library_id=None, **values):
     values['updated_at'] = datetime.now()
-    return _target(target).execute(sa.update(Groups).where(Groups.c.id == group_id).values(**values)).rowcount
+    statement = sa.update(Groups).where(Groups.c.id == group_id)
+    if owner_library_id is not None:
+        statement = statement.where(Groups.c.library_id == owner_library_id)
+    return _target(target).execute(statement.values(**values)).rowcount
 
 
-def delete_empty_groups(group_ids, target=None):
+def delete_empty_groups(group_ids, target=None, *, owner_library_id=None):
     """Delete the groups among ``group_ids`` that hold no item. Returns how many were deleted."""
     group_ids = list(group_ids)
     if not group_ids:
         return 0
     held = sa.select(Items.c.id).where(Items.c.group_id == Groups.c.id).exists()
-    return _target(target).execute(sa.delete(Groups).where(Groups.c.id.in_(group_ids), ~held)).rowcount
+    statement = sa.delete(Groups).where(Groups.c.id.in_(group_ids), ~held)
+    if owner_library_id is not None:
+        statement = statement.where(Groups.c.library_id == owner_library_id)
+    return _target(target).execute(statement).rowcount
 
 
 def create_group(*, source_id, library_id, kind, group_key, title, identity_source='filename',
@@ -298,18 +304,25 @@ def insert_item(target=None, **values):
     return _insert(target, Items, values)
 
 
-def update_item(item_id, target=None, **values):
+def update_item(item_id, target=None, *, owner_library_id=None, **values):
     values['updated_at'] = datetime.now()
-    return _target(target).execute(sa.update(Items).where(Items.c.id == item_id).values(**values)).rowcount
+    statement = sa.update(Items).where(Items.c.id == item_id)
+    if owner_library_id is not None:
+        statement = statement.where(Items.c.library_id == owner_library_id)
+    return _target(target).execute(statement.values(**values)).rowcount
 
 
-def delete_items(item_ids, target=None):
+def delete_items(item_ids, target=None, *, owner_library_id=None):
     """Delete items. Their history and blacklist rows stay, with ``item_id`` set to NULL."""
     item_ids = list(item_ids)
+    deleted = 0
     # In batches: SQLite refuses an IN list of more than 32,766 values.
     for start in range(0, len(item_ids), 500):
-        _target(target).execute(sa.delete(Items).where(Items.c.id.in_(item_ids[start:start + 500])))
-    return len(item_ids)
+        statement = sa.delete(Items).where(Items.c.id.in_(item_ids[start:start + 500]))
+        if owner_library_id is not None:
+            statement = statement.where(Items.c.library_id == owner_library_id)
+        deleted += _target(target).execute(statement).rowcount
+    return deleted
 
 
 def write_item_index(item_id, subtitles, missing_subtitles, target=None):
