@@ -385,6 +385,17 @@ def _field_list(fields: Any, where: str, *, host_keys: frozenset[str] = frozense
                 or not isinstance(condition["key"], str) or not isinstance(condition["equals"], str)
                 or not condition["equals"].strip()):
             raise ManifestValidationError(f"{name} needs a public list, key and nonempty equals")
+        required = item.get("required")
+        if (required is not None and required is not False) or item.get("default") not in (None, []):
+            raise ManifestValidationError(f"{name} needs an optional clearable list with no default entries")
+        minima = (item.get("min"), item.get("min_items"), item.get("minItems"))
+        max_items = item.get("max_items")
+        if (any(value is not None and (type(value) not in (int, float) or value != 0) for value in minima)
+                or (max_items is not None and (type(max_items) is not int or max_items < 0))):
+            raise ManifestValidationError(f"{name} needs a clearable list with limits that allow zero entries")
+        if ("const" in item or "enum" in item or item.get("items") not in (None, [])
+                or item.get("choices") not in (None, [])):
+            raise ManifestValidationError(f"{name} needs a clearable list without fixed values")
         controller = declared.get(condition["key"], {})
         choices = controller.get("choices")
         if controller.get("type") != "choice" or not isinstance(choices, list):

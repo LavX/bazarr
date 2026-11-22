@@ -42,6 +42,40 @@ def test_a_reorder_only_field_cannot_declare_forbidden_if():
         parse_plugin_manifest(manifest)
 
 
+@pytest.mark.parametrize("attrs,clearable", [
+    ({}, True),
+    ({"required": False, "default": None, "max_items": 20, "min": None, "choices": []}, True),
+    ({"required": None, "default": [], "min": 0, "min_items": 0, "minItems": 0, "max_items": 0, "items": []}, True),
+    ({"required": True}, False),
+    ({"default": ["fixed"]}, False),
+    ({"default": ""}, False),
+    ({"min": 1}, False),
+    ({"min_items": 1}, False),
+    ({"minItems": 1}, False),
+    ({"max_items": -1}, False),
+    ({"const": ["fixed"]}, False),
+    ({"enum": [["fixed"]]}, False),
+    ({"items": ["fixed"]}, False),
+    ({"choices": ["fixed"]}, False),
+])
+def test_forbidden_if_requires_a_list_that_can_be_cleared(attrs, clearable):
+    from provider_hub.manifest import ManifestValidationError
+    from provider_hub.plugin_manifest import parse_plugin_manifest
+
+    target = {"key": "selection", "type": "list", "forbidden_if": {"key": "mode", "equals": "auto"}, **attrs}
+    fields = [{"key": "mode", "type": "choice", "choices": ["auto"]}, target]
+    manifest = service_manifest("sample", kind="translator", kind_api="bazarr.translator.v1", settings_version=1,
+                                settings={"fields": [], "backend_types": {"sample": {"fields": fields}}})
+    if clearable:
+        assert dict(parse_plugin_manifest(manifest).backend_fields)["sample"][1] == target
+    else:
+        with pytest.raises(ManifestValidationError, match="forbidden_if.*clearable"):
+            parse_plugin_manifest(manifest)
+
+    del target["forbidden_if"]
+    assert dict(parse_plugin_manifest(manifest).backend_fields)["sample"][1] == target
+
+
 @pytest.mark.parametrize("lower,higher", [
     ("2.8.0-alpha", "2.8.0-alpha.1"),
     ("2.8.0-alpha.1", "2.8.0-alpha.beta"),
