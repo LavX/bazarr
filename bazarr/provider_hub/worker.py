@@ -614,6 +614,11 @@ class ProviderWorkerClient:
                 # left running before its slot is reused.
                 self._kill_tree(self.process, 5.0)
 
+        if getattr(self, "_closed", False):
+            # Stopped or cancelled: nothing starts on this client again. A request that passed its own check just
+            # before a cancel reaches here, and must not respawn the worker the cancel killed.
+            raise WorkerError("worker client is stopped")
+
         before_start = getattr(self, "_before_start", None)
         if before_start is not None:
             before_start()
@@ -1225,6 +1230,31 @@ class ProviderWorkerClient:
     def revoke_host_calls(self) -> None:
         """Take back every host capability this worker was given, for the calls that follow."""
         self._host_calls = {}
+
+    def cancel(self) -> None:
+        """End this worker now, without waiting for the request it is serving.
+
+        ``stop`` asks the worker to shut down through the same lock a request holds, so it waits for the request
+        to end. This is for a release that must not run another second (a revoked one): the client is closed, so
+        nothing is sent or respawned on it, and the process and everything it started are killed. The request in
+        flight fails as a worker that closed its output. Never starts a process and never raises.
+        """
+        self._closed = True
+        self._host_calls = {}
+        latch = getattr(self, "_outcome_latch", None)
+        if latch is not None:
+            latch.set()
+        try:
+            self._kill_worker()
+        except Exception:
+            logger.warning("Provider Hub: could not kill the worker of %s", self.provider_id, exc_info=True)
+            return
+        process = self.process
+        if process is not None and self._has_exited(process):
+            self._deregister()
+        elif process is not None:
+            # Still there: held, so a later sweep tries again once the pool lets go of the client.
+            self._retain_survivor()
 
     def _read_reply(self, request_id: str, timeout: float) -> str:
         """Read the line that answers the request, serving the worker's host calls on the way.

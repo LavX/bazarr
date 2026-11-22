@@ -29,6 +29,7 @@ import { ProviderStatusBadge } from "@/components/hub/StatusBadge";
 import { TrustBadge } from "@/components/hub/TrustBadge";
 import {
   isAwaitingRestart,
+  isRemoving,
   parseManifest,
   usesAntiCaptcha,
   usesFlaresolverr,
@@ -78,7 +79,8 @@ type CtaState =
   | "restart"
   | "repair"
   | "broken"
-  | "blocked";
+  | "blocked"
+  | "removing";
 
 function isPendingRemoval(installed: ProviderHubInstallation | null) {
   return installed?.needs_restart === true && installed.state === "removed";
@@ -107,6 +109,7 @@ function deriveCta(
 ): CtaState {
   if (!installed && !manifestValid) return "broken";
   if (!installed) return entry.blocked_reason ? "blocked" : "install";
+  if (isRemoving(installed)) return "removing";
   if (isAwaitingRestart(installed)) return "restart";
   if (installed.needs_repair) return "repair";
   if (
@@ -140,7 +143,8 @@ export const CatalogCard: FunctionComponent<CatalogCardProps> = ({
   const pendingRemoval = isPendingRemoval(installed);
   const pendingInstall = isPendingInstall(installed);
   const pendingUpdate = isPendingUpdate(installed);
-  const canShowActions = installed !== null && !pendingRemoval;
+  const canShowActions =
+    installed !== null && !pendingRemoval && !isRemoving(installed);
   const canTest = installed?.state === "active" && !installed.needs_restart;
   const removeLabel = pendingInstall
     ? "Cancel staged install"
@@ -188,6 +192,12 @@ export const CatalogCard: FunctionComponent<CatalogCardProps> = ({
           >
             Update
           </Button>
+        );
+      case "removing":
+        return (
+          <Tooltip label="This plugin is being removed. It goes when the calls it is running end, or after a few minutes.">
+            <span className={styles.hubCardPendingText}>Removing</span>
+          </Tooltip>
         );
       case "restart":
         return (

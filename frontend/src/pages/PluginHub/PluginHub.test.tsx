@@ -855,3 +855,37 @@ describe("the two states an update can wait in", () => {
     expect(screen.getByText(/0 available, 1 awaiting restart/)).toBeVisible();
   });
 });
+
+describe("a plugin that is being removed while Bazarr+ runs", () => {
+  it("says Removing on its card, offers no update and disables every action", async () => {
+    installed = [
+      {
+        ...installedTranslator,
+        state: "removed",
+        needs_restart: false,
+      },
+    ];
+    current = catalog([aiTranslator]);
+    showPage("?tab=marketplace");
+
+    expect((await screen.findAllByText("Removing")).length).toBeGreaterThan(0);
+    expect(
+      screen.queryByRole("button", {
+        name: /Update AI Subtitle Translator/,
+      }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Installed" }),
+    ).not.toBeInTheDocument();
+    await userEvent.click(
+      await screen.findByRole("button", {
+        name: "AI Subtitle Translator actions",
+      }),
+    );
+    for (const name of [/Turn off/, /Repair/, /Remove/]) {
+      expect(
+        await screen.findByRole("menuitem", { name, hidden: true }),
+      ).toHaveAttribute("aria-disabled", "true");
+    }
+  });
+});

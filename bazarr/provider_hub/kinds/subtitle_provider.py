@@ -14,7 +14,7 @@ import logging
 from types import MappingProxyType
 from typing import Any, Sequence
 
-from . import ATTACH_ON_RESTART, SUBTITLE_PROVIDER, Kind, kind_of, register_kind
+from . import ATTACH_ON_RESTART, DETACH_LIVE, SUBTITLE_PROVIDER, Kind, kind_of, register_kind
 
 logger = logging.getLogger(__name__)
 
@@ -177,6 +177,7 @@ def apply_settings_overlay(provider_configs: dict[str, dict[str, Any]], settings
     The two hub modules are read through their module attributes at call time,
     because the tests of the pool overlay patch them there.
     """
+    from provider_hub import registry
     from provider_hub import service as hub_service
     from provider_hub import state as hub_state
     from provider_hub.capabilities import deliver
@@ -193,6 +194,9 @@ def apply_settings_overlay(provider_configs: dict[str, dict[str, Any]], settings
         # a restart, so a pending update must not strip the section overlay.
         for installation in hub_state.running_installations():
             if installation.provider_id in blocked:
+                continue
+            if not registry.is_plugin_class(installation.provider_id):
+                # A built-in holds the id: it is built from its own settings, not from this plugin's.
                 continue
             manifest = installation.manifest
             schema = manifest.get("config_schema") if isinstance(manifest, dict) else {}
@@ -293,8 +297,38 @@ class SubtitleProviderKind(Kind):
     # FlareSolverr's address arrives in the provider's own ``flaresolverr_url`` field.
     capability_delivery = MappingProxyType({"flaresolverr.v1": ("flaresolverr_url", "url")})
     attach_policy = ATTACH_ON_RESTART
+    # A new release waits for the restart, but a provider that is switched off, removed or revoked is taken out
+    # of every pool and its worker stopped at once.
+    detach_policy = DETACH_LIVE
     noun = "provider"
     keeps_data = True
+
+    def detach(self, plugin_id: str, *, withdraw: bool, grace: float | None = None,
+               release_key: str | None = None):
+        from provider_hub import registry
+
+        if withdraw:
+            # First: a pool that builds an instance from here on finds no class, and the built-in a plugin had
+            # replaced is registered again in the same step.
+            if registry.unregister_provider_class(plugin_id).removed:
+                # The pools merge settings into what they hold, so what they hold for the id is replaced: the
+                # built-in that may take the id back is built from its own settings, never from the plugin's, and
+                # starts without the backoff the plugin earned. (When the plugin's class was never in the registry
+                # a built-in already serves the id, and what the pools hold for it is its own.)
+                registry.release_provider_id(plugin_id)
+        try:
+            from compat.service import reset_compat_pool
+
+            # The persistent pool of the compat endpoint and Discover is replaced, never edited: a search that
+            # already holds it finishes on it, the next one gets a pool built without the provider.
+            reset_compat_pool()
+        except Exception:
+            logger.exception("Failed to replace the compat pool after detaching %s", plugin_id)
+        if withdraw:
+            # The release is gone for good: a worker still finishing its calls asks the host for nothing more.
+            registry.revoke_host_calls_of(plugin_id)
+        drains = registry.retire_provider_instances(plugin_id, grace)
+        return drains
 
     def after_removed(self, plugin_id: str, keep_data: bool = False) -> None:
         # A provider keeps nothing but its settings: its own section of the configuration, and the settings on its

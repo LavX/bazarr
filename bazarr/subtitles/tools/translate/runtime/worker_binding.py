@@ -420,6 +420,17 @@ def plugin_changed(plugin_id: str) -> None:
         port.retire(plugin_id)
 
 
+def plugin_detached(plugin_id: str, grace: float | None = None) -> "list[threading.Thread]":
+    """The plugin was removed or revoked and its release is taken out of use now: nothing new is sent to its
+    worker, the jobs it holds finish (or are cut after ``grace`` seconds), and the worker goes. Returns the
+    threads that end when nothing of it runs. Empty while no binding is in place."""
+    with _lock:
+        port = _port
+    if port is None:
+        return []
+    return port.detach(plugin_id, grace=grace)
+
+
 def _set_kept(plugin_id: str, kept: bool) -> None:
     """Mark the plugin's writable folders as kept on purpose, or take the mark off. Works whether or not a binding
     is in place, since the mark is read by a later start, which may be bound when this process was not. A plugin

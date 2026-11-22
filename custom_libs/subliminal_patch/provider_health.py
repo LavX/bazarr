@@ -105,6 +105,12 @@ class ProviderHealthTracker:
                 # discard_level persists so the next cooldown is longer.
                 st.consecutive_failures = 0
 
+    def forget(self, name: str) -> None:
+        """Drop everything recorded for a provider: its id now names another class (a plugin detached while Bazarr+
+        runs gives its id back to a built-in), and that class starts with a clean record."""
+        with self._lock:
+            self._state.pop(name, None)
+
     def is_discarded(self, name: str) -> bool:
         """Is this provider currently under cooldown?"""
         with self._lock:

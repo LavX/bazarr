@@ -266,12 +266,34 @@ def _nested_update(item, to_update):
     return item
 
 
+class ConfigSnapshot(dict):
+    """The configuration of every provider as it was read, stamped with the registry's ownership counts of that moment.
+
+    A pool that is handed one skips the entries of a provider whose id changed hands between a plugin and a built-in
+    since (a plugin detached while Bazarr+ runs gives its id back to the built-in it replaced): they are the old
+    class's settings, read before the change and merged after it. Only a handover moves the stamp; a settings save does
+    not, so the new settings of a built-in are never dropped. ``ownership`` is None when nothing stamped it, and then
+    nothing is skipped.
+    """
+
+    ownership = None
+
+
 class _ProviderConfigs(dict):
     def __init__(self, pool, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self._pool = pool
 
     def update(self, items):
+        stamp = getattr(items, 'ownership', None)
+        counts = getattr(provider_registry, 'ownership_generations', None)
+        if stamp is not None and counts is not None:
+            current = counts()
+            stale = {key for key in items if stamp.get(key, 0) != current.get(key, 0)
+                     and provider_registry[key] is not None and not getattr(provider_registry[key], 'hub_proxy', False)}
+            if stale:
+                logger.debug('Not merging settings read before %s changed hands', sorted(stale))
+                items = {key: value for key, value in items.items() if key not in stale}
         updated = set()
         # Restart providers with new configs
         for key, val in items.items():
@@ -842,7 +864,12 @@ class SZProviderPool(ProviderPool):
                 if stored is not None:
                     return stored
                 generation = provider_generation(name)
-                provider = provider_registry[name](**config())
+                # Looked up once. A plugin detached while Bazarr+ runs leaves the registry, and a name with no
+                # class is excluded (the quiet answer), never a call on None.
+                provider_class = provider_registry[name]
+                if provider_class is None:
+                    raise ProviderExcludedError(name)
+                provider = provider_class(**config())
                 provider.initialize()
                 if self._install_provider(name, provider, generation):
                     return provider
@@ -930,6 +957,20 @@ class SZProviderPool(ProviderPool):
             # failure above: the announce's chain can quote the provider error.
             logger.error('Throttle announce failed for provider %r while naming the %s it recorded',
                          name, type(error).__name__)
+
+    def forget_provider_config(self, name, config=None):
+        """Replace what this pool holds as the configuration of a provider with ``config`` (nothing, by default).
+
+        The configs are merged into, never replaced, so a provider whose id was taken over by another class (a
+        plugin detached while Bazarr+ runs gives its id back to the built-in it replaced) would otherwise keep the
+        keys of the class that left. With ``config`` the new class is built from its own settings at once, without
+        waiting for the next ``update``. A discard this pool recorded for the id is lifted: it was the old class's.
+        """
+        with self._store_lock:
+            self.provider_configs.pop(name, None)
+            if config is not None:
+                dict.__setitem__(self.provider_configs, name, dict(config))
+            self.discarded_providers.discard(name)
 
     def retire_provider(self, name):
         """Terminate an initialized provider without throttling its name.
@@ -1029,8 +1070,15 @@ class SZProviderPool(ProviderPool):
         if excluded_languages is None:
             excluded_languages = set()
 
+        # The class this search runs on, read once: every check below uses it, so a plugin detached while the
+        # search is running is never looked up again and found missing half way through.
+        provider_class = provider_registry[provider]
+        if provider_class is None:
+            logger.info('Skipping provider %r: it is no longer registered', provider)
+            return finish(None, "skipped", "provider_excluded")
+
         # check video validity
-        if not provider_registry[provider].check(video):
+        if not provider_class.check(video):
             logger.info('Skipping provider %r: not a valid video', provider)
             return finish([], "skipped", "unsupported_media")
 
@@ -1053,8 +1101,8 @@ class SZProviderPool(ProviderPool):
             return finish([], "skipped", "excluded_language")
 
         # check supported languages
-        search_languages = _hub_search_languages(provider_registry[provider], use_languages)
-        provider_languages = self.lang_equals.check_set(set(provider_registry[provider].languages)) & search_languages
+        search_languages = _hub_search_languages(provider_class, use_languages)
+        provider_languages = self.lang_equals.check_set(set(provider_class.languages)) & search_languages
         if not provider_languages:
             logger.info('Skipping provider %r: no language to search for', provider)
             return finish([], "skipped", "unsupported_language")
@@ -1062,7 +1110,7 @@ class SZProviderPool(ProviderPool):
         # list subtitles
         results = []
 
-        to_request = self.lang_equals.translate(provider_languages) & set(provider_registry[provider].languages)
+        to_request = self.lang_equals.translate(provider_languages) & set(provider_class.languages)
 
         logger.info('Listing subtitles with provider %r and languages %r', provider, to_request)
 
@@ -1405,6 +1453,19 @@ class SZProviderPool(ProviderPool):
             subtitle.skip_reason = 'provider_excluded'
             return False
 
+        # A candidate a plugin found is downloaded by that plugin. When the plugin was detached while Bazarr+ ran
+        # and the id now names a built-in provider, the built-in cannot read the candidate: it is
+        # refused quietly, not handed over to fail and be recorded against a provider that did nothing wrong.
+        registered = provider_registry[subtitle.provider_name]
+        if getattr(subtitle, 'hub_proxy', False) and registered is not None and not getattr(
+                registered, 'hub_proxy', False):
+            # Plain fields only: a log line must never raise, and the repr of a subtitle reads attributes a
+            # candidate may not have.
+            logger.info('Provider %r no longer serves the plugin that found subtitle %r; not downloading it',
+                        subtitle.provider_name, getattr(subtitle, 'id', None))
+            subtitle.skip_reason = 'provider_excluded'
+            return False
+
         logger.info('Downloading subtitle %r', subtitle)
         tries = 0
 
@@ -1439,7 +1500,9 @@ class SZProviderPool(ProviderPool):
 
                     try:
                         initialized_provider = self[subtitle.provider_name]
-                    except ProviderExcludedError:
+                    except KeyError:
+                        # ProviderExcludedError, or a provider that left the registry after the admission check
+                        # above (a plugin detached while Bazarr+ runs): refused quietly either way.
                         logger.info('Provider %r is currently excluded (disabled, '
                                     'throttled or discarded); not downloading from it',
                                     subtitle.provider_name)

@@ -427,6 +427,13 @@ def test_provider_updates_and_removal_clear_account_quota(tmp_path, monkeypatch)
 
         enabled_provider_ids.add("examplehub")
         runtime_status.consume("examplehub", [{"type": "translation_quota", "remaining": 0}])
+
+        def cannot_stop(*args, **kwargs):
+            raise RuntimeError("a pool would not let go")
+
+        # The release cannot be stopped live here, so the removed row stays listed until the restart. (A row that is
+        # finished live is gone before it could be listed.)
+        monkeypatch.setattr("provider_hub.detach.detach", cannot_stop)
         assert service.remove_installation("examplehub") is True
         assert runtime_status.get("examplehub") is None
         enabled_provider_ids.add("examplehub")

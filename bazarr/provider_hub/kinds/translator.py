@@ -18,7 +18,7 @@ import logging
 
 from typing import Any, Sequence
 
-from . import ATTACH_ON_RESTART, TRANSLATOR, Kind, register_kind
+from . import ATTACH_ON_RESTART, DETACH_LIVE, TRANSLATOR, Kind, register_kind
 
 logger = logging.getLogger(__name__)
 
@@ -48,8 +48,20 @@ class TranslatorKind(Kind):
     name = TRANSLATOR
     kind_apis = frozenset({TRANSLATOR_KIND_API})
     attach_policy = ATTACH_ON_RESTART
+    # A removed or revoked translator stops taking jobs now and its worker goes once its jobs are done.
+    detach_policy = DETACH_LIVE
     noun = "translator"
     keeps_data = True
+
+    def detach(self, plugin_id: str, *, withdraw: bool, grace: float | None = None,
+               release_key: str | None = None):
+        from subtitles.tools.translate.runtime import worker_binding
+
+        if not withdraw:
+            # Switched off: the worker is retired as the switch always did, and the gate refuses new jobs.
+            worker_binding.plugin_changed(plugin_id)
+            return []
+        return worker_binding.plugin_detached(plugin_id, grace)
 
     def kept_data_reclaimed(self, plugin_id: str) -> None:
         try:
@@ -94,6 +106,16 @@ class TranslatorKind(Kind):
             return False
         _retire_worker(plugin_id)
         return True
+
+    def removal_finished(self, plugin_id: str) -> None:
+        # The folders of a plugin that is not installed any more go now that nothing of it runs, as the sweep after
+        # a restart would clear them.
+        try:
+            from subtitles.tools.translate.runtime import worker_binding
+
+            worker_binding.sweep_removed_plugins()
+        except Exception:
+            logger.warning("Could not clear the folders of translator %s", plugin_id, exc_info=True)
 
     def after_removed(self, plugin_id: str, keep_data: bool = False) -> None:
         if keep_data:

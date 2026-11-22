@@ -121,9 +121,7 @@ def test_a_staged_install_activates_on_restart(hub, tmp_path, monkeypatch):
                for job in _stored(hub)["jobs"])
 
 
-def test_an_uninstall_stages_the_removal_and_the_restart_finishes_it(hub, monkeypatch):
-    from provider_hub.service import activate_staged_installations, list_jobs, remove_installation
-    from provider_hub.state import load_state
+def _installed_example(monkeypatch):
     monkeypatch.setattr("provider_hub.kinds.subtitle_provider.set_bazarr_provider_enabled",
                         lambda provider_id, enabled: True)
     monkeypatch.setattr("provider_hub.service.verify_bundle_tree", lambda manifest, root: None)
@@ -133,6 +131,18 @@ def test_an_uninstall_stages_the_removal_and_the_restart_finishes_it(hub, monkey
         "manifest": {"provider_id": "examplehub", "version": "1.0.0"},
     }})
 
+
+def test_an_uninstall_stages_the_removal_and_the_restart_finishes_it_when_the_release_cannot_be_stopped(
+        hub, monkeypatch):
+    from provider_hub.service import activate_staged_installations, list_jobs, remove_installation
+    from provider_hub.state import load_state
+
+    def cannot_stop(*args, **kwargs):
+        raise RuntimeError("a pool would not let go")
+
+    _installed_example(monkeypatch)
+    monkeypatch.setattr("provider_hub.detach.detach", cannot_stop)
+
     assert remove_installation("examplehub") is True
 
     assert list_jobs()[-1]["action"] == "uninstall"
@@ -140,6 +150,23 @@ def test_an_uninstall_stages_the_removal_and_the_restart_finishes_it(hub, monkey
     activate_staged_installations()
     assert "examplehub" not in load_state()["installations"]
     assert "examplehub" not in _stored(hub)["installations"]
+
+
+def test_an_uninstall_of_a_provider_finishes_without_a_restart_and_takes_its_releases_with_it(hub, monkeypatch):
+    from provider_hub import detach, state_store
+    from provider_hub.service import list_jobs, remove_installation
+    from provider_hub.state import load_state
+
+    _installed_example(monkeypatch)
+    assert [item.version for item in state_store.list_releases("examplehub", bind=hub)] == ["1.0.0"]
+
+    assert remove_installation("examplehub") is True
+
+    assert list_jobs()[-1]["action"] == "uninstall"
+    assert detach.wait_idle(20)
+    assert "examplehub" not in load_state()["installations"]
+    assert "examplehub" not in _stored(hub)["installations"]
+    assert state_store.list_releases("examplehub", bind=hub) == []
 
 
 def test_a_catalog_refresh_with_a_stubbed_fetch_records_its_summary(hub, monkeypatch):

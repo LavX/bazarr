@@ -78,6 +78,11 @@ class WorkerPort(Protocol):
     def abandon(self, plugin_id: str) -> None:
         """Take the plugin's worker out of service once the jobs it holds are done: it ignored a cancel."""
 
+    def detach(self, plugin_id: str, *, grace: float | None = None) -> "list[threading.Thread]":
+        """Take the plugin out of service for good (removed or revoked): nothing new is sent to it, the jobs
+        its worker holds finish, or are cut once ``grace`` seconds have passed. Returns the threads that end
+        when the worker and what it started are gone."""
+
     def call(self, plugin_id: str, op: str, params: dict, secrets: Mapping[str, str] | None, *,
              timeout: float) -> Any:
         """One short request (``test`` or ``options``), run in a worker of its own.
@@ -98,6 +103,9 @@ class UnboundWorkers:
 
     def abandon(self, plugin_id):
         return None
+
+    def detach(self, plugin_id, *, grace=None):
+        return []
 
     def call(self, plugin_id, op, params, secrets, *, timeout):
         raise NotSent("no translator worker is bound for this plugin")
@@ -124,10 +132,18 @@ class PoolWorkers:
         self._calls: dict[str, int] = {}
         # The port set each long-lived worker was last asked to run with, by pool key.
         self._ports: dict[str, frozenset[int] | None] = {}
+        # Plugins that were detached (removed or revoked): nothing is sent to them again while Bazarr+ runs. A
+        # release that replaces one attaches at the next start, which builds a port of its own.
+        self._withdrawn: set[str] = set()
 
     def _ensure(self, plugin_id: str) -> str:
         from provider_hub.runtime.pool import PoolCodes, PoolUnavailable, UnknownWorker
 
+        with self._lock:
+            withdrawn = plugin_id in self._withdrawn
+        if withdrawn:
+            # The registered definition is the release that was detached: it is never started again.
+            raise PoolUnavailable("this translator plugin was removed or revoked", code=PoolCodes.UNAVAILABLE)
         key = self._key_for(plugin_id)
         try:
             self._pool.definition(key)
@@ -193,8 +209,20 @@ class PoolWorkers:
     def submit(self, plugin_id, request, secrets, *, context, on_progress):
         key = self._ensure(plugin_id)
         self._follow_ports(plugin_id, key)
-        return self._pool.submit(key, TRANSLATE_OP, {"request": request}, secrets=dict(secrets) or None,
-                                 on_progress=on_progress, context=context)
+        handle = self._pool.submit(key, TRANSLATE_OP, {"request": request}, secrets=dict(secrets) or None,
+                                   on_progress=on_progress, context=context)
+        with self._lock:
+            detached = plugin_id in self._withdrawn
+        if detached:
+            # The plugin was detached after the check above and before the pool took the job: the worker the pool
+            # started for it is of the release that left, so the job is not left running on it.
+            from provider_hub.runtime.pool import PoolCodes, PoolUnavailable
+
+            handle.cancel("the plugin was removed or revoked")
+            # The detach may have finished before the pool started that worker, so nothing else would end it.
+            self.retire(plugin_id)
+            raise PoolUnavailable("this translator plugin was removed or revoked", code=PoolCodes.UNAVAILABLE)
+        return handle
 
     def _one_call_definition(self, plugin_id: str, params: Mapping[str, Any], call_id: str):
         from dataclasses import replace
@@ -239,6 +267,8 @@ class PoolWorkers:
 
         call_id = uuid.uuid4().hex[:12]
         with self._lock:
+            if plugin_id in self._withdrawn:
+                raise NotSent("this translator plugin was removed or revoked")
             self._calls[plugin_id] = self._calls.get(plugin_id, 0) + 1
         try:
             # Everything that can refuse the request before a worker exists is settled here, so that what is raised
@@ -319,6 +349,56 @@ class PoolWorkers:
 
     def abandon(self, plugin_id):
         self.retire(plugin_id)
+
+    def detach(self, plugin_id, *, grace=None):
+        """Take the plugin out of service for good. The submissions that follow are refused, the worker that holds
+        jobs keeps them until they finish (retired, so it is stopped when the last is done), and with ``grace`` the
+        jobs still running after that many seconds are cut by stopping the worker: the dispatcher sees them end
+        as any killed worker's job does. The thread this returns ends when no process of the plugin is left."""
+        key = self._key_for(plugin_id)
+        with self._lock:
+            # A submission that checked before this and is still on its way to the pool is caught by the recheck
+            # after the pool takes the job (``submit``), which cancels it and retires the worker it started.
+            self._withdrawn.add(plugin_id)
+        self.retire(plugin_id)
+        thread = threading.Thread(target=self._finish_detach, args=(plugin_id, key, grace),
+                                  name=f"translator-detach-{plugin_id}", daemon=True)
+        thread.start()
+        return [thread]
+
+    # The longest a detach waits for the jobs a worker holds when it was given no grace: a request may run for the
+    # ceiling a worker is allowed (a day), and after that the worker is stopped.
+    DETACH_CEILING_SECONDS = 25 * 3600.0
+
+    def _finish_detach(self, plugin_id: str, key: str, grace: float | None) -> None:
+        import time
+
+        began = time.monotonic()
+        deadline = began + (self.DETACH_CEILING_SECONDS if grace is None else max(0.0, grace))
+        cut = False  # set once a stop has worked; the loop goes on until the worker is gone
+        pause = 0.1
+        failed = False
+        while not self.idle(plugin_id):
+            stop = False
+            if time.monotonic() >= deadline and not cut:
+                # Tried on every look from here on until a stop has worked: a cut that failed is not given up on.
+                stop = True
+            else:
+                # A worker the pool started for a job that arrived as the detach ran was not the one retired: once it
+                # holds no job it is stopped here, since nothing is sent to it again.
+                worker = self._worker_status(plugin_id)
+                stop = bool(worker) and worker.get("state") == "ready" and not worker.get("in_flight")
+            if stop:
+                try:
+                    self._pool.stop(key)
+                    cut = True
+                except Exception:
+                    if not failed:
+                        failed = True
+                        logger.warning("Could not stop the worker of translator %s", plugin_id, exc_info=True)
+            time.sleep(pause)
+            # The wait is long when a job is: it looks less often the longer it has waited.
+            pause = min(2.0, pause * 1.5)
 
     def runtime(self, plugin_id: str) -> dict | None:
         """How the plugin's long-lived worker is doing, for a card. None when it never had one."""

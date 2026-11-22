@@ -942,7 +942,8 @@ def running_installations(
     The active provider class stays registered until restart, even while an
     update or a removal is staged, so the population the worker uses is
     every row with an active_version, whatever its state and restart
-    flag. The settings overlay walks exactly this population: cutting it to
+    flag, except a removal that was detached live (marked removed, no restart
+    waiting). The settings overlay walks exactly this population: cutting it to
     the non-pending rows would let a provider be admitted on a
     settings-section credential that never reaches its worker config.
     Defaults to subtitle providers; ``kind=None`` returns every kind."""
@@ -955,6 +956,10 @@ def running_installations(
             continue
         # A plugin held back at boot because what it relies on is not running does not run.
         if not item.get("active_version") or item.get("blocked"):
+            continue
+        # A removal that waits for no restart was detached while Bazarr+ ran: its row stays until its calls are
+        # done, and nothing reads it as running.
+        if item.get("state") == "removed" and not item.get("pending_restart"):
             continue
         manifest = item.get("manifest")
         if not isinstance(manifest, dict):

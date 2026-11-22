@@ -133,6 +133,30 @@ def _keep_the_session_generation():
         auth["session_generation"] = before
 
 
+@pytest.hookimpl(wrapper=True)
+def pytest_runtest_teardown(item, nextitem):
+    """A release that is detached while a test runs is finished on threads of its own (its row deleted once its
+    calls are done). They end before the test's fixtures are torn down, so a thread that ends late finishes against
+    the state the test set up, and none of them writes into another test's state.
+
+    This is a hook and not an autouse fixture on purpose: a fixture that asks for ``monkeypatch`` is created before
+    the test's own fixtures and torn down after them, which changes the teardown order of every unrelated test. The wait
+    runs first, before any fixture of the item is finalised, and touches nothing when no release was detached."""
+    import sys
+
+    detach = sys.modules.get("provider_hub.detach")
+    finished = True
+    if detach is not None:
+        finished = detach.wait_idle(30)
+        if not finished:
+            # The list is cleared so the next test does not wait on a thread this one leaked.
+            with detach._PENDING_LOCK:
+                detach._PENDING.clear()
+    yield
+    # A release whose detach never ends is a test that leaked a thread: it fails here, after the fixtures are undone.
+    assert finished, "a release detached by this test was still being detached 30 seconds after it ended"
+
+
 @pytest.fixture
 def service_kind():
     """A second plugin kind, registered for one test, that records every hook call."""

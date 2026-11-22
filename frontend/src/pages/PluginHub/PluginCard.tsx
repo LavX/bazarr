@@ -24,6 +24,7 @@ import {
 import {
   isAwaitingRestart,
   isInstalled,
+  isRemoving,
   permissionMark,
   PluginRow,
   SandboxFacts,
@@ -89,6 +90,13 @@ const Action: FunctionComponent<PluginCardProps> = ({
   const occupied = working || (openJobs.get(row.id)?.size ?? 0) > 0;
   // A row that only records a failed install is not an installation: the install is offered again.
   const installation = isInstalled(row.installation) ? row.installation : null;
+  if (installation && isRemoving(installation)) {
+    return (
+      <Tooltip label="This plugin is being removed. Wait for it to finish.">
+        <span className={styles.hubCardPendingText}>Removing</span>
+      </Tooltip>
+    );
+  }
   if (installation && isAwaitingRestart(installation)) {
     return (
       <Tooltip label="Restart Bazarr+ to finish this change">

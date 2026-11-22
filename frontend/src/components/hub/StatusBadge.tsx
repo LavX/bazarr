@@ -87,6 +87,18 @@ export const ProviderStatusBadge: FunctionComponent<{
       />
     );
   }
+  if (state === "removed" && !pendingRestart) {
+    // Removed while Bazarr+ runs: the row stays until the calls the plugin already took are done.
+    return (
+      <StatusBadge
+        tone="warning"
+        label="Removing"
+        icon={meta.icon}
+        variant="dot"
+        tooltip="This plugin is being removed. It goes when the calls it is running end, or after a few minutes."
+      />
+    );
+  }
   if (needsRepair && !pendingRestart) {
     return (
       <StatusBadge
