@@ -15,6 +15,7 @@ import weakref
 import time
 import uuid
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from decimal import Decimal
 from pathlib import Path
@@ -22,6 +23,7 @@ from typing import Any
 
 from . import WORKER_ABI_VERSION
 from . import runtime_status
+from .provider_roots import SourceMediaFile
 from secret_store.scrub import scrub_text
 
 logger = logging.getLogger(__name__)
@@ -479,12 +481,12 @@ def _is_provider_runner(command, env) -> bool:
         return False
 
 
-def provider_spec(layout: ProviderLayout, command, cwd, env):
+def provider_spec(layout: ProviderLayout, command, cwd, env, *, source_media: SourceMediaFile | None = None):
     """The launch specification of one provider worker: the softer provider profile.
 
     Filesystem: an allowlist. Read-only for the system paths, the interpreter and its libraries, the
-    plugin's bundle and environment, the programs on ``PATH`` and the media root folders; read-write
-    for the plugin's own data and temp folders. Everything else is denied: the configuration folder
+    plugin's bundle and environment, the programs on ``PATH``, Arr roots and any approved source file;
+    read-write for the plugin's own data and temp folders. Everything else is denied: the configuration folder
     (``config.yaml`` and the database), the backup folder, home folders and other services' data.
     No port allowlist (only Bazarr+'s own ports are refused, where the kernel can), no file-size or
     process-count limit and no metadata filter, so ``ffmpeg`` can write large temporary files and run
@@ -496,6 +498,7 @@ def provider_spec(layout: ProviderLayout, command, cwd, env):
     from .sandbox.policy import (
         PROVIDER_EXTRA_READ_PATHS,
         PROVIDER_LIMITS,
+        PolicyError,
         RuntimeSpec,
         SandboxPolicy,
         provider_tree_grants,
@@ -509,6 +512,7 @@ def provider_spec(layout: ProviderLayout, command, cwd, env):
         os.chmod(folder, 0o700)
     backups = backup_folders()
     shields = [layout.config_dir, *backups]
+    source_paths = provider_tree_grants([source_media.path], shields) if source_media is not None else ()
     managed_binaries = layout.config_dir / "managed" / "bin"
     policy = SandboxPolicy.for_interpreter(
         layout.interpreter,
@@ -519,6 +523,7 @@ def provider_spec(layout: ProviderLayout, command, cwd, env):
             *PROVIDER_EXTRA_READ_PATHS,
             *provider_tree_grants([*program_folders(), *binary_folders(), *media_root_folders()], shields),
         ],
+        read_files=source_paths,
         read_write=[data, temp],
         # The folders, and the files in them: a file that is a link into a granted tree is refused too.
         protected_paths=[layout.config_dir / "config", layout.config_dir / "db", *backups, *_secret_files(layout.config_dir)],
@@ -527,6 +532,8 @@ def provider_spec(layout: ProviderLayout, command, cwd, env):
         # TCP connection stays open. MPTCP sockets, which those rules do not cover, are refused by the filter.
         deny_connect_ports=own_ports(),
     )
+    if source_paths and policy.identities.get(str(source_media.path)) != source_media.identity:
+        raise PolicyError("the source media file changed while preparing its read grant")
     environment = worker_environment(
         "subtitle_provider",
         home=data,
@@ -605,7 +612,7 @@ class ProviderWorkerClient:
         self._sandbox_failed_open = False
         self._sandbox_layout: ProviderLayout | None = None
 
-    def start(self) -> bool:
+    def start(self, *, source_media: SourceMediaFile | None = None) -> bool:
         if self.process:
             if not self._has_exited(self.process):
                 return False
@@ -632,7 +639,7 @@ class ProviderWorkerClient:
             env.update(self.env)
 
         self.last_used = time.monotonic()
-        self.process = self._spawn(env)
+        self.process = self._spawn(env, source_media=source_media)
         if self._is_launcher(self.process):
             # Every launcher this client started stays on the list until it has confirmed its cleanup:
             # a respawn must not make the previous launcher's descendants forgotten.
@@ -668,7 +675,7 @@ class ProviderWorkerClient:
             runtime_status.worker_started(provider_id)
         return True
 
-    def _spawn(self, env: dict[str, str]):
+    def _spawn(self, env: dict[str, str], *, source_media: SourceMediaFile | None = None):
         """Start the worker process: through the provider sandbox when it applies, else directly.
 
         A provider worker is sandboxed unless the user switched that off or the kernel has no Landlock
@@ -679,7 +686,7 @@ class ProviderWorkerClient:
         for its next start. Everything that is not a hub provider worker starts as before.
         """
         self._sandbox_layout = None
-        profile = self._sandbox_profile()
+        profile = self._sandbox_profile(source_media=source_media)
         if profile is not None:
             try:
                 return profile()
@@ -697,7 +704,7 @@ class ProviderWorkerClient:
             start_new_session=True,
         )
 
-    def _sandbox_profile(self):
+    def _sandbox_profile(self, *, source_media: SourceMediaFile | None = None):
         """A callable that starts the sandboxed worker, or None when this start is unsandboxed."""
         if getattr(self, "_sandbox_failed_open", False):
             return None
@@ -740,7 +747,8 @@ class ProviderWorkerClient:
             )
 
         def start():
-            spec = provider_spec(layout, self.command, self.cwd, self.env)
+            options = {"source_media": source_media} if source_media is not None else {}
+            spec = provider_spec(layout, self.command, self.cwd, self.env, **options)
             process = spawn_worker(
                 spec,
                 probe=probe,
@@ -1450,8 +1458,29 @@ class ProviderWorkerClient:
             self._latch_owner.cleared = True
             return
 
+    def _end_worker_for_source_scope(self) -> None:
+        """Retire a process and its descendants while leaving the client open for the next request."""
+        process = self.process
+        if process is None:
+            return
+        try:
+            if getattr(process, "returncode", None) is None:
+                try:
+                    self._terminate_tree(process, 5.0)
+                except Exception:
+                    self._kill_tree(process, 5.0)
+            ended = _client_gone(self, 0.0)
+        except Exception:
+            logger.warning("Provider Hub could not check a source media worker's exit", exc_info=True)
+            ended = False
+        if not ended:
+            self._closed = True
+            self._retain_survivor()
+            raise WorkerError("the worker could not be stopped for the source media scope")
+        self._deregister()
+
     def request(self, op: str, payload: dict[str, Any] | None = None, timeout: float = 30.0,
-                admit=None) -> WorkerResult:
+                admit=None, *, source_media: Callable[[], SourceMediaFile | None] | None = None) -> WorkerResult:
         """Send one request and read its reply.
 
         With ``admit``, a callable answering whether the provider may still be
@@ -1459,6 +1488,9 @@ class ProviderWorkerClient:
         report the outcome through outcome_recorded(). Without it the request
         queues on the lock as it always has, which shutdown and the archive
         member selection rely on.
+
+        ``source_media`` is a host-only lookup after admission. A worker with that
+        grant serves one request, then ends before the next request gets the lock.
         """
         request_id = str(uuid.uuid4())
         message = {
@@ -1473,6 +1505,7 @@ class ProviderWorkerClient:
             self._lock.acquire()
         else:
             self._acquire_gated(timeout, admit)
+        launch_options = {}
         try:
             # Startup and the freshness stamp live under the request lock:
             # outside it, the sweep can acquire the lock after start() returns,
@@ -1488,11 +1521,19 @@ class ProviderWorkerClient:
                 # between the caller's check and this request has nothing left
                 # to shut down.
                 raise WorkerError("worker is not running")
+            if source_media is not None and not self._sandbox_failed_open:
+                from .sandbox import probe_sandbox, provider_profile_enabled
+
+                if provider_profile_enabled() and not probe_sandbox().absent and (grant := source_media()) is not None:
+                    # Landlock grants live for the process. A warm worker has the
+                    # previous ruleset, so prepare a fresh one for this file.
+                    self._end_worker_for_source_scope()
+                    launch_options["source_media"] = grant
             encoded = json.dumps(message, separators=(",", ":"), default=_json_default) + "\n"
             # A second pass only happens when the sandbox ruleset could not be applied to the
             # worker just started: the provider then runs without it (see ``_fail_open``).
             for attempt in (0, 1):
-                worker_started = self.start() is True
+                worker_started = self.start(**launch_options) is True
                 provider_id = getattr(self, "provider_id", None)
                 status_generation = (
                     runtime_status.generation(provider_id)
@@ -1526,7 +1567,11 @@ class ProviderWorkerClient:
             # STARTED would read as idle for almost all of that.
             self.last_used = time.monotonic()
         finally:
-            self._lock.release()
+            try:
+                if launch_options and self._sandbox_layout is not None:
+                    self._end_worker_for_source_scope()
+            finally:
+                self._lock.release()
 
         if not line:
             raise WorkerError("worker closed stdout")

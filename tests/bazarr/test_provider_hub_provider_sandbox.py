@@ -17,9 +17,11 @@ import stat
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
+from media_source_helpers import add_item, add_source
 from provider_hub import worker as worker_module
 from provider_hub.sandbox import (
     PROVIDER_MIN_ABI,
@@ -67,6 +69,21 @@ class Fixture:
                     handle.write("x")
                 return "written"
             return [{"result": _try(write)}]
+        if op == "source":
+            def read(path):
+                with open(path, encoding="utf-8") as handle:
+                    return handle.read()
+
+            path = video["name"]
+            result = _try(lambda: read(path))
+            if result.splitlines()[-1:] != ["exit 0"]:
+                return []
+            mode = _try(lambda: open(path, "r+").close())
+            return [{"id": "source-fixture", "language": {"alpha3": "eng"}, "provider_payload": {
+                "path": path, "write": mode, "sibling": _try(lambda: read(config["sibling"])),
+                "backup": _try(lambda: read(config["backup"])),
+                "exec": _try(lambda: subprocess.run([path], check=True).returncode),
+            }}]
         if op == "list":
             return [{"result": _try(lambda: sorted(os.listdir(config["path"])))}]
         if op == "stub":
@@ -105,6 +122,10 @@ class Fixture:
         if op == "env":
             return [{"result": {key: os.environ.get(key) for key in config["keys"]}}]
         raise ValueError(op)
+
+    def download(self, provider_payload, language, config):
+        with open(provider_payload["path"], encoding="utf-8") as handle:
+            return handle.read().encode()
 '''
 
 STUB = '''#!{python}
@@ -251,6 +272,114 @@ def test_a_provider_worker_reads_media_and_cannot_change_it(host, client):
     assert _ask(worker, op="write", path=str(host["media"] / "film.mkv"))["result"] == "denied"
     assert _ask(worker, op="write", path=str(host["media"] / "new.srt"))["result"] == "denied"
     assert (host["media"] / "film.mkv").read_text(encoding="utf-8") == "film"
+
+
+def test_source_search_and_download_get_one_read_only_file_per_request(host, client, source_db, monkeypatch):
+    from media_sources import repository
+    from media_sources.context import resolve_item
+    from provider_hub import capabilities
+    from provider_hub.registry import HubProxyProvider
+    from provider_hub.state import OFFICIAL_CATALOG_REPO, OFFICIAL_CATALOG_SOURCE_ID
+    from subliminal.video import Movie
+
+    _enforcing_kernel()
+    source_id, library_id, root = add_source(source_db, host["root"])
+    movie_path, sibling = root / "Film.mkv", root / "Other.mkv"
+    media_bytes = b"#!/bin/sh\nexit 0\n"
+    movie_path.write_bytes(media_bytes)
+    movie_path.chmod(0o700)
+    sibling.write_text("another movie", encoding="utf-8")
+    item_id = add_item(source_db, source_id, library_id, movie_path)
+    video = Movie(str(movie_path), "Film")
+    video.source_context = resolve_item(item_id, source_db)
+    manifest = SimpleNamespace(schema_version=1, raw={}, source_repo=OFFICIAL_CATALOG_REPO, bundle_sha256="fixture")
+    row = {"trusted": True, "origin": "catalog", "source_id": OFFICIAL_CATALOG_SOURCE_ID,
+           "manifest": {"bundle_sha256": manifest.bundle_sha256}}
+    monkeypatch.setattr(capabilities, "live_row", lambda provider_id: row)
+
+    class Embedded(HubProxyProvider):
+        provider_name = "embeddedsubtitles"
+
+    Embedded.manifest = manifest
+    worker = client()
+    proxy = Embedded(worker_client=worker, op="source", sibling=str(sibling),
+                     backup=str(host["backups"] / "backup.txt"))
+
+    # The ordinary worker is already running, with only the Arr profile.
+    assert _ask(worker, op="read", path=str(movie_path))["result"] == "denied"
+    ordinary_process = worker.process
+
+    [subtitle] = proxy.list_subtitles(video, [])
+    assert subtitle.provider_payload == {
+        "path": str(movie_path), "write": "denied", "exec": "denied", "sibling": "denied", "backup": "denied",
+    }
+    assert ordinary_process.poll() is not None
+    assert worker.process.poll() is not None
+    assert worker.launcher_cleanup_state() == "confirmed"
+
+    # The normal pool carries this host-only context from the video to the candidate.
+    subtitle.source_context = video.source_context
+    assert proxy.download_subtitle(subtitle)
+    assert subtitle.content == media_bytes
+    assert worker.process.poll() is not None
+    assert _ask(worker, op="read", path=str(movie_path))["result"] == "denied"
+
+    # A backup subfolder inside an approved library is still excluded.
+    nested_backups = root / "backups"
+    nested_backups.mkdir()
+    nested_path = nested_backups / movie_path.name
+    nested_path.write_bytes(media_bytes)
+    nested_id = add_item(source_db, source_id, library_id, nested_path)
+    nested_video = Movie(str(nested_path), "Film")
+    nested_video.source_context = resolve_item(nested_id, source_db)
+    monkeypatch.setattr(_provider_roots, "backup_folders", lambda: [host["backups"], nested_backups])
+    assert proxy.list_subtitles(nested_video, []) == []
+
+    repository.update_library(library_id, source_db, enabled=0)
+    assert proxy.list_subtitles(video, []) == []
+    repository.update_library(library_id, source_db, enabled=1)
+    repository.update_source(source_id, source_db, enabled=0)
+    assert proxy.list_subtitles(video, []) == []
+    repository.update_source(source_id, source_db, enabled=1)
+    moved_root = host["root"] / "moved"
+    moved_root.mkdir()
+    repository.replace_roots(library_id, [(None, str(moved_root))], source_db)
+    assert proxy.list_subtitles(video, []) == []
+    moved_path = moved_root / movie_path.name
+    moved_path.write_bytes(media_bytes)
+    moved_path.chmod(0o700)
+    repository.update_item(item_id, source_db, path=str(moved_path))
+    moved_video = Movie(str(moved_path), "Film")
+    moved_video.source_context = resolve_item(item_id, source_db)
+    assert len(proxy.list_subtitles(moved_video, [])) == 1
+    assert proxy.list_subtitles(video, []) == []
+    row["trusted"] = False
+    assert proxy.list_subtitles(moved_video, []) == []
+    row["trusted"] = True
+    repository.delete_source(source_id, source_db)
+    assert proxy.list_subtitles(moved_video, []) == []
+
+
+@pytest.mark.parametrize(("schema", "declared", "current", "allowed"), [
+    (1, ["media_read"], ["media_read"], False),
+    (2, None, [], False),
+    (2, ["media_read"], ["network"], False),
+    (2, ["media_read"], ["media_read"], True),
+])
+def test_standalone_media_needs_current_provider_permission(schema, declared, current, allowed, monkeypatch):
+    from provider_hub import capabilities
+    from provider_hub.registry import HubProxyProvider
+
+    class CatalogProvider(HubProxyProvider):
+        provider_name = "exampleprovider"
+        manifest = SimpleNamespace(schema_version=schema, raw={"permissions": declared}, bundle_sha256="fixture")
+
+    current_manifest = {"permissions": current, "bundle_sha256": "fixture"}
+    monkeypatch.setattr(capabilities, "live_row", lambda provider_id: {"manifest": current_manifest, "trusted": True})
+    grant = object()
+    monkeypatch.setattr(_provider_roots, "source_media_file", lambda context: grant)
+
+    assert CatalogProvider()._source_media(object()) is (grant if allowed else None)
 
 
 def test_a_provider_worker_keeps_its_bundle_readable_and_its_own_folders_writable(host, client):

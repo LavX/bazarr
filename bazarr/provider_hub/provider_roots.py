@@ -2,23 +2,25 @@
 """Where a subtitle provider worker may read: the media library and the folders it runs programs from.
 
 The provider sandbox profile is an allowlist. Besides the system paths, the interpreter and the plugin's
-own bundle, a worker is given the media root folders (it probes and extracts from media files) and the
-directories on ``PATH`` (``ffmpeg`` and ``ffprobe`` are found there), nothing else. The configuration
-folder, the backup folder, home folders and every other service's data stay out of reach.
+own bundle, a worker is given the Arr media root folders and the directories on ``PATH`` (``ffmpeg`` and
+``ffprobe`` are found there). An eligible provider can also read the one source movie or episode it is asked
+to process. The configuration folder, the backup folder and other services' data stay out of reach.
 """
 from __future__ import annotations
 
 import logging
 import os
 import shutil
+import stat
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
 
 def media_root_folders() -> list[str]:
-    """Every media root folder Bazarr+ knows, as this host sees it. Folders that do not exist are left out.
+    """Every Arr media root folder Bazarr+ knows, as this host sees it. Missing folders are left out.
 
     Read from the Sonarr, Radarr and Sportarr root folders of every instance, each also through the
     path mappings that apply to its instance, because the stored path is the one the arr application
@@ -58,6 +60,44 @@ def media_root_folders() -> list[str]:
         except Exception:
             logger.debug("Provider Hub: no path mapping applied to the sports root folder %s", path, exc_info=True)
     return list(found)
+
+
+@dataclass(frozen=True)
+class SourceMediaFile:
+    path: Path
+    identity: tuple[int, int]
+
+
+def source_media_file(context) -> SourceMediaFile | None:
+    """One current source file inside its enabled library's configured local roots."""
+    from media_sources import repository
+    from media_sources.context import SourceItemContext
+
+    if not isinstance(context, SourceItemContext):
+        return None
+    path = Path(context.path)
+    if not path.is_absolute():
+        return None
+    roots = repository.enabled_item_roots(context.item_id, context.source_id, context.library_id, context.path)
+    if not roots:
+        return None
+    try:
+        real = path.resolve(strict=True)
+        info = real.lstat()
+    except (OSError, ValueError):
+        return None
+    if not stat.S_ISREG(info.st_mode):
+        return None
+    for root in map(Path, roots):
+        if not root.is_absolute() or root == Path(root.anchor) or not path.is_relative_to(root):
+            continue
+        try:
+            local = root.resolve(strict=True)
+        except (OSError, ValueError):
+            continue
+        if local != Path(local.anchor) and real != local and real.is_relative_to(local) and local.is_dir():
+            return SourceMediaFile(real, (info.st_dev, info.st_ino))
+    return None
 
 
 def program_folders(path_value: str | None = None) -> list[str]:
