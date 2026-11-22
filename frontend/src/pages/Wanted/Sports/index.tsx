@@ -114,7 +114,7 @@ const WantedSportsView: FunctionComponent = () => {
   // the Audio column speak code2, so both directions are mapped through this
   // catalogue: names become the codes the rows carry, and the column turns
   // those back into readable names.
-  const { data: audioLangs = [] } = useAudioLanguages();
+  const { data: audioLangs = [] } = useAudioLanguages(arrEnabled);
   const langOptions = useMemo(
     () => audioLangs.map((l) => ({ value: l.code2, label: l.name })),
     [audioLangs],

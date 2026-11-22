@@ -46,10 +46,11 @@ export function getArrInstanceDeleteConflict(
     : null;
 }
 
-export function useArrInstances() {
+export function useArrInstances(enabled = true) {
   return useQuery({
     queryKey: arrKey,
     queryFn: () => api.arrInstances.list(),
+    enabled,
   });
 }
 

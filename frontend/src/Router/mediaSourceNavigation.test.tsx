@@ -1,7 +1,7 @@
 /* eslint-disable camelcase -- API field names. */
 import { act } from "@testing-library/react";
 import { http, HttpResponse } from "msw";
-import { expect, it, vi } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { mediaSourcesKey } from "@/apis/hooks/mediaSources";
 import { useSportsAvailability } from "@/apis/hooks/sports";
 import queryClient from "@/apis/queries";
@@ -220,6 +220,10 @@ it.each([
         requests("upgradable");
         return HttpResponse.json({ movies: [], series: [], sports: [] });
       }),
+      http.get("/api/system/languages/audio", () => {
+        requests("audio catalogue");
+        return HttpResponse.json([]);
+      }),
       http.all(endpoint, ({ request }) => {
         requests(request.method);
         return HttpResponse.json({
@@ -239,5 +243,116 @@ it.each([
       }),
     ).not.toBeInTheDocument();
     expect(requests).not.toHaveBeenCalled();
+  },
+);
+
+describe.each([
+  ["sonarr", "series", "/api/episodes/blacklist"],
+  ["radarr", "movies", "/api/movies/blacklist"],
+] as const)(
+  "%s exclusions with the master toggle on",
+  (kind, path, endpoint) => {
+    it.each([
+      {
+        mode: "disabled instance and an old scalar",
+        record: false,
+        legacy: true,
+        visible: true,
+        accessible: false,
+      },
+      {
+        mode: "no instance or legacy connection",
+        record: null,
+        legacy: false,
+        visible: true,
+        accessible: false,
+      },
+      {
+        mode: "active instance",
+        record: true,
+        legacy: false,
+        visible: true,
+        accessible: true,
+      },
+      {
+        mode: "configured pre-instance legacy connection",
+        record: null,
+        legacy: true,
+        visible: true,
+        accessible: true,
+      },
+      {
+        mode: "hidden folder feature",
+        record: null,
+        legacy: false,
+        visible: false,
+        accessible: true,
+      },
+    ])(
+      "handles $mode without granting folder sources Arr privileges",
+      async ({ record, legacy, visible, accessible }) => {
+        const requestArr = vi.fn();
+        const requestExcluded = vi.fn();
+        server.use(
+          http.get("/api/system/settings", () =>
+            HttpResponse.json({
+              general: { [`use_${kind}`]: true },
+              media_sources: { visible },
+              [kind]: {
+                ip: "127.0.0.1",
+                apikey: legacy ? "synthetic-configured" : "",
+              },
+            }),
+          ),
+          http.get("/api/system/arr-instances", () => {
+            requestArr();
+            return HttpResponse.json([
+              makeInstance({
+                kind: kind === "sonarr" ? "radarr" : "sonarr",
+                id: 5,
+                enabled: true,
+              }),
+              ...(record === null
+                ? []
+                : [makeInstance({ kind, enabled: record })]),
+            ]);
+          }),
+          http.get("/api/system/status", () => HttpResponse.json({ data: {} })),
+          http.get("/api/system/media-sources", () =>
+            HttpResponse.json({
+              data: [],
+              availability: {
+                series: RETAINED,
+                movie: RETAINED,
+                sports: ABSENT,
+              },
+            }),
+          ),
+          http.get("/api/badges", () => HttpResponse.json({})),
+          http.all(endpoint, ({ request }) => {
+            requestExcluded(request.method);
+            return HttpResponse.json({ data: [] });
+          }),
+        );
+        customRender(<MediaPage group="blacklist" path={path} />);
+        if (accessible) {
+          expect(
+            await screen.findByRole("button", { name: "Remove All" }),
+          ).toBeInTheDocument();
+          await waitFor(() =>
+            expect(requestExcluded).toHaveBeenCalledWith("GET"),
+          );
+        } else {
+          expect(
+            await screen.findByRole("link", { name: "Connections" }),
+          ).toBeInTheDocument();
+          expect(
+            screen.queryByRole("button", { name: "Remove All" }),
+          ).not.toBeInTheDocument();
+          expect(requestExcluded).not.toHaveBeenCalled();
+        }
+        if (!visible) expect(requestArr).not.toHaveBeenCalled();
+      },
+    );
   },
 );

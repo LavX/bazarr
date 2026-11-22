@@ -1,4 +1,5 @@
 import type { PropsWithChildren } from "react";
+import { useArrInstances } from "@/apis/hooks/arrInstances";
 import { useSystemSettings } from "@/apis/hooks/system";
 import FolderMediaNotice from "@/pages/views/FolderMediaNotice";
 
@@ -7,12 +8,25 @@ export default function ArrMediaRoute({
   children,
 }: PropsWithChildren<{ kind: "sonarr" | "radarr" }>) {
   const { data } = useSystemSettings();
+  const visible = data?.media_sources?.visible === true;
+  const master = data?.general[`use_${kind}`] === true;
+  const instances = useArrInstances(visible && master);
   if (!data) return null;
+  if (!visible) return children;
+  if (!master) return <FolderMediaNotice />;
+  if (instances.isLoading) return null;
 
-  // Source navigation can open these addresses while the existing pages still
-  // read and mutate the entire Arr library. Mount them only for the Arr route.
-  if (data.media_sources?.visible && !data.general[`use_${kind}`]) {
-    return <FolderMediaNotice />;
-  }
-  return children;
+  // Once there are instance records, they govern access to the legacy Arr
+  // pages. A scalar connection can predate those records on an older install.
+  const records = instances.data?.filter((instance) => instance.kind === kind);
+  const legacy = data[kind];
+  const hasLegacyConnection =
+    records?.length === 0 &&
+    Boolean(legacy?.ip?.trim() && legacy.apikey?.trim());
+  return records?.some((instance) => instance.enabled) ||
+    hasLegacyConnection ? (
+    children
+  ) : (
+    <FolderMediaNotice />
+  );
 }
