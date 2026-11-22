@@ -568,15 +568,15 @@ def test_a_pending_identification_is_asked_again_on_every_scan_and_a_users_is_le
     repository.update_item(items[str(mine)].id, movies.session, identify_pending=1, identity_source="user",
                            title="Mine")
     asked = []
-    real = identify.identify_item
-    monkeypatch.setattr(identify, "identify_item", lambda *args: asked.append(args[1]) or real(*args))
+    real = identify.confirm_title
+    monkeypatch.setattr(identify, "confirm_title", lambda *args: asked.append(args) or real(*args))
 
     movies.scan()
 
     items = movies.items()
     assert items[str(path)].identify_pending == 0 and items[str(path)].title == "Film"
     assert (items[str(mine)].identify_pending, items[str(mine)].title) == (0, "Mine")
-    assert asked == [str(path)]
+    assert asked == [("Film", "2001", "movie")]
 
 
 def test_twenty_thousand_entries_are_written_in_batches_not_one_transaction(movies, monkeypatch):

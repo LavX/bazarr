@@ -216,6 +216,7 @@ def test_manual_search_still_builds_an_unmatched_episode_video(source_db, tmp_pa
 
     from subliminal_patch import core
     from subliminal_patch.providers.legendasdivx import LegendasdivxProvider
+    from subliminal_patch.providers.napiprojekt import NapiProjektProvider
     from subliminal_patch.providers.shooter import ShooterProvider
     from subzero.language import Language
 
@@ -232,7 +233,12 @@ def test_manual_search_still_builds_an_unmatched_episode_video(source_db, tmp_pa
     monkeypatch.setattr(ShooterProvider, 'terminate', lambda self: None)
     monkeypatch.setattr(ShooterProvider, 'query', lambda self, language, filename, hash:
                         [self.subtitle_class(language, hash, 'https://example.invalid/hash-result')])
-    libraries = {'legendasdivx': LegendasdivxProvider, 'embeddedsubtitles': FileProvider, 'shooter': ShooterProvider}
+    monkeypatch.setattr(NapiProjektProvider, 'initialize', lambda self: None)
+    monkeypatch.setattr(NapiProjektProvider, 'terminate', lambda self: None)
+    monkeypatch.setattr(NapiProjektProvider, 'query', lambda *args: None)
+    monkeypatch.setattr(NapiProjektProvider, '_find_title', lambda *args: ('Mystery Show', set()))
+    libraries = {'legendasdivx': LegendasdivxProvider, 'embeddedsubtitles': FileProvider, 'shooter': ShooterProvider,
+                 'napiprojekt': NapiProjektProvider}
     monkeypatch.setattr(core, 'provider_registry', libraries)
     configuration = {provider: {'username': None, 'password': None}
                      for provider in ('legendasdivx', 'embeddedsubtitles')}
@@ -241,6 +247,9 @@ def test_manual_search_still_builds_an_unmatched_episode_video(source_db, tmp_pa
                              throttle_callback=lambda *args, **kwargs: failures.append(args)) as pool:
         result = pool.list_subtitles_provider('legendasdivx', video, {Language('por')}, detailed=True)
         assert (result.status, result.reason) == ('skipped', 'unsupported_media')
+        video.hashes['napiprojekt'] = 'fixture-napi-hash'
+        mixed = pool.list_subtitles_provider('napiprojekt', video, {Language('pol')}, detailed=True)
+        assert (mixed.status, mixed.reason) == ('skipped', 'unsupported_media')
         assert not pool.discarded_providers
         file_result = pool.list_subtitles_provider('embeddedsubtitles', video, {Language('por')}, detailed=True)
         assert file_result.status == 'empty'
@@ -617,3 +626,144 @@ def test_a_pending_show_does_not_reparse_an_unchanged_multi_episode_file(source_
     assert lib.scan().unchanged == 1
     row = lib.items()[str(path)]
     assert (row.identity_state, row.identify_pending, row.episode) == ('unmatched', 1, None)
+
+
+@pytest.mark.parametrize('correct_show', [True, False], ids=['concurrent-correction', 'pending-lookup'])
+def test_cancel_after_renamed_episode_commits_its_current_group_state(source_db, tmp_path, metadata, client,
+                                                                    monkeypatch, correct_show):
+    from concurrent.futures import ThreadPoolExecutor
+
+    from app.jobs_queue import JobCancelled
+    from media_sources import identify, scanner
+
+    _, shows, _, _ = metadata
+    lib = Lib(source_db, tmp_path)
+    group_dir = "1080p" if correct_show else "Original Show"
+    next_dir = "720p" if correct_show else "Replacement Show"
+    original = stamped_video(lib.root / group_dir / "Season 1" / "E05.mkv")
+    shows["Original Show"] = response(status="unavailable")
+    lib.scan()
+    group_id = lib.group(group_dir).id
+    renamed = lib.root / next_dir / "Season 1" / original.name
+    original.parents[1].rename(lib.root / next_dir)
+    episode_parse = identify.identify_item
+    count_repathed = scanner._count_repathed
+    item_committed = False
+
+    def correct_show_in_other_request():
+        try:
+            response = client.application.test_client().patch(
+                f"/api/sources/groups/{group_id}", json={"title": "User Show"}, headers=HEADERS)
+            assert response.status_code == 200
+        finally:
+            source_db.remove()
+
+    def parse(*args, **kwargs):
+        if correct_show and args[1] == str(renamed):
+            with ThreadPoolExecutor(max_workers=1) as workers:
+                workers.submit(correct_show_in_other_request).result(timeout=10)
+        return episode_parse(*args, **kwargs)
+
+    def committed(*args):
+        nonlocal item_committed
+        item_committed = True
+        return count_repathed(*args)
+
+    def interrupt():
+        if item_committed:
+            raise JobCancelled()
+
+    monkeypatch.setattr(identify, 'identify_item', parse)
+    monkeypatch.setattr(scanner, '_count_repathed', committed)
+    with pytest.raises(JobCancelled):
+        scanner.run_scan(lib.source_id, lib.library_id, cancel=interrupt)
+    group = lib.group(next_dir)
+    episode = lib.items()[str(renamed)]
+    assert group.identity_state == ('identified' if correct_show else 'parsed')
+    assert (episode.identity_state, episode.season, episode.episode) == ('parsed', 1, 5)
+    assert episode.identify_pending == group.identify_pending == (0 if correct_show else 1)
+
+
+def test_a_pending_movie_retries_using_its_saved_filename_parse(source_db, tmp_path, metadata, monkeypatch):
+    from media_sources import identify
+
+    movies, _, details, queried = metadata
+    lib = Lib(source_db, tmp_path, content_kind="movie")
+    path = stamped_video(lib.root / "Alien.1979.mkv")
+    movies["Alien"] = response(status="unavailable")
+    lib.scan()
+    assert lib.items()[str(path)].identify_pending
+    monkeypatch.setattr(identify, "identify_item", lambda *args: pytest.fail("unchanged movie was reparsed"))
+
+    assert lib.scan().unchanged == 1
+    assert lib.items()[str(path)].identify_pending
+    movies["Alien"] = response(items=[title(601, "Alien", 1979)])
+    details["601"] = response(item=title(601, "Alien", 1979))
+    assert lib.scan().unchanged == 1
+    row = lib.items()[str(path)]
+    assert (row.identity_state, row.identify_pending, row.tmdb_id) == ("identified", 0, "601")
+    assert queried == [("movie", "Alien")] * 3
+
+
+def test_manual_source_job_hashes_scores_and_saves_a_shooter_result(source_db, tmp_path, metadata, monkeypatch, caplog):
+    from types import SimpleNamespace
+
+    from app.config import settings
+    from media_servers import dispatcher
+    from media_sources import indexer, repository, service
+    from media_source_helpers import add_profile
+    from subliminal_patch import core
+    from subliminal_patch.hashes import hash_shooter
+    from subliminal_patch.providers.shooter import ShooterProvider
+    from subliminal_patch.score import DEFAULT_SCORES
+    from subtitles import download, pool, processing, sync
+    from subzero.language import Language
+
+    caplog.set_level('DEBUG', logger='subliminal_patch')
+    english = Language('eng')
+    monkeypatch.setattr(indexer, 'get_language_set', lambda: {english})
+    monkeypatch.setitem(settings.general, 'skip_hashing', False)
+    monkeypatch.setitem(settings.general, 'single_language', False)
+    monkeypatch.setattr(pool, '_update_pool', lambda *args, **kwargs: False)
+    monkeypatch.setattr(download.subliminal, 'region', SimpleNamespace(backend=SimpleNamespace(sync=lambda: None)))
+    monkeypatch.setattr(service, 'get_providers', lambda: ['shooter'])
+    monkeypatch.setattr(service.jobs_queue, 'update_job_progress', lambda **kwargs: None)
+    monkeypatch.setattr(dispatcher, 'notify_subtitle_mutation', lambda event: None)
+    monkeypatch.setattr(processing, 'call_external_webhook', lambda *args, **kwargs: None)
+    monkeypatch.setattr(processing, '_defaul_sync_checker', lambda subtitle: False)
+    monkeypatch.setattr(sync, '_resolve_subsync_overrides', lambda *args, **kwargs: (True, False, 0, None, '60'))
+
+    lib = Lib(source_db, tmp_path)
+    profile = add_profile(source_db, [('en', 'False', 'False')])
+    repository.update_library(lib.library_id, source_db, profile_id=profile)
+    path = stamped_video(lib.root / 'Mystery Show' / 'recording.mkv')
+    with path.open('r+b') as media:
+        media.truncate(11 * 1024 * 1024)
+        media.seek(4096)
+        media.write(b'fixture bytes at the first Shooter hash offset')
+    lib.scan()
+    item = lib.items()[str(path)]
+    assert item.identity_state == 'unmatched' and item.missing_subtitles == "['en']"
+
+    requests = []
+    content = b'1\n00:00:01,000 --> 00:00:02,000\nA matching subtitle.\n'
+
+    def query(provider, language, filename, hash):
+        requests.append((language, filename, hash))
+        return [provider.subtitle_class(language, hash, 'https://example.invalid/subtitle')]
+
+    monkeypatch.setattr(ShooterProvider, 'initialize', lambda self: None)
+    monkeypatch.setattr(ShooterProvider, 'terminate', lambda self: None)
+    monkeypatch.setattr(ShooterProvider, 'query', query)
+    monkeypatch.setattr(ShooterProvider, 'download_subtitle', lambda self, subtitle: setattr(subtitle, 'content', content))
+    monkeypatch.setattr(core, 'provider_registry', {'shooter': ShooterProvider})
+    with core.SZProviderPool(['shooter']) as search_pool:
+        monkeypatch.setattr(download, '_get_pool', lambda *args, **kwargs: search_pool)
+        service.search_source_item(item.id, job_id=3)
+
+    assert requests == [(english, str(path), hash_shooter(path))]
+    assert path.with_suffix('.en.srt').read_bytes() == content
+    (saved,) = source_db.execute(repository.History.select()).all()
+    scores = DEFAULT_SCORES['episode']
+    assert saved.item_id == item.id and saved.provider == 'shooter'
+    assert saved.score == scores['hash'] + scores['hearing_impaired']

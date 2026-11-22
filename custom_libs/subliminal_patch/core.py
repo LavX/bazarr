@@ -588,16 +588,19 @@ def _hub_candidate_fails_forced_hi(subtitle, hearing_impaired):
             and subtitle.hearing_impaired is not True)
 
 
+# Verified standalone inputs for legacy providers. A provider can require a
+# hash and still perform coordinate-based searches, as NapiProjekt does.
+_UNLOCATED_EPISODE_FILE_SEARCH = frozenset(('embeddedsubtitles', 'whisperai'))
+_UNLOCATED_EPISODE_HASH_SEARCH = {'shooter': 'shooter', 'napisy24': 'napisy24'}
+
+
 def _accepts_unlocated_episode(provider, provider_class, video):
-    required_hash = getattr(provider_class, 'required_hash', None)
-    if required_hash:
-        return bool(video.hashes.get(required_hash))
     if getattr(provider_class, 'hub_proxy', False):
         return False
-    # The legacy Shooter adapter does not declare its hash requirement.
-    if provider == 'shooter':
-        return bool(video.hashes.get(provider))
-    return provider in ('embeddedsubtitles', 'whisperai')
+    hash_key = _UNLOCATED_EPISODE_HASH_SEARCH.get(provider)
+    if hash_key:
+        return bool(video.hashes.get(hash_key))
+    return provider in _UNLOCATED_EPISODE_FILE_SEARCH
 
 
 def _hub_search_languages(provider_class, languages):

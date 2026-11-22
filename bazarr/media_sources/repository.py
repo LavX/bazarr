@@ -272,7 +272,7 @@ def foreign_candidates(inodes, paths, library_id, target=None):
 
 def pending_movies(library_id, target=None):
     return _target(target).execute(
-        sa.select(Items.c.id, Items.c.path, Items.c.identity_source)
+        sa.select(Items.c.id, Items.c.identity_source, Items.c.parsed_title, Items.c.title, Items.c.year)
         .where(Items.c.library_id == library_id, Items.c.kind == 'movie', Items.c.identify_pending == 1)).all()
 
 
@@ -283,7 +283,7 @@ def _episode_needs_reparse():
 
 def pending_episode_parses(library_id, target=None):
     return _target(target).execute(
-        sa.select(Items.c.id, Items.c.path, Items.c.group_id, Groups.c.group_key)
+        sa.select(Items.c.id, Items.c.path, Items.c.kind, Items.c.library_id, Items.c.group_id, Groups.c.group_key)
         .select_from(Items.join(Groups, Items.c.group_id == Groups.c.id))
         .where(Items.c.library_id == library_id, Items.c.kind == 'episode', _episode_needs_reparse())).all()
 
@@ -293,13 +293,31 @@ def group_episode_paths(group_id, target=None):
         sa.select(Items.c.path).where(Items.c.group_id == group_id, Items.c.kind == 'episode')).scalars().all()
 
 
-def sync_episode_identities(connection, *, library_id=None, group_id=None, item_id=None):
-    """Refresh the episode state from its show without replacing item metadata."""
-    if library_id is not None:
-        # Lock in the same order as the identity endpoints: parent before episodes.
-        groups = sa.select(Groups.c.id).where(Groups.c.library_id == library_id, Groups.c.kind == 'show')
-        connection.execute(groups.order_by(Groups.c.id).with_for_update(key_share=True)).all()
+def write_episode_identity(connection, group_id, save, *, previous_group_id=None, group_key=None):
+    """Lock the affected shows, then save and refresh the episode before commit."""
+    group_ids = {group_id}
+    if previous_group_id is not None:
+        group_ids.add(previous_group_id)
+    statement = sa.select(Groups.c.id, Groups.c.group_key).where(Groups.c.id.in_(group_ids))
+    shows = dict(connection.execute(statement.order_by(Groups.c.id).with_for_update(key_share=True)).all())
+    if group_id not in shows or (group_key is not None and shows[group_id] != group_key):
+        return None
+    item_id = save()
+    if item_id is not None:
+        sync_episode_identities(connection, item_id=item_id)
+    return item_id
 
+
+def update_show_identity(group_id, connection, **values):
+    """Write the show identity and its dependent episode states in one transaction."""
+    updated = update_group(group_id, connection, **values)
+    if updated:
+        sync_episode_identities(connection, group_id=group_id)
+    return updated
+
+
+def sync_episode_identities(connection, *, group_id=None, item_id=None):
+    """Refresh episode state with the parent locked by the caller."""
     group = sa.select(Groups).where(Groups.c.id == Items.c.group_id)
     group_state = group.with_only_columns(Groups.c.identity_state).scalar_subquery()
     # Keep unlocated legacy rows queued until their filenames have been parsed,
@@ -316,8 +334,6 @@ def sync_episode_identities(connection, *, library_id=None, group_id=None, item_
                                        sa.or_(Items.c.identity_state != state, Items.c.identify_pending != pending))
     if group_id is not None:
         statement = statement.where(Items.c.group_id == group_id)
-    if library_id is not None:
-        statement = statement.where(Items.c.library_id == library_id)
     if item_id is not None:
         statement = statement.where(Items.c.id == item_id)
     connection.execute(statement.values(identity_state=state, identify_pending=pending, updated_at=datetime.now()))
@@ -362,11 +378,13 @@ def insert_item(target=None, **values):
 
 
 def update_item(item_id, target=None, *, owner_library_id=None, only_automatic=False,
-                protect_user=(), **values):
+                protect_user=(), previous_group_id=None, **values):
     values['updated_at'] = datetime.now()
     statement = sa.update(Items).where(Items.c.id == item_id)
     if owner_library_id is not None:
         statement = statement.where(Items.c.library_id == owner_library_id)
+    if previous_group_id is not None:
+        statement = statement.where(Items.c.group_id == previous_group_id)
     if only_automatic:
         statement = statement.where(Items.c.identity_source != 'user')
     return _target(target).execute(statement.values(**_protect_user(Items, values, protect_user))).rowcount

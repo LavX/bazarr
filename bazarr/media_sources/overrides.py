@@ -48,7 +48,6 @@ def _already_selected(row, candidate_id):
 
 def override_identity(row_id, body, *, group=False):
     getter = repository.get_group if group else repository.get_item
-    update = repository.update_group if group else repository.update_item
     if not isinstance(body, dict) or not body:
         raise SourceError('Provide a JSON object with an identity correction.')
     candidate_id = candidate = None
@@ -88,9 +87,10 @@ def override_identity(row_id, body, *, group=False):
             if row.kind not in ('movie', 'show', 'episode') or body.keys() - allowed:
                 raise SourceError('This title does not support one or more of those identity fields.')
             values = _manual_values(body, row)
-        update(row_id, connection, **values)
         if group:
-            repository.sync_episode_identities(connection, group_id=row_id)
-        elif row.kind == 'episode':
-            repository.sync_episode_identities(connection, item_id=row_id)
+            repository.update_show_identity(row_id, connection, **values)
+        else:
+            repository.update_item(row_id, connection, **values)
+            if row.kind == 'episode':
+                repository.sync_episode_identities(connection, item_id=row_id)
         return getter(row_id, connection)
