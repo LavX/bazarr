@@ -649,6 +649,69 @@ def test_source_read_cannot_start_without_full_enforcement(host, client, monkeyp
     assert worker._sandbox_failed_open is False
 
 
+@pytest.mark.parametrize("close", ["cancel", "stop"])
+def test_scoped_worker_does_not_launch_after_close_during_policy_preparation(host, client, monkeypatch, close):
+    probe = SandboxProbe(abi=3, verified=True)
+    monkeypatch.setattr("provider_hub.sandbox.probe_sandbox", lambda: probe)
+    worker, grant = client(), _standalone_file(host)
+
+    def prepare(*args, **kwargs):
+        getattr(worker, close)()
+        return object()
+
+    monkeypatch.setattr(worker_module, "provider_spec", prepare)
+    monkeypatch.setattr("provider_hub.sandbox.spawn_worker",
+                        lambda *args, **kwargs: pytest.fail("a closed client tried to launch a scoped worker"))
+
+    error = worker_module.WorkerCancelled if close == "cancel" else worker_module.SourceMediaRefused
+    with pytest.raises(error, match="worker client is stopped"):
+        worker.request("search", source_media=lambda: grant)
+    assert worker.process is None
+
+
+def test_scoped_launch_publishes_the_handle_before_start_resumes(host, client, monkeypatch):
+    probe = SandboxProbe(abi=3, verified=True)
+    monkeypatch.setattr("provider_hub.sandbox.probe_sandbox", lambda: probe)
+    worker, grant = client(), _standalone_file(host)
+    launched = object()
+    cut = []
+
+    def launch(*args, **kwargs):
+        assert worker._launch_lock.locked()
+        return launched
+
+    def kill():
+        assert not worker._launch_lock.locked()
+        cut.append(worker.process)
+
+    monkeypatch.setattr(worker_module, "provider_spec", lambda *args, **kwargs: object())
+    monkeypatch.setattr("provider_hub.sandbox.spawn_worker", launch)
+    monkeypatch.setattr(worker, "_has_exited", lambda process: bool(cut))
+    monkeypatch.setattr(worker, "_kill_worker", kill)
+
+    assert worker._spawn({}, source_media=grant) is launched
+    worker.cancel()
+    assert cut == [launched]
+
+
+@pytest.mark.parametrize("cancelled", [False, True])
+def test_unavailable_scoped_archive_selector_keeps_its_item_exclusion(monkeypatch, cancelled):
+    worker = ProviderWorkerClient(["fixture"])
+    worker.process = object()
+
+    def observe_exit(process):
+        assert process is worker.process
+        if cancelled:
+            # Model a cut observed after the selector's first closed check.
+            worker._closed = worker._cancelled = True
+        return True
+
+    monkeypatch.setattr(worker, "_has_exited", observe_exit)
+    error = worker_module.WorkerCancelled if cancelled else worker_module.SourceMediaRefused
+    with pytest.raises(error, match="before archive selection"):
+        worker._request_locked("select_archive_member", {}, 1.0, process=worker.process)
+
+
 def test_source_read_never_retries_without_a_failed_ruleset(host, client, monkeypatch):
     _enforcing_kernel(spawn_module.MIN_ENFORCED_ABI)
     # A deliberately impossible ABI makes the local launcher refuse its own ruleset.

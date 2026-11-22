@@ -16,6 +16,7 @@ import time
 import uuid
 
 from collections.abc import Callable
+from contextlib import nullcontext
 from dataclasses import dataclass
 from decimal import Decimal
 from pathlib import Path
@@ -618,6 +619,9 @@ class ProviderWorkerClient:
         # monotonic timestamp of the last request, read by reap_idle_workers
         self.last_used: float = time.monotonic()
         self._lock = threading.Lock()
+        # Close and scoped launch publication are mutually exclusive. Policy
+        # preparation and worker shutdown stay outside this lock.
+        self._launch_lock = threading.Lock()
         # Set while no gated request on this worker is waiting for its outcome
         # to be recorded. A gated request clears it right before it writes and
         # the pool sets it again, through outcome_recorded(), once the backoff
@@ -676,8 +680,10 @@ class ProviderWorkerClient:
             env.update(self.env)
 
         self.last_used = time.monotonic()
-        options = {"source_media": source_media} if source_media is not None else {}
-        self.process = self._spawn(env, **options)
+        if source_media is None:
+            self.process = self._spawn(env)
+        else:
+            self._spawn(env, source_media=source_media)  # Published at launch under _launch_lock.
         if self._is_launcher(self.process):
             # Every launcher this client started stays on the list until it has confirmed its cleanup:
             # a respawn must not make the previous launcher's descendants forgotten.
@@ -804,17 +810,22 @@ class ProviderWorkerClient:
         def start():
             options = {"source_media": source_media} if source_media is not None else {}
             spec = provider_spec(layout, self.command, self.cwd, self.env, **options)
-            process = spawn_worker(
-                spec,
-                probe=probe,
-                minimum_abi=minimum_abi,
-                require_sandbox=source_media is not None,
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-            )
-            self._sandbox_layout = layout
+            with self._launch_lock if source_media is not None else nullcontext():
+                if source_media is not None and self._closed:
+                    raise self._closed_worker_error("worker client is stopped")
+                process = spawn_worker(
+                    spec,
+                    probe=probe,
+                    minimum_abi=minimum_abi,
+                    require_sandbox=source_media is not None,
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                )
+                self._sandbox_layout = layout
+                if source_media is not None:
+                    self.process = process
             return process
 
         return start
@@ -1203,11 +1214,12 @@ class ProviderWorkerClient:
     def stop(self, grace_seconds: float = 5.0) -> None:
         # Closed first, on every path, then the latch is set so that a gated
         # request waiting on it wakes, sees the mark and gives up.
-        self._closed = True
+        with self._launch_lock:
+            self._closed = True
+            process = self.process
         latch = getattr(self, "_outcome_latch", None)
         if latch is not None:
             latch.set()
-        process = self.process
         if not process or self._has_exited(process):
             if process is not None and getattr(process, "returncode", 0) is None:
                 # Exited but not yet reaped: its group id is still reserved, so
@@ -1314,13 +1326,14 @@ class ProviderWorkerClient:
         flight reports cancellation when the host can attribute the interruption to the cut.
         Never starts a process and never raises.
         """
-        self._cancelled = True
-        self._closed = True
-        self._host_calls = {}
+        with self._launch_lock:
+            self._cancelled = True
+            self._closed = True
+            self._host_calls = {}
+            process = self.process
         latch = getattr(self, "_outcome_latch", None)
         if latch is not None:
             latch.set()
-        process = self.process
         try:
             # A directly observed worker must still be alive when the cut
             # starts. A live launcher can already be cleaning up an exited
@@ -1621,7 +1634,10 @@ class ProviderWorkerClient:
         # A bound archive selector may speak only to the worker that downloaded
         # its archive. It cannot launch or fall back to a different process.
         if process is not None and (self.process is not process or self._has_exited(process)):
-            raise WorkerError("the source media worker closed before archive selection")
+            message = "the source media worker closed before archive selection"
+            if self._cancelled:
+                raise WorkerCancelled(message)
+            raise SourceMediaRefused(message)
         if op == "shutdown" and not (self.process is not None and not self._has_exited(self.process)):
             raise WorkerError("worker is not running")
         request_id = str(uuid.uuid4())
@@ -1640,7 +1656,7 @@ class ProviderWorkerClient:
         # ruleset. Source media is never sent to an unsandboxed worker.
         for attempt in (0, 1):
             worker_started = process is None and self.start(**launch_options) is True
-            if source_media is not None and getattr(self, "_closed", False):
+            if (source_media is not None or process is not None) and self._closed:
                 raise self._closed_worker_error("worker client is stopped")
             provider_id = getattr(self, "provider_id", None)
             status_generation = runtime_status.generation(provider_id) if provider_id is not None else None
