@@ -196,16 +196,13 @@ export function useRestartAware() {
     }
   }, [snapshot, state, isFetchedAfterMount, installationsFetched, refetch]);
 
-  // The entry reply from Translation is newer than a pre-entry installation cache.
-  const visibleSnapshot =
-    query.isSuccess && isFetchedAfterMount && !installationsFetched
-      ? undefined
-      : snapshot;
+  const freshEntry =
+    query.isSuccess && isFetchedAfterMount && !installationsFetched;
   const view = useMemo(() => {
-    if (!state || !visibleSnapshot) {
-      return { state, waiting: visibleSnapshot?.changes.size ?? 0 };
+    if (!state || !snapshot) {
+      return { state, waiting: snapshot?.changes.size ?? 0 };
     }
-    const { changes, removing, engineRows } = visibleSnapshot;
+    const { changes, removing, engineRows } = snapshot;
     const mark = <T extends { plugin_id: string }>(engine: T): T => {
       const change = changes.get(engine.plugin_id);
       return change ? { ...engine, awaiting_restart: change } : engine;
@@ -230,14 +227,25 @@ export function useRestartAware() {
         official: false,
       };
     });
-    const available = state.available_engines
-      ?.filter(
-        (offer) =>
-          !removing.has(offer.plugin_id) &&
-          (!engineRows.get(offer.plugin_id)?.active_version ||
-            changes.has(offer.plugin_id)),
+    const available = state.available_engines?.flatMap((offer) => {
+      const row = engineRows.get(offer.plugin_id);
+      // A returned catalog offer can outlive a draining row in the pre-entry cache.
+      if (
+        freshEntry &&
+        row?.state === "removed" &&
+        !state.instances.some(
+          (engine) =>
+            engine.plugin_id === offer.plugin_id && engine.plugin?.active,
+        )
       )
-      .map(mark);
+        return [offer];
+      if (
+        removing.has(offer.plugin_id) ||
+        (row?.active_version && !changes.has(offer.plugin_id))
+      )
+        return [];
+      return [mark(offer)];
+    });
     const usablePointer = (id: number | null) =>
       instances.some((engine) => engine.id === id && engineSelectable(engine))
         ? id
@@ -256,6 +264,6 @@ export function useRestartAware() {
       // data has no engine left, and a plugin whose release is still active is in neither list.
       waiting: changes.size,
     };
-  }, [state, visibleSnapshot]);
+  }, [state, snapshot, freshEntry]);
   return { ...query, data: view.state, waiting: view.waiting };
 }

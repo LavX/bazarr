@@ -2737,6 +2737,101 @@ describe("Translation page, an engine installed and waiting for a restart", () =
     expect(screen.queryByText(/waiting for a restart/)).not.toBeInTheDocument();
   });
 
+  it.each(["Translation", "installations"])(
+    "keeps cached disable and restart safeguards when %s answers first on reentry",
+    async (firstReply) => {
+      const held = gate();
+      let returning = false;
+      const ai = engine({
+        configured: false,
+        connections: engine().connections.map((item) => ({
+          ...item,
+          usable: false,
+        })),
+      });
+      state = { ...state, engine: second.id, instances: [second, ai] };
+      const rows = [
+        ...engineInstallations([second]),
+        { ...engineInstallations([ai])[0], enabled: false },
+        {
+          provider_id: "retiring",
+          kind: "translator",
+          state: "removed",
+          active_version: "1.0.0",
+          needs_restart: true,
+        },
+      ];
+      const stateKey = [QueryKeys.Translation, "state"];
+      const installationsKey = [
+        QueryKeys.Plugins,
+        "installations",
+        QueryKeys.All,
+      ];
+      server.use(
+        http.get("/api/translation/state", async () => {
+          if (returning && firstReply === "installations") await held.opened;
+          return HttpResponse.json(state);
+        }),
+        http.get("/api/plugins/installations", async () => {
+          if (returning && firstReply === "Translation") await held.opened;
+          return HttpResponse.json({ data: rows });
+        }),
+        http.put("/api/translation/pointers", async ({ request }) => {
+          record("put", "pointers", await request.json());
+          return HttpResponse.json({
+            engine: ai.id,
+            fallback_engine: null,
+            notices: [],
+          });
+        }),
+      );
+
+      const { unmount } = customRender(<TranslationView />);
+      await screen.findByText("Plugin off");
+      unmount();
+      returning = true;
+      const user = userEvent.setup();
+      try {
+        const group = await showPage();
+        const firstKey =
+          firstReply === "Translation" ? stateKey : installationsKey;
+        await waitFor(() =>
+          expect(queryClient.getQueryState(firstKey)?.dataUpdateCount).toBe(2),
+        );
+        const disabled = within(group).getByRole("radio", {
+          name: /AI Subtitle Translator/,
+        });
+        await user.click(disabled);
+        expect(calls).toEqual([]);
+        expect(disabled).toBeDisabled();
+        expect(
+          within(group).getByRole("radio", { name: "Google Translate" }),
+        ).toBeChecked();
+        expect(
+          screen.getByRole("button", { name: "Restart Bazarr now" }),
+        ).toBeEnabled();
+        const fallback = screen.getByRole("combobox", {
+          name: "Fallback engine",
+        });
+        await user.click(fallback);
+        const listbox = screen
+          .getAllByRole("listbox", { hidden: true })
+          .find(
+            (box) =>
+              box.getAttribute("id") === fallback.getAttribute("aria-controls"),
+          )!;
+        expect(
+          within(listbox).queryByRole("option", {
+            name: /AI Subtitle Translator/,
+            hidden: true,
+          }),
+        ).not.toBeInTheDocument();
+      } finally {
+        held.open();
+      }
+    },
+  );
+
   it("clears a primary disabled in the Plugin Hub and keeps its settings and update available", async () => {
     const response = gate();
     let holdResponse = false;
