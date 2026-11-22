@@ -468,7 +468,7 @@ def list_all_subtitles_parallel(videos, languages, pool_instance,
         wall is enforced by cpython itself, not by a per-iteration check.
       - On wall expiry, any future that finished before the wall but was
         not yet yielded is harvested (no results dropped); futures still
-        running are reported as "abandoned" via on_result and registered
+        running are reported as "abandoned" via on_outcome and registered
         in the module-level abandoned set so they remain observable.
       - A future still queued when the wall fires is cancelled and
         reported as "not_started". It never reached a worker, so it made
@@ -496,7 +496,9 @@ def list_all_subtitles_parallel(videos, languages, pool_instance,
       wall_timeout: hard budget for the whole fanout, in seconds.
       exclude_providers: iterable of provider names to skip entirely.
       on_result: optional callable ``(name, outcome, latency_ms) -> None``
-        invoked exactly once per non-excluded provider. Outcomes:
+        reports health when there is an outcome for the current owner.
+        Skipped searches and abandonment before a provider is called have no
+        health outcome. Outcomes:
         ``"ok"`` (returned within per_provider_timeout),
         ``"slow"`` (returned, but over threshold),
         ``"exception"`` (raised),

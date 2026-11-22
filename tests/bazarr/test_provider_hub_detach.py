@@ -1959,15 +1959,20 @@ def test_a_throttle_write_rechecks_ownership_after_classifying_the_error(world, 
     assert BUILT_IN not in get_providers.throttle_count
 
 
-@pytest.mark.parametrize("cancel_timing", ["never", "before_eof", "after_eof", "exited_before_eof"])
+@pytest.mark.parametrize("cancel_timing", [
+    "never", "before_eof", "after_eof", "exited_before_eof", "launcher_cleanup", "launcher_cut",
+])
 def test_worker_eof_keeps_its_cause_until_the_request_consumes_it(monkeypatch, cancel_timing):
     from io import StringIO
     from types import SimpleNamespace
 
-    from provider_hub import worker
+    from provider_hub import sandbox, worker
 
     close_stdout, queued_eof, consume_eof = threading.Event(), threading.Event(), threading.Event()
     exited = threading.Event()
+    child_exited = threading.Event()
+    killed_live_child = []
+    supervised = cancel_timing.startswith("launcher")
 
     class Pipe:
         def readline(self, size):
@@ -1981,12 +1986,21 @@ def test_worker_eof_keeps_its_cause_until_the_request_consumes_it(monkeypatch, c
             assert consume_eof.wait(WAIT)
             return chunk
 
+    class Launcher(SimpleNamespace):
+        def poll(self):
+            return 1 if exited.is_set() else None
+
     client = worker.ProviderWorkerClient(["fake"], provider_id=PLUGIN)
-    process = SimpleNamespace(stdin=StringIO(), stdout=Pipe(), stderr=None, pid=8888)
+    process_type = Launcher if supervised else SimpleNamespace
+    process = process_type(stdin=StringIO(), stdout=Pipe(), stderr=None, pid=8888)
+    monkeypatch.setattr(sandbox, "LauncherProcess", Launcher)
     monkeypatch.setattr(worker, "_BoundedChunks", ReplyQueue)
     monkeypatch.setattr(client, "_spawn", lambda env: process)
 
     def kill():
+        if supervised:
+            killed_live_child.append(not child_exited.is_set())
+            child_exited.set()
         exited.set()
         close_stdout.set()
 
@@ -1997,8 +2011,14 @@ def test_worker_eof_keeps_its_cause_until_the_request_consumes_it(monkeypatch, c
         assert _wait_for(lambda: client.process is process)
         if cancel_timing == "before_eof":
             client.cancel()
-        elif cancel_timing == "exited_before_eof":
-            exited.set()
+        elif cancel_timing in ("exited_before_eof", "launcher_cleanup", "launcher_cut"):
+            if cancel_timing == "exited_before_eof":
+                exited.set()
+            if cancel_timing == "launcher_cleanup":
+                child_exited.set()
+            # In launcher_cleanup the child has already exited while its
+            # supervisor is still alive, and the reader has not queued EOF.
+            # The host sees the same supervisor state in launcher_cut.
             client.cancel()
         else:
             exited.set()
@@ -2013,6 +2033,61 @@ def test_worker_eof_keeps_its_cause_until_the_request_consumes_it(monkeypatch, c
 
     error_type = worker.WorkerCancelled if cancel_timing == "before_eof" else worker.WorkerError
     assert type(result["error"]) is error_type
+    if supervised:
+        assert killed_live_child == [cancel_timing == "launcher_cut"]
+        # An operation that reaches an explicitly closed client does have
+        # affirmative evidence that the host refused to send it.
+        with pytest.raises(worker.WorkerCancelled):
+            client.request("search")
+
+
+@pytest.mark.parametrize("cut_first", [False, True], ids=["failed-before-cut", "failed-during-cut"])
+@pytest.mark.parametrize("supervised", [False, True], ids=["direct", "launcher"])
+def test_the_host_reply_writer_preserves_the_cancellation_state_it_observed(monkeypatch, cut_first, supervised):
+    from types import SimpleNamespace
+
+    from provider_hub import sandbox, worker
+
+    client = worker.ProviderWorkerClient(["fake"], provider_id=PLUGIN)
+    exited = False
+
+    class Pipe:
+        def write(self, text):
+            if cut_first:
+                client.cancel()
+            raise BrokenPipeError("the worker's input closed")
+
+    class ReplyThread:
+        def __init__(self, *, target, **kwargs):
+            self.write = target
+
+        def start(self):
+            self.write()
+
+        def join(self, timeout):
+            if not cut_first:
+                client.cancel()
+
+        def is_alive(self):
+            return False
+
+    def kill():
+        nonlocal exited
+        exited = True
+
+    class Launcher(SimpleNamespace):
+        pass
+
+    process_type = Launcher if supervised else SimpleNamespace
+    client.process = process_type(stdin=Pipe(), poll=lambda: 1 if exited else None)
+    monkeypatch.setattr(sandbox, "LauncherProcess", Launcher)
+    monkeypatch.setattr(client, "_kill_worker", kill)
+    monkeypatch.setattr(worker, "threading", SimpleNamespace(Thread=ReplyThread))
+    expected = worker.WorkerCancelled if cut_first and not supervised else worker.WorkerError
+    with pytest.raises(expected) as failure:
+        client._send_reply("answer", time.monotonic() + WAIT)
+    assert type(failure.value) is expected
+    assert isinstance(failure.value.__cause__, BrokenPipeError)
 
 
 @pytest.mark.parametrize("detailed", [True, False])

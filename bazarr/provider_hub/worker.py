@@ -1259,7 +1259,8 @@ class ProviderWorkerClient:
         ``stop`` asks the worker to shut down through the same lock a request holds, so it waits for the request
         to end. This is for a release that must not run another second (a revoked one): the client is closed, so
         nothing is sent or respawned on it, and the process and everything it started are killed. The request in
-        flight reports cancellation if the cut interrupts its transport. Never starts a process and never raises.
+        flight reports cancellation when the host can attribute the interruption to the cut.
+        Never starts a process and never raises.
         """
         self._cancelled = True
         self._closed = True
@@ -1269,10 +1270,10 @@ class ProviderWorkerClient:
             latch.set()
         process = self.process
         try:
-            # The transport attributes EOF to cancellation only for a process
-            # observed alive when the cut begins. An exit already visible here
-            # remains a worker failure even if the reader has not queued EOF.
-            if process is not None and not self._has_exited(process):
+            # A directly observed worker must still be alive when the cut
+            # starts. A live launcher can already be cleaning up an exited
+            # child, so its liveness cannot explain the worker's pipe failure.
+            if process is not None and not self._is_launcher(process) and not self._has_exited(process):
                 self._cut_process = process
             self._kill_worker()
         except Exception:
@@ -1347,14 +1348,15 @@ class ProviderWorkerClient:
         ends the write. The request's lock is therefore never held for longer than that wait.
         """
         process = self.process
-        failures: list[BaseException] = []
+        failures: list[tuple[BaseException, bool]] = []
 
         def write():
             try:
                 process.stdin.write(text)
                 process.stdin.flush()
             except BaseException as error:  # reported by the caller
-                failures.append(error)
+                cut = isinstance(error, BrokenPipeError) and getattr(self, "_cut_process", None) is process
+                failures.append((error, cut))
 
         thread = threading.Thread(target=write, name="provider-host-reply", daemon=True)
         thread.start()
@@ -1364,11 +1366,9 @@ class ProviderWorkerClient:
             thread.join(5.0)
             raise WorkerError("worker did not read the host's answer to its call")
         if failures:
-            error = failures[0]
-            message = "worker closed while the host answered its call"
-            if isinstance(error, BrokenPipeError) and getattr(self, "_cut_process", None) is process:
-                raise WorkerCancelled(message) from error
-            raise WorkerError(message) from error
+            error, cut = failures[0]
+            error_type = WorkerCancelled if cut else WorkerError
+            raise error_type("worker closed while the host answered its call") from error
 
     def _answer_host_call(self, call: dict, deadline: float) -> dict:
         """Run one call and shape the outcome. Never raises, and says nothing the plugin may not see."""
