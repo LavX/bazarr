@@ -676,6 +676,7 @@ def test_default_srt_rendering_preserves_dialogue_without_alignment_override(dia
 @pytest.mark.parametrize("lines, expected", [
     (["(door creaks)", "(footsteps)"], None),
     (["<i>(door creaks)</i>", "<i>(footsteps)</i>"], None),
+    (["[DRAMATIC ORCHESTRAL", "MUSIC PLAYING]"], None),
     (["♪ When the night has come", "And the land is dark"], None),
     (["♪ Some lyrics ♪", "Do <i>not</i> leave."], ["♪ Some lyrics ♪", "Do <i>not</i> leave."]),
     (["<i>♪ Some lyrics ♪</i>", "<i>Do not leave.</i>"], ["<i>Do not leave.</i>"]),
@@ -686,6 +687,23 @@ def test_default_srt_rendering_preserves_dialogue_without_alignment_override(dia
 def test_aligned_multiline_cues_remove_only_supported_hi_content(lines, expected, render):
     srt = _pair_srt([r"{\an8}" + lines[0], *lines[1:]])
     output = render(srt, ["remove_HI"])
+    assert _cue_text(output) == expected
+    assert "Hallo." in output
+
+
+@pytest.mark.parametrize("lines", [
+    ["[door creaks]", "Please stay here.", "[footsteps]"],
+    ["♪", "Please stay here."],
+    ["Please stay here.", "♪"],
+    ["Please stay here.", "Lyrics ♪"],
+])
+@pytest.mark.parametrize("mods", MODS)
+def test_aligned_multiline_hi_cannot_remove_separate_speech(lines, mods, render):
+    if "Lyrics ♪" in lines and "keep_lyrics" in mods[0]:
+        expected = ["Please stay here.", "Lyrics ♪"]
+    else:
+        expected = ["Please stay here."]
+    output = render(_pair_srt([r"{\an8}" + lines[0], *lines[1:]]), mods)
     assert _cue_text(output) == expected
     assert "Hallo." in output
 

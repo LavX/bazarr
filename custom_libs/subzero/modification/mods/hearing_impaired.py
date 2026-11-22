@@ -37,9 +37,25 @@ class CapsCueProcessor(NReProcessor):
 # as real content rather than pure decoration.
 _HI_CONTENT_RE = re.compile(r'[^\W_]', re.UNICODE)
 _MUSIC_SYMBOL_RE = re.compile(r'[*#¶♫♪]')
+_MUSIC_PREFIX_RE = re.compile(r"[-\s>~]*" + _MUSIC_SYMBOL_RE.pattern + "+")
+_BRACKET_SPAN = r"[ \t]*-?[ \t]*(?:\[[^\[\]]+\]|\([^()]+\))"
+_BRACKETED_CUE_RE = re.compile(rf"{_BRACKET_SPAN}(?:[ \t]*{re.escape(LINE_BREAK)}{_BRACKET_SPAN})*[ \t]*")
 # SSA/ASS override tags ({\i1}, {\an8}, {\c&H..&}, ...) carry letters/digits that
 # must not be mistaken for lyric content when testing a line.
 _OVERRIDE_TAG_RE = re.compile(r'\{[^}]*\}')
+
+
+def has_whole_cue_hi_span(entry):
+    """Whether an understood aligned cue has a bracket group or open lyric covering it."""
+    if _BRACKETED_CUE_RE.fullmatch(entry):
+        return True
+
+    first_line = entry.partition(LINE_BREAK)[0]
+    marker = _MUSIC_PREFIX_RE.match(first_line)
+    if marker is None:
+        return False
+    lyric = first_line[marker.end():]
+    return _HI_CONTENT_RE.search(lyric) is not None and _MUSIC_SYMBOL_RE.search(lyric) is None
 
 
 class MusicEntryProcessor(NReProcessor):
@@ -60,7 +76,7 @@ class MusicEntryProcessor(NReProcessor):
     subtitle convention and are removed earlier by HI_brackets.
     See https://github.com/LavX/bazarr/issues/225
     """
-    def process(self, content, debug=False, keep_lyrics=None, aligned=False, entry=None, **kwargs):
+    def process(self, content, debug=False, keep_lyrics=None, **kwargs):
         if keep_lyrics:
             text = content or ""
             # Only music-note lines are in this processor's scope; leave anything
@@ -74,14 +90,7 @@ class MusicEntryProcessor(NReProcessor):
             # letters/digits (e.g. {\i1}) are not counted as content.
             stripped = _OVERRIDE_TAG_RE.sub('', text)
             return content if _HI_CONTENT_RE.search(stripped) else ""
-        if aligned and entry and LINE_BREAK in entry:
-            first_line = entry.split(LINE_BREAK, 1)[0].strip("- \t>~")
-            if (len(first_line) > 1 and first_line[0] == first_line[-1]
-                    and _MUSIC_SYMBOL_RE.match(first_line)):
-                # The first lyric line closes its own marker. Applying the
-                # entry-wide rule here would also erase any following speech.
-                return self.pattern.sub(self.replace_with, content)
-        return super(MusicEntryProcessor, self).process(content, debug=debug, entry=entry, **kwargs)
+        return super(MusicEntryProcessor, self).process(content, debug=debug, **kwargs)
 
 
 class HearingImpaired(SubtitleTextModification):

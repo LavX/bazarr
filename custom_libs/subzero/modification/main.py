@@ -8,6 +8,7 @@ import logging
 import time
 
 from .mods import EMPTY_TAG_PROCESSOR
+from .mods.hearing_impaired import has_whole_cue_hi_span
 from .markup import unwrap_entry
 from .exc import EmptyEntryError
 from .registry import registry
@@ -322,7 +323,10 @@ class SubtitleModifications(object):
 
             original_entry = wrapped.entry_for_rules if wrapped is not None else None
             entry_for_rules = original_entry if original_entry is not None else t
-            aligned = wrapped is not None and bool(wrapped.alignment)
+            # Normalizing an alignment tag must not let a rule cross from one
+            # marked line into separate dialogue.
+            line_scoped = (wrapped is not None and bool(wrapped.alignment) and original_entry is None
+                           and len(line_split) > 1 and not has_whole_cue_hi_span(t))
             skip_entry = False
             origins = []
             for line_no, line in enumerate(line_split):
@@ -346,6 +350,7 @@ class SubtitleModifications(object):
                     end_tag = line[-5:]
                     line = line[:-5]
 
+                rule_entry = line.strip() if line_scoped else entry_for_rules
                 last_procs_mods = []
 
                 # fixme: this double loop is ugly
@@ -353,13 +358,13 @@ class SubtitleModifications(object):
                     mod = self.initialized_mods[identifier]
 
                     try:
-                        line = mod.modify(line.strip(), entry=entry_for_rules, debug=self.debug, parent=self,
+                        line = mod.modify(line.strip(), entry=rule_entry, debug=self.debug, parent=self,
                                           index=index, protect_caps_dialogue=original_entry is not None and line_no == 0,
                                           **args)
                     except EmptyEntryError:
                         if self.debug:
-                            logger.debug(u"%d: %s: %r -> ''", index, identifier, t)
-                        skip_entry = True
+                            logger.debug(u"%d: %s: %r -> ''", index, identifier, rule_entry)
+                        skip_entry, skip_line = not line_scoped, line_scoped
                         break
 
                     if not line:
@@ -383,12 +388,12 @@ class SubtitleModifications(object):
                     mod = self.initialized_mods[identifier]
 
                     try:
-                        line = mod.modify(line.strip(), entry=entry_for_rules, debug=self.debug, parent=self,
-                                          index=index, procs=["last_process"], aligned=aligned, **args)
+                        line = mod.modify(line.strip(), entry=rule_entry, debug=self.debug, parent=self,
+                                          index=index, procs=["last_process"], **args)
                     except EmptyEntryError:
                         if self.debug:
-                            logger.debug(u"%d: %s: %r -> ''", index, identifier, t)
-                        skip_entry = True
+                            logger.debug(u"%d: %s: %r -> ''", index, identifier, rule_entry)
+                        skip_entry, skip_line = not line_scoped, line_scoped
                         break
 
                     if not line:
