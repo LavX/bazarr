@@ -2362,7 +2362,12 @@ describe("Translation page, an engine installed and waiting for a restart", () =
   it("keeps the restart prompt for a removal that deleted its data, when no engine of the plugin is left", async () => {
     // The engine rows go with the data at once, and the removed row keeps its release until the restart,
     // so neither the engines nor the catalog's offers name the plugin any more.
-    state = { ...state, instances: [second], available_engines: [] };
+    state = {
+      ...state,
+      engine: second.id,
+      instances: [second],
+      available_engines: [],
+    };
     waitingFor({
       state: "removed",
       active_version: "1.0.0",
@@ -2486,7 +2491,8 @@ describe("Translation page, an engine installed and waiting for a restart", () =
   });
 
   it("keeps a removed engine unavailable after its installation disappears and Translation state stays cached", async () => {
-    let stateReads = 0;
+    const response = gate();
+    let holdResponse = false;
     state = {
       ...state,
       engine: 2,
@@ -2498,8 +2504,8 @@ describe("Translation page, an engine installed and waiting for a restart", () =
       ],
     };
     server.use(
-      http.get("/api/translation/state", () => {
-        stateReads++;
+      http.get("/api/translation/state", async () => {
+        if (holdResponse) await response.opened;
         return HttpResponse.json(state);
       }),
     );
@@ -2532,45 +2538,53 @@ describe("Translation page, an engine installed and waiting for a restart", () =
       ),
     );
     // The installation poll sees the completed uninstall. Translation state is still cached.
-    await queryClient.invalidateQueries({
-      queryKey: [QueryKeys.Plugins, "installations"],
-    });
-    await waitFor(() =>
-      expect(within(group).queryByText("Removing")).not.toBeInTheDocument(),
-    );
-    expect(
-      within(listbox).queryByRole("option", {
-        name: /AI Subtitle Translator/,
-        hidden: true,
-      }),
-    ).not.toBeInTheDocument();
-    expect(
-      within(listbox).getByRole("option", { name: "Lingarr", hidden: true }),
-    ).toBeInTheDocument();
-    expect(input).toHaveValue("None");
-    expect(within(group).getByText("Plugin not running")).toBeVisible();
-    expect(
-      within(group).getByText(/Repair or reinstall it in the Plugin Hub/),
-    ).toBeVisible();
-    expect(
-      within(group).getByRole("radio", { name: /AI Subtitle Translator/ }),
-    ).toBeDisabled();
-    expect(
-      within(group).queryByRole("link", { name: "Update available" }),
-    ).not.toBeInTheDocument();
-    expect(
-      within(group).queryByRole("button", {
-        name: "Set up AI Subtitle Translator",
-      }),
-    ).not.toBeInTheDocument();
-    expect(within(group).getByRole("radio", { name: /Lingarr/ })).toBeEnabled();
-    expect(
-      within(group).getByRole("radio", { name: "Google Translate" }),
-    ).toBeEnabled();
-    expect(stateReads).toBe(1);
+    holdResponse = true;
+    try {
+      await queryClient.invalidateQueries({
+        queryKey: [QueryKeys.Plugins, "installations"],
+      });
+      await waitFor(() =>
+        expect(within(group).queryByText("Removing")).not.toBeInTheDocument(),
+      );
+      expect(
+        within(listbox).queryByRole("option", {
+          name: /AI Subtitle Translator/,
+          hidden: true,
+        }),
+      ).not.toBeInTheDocument();
+      expect(
+        within(listbox).getByRole("option", { name: "Lingarr", hidden: true }),
+      ).toBeInTheDocument();
+      expect(input).toHaveValue("None");
+      expect(within(group).getByText("Plugin not running")).toBeVisible();
+      expect(
+        within(group).getByText(/Repair or reinstall it in the Plugin Hub/),
+      ).toBeVisible();
+      expect(
+        within(group).getByRole("radio", { name: /AI Subtitle Translator/ }),
+      ).toBeDisabled();
+      expect(
+        within(group).queryByRole("link", { name: "Update available" }),
+      ).not.toBeInTheDocument();
+      expect(
+        within(group).queryByRole("button", {
+          name: "Set up AI Subtitle Translator",
+        }),
+      ).not.toBeInTheDocument();
+      expect(
+        within(group).getByRole("radio", { name: /Lingarr/ }),
+      ).toBeEnabled();
+      expect(
+        within(group).getByRole("radio", { name: "Google Translate" }),
+      ).toBeEnabled();
+    } finally {
+      response.open();
+    }
   });
 
-  it("disables an open engine setup when removal finishes", async () => {
+  it("clears a removed primary and keeps a staged reinstall unavailable while state is refreshed", async () => {
+    const response = gate();
+    let holdResponse = false;
     state = {
       ...state,
       instances: [
@@ -2585,31 +2599,116 @@ describe("Translation page, an engine installed and waiting for a restart", () =
         }),
       ],
     };
-    waitingFor({ state: "removed", needs_restart: false });
-    const group = await showPage();
-    await within(group).findByText("Removing");
-    expect(
-      within(group).queryByRole("link", { name: "Update available" }),
-    ).not.toBeInTheDocument();
-
     server.use(
-      http.get("/api/plugins/installations", () =>
-        HttpResponse.json({ data: engineInstallations([second]) }),
-      ),
+      http.get("/api/translation/state", async () => {
+        if (holdResponse) await response.opened;
+        return HttpResponse.json(state);
+      }),
     );
-    await queryClient.invalidateQueries({
-      queryKey: [QueryKeys.Plugins, "installations"],
+    const group = await showPage();
+    const primary = within(group).getByRole("radio", {
+      name: /AI Subtitle Translator/,
     });
-    await within(group).findByText("Plugin not running");
-    expect(
-      screen.getByLabelText("Turn AI Subtitle Translator on or off"),
-    ).toBeDisabled();
-    expect(
-      screen.queryByRole("heading", { name: "Back ends" }),
-    ).not.toBeInTheDocument();
-    expect(
-      screen.queryByRole("heading", { name: "Engine settings" }),
-    ).not.toBeInTheDocument();
+    expect(primary).toBeChecked();
+    expect(primary).toBeEnabled();
+    await waitFor(() =>
+      expect(
+        queryClient.getQueryState([
+          QueryKeys.Plugins,
+          "installations",
+          QueryKeys.All,
+        ])?.status,
+      ).toBe("success"),
+    );
+
+    const refreshInstallations = () =>
+      queryClient.invalidateQueries({
+        queryKey: [QueryKeys.Plugins, "installations"],
+      });
+    // An update still has its currently working release.
+    waitingFor({
+      state: "staged",
+      active_version: "2.2.0",
+      staged_version: "2.3.0",
+      needs_restart: true,
+    });
+    holdResponse = true;
+    try {
+      await refreshInstallations();
+      await screen.findByText("1 plugin change is waiting for a restart.");
+      expect(primary).toBeChecked();
+      expect(primary).toBeEnabled();
+      expect(
+        screen.getByLabelText("Turn AI Subtitle Translator on or off"),
+      ).toBeEnabled();
+
+      waitingFor({
+        state: "removed",
+        active_version: "2.2.0",
+        needs_restart: false,
+      });
+      await refreshInstallations();
+      await within(group).findByText("Removing");
+      expect(primary).not.toBeChecked();
+      expect(within(group).getByRole("radio", { name: "None" })).toBeChecked();
+      expect(
+        within(group).queryByRole("link", { name: "Update available" }),
+      ).not.toBeInTheDocument();
+
+      server.use(
+        http.get("/api/plugins/installations", () =>
+          HttpResponse.json({ data: engineInstallations([second]) }),
+        ),
+      );
+      await refreshInstallations();
+      await within(group).findByText("Plugin not running");
+      expect(
+        screen.getByLabelText("Turn AI Subtitle Translator on or off"),
+      ).toBeDisabled();
+      expect(
+        screen.queryByRole("heading", { name: "Back ends" }),
+      ).not.toBeInTheDocument();
+      expect(
+        screen.queryByRole("heading", { name: "Engine settings" }),
+      ).not.toBeInTheDocument();
+
+      waitingFor({
+        state: "staged",
+        active_version: null,
+        staged_version: "2.3.0",
+        needs_restart: true,
+      });
+      await refreshInstallations();
+      await within(group).findByText("Pending restart");
+      expect(primary).toBeDisabled();
+      expect(primary).not.toBeChecked();
+      expect(
+        screen.getByLabelText("Turn AI Subtitle Translator on or off"),
+      ).toBeDisabled();
+      expect(
+        within(group).queryByRole("link", { name: "Update available" }),
+      ).not.toBeInTheDocument();
+      expect(
+        screen.queryByRole("heading", { name: "Engine settings" }),
+      ).not.toBeInTheDocument();
+    } finally {
+      state = {
+        ...state,
+        engine: null,
+        instances: [
+          second,
+          engine({
+            configured: false,
+            plugin: {
+              name: "AI Subtitle Translator",
+              version: "2.3.0",
+              active: false,
+            },
+          }),
+        ],
+      };
+      response.open();
+    }
   });
 
   it("keeps the repair hint for a plugin the server does not say is waiting", async () => {

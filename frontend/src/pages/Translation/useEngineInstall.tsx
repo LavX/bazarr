@@ -1,6 +1,10 @@
-import { ReactElement, useCallback, useMemo } from "react";
+import { ReactElement, useCallback, useEffect, useMemo, useRef } from "react";
 import { usePluginInstallations } from "@/apis/hooks/plugins";
-import { useTranslationSummary } from "@/apis/hooks/translation";
+import {
+  type useTranslationState,
+  useTranslationSummary,
+} from "@/apis/hooks/translation";
+import type { PluginInstallation } from "@/apis/raw/plugins";
 import {
   PluginCostCaps,
   usePluginConsentFlow,
@@ -15,6 +19,7 @@ import type {
   TranslationAvailableEngine,
   TranslationState,
 } from "@/types/translation";
+import { engineUnavailable } from "./model";
 
 /** The kinds of plugin the Translation page is about: engines and their back ends. */
 const TRANSLATION_KINDS = new Set(["translator", "translator_backend"]);
@@ -69,30 +74,71 @@ export function useEngineInstall(
   return { begin, dialog: flow.dialog, busy: flow.busy };
 }
 
-/**
- * Apply the latest installation state to the settings snapshot, which may be older. Count staged
- * changes from the installations, including those with no engine left in the settings snapshot.
- */
-export function useRestartAware(state: TranslationState | undefined): {
+/** A first lookup can reveal that the cached settings snapshot is already behind. */
+function installationMismatch(
+  state: TranslationState,
+  engineRows: ReadonlyMap<string, PluginInstallation>,
+): boolean {
+  return (
+    state.instances.some((engine) => {
+      if (engine.legacy) return false;
+      const row = engineRows.get(engine.plugin_id);
+      if (!row) return engine.plugin !== null;
+      if (row.state === "removed") {
+        return (
+          engine.plugin?.active === true ||
+          state.engine === engine.id ||
+          state.fallback_engine === engine.id
+        );
+      }
+      return row.active_version
+        ? engine.plugin?.version !== row.active_version
+        : engine.plugin?.active === true;
+    }) ||
+    (state.available_engines ?? []).some((engine) => {
+      const row = engineRows.get(engine.plugin_id);
+      return Boolean(row?.active_version || row?.staged_version);
+    })
+  );
+}
+
+/** Apply installation changes at once and ask for the canonical pointers, settings and catalog offers. */
+export function useRestartAware({
+  data: state,
+  refetch,
+}: Pick<ReturnType<typeof useTranslationState>, "data" | "refetch">): {
   state: TranslationState | undefined;
   waiting: number;
 } {
   const installations = usePluginInstallations();
+  const previousLifecycle = useRef<string | undefined>(undefined);
   // What the restart will do to each plugin that waits on one, read from the installation: a removal is
   // staged as a removed row, an update as a staged release beside an active one, an install as a staged
   // release with nothing active.
-  const { ids, removing, installedEnginePlugins } = useMemo(() => {
+  const snapshot = useMemo(() => {
+    if (!installations.data) return undefined;
     const changes = new Map<string, RestartChange>();
     const removing = new Set<string>();
-    const installedEnginePlugins = installations.data && new Set<string>();
-    for (const item of installations.data ?? []) {
+    const engineRows = new Map<string, PluginInstallation>();
+    const lifecycle = [];
+    const rows = installations.data
+      .filter((item) => TRANSLATION_KINDS.has(installationKind(item)))
+      .sort((a, b) => a.provider_id.localeCompare(b.provider_id));
+    for (const item of rows) {
       const kind = installationKind(item);
-      if (!TRANSLATION_KINDS.has(kind)) {
-        continue;
-      }
       if (kind === "translator") {
-        installedEnginePlugins?.add(item.provider_id);
+        engineRows.set(item.provider_id, item);
       }
+      lifecycle.push([
+        item.provider_id,
+        kind,
+        item.state,
+        item.active_version,
+        item.staged_version,
+        item.needs_restart === true,
+        item.enabled !== false,
+        item.blocked_reason,
+      ]);
       if (isRemoving(item)) {
         removing.add(item.provider_id);
       }
@@ -107,21 +153,41 @@ export function useRestartAware(state: TranslationState | undefined): {
         );
       }
     }
-    return { ids: changes, removing, installedEnginePlugins };
+    return {
+      changes,
+      removing,
+      engineRows,
+      lifecycle: JSON.stringify(lifecycle),
+    };
   }, [installations.data]);
-  return useMemo(() => {
-    if (!state || !installedEnginePlugins) {
-      return { state, waiting: ids.size };
+
+  useEffect(() => {
+    if (!snapshot || !state) return;
+    const previous = previousLifecycle.current;
+    if (previous === snapshot.lifecycle) return;
+    previousLifecycle.current = snapshot.lifecycle;
+    if (
+      previous !== undefined ||
+      installationMismatch(state, snapshot.engineRows)
+    ) {
+      void refetch();
     }
+  }, [snapshot, state, refetch]);
+
+  return useMemo(() => {
+    if (!state || !snapshot) {
+      return { state, waiting: snapshot?.changes.size ?? 0 };
+    }
+    const { changes, removing, engineRows } = snapshot;
     const mark = <T extends { plugin_id: string }>(engine: T): T => {
-      const change = ids.get(engine.plugin_id);
+      const change = changes.get(engine.plugin_id);
       return change ? { ...engine, awaiting_restart: change } : engine;
     };
     const instances = state.instances.map((engine) => {
       const marked = mark(engine);
       if (engine.legacy) return marked;
       if (removing.has(engine.plugin_id)) return { ...marked, removing: true };
-      if (installedEnginePlugins.has(engine.plugin_id)) return marked;
+      if (engineRows.has(engine.plugin_id)) return marked;
       // Match the missing-plugin state that a fresh Translation response would report.
       // Keep the engine instance and its saved connections for a possible reinstall.
       return {
@@ -132,16 +198,31 @@ export function useRestartAware(state: TranslationState | undefined): {
         official: false,
       };
     });
-    const available = state.available_engines?.map(mark);
+    const available = state.available_engines
+      ?.filter(
+        (offer) =>
+          !removing.has(offer.plugin_id) &&
+          (!engineRows.get(offer.plugin_id)?.active_version ||
+            changes.has(offer.plugin_id)),
+      )
+      .map(mark);
+    const usablePointer = (id: number | null) =>
+      instances.some((engine) => engine.id === id && !engineUnavailable(engine))
+        ? id
+        : null;
     return {
       state: {
         ...state,
+        engine: usablePointer(state.engine),
+        // The server may pick a different fallback. The refresh will supply it.
+        // eslint-disable-next-line camelcase -- transport name
+        fallback_engine: usablePointer(state.fallback_engine),
         instances,
         ...(available ? { available_engines: available } : {}),
       },
       // Counted from the installations, not from the engines the page lists: a removal that deleted its
       // data has no engine left, and a plugin whose release is still active is in neither list.
-      waiting: ids.size,
+      waiting: changes.size,
     };
-  }, [state, ids, removing, installedEnginePlugins]);
+  }, [state, snapshot]);
 }

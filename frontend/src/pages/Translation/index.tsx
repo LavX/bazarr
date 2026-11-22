@@ -95,13 +95,8 @@ const EngineTab: FunctionComponent<{
 /** Translation: the engine, its back ends, the defaults and what has been translated. */
 const TranslationView: FunctionComponent = () => {
   useDocumentTitle(`Translation - ${useAppTitle()}`);
-  const {
-    data: loaded,
-    isLoading,
-    error,
-    refetch,
-    isFetching,
-  } = useTranslationState();
+  const loaded = useTranslationState();
+  const { isLoading, error, refetch, isFetching } = loaded;
   const { state: data, waiting } = useRestartAware(loaded);
   // The server says what it can do beyond the settings. Nothing is asked of, or shown for, a route it
   // does not list.

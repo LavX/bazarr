@@ -14,7 +14,7 @@ import {
   second,
   SECRET,
 } from "@/pages/Translation/fixtures";
-import { customRender, screen, waitFor, within } from "@/tests";
+import { act, customRender, screen, waitFor, within } from "@/tests";
 import server from "@/tests/mocks/node";
 import type {
   TranslationAvailableEngine,
@@ -414,11 +414,11 @@ describe("TranslationStep", () => {
             plugin: {
               name: "AI Subtitle Translator",
               version: "2.2.0",
-              active: true,
+              active: false,
             },
           }),
         ],
-        available_engines: [OFFICIAL_OFFER, GOOGLE_OFFER],
+        available_engines: [GOOGLE_OFFER],
       }),
     );
     server.use(
@@ -451,7 +451,19 @@ describe("TranslationStep", () => {
       screen.queryByRole("button", { name: "Install AI Subtitle Translator" }),
     ).not.toBeInTheDocument();
 
+    let refreshed = 0;
     server.use(
+      http.get("/api/translation/state", () => {
+        refreshed++;
+        return HttpResponse.json(
+          firstRun({
+            instances: [
+              aiEngine({ plugin: null, schema: null, official: false }),
+            ],
+            available_engines: [OFFICIAL_OFFER, GOOGLE_OFFER],
+          }),
+        );
+      }),
       http.get("/api/plugins/installations", () =>
         HttpResponse.json({ data: [] }),
       ),
@@ -462,9 +474,63 @@ describe("TranslationStep", () => {
 
     expect(await screen.findByText("Plugin not running")).toBeVisible();
     expect(screen.queryByLabelText("OpenRouter key")).not.toBeInTheDocument();
-    expect(
-      screen.getByRole("button", { name: "Install AI Subtitle Translator" }),
-    ).toBeEnabled();
+    await waitFor(() =>
+      expect(
+        screen.getByRole("button", { name: "Install AI Subtitle Translator" }),
+      ).toBeEnabled(),
+    );
+
+    server.use(
+      http.get("/api/plugins/installations", () =>
+        HttpResponse.json({
+          data: [
+            {
+              provider_id: "subtitles",
+              kind: "subtitle_provider",
+              state: "active",
+            },
+          ],
+        }),
+      ),
+    );
+    await act(() =>
+      queryClient.invalidateQueries({
+        queryKey: [QueryKeys.Plugins, "installations"],
+      }),
+    );
+    expect(refreshed).toBe(1);
+  });
+
+  it("refreshes an initially cached engine missing from installations", async () => {
+    let reads = 0;
+    const cached = firstRun();
+    server.use(
+      http.get("/api/translation/state", () => {
+        reads++;
+        return HttpResponse.json(
+          reads === 1
+            ? cached
+            : firstRun({
+                instances: [
+                  aiEngine({ plugin: null, schema: null, official: false }),
+                ],
+                available_engines: [OFFICIAL_OFFER, GOOGLE_OFFER],
+              }),
+        );
+      }),
+      http.get("/api/plugins/installations", () =>
+        HttpResponse.json({ data: [] }),
+      ),
+    );
+    customRender(<TranslationStep onNext={onNext} />);
+
+    await waitFor(() =>
+      expect(
+        screen.getByRole("button", { name: "Install AI Subtitle Translator" }),
+      ).toBeEnabled(),
+    );
+    expect(reads).toBe(2);
+    expect(screen.queryByLabelText("OpenRouter key")).not.toBeInTheDocument();
   });
 
   it.each([

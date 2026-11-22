@@ -131,9 +131,10 @@ export function pickableChoices(
   return [...backEnds, ...engines];
 }
 
-/** Whether the engine's plugin is missing or on its way out. */
+/** Whether selection and configuration must wait for an install or removal. */
 export const engineUnavailable = (engine: TranslationEngine) =>
   engine.removing === true ||
+  engine.awaiting_restart === "install" ||
   engine.awaiting_restart === "removal" ||
   (!engine.legacy && engine.plugin === null);
 

@@ -85,7 +85,7 @@ const InstallAction: FC<{
  */
 const TranslationStep: FC<WizardStepProps> = ({ onNext, onBack }) => {
   const loaded = useTranslationState();
-  const aware = useRestartAware(loaded.data);
+  const aware = useRestartAware(loaded);
   const state = { ...loaded, data: aware.state };
   const pointers = usePointersMutation();
   const install = useEngineInstall(state.data);

@@ -165,10 +165,15 @@ const EnginePanel: FunctionComponent<EnginePanelProps> = ({
     (a, b) => Number(b.official ?? false) - Number(a.official ?? false),
   );
   // The choice shows at once; the saved one replaces it when the save comes back.
-  const chosen =
+  const requested =
     "engine" in pointers.chosen
       ? (pointers.chosen.engine ?? null)
       : state.engine;
+  const chosen = engines.some(
+    (item) => item.id === requested && !engineUnavailable(item),
+  )
+    ? requested
+    : null;
   const fallback =
     "fallback_engine" in pointers.chosen
       ? (pointers.chosen.fallback_engine ?? null)
@@ -212,9 +217,12 @@ const EnginePanel: FunctionComponent<EnginePanelProps> = ({
           </p>
           <div className={styles.engineMeta}>
             <StatusBadge tone={status.tone} label={status.label} />
-            {engine.plugin?.version && (
-              <span className={styles.version}>v{engine.plugin.version}</span>
-            )}
+            {engine.plugin?.version &&
+              !(
+                engine.awaiting_restart === "install" && engine.plugin.active
+              ) && (
+                <span className={styles.version}>v{engine.plugin.version}</span>
+              )}
             {!unavailable && engine.plugin?.update_version && (
               <Link
                 className={styles.chip}
