@@ -609,6 +609,11 @@ docker compose up -d
 | `PGID` | `1000` | Group ID for file permissions |
 | `TZ` | `UTC` | Timezone (e.g., `Europe/Budapest`) |
 
+For a root-started container, explicitly configured supplementary groups, such
+as Compose `group_add`, are retained when dropping to `PUID` and `PGID`. Group
+0 and the startup process's primary group are excluded. Grant only the groups
+needed for your mounted files.
+
 The OpenSubtitles.org plugin no longer uses environment variables. Configure its FlareSolverr URL in the plugin settings UI (Subtitle Hub > My Providers), not via Bazarr+ env vars.
 
 ### Volumes
