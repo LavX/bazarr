@@ -378,7 +378,11 @@ def provider_profile_limitations(abi: int) -> list[str]:
             else "network connections are not restricted"
         ),
         "ordinary workers can read media inside the root folders of Sonarr, Radarr and Sportarr",
-        "an eligible provider can read one standalone media file with one hard link on verified Landlock ABI 3 or later",
+        (
+            "standalone media reads require the enabled provider sandbox, verified Landlock ABI 3 or later, "
+            "metadata filtering and capability dropping. The file must have one link and configured libraries "
+            "must be separate from system and application runtime locations"
+        ),
     ]
     if abi < 9:
         notes.append("connections to pathname UNIX sockets (a Docker socket, a user session bus) are not restricted")

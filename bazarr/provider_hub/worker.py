@@ -146,6 +146,10 @@ class RequestNotAdmitted(Exception):
     """
 
 
+class SourceMediaRefused(Exception):
+    """This item cannot be given a confined local-media read."""
+
+
 class WorkerBusy(Exception):
     """A gated request that could not get its turn within its own timeout, or
     whose client was stopped while it waited. Not a WorkerError either."""
@@ -484,15 +488,16 @@ def _is_provider_runner(command, env) -> bool:
 def provider_spec(layout: ProviderLayout, command, cwd, env, *, source_media: SourceMediaFile | None = None):
     """The launch specification of one provider worker: the softer provider profile.
 
-    The ordinary worker can read Arr roots and programs on ``PATH``. A scoped worker receives its
-    runtime paths, individual media tools and one source file, with the metadata filter enabled.
+    Both profiles retain their system, interpreter and bundle access. The ordinary worker also
+    receives Arr roots and program directories. A scoped worker gets individual media tools and
+    one source file, with the metadata filter enabled.
     Both can write to their own data and temp folders. The configuration, database and backups
     remain protected. The limits allow ffmpeg to write large temporary files and run its threads.
     """
     from .sandbox import capabilities
     from .provider_roots import (
-        backup_folders, binary_folders, media_root_folders, own_ports, program_folders, source_file_is_shielded,
-        source_tool_paths,
+        backup_folders, binary_folders, configured_media_roots, media_root_folders, own_ports, program_folders,
+        source_file_is_shielded, source_tool_paths,
     )
     from .runtime.environment import worker_environment
     from .sandbox.policy import (
@@ -515,6 +520,7 @@ def provider_spec(layout: ProviderLayout, command, cwd, env, *, source_media: So
     managed_binaries = layout.config_dir / "managed" / "bin"
     secrets = _secret_files(layout.config_dir)
     source_paths = ()
+    tool_paths = ()
     if source_media is None:
         runtime_paths = (managed_binaries, *provider_tree_grants(
             [*program_folders(), *binary_folders(), *media_root_folders()], shields))
@@ -523,9 +529,10 @@ def provider_spec(layout: ProviderLayout, command, cwd, env, *, source_media: So
             raise PolicyError("the source media file is in a protected location")
         source_paths = (source_media.path,)
         managed = managed_binaries.resolve()
-        runtime_paths = tuple(tool for tool in source_tool_paths(layout.config_dir)
-                              if not source_file_is_shielded(
-                                  tool, backups if tool.is_relative_to(managed) else shields, secrets))
+        runtime_paths = ()
+        tool_paths = tuple(tool for tool in source_tool_paths(layout.config_dir)
+                           if not source_file_is_shielded(
+                               tool, backups if tool.is_relative_to(managed) else shields, secrets))
     policy = SandboxPolicy.for_interpreter(
         layout.interpreter,
         read_only=[
@@ -535,6 +542,7 @@ def provider_spec(layout: ProviderLayout, command, cwd, env, *, source_media: So
             *runtime_paths,
         ],
         read_files=source_paths,
+        execute_files=tool_paths,
         read_write=[data, temp],
         # The folders, and the files in them: a file that is a link into a granted tree is refused too.
         protected_paths=[layout.config_dir / "config", layout.config_dir / "db", *backups, *secrets],
@@ -546,13 +554,17 @@ def provider_spec(layout: ProviderLayout, command, cwd, env, *, source_media: So
     if source_media is not None:
         if policy.identities.get(str(source_media.path)) != source_media.identity:
             raise PolicyError("the source media file changed while preparing its read grant")
-        root_info = source_media.root.stat()
-        media_identities = {source_media.identity, (root_info.st_dev, root_info.st_ino)}
-        for grant in (*policy.read_only, *policy.read_write):
+        media_roots = {source_media.root, *configured_media_roots()}
+        media_identities = {source_media.identity}
+        for root in media_roots:
+            info = root.stat()
+            media_identities.add((info.st_dev, info.st_ino))
+        for grant in (*policy.read_only, *policy.read_write, *policy.execute_files):
             runtime = Path(grant)
-            if (policy.identities.get(grant) in media_identities or source_media.root.is_relative_to(runtime)
-                    or runtime.is_relative_to(source_media.root)):
-                raise PolicyError("the source media library overlaps a provider runtime location")
+            if policy.identities.get(grant) in media_identities or any(
+                root.is_relative_to(runtime) or runtime.is_relative_to(root) for root in media_roots
+            ):
+                raise PolicyError("a configured media library overlaps a provider runtime location")
     environment = worker_environment(
         "subtitle_provider",
         home=data,
@@ -705,17 +717,24 @@ class ProviderWorkerClient:
         for its next start. Everything that is not a hub provider worker starts as before.
         """
         self._sandbox_layout = None
-        profile = self._sandbox_profile(source_media=source_media)
+        if source_media is not None:
+            try:
+                profile = self._sandbox_profile(source_media=source_media)
+                if profile is None:
+                    raise SourceMediaRefused("source media requires the enforcing Provider Hub sandbox")
+                return profile()
+            except SourceMediaRefused:
+                raise
+            except Exception as error:
+                raise SourceMediaRefused(f"the source media ruleset could not be prepared: {error}") from error
+
+        profile = self._sandbox_profile()
         if profile is not None:
             try:
                 return profile()
             except Exception as error:
                 self._blocked(f"the ruleset could not be prepared: {error}")
                 raise WorkerError(f"the sandbox could not be prepared, so the provider was not started: {error}") from error
-        if source_media is not None:
-            cause = "source media requires the enforcing Provider Hub sandbox"
-            self._blocked(cause)
-            raise WorkerError(cause)
         return subprocess.Popen(
             self.command,
             cwd=self.cwd,
@@ -734,7 +753,7 @@ class ProviderWorkerClient:
         provider_id = getattr(self, "provider_id", None)
         layout = provider_layout(self.command, self.cwd, self.env, provider_id)
         if layout is None:
-            if _is_provider_runner(self.command, self.env):
+            if source_media is None and _is_provider_runner(self.command, self.env):
                 from .sandbox import note_provider_unsandboxed, provider_profile_enabled
 
                 if provider_profile_enabled():
@@ -758,9 +777,7 @@ class ProviderWorkerClient:
             probe = _probe_again(probe)
         if not probe.enforces(minimum_abi):
             if source_media is not None:
-                cause = "source media requires verified Landlock ABI 3 or later"
-                self._blocked(cause)
-                raise WorkerError(cause)
+                raise SourceMediaRefused("source media requires verified Landlock ABI 3 or later")
             if probe.absent:
                 # The kernel genuinely has no Landlock: nothing can be applied, and the provider runs without it.
                 note_provider_unsandboxed(layout.key, probe.reason or "this host has no Landlock")
@@ -836,8 +853,10 @@ class ProviderWorkerClient:
         if not cause:
             return False
         self._kill_tree(process, 5.0)
+        if not allow_fallback:
+            raise SourceMediaRefused(f"the source media ruleset could not be applied: {cause}")
         match = _ERRNO_IN_MESSAGE.search(cause)
-        if allow_fallback and match and int(match.group(1)) in _KERNEL_CANNOT_APPLY:
+        if match and int(match.group(1)) in _KERNEL_CANNOT_APPLY:
             self._fail_open(f"the kernel could not apply the ruleset: {cause}")
             return True
         self._blocked(f"the ruleset could not be applied: {cause}")
@@ -1533,13 +1552,12 @@ class ProviderWorkerClient:
             if getattr(self, "_closed", False) and op != "shutdown":
                 raise WorkerError("worker client is stopped")
             if source_media is not None:
-                authorized = source_media()
+                try:
+                    authorized = source_media()
+                except Exception as error:
+                    raise SourceMediaRefused("the source file could not be checked for local media access") from error
                 if authorized is None:
-                    reply = {"candidates": []} if op == "search" else {"empty": True}
-                    result = WorkerResult(ok=True, payload=reply, events=[])
-                    if consume_source_reply is not None:
-                        consume_source_reply(result, None)
-                    return result
+                    raise SourceMediaRefused("the source file is no longer eligible for local media access")
                 # A warm worker has a different ruleset. Retire it before
                 # starting a launcher that can read only this source file.
                 self._end_worker_for_source_scope()

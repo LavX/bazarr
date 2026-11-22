@@ -502,6 +502,8 @@ class SandboxPolicy:
     identities: Mapping[str, tuple[int, int]] = field(default_factory=dict)
     # Exact regular files, for data access without execute permission.
     read_files: tuple[str, ...] = ()
+    # Exact regular executables, with read and execute permission for that file.
+    execute_files: tuple[str, ...] = ()
 
     @classmethod
     def for_interpreter(
@@ -511,6 +513,7 @@ class SandboxPolicy:
         read_only: Iterable[str | os.PathLike] = (),
         read_write: Iterable[str | os.PathLike] = (),
         read_files: Iterable[str | os.PathLike] = (),
+        execute_files: Iterable[str | os.PathLike] = (),
         connect_ports: Iterable[int] | None = None,
         deny_connect_ports: Iterable[int] = (),
         reserved_ports: Iterable[int] = (),
@@ -550,13 +553,18 @@ class SandboxPolicy:
         for path, _ident, mode in file_items:
             if not stat_module.S_ISREG(mode):
                 raise PolicyError("read-file path is not a regular file: %s" % path)
+        exec_items = _resolve_grants(execute_files, read_write)
+        for path, _ident, mode in exec_items:
+            if not stat_module.S_ISREG(mode) or not mode & 0o111:
+                raise PolicyError("execute-file path is not an executable regular file: %s" % path)
         device_items = _resolve_grants(DEVICE_PATHS, read_write)
         unix_items = _resolve_grants(RESOLVE_UNIX_PATHS, read_write)
-        every = [*ro_items, *rw_items, *device_items, *unix_items, *file_items]
+        every = [*ro_items, *rw_items, *device_items, *unix_items, *file_items, *exec_items]
         policy = cls(
             read_only=(*(p for p, _i, _m in ro_items), "/proc/self"),
             read_write=tuple(p for p, _i, _m in rw_items),
             read_files=tuple(p for p, _i, _m in file_items),
+            execute_files=tuple(p for p, _i, _m in exec_items),
             devices=tuple(p for p, _i, _m in device_items),
             resolve_unix=tuple(p for p, _i, _m in unix_items),
             connect_ports=ports,
@@ -568,7 +576,7 @@ class SandboxPolicy:
         return policy
 
     def validate(self, protected_paths: Iterable[str | os.PathLike] = ()) -> None:
-        granted = (*self.read_only, *self.read_write, *self.read_files)
+        granted = (*self.read_only, *self.read_write, *self.read_files, *self.execute_files)
         if "/" in granted:
             raise PolicyError("the filesystem root cannot be granted")
         for item in protected_paths:
@@ -650,6 +658,8 @@ class RuntimeSpec:
         }
         if self.policy.read_files:
             payload["read_files"] = [self.policy.grant(path) for path in self.policy.read_files]
+        if self.policy.execute_files:
+            payload["execute_files"] = [self.policy.grant(path) for path in self.policy.execute_files]
         data = json.dumps(payload, separators=(",", ":")).encode("utf-8")
         if len(data) > MAX_SPEC_BYTES:
             raise PolicyError("launch spec is %d bytes, over the %d limit" % (len(data), MAX_SPEC_BYTES))

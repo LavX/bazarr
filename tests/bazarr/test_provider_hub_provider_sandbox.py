@@ -90,6 +90,8 @@ class Fixture:
                 "backup": _try(lambda: read(config["backup"])),
                 "exec": _try(lambda: subprocess.run([path], check=True).returncode),
                 "truncate": _try(lambda: os.truncate(path, os.path.getsize(path))),
+                "chmod": _try(lambda: os.chmod(path, os.stat(path).st_mode & 0o777)),
+                "tool": subprocess.run([config["tool"]], capture_output=True, check=True, text=True).stdout.strip(),
             }}]
         if op == "list":
             return [{"result": _try(lambda: sorted(os.listdir(config["path"])))}]
@@ -260,10 +262,10 @@ def client(host):
         worker.stop()
 
 
-def _enforcing_kernel():
-    """The provider profile needs Landlock from ABI 1, not the full sandbox, so this runs on older kernels too."""
+def _enforcing_kernel(minimum_abi=PROVIDER_MIN_ABI):
+    """Require the ABI of the profile exercised by the test."""
     probe = probe_sandbox()
-    if not probe.enforces(PROVIDER_MIN_ABI):
+    if not probe.enforces(minimum_abi):
         reason = "this host cannot enforce the provider sandbox: %s" % probe.reason
         if os.environ.get("BAZARR_REQUIRE_SANDBOX_TESTS") == "1":
             pytest.fail("BAZARR_REQUIRE_SANDBOX_TESTS=1 but %s" % reason, pytrace=False)
@@ -301,8 +303,9 @@ def test_source_search_and_download_get_one_read_only_file_per_request(host, cli
     from provider_hub.registry import HubProxyProvider
     from provider_hub.state import OFFICIAL_CATALOG_REPO, OFFICIAL_CATALOG_SOURCE_ID
     from subliminal.video import Movie
+    from subliminal_patch.core import ProviderItemExcludedError
 
-    _enforcing_kernel()
+    _enforcing_kernel(spawn_module.MIN_ENFORCED_ABI)
     source_id, library_id, root = add_source(source_db, host["root"])
     movie_path, sibling = root / "Film.mkv", root / "Other.mkv"
     media_bytes = b"#!/bin/sh\nexit 0\n"
@@ -322,8 +325,15 @@ def test_source_search_and_download_get_one_read_only_file_per_request(host, cli
 
     Embedded.manifest = manifest
     worker = client()
+    host["stub"].write_text("#!/bin/sh\nprintf 'media tool'\n", encoding="utf-8")
     proxy = Embedded(worker_client=worker, op="source", sibling=str(sibling),
-                     arr=str(host["media"] / "film.mkv"), backup=str(host["backups"] / "backup.txt"))
+                     arr=str(host["media"] / "film.mkv"), backup=str(host["backups"] / "backup.txt"),
+                     tool=str(host["stub"]))
+
+    def assert_excluded(movie, reason="no longer eligible"):
+        with pytest.raises(ProviderItemExcludedError) as error:
+            proxy.list_subtitles(movie, [])
+        assert reason in error.value.reason
 
     # The ordinary worker is already running, with only the Arr profile.
     assert _ask(worker, op="read", path=str(movie_path))["result"] == "denied"
@@ -333,7 +343,7 @@ def test_source_search_and_download_get_one_read_only_file_per_request(host, cli
     [subtitle] = proxy.list_subtitles(video, [])
     assert subtitle.provider_payload == {
         "path": str(movie_path), "write": "denied", "exec": "denied", "sibling": "denied", "backup": "denied",
-        "arr": "denied", "truncate": "denied",
+        "arr": "denied", "truncate": "denied", "chmod": "denied", "tool": "media tool",
     }
     assert ordinary_process.poll() is not None
     assert worker.process.poll() is not None
@@ -351,7 +361,7 @@ def test_source_search_and_download_get_one_read_only_file_per_request(host, cli
 
     alias = root / "Duplicate.mkv"
     alias.hardlink_to(movie_path)
-    assert proxy.list_subtitles(video, []) == []
+    assert_excluded(video)
     alias.unlink()
     assert len(proxy.list_subtitles(video, [])) == 1
 
@@ -364,8 +374,7 @@ def test_source_search_and_download_get_one_read_only_file_per_request(host, cli
     nested_video = Movie(str(nested_path), "Film")
     nested_video.source_context = resolve_item(nested_id, source_db)
     monkeypatch.setattr(_provider_roots, "backup_folders", lambda: [host["backups"], nested_backups])
-    with pytest.raises(worker_module.WorkerError, match="protected location"):
-        proxy.list_subtitles(nested_video, [])
+    assert_excluded(nested_video, "protected location")
 
     # Even with a context gathered earlier, admission reads today's owner flags.
     def admit():
@@ -373,19 +382,19 @@ def test_source_search_and_download_get_one_read_only_file_per_request(host, cli
         return True
 
     proxy.admit = admit
-    assert proxy.list_subtitles(video, []) == []
+    assert_excluded(video)
     proxy.outcome_recorded()
     proxy.admit = None
     repository.update_library(library_id, source_db, enabled=0)
-    assert proxy.list_subtitles(video, []) == []
+    assert_excluded(video)
     repository.update_library(library_id, source_db, enabled=1)
     repository.update_source(source_id, source_db, enabled=0)
-    assert proxy.list_subtitles(video, []) == []
+    assert_excluded(video)
     repository.update_source(source_id, source_db, enabled=1)
     moved_root = host["root"] / "moved"
     moved_root.mkdir()
     repository.replace_roots(library_id, [(None, str(moved_root))], source_db)
-    assert proxy.list_subtitles(video, []) == []
+    assert_excluded(video)
     moved_path = moved_root / movie_path.name
     moved_path.write_bytes(media_bytes)
     moved_path.chmod(0o700)
@@ -393,12 +402,12 @@ def test_source_search_and_download_get_one_read_only_file_per_request(host, cli
     moved_video = Movie(str(moved_path), "Film")
     moved_video.source_context = resolve_item(item_id, source_db)
     assert len(proxy.list_subtitles(moved_video, [])) == 1
-    assert proxy.list_subtitles(video, []) == []
+    assert_excluded(video)
     row["trusted"] = False
-    assert proxy.list_subtitles(moved_video, []) == []
+    assert_excluded(moved_video)
     row["trusted"] = True
     repository.delete_source(source_id, source_db)
-    assert proxy.list_subtitles(moved_video, []) == []
+    assert_excluded(moved_video)
 
 
 @pytest.mark.parametrize(("schema", "declared", "current", "allowed"), [
@@ -475,6 +484,90 @@ def _standalone_file(host):
     return _provider_roots.SourceMediaFile(path, (info.st_dev, info.st_ino), root)
 
 
+def test_refused_source_item_keeps_ordinary_searches_in_the_same_pool(host, client, monkeypatch):
+    from provider_hub.registry import HubProxyProvider
+    from subliminal.video import Movie
+    from subliminal_patch.core import SZProviderPool, provider_registry
+    from subzero.language import Language
+
+    monkeypatch.setattr("provider_hub.sandbox.provider_profile_enabled", lambda: False)
+    worker, grant = client(), _standalone_file(host)
+    english = Language("eng")
+
+    class LocalProvider(HubProxyProvider):
+        provider_name = "scoped_fixture"
+        languages = {english}
+        manifest = SimpleNamespace(schema_version=2, raw={"permissions": ["media_read"]})
+        worker_client = worker
+
+        def _source_media(self, context):
+            return grant
+
+    name = LocalProvider.provider_name
+    monkeypatch.setitem(provider_registry.providers, name, LocalProvider)
+    errors = []
+    pool = SZProviderPool(providers=[name], provider_configs={name: {"op": "catalog"}},
+                          throttle_callback=lambda *args, **kwargs: errors.append(args))
+    source_video = Movie(str(grant.path), "Source movie")
+    source_video.source_context = object()
+    arr_video = Movie(str(host["media"] / "film.mkv"), "Arr movie")
+
+    result = pool.list_subtitles_provider(name, source_video, {english}, detailed=True, discard_on_failure=True)
+    assert result.status == "skipped" and result.reason == "provider_excluded"
+    [subtitle] = pool.list_subtitles_provider(name, arr_video, {english}, discard_on_failure=True)
+    subtitle.source_context = source_video.source_context
+    assert pool.download_subtitle(subtitle) is False
+    assert subtitle.skip_reason == "provider_excluded"
+    assert pool.list_subtitles_provider(name, arr_video, {english}, discard_on_failure=True)
+    assert name not in pool.discarded_providers
+    assert errors == []
+
+
+@pytest.mark.parametrize("owner", ["arr", "standalone"])
+def test_scoped_policy_refuses_other_configured_media_under_a_runtime_grant(host, source_db, monkeypatch, owner):
+    from media_sources import repository
+
+    grant = _standalone_file(host)
+    runtime = host["root"] / "application-runtime"
+    runtime.mkdir()
+    if owner == "arr":
+        other = runtime / "Library"
+        other.mkdir()
+        monkeypatch.setattr(_provider_roots, "media_root_folders", lambda: [str(other)])
+    else:
+        _, library, _ = add_source(source_db, runtime)
+        repository.update_library(library, source_db, enabled=0)
+    monkeypatch.setattr(policy_module, "SYSTEM_READ_PATHS", (*policy_module.SYSTEM_READ_PATHS, str(runtime)))
+
+    with pytest.raises(policy_module.PolicyError, match="configured media library overlaps"):
+        worker_module.provider_spec(
+            host["layout"], worker_command(sys.executable, RUNNER), host["bundle"], {}, source_media=grant,
+        )
+
+
+def test_scoped_tools_use_the_host_layout_and_only_existing_executables(host, monkeypatch):
+    import platform
+    from utilities import binaries
+
+    legacy = host["root"] / "legacy"
+    monkeypatch.setattr(binaries, "legacy_binaries_dir", lambda: str(legacy))
+    monkeypatch.setattr(_provider_roots.shutil, "which", lambda name: str(host["stub"]) if name == "ffmpeg" else None)
+    machine = Path(platform.system()) / platform.machine()
+    managed = host["config"] / "managed" / "bin" / machine
+    nonexec = managed / "ffmpeg" / "ffprobe"
+    fallback = legacy / machine / "ffmpeg" / "ffprobe"
+    unrelated = managed.parent / "other-architecture" / "mediainfo" / "mediainfo"
+    for path in (nonexec, fallback, unrelated):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("fixture tool", encoding="utf-8")
+        path.chmod(0o600 if path == nonexec else 0o700)
+
+    assert set(_provider_roots.source_tool_paths(host["config"])) == {host["stub"], fallback}
+    for invalid in (nonexec, nonexec.parent):
+        with pytest.raises(policy_module.PolicyError, match="not an executable regular file"):
+            policy_module.SandboxPolicy.for_interpreter(sys.executable, execute_files=[invalid])
+
+
 @pytest.mark.parametrize(("enabled", "probe", "reason"), [
     (False, SandboxProbe(abi=10, verified=True), "enforcing Provider Hub sandbox"),
     (True, SandboxProbe(abi=0, verified=False, absent=True), "verified Landlock ABI 3"),
@@ -485,7 +578,7 @@ def test_source_read_cannot_start_without_full_enforcement(host, client, monkeyp
     monkeypatch.setattr("provider_hub.sandbox.probe_sandbox", lambda *args, **kwargs: probe)
     worker, grant = client(), _standalone_file(host)
 
-    with pytest.raises(worker_module.WorkerError, match=reason):
+    with pytest.raises(worker_module.SourceMediaRefused, match=reason):
         worker.request("search", {"config": {"op": "read", "path": str(grant.path)}}, source_media=lambda: grant)
 
     assert worker.process is None
@@ -493,13 +586,14 @@ def test_source_read_cannot_start_without_full_enforcement(host, client, monkeyp
 
 
 def test_source_read_never_retries_without_a_failed_ruleset(host, client, monkeypatch):
-    _enforcing_kernel()
+    _enforcing_kernel(spawn_module.MIN_ENFORCED_ABI)
     # A deliberately impossible ABI makes the local launcher refuse its own ruleset.
     probe = SandboxProbe(abi=99, verified=True)
     monkeypatch.setattr("provider_hub.sandbox.probe_sandbox", lambda *args, **kwargs: probe)
+    monkeypatch.setattr(_provider_roots, "configured_media_roots", set)
     worker, grant = client(), _standalone_file(host)
 
-    with pytest.raises(worker_module.WorkerError, match="sandbox could not be applied"):
+    with pytest.raises(worker_module.SourceMediaRefused, match="ruleset could not be applied"):
         worker.request("search", {"config": {"op": "read", "path": str(grant.path)}}, source_media=lambda: grant)
 
     assert worker.process.poll() is not None
@@ -1520,7 +1614,8 @@ def test_the_limitations_name_the_unix_socket_and_signal_gaps_of_older_kernels()
     assert "pathname UNIX sockets" in old and "signal other processes" in old
     assert "pathname UNIX sockets" not in new and "signal other processes" not in new
     assert "root folders of Sonarr, Radarr and Sportarr" in new
-    assert "one hard link on verified Landlock ABI 3 or later" in new
+    assert "verified Landlock ABI 3 or later" in new and "file must have one link" in new
+    assert "metadata filtering and capability dropping" in new
 
 
 # ------------------------------------------------------------------------ the host check, again

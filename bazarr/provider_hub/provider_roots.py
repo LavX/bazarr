@@ -3,13 +3,14 @@
 
 The provider sandbox profile is an allowlist. Besides the system paths, the interpreter and the plugin's
 own bundle, an ordinary worker is given the Arr media roots and the directories on ``PATH``.
-An eligible provider processing a source item gets a separate profile with just that media file and its
-runtime. The configuration folder, the backup folder and other services' data stay out of reach.
+An eligible provider processing a source item gets a separate file grant alongside the system and application
+runtime grants. Configured libraries must be kept separate from these runtime paths.
 """
 from __future__ import annotations
 
 import logging
 import os
+import platform
 import shutil
 import stat
 import sys
@@ -106,18 +107,42 @@ def source_tool_paths(config_dir: Path) -> list[Path]:
     from utilities.binaries import legacy_binaries_dir
 
     roots = (config_dir / "managed" / "bin", Path(legacy_binaries_dir()))
+    system, machine = platform.system(), platform.machine()
     found: dict[Path, None] = {}
+
+    def executable(path: Path, below: Path | None = None) -> Path | None:
+        try:
+            real = path.resolve(strict=True)
+            mode = real.stat().st_mode
+        except (OSError, ValueError):
+            return None
+        if stat.S_ISREG(mode) and mode & 0o111 and (below is None or real.is_relative_to(below)):
+            return real
+        return None
+
     for name in ("ffmpeg", "ffprobe", "mediainfo"):
         command = shutil.which(name)
-        if command:
-            found[Path(command).resolve()] = None
+        if command and (tool := executable(Path(command))) is not None:
+            found[tool] = None
+        directory = "ffmpeg" if name == "ffprobe" else name
         for root in roots:
-            canonical_root = root.resolve()
-            for path in root.glob(f"*/*/*/{name}"):
-                real = path.resolve()
-                if path.is_file() and real.is_relative_to(canonical_root):
-                    found[real] = None
+            tool = executable(root / system / machine / directory / name, below=root.resolve())
+            if tool is not None:
+                found[tool] = None
+                break
     return list(found)
+
+
+def configured_media_roots() -> set[Path]:
+    """Existing canonical Arr and standalone library paths."""
+    from media_sources.repository import configured_library_root_paths
+
+    found = set()
+    for item in (*media_root_folders(), *configured_library_root_paths()):
+        path = Path(item)
+        if path.is_absolute() and path.is_dir():
+            found.add(path.resolve())
+    return found
 
 
 def source_file_is_shielded(path: Path, shields: list[Path], protected_files: list[Path]) -> bool:

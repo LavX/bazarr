@@ -32,7 +32,10 @@ from .state import (
 from . import leases, runtime_status
 from .env_registry import env_dir_of
 from .venv import hold_environment, validated_bundle_path, validated_interpreter
-from .worker import ProviderWorkerClient, release_when_gone, RequestNotAdmitted, WorkerBusy, WorkerError, worker_command
+from .worker import (
+    ProviderWorkerClient, RequestNotAdmitted, SourceMediaRefused, WorkerBusy, WorkerError, release_when_gone,
+    worker_command,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -305,10 +308,13 @@ class HubProxyProvider(Provider):
             options["source_media"] = lambda: self._source_media(source_context)
             if consume_source_reply is not None:
                 options["consume_source_reply"] = consume_source_reply
-        if self.admit is None:
-            return self._worker().request(op, request, timeout=timeout, **options)
         try:
-            return self._worker().request(op, request, timeout=timeout, admit=self.admit, **options)
+            if self.admit is not None:
+                options["admit"] = self.admit
+            return self._worker().request(op, request, timeout=timeout, **options)
+        except SourceMediaRefused as error:
+            from subliminal_patch.core import ProviderItemExcludedError
+            raise ProviderItemExcludedError(self.provider_name, str(error)) from error
         except RequestNotAdmitted as error:
             from subliminal_patch.core import ProviderExcludedWhileQueuedError
             raise ProviderExcludedWhileQueuedError(self.provider_name) from error

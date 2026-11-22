@@ -96,6 +96,11 @@ def get_roots(library_id, target=None):
         sa.select(Roots).where(Roots.c.library_id == library_id).order_by(Roots.c.id)).all()
 
 
+def configured_library_root_paths(target=None):
+    """All configured local paths, including disabled libraries."""
+    return _target(target).execute(sa.select(Roots.c.local_path).distinct()).scalars().all()
+
+
 def enabled_item_roots(item_id, source_id, library_id, path, target=None):
     """Current local roots for a request whose item, path and owners still match."""
     return _target(target).execute(
