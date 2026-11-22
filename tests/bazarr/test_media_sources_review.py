@@ -302,6 +302,88 @@ def test_a_rejected_handover_keeps_the_holder_and_the_displaced_destination_row(
     assert movies.items()[str(destination)].id == destination_row.id
 
 
+def test_a_rejected_series_handover_keeps_the_displaced_groups_key(lib, tmp_path, monkeypatch):
+    from media_sources import repository
+
+    other = Lib(lib.session, tmp_path, name="Other", folder="Other")
+    (local_move,) = lib.show("Local Move", count=1)
+    (destination,) = lib.show("Destination", count=1)
+    (incoming,) = other.show("Incoming", count=1)
+    other.show("Keeps", count=1)
+    lib.scan()
+    other.scan()
+    lib.set_group("Destination", monitored=0, title="My Destination", identity_source="user")
+    original_items = {path: row.id for path, row in lib.items().items()}
+    destination_group = lib.group("Destination")
+    local_group = lib.group("Local Move")
+    foreign_row = other.items()[str(incoming)]
+    local_move.rename(destination.parent / local_move.name)
+    local_move.parent.rmdir()
+    incoming.replace(destination)
+    real_update = repository.update_item
+
+    def reject_handover(item_id, target=None, **values):
+        if item_id == foreign_row.id and values.get("library_id") == lib.library_id:
+            raise IntegrityError(None, None, ValueError("move refused"))
+        return real_update(item_id, target, **values)
+
+    monkeypatch.setattr(repository, "update_item", reject_handover)
+
+    result = lib.scan()
+
+    assert {path: row.id for path, row in lib.groups().items()} == {
+        lib.path("Destination"): destination_group.id, lib.path("Local Move"): local_group.id}
+    retained = lib.group("Destination")
+    assert (retained.monitored, retained.title) == (0, "My Destination")
+    assert {path: row.id for path, row in lib.items().items()} == original_items
+    assert other.items()[str(incoming)].id == foreign_row.id
+    assert (result.status, result.deleted, result.handed_over) == ("partial", 0, 0)
+
+    monkeypatch.setattr(repository, "update_item", real_update)
+    assert lib.scan().handed_over == 1
+    assert lib.group("Destination").id == local_group.id
+    assert {item.group_id for item in lib.items().values()} == {local_group.id}
+
+
+@pytest.mark.parametrize("mount_location", ["root", "nested"])
+def test_holders_move_waits_when_its_mount_disappears_during_another_holders_walk(
+        movies, tmp_path, monkeypatch, mount_location):
+    first = Lib(movies.session, tmp_path, name="First", folder="First", content_kind="movie")
+    second = Lib(movies.session, tmp_path, name="Second", folder="Second", content_kind="movie")
+    first_mount = first.root if mount_location == "root" else first.root / "Nested"
+    first_move = stamped_video(first_mount / "A.2001.mkv")
+    first_alias = stamped_video(first_mount / "C.2003.mkv")
+    second_move = stamped_video(second.root / "B.2002.mkv")
+    stamped_video(second.root / "Stay.2004.mkv")
+    first.scan()
+    second.scan()
+    first_ids = {path: row.id for path, row in first.items().items()}
+    second_id = second.items()[str(second_move)].id
+    first_move.rename(movies.root / first_move.name)
+    second_move.rename(movies.root / second_move.name)
+    os.link(first_alias, movies.root / first_alias.name)
+    real_scandir = os.scandir
+    unmounted = False
+
+    def unmount_first_while_walking_second(path):
+        nonlocal unmounted
+        if str(path) == str(second.root) and not unmounted:
+            unmounted = True
+            first_mount.rename(tmp_path / "First.away")
+            first_mount.mkdir()
+        return real_scandir(path)
+
+    monkeypatch.setattr(os, "scandir", unmount_first_while_walking_second)
+
+    result = movies.scan()
+
+    assert unmounted
+    assert {path: row.id for path, row in first.items().items()} == first_ids
+    assert {path: row.id for path, row in movies.items().items()} == {
+        movies.path(second_move.name): second_id}
+    assert (result.handed_over, result.deleted) == (1, 0)
+
+
 def test_a_rejected_insert_keeps_the_foreign_row(source_db, tmp_path, monkeypatch):
     from media_sources import repository
 
@@ -436,7 +518,7 @@ def test_a_nested_directory_replaced_during_the_walk_cannot_vouch_for_the_old_vi
 
 
 def test_the_previous_owner_cannot_delete_an_item_during_handover(lib, tmp_path, monkeypatch):
-    from media_sources import scanner
+    from media_sources import repository, scanner
 
     other = Lib(lib.session, tmp_path, name="Other", folder="Other")
     (moving,) = lib.show("Moving", count=1)
@@ -484,8 +566,26 @@ def test_the_previous_owner_cannot_delete_an_item_during_handover(lib, tmp_path,
         assert previous.result(timeout=10).deleted == 0
 
     new_group = other.group("Moving")
+    assert repository.delete_items([old_id], lib.session, owner_library_id=lib.library_id) == 0
     (item,) = other.items().values()
     assert (item.id, item.group_id, new_group.monitored) == (old_id, new_group.id, 0)
+
+
+def test_a_library_disabled_while_waiting_for_another_scan_is_skipped(lib):
+    from media_sources import repository, scanner
+
+    lib.show("Waiting", count=1)
+    waiting = Event()
+
+    with ThreadPoolExecutor(max_workers=1) as workers:
+        with scanner._scan_lock:
+            scan = workers.submit(scanner.run_scan, lib.source_id, lib.library_id, cancel=waiting.set)
+            assert waiting.wait(10)
+            repository.update_library(lib.library_id, lib.session, enabled=0)
+        (result,) = scan.result(timeout=10)
+
+    assert (result.status, result.inserted) == ("disabled", 0)
+    assert lib.items() == {} and lib.groups() == {}
 
 
 # 4. Isolation (see the no-change file for the stub import itself)

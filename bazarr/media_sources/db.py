@@ -7,6 +7,7 @@ a real transaction instead, the way the Sportarr library does.
 """
 from contextlib import contextmanager
 
+from sqlalchemy.engine import Connection
 
 from app import database as _database_module
 
@@ -19,6 +20,11 @@ def handle(session=None):
 @contextmanager
 def source_transaction(session=None):
     """A connection inside a transaction that commits on success and rolls back on any error."""
+    if isinstance(session, Connection):
+        with session.begin_nested():
+            yield session
+        return
+
     engine = handle(session).get_bind()
     # The engine is AUTOCOMMIT, so a transaction needs an isolation level of its own. PostgreSQL waits for a
     # concurrent writer at READ COMMITTED instead of failing the batch with a serialization error; SQLite has

@@ -10,7 +10,6 @@ This module only plans: it reads nothing but the stats it is given and writes no
 plan in one transaction, before any item is written, and only when the root guard holds.
 """
 import errno
-import logging
 import os
 from collections import namedtuple
 from dataclasses import dataclass, field
@@ -166,5 +165,3 @@ def apply_plan(plan, connection, update_group, identity_values):
         update_group(group_id, connection, **values)
     for group_id, note in sorted(plan.notes.items()):
         update_group(group_id, connection, resolution_note=note)
-    for line in plan.log:
-        logging.info(line)

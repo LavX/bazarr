@@ -88,7 +88,6 @@ class FolderKind:
         its path as their group key, and a video file directly in the root has no group and is only counted."""
         seen = set()
         pending = [(root, None, stat_directory(root))]
-        directories = {}
         readable = True
         while pending:
             if cancel is not None:
@@ -102,7 +101,7 @@ class FolderKind:
                 if error.errno in (errno.ENOENT, errno.ENOTDIR):
                     listing.unstable = True
                 continue
-            directories[directory] = state
+            listing.directory_states[directory] = state
             subdirectories = []
             with_files = []
             for entry in entries:
@@ -147,7 +146,7 @@ class FolderKind:
             pending.extend(reversed(subdirectories))
         # DirEntry and the videos yielded above describe the filesystem at traversal time. Verify the directory
         # identities again so a bare mount point or a same-device replacement cannot validate that old view.
-        for directory, state in directories.items():
+        for directory, state in listing.directory_states.items():
             if stat_directory(directory) != state or not os.access(directory, os.R_OK | os.X_OK):
                 listing.unstable = True
                 break

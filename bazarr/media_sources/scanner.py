@@ -22,7 +22,7 @@ from . import groups as group_rules
 from . import identify, identity, repository
 from .db import source_transaction
 from .indexer import SourceOutputOwnerIndex, index_item
-from .kinds import get_kind
+from .kinds import UnknownSourceKind, get_kind
 
 BATCH_SIZE = 500
 # PostgreSQL refuses an index entry of more than about 2,700 bytes. A path above this is logged and skipped, on
@@ -132,7 +132,14 @@ def scan_library(source, library, *, cancel=None, session=None, shadow_context=N
             if cancel is not None:
                 cancel()
         try:
-            return _scan_library(source, library, cancel, session, shadow_context or ShadowContext(session))
+            current_source = repository.get_source(source.id, session)
+            current_library = repository.get_library(library.id, session)
+            if current_source is None or current_library is None or current_library.source_id != source.id:
+                return LibraryScan(library.id, status='unavailable', message='The library was removed before its scan.')
+            if not current_source.enabled or not current_library.enabled:
+                return LibraryScan(library.id, status='disabled', message='The library was disabled before its scan.')
+            return _scan_library(current_source, current_library, cancel, session,
+                                 shadow_context or ShadowContext(session))
         finally:
             _scan_lock.release()
     finally:
@@ -158,36 +165,62 @@ def _group_directory_vouches(group):
     return state.status == 'dir' and group.dir_ino is not None and state.ino == group.dir_ino
 
 
-def _foreign_guard(session, cancel):
-    """Check each affected holder's own roots and walk once before accepting a move out of that library."""
-    verdicts = {}
+class _ForeignGuard:
+    """Read each foreign library once, and verify its mount again before relying on that walk."""
 
-    def library_vouches(holder):
-        library = repository.get_library(holder.library_id, session)
-        source = repository.get_source(holder.source_id, session)
+    def __init__(self, session, cancel):
+        self.session = session
+        self.cancel = cancel
+        self.walks = {}
+
+    def _walk(self, holder):
+        library = repository.get_library(holder.library_id, self.session)
+        source = repository.get_source(holder.source_id, self.session)
         if library is None or source is None:
-            return False
-        roots = repository.get_roots(holder.library_id, session)
+            return None
+        roots = repository.get_roots(holder.library_id, self.session)
         before = _root_snapshot(roots)
         if before is None or any(root.last_dev != before[root.local_path].dev for root in roots):
-            return False
-        kind = get_kind(source.kind)
+            return None
+        try:
+            kind = get_kind(source.kind)
+        except UnknownSourceKind:
+            return None
         if kind.validate_library(source, library):
-            return False
-        listing = kind.enumerate(source, library, cancel)
+            return None
+        listing = kind.enumerate(source, library, self.cancel)
         found_video = False
         for _ in listing:
             found_video = True
-        return found_video and listing.complete and not listing.unstable and _root_snapshot(roots) == before
+        if found_video and listing.complete and not listing.unstable and _root_snapshot(roots) == before:
+            return roots, before, listing.directory_states
+        return None
 
-    # The row's path is either gone or holds another file (a new file at an old name): both are answers. Only
-    # a stat that fails otherwise is not.
-    def vouches(holder):
-        if holder.library_id not in verdicts:
-            verdicts[holder.library_id] = library_vouches(holder)
-        return verdicts[holder.library_id] and identity.path_can_be_judged(holder.path)
+    def vouches(self, holder, found):
+        if holder.library_id not in self.walks:
+            self.walks[holder.library_id] = self._walk(holder)
+        walk = self.walks[holder.library_id]
+        if walk is None:
+            return False
+        roots, snapshot, directories = walk
+        if _root_snapshot(roots) != snapshot:
+            self.walks[holder.library_id] = None
+            return False
+        # A mount can sit below a configured root. Recheck the ancestors of the path being released.
+        directory = os.path.dirname(holder.path)
+        while directory and directory != os.path.dirname(directory):
+            if directory in directories and directory not in snapshot:
+                if (group_rules.stat_directory(directory) != directories[directory]
+                        or not os.access(directory, os.R_OK | os.X_OK)):
+                    return False
+            directory = os.path.dirname(directory)
+        return identity.path_can_release(holder.path, found)
 
-    return vouches
+    def can_handover(self, holder, found, alias):
+        if alias:
+            live = identity.stat_file(holder.path)
+            return live is not None and (live.dev, live.ino) == (found.dev, found.ino)
+        return self.vouches(holder, found)
 
 
 def _scan_library(source, library, cancel, session, shadow_context) -> LibraryScan:
@@ -238,11 +271,11 @@ def _scan_library(source, library, cancel, session, shadow_context) -> LibrarySc
         result.skipped += len(too_long)
 
     complete = listing.complete
-    foreign_vouched = _foreign_guard(session, cancel)
+    foreign_guard = _ForeignGuard(session, cancel)
     matching = identity.match_library(
         discovered, rows, ignore_dev=ignore_dev, library_content_kind=library.content_kind,
         foreign_lookup=lambda inodes, paths: repository.foreign_candidates(inodes, paths, library.id, session),
-        foreign_vouched=lambda holder: complete and foreign_vouched(holder))
+        foreign_vouched=lambda holder, found: complete and foreign_guard.vouches(holder, found))
 
     # A remounted root has to vouch for what this library knows: a file it holds by identity, or, for a library
     # that holds only folders, a folder that is the one recorded.
@@ -255,9 +288,6 @@ def _scan_library(source, library, cancel, session, shadow_context) -> LibrarySc
                                       'of the known files. Nothing was changed. If the library was replaced on '
                                       'purpose, remove it and add it again.')
 
-    if _root_snapshot(roots) != root_snapshot:
-        return refuse('root_missing', 'A folder became unavailable or changed during the scan. Nothing was changed.')
-
     result.status = 'ok' if complete else 'partial'
     if listing.problems:
         result.message = '; '.join(listing.problems[:3])
@@ -266,12 +296,10 @@ def _scan_library(source, library, cancel, session, shadow_context) -> LibrarySc
 
     follows_directories = grouped and getattr(kind, "groups_are_directories", False)
     plan = None
+    group_identities = {}
     if follows_directories and complete:
-        plan = _resolve_groups(groups, matching, bool(changed_roots), roots, library.id, session)
+        plan, group_identities = _plan_groups(groups, matching, bool(changed_roots), roots)
         group_for_dir = dict(plan.target)
-        # Re-identified groups were rewritten: whatever was read before is stale.
-        for group_id in plan.reidentify:
-            groups.pop(group_id, None)
     elif follows_directories and groups:
         # An incomplete walk decides no group: a folder is trusted only when its group has a file matched at home
         # in this very walk, which is step one of the rules decided on what was seen.
@@ -280,30 +308,28 @@ def _scan_library(source, library, cancel, session, shadow_context) -> LibrarySc
     else:
         group_for_dir = {row.group_key: row.id for row in groups.values()}
 
-    decisions = _decide(matching, groups, plan, group_for_dir, grouped, follows_directories, complete, roots)
+    decisions = _decide(matching, groups, plan, group_for_dir, grouped, follows_directories, complete, roots,
+                        foreign_guard)
+    if _root_snapshot(roots) != root_snapshot:
+        return refuse('root_missing', 'A folder became unavailable or changed during the scan. Nothing was changed.')
+
     result.deferred = decisions.deferred
-    group_for_dir.update(_create_groups(library, decisions, group_for_dir, groups, session))
-    if cancel is not None:
-        cancel()
+    write_args = (library, decisions, plan, group_identities, group_for_dir, groups, result, cancel)
+    if decisions.required_paths:
+        # These incoming files release rows whose groups give up their keys. A rejected write must also
+        # roll back the group keys, so these scans keep the key changes and item writes together.
+        try:
+            with source_transaction(session) as connection:
+                inserted = _write_library(*write_args, connection)
+        except _GroupedAdmissionRefused:
+            result = LibraryScan(library.id)
+            return refuse('partial', 'An incoming file could not be written. No item or group changes were saved.')
+    else:
+        inserted = _write_library(*write_args, session)
 
-    # 1. Rows closed or displaced go first, so that a path they held is free.
-    for batch in _chunks(decisions.delete_ids):
-        with source_transaction(session) as connection:
-            result.deleted += repository.delete_items(batch, connection, owner_library_id=library.id)
-
-    # 2. Rows that stayed: refresh what the walk saw, and join the group of the directory they are in.
-    _write_unchanged(decisions, group_for_dir, groups, grouped, result, session, cancel)
-
-    # 3. Rows that moved take a temporary path, then their final one: two files trading paths never collide.
-    _write_repathed(library, decisions, group_for_dir, groups, grouped, result, session, cancel)
-
-    # 4. Rows whose content changed at the same path, then the files nothing claimed.
-    _write_path_only(library, decisions, groups, group_for_dir, result, session, cancel)
-    inserted = _insert_new(library, decisions, group_for_dir, groups, result, session, cancel)
-
-    if plan is not None and complete:
-        # Empty groups: a group resolution found gone is deleted once it holds nothing.
-        repository.delete_empty_groups(plan.gone, session, owner_library_id=library.id)
+    if plan is not None:
+        for line in plan.log:
+            logging.info(line)
 
     for root in roots:
         if root.local_path in changed_roots and not complete:
@@ -325,6 +351,35 @@ def _scan_library(source, library, cancel, session, shadow_context) -> LibrarySc
     result.message = _summary(result, matching, listing)
     repository.record_library_scan(library.id, result.status, result.message, session)
     return result
+
+
+def _write_library(library, decisions, plan, group_identities, group_for_dir, groups, result, cancel, session):
+    if plan is not None and not plan.writes_nothing:
+        with source_transaction(session) as connection:
+            def update_group(group_id, connection, **values):
+                repository.update_group(group_id, connection, owner_library_id=library.id, **values)
+
+            group_rules.apply_plan(plan, connection, update_group, group_identities)
+        for group_id in plan.reidentify:
+            groups.pop(group_id, None)
+
+    grouped = library.content_kind != 'movie'
+    group_for_dir.update(_create_groups(library, decisions, group_for_dir, groups, session))
+    if cancel is not None:
+        cancel()
+
+    for batch in _chunks(decisions.delete_ids):
+        with source_transaction(session) as connection:
+            result.deleted += repository.delete_items(batch, connection, owner_library_id=library.id)
+
+    _write_unchanged(decisions, group_for_dir, groups, grouped, result, session, cancel)
+    _write_repathed(library, decisions, group_for_dir, groups, grouped, result, session, cancel)
+    _write_path_only(library, decisions, groups, group_for_dir, result, session, cancel)
+    inserted = _insert_new(library, decisions, group_for_dir, groups, result, session, cancel)
+
+    if plan is not None:
+        repository.delete_empty_groups(plan.gone, session, owner_library_id=library.id)
+    return inserted
 
 
 def _summary(result, matching, listing):
@@ -361,14 +416,17 @@ def _summary(result, matching, listing):
 
 @dataclass
 class _Decisions:
+    foreign_guard: _ForeignGuard
     unchanged: list = field(default_factory=list)       # (row, found)
     alias: list = field(default_factory=list)           # (row, found, the folder of the row's own path)
     repathed: list = field(default_factory=list)        # (row, found, handover: bool)
     path_only: list = field(default_factory=list)       # (row, found), kept
     new: list = field(default_factory=list)             # found
     delete_ids: list = field(default_factory=list)
-    handover_displaced: dict = field(default_factory=dict)  # destination path -> the displaced local row
+    admission_displaced: dict = field(default_factory=dict)  # destination path -> the displaced local row
     foreign_to_close: dict = field(default_factory=dict)  # destination path -> the foreign row
+    foreign_aliases: set = field(default_factory=set)
+    required_paths: set = field(default_factory=set)      # incoming paths whose groups give up their keys
     deferred: int = 0
     #: The walk was incomplete in a library whose groups follow directories: no group is created or changed.
     conservative: bool = False
@@ -387,8 +445,8 @@ def _own_directory(path, roots):
     return None
 
 
-def _resolve_groups(groups, matching, dev_changed, roots, library_id, session):
-    """Resolve every group of a folder library and apply the plan in one transaction, before any item write."""
+def _plan_groups(groups, matching, dev_changed, roots):
+    """Resolve every group of a folder library before making any changes."""
     held_dirs = defaultdict(list)
     for row, found in matching.unchanged + matching.moved:
         if row.group_id is not None:
@@ -407,21 +465,17 @@ def _resolve_groups(groups, matching, dev_changed, roots, library_id, session):
     for group_id in plan.reidentify:
         directory = plan.move.get(group_id) or groups[group_id].group_key
         identities[group_id] = identify.identify_group(directory)
-    if not plan.writes_nothing:
-        with source_transaction(session) as connection:
-            def update_group(group_id, connection, **values):
-                repository.update_group(group_id, connection, owner_library_id=library_id, **values)
-
-            group_rules.apply_plan(plan, connection, update_group, identities)
-    return plan
+    return plan, identities
 
 
-def _decide(matching, groups, plan, group_for_dir, grouped, follows_directories, complete, roots):
+def _decide(matching, groups, plan, group_for_dir, grouped, follows_directories, complete, roots, foreign_guard):
     """Turn the matching into writes. Nothing is deferred on a complete walk. On an incomplete one nothing that
     needs a group decision is done, and nothing is written to a path that a row which has to wait still holds:
     only a folder whose group has a file matched at home may take files, and only rows whose identity matched in
     this walk are touched."""
-    decisions = _Decisions()
+    decisions = _Decisions(foreign_guard)
+    decisions.foreign_to_close.update((found.path, holder) for holder, found in matching.closed_foreign)
+    decisions.foreign_aliases.update(found.path for _, found, alias in matching.handovers if alias)
     # With no group yet (the first scan) nothing can be moving anywhere, so a fresh group is always safe.
     decisions.conservative = grouped and follows_directories and not complete and bool(groups)
     # Rows that would be deleted because their path was reused cannot be, on an incomplete walk: whatever wants
@@ -432,7 +486,7 @@ def _decide(matching, groups, plan, group_for_dir, grouped, follows_directories,
         return not (decisions.conservative and found.group_key not in group_for_dir)
 
     moves = [(row, found, False) for row, found in matching.moved]
-    moves += [(holder, found, True) for holder, found in matching.handovers]
+    moves += [(holder, found, True) for holder, found, _ in matching.handovers]
     waiting = set()
     changed = True
     while changed:
@@ -465,7 +519,10 @@ def _decide(matching, groups, plan, group_for_dir, grouped, follows_directories,
                 decisions.path_only.append((row, found))
             else:
                 # The row's group left or is gone: the row is closed, and the file is new where it is.
-                decisions.delete_ids.append(row.id)
+                if found.path in decisions.foreign_to_close:
+                    decisions.admission_displaced[found.path] = row
+                else:
+                    decisions.delete_ids.append(row.id)
                 new.append(found)
         elif group_for_dir.get(found.group_key) == row.group_id:
             decisions.path_only.append((row, found))
@@ -480,13 +537,16 @@ def _decide(matching, groups, plan, group_for_dir, grouped, follows_directories,
         incoming = {found.path for _, found, handover in decisions.repathed if handover}
         for row in matching.displaced:
             if row.path in incoming:
-                decisions.handover_displaced[row.path] = row
+                decisions.admission_displaced[row.path] = row
             else:
                 decisions.delete_ids.append(row.id)
         for row in matching.unmatched:
             if identity.path_is_gone(row.path):
                 decisions.delete_ids.append(row.id)
-        decisions.foreign_to_close.update((found.path, holder) for holder, found in matching.closed_foreign)
+    if plan is not None:
+        rekeyed = plan.gone | plan.move.keys()
+        decisions.required_paths.update(path for path, row in decisions.admission_displaced.items()
+                                        if row.group_id in rekeyed)
     return decisions
 
 
@@ -601,14 +661,16 @@ def _write_repathed(library, decisions, group_for_dir, groups, grouped, result, 
             with source_transaction(session) as connection:
                 moved = [(entry, _write_final_path(library, entry, grouped, decisions, connection))
                          for entry in batch]
-        except (IntegrityError, _StaleHandover):
+        except (IntegrityError, _ForeignClaimChanged):
             # Retry each move on its own. An unsuccessful local move is recovered from its temporary path
             # on the next scan. A handover keeps the old owner and path until it succeeds.
             for entry in batch:
                 try:
                     with source_transaction(session) as connection:
                         deleted = _write_final_path(library, entry, grouped, decisions, connection)
-                except (IntegrityError, _StaleHandover):
+                except (IntegrityError, _ForeignClaimChanged) as error:
+                    if entry[1].path in decisions.required_paths:
+                        raise _GroupedAdmissionRefused from error
                     logging.warning('BAZARR the source file could not be moved to its new path and waits for the '
                                     'next scan: %s', entry[1].path)
                     result.deferred += 1
@@ -625,8 +687,12 @@ def _write_repathed(library, decisions, group_for_dir, groups, grouped, result, 
             cancel()
 
 
-class _StaleHandover(Exception):
-    """The prior owner changed before the transaction could transfer the item."""
+class _ForeignClaimChanged(Exception):
+    """The prior owner's mount, path or row changed before a transfer could commit."""
+
+
+class _GroupedAdmissionRefused(Exception):
+    """A replacement that must succeed with a group key change could not be written."""
 
 
 def _delete_owned(row, connection):
@@ -642,13 +708,13 @@ def _write_final_path(library, entry, grouped, decisions, connection):
     displaced = 0
     if handover:
         # Release the occupied path only in the transaction that makes the incoming item its new owner.
-        displaced = _delete_owned(decisions.handover_displaced.get(found.path), connection)
+        displaced = _delete_owned(decisions.admission_displaced.get(found.path), connection)
         values.update(source_id=library.source_id, library_id=library.id)
-    if repository.update_item(row.id, connection, owner_library_id=row.library_id, **values):
-        return displaced
-    if handover:
-        raise _StaleHandover
-    return None
+    updated = repository.update_item(row.id, connection, owner_library_id=row.library_id, **values)
+    if handover and (not updated or not decisions.foreign_guard.can_handover(
+            row, found, found.path in decisions.foreign_aliases)):
+        raise _ForeignClaimChanged
+    return displaced if updated else None
 
 
 def _count_repathed(entry, result, deleted):
@@ -668,11 +734,15 @@ def _write_path_only(library, decisions, groups, group_for_dir, result, session,
         deleted = 0
         with source_transaction(session) as connection:
             for row, found, identified in batch:
+                holder = decisions.foreign_to_close.get(found.path)
+                if holder is not None and not decisions.foreign_guard.vouches(holder, found):
+                    result.deferred += 1
+                    continue
                 values = _item_values(found, identified, keep_identity=row.identity_source == 'user')
                 # The file changed: its codec cache described the old content.
                 if repository.update_item(row.id, connection, owner_library_id=row.library_id,
                                           ffprobe_cache=None, **values):
-                    deleted += _delete_owned(decisions.foreign_to_close.get(found.path), connection)
+                    deleted += _delete_owned(holder, connection)
                     result.item_ids.append(row.id)
                     result.updated += 1
         result.deleted += deleted
@@ -684,8 +754,7 @@ def _insert_new(library, decisions, group_for_dir, groups, result, session, canc
     inserted = []
     item_kind = 'movie' if library.content_kind == 'movie' else 'episode'
     for batch in _chunks(decisions.new):
-        _insert_batch(batch, library, item_kind, group_for_dir, groups, result, session, inserted,
-                      decisions.foreign_to_close)
+        _insert_batch(batch, library, item_kind, group_for_dir, groups, result, session, inserted, decisions)
         if cancel is not None:
             cancel()
     return inserted
@@ -699,7 +768,7 @@ def _is_refused_row(error):
     return isinstance(error, OperationalError) and getattr(error.orig, 'pgcode', None) == '54000'
 
 
-def _insert_batch(batch, library, item_kind, group_for_dir, groups, result, session, inserted, foreign_to_close):
+def _insert_batch(batch, library, item_kind, group_for_dir, groups, result, session, inserted, decisions):
     """Insert a batch in one transaction. When the batch is refused as a whole (a path another row took in the
     meantime, a name the driver cannot bind), its files are tried one at a time: the ones that cannot be added
     are logged and skipped, and the rest are kept."""
@@ -709,15 +778,19 @@ def _insert_batch(batch, library, item_kind, group_for_dir, groups, result, sess
         parses.append((found, group_id, _identified(library, found, group_id, groups, session)))
 
     def insert(connection, found, group_id, identified):
+        holder = decisions.foreign_to_close.get(found.path)
+        deleted = _delete_owned(decisions.admission_displaced.get(found.path), connection)
         item_id = repository.insert_item(connection, source_id=library.source_id, library_id=library.id,
                                          kind=item_kind, path=found.path, group_id=group_id,
                                          **_item_values(found, identified))
-        return item_id, _delete_owned(foreign_to_close.get(found.path), connection)
+        if holder is not None and not decisions.foreign_guard.vouches(holder, found):
+            raise _ForeignClaimChanged
+        return item_id, deleted + _delete_owned(holder, connection)
     try:
         with source_transaction(session) as connection:
             written = [insert(connection, found, group_id, identified) for found, group_id, identified in parses]
-    except (IntegrityError, DataError, OperationalError) as error:
-        if not _is_refused_row(error):
+    except (IntegrityError, DataError, OperationalError, _ForeignClaimChanged) as error:
+        if not isinstance(error, _ForeignClaimChanged) and not _is_refused_row(error):
             raise
         for found, group_id, identified in parses:
             try:
@@ -727,9 +800,15 @@ def _insert_batch(batch, library, item_kind, group_for_dir, groups, result, sess
                 inserted.append((item_id, found))
                 result.inserted += 1
                 result.deleted += deleted
-            except (IntegrityError, DataError, OperationalError) as refusal:
-                if not _is_refused_row(refusal):
+            except (IntegrityError, DataError, OperationalError, _ForeignClaimChanged) as refusal:
+                foreign_changed = isinstance(refusal, _ForeignClaimChanged)
+                if not foreign_changed and not _is_refused_row(refusal):
                     raise
+                if found.path in decisions.required_paths:
+                    raise _GroupedAdmissionRefused from refusal
+                if foreign_changed:
+                    result.deferred += 1
+                    continue
                 logging.warning('BAZARR the source file could not be added and was skipped: %s', found.path)
                 result.skipped += 1
         return

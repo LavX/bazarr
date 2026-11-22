@@ -64,6 +64,8 @@ class Listing:
     problems: list = field(default_factory=list)
     #: A walked directory vanished, became inaccessible or changed identity during the walk.
     unstable: bool = False
+    #: Directory identities recorded by a folder walk, for validating later foreign releases.
+    directory_states: dict = field(default_factory=dict)
     #: Files left out because their name cannot be stored (bytes that are not valid UTF-8).
     skipped_names: int = 0
     #: Files directly in the root of a series or sports library: they belong to no show or league.

@@ -44,16 +44,15 @@ def path_is_gone(path):
     return False
 
 
-def path_can_be_judged(path):
-    """True when a stat of the path gives a definite answer: the file is there, or it is known to be absent. Any
-    other failure (a permission error, a stale handle) means nothing can be said about it."""
+def path_can_release(path, found):
+    """A foreign path may release a file only if it is absent or holds a different physical file."""
     try:
-        os.stat(path)
+        info = os.stat(path)
     except OSError as error:
         return error.errno in (errno.ENOENT, errno.ENOTDIR)
     except ValueError:
         return False
-    return True
+    return (unsigned(info.st_dev), unsigned(info.st_ino)) != (found.dev, found.ino)
 
 
 def same_file(first, second, *, attributes=False, stat_first=None, stat_second=None):
@@ -114,8 +113,8 @@ class Matching:
     alias_unchanged: list = field(default_factory=list)
     #: ``(row, found)``: the row's file is at another path of this library.
     moved: list = field(default_factory=list)
-    #: ``(holder, found)``: a row of another library whose file is at ``found`` now, or an alias of a disabled
-    #: holder's file; the row moves here under the handover procedure.
+    #: ``(holder, found, alias)``: a row of another library whose file moved here or is held through a live
+    #: alias by a disabled library.
     handovers: list = field(default_factory=list)
     #: ``(holder, found)``: a row of another content kind closes when the destination is written.
     closed_foreign: list = field(default_factory=list)
@@ -151,15 +150,15 @@ def _holds_live(row_path, found):
 
 
 def match_library(found_files, rows, *, ignore_dev, foreign_lookup, library_content_kind,
-                  foreign_vouched=lambda holder: True):
+                  foreign_vouched=lambda holder, found: True):
     """Match a library's discovered files to its stored rows, over the whole library and before any write.
 
     ``ignore_dev(found)`` says whether a file's root changed device since the last scan. ``foreign_lookup(inodes,
     paths)`` returns the rows of other libraries that may be the same files. Everything is processed in a fixed
     order, so the answer does not depend on the order the walk produced the files in.
 
-    ``foreign_vouched(holder)`` says whether the holder's own library can vouch for the row being closed or moved
-    away from it. Without it the row is left to that library's own next scan."""
+    ``foreign_vouched(holder, found)`` says whether the holder's own library can vouch for the row being closed
+    or moved away from it. Without it the row is left to that library's own next scan."""
     result = Matching()
     found_files = sorted(found_files, key=lambda found: found.path)
     rows = sorted(rows, key=lambda row: row.id)
@@ -221,16 +220,16 @@ def match_library(found_files, rows, *, ignore_dev, foreign_lookup, library_cont
                 if holder.library_enabled and holder.source_enabled:
                     result.supplied.append((found, holder))
                 elif same_kind:
-                    result.handovers.append((holder, found))
+                    result.handovers.append((holder, found, True))
                 else:
                     result.held_elsewhere.append((found, holder))
-            elif not foreign_vouched(holder):
+            elif not foreign_vouched(holder, found):
                 claimed[found.path] = holder.id
                 result.deferred_foreign.append((found, holder))
             elif same_kind:
                 # The file physically moved here: the row follows its own identity, from an enabled library too.
                 claimed[found.path] = holder.id
-                result.handovers.append((holder, found))
+                result.handovers.append((holder, found, False))
             else:
                 # It cannot carry the row into another kind of library: the row is closed, the file is new here.
                 result.closed_foreign.append((holder, found))
@@ -245,7 +244,8 @@ def match_library(found_files, rows, *, ignore_dev, foreign_lookup, library_cont
             matched_rows.add(row.id)
             result.path_only.append((row, found))
 
-    replacement_paths = {found.path for _, found in result.moved + result.handovers}
+    replacement_paths = {found.path for _, found in result.moved}
+    replacement_paths.update(found.path for _, found, _ in result.handovers)
     for row in rows:
         if row.id not in matched_rows:
             if row.path in replacement_paths:
