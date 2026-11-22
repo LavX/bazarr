@@ -8,6 +8,7 @@ import {
   canRun,
   engineName,
   engineStatus,
+  engineUnavailable,
   hasBackends,
   heldBack,
 } from "./model";
@@ -30,6 +31,7 @@ const EngineSetup: FunctionComponent<{
   canTest?: boolean;
 }> = ({ engine, selected, canTest }) => {
   const status = engineStatus(engine);
+  const unavailable = engineUnavailable(engine);
   const name = engineName(engine);
   const fields = engine.schema?.fields ?? [];
   const backends = hasBackends(engine);
@@ -50,7 +52,7 @@ const EngineSetup: FunctionComponent<{
           checked={power.checked}
           aria-busy={power.busy}
           // The settings form writes the same row: while it saves, the switch waits its turn.
-          disabled={formBusy}
+          disabled={formBusy || unavailable}
           onChange={(event) => void power.set(event.currentTarget.checked)}
         />
       </div>
@@ -91,7 +93,7 @@ const EngineSetup: FunctionComponent<{
       ))}
 
       <div className={styles.setupBody}>
-        {backends && (
+        {backends && !unavailable && (
           <section className={styles.section}>
             <div className={styles.sectionHead}>
               <div>
@@ -107,7 +109,7 @@ const EngineSetup: FunctionComponent<{
           </section>
         )}
 
-        {fields.length > 0 && (
+        {fields.length > 0 && !unavailable && (
           <section className={styles.section}>
             <div className={styles.sectionHead}>
               <h3 className={styles.sectionTitle}>Engine settings</h3>

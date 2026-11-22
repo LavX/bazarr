@@ -43,6 +43,45 @@ describe("CapabilityStatus", () => {
     ).toBeVisible();
   });
 
+  it("labels an address the user typed as External and says what the last check found", () => {
+    customRender(
+      <CapabilityStatus
+        capabilities={[
+          {
+            ...ready,
+            external: true,
+            health: { state: "ready", code: "ok", checked_at: 1 },
+          },
+          {
+            ...ready,
+            capability: "other.thing.v2",
+            external: true,
+            health: { state: "unreachable", code: "timeout", checked_at: 1 },
+          },
+        ]}
+      />,
+    );
+    const answered = screen.getByText("FlareSolverr").closest("li");
+    expect(within(answered as HTMLElement).getByText("External")).toBeVisible();
+    expect(
+      within(answered as HTMLElement).getByText("Last check: answered"),
+    ).toBeVisible();
+    const silent = screen.getByText("other.thing.v2").closest("li");
+    expect(
+      within(silent as HTMLElement).getByText("Last check: no answer"),
+    ).toBeVisible();
+  });
+
+  it("says nothing of an external service when the capability is not external", () => {
+    customRender(
+      <CapabilityStatus
+        capabilities={[{ ...ready, source: "managed" }, missing]}
+      />,
+    );
+    expect(screen.queryByText("External")).toBeNull();
+    expect(screen.queryByText(/Last check/)).toBeNull();
+  });
+
   it("shows an id the host has no name for as it is", () => {
     customRender(
       <CapabilityStatus

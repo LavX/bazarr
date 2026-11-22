@@ -1,6 +1,7 @@
 """A source item through the shared subtitle pipeline: the seam, the pool, the blacklist, sync and history."""
 import logging
 import re
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -536,7 +537,7 @@ def test_an_item_deleted_between_the_search_and_the_finalize_logs_one_line_and_k
     assert open(subtitle.storage_path, "rb").read() == CONTENT
 
 
-def test_processing_a_source_subtitle_returns_the_result_tuple_without_mapping_or_arr_calls(world, monkeypatch):
+def test_processing_a_source_subtitle_returns_the_result_without_mapping_or_arr_calls(world, monkeypatch):
     from subtitles import processing
 
     context = _movie(world)
@@ -550,7 +551,7 @@ def test_processing_a_source_subtitle_returns_the_result_tuple_without_mapping_o
     monkeypatch.setattr(processing.path_mappings, "path_replace_reverse_movie", mapped)
     monkeypatch.setattr(processing.path_mappings, "path_replace_reverse", mapped)
 
-    (result,) = processing.process_subtitle(subtitle, "movie", "None", context.path, 100, source=context)
+    result = processing.process_subtitle(subtitle, "movie", "None", context.path, 100, source=context)
 
     assert (result.path, result.subs_path, result.language_code, result.provider) == (
         context.path, subtitle.storage_path, "en", "fake")
@@ -608,28 +609,33 @@ def test_a_source_sync_takes_its_thresholds_and_publication_from_the_items_kind(
 
 def test_a_source_sync_writes_its_history_to_the_source_table(world, monkeypatch):
     from media_sources import repository
-    from subtitles.tools.subsyncer import SubSyncer
-    from subtitles.tools.subsync_engines import RESULT_SUCCESS, SyncEngineResult
+    from subtitles.tools import subsyncer
 
     context = _movie(world)
-    syncer = SubSyncer()
-    syncer.reference = context.path
-    output = context.path.replace(".mkv", ".en.synced.srt")
-    success = SyncEngineResult(engine="ffsubsync", status=RESULT_SUCCESS, output_path=output,
-                               raw_result={"offset_seconds": 1.5, "framerate_scale_factor": 1.0,
-                                           "quality_of_fit": 0.9})
+    original = Path(context.path).with_suffix(".en.srt")
+    original.write_bytes(CONTENT)
+    output = original.with_suffix(".alass.srt")
     arr_calls = []
-    from subtitles.tools import subsyncer
+
+    def align(self, engine, output_path, video_path, no_fix_framerate):
+        output_path.write_bytes(CONTENT)
+        return {"offset_seconds": 1.5, "framerate_scale_factor": 1.0, "quality_of_fit": 0.9}
+
+    monkeypatch.setattr(subsyncer.SubSyncer, "_run_external_engine", align)
     monkeypatch.setattr(subsyncer, "history_log_movie", lambda *a, **k: arr_calls.append(a))
     monkeypatch.setattr(subsyncer, "history_log", lambda *a, **k: arr_calls.append(a))
     before = table_counts(world.db, ARR_AND_SPORTS_TABLES)
 
-    syncer._log_sync_history(success, "overwrite", "en", False, False, source=context)
+    result = subsyncer.SubSyncer().sync(
+        video_path=context.path, srt_path=str(original), srt_lang="en", hi=False, forced=False,
+        max_offset_seconds="60", no_fix_framerate=True, gss=True, force_sync=True,
+        output_mode="keep_all", enabled_engines=["alass"], source=context)
 
+    assert result.success and output.read_bytes() == CONTENT
     (row,) = world.db.execute(sa.select(repository.History)).all()
     assert (row.action, row.item_id, row.source_id, row.item_kind, row.language) == (5, context.item_id,
                                                                                     world.source_id, "movie", "en")
-    assert (row.video_path, row.subtitles_path, row.source_name) == (context.path, output, "Local")
+    assert (row.video_path, row.subtitles_path, row.source_name) == (context.path, str(output), "Local")
     assert "offset of 1.5 seconds" in row.description
     assert arr_calls == [] and table_counts(world.db, ARR_AND_SPORTS_TABLES) == before
 

@@ -4,8 +4,9 @@
 One address per capability, kept in the ``endpoints`` settings section under
 ``<capability, dots as underscores>_url``. FlareSolverr is the first one: a
 plugin that can solve its Cloudflare challenges through FlareSolverr reads its
-own ``flaresolverr_url``, and when that is empty the host fills it from here
-(``capabilities.deliver``).
+own ``flaresolverr_url``. If it is empty and an address is set here, the host
+hands it to the plugin for the duration of the call through a lease
+(``capabilities.CallLeases``).
 
 Nothing in this module adopts an address by itself. A FlareSolverr container
 that answers on its usual sibling name is reported as a hint, and the setting
@@ -57,14 +58,16 @@ def normalize_endpoint_url(value) -> str:
     if not isinstance(value, str):
         return ""
     text = value.strip()
-    if not text:
+    # Parsers can disagree about backslashes and silently discard whitespace or controls.
+    if not text or "\\" in text or any(char.isspace() or ord(char) < 32 for char in text):
         return ""
     try:
         parts = urlsplit(text)
         host = parts.hostname
+        port = parts.port
     except ValueError:
         return ""
-    if parts.scheme not in ("http", "https") or not host:
+    if parts.scheme not in ("http", "https") or not host or port == 0:
         return ""
     return text
 
@@ -604,7 +607,7 @@ def check_flaresolverr_address(address) -> dict:
     text = address.strip() if isinstance(address, str) else ""
     if not text:
         return _address_result("invalid_address", "empty")
-    if len(text) > ADDRESS_TEST_MAX_LENGTH or "\\" in text or any(char.isspace() or ord(char) < 32 for char in text):
+    if len(text) > ADDRESS_TEST_MAX_LENGTH or not normalize_endpoint_url(text):
         return _address_result("invalid_address")
     try:
         parsed = _validate_test_base_url(text)
@@ -684,4 +687,17 @@ def run_flaresolverr_test(typed, settings=None) -> dict:
         source = "typed"
     result = check_flaresolverr_address(typed)
     result["source"] = source
+    _record_health_of_address_in_use(typed, result, settings)
     return result
+
+
+def _record_health_of_address_in_use(address, result: dict, settings=None) -> None:
+    """A Test of the address providers use is also the health the cards show. A different typed address is not."""
+    try:
+        in_use = flaresolverr_url_source(settings)[0]
+        if isinstance(address, str) and same_flaresolverr_service(address, in_use):
+            from . import service_health
+
+            service_health.record(FLARESOLVERR_CAPABILITY, in_use, result)
+    except Exception as error:
+        logger.warning("Could not keep the result of a FlareSolverr test (%s)", type(error).__name__)

@@ -62,8 +62,14 @@ class Listing:
     files: Iterator[DiscoveredFile]
     complete: bool = False
     problems: list = field(default_factory=list)
+    #: A walked directory vanished, became inaccessible or changed identity during the walk.
+    unstable: bool = False
+    #: Directory identities recorded by a folder walk, for validating later foreign releases.
+    directory_states: dict = field(default_factory=dict)
     #: Files left out because their name cannot be stored (bytes that are not valid UTF-8).
     skipped_names: int = 0
+    #: Files directly in the root of a series or sports library: they belong to no show or league.
+    ungrouped: int = 0
 
     def __iter__(self):
         return iter(self.files)
@@ -71,6 +77,9 @@ class Listing:
 
 class SourceKind(Protocol):
     kind: str
+    #: True when a group is a directory, so the scanner resolves groups against the disk (the folder kind). A
+    #: kind that keys its groups by the server's own id has no directories to follow.
+    groups_are_directories: bool
 
     def validate_library(self, source, library) -> list[Problem]: ...
 

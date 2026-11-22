@@ -15,7 +15,7 @@ import pytest
 import sqlalchemy as sa
 from flask import Flask
 
-from media_source_helpers import add_profile, add_source, video
+from media_source_helpers import add_profile, add_source, pristine_media_source_modules, video  # noqa: F401
 
 HEADERS = {"X-API-KEY": "synthetic-bazarr-key"}
 
@@ -175,7 +175,7 @@ def test_the_arr_tables_are_not_touched_by_a_source(client, arr_library, tmp_pat
     assert table_counts(arr_library, ARR_AND_SPORTS_TABLES) == before
 
 
-def test_the_repository_imports_while_the_database_module_is_a_stub(monkeypatch):
+def test_the_repository_imports_while_the_database_module_is_a_stub(monkeypatch, pristine_media_source_modules):  # noqa: F811
     """Importing the API package imports the repository, and some test files do that with ``app.database``
     replaced by a stub whose classes carry no ``__table__``."""
     import importlib
@@ -192,3 +192,15 @@ def test_the_repository_imports_while_the_database_module_is_a_stub(monkeypatch)
     monkeypatch.setitem(sys.modules, "app.database", Stub("app.database"))
     repository = importlib.import_module("media_sources.repository")
     assert repository.Items is None and repository.ITEM_KINDS
+
+
+def test_the_stub_import_leaves_the_package_as_it_found_it():
+    """The test above re-imports the repository under a stub. Whatever it did must be undone: the next test
+    that asks the package for the repository must get the real one, in any order the files run in."""
+    import media_sources
+    from media_sources import db, repository
+
+    assert repository.Items is not None and media_sources.repository.Sources is not None
+    assert sys.modules["media_sources.repository"] is media_sources.repository is repository
+    assert sys.modules["media_sources.db"] is media_sources.db is db
+    assert sys.modules["app.database"].__class__.__name__ != "Stub"

@@ -351,8 +351,6 @@ def _save_and_process(video, subtitles, episode, video_path, language, audio_lan
         if not result:
             logging.debug('BAZARR forced search: unable to process this subtitle: %s', subtitle)
             continue
-        if isinstance(result, tuple) and len(result):
-            result = result[0]
         processed.append(result)
     return processed
 

@@ -13,6 +13,7 @@ import sys
 import threading
 import time
 from collections import deque
+from io import BytesIO
 from pathlib import Path
 
 import pytest
@@ -1798,6 +1799,182 @@ def test_no_one_off_worker_is_spawned_once_the_pool_is_closing(make_pool):
 
 
 @needs_smaps
+@pytest.mark.parametrize("interrupted", ["children", "maps"])
+def test_a_child_reaped_during_sampling_does_not_stop_its_live_worker(make_pool, clock, monkeypatch, interrupted):
+    runtime = StubProcessRuntime()
+    runtime.process.pid = os.getpid()
+    pool = make_pool()
+    pool.register(WorkerDefinition("tr", kind="daemon", memory_limit_bytes=4 * GIB,
+                                   runtime=lambda *args: runtime))
+    pool.warm("tr")
+    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    real_open = open
+
+    def reap_child():
+        child.terminate()
+        child.wait(timeout=5)
+
+    class EndingMappings(BytesIO):
+        def readline(self, size=-1):
+            record = super().readline(size)
+            if record:
+                return record
+            reap_child()
+            raise FileNotFoundError(2, "No such file or directory")
+
+    def racing_open(path, *args, **kwargs):
+        if interrupted == "children" and path == "/proc/%d/task/%d/children" % (child.pid, child.pid):
+            reap_child()
+            raise ProcessLookupError(3, "No such process")
+        if interrupted == "maps" and path == "/proc/%d/maps" % child.pid:
+            return EndingMappings(b"7f0000000000-7f0000001000 rw-s 00000000 00:01 77 /memfd:child (deleted)\n")
+        return real_open(path, *args, **kwargs)
+
+    try:
+        monkeypatch.setattr("builtins.open", racing_open)
+        clock.advance(1)
+        pool.sweep()
+        assert child.returncode is not None, "the child must exit during the sample"
+        assert pool.state("tr") is WorkerState.READY
+        assert pool.run("tr", "echo").result == {"op": "echo"}
+    finally:
+        runtime.process.returncode = 0
+        if child.returncode is None:
+            child.kill()
+            child.wait(timeout=5)
+
+
+@needs_smaps
+def test_a_pid_reused_during_sampling_is_not_counted_as_worker_memory(monkeypatch):
+    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    stat_path = "/proc/%d/stat" % child.pid
+    smaps_path = "/proc/%d/smaps_rollup" % child.pid
+    real_open = open
+
+    def replacing_open(path, *args, **kwargs):
+        if path == smaps_path:
+            child.terminate()
+            child.wait(timeout=5)
+            return BytesIO(b"Pss: 3145728 kB\nRss: 3145728 kB\n")
+        if path == stat_path and child.returncode is not None:
+            return BytesIO(replacement)
+        return real_open(path, *args, **kwargs)
+
+    try:
+        with real_open(stat_path, "rb") as handle:
+            name, fields = handle.read().rsplit(b")", 1)
+        fields = fields.split()
+        fields[19] = str(int(fields[19]) + 1).encode()  # the replacement process started a tick later
+        replacement = name + b") " + b" ".join(fields) + b"\n"
+        monkeypatch.setattr("builtins.open", replacing_open)
+        sample = read_process_tree_memory(os.getpid())
+        assert child.returncode is not None, "the PID must be replaced during the sample"
+        assert sample is not None and not sample.truncated
+        assert sample.bytes < 3 * GIB  # the replacement process alone would have contributed 3 GiB
+    finally:
+        if child.returncode is None:
+            child.kill()
+            child.wait(timeout=5)
+
+
+@needs_smaps
+def test_the_sampler_uses_the_identity_saved_at_worker_start(make_pool, monkeypatch):
+    runtime = StubProcessRuntime()
+    runtime.process.pid = os.getpid()
+    pool = make_pool()
+    pool.register(WorkerDefinition("tr", kind="daemon", memory_limit_bytes=4 * GIB,
+                                   runtime=lambda *args: runtime))
+    pool.warm("tr")
+    slot = pool._entries["tr"].slot
+    previous_bytes = slot.memory_bytes
+    runtime._process_mark = b"1"  # the old worker's stamp, before its PID was reused
+    monkeypatch.setattr(pool_module, "_read_kb", lambda *args, **kwargs: {"Pss": 3 * GIB})
+    pool._sample(slot)
+    runtime.process.returncode = 0
+    assert slot.memory_bytes == previous_bytes
+
+
+@needs_smaps
+@pytest.mark.parametrize("persistent", [False, True], ids=["clears", "persists"])
+@pytest.mark.parametrize("record", ["maps", "fd"])
+def test_an_interrupted_proc_read_of_a_live_child_is_retried_once(sleeper, monkeypatch, record, persistent):
+    attempts = 0
+    real_open = open
+    real_listdir = os.listdir
+    path = "/proc/%d/%s" % (sleeper.pid, record)
+
+    def should_interrupt():
+        nonlocal attempts
+        attempts += 1
+        return attempts == 1 or persistent
+
+    class InterruptedMaps(BytesIO):
+        def readline(self, size=-1):
+            line = super().readline(size)
+            if not line:
+                raise ProcessLookupError(3, "No such process")
+            return line
+
+    def open_maps(name, *args, **kwargs):
+        if name == path and should_interrupt():
+            return InterruptedMaps(b"7f0000000000-7f0000001000 rw-p 00000000 00:00 0 [heap]\n")
+        return real_open(name, *args, **kwargs)
+
+    def list_fds(name):
+        if name == path and should_interrupt():
+            raise FileNotFoundError(2, "No such file or directory")
+        return real_listdir(name)
+
+    if record == "maps":
+        monkeypatch.setattr("builtins.open", open_maps)
+    else:
+        monkeypatch.setattr(os, "listdir", list_fds)
+    sample = read_process_tree_memory(os.getpid())
+    assert attempts == 2
+    assert sleeper.poll() is None
+    assert sample is not None and sample.truncated is persistent
+
+
+@needs_smaps
+@pytest.mark.parametrize("changes_again", [False, True], ids=["adopted", "keeps-changing"])
+def test_a_newly_adopted_descendant_is_measured_or_fails_closed(sleeper, monkeypatch, changes_again):
+    root = os.getpid()
+    real_children = pool_module._children_of
+    # The first root listing preceded adoption. A second change during the retry must fail closed.
+    listings = iter([[], [sleeper.pid], [sleeper.pid], [] if changes_again else [sleeper.pid]])
+
+    def children(pid, budget=None):
+        if pid == root:
+            return next(listings), False
+        return real_children(pid, budget)
+
+    monkeypatch.setattr(pool_module, "_children_of", children)
+    sample = read_process_tree_memory(root)
+    assert sample is not None and sample.truncated is changes_again
+    if not changes_again:
+        assert sample.processes == 2
+
+
+@needs_smaps
+def test_a_final_identity_read_that_crosses_the_deadline_makes_the_sample_incomplete(monkeypatch):
+    real_identity = pool_module._proc_identity
+    reads = 0
+
+    def read_identity(pid, budget):
+        nonlocal reads
+        identity = real_identity(pid, budget)
+        reads += 1
+        if reads == 2:
+            budget.deadline = 0
+        return identity
+
+    monkeypatch.setattr(pool_module, "_proc_identity", read_identity)
+    sample = read_process_tree_memory(os.getpid())
+    assert reads == 2
+    assert sample is not None and sample.truncated
+
+
+@needs_smaps
 def test_a_live_descendant_whose_memory_cannot_be_read_makes_the_sample_incomplete(monkeypatch):
     child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
     real = pool_module._read_kb
@@ -1814,14 +1991,14 @@ def test_a_live_descendant_whose_memory_cannot_be_read_makes_the_sample_incomple
         sample = read_process_tree_memory(os.getpid())
         assert sample is not None and sample.truncated is True
 
-        def vanished(path, *names, **kwargs):
+        def missing_records(path, *names, **kwargs):
             if "/proc/%d/" % child.pid in path:
                 raise FileNotFoundError(2, "No such file or directory")
             return real(path, *names, **kwargs)
 
-        # A process that exited between the listing and the read is not an unknown.
-        monkeypatch.setattr(pool_module, "_read_kb", vanished)
-        assert read_process_tree_memory(os.getpid()).truncated is False
+        # A still-live process can have an unreadable memory record, even when the read reports ENOENT.
+        monkeypatch.setattr(pool_module, "_read_kb", missing_records)
+        assert read_process_tree_memory(os.getpid()).truncated is True
     finally:
         monkeypatch.undo()
         child.kill()

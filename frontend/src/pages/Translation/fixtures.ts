@@ -1,9 +1,27 @@
 /* eslint-disable camelcase -- transport names. */
+import type { PluginInstallation } from "@/apis/raw/plugins";
 import type {
   TranslationConnection,
   TranslationEngine,
   TranslationHistoryJob,
 } from "@/types/translation";
+
+export function engineInstallations(
+  engines: TranslationEngine[],
+): PluginInstallation[] {
+  return engines.flatMap(({ plugin, plugin_id: id, legacy }) =>
+    plugin && !legacy
+      ? [
+          {
+            provider_id: id,
+            kind: "translator",
+            state: "active",
+            active_version: plugin.version,
+          },
+        ]
+      : [],
+  );
+}
 
 /** What the page's tests start from: one official engine with two back ends, and a second engine. */
 export const SECRET = "sk-page-test-0123456789"; // pragma: allowlist secret

@@ -17,6 +17,8 @@ import server from "@/tests/mocks/node";
 import {
   choose,
   optionsOf,
+  PICK_INSTALLATIONS,
+  refreshPickInstallations,
   stateLoaded,
   translatorStatus,
 } from "./pickFixtures";
@@ -312,35 +314,51 @@ describe("MassTranslateForm and the manual pick", () => {
     expect(sent?.options).not.toHaveProperty("connection_id");
   });
 
-  it("sends no back end for Automatic", async () => {
-    const user = userEvent.setup();
-    settings();
-    translatorStatus(true, { available: true, reason: "" });
-    let sent: { options?: Record<string, unknown> } | undefined;
-    server.use(
-      http.post("/api/subtitles/batch", async ({ request }) => {
-        sent = (await request.json()) as typeof sent;
-        return HttpResponse.json({
-          queued: 1,
-          skipped: 0,
-          errors: [],
-          job_id: 5,
-        });
-      }),
-    );
-    customRender(<MassTranslateForm items={[MOVIE]} />);
-    await languagesLoaded();
-    await screen.findByRole("combobox", { name: "Translate with" });
+  it.each([false, true])(
+    "sends no manual pick for Automatic (engine removed: %s)",
+    async (removed) => {
+      const user = userEvent.setup();
+      settings();
+      translatorStatus(true, { available: true, reason: "" });
+      let sent: { options?: Record<string, unknown> } | undefined;
+      server.use(
+        http.post("/api/subtitles/batch", async ({ request }) => {
+          sent = (await request.json()) as typeof sent;
+          return HttpResponse.json({
+            queued: 1,
+            skipped: 0,
+            errors: [],
+            job_id: 5,
+          });
+        }),
+      );
+      customRender(<MassTranslateForm items={[MOVIE]} />);
+      await languagesLoaded();
+      const picker = await screen.findByRole("combobox", {
+        name: "Translate with",
+      });
+      if (removed) {
+        await stateLoaded();
+        await choose(user, "Translate with", "Google Translate");
+        await refreshPickInstallations(
+          PICK_INSTALLATIONS.filter(
+            (item) => item.provider_id !== "google_translate",
+          ),
+        );
+        await waitFor(() => expect(picker).toHaveValue("Automatic"));
+      }
 
-    await choose(user, "Source Language", "English");
-    await choose(user, "Target Language", "Hungarian");
-    await user.click(
-      screen.getByRole("button", { name: "Translate 1 Item(s)" }),
-    );
+      await choose(user, "Source Language", "English");
+      await choose(user, "Target Language", "Hungarian");
+      await user.click(
+        screen.getByRole("button", { name: "Translate 1 Item(s)" }),
+      );
 
-    await waitFor(() => expect(sent).toBeDefined());
-    expect(sent?.options).not.toHaveProperty("connection_id");
-  });
+      await waitFor(() => expect(sent).toBeDefined());
+      expect(sent?.options).not.toHaveProperty("connection_id");
+      expect(sent?.options).not.toHaveProperty("engine_id");
+    },
+  );
 
   it("lets a picked back end start when the selected engine's gate is closed", async () => {
     const user = userEvent.setup();

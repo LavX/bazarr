@@ -206,7 +206,7 @@ def test_an_unreadable_subdirectory_deletes_nothing_below_the_root(library):
 
 def test_an_item_is_deleted_only_when_its_own_file_is_gone(library, monkeypatch):
     """A listing that no longer contains a file is not proof it is gone: the disk decides."""
-    from media_sources import repository, scanner
+    from media_sources import identity, repository
 
     session, source_id, library_id, root = library
     video(root / "Other.2002.mkv")
@@ -230,10 +230,10 @@ def test_an_item_is_deleted_only_when_its_own_file_is_gone(library, monkeypatch)
     def denied(path, *args, **kwargs):
         raise PermissionError(13, "denied")
 
-    monkeypatch.setattr(scanner.os, "stat", denied)
-    assert scanner._path_is_gone(str(root / "Other.2002.mkv")) is False
-    monkeypatch.setattr(scanner.os, "stat", real_stat)
-    assert scanner._path_is_gone(str(root / "nothing.mkv")) is True
+    monkeypatch.setattr(identity.os, "stat", denied)
+    assert identity.path_is_gone(str(root / "Other.2002.mkv")) is False
+    monkeypatch.setattr(identity.os, "stat", real_stat)
+    assert identity.path_is_gone(str(root / "nothing.mkv")) is True
 
 
 def test_writes_go_in_batches_and_every_batch_commits(library, monkeypatch):
@@ -449,7 +449,8 @@ def test_the_folder_kind_refuses_paths_it_cannot_use(tmp_path):
     assert "root" in problems(os.sep)
     assert "config_directory" in problems(args.config_dir)
     assert "config_directory" in problems(os.path.dirname(args.config_dir))
-    assert "content_kind" in problems(str(tmp_path), "series")
+    assert problems(str(tmp_path), "series") == set()
+    assert "content_kind" in problems(str(tmp_path), "sports")
     with pytest.raises(UnknownSourceKind):
         get_kind("jellyfin")
 
@@ -528,17 +529,20 @@ def test_a_file_another_library_holds_is_skipped_and_reported_not_inserted(libra
     assert (first.inserted, first.held, first.deleted) == (0, 1, 0)
 
 
-def test_a_file_held_by_a_disabled_library_is_reported_as_held_not_adopted(library):
+def test_a_file_held_by_a_disabled_library_is_adopted_by_the_scanning_source(library):
+    """A disabled holder hands an aliased file over: the item keeps its id and moves to the scanning library."""
     from media_sources import repository
 
     session, source_id, library_id, root = library
     video(root / "Film.2001.mkv")
     _scan(source_id)
+    (item,) = _items(library_id).values()
     session.execute(sa.update(repository.Libraries).where(repository.Libraries.c.id == library_id).values(enabled=0))
     other_source, other_library = _second_library(session, root)
     (result,) = _scan(other_source)
-    assert result.inserted == 0 and result.held == 1 and "held by Local" in result.message
-    assert repository.count_items(library_id=other_library) == 0
+    assert (result.inserted, result.handed_over) == (0, 1)
+    adopted = repository.get_item(item.id)
+    assert (adopted.library_id, adopted.source_id) == (other_library, other_source)
 
 
 def test_a_batch_that_hits_the_unique_path_anyway_falls_back_to_one_file_at_a_time(library, monkeypatch):
@@ -637,7 +641,7 @@ def test_a_name_that_is_not_valid_utf8_is_skipped_and_reported_and_the_scan_goes
 
 
 def test_changed_files_are_parsed_before_the_write_transaction_opens(library, monkeypatch):
-    from media_sources import scanner
+    from media_sources import identify, scanner
 
     session, source_id, library_id, root = library
     paths = [video(root / f"Film.{2000 + number}.mkv") for number in range(3)]
@@ -645,7 +649,7 @@ def test_changed_files_are_parsed_before_the_write_transaction_opens(library, mo
     for path in paths:
         path.write_bytes(b"\0" * 2000)
     inside = []
-    real_transaction, real_parse = scanner.source_transaction, scanner.parse_movie_file
+    real_transaction, real_parse = scanner.source_transaction, identify.parse_movie_file
 
     class Tracking:
         def __init__(self, *args, **kwargs):
@@ -665,6 +669,6 @@ def test_changed_files_are_parsed_before_the_write_transaction_opens(library, mo
         return real_parse(path)
 
     monkeypatch.setattr(scanner, "source_transaction", Tracking)
-    monkeypatch.setattr(scanner, "parse_movie_file", parse)
+    monkeypatch.setattr(identify, "parse_movie_file", parse)
     (result,) = _scan(source_id)
     assert result.updated == 3

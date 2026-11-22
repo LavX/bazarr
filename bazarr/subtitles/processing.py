@@ -311,7 +311,7 @@ def _postprocessing_config(media_type, arr_instance_id):
 def process_subtitle(subtitle, media_type, audio_language, path, max_score, is_upgrade=False, is_manual=False,
                      job_id=None, arr_instance_id=None, *,
                      context=None, validate=None, cancel=None, publication_guard=None, auto_translate=True,
-                     source=None):
+                     source=None) -> ProcessSubtitlesResult | None:
     if media_type == 'sports' and (context is None or validate is None or publication_guard is None):
         raise ValueError('Sports processing requires its owned publication guard')
     if context is not None and media_type != 'sports':
@@ -573,7 +573,7 @@ def process_subtitle(subtitle, media_type, audio_language, path, max_score, is_u
                                   hearing_impaired=subtitle.language.hi,
                                   matched=list(subtitle.matches or []),
                                   not_matched=_get_not_matched(subtitle, media_type),
-                                  ai_translated=getattr(subtitle, 'ai_translated', False) is True),
+                                  ai_translated=getattr(subtitle, 'ai_translated', False) is True)
 
 
 def _get_not_matched(subtitle, media_type):

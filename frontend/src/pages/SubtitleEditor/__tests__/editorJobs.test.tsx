@@ -6,7 +6,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import queryClient from "@/apis/queries";
 import { QueryKeys } from "@/apis/queries/keys";
 import {
+  PICK_INSTALLATIONS,
   PICK_STATE,
+  refreshPickInstallations,
   stateLoaded,
   translatorStatus,
 } from "@/components/forms/__tests__/pickFixtures";
@@ -1419,18 +1421,42 @@ describe("TranslatePanel and the manual pick", () => {
     expect(submitted[0]).not.toHaveProperty("connectionId");
   });
 
-  it("queues no back end for Automatic", async () => {
-    translatorStatus(true, OPEN);
-    const submitted = queued();
-    renderPanel();
-    const user = userEvent.setup();
+  it.each([false, true])(
+    "queues no manual pick for Automatic (engine removed: %s)",
+    async (removed) => {
+      translatorStatus(true, OPEN);
+      const submitted = queued();
+      renderPanel();
+      const user = userEvent.setup();
 
-    await screen.findByRole("combobox", { name: "Translate with" });
-    await user.click(await screen.findByRole("button", { name: "Translate" }));
+      const picker = await screen.findByRole("combobox", {
+        name: "Translate with",
+      });
+      if (removed) {
+        await stateLoaded();
+        await user.selectOptions(
+          picker,
+          await within(picker).findByRole("option", {
+            name: "OpenAI compatible, usable-model",
+          }),
+        );
+        expect(picker).toHaveValue("connection:1");
+        await refreshPickInstallations(
+          PICK_INSTALLATIONS.filter(
+            (item) => item.provider_id !== "ai_translator",
+          ),
+        );
+        await waitFor(() => expect(picker).toHaveValue(""));
+      }
+      await user.click(
+        await screen.findByRole("button", { name: "Translate" }),
+      );
 
-    await screen.findByRole("button", { name: "Cancel" });
-    expect(submitted[0]).not.toHaveProperty("connectionId");
-  });
+      await screen.findByRole("button", { name: "Cancel" });
+      expect(submitted[0]).not.toHaveProperty("connectionId");
+      expect(submitted[0]).not.toHaveProperty("engineId");
+    },
+  );
 
   it("lets a picked back end translate when the editor's gate is closed", async () => {
     translatorStatus(true, {

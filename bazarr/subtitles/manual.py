@@ -483,8 +483,6 @@ def episode_manually_download_specific_subtitle(sonarr_series_id, sonarr_episode
                                           arr_instance_id=arr_instance_id)
     except OSError as e:
         raise JobFailed(f'Unable to save the subtitle file: {e}') from e
-    if isinstance(result, tuple) and len(result):
-        result = result[0]
     if not result:
         raise JobFailed('The subtitle could not be downloaded. Check the logs.')
     # The subtitle exists and its history row is about to be written, so this
@@ -547,8 +545,6 @@ def movie_manually_download_specific_subtitle(radarr_id, hi, forced, use_origina
                                           arr_instance_id=arr_instance_id)
     except OSError as e:
         raise JobFailed(f'Unable to save the subtitle file: {e}') from e
-    if isinstance(result, tuple) and len(result):
-        result = result[0]
     if not result:
         raise JobFailed('The subtitle could not be downloaded. Check the logs.')
     activity.note_publication(observed, outcome='success',

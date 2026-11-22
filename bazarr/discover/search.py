@@ -318,6 +318,14 @@ def _pool_state(pool):
         return pool._discover_state
 
 
+def _missing_configuration(config, manifest, installation):
+    from provider_hub import capabilities
+
+    required = getattr(manifest, "config_schema", {}).get("required", [])
+    missing = {field for field in required if config.get(field) in (None, "")}
+    return bool(missing and missing - capabilities.ready_url_fields(installation, missing, settings))
+
+
 def _coverage(pool, state, *, has_file=False):
     # Registration performs catalog validation. Check the actual class too:
     # historical registration IDs can outlive a removed/rejected installation.
@@ -333,7 +341,7 @@ def _coverage(pool, state, *, has_file=False):
     from provider_hub import registry
     from subliminal_patch.provider_health import get_tracker
 
-    trusted = {item.provider_id for item in registry.active_installations() if item.trusted}
+    trusted = {item.provider_id: item for item in registry.active_installations() if item.trusted}
     discarded = get_tracker().currently_discarded() | set(pool.discarded_providers)
     now = time.time()
     planned, outcomes = [], {}
@@ -346,11 +354,7 @@ def _coverage(pool, state, *, has_file=False):
             status, reason = "setup_required", "provider_unavailable"
         elif not issubclass(cls, registry.HubProxyProvider) or name not in trusted:
             status, reason = "skipped", "not_catalog_provider"
-        elif any(
-                field not in pool.provider_configs.get(name, {})
-                or pool.provider_configs[name][field] is None
-                or pool.provider_configs[name][field] == ""
-                for field in getattr(getattr(cls, "manifest", None), "config_schema", {}).get("required", [])):
+        elif _missing_configuration(pool.provider_configs.get(name, {}), getattr(cls, "manifest", None), trusted[name]):
             status, reason = "setup_required", "missing_configuration"
         elif name in service._SKIP_FOR_VIRTUAL_VIDEO and not has_file:
             status, reason = "skipped", "requires_file"

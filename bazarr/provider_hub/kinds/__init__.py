@@ -21,6 +21,7 @@ if TYPE_CHECKING:
 
 SUBTITLE_PROVIDER = "subtitle_provider"
 TRANSLATOR = "translator"
+SERVICE = "service"
 
 ATTACH_ON_RESTART = "restart"
 ATTACH_LIVE = "live"
@@ -222,5 +223,6 @@ def of_kind(items: Iterable[Any], kind: str | None) -> list[Any]:
     return [item for item in items if kind_of(item) == kind]
 
 
-# Registers the built-in kind. Imported last because the module subclasses Kind.
+# Registers the built-in kinds. Imported last because the modules subclass Kind.
 from . import subtitle_provider as _subtitle_provider  # noqa: E402,F401
+from . import service as _service  # noqa: E402,F401

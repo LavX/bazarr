@@ -95,7 +95,7 @@ def test_sports_process_subtitle_does_not_duplicate_the_file_publication(monkeyp
     subtitle = _fake_subtitle()
     subtitle.language = Language("eng")
 
-    result, = processing.process_subtitle(
+    result = processing.process_subtitle(
         subtitle, "sports", "English", context.mapped_path, max_score=100,
         context=context, validate=lambda: instance, publication_guard=nullcontext)
 
@@ -129,7 +129,7 @@ def test_the_history_message_says_when_a_subtitle_is_ai_translated(monkeypatch, 
     subtitle.language = Language("eng")
     subtitle.ai_translated = ai_translated
 
-    result, = processing.process_subtitle(
+    result = processing.process_subtitle(
         subtitle, "sports", "English", context.mapped_path, max_score=100,
         context=context, validate=lambda: instance, publication_guard=nullcontext)
 

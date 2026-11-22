@@ -19,7 +19,9 @@ import type {
 import {
   backendLabel,
   engineName,
+  engineSelectable,
   engineStatus,
+  engineUnavailable,
   hasBackends,
   orderedEngines,
   working,
@@ -164,25 +166,35 @@ const EnginePanel: FunctionComponent<EnginePanelProps> = ({
     (a, b) => Number(b.official ?? false) - Number(a.official ?? false),
   );
   // The choice shows at once; the saved one replaces it when the save comes back.
-  const chosen =
+  const requested =
     "engine" in pointers.chosen
       ? (pointers.chosen.engine ?? null)
       : state.engine;
+  const chosen = engines.some(
+    (item) => item.id === requested && engineSelectable(item),
+  )
+    ? requested
+    : null;
   const fallback =
     "fallback_engine" in pointers.chosen
       ? (pointers.chosen.fallback_engine ?? null)
       : state.fallback_engine;
+  const fallbackChoices = engines.filter(
+    (item) => item.id !== chosen && engineSelectable(item),
+  );
   const toId = (value: string | null) =>
     value === null || value === NONE ? null : Number(value);
 
   const installed = (engine: TranslationEngine) => {
     const status = engineStatus(engine);
+    const unavailable = engineUnavailable(engine);
     const id = `${group}-${engine.id}`;
     return (
       <div
         key={engine.id}
         className={styles.engineCard}
         data-checked={chosen === engine.id}
+        data-unavailable={unavailable ? "true" : undefined}
       >
         <input
           type="radio"
@@ -190,6 +202,7 @@ const EnginePanel: FunctionComponent<EnginePanelProps> = ({
           id={id}
           name={group}
           checked={chosen === engine.id}
+          disabled={!engineSelectable(engine)}
           aria-describedby={`${id}-text`}
           onChange={() => pointers.choose({ engine: engine.id })}
         />
@@ -205,10 +218,13 @@ const EnginePanel: FunctionComponent<EnginePanelProps> = ({
           </p>
           <div className={styles.engineMeta}>
             <StatusBadge tone={status.tone} label={status.label} />
-            {engine.plugin?.version && (
-              <span className={styles.version}>v{engine.plugin.version}</span>
-            )}
-            {engine.plugin?.update_version && (
+            {engine.plugin?.version &&
+              !(
+                engine.awaiting_restart === "install" && engine.plugin.active
+              ) && (
+                <span className={styles.version}>v{engine.plugin.version}</span>
+              )}
+            {!unavailable && engine.plugin?.update_version && (
               <Link
                 className={styles.chip}
                 to="/plugin-hub?tab=updates"
@@ -218,7 +234,7 @@ const EnginePanel: FunctionComponent<EnginePanelProps> = ({
                 Update available
               </Link>
             )}
-            {openId !== engine.id && (
+            {openId !== engine.id && !unavailable && (
               <Button
                 size="compact-xs"
                 variant="subtle"
@@ -348,14 +364,16 @@ const EnginePanel: FunctionComponent<EnginePanelProps> = ({
         description="Takes a job the engine declines. Most set-ups need none."
         data={[
           { value: NONE, label: "None" },
-          ...engines
-            .filter((item) => item.id !== chosen)
-            .map((item) => ({
-              value: String(item.id),
-              label: `${engineName(item)}${item.official ? " (Official)" : ""}`,
-            })),
+          ...fallbackChoices.map((item) => ({
+            value: String(item.id),
+            label: `${engineName(item)}${item.official ? " (Official)" : ""}`,
+          })),
         ]}
-        value={fallback === null ? NONE : String(fallback)}
+        value={
+          fallbackChoices.some((item) => item.id === fallback)
+            ? String(fallback)
+            : NONE
+        }
         allowDeselect={false}
         onChange={(next) => pointers.choose({ fallback_engine: toId(next) })}
       />
