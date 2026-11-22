@@ -3,6 +3,8 @@
 import logging
 import os
 import pickle
+from contextlib import contextmanager
+from contextvars import ContextVar
 
 from app.config import settings
 from utilities import video_analyzer
@@ -13,6 +15,17 @@ from .identity import FileStat, file_content_stamp, stored_content_stamp, unsign
 
 UNKNOWN_STREAM_COLUMNS = dict(ffprobe_cache=None, audio_language=None, audio_codec=None, video_codec=None,
                               resolution=None)
+_search_probe_failures = ContextVar('source_search_probe_failures', default=None)
+
+
+@contextmanager
+def source_search_probes(item_id):
+    """Remember failed media probes across the sidecar reindexes of one search."""
+    token = _search_probe_failures.set((item_id, set()))
+    try:
+        yield
+    finally:
+        _search_probe_failures.reset(token)
 
 
 def read_metadata(blob):
@@ -75,14 +88,22 @@ def probe_item(item, stat):
     # file to a stream URL, which is outside the scope of this local scan.
     if item.path.lower().endswith('.strm'):
         return cached, None
+    scope = _search_probe_failures.get()
+    failures = scope[1] if scope is not None and scope[0] == item.id else None
+    stamp = _content_stamp(stat)
+    attempt = (parser, stamp)
+    if failures is not None and attempt in failures:
+        return cached, None
     try:
         data = video_analyzer.parse_video_metadata(item.path, stat.st_size, use_cache=False)
     except (OSError, BinaryNotFound):
         logging.warning('BAZARR could not analyze the source file %s', item.path, exc_info=True)
-        return cached, None
+        data = None
     if not data or not data.get(parser):
+        if failures is not None:
+            failures.add(attempt)
         return cached, None
-    return data, stamp_index(data, _content_stamp(stat))
+    return data, stamp_index(data, stamp)
 
 
 def local_stat(path):

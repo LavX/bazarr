@@ -17,7 +17,7 @@ from app.jobs_queue import JobFailed, jobs_queue
 from subtitles.indexer.missing_refresh import queue_missing_subtitles_recalculation
 
 from . import identity, paths, repository
-from .analysis import index_matches_file, local_stat
+from .analysis import index_matches_file, local_stat, source_search_probes
 from .context import SourceItemGone, resolve_item
 from .db import source_transaction
 from .history import history_log_source
@@ -402,7 +402,11 @@ def search_source_item(item_id, job_id=None):
     """Search the missing subtitles of one source item. Called without a job id it queues itself."""
     if not job_id:
         return jobs_queue.add_job_from_function(f"Searching subtitles for {_label(item_id)}", is_progress=True)
+    with source_search_probes(item_id):
+        return _search_source_item(item_id, job_id)
 
+
+def _search_source_item(item_id, job_id):
     try:
         context = resolve_item(item_id)
     except SourceItemGone as error:
