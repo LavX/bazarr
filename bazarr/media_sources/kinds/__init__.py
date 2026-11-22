@@ -37,6 +37,7 @@ class IdentityHints:
     tvdb_id: Optional[int] = None
     external_id: Optional[str] = None
     premiere_date: Optional[str] = None
+    poster: Optional[str] = None
 
 
 @dataclass(frozen=True)

@@ -12,28 +12,33 @@ from .context import SourceItemContext
 
 
 def refine_from_source(path, video, source: SourceItemContext):
-    """What the item says wins over what the file name guessed where the user set it, and fills the gaps where
-    it did not."""
-    user = source.identity_source == 'user'
+    """Apply confirmed source identities and fill gaps with the scanner's parse."""
+    authoritative = source.identity_source in ('user', 'media_server', 'tmdb')
     if isinstance(video, Episode):
         if source.group_title:
             video.series = source.group_title
-        if source.season is not None:
-            video.season = int(source.season)
-        if source.episode is not None:
-            video.episode = int(source.episode)
+        # An unresolved or multi-episode parse has no single episode number.
+        video.season = source.season
+        video.episode = source.episode
         video.title = source.title
-        # Only refine year as a fallback, unless the user set it.
-        if source.year and (user or not video.year):
+        if authoritative and source.year:
             video.year = source.year
-        if source.tvdb_id and (user or not video.tvdb_id):
-            video.tvdb_id = int(source.tvdb_id)
-        if source.imdb_id and (user or not video.imdb_id):
+        elif source.series_year and (source.series_identity_source != 'filename' or not video.year):
+            video.year = source.series_year
+        elif not video.year:
+            video.year = source.year
+        if source.tvdb_id or authoritative:
+            video.tvdb_id = source.tvdb_id
+        if source.imdb_id or authoritative:
             video.imdb_id = source.imdb_id
+        if source.tmdb_id or authoritative:
+            video.tmdb_id = int(source.tmdb_id) if source.tmdb_id else None
         if source.series_tvdb_id:
             video.series_tvdb_id = int(source.series_tvdb_id)
-        if source.series_imdb_id and not video.series_imdb_id:
+        if source.series_imdb_id:
             video.series_imdb_id = source.series_imdb_id
+        if source.series_tmdb_id:
+            video.series_tmdb_id = int(source.series_tmdb_id)
     elif isinstance(video, Movie):
         if source.kind == 'sports_event':
             # What get_sports_video does: the event's own title and year, never a movie id.
@@ -47,10 +52,10 @@ def refine_from_source(path, video, source: SourceItemContext):
                 pass
         else:
             video.title = source.title
-            if source.year and (user or not video.year):
+            if source.year and (authoritative or not video.year):
                 video.year = source.year
-            if source.imdb_id and (user or not video.imdb_id):
+            if source.imdb_id or authoritative:
                 video.imdb_id = source.imdb_id
-            if source.tmdb_id and (user or not video.tmdb_id):
-                video.tmdb_id = source.tmdb_id
+            if source.tmdb_id or authoritative:
+                video.tmdb_id = int(source.tmdb_id) if source.tmdb_id else None
     return video

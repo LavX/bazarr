@@ -329,7 +329,7 @@ def _scan_library(source, library, cancel, session, shadow_context) -> LibrarySc
         return refuse('root_missing', 'A folder became unavailable or changed during the scan. Nothing was changed.')
 
     result.deferred = decisions.deferred
-    write_args = (library, decisions, plan, group_identities, group_for_dir, groups, result, cancel)
+    write_args = (library, decisions, plan, group_identities, group_for_dir, result, cancel)
     if decisions.required_paths:
         # These incoming files release rows whose groups give up their keys. A rejected write must also
         # roll back the group keys, so these scans keep the key changes and item writes together.
@@ -352,7 +352,7 @@ def _scan_library(source, library, cancel, session, shadow_context) -> LibrarySc
             continue
         repository.record_root_device(root.id, root_snapshot[root.local_path].dev, session)
 
-    _identify_pending(library, session)
+    _identify_pending(source, kind, library, decisions, cancel, session)
     _refresh_shadows(library.id, decisions, inserted, set(result.item_ids), session, shadow_context)
 
     # The subtitle listing is rebuilt for every item on every scan, whether or not its video changed. One
@@ -368,19 +368,19 @@ def _scan_library(source, library, cancel, session, shadow_context) -> LibrarySc
     return result
 
 
-def _write_library(library, decisions, plan, group_identities, group_for_dir, groups, result, cancel, session,
+def _write_library(library, decisions, plan, group_identities, group_for_dir, result, cancel, session,
                    outer_releases=None):
     if plan is not None and not plan.writes_nothing:
         with source_transaction(session) as connection:
             def update_group(group_id, connection, **values):
-                repository.update_group(group_id, connection, owner_library_id=library.id, **values)
+                identity_fields = group_identities.get(group_id, {}).keys() & values.keys()
+                write = repository.update_show_identity if identity_fields else repository.update_group
+                write(group_id, connection, owner_library_id=library.id, protect_user=identity_fields, **values)
 
             group_rules.apply_plan(plan, connection, update_group, group_identities)
-        for group_id in plan.reidentify:
-            groups.pop(group_id, None)
 
     grouped = library.content_kind != 'movie'
-    group_for_dir.update(_create_groups(library, decisions, group_for_dir, groups, session))
+    group_for_dir.update(_create_groups(library, decisions, group_for_dir, session))
     if cancel is not None:
         cancel()
 
@@ -388,10 +388,10 @@ def _write_library(library, decisions, plan, group_identities, group_for_dir, gr
         with source_transaction(session) as connection:
             result.deleted += repository.delete_items(batch, connection, owner_library_id=library.id)
 
-    _write_unchanged(decisions, group_for_dir, groups, grouped, result, session, cancel)
-    _write_repathed(library, decisions, group_for_dir, groups, grouped, result, session, cancel, outer_releases)
-    _write_path_only(library, decisions, groups, result, session, cancel, outer_releases)
-    inserted = _insert_new(library, decisions, group_for_dir, groups, result, session, cancel, outer_releases)
+    _write_unchanged(decisions, group_for_dir, grouped, result, session, cancel)
+    _write_repathed(library, decisions, group_for_dir, grouped, result, session, cancel, outer_releases)
+    _write_path_only(library, decisions, result, session, cancel, outer_releases)
+    inserted = _insert_new(library, decisions, group_for_dir, result, session, cancel, outer_releases)
 
     if plan is not None:
         repository.delete_empty_groups(plan.gone, session, owner_library_id=library.id)
@@ -566,7 +566,7 @@ def _decide(matching, groups, plan, group_for_dir, grouped, follows_directories,
     return decisions
 
 
-def _create_groups(library, decisions, group_for_dir, groups, session):
+def _create_groups(library, decisions, group_for_dir, session):
     """A fresh group for every directory that holds a file to write and that no group holds (step 6), parsed and
     identified fresh from its own name. Returns ``{directory: group id}``."""
     needed = set()
@@ -588,7 +588,7 @@ def _create_groups(library, decisions, group_for_dir, groups, session):
         for directory in batch:
             identified = identify.identify_group(directory)
             state = group_rules.stat_directory(directory)
-            carried = _carried_settings(directory, decisions, state, groups, session)
+            carried = _carried_settings(directory, decisions, state, session)
             values.append((directory, {**identified, 'dir_dev': state.dev, 'dir_ino': state.ino, **carried}))
         with source_transaction(session) as connection:
             for directory, extra in values:
@@ -600,7 +600,7 @@ def _create_groups(library, decisions, group_for_dir, groups, session):
     return created
 
 
-def _carried_settings(directory, decisions, state, groups, session):
+def _carried_settings(directory, decisions, state, session):
     """The group-level user settings a fresh group takes over, only when it is the same physical directory as
     the group the item came from (an alias of it): then it is the same show."""
     old_id = decisions.carry_from.get(directory)
@@ -618,25 +618,41 @@ def _carried_settings(directory, decisions, state, groups, session):
     return carried
 
 
-def _group_state(group_id, groups, session):
-    group = groups.get(group_id)
-    if group is None and group_id is not None:
-        group = repository.get_group(group_id, session)
-        if group is not None:
-            groups[group_id] = group
-    return group.identity_state if group is not None else 'parsed'
+_EPISODE_STATE_FIELDS = frozenset(('group_id', 'identity_state', 'identity_source', 'identify_pending',
+                                   'season', 'episode'))
 
 
-def _identified(library, found, group_id, groups, session):
-    state = _group_state(group_id, groups, session) if group_id is not None else 'parsed'
-    return identify.identify_item(library.content_kind, found.path, found.group_key, state)
+def _update_scanned_item(row, connection, *, reparse=False, **values):
+    episode_identity = row.kind == 'episode' and not _EPISODE_STATE_FIELDS.isdisjoint(values)
+    previous_group_id = row.group_id if episode_identity else None
+
+    def save():
+        if reparse:
+            current = repository.get_item(row.id, connection, for_update=True)
+            if (current is None or current.group_id != row.group_id or current.path != row.path
+                    or current.scene_name is not None):
+                return None
+        if repository.update_item(row.id, connection, owner_library_id=row.library_id,
+                                  previous_group_id=previous_group_id, **values):
+            return row.id
+        return None
+
+    if episode_identity:
+        group_id = values.get('group_id', row.group_id)
+        return repository.write_episode_identity(connection, group_id, save, previous_group_id=previous_group_id,
+                                                 group_key=row.group_key if reparse else None)
+    return save()
+
+
+def _identified(library, found):
+    return identify.identify_item(library.content_kind, found.path, found.group_key, 'parsed', found.hints)
 
 
 def _group_of(found, group_for_dir):
     return group_for_dir.get(found.group_key) if found.group_key is not None else None
 
 
-def _write_unchanged(decisions, group_for_dir, groups, grouped, result, session, cancel):
+def _write_unchanged(decisions, group_for_dir, grouped, result, session, cancel):
     for batch in _chunks(decisions.unchanged):
         with source_transaction(session) as connection:
             for row, found in batch:
@@ -644,7 +660,7 @@ def _write_unchanged(decisions, group_for_dir, groups, grouped, result, session,
                 group_id = None if decisions.conservative else _group_of(found, group_for_dir)
                 if grouped and group_id is not None and row.group_id != group_id:
                     values['group_id'] = group_id
-                if repository.update_item(row.id, connection, owner_library_id=row.library_id, **values):
+                if _update_scanned_item(row, connection, **values):
                     result.item_ids.append(row.id)
                     result.unchanged += 1
         if cancel is not None:
@@ -655,18 +671,23 @@ def _write_unchanged(decisions, group_for_dir, groups, grouped, result, session,
         group_id = group_for_dir.get(own_directory) if own_directory is not None else None
         if grouped and not decisions.conservative and group_id is not None and row.group_id != group_id:
             values['group_id'] = group_id
-        if repository.update_item(row.id, session, owner_library_id=row.library_id, **values):
+        if 'group_id' in values:
+            with source_transaction(session) as connection:
+                updated = _update_scanned_item(row, connection, **values)
+        else:
+            updated = _update_scanned_item(row, session, **values)
+        if updated:
             result.item_ids.append(row.id)
             result.unchanged += 1
 
 
-def _write_repathed(library, decisions, group_for_dir, groups, grouped, result, session, cancel, outer_releases):
+def _write_repathed(library, decisions, group_for_dir, grouped, result, session, cancel, outer_releases):
     repathed = decisions.repathed
     # Parsing and identifying are slow and hold nothing: they happen before the write lock is taken.
     prepared = []
     for row, found, handover in repathed:
         group_id = _group_of(found, group_for_dir) if grouped else None
-        identified = _identified(library, found, group_id, groups, session)
+        identified = _identified(library, found)
         prepared.append((row, found, handover, group_id, identified))
     for batch in _chunks([entry for entry in prepared if not entry[2]]):
         with source_transaction(session) as connection:
@@ -713,7 +734,12 @@ class _GroupedAdmissionRefused(Exception):
 
 
 def _delete_owned(row, connection):
-    return repository.delete_items([row.id], connection, owner_library_id=row.library_id) if row else 0
+    if row is None:
+        return 0
+    if row.kind == 'episode':
+        # A concurrent show correction locks the show before its episodes.
+        repository.lock_show_groups(connection, (row.group_id,))
+    return repository.delete_items([row.id], connection, owner_library_id=row.library_id)
 
 
 def _write_final_path(library, entry, grouped, decisions, connection, releases):
@@ -727,7 +753,8 @@ def _write_final_path(library, entry, grouped, decisions, connection, releases):
         # Release the occupied path only in the transaction that makes the incoming item its new owner.
         displaced = _delete_owned(decisions.admission_displaced.get(found.path), connection)
         values.update(source_id=library.source_id, library_id=library.id)
-    updated = repository.update_item(row.id, connection, owner_library_id=row.library_id, **values)
+    protected = (identified.keys() & values.keys()) - {'scene_name'}
+    updated = _update_scanned_item(row, connection, protect_user=protected, **values)
     if handover:
         if not updated:
             raise _ForeignClaimChanged
@@ -755,15 +782,15 @@ def _close_foreign(holder, found, connection, releases):
     return deleted
 
 
-def _write_path_only(library, decisions, groups, result, session, cancel, outer_releases):
-    pending = [(row, found, _identified(library, found, row.group_id, groups, session))
+def _write_path_only(library, decisions, result, session, cancel, outer_releases):
+    pending = [(row, found, _identified(library, found))
                for row, found in decisions.path_only]
 
     def update(connection, row, found, identified):
         values = _item_values(found, identified, keep_identity=row.identity_source == 'user')
         # The file changed: its codec cache described the old content.
-        return repository.update_item(row.id, connection, owner_library_id=row.library_id, ffprobe_cache=None,
-                                      **values)
+        protected = (identified.keys() & values.keys()) - {'scene_name'}
+        return _update_scanned_item(row, connection, ffprobe_cache=None, protect_user=protected, **values)
 
     local = [entry for entry in pending if entry[1].path not in decisions.foreign_to_close]
     for batch in _chunks(local):
@@ -794,11 +821,11 @@ def _write_path_only(library, decisions, groups, result, session, cancel, outer_
             cancel()
 
 
-def _insert_new(library, decisions, group_for_dir, groups, result, session, cancel, outer_releases):
+def _insert_new(library, decisions, group_for_dir, result, session, cancel, outer_releases):
     inserted = []
     item_kind = 'movie' if library.content_kind == 'movie' else 'episode'
     for batch in _chunks(decisions.new):
-        _insert_batch(batch, library, item_kind, group_for_dir, groups, result, session, inserted, decisions,
+        _insert_batch(batch, library, item_kind, group_for_dir, result, session, inserted, decisions,
                       outer_releases)
         if cancel is not None:
             cancel()
@@ -813,7 +840,7 @@ def _is_refused_row(error):
     return isinstance(error, OperationalError) and getattr(error.orig, 'pgcode', None) == '54000'
 
 
-def _insert_batch(batch, library, item_kind, group_for_dir, groups, result, session, inserted, decisions,
+def _insert_batch(batch, library, item_kind, group_for_dir, result, session, inserted, decisions,
                   outer_releases):
     """Insert a batch in one transaction. When the batch is refused as a whole (a path another row took in the
     meantime, a name the driver cannot bind), its files are tried one at a time: the ones that cannot be added
@@ -821,14 +848,22 @@ def _insert_batch(batch, library, item_kind, group_for_dir, groups, result, sess
     parses = []
     for found in batch:
         group_id = _group_of(found, group_for_dir) if item_kind != 'movie' else None
-        parses.append((found, group_id, _identified(library, found, group_id, groups, session)))
+        parses.append((found, group_id, _identified(library, found)))
 
     def insert(connection, releases, found, group_id, identified):
         holder = decisions.foreign_to_close.get(found.path)
         deleted = _delete_owned(decisions.admission_displaced.get(found.path), connection)
-        item_id = repository.insert_item(connection, source_id=library.source_id, library_id=library.id,
-                                         kind=item_kind, path=found.path, group_id=group_id,
-                                         **_item_values(found, identified))
+        def save():
+            return repository.insert_item(connection, source_id=library.source_id, library_id=library.id,
+                                          kind=item_kind, path=found.path, group_id=group_id,
+                                          **_item_values(found, identified))
+
+        if item_kind == 'episode':
+            item_id = repository.write_episode_identity(connection, group_id, save)
+            if item_id is None:
+                raise _ForeignClaimChanged
+        else:
+            item_id = save()
         return item_id, deleted + _close_foreign(holder, found, connection, releases)
     try:
         with _admission_transaction(session, decisions.foreign_guard, outer_releases) as (connection, releases):
@@ -865,23 +900,87 @@ def _insert_batch(batch, library, item_kind, group_for_dir, groups, result, sess
     result.deleted += sum(deleted)
 
 
-def _identify_pending(library, session):
-    """Every item and group whose last lookup could not be answered is asked again, on every scan."""
-    for row in repository.pending_items(library.id, session):
-        if row.identity_source == 'user':
-            repository.update_item(row.id, session, owner_library_id=library.id, identify_pending=0)
+def _reparse_episode(row, session):
+    values = identify.identify_item('series', row.path, row.group_key)
+    values.pop('external_id', None)
+    with source_transaction(session) as connection:
+        _update_scanned_item(row, connection, reparse=True, only_automatic=True, **values)
+
+
+def _identify_pending(source, kind, library, decisions, cancel, session):
+    """Apply new hints and confirm pending filename identities after the scanner commits its writes."""
+    # Hints can arrive or change while the file's size, name and mtime stay the same.
+    for row, found in decisions.unchanged:
+        if found.hints is None or row.identity_source == 'user':
             continue
-        group = repository.get_group(row.group_id, session) if row.group_id is not None else None
-        values = identify.identify_item(library.content_kind, row.path, group.group_key if group else None,
-                                        group.identity_state if group else 'parsed')
-        values.pop('scene_name', None)
-        repository.update_item(row.id, session, owner_library_id=library.id, **values)
-    for group in repository.pending_groups(library.id, session):
-        if group.identity_source != 'user':
-            repository.update_group(group.id, session, owner_library_id=library.id,
-                                    **identify.identify_group(group.group_key))
+        if cancel is not None:
+            cancel()
+        values = _identified(library, found)
+        if values['identity_source'] != 'media_server':
+            values = {'external_id': found.hints.external_id} if found.hints.external_id else {}
+        if row.kind == 'episode' and not _EPISODE_STATE_FIELDS.isdisjoint(values):
+            current = repository.get_item(row.id, session)
+            if current is not None and current.library_id == library.id and current.path == found.path:
+                with source_transaction(session) as connection:
+                    _update_scanned_item(current, connection, only_automatic=True, **values)
+        elif values:
+            _update_scanned_item(row, session, only_automatic=True, **values)
+
+    if library.content_kind == 'movie':
+        for row in repository.pending_movies(library.id, session):
+            if cancel is not None:
+                cancel()
+            if row.identity_source == 'user':
+                repository.update_item(row.id, session, owner_library_id=library.id, identify_pending=0)
+                continue
+            values = {}
+            if (row.scene_name is None and row.identity_source == 'filename' and row.identity_state == 'unmatched'
+                    and (row.parsed_title is None or row.year is None)):
+                parsed = identify.identify_item('movie', row.path)
+                values = {field: parsed[field] for field in
+                          ('title', 'sort_title', 'parsed_title', 'year', 'scene_name', 'identity_state')}
+            values.update(identify.confirm_title(values.get('parsed_title', row.parsed_title),
+                                                 values.get('year', row.year), 'movie'))
+            if row.parsed_title and row.title != row.parsed_title and 'title' not in values:
+                values.update(title=row.parsed_title, sort_title=row.parsed_title.lower())
+            if values != {'identify_pending': 1}:
+                repository.update_item(row.id, session, owner_library_id=library.id, only_automatic=True, **values)
+        return
+    if library.content_kind != 'series':
+        return
+
+    for row in repository.pending_episode_parses(library.id, session):
+        if cancel is not None:
+            cancel()
+        _reparse_episode(row, session)
+
+    for group in repository.library_groups(library.id, session):
+        if cancel is not None:
+            cancel()
+        if group.identity_source == 'user':
+            continue
+        lookup = getattr(kind, 'series_identity', None)
+        hints = lookup(source, group.group_key) if lookup else None
+        if identify.has_provider_id(hints):
+            values = identify.group_hints(group, hints)
+        elif group.identify_pending or (group.identity_source == 'filename' and not group.parsed_title):
+            directory_key = getattr(kind, 'groups_are_directories', True)
+            if group.parsed_title and directory_key:
+                values = identify.confirm_title(group.parsed_title, group.year, 'show')
+            else:
+                paths = repository.group_episode_paths(group.id, session)
+                values = identify.identify_group(group.group_key, paths, directory_key=directory_key)
+                values.pop('external_id', None)
+                values.update(identify.confirm_title(values['parsed_title'], values['year'], 'show'))
         else:
-            repository.update_group(group.id, session, owner_library_id=library.id, identify_pending=0)
+            values = {}
+        if hints and hints.external_id:
+            values['external_id'] = hints.external_id
+        changes = {key: value for key, value in values.items() if getattr(group, key) != value}
+        if changes:
+            with source_transaction(session) as connection:
+                repository.update_show_identity(group.id, connection, owner_library_id=library.id,
+                                                only_automatic=True, **changes)
 
 
 def _refresh_shadows(library_id, decisions, inserted, written_ids, session, context):

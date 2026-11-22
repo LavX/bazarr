@@ -731,6 +731,7 @@ jobs:
           for f in \
             tests/bazarr/test_discover_digital_releases.py \
             tests/bazarr/test_discover_recent_episodes.py \
+            tests/bazarr/test_media_sources_identification.py \
             tests/bazarr/test_editor_api.py \
             tests/bazarr/test_media_server_convergence_migration.py \
             tests/bazarr/test_sportarr_leagues.py \
