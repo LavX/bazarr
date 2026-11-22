@@ -5,9 +5,9 @@
 # The gate runs against a frozen copy of origin/development's Remove HI implementation,
 # vendored under tests/bazarr/fixtures/hi_reference and checked by hash.
 #
-# The rules work on plain text exactly as origin/development has them. Only cues whose
-# markup is simple (whole-line pairs of <i>, <b>, <u>, <font> or SSA override tags) are
-# handed to the rules with that markup removed, and wrapped again afterwards. So:
+# The rules work on plain text exactly as origin/development has them. Supported
+# styles around full lines or leading labels and cue-level alignment are set aside,
+# then restored on surviving text. So:
 #
 # * plain cues must produce output byte-identical to origin/development, and every
 #   output must be a string: a load failure fails the gate instead of comparing as equal;
@@ -254,7 +254,8 @@ _REVIEW_MULTILINE = [
 ]
 # Markup the layer does not take apart. Each must come out exactly as development makes it.
 _UNKNOWN_CUES = [
-    ["{\\an8}♪ la la ♪"], ["Hello <i>there</i>"], ["<i>a <b>b</b> c</i>"],
+    ["Hello <i>there</i>"], ["<i>a <b>b</b> c</i>"],
+    ["<i>LAUGHING</b>"], ["<s>LAUGHING"], ["<i />LAUGHING</i>"],
     ["<i>♪ Music ♪", "<font color=\"#fff\">Hello</font></i>"],
     ["<i>[door creaks]", "I know you're in there (knocking)</i>"], ["<i>♪ la", "</i>"],
     ["<i>unclosed"], ["<i>a</i> <i>b</i>"], ["<i></i>"], ["<i>   </i>"], ["<b></b>", "Hallo."],
@@ -577,6 +578,76 @@ def test_wrapped_bracket_line_is_removed_whole(cue, render):
     assert "<i" not in out
     assert "</i>" not in out
     assert "Hallo." in out
+
+
+@pytest.mark.parametrize("plain, styled, expected", [
+    ("JOHN: Where is it?", "<i>JOHN:</i> Where is it?", ["Where is it?"]),
+    ("John: We can go.", "<b><i>John:</i></b> We can go.", ["We can go."]),
+    ("WOMAN: Hello.", "<s>WOMAN:</s> Hello.", ["Hello."]),
+    ("[sighs] WOMAN: Hello.", "<s>[sighs] WOMAN: Hello.</s>", ["Hello."]),
+    ("LAUGHING", "<s>LAUGHING</s>", None),
+    ("COUGHING", "< i >COUGHING< / i >", None),
+    ("LAUGHING", r"{\an8}LAUGHING", None),
+    ("[door creaks]", r"{\an8}<i>[door creaks]</i>", None),
+    ("♪ Some lyric ♪", r"{\an8}♪ Some lyric ♪", None),
+    ("♪♪", r"{\an8}<s>♪♪</s>", None),
+    ("LAUGHING Where is it?", r"{\an8}<i>LAUGHING Where is it?</i>", ["Where is it?"]),
+])
+def test_tagged_hi_cue_matches_its_plain_form(plain, styled, expected, render):
+    for text in (plain, styled):
+        output = render(_pair_srt([text]), ["remove_HI"])
+        cue = _cue_text(output)
+        assert ([_visible(line) for line in cue] if cue is not None else None) == expected
+        assert "Hallo." in output
+
+
+@pytest.mark.parametrize("plain, styled", [
+    ("I left the door open.", "I left the <s>door</s> open."),
+    ("I heard someone laughing.", r"{\an8}I heard someone < i >laughing< / i >."),
+    ("Keep the door open.", "<i>Keep the <s>door</s> open.</i>"),
+    ("The plan: we stay.", "<i>The plan:</i> we stay."),
+])
+def test_dialogue_survives_mid_line_markup(plain, styled, render):
+    for text in (plain, styled):
+        cue = _cue_text(render(_pair_srt([text]), ["remove_HI"]))
+        assert cue is not None
+        assert [_visible(line) for line in cue] == [plain]
+
+
+@pytest.mark.parametrize("styled, expected", [
+    ("<s><i>JOHN:</i> Hello.</s>", "<s>Hello.</s>"),
+    ("<i>The plan:</i> we stay.", "<i>The plan:</i> we stay."),
+    ("OPEN THE <s>DOOR</s>", "OPEN THE <s>DOOR</s>"),
+])
+def test_styles_are_kept_on_surviving_dialogue(styled, expected, render):
+    output = render(_pair_srt([styled]), ["remove_HI"])
+    assert _cue_text(output) == [expected]
+
+
+@pytest.mark.parametrize("opening, closing", [
+    ("<s>", "</s>"),
+    ("< i >", "< / i >"),
+    (r"{\an8}", ""),
+])
+def test_caps_dialogue_is_kept_in_mostly_uppercase_subtitle(opening, closing, render):
+    line = "OPEN THE DOOR"
+    srt = _srt_from_cues([[opening + line + closing] for _ in range(12)])
+    output = render(srt, ["remove_HI"])
+    assert [_visible(lines[0]) for _, _, lines in _parse_srt(output)] == [line] * 12
+
+
+@pytest.mark.parametrize("route", ROUTES)
+def test_positioning_is_kept_when_the_first_line_is_removed(route, tmp_path):
+    srt = _pair_srt([r"{\an8}LAUGHING", "Hello there."])
+    sm = SubtitleModifications()
+    if route == "content":
+        assert sm.load(content=srt, language=Language("eng"), mods=["remove_HI"])
+    else:
+        path = tmp_path / "positioned.srt"
+        path.write_text(srt, encoding="utf-8")
+        assert sm.load(fn=str(path), language=Language("eng"), mods=["remove_HI"])
+    sm.modify("remove_HI")
+    assert _cue_text(sm.f.to_string("srt", keep_ssa_tags=True)) == [r"{\an8}Hello there."]
 
 
 def test_content_route_keeps_only_the_wrapped_dialogue_line():

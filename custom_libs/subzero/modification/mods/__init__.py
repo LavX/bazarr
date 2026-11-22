@@ -98,7 +98,7 @@ class SubtitleTextModification(SubtitleModification):
 
 
 TAG = r"(?:\s*{\\[iusb][0-1]}\s*)*"
-EMPTY_TAG_PROCESSOR = ReProcessor(re.compile(r'({\\\w1})[\s.,-_!?]*({\\\w0})'), "", name="empty_tag")
+EMPTY_TAG_PROCESSOR = ReProcessor(re.compile(r'({\\\w1})[\s.,_!?-]*({\\\w0})'), "", name="empty_tag")
 
 empty_line_post_processors = [
     # empty tag
