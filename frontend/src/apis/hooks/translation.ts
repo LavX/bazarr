@@ -33,13 +33,15 @@ export function useTranslationRuntime(): boolean {
 /**
  * The page's state. `enabled` is for a caller outside the page that reads it
  * only while the runtime is on: the route does not exist with it off.
+ * The page and setup refresh on entry even when other callers have a fresh cache.
  */
-export function useTranslationState(enabled = true) {
+export function useTranslationState(enabled = true, refetchOnMount?: "always") {
   return useQuery({
     queryKey: stateKey,
     queryFn: () => api.translation.state(),
     enabled,
     retry: false,
+    refetchOnMount,
     refetchOnWindowFocus: false,
   });
 }

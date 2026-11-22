@@ -56,10 +56,11 @@ export function usePluginCatalog(kind?: string) {
   });
 }
 
-export function usePluginInstallations(kind?: string) {
+export function usePluginInstallations(kind?: string, enabled = true) {
   return useQuery({
     queryKey: [...pluginsKey, "installations", kind ?? QueryKeys.All],
     queryFn: () => api.plugins.installations(kind),
+    enabled,
     refetchOnMount: "always",
     refetchInterval: 10_000,
   });

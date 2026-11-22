@@ -17,7 +17,7 @@ import {
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import { useProviderHubCatalog, useProviderHubProviders } from "@/apis/hooks";
 import type { ProviderHubInstallation } from "@/apis/raw/providerHub";
-import { summarizeUpdates } from "@/components/hub/utils";
+import { isRemoving, summarizeUpdates } from "@/components/hub/utils";
 import {
   Check,
   CollapseBox,
@@ -152,7 +152,7 @@ function providerHubOption(provider: ProviderHubInstallation): ProviderInfo {
   };
 }
 
-function useProviderOptions(
+export function useProviderOptions(
   providers: ProviderHubInstallation[] | undefined,
 ): Readonly<ProviderInfo[]> {
   return useMemo(() => {
@@ -164,8 +164,10 @@ function useProviderOptions(
     // stay put instead of briefly falling back to the shipped card (which would
     // expose the wrong config schema in the drawer). A first-install staged row
     // has no active_version yet, so the built-in keeps serving until activation.
-    const live = (providers ?? []).filter((provider) =>
-      Boolean(provider.active_version),
+    // A plugin removed while Bazarr+ runs has let go of its id already, though
+    // its row stays until its last calls end, so it no longer owns the card.
+    const live = (providers ?? []).filter(
+      (provider) => Boolean(provider.active_version) && !isRemoving(provider),
     );
     // A catalog plugin reuses the built-in's id when it replaces it (e.g. subdl,
     // embeddedsubtitles). Drop the shipped card for any id a live plugin owns

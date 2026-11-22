@@ -13,6 +13,7 @@ import {
   getLatestCatalogEntry,
   getProviderStateMeta,
   isAwaitingRestart,
+  isRemoving,
   isUpdateAvailable,
   parseGitHubUrl,
   parseManifest,
@@ -230,6 +231,21 @@ describe("isUpdateAvailable / summarizeUpdates", () => {
     expect(summary.pendingRestart).toHaveLength(0);
     expect(isAwaitingRestart(revoked)).toBe(false);
     expect(isAwaitingRestart({ ...revoked, state: "removed" })).toBe(true);
+  });
+
+  it("offers nothing for a plugin that is being removed while Bazarr+ runs", () => {
+    const removing = {
+      provider_id: "a",
+      state: "removed",
+      active_version: "1.0.0",
+      source_id: "s",
+      needs_restart: false,
+    } as ProviderHubInstallation;
+    expect(isRemoving(removing)).toBe(true);
+    expect(isUpdateAvailable(removing, catalog)).toBe(false);
+    const summary = summarizeUpdates([removing], catalog);
+    expect(summary.available).toHaveLength(0);
+    expect(summary.pendingRestart).toHaveLength(0);
   });
 
   it("reads a waiting restart from the one field the server sets, and from nothing else", () => {

@@ -44,6 +44,18 @@ export const UpdateBanner: FunctionComponent<UpdateBannerProps> = ({
 
   if (hasRestart) {
     const n = summary.pendingRestart.length;
+    // A removal waits on a restart only when the plugin could not be stopped while Bazarr+ runs.
+    const removals = summary.pendingRestart.filter(
+      (provider) => provider.state === "removed",
+    ).length;
+    const detail =
+      removals === 0
+        ? "Staged installs and updates finish after a restart."
+        : removals === n
+          ? n === 1
+            ? "This plugin could not be stopped while Bazarr+ runs, so its removal finishes after a restart."
+            : "These plugins could not be stopped while Bazarr+ runs, so their removals finish after a restart."
+          : `A restart applies staged installs and updates and finishes removing ${removals === 1 ? "1 plugin" : `${removals} plugins`} that could not be stopped while Bazarr+ runs.`;
     return (
       <div
         className={clsx(styles.banner, styles["banner-warning"])}
@@ -56,9 +68,7 @@ export const UpdateBanner: FunctionComponent<UpdateBannerProps> = ({
               ? "1 Provider Hub change is staged. Restart Bazarr+ to apply it."
               : `${n} Provider Hub changes are staged. Restart Bazarr+ to apply them.`}
           </div>
-          <div className={styles.bannerSubtitle}>
-            Staged installs, updates, and removals finish after restart.
-          </div>
+          <div className={styles.bannerSubtitle}>{detail}</div>
         </div>
         <div className={styles.bannerActions}>
           <Button

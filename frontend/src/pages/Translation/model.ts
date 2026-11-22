@@ -89,17 +89,30 @@ export const ENGINES_GROUP = "Engines";
  * held back or off is not offered rather than offered and refused. An engine that has back ends is picked
  * through them, and a legacy engine is set up and used where it always was.
  */
-export function pickableChoices(state: TranslationState): PickChoice[] {
+export function pickableChoices(
+  state: TranslationState,
+  installed?: ReadonlySet<string>,
+): PickChoice[] {
+  const present = (pluginId: string) => installed?.has(pluginId) ?? true;
   const running = orderedEngines(state.instances)
-    .filter((engine) => engine.enabled && !engine.awaiting_secrets)
+    .filter(
+      (engine) =>
+        engine.enabled &&
+        !engine.awaiting_secrets &&
+        (engine.legacy || present(engine.plugin_id)),
+    )
     .filter(canRun);
   const backEnds = running.flatMap((engine) =>
-    engine.connections.filter(working).map((item) => ({
-      key: `connection:${item.id}`,
-      connectionId: item.id,
-      label: backendName(engine, item),
-      engine: engineName(engine),
-    })),
+    engine.connections
+      .filter(
+        (item) => working(item) && (!item.plugin_id || present(item.plugin_id)),
+      )
+      .map((item) => ({
+        key: `connection:${item.id}`,
+        connectionId: item.id,
+        label: backendName(engine, item),
+        engine: engineName(engine),
+      })),
   );
   const engines = running
     .filter(
@@ -118,9 +131,20 @@ export function pickableChoices(state: TranslationState): PickChoice[] {
   return [...backEnds, ...engines];
 }
 
+/** Whether selection and configuration must wait for an install or removal. */
+export const engineUnavailable = (engine: TranslationEngine) =>
+  engine.removing === true ||
+  engine.awaiting_restart === "install" ||
+  engine.awaiting_restart === "removal" ||
+  (!engine.legacy && engine.plugin === null);
+
+export const engineSelectable = (engine: TranslationEngine) =>
+  !engineUnavailable(engine) && !engine.pluginDisabled;
+
 /** Whether there is something to run: an engine's plugin, or Bazarr+ itself for an engine it runs. */
 export const canRun = (engine: TranslationEngine) =>
-  engine.legacy === true || engine.plugin?.active === true;
+  engineSelectable(engine) &&
+  (engine.legacy === true || engine.plugin?.active === true);
 
 export interface Status {
   tone: Tone;
@@ -169,6 +193,21 @@ export const RESTART_LINES: Record<RestartChange, string> = {
 
 /** Whether an engine can take a job, and when it cannot, the reason and the next step. */
 export function engineStatus(engine: TranslationEngine): Status {
+  // Removed while Bazarr+ runs: it takes no job, and there is nothing to repair or reinstall.
+  if (engine.removing) {
+    return {
+      tone: "warning",
+      label: "Removing",
+      next: "This plugin is being removed. It goes when the calls it is running end, or after a few minutes.",
+    };
+  }
+  if (engine.pluginDisabled && !engineUnavailable(engine)) {
+    return {
+      tone: "neutral",
+      label: "Plugin off",
+      next: "Turn it on in the Plugin Hub to use this engine.",
+    };
+  }
   // A removal waits on the restart whether or not the plugin still runs until then.
   if (
     engine.awaiting_restart === "removal" ||
