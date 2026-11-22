@@ -11,6 +11,7 @@ import logging
 import os
 import threading
 from collections import Counter, defaultdict
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime
 
@@ -216,11 +217,25 @@ class _ForeignGuard:
             directory = os.path.dirname(directory)
         return identity.path_can_release(holder.path, found)
 
-    def can_handover(self, holder, found, alias):
+    def can_release(self, holder, found, alias):
         if alias:
             live = identity.stat_file(holder.path)
             return live is not None and (live.dev, live.ino) == (found.dev, found.ino)
         return self.vouches(holder, found)
+
+
+@contextmanager
+def _admission_transaction(session, guard, outer_releases=None):
+    """Verify every release just before commit. Savepoints pass their releases to the outer transaction."""
+    releases = []
+    with source_transaction(session) as connection:
+        yield connection, releases
+        if outer_releases is None:
+            for holder, found, alias in releases:
+                if not guard.can_release(holder, found, alias):
+                    raise _ForeignClaimChanged
+    if outer_releases is not None:
+        outer_releases.extend(releases)
 
 
 def _scan_library(source, library, cancel, session, shadow_context) -> LibraryScan:
@@ -319,9 +334,9 @@ def _scan_library(source, library, cancel, session, shadow_context) -> LibrarySc
         # These incoming files release rows whose groups give up their keys. A rejected write must also
         # roll back the group keys, so these scans keep the key changes and item writes together.
         try:
-            with source_transaction(session) as connection:
-                inserted = _write_library(*write_args, connection)
-        except _GroupedAdmissionRefused:
+            with _admission_transaction(session, decisions.foreign_guard) as (connection, releases):
+                inserted = _write_library(*write_args, connection, releases)
+        except (_GroupedAdmissionRefused, _ForeignClaimChanged):
             result = LibraryScan(library.id)
             return refuse('partial', 'An incoming file could not be written. No item or group changes were saved.')
     else:
@@ -338,7 +353,7 @@ def _scan_library(source, library, cancel, session, shadow_context) -> LibrarySc
         repository.record_root_device(root.id, root_snapshot[root.local_path].dev, session)
 
     _identify_pending(library, session)
-    _refresh_shadows(library.id, decisions, inserted, session, shadow_context)
+    _refresh_shadows(library.id, decisions, inserted, set(result.item_ids), session, shadow_context)
 
     # The subtitle listing is rebuilt for every item on every scan, whether or not its video changed. One
     # ownership index serves the whole pass.
@@ -353,7 +368,8 @@ def _scan_library(source, library, cancel, session, shadow_context) -> LibrarySc
     return result
 
 
-def _write_library(library, decisions, plan, group_identities, group_for_dir, groups, result, cancel, session):
+def _write_library(library, decisions, plan, group_identities, group_for_dir, groups, result, cancel, session,
+                   outer_releases=None):
     if plan is not None and not plan.writes_nothing:
         with source_transaction(session) as connection:
             def update_group(group_id, connection, **values):
@@ -373,9 +389,9 @@ def _write_library(library, decisions, plan, group_identities, group_for_dir, gr
             result.deleted += repository.delete_items(batch, connection, owner_library_id=library.id)
 
     _write_unchanged(decisions, group_for_dir, groups, grouped, result, session, cancel)
-    _write_repathed(library, decisions, group_for_dir, groups, grouped, result, session, cancel)
-    _write_path_only(library, decisions, groups, group_for_dir, result, session, cancel)
-    inserted = _insert_new(library, decisions, group_for_dir, groups, result, session, cancel)
+    _write_repathed(library, decisions, group_for_dir, groups, grouped, result, session, cancel, outer_releases)
+    _write_path_only(library, decisions, groups, result, session, cancel, outer_releases)
+    inserted = _insert_new(library, decisions, group_for_dir, groups, result, session, cancel, outer_releases)
 
     if plan is not None:
         repository.delete_empty_groups(plan.gone, session, owner_library_id=library.id)
@@ -644,7 +660,7 @@ def _write_unchanged(decisions, group_for_dir, groups, grouped, result, session,
             result.unchanged += 1
 
 
-def _write_repathed(library, decisions, group_for_dir, groups, grouped, result, session, cancel):
+def _write_repathed(library, decisions, group_for_dir, groups, grouped, result, session, cancel, outer_releases):
     repathed = decisions.repathed
     # Parsing and identifying are slow and hold nothing: they happen before the write lock is taken.
     prepared = []
@@ -658,16 +674,17 @@ def _write_repathed(library, decisions, group_for_dir, groups, grouped, result, 
                 repository.update_item(row.id, connection, owner_library_id=row.library_id, path=f'pending:{row.id}')
     for batch in _chunks(prepared):
         try:
-            with source_transaction(session) as connection:
-                moved = [(entry, _write_final_path(library, entry, grouped, decisions, connection))
+            with _admission_transaction(session, decisions.foreign_guard, outer_releases) as (connection, releases):
+                moved = [(entry, _write_final_path(library, entry, grouped, decisions, connection, releases))
                          for entry in batch]
         except (IntegrityError, _ForeignClaimChanged):
             # Retry each move on its own. An unsuccessful local move is recovered from its temporary path
             # on the next scan. A handover keeps the old owner and path until it succeeds.
             for entry in batch:
                 try:
-                    with source_transaction(session) as connection:
-                        deleted = _write_final_path(library, entry, grouped, decisions, connection)
+                    with _admission_transaction(session, decisions.foreign_guard, outer_releases) as (
+                            connection, releases):
+                        deleted = _write_final_path(library, entry, grouped, decisions, connection, releases)
                 except (IntegrityError, _ForeignClaimChanged) as error:
                     if entry[1].path in decisions.required_paths:
                         raise _GroupedAdmissionRefused from error
@@ -699,7 +716,7 @@ def _delete_owned(row, connection):
     return repository.delete_items([row.id], connection, owner_library_id=row.library_id) if row else 0
 
 
-def _write_final_path(library, entry, grouped, decisions, connection):
+def _write_final_path(library, entry, grouped, decisions, connection, releases):
     row, found, handover, group_id, identified = entry
     values = _item_values(found, identified, keep_identity=row.identity_source == 'user')
     values['path'] = found.path
@@ -711,9 +728,10 @@ def _write_final_path(library, entry, grouped, decisions, connection):
         displaced = _delete_owned(decisions.admission_displaced.get(found.path), connection)
         values.update(source_id=library.source_id, library_id=library.id)
     updated = repository.update_item(row.id, connection, owner_library_id=row.library_id, **values)
-    if handover and (not updated or not decisions.foreign_guard.can_handover(
-            row, found, found.path in decisions.foreign_aliases)):
-        raise _ForeignClaimChanged
+    if handover:
+        if not updated:
+            raise _ForeignClaimChanged
+        releases.append((row, found, found.path in decisions.foreign_aliases))
     return displaced if updated else None
 
 
@@ -727,34 +745,61 @@ def _count_repathed(entry, result, deleted):
         result.moved += 1
 
 
-def _write_path_only(library, decisions, groups, group_for_dir, result, session, cancel):
+def _close_foreign(holder, found, connection, releases):
+    if holder is None:
+        return 0
+    deleted = _delete_owned(holder, connection)
+    if not deleted:
+        raise _ForeignClaimChanged
+    releases.append((holder, found, False))
+    return deleted
+
+
+def _write_path_only(library, decisions, groups, result, session, cancel, outer_releases):
     pending = [(row, found, _identified(library, found, row.group_id, groups, session))
                for row, found in decisions.path_only]
-    for batch in _chunks(pending):
-        deleted = 0
+
+    def update(connection, row, found, identified):
+        values = _item_values(found, identified, keep_identity=row.identity_source == 'user')
+        # The file changed: its codec cache described the old content.
+        return repository.update_item(row.id, connection, owner_library_id=row.library_id, ffprobe_cache=None,
+                                      **values)
+
+    local = [entry for entry in pending if entry[1].path not in decisions.foreign_to_close]
+    for batch in _chunks(local):
         with source_transaction(session) as connection:
             for row, found, identified in batch:
-                holder = decisions.foreign_to_close.get(found.path)
-                if holder is not None and not decisions.foreign_guard.vouches(holder, found):
-                    result.deferred += 1
-                    continue
-                values = _item_values(found, identified, keep_identity=row.identity_source == 'user')
-                # The file changed: its codec cache described the old content.
-                if repository.update_item(row.id, connection, owner_library_id=row.library_id,
-                                          ffprobe_cache=None, **values):
-                    deleted += _delete_owned(holder, connection)
+                if update(connection, row, found, identified):
                     result.item_ids.append(row.id)
                     result.updated += 1
-        result.deleted += deleted
+        if cancel is not None:
+            cancel()
+
+    for row, found, identified in pending:
+        holder = decisions.foreign_to_close.get(found.path)
+        if holder is None:
+            continue
+        try:
+            with _admission_transaction(session, decisions.foreign_guard, outer_releases) as (connection, releases):
+                updated = update(connection, row, found, identified)
+                deleted = _close_foreign(holder, found, connection, releases) if updated else 0
+        except _ForeignClaimChanged:
+            result.deferred += 1
+        else:
+            if updated:
+                result.item_ids.append(row.id)
+                result.updated += 1
+                result.deleted += deleted
         if cancel is not None:
             cancel()
 
 
-def _insert_new(library, decisions, group_for_dir, groups, result, session, cancel):
+def _insert_new(library, decisions, group_for_dir, groups, result, session, cancel, outer_releases):
     inserted = []
     item_kind = 'movie' if library.content_kind == 'movie' else 'episode'
     for batch in _chunks(decisions.new):
-        _insert_batch(batch, library, item_kind, group_for_dir, groups, result, session, inserted, decisions)
+        _insert_batch(batch, library, item_kind, group_for_dir, groups, result, session, inserted, decisions,
+                      outer_releases)
         if cancel is not None:
             cancel()
     return inserted
@@ -768,7 +813,8 @@ def _is_refused_row(error):
     return isinstance(error, OperationalError) and getattr(error.orig, 'pgcode', None) == '54000'
 
 
-def _insert_batch(batch, library, item_kind, group_for_dir, groups, result, session, inserted, decisions):
+def _insert_batch(batch, library, item_kind, group_for_dir, groups, result, session, inserted, decisions,
+                  outer_releases):
     """Insert a batch in one transaction. When the batch is refused as a whole (a path another row took in the
     meantime, a name the driver cannot bind), its files are tried one at a time: the ones that cannot be added
     are logged and skipped, and the rest are kept."""
@@ -777,25 +823,25 @@ def _insert_batch(batch, library, item_kind, group_for_dir, groups, result, sess
         group_id = _group_of(found, group_for_dir) if item_kind != 'movie' else None
         parses.append((found, group_id, _identified(library, found, group_id, groups, session)))
 
-    def insert(connection, found, group_id, identified):
+    def insert(connection, releases, found, group_id, identified):
         holder = decisions.foreign_to_close.get(found.path)
         deleted = _delete_owned(decisions.admission_displaced.get(found.path), connection)
         item_id = repository.insert_item(connection, source_id=library.source_id, library_id=library.id,
                                          kind=item_kind, path=found.path, group_id=group_id,
                                          **_item_values(found, identified))
-        if holder is not None and not decisions.foreign_guard.vouches(holder, found):
-            raise _ForeignClaimChanged
-        return item_id, deleted + _delete_owned(holder, connection)
+        return item_id, deleted + _close_foreign(holder, found, connection, releases)
     try:
-        with source_transaction(session) as connection:
-            written = [insert(connection, found, group_id, identified) for found, group_id, identified in parses]
+        with _admission_transaction(session, decisions.foreign_guard, outer_releases) as (connection, releases):
+            written = [insert(connection, releases, found, group_id, identified)
+                       for found, group_id, identified in parses]
     except (IntegrityError, DataError, OperationalError, _ForeignClaimChanged) as error:
         if not isinstance(error, _ForeignClaimChanged) and not _is_refused_row(error):
             raise
         for found, group_id, identified in parses:
             try:
-                with source_transaction(session) as connection:
-                    item_id, deleted = insert(connection, found, group_id, identified)
+                with _admission_transaction(session, decisions.foreign_guard, outer_releases) as (
+                        connection, releases):
+                    item_id, deleted = insert(connection, releases, found, group_id, identified)
                 result.item_ids.append(item_id)
                 inserted.append((item_id, found))
                 result.inserted += 1
@@ -838,7 +884,7 @@ def _identify_pending(library, session):
             repository.update_group(group.id, session, owner_library_id=library.id, identify_pending=0)
 
 
-def _refresh_shadows(library_id, decisions, inserted, session, context):
+def _refresh_shadows(library_id, decisions, inserted, written_ids, session, context):
     """Shadows are fully recomputed on every scan, both stages, for the files this scan saw."""
     # ``{item id: (the path to match, its stat)}``. A row reached through an alias is matched by its own path.
     seen = {row.id: (found.path, identity.FileStat(found.dev, found.ino, found.size, found.mtime_ns))
@@ -851,6 +897,7 @@ def _refresh_shadows(library_id, decisions, inserted, session, context):
                  for row, found, _ in decisions.alias})
     seen.update({item_id: (found.path, identity.FileStat(found.dev, found.ino, found.size, found.mtime_ns))
                  for item_id, found in inserted})
+    seen = {item_id: file for item_id, file in seen.items() if item_id in written_ids}
     if not seen:
         return
     index = context.index()

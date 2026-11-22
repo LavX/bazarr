@@ -345,6 +345,82 @@ def test_a_rejected_series_handover_keeps_the_displaced_groups_key(lib, tmp_path
     assert {item.group_id for item in lib.items().values()} == {local_group.id}
 
 
+def test_a_grouped_handover_rolls_back_if_the_holder_mount_changes_during_group_cleanup(lib, tmp_path, monkeypatch):
+    from media_sources import repository
+
+    other = Lib(lib.session, tmp_path, name="Other", folder="Other")
+    (local_move,) = lib.show("Local Move", count=1)
+    (destination,) = lib.show("Destination", count=1)
+    (incoming,) = other.show("Incoming", count=1)
+    other.show("Keeps", count=1)
+    lib.scan()
+    other.scan()
+    old_items = {path: row.id for path, row in lib.items().items()}
+    old_groups = {path: row.id for path, row in lib.groups().items()}
+    foreign_id = other.items()[str(incoming)].id
+    local_move.rename(destination.parent / local_move.name)
+    local_move.parent.rmdir()
+    incoming.replace(destination)
+    real_cleanup = repository.delete_empty_groups
+    unmounted = False
+
+    def finish_groups(group_ids, target=None, **kwargs):
+        nonlocal unmounted
+        deleted = real_cleanup(group_ids, target, **kwargs)
+        if old_groups[str(destination.parent)] in group_ids and not unmounted:
+            unmounted = True
+            incoming.parent.rename(tmp_path / "Incoming.away")
+            incoming.parent.mkdir()
+        return deleted
+
+    monkeypatch.setattr(repository, "delete_empty_groups", finish_groups)
+
+    result = lib.scan()
+
+    assert unmounted
+    assert {path: row.id for path, row in lib.groups().items()} == old_groups
+    assert {path: row.id for path, row in lib.items().items()} == old_items
+    assert other.items()[str(incoming)].id == foreign_id
+    assert (result.status, result.deleted, result.handed_over) == ("partial", 0, 0)
+
+
+def test_a_cross_kind_replacement_rolls_back_if_the_holder_mount_changes_during_the_update(
+        movies, tmp_path, monkeypatch):
+    from media_sources import repository
+
+    other = Lib(movies.session, tmp_path, name="TV", folder="TV")
+    (incoming,) = other.show("Incoming", count=1)
+    other.show("Keeps", count=1)
+    destination = stamped_video(movies.root / "Destination.2002.mkv")
+    movies.scan()
+    other.scan()
+    original = movies.items()[str(destination)]
+    foreign_id = other.items()[str(incoming)].id
+    repository.update_item(original.id, movies.session, arr_shadow=1, shadow_owner="Original shadow")
+    incoming.replace(destination)
+    real_update = repository.update_item
+    unmounted = False
+
+    def update_then_unmount(item_id, target=None, **values):
+        nonlocal unmounted
+        updated = real_update(item_id, target, **values)
+        if item_id == original.id and "ffprobe_cache" in values and not unmounted:
+            unmounted = True
+            other.root.rename(tmp_path / "TV.away")
+            other.root.mkdir()
+        return updated
+
+    monkeypatch.setattr(repository, "update_item", update_then_unmount)
+
+    result = movies.scan()
+
+    assert unmounted and other.items()[str(incoming)].id == foreign_id
+    retained = repository.get_item(original.id)
+    assert (retained.file_size, retained.file_ino, retained.arr_shadow, retained.shadow_owner) == (
+        original.file_size, original.file_ino, 1, "Original shadow")
+    assert (result.deleted, result.updated, result.deferred) == (0, 0, 1)
+
+
 @pytest.mark.parametrize("mount_location", ["root", "nested"])
 def test_holders_move_waits_when_its_mount_disappears_during_another_holders_walk(
         movies, tmp_path, monkeypatch, mount_location):
