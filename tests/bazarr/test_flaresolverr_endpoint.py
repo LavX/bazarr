@@ -71,26 +71,40 @@ class TestResolution:
         assert endpoints.flaresolverr_url_source(_settings("")) == ("", "none")
         assert endpoints.flaresolverr_url_source({}) == ("", "none")
 
-    @pytest.mark.parametrize("bad", ["solver:8191", "ftp://solver", "http://", "   ", None, 5])
+    @pytest.mark.parametrize("bad", [
+        "solver:8191", "ftp://solver", "http://", "   ", None, 5,
+        "http://solver:bad", "http://solver:65536", "http://solver:-1", "http://solver:0",
+        "http://solver:81\n91", "http://solver:81\t91", "http://[::1",
+    ])
     def test_an_unusable_address_is_ignored(self, bad):
         assert endpoints.flaresolverr_url_source(_settings(bad)) == ("", "none")
 
+    def test_bad_ports_in_the_setting_and_environment_are_ignored(self, monkeypatch):
+        monkeypatch.setenv(endpoints.FLARESOLVERR_ENV, "http://from-env:65536")
+        assert endpoints.flaresolverr_url_source(_settings("http://solver:bad")) == ("", "none")
+
+        monkeypatch.setenv(endpoints.FLARESOLVERR_ENV, "https://[::1]:8443/path")
+        assert endpoints.flaresolverr_url_source(_settings("http://solver:bad")) == ("https://[::1]:8443/path", "env")
+
 
 class TestFill:
-    def test_an_empty_field_of_a_trusted_installation_is_filled(self, monkeypatch):
+    """The address is not put in a plugin's configuration: the key is reserved empty and each call fills it from a
+    lease (``capabilities.CallLeases``, covered in ``test_service_leases``)."""
+
+    def test_an_empty_field_of_a_trusted_installation_is_reserved_not_filled(self, monkeypatch):
         configs = _overlay(monkeypatch, [_installation("alpha", trusted=True)],
                            {"alpha": {FIELD: ""}}, _settings())
-        assert configs["alpha"][FIELD] == GLOBAL_URL
+        assert configs["alpha"][FIELD] == ""
 
-    def test_a_missing_stored_config_is_filled_too(self, monkeypatch):
+    def test_a_missing_stored_config_is_reserved_too(self, monkeypatch):
         configs = _overlay(monkeypatch, [_installation("alpha", trusted=True)], {}, _settings())
-        assert configs["alpha"][FIELD] == GLOBAL_URL
+        assert configs["alpha"][FIELD] == ""
 
-    def test_an_untrusted_plugin_whose_manifest_is_flagged_is_filled(self, monkeypatch):
+    def test_an_untrusted_plugin_whose_manifest_is_flagged_is_reserved(self, monkeypatch):
         configs = _overlay(monkeypatch,
                            [_installation("alpha", manifest_extra={"flaresolverr": True})],
                            {}, _settings())
-        assert configs["alpha"][FIELD] == GLOBAL_URL
+        assert configs["alpha"][FIELD] == ""
 
     def test_an_untrusted_unflagged_plugin_never_gets_the_address(self, monkeypatch):
         configs = _overlay(monkeypatch, [_installation("alpha")], {"alpha": {FIELD: ""}}, _settings())
@@ -150,11 +164,11 @@ class TestFill:
         monkeypatch.setitem(provider_registry.providers, "alpha", Provider)
         properties = {FIELD: {"type": "string"}}
         installations = [_installation("alpha", properties, trusted=True)]
-        pool = SZProviderPool(providers=["alpha"], provider_configs=_overlay(
-            monkeypatch, installations, {}, _settings(GLOBAL_URL)))
+        # A pool built by a release that put the address in the configuration.
+        pool = SZProviderPool(providers=["alpha"], provider_configs={"alpha": {FIELD: GLOBAL_URL}})
         assert pool.provider_configs["alpha"][FIELD] == GLOBAL_URL
 
-        pool.provider_configs.update(_overlay(monkeypatch, installations, {}, _settings("")))
+        pool.provider_configs.update(_overlay(monkeypatch, installations, {}, _settings(GLOBAL_URL)))
 
         assert pool.provider_configs["alpha"][FIELD] == ""
         assert pool["alpha"].config[FIELD] == ""
@@ -164,10 +178,10 @@ class TestFill:
                            {"alpha": {FIELD: ""}}, _settings(), blocked={"alpha"})
         assert configs["alpha"][FIELD] == ""
 
-    def test_the_environment_address_is_used_when_no_setting_is_saved(self, monkeypatch):
+    def test_the_environment_address_is_not_put_in_the_configuration_either(self, monkeypatch):
         monkeypatch.setenv(endpoints.FLARESOLVERR_ENV, "http://from-env:8191")
         configs = _overlay(monkeypatch, [_installation("alpha", trusted=True)], {}, _settings(""))
-        assert configs["alpha"][FIELD] == "http://from-env:8191"
+        assert configs["alpha"][FIELD] == ""
 
     def test_with_no_address_every_config_is_byte_identical(self, monkeypatch):
         installations = [_installation("alpha", trusted=True), _installation("beta")]
@@ -184,7 +198,7 @@ class TestFill:
         ]
         stored = {"alpha": {"apikey": "a"}, "plain": {"apikey": "p"}, "owned": {FIELD: "http://own:8191"}}
         configs = _overlay(monkeypatch, installations, stored, _settings())
-        assert configs["alpha"] == {FIELD: GLOBAL_URL, "apikey": "a"}
+        assert configs["alpha"] == {FIELD: "", "apikey": "a"}
         assert configs["plain"] == {"apikey": "p"}
         assert configs["owned"][FIELD] == "http://own:8191"
 
@@ -220,11 +234,17 @@ class TestValidator:
             return False
         return True
 
-    @pytest.mark.parametrize("value", ["", "http://flaresolverr:8191", "https://solver.lan/path"])
+    @pytest.mark.parametrize("value", [
+        "", "http://flaresolverr:8191", "https://solver.lan/path", "https://[::1]:65535/path",
+        "http://fixture:placeholder@[::1]:8191",
+    ])
     def test_accepts_empty_and_http_addresses(self, value):
         assert self._check(value)
 
-    @pytest.mark.parametrize("value", ["solver:8191", "ftp://solver", "http://", " http://solver:8191"])
+    @pytest.mark.parametrize("value", [
+        "solver:8191", "ftp://solver", "http://", " http://solver:8191",
+        "http://solver:bad", "http://solver:65536", "http://solver:-1", "http://solver:0", "http://[::1",
+    ])
     def test_refuses_anything_else(self, value):
         assert not self._check(value)
 
@@ -237,6 +257,36 @@ class TestValidator:
         fake = Dynaconf(core_loaders=[])
         validator.validate(fake)
         assert fake.endpoints.flaresolverr_v1_url == ""
+
+    def test_startup_clears_a_rejected_legacy_address_without_logging_userinfo(self, tmp_path):
+        import os
+        import subprocess
+        from pathlib import Path
+
+        import yaml
+
+        config_path = tmp_path / "config" / "config.yaml"
+        config_path.parent.mkdir()
+        config_path.write_text(yaml.safe_dump(_settings("http://fixture_user:fixture_password\\@127.0.0.1:8191")),
+                               encoding="utf-8")
+        repo = Path(__file__).resolve().parents[2]
+        env = {
+            "PATH": os.environ.get("PATH", ""),
+            "BAZARR_CONFIG_DIR": str(tmp_path),
+            "NO_CLI": "true",
+            "PYTHONPATH": os.pathsep.join(map(str, (repo / "bazarr", repo / "custom_libs"))),
+            "PYTHONDONTWRITEBYTECODE": "1",
+            "XDG_CACHE_HOME": str(tmp_path / "cache"),
+        }
+        result = subprocess.run(
+            [sys.executable, "-c", "from app.config import settings; assert settings.endpoints.flaresolverr_v1_url == ''"],
+            env=env, cwd=repo, capture_output=True, text=True, timeout=60,
+        )
+
+        output = result.stdout + result.stderr
+        assert "fixture_user" not in output and "fixture_password" not in output
+        assert result.returncode == 0, output
+        assert "VALIDATOR RESET: endpoints.flaresolverr_v1_url from '[redacted]'" in output
 
 
 class _FakeUpdate:
@@ -293,6 +343,18 @@ class TestSave:
         env.config.save_settings([(endpoints.FLARESOLVERR_FORM_KEY, [f"  {GLOBAL_URL} \n"])])
 
         assert env.settings.endpoints.flaresolverr_v1_url == GLOBAL_URL
+
+    def test_refusing_a_bad_port_does_not_echo_the_address_or_save_it(self, env):
+        from dynaconf.validator import ValidationError
+
+        validator = next(item for item in env.config.validators if endpoints.FLARESOLVERR_SETTING_PATH in item.names)
+        env.settings.validators.register(validator)
+        with pytest.raises(ValidationError, match="Invalid FlareSolverr address") as error:
+            env.config.save_settings([(endpoints.FLARESOLVERR_FORM_KEY, ["http://fixture:placeholder@solver:bad"])])
+
+        assert "fixture" not in str(error.value) and "placeholder" not in str(error.value)
+        assert env.settings.endpoints.flaresolverr_v1_url == ""
+        assert env.events == []
 
     def test_an_unrelated_save_does_not_reset_the_pool(self, env):
         env.config.save_settings([("settings-general-page_size", ["77"])])

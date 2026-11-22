@@ -7,18 +7,18 @@ walks both through the entries one catalog source lists and through what is alre
 answers three things: the plugins that would be installed with it (dependencies first, the plugin
 last), what is already there and satisfies a need, and what does not resolve.
 
-A capability no plugin provides anywhere is not a plugin's to supply: it names a host capability
-(``host.ffmpeg.v1``) or an address or instance the user configures. Those are listed as external and
-never block, because this module cannot tell whether the host has them. Binding them is not done here.
+Host capabilities and configured external bindings satisfy requirements before looking for plugin
+suppliers. A capability no plugin provides anywhere is also listed as external.
 
-The functions read the state document and take what depends on the running host (is an entry usable
-here?) as a callback, so this module imports nothing from the service.
+The resolver takes catalog compatibility as a callback, so this module imports nothing from the
+service.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import Any, Callable, Iterable
 
+from .capabilities import has_external_binding
 from .manifest import ManifestValidationError
 from .plugin_manifest import HOST_CAPABILITY_PREFIX, PluginManifest, parse_plugin_manifest
 from .compatibility import select_entry
@@ -175,7 +175,7 @@ def resolve_closure(
                 return
             visit(candidate, "extends", len(visiting))
             return
-        if capability.startswith(HOST_CAPABILITY_PREFIX):
+        if capability.startswith(HOST_CAPABILITY_PREFIX) or has_external_binding(owner, capability):
             closure.external.append(capability)
             return
         switched_off = []
@@ -321,8 +321,8 @@ def dependents(
     """The ids of installed plugins that depend on ``plugin_id``.
 
     A plugin depends on another when it extends it, or requires a capability the other provides and
-    no other enabled plugin provides. That is judged twice, on what runs now and on what runs after the
-    next restart, each with one consistent set of releases: a staged update that drops a capability stops
+    neither an external binding nor another enabled plugin supplies. That is judged on what runs now and
+    after the next restart, each with one consistent set of releases. A staged update that drops a capability stops
     supplying it after the restart, and one that adds it does not supply it before. With ``enabled_only``,
     plugins that are switched off do not count, which is the rule for switching a dependency off;
     removing one counts every installed dependent. ``enabled`` overrides, by id, whether a plugin counts as
@@ -354,7 +354,8 @@ def dependents(
                 continue
             depends = consumer.extends is not None and consumer.extends.plugin_id == plugin_id
             for capability in consumer.requires:
-                if depends or capability not in target.provides or capability in consumer.provides:
+                if (depends or capability not in target.provides or capability in consumer.provides
+                        or has_external_binding(consumer, capability)):
                     continue
                 # A plugin that is switched off supplies nothing.
                 elsewhere = False
@@ -379,7 +380,7 @@ def broken_by(state: dict[str, Any], plugin_id: str, replacement: dict[str, Any]
     ``replacement`` is the manifest that would become its staged release, and None means its staged release
     goes away and its active one is what runs after the restart. A dependent counts when it relies on a
     capability this plugin supplies after the next restart (or, for ``extends``, on it as the parent), the
-    change drops that capability, and no other enabled plugin supplies it. Returns ``(dependent id,
+    change drops that capability, and there is no suitable alternative. Returns ``(dependent id,
     capability)`` pairs, sorted.
     """
     installed = installed_plugins(state)
@@ -408,7 +409,8 @@ def broken_by(state: dict[str, Any], plugin_id: str, replacement: dict[str, Any]
         for capability, parent in needs:
             if capability not in current.provides or (after is not None and capability in after.provides):
                 continue
-            if not parent and _supplied_elsewhere(installed, capability, (plugin_id, other_id)):
+            if not parent and (has_external_binding(consumer, capability)
+                               or _supplied_elsewhere(installed, capability, (plugin_id, other_id))):
                 continue
             broken.add((other_id, capability))
     return sorted(broken)
@@ -535,8 +537,8 @@ def unmet_needs(installations: dict[str, Any], enabled: dict[str, bool] | None =
     """For each installation whose active release relies on a plugin that is not running, what is missing.
 
     Judged on the set that actually activated and is switched on. The plugin it extends must be that
-    plugin, running and providing the capability. A capability it once had an installed supplier for is met
-    by any running supplier of it, not only the one recorded, and is unmet only when none runs. A plugin
+    plugin, running and providing the capability. A requirement with a recorded supplier is met by a
+    configured external binding or any running supplier of that capability. A plugin
     that is itself unmet is not running, so what relies on it is unmet too, and a plugin that is switched
     off supplies nothing (it is still judged, so switching it on cannot start it unmet). A plugin whose
     environment is flagged as needing repair, or whose active release the catalog revoked, does not run
@@ -574,7 +576,7 @@ def unmet_needs(installations: dict[str, Any], enabled: dict[str, bool] | None =
                 if parent is None or plugin.extends.capability not in parent.provides:
                     missing.append(f"{parent_id} ({plugin.extends.capability})")
             for capability, recorded in sorted((rows[pid].get("supplied_by") or {}).items()):
-                if capability not in plugin.requires:
+                if capability not in plugin.requires or has_external_binding(plugin, capability):
                     continue
                 if not any(capability in parsed[sid].provides for sid in suppliers if sid != pid):
                     missing.append(f"{recorded} ({capability})")

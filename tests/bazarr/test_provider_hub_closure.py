@@ -2,7 +2,7 @@
 """What a plugin needs, resolved at selection, and what cannot be removed or switched off under it."""
 import pytest
 
-from plugin_platform_helpers import service_manifest, verified_official_source, write_state
+from plugin_platform_helpers import oci_runtime, provider_manifest_v2, service_manifest, verified_official_source, write_state
 
 PARENT_CAPABILITY = "demo_parent.backend.v1"
 
@@ -112,6 +112,130 @@ def test_a_capability_only_an_incompatible_plugin_provides_does_not_resolve(tmp_
     assert "no plugin this Bazarr+ can install provides" in _closure("user").refusal
 
 
+@pytest.mark.parametrize("address, capability, declares_field, expected", [
+    ("http://127.0.0.1:8191", "flaresolverr.v1", True, True),
+    ("", "flaresolverr.v1", True, False),
+    ("http://127.0.0.1:8191", "flaresolverr.v2", True, False),
+    ("http://127.0.0.1:8191", "flaresolverr.v1", False, False),
+])
+def test_install_and_update_use_a_matching_external_service(
+        tmp_path, monkeypatch, address, capability, declares_field, expected):
+    from app.config import settings
+    from provider_hub import endpoints, service, state
+    from provider_hub.kinds.service import SERVICE_KIND_API
+    from provider_hub.runtime.oci import ENABLE_ENV
+
+    monkeypatch.delenv(ENABLE_ENV, raising=False)
+    monkeypatch.delenv(endpoints.FLARESOLVERR_ENV, raising=False)
+    monkeypatch.setitem(settings.endpoints, endpoints.FLARESOLVERR_SETTING_KEY, address)
+    assert endpoints.flaresolverr_url_source()[0] == address
+
+    managed = service_manifest("managed_fixture", kind="service", kind_api=SERVICE_KIND_API,
+                               provides=[capability], **oci_runtime())
+    old = provider_manifest_v2("consumer_fixture")
+    new = provider_manifest_v2("consumer_fixture", "2.0.0", requires=[capability])
+    if declares_field:
+        new["config_schema"]["properties"][endpoints.FLARESOLVERR_PROVIDER_FIELD] = {"type": "string"}
+    _world(tmp_path, monkeypatch, [managed, old, new])
+
+    staged = []
+
+    def stage(manifest, **kwargs):
+        staged.append((manifest["id"], manifest["version"]))
+        return manifest
+
+    monkeypatch.setattr(service, "stage_install", stage)
+    if expected:
+        summary = service.install_consent("official", "consumer_fixture", "2.0.0", catalog_list="plugins")
+        assert summary["external_requirements"] == [capability]
+        service.install_catalog_entry("official", "consumer_fixture", "2.0.0", consent_digest=summary["digest"])
+        assert staged == [("consumer_fixture", "2.0.0")]
+    else:
+        with pytest.raises(service.ProviderHubInstallError, match="no plugin this Bazarr\\+ can install provides"):
+            service.install_catalog_entry("official", "consumer_fixture", "2.0.0")
+        assert staged == []
+
+    state.mutate_state(lambda data: data["installations"].update(
+        _installed(old, source_bound=True, source_id="official", catalog_list="plugins")))
+    assert service.offered_update_version("consumer_fixture") == ("2.0.0" if expected else None)
+    if expected:
+        staged.clear()
+        service.apply_update("consumer_fixture")
+        assert staged == [("consumer_fixture", "2.0.0")]
+    else:
+        refused = service.apply_update("consumer_fixture")
+        assert "no plugin this Bazarr+ can install provides" in refused["last_error"]
+        assert staged == []
+
+
+def test_an_update_only_stages_the_dependencies_checked_for_consent(tmp_path, monkeypatch):
+    from app.config import settings
+    from provider_hub import endpoints, service
+    from provider_hub.compatibility import HostFacts
+    from provider_hub.kinds.service import SERVICE_KIND_API
+
+    capability = endpoints.FLARESOLVERR_CAPABILITY
+    managed = service_manifest("managed_fixture", kind="service", kind_api=SERVICE_KIND_API,
+                               provides=[capability], **oci_runtime())
+    old = provider_manifest_v2("consumer_fixture")
+    new = provider_manifest_v2("consumer_fixture", "2.0.0", requires=[capability])
+    new["config_schema"]["properties"][endpoints.FLARESOLVERR_PROVIDER_FIELD] = {"type": "string"}
+    _world(tmp_path, monkeypatch, [managed, new], _installed(
+        old, source_bound=True, source_id="official", catalog_list="plugins"))
+    host = HostFacts(None, "linux-x86_64", frozenset({("python", "worker"), ("oci", "daemon")}), in_container=True)
+    monkeypatch.setattr(service, "current_host", lambda: host)
+    monkeypatch.delenv(endpoints.FLARESOLVERR_ENV, raising=False)
+    monkeypatch.setitem(settings.endpoints, endpoints.FLARESOLVERR_SETTING_KEY, "http://127.0.0.1:8191")
+    staged = []
+    monkeypatch.setattr(service, "stage_install", lambda manifest, **kwargs: staged.append(manifest["id"]) or manifest)
+
+    original_delta = service._update_delta
+
+    def clear_address_after_check(*args, **kwargs):
+        delta = original_delta(*args, **kwargs)
+        monkeypatch.setitem(settings.endpoints, endpoints.FLARESOLVERR_SETTING_KEY, "")
+        return delta
+
+    monkeypatch.setattr(service, "_update_delta", clear_address_after_check)
+
+    service.apply_update("consumer_fixture")
+
+    assert staged == ["consumer_fixture"]
+
+    # A new attempt sees the changed binding and asks before adding the managed service.
+    refused = service.apply_update("consumer_fixture")
+    assert "needs your consent" in refused["last_error"] and staged == ["consumer_fixture"]
+
+
+def test_a_configured_address_clears_the_boot_hold_from_a_disabled_service(tmp_path, monkeypatch):
+    from app.config import settings
+    from provider_hub import endpoints, service, state
+    from provider_hub.kinds.service import SERVICE_KIND_API
+
+    capability = endpoints.FLARESOLVERR_CAPABILITY
+    managed = service_manifest("managed_fixture", kind="service", kind_api=SERVICE_KIND_API,
+                               provides=[capability], **oci_runtime())
+    consumer = provider_manifest_v2("consumer_fixture", requires=[capability])
+    consumer["config_schema"]["properties"][endpoints.FLARESOLVERR_PROVIDER_FIELD] = {"type": "string"}
+    rows = {**_installed(managed, enabled=False), **_installed(consumer, supplied_by={capability: managed["id"]})}
+    monkeypatch.delenv(endpoints.FLARESOLVERR_ENV, raising=False)
+    monkeypatch.setitem(settings.general, "enabled_providers", ["consumer_fixture"])
+    monkeypatch.setitem(settings.endpoints, endpoints.FLARESOLVERR_SETTING_KEY, "")
+    held = _boot(tmp_path, monkeypatch, rows)["consumer_fixture"]
+    assert held["blocked"] and held["last_error"] == held["blocked_reason"]
+
+    monkeypatch.setitem(settings.endpoints, endpoints.FLARESOLVERR_SETTING_KEY, "http://127.0.0.1:8191")
+    service.activate_staged_installations()
+    released = state.load_state()["installations"]["consumer_fixture"]
+
+    assert "blocked" not in released and "blocked_reason" not in released and "blocked_cause" not in released
+    assert released["last_error"] is None
+
+    monkeypatch.setitem(settings.endpoints, endpoints.FLARESOLVERR_SETTING_KEY, "")
+    service.activate_staged_installations()
+    assert state.load_state()["installations"]["consumer_fixture"]["blocked"]
+
+
 def test_a_plugin_cycle_does_not_resolve(tmp_path, monkeypatch, service_kind):
     first = _manifest("first", provides=["first.v1"], requires=["second.v1"])
     second = _manifest("second", provides=["second.v1"], requires=["first.v1"])
@@ -210,6 +334,51 @@ def test_a_capability_another_installed_plugin_also_provides_leaves_each_removab
     _world(tmp_path, monkeypatch, [], {**_installed(first), **_installed(second), **_installed(user)})
 
     assert remove_installation("first") is True
+
+
+@pytest.mark.parametrize("requirement", [
+    "external", "unbound", "named", "other", "no_field", "bad_port", "port_range", "backslash",
+])
+def test_managed_service_guards_accept_only_a_matching_external_binding(tmp_path, monkeypatch, requirement):
+    from app.config import settings
+    from provider_hub import closure, endpoints, service, state
+    from provider_hub.kinds.service import SERVICE_KIND_API
+
+    capability = endpoints.FLARESOLVERR_CAPABILITY
+    other = "fixture.backend.v1"
+    managed = service_manifest("managed_fixture", kind="service", kind_api=SERVICE_KIND_API,
+                               provides=[capability, other], **oci_runtime())
+    consumer = provider_manifest_v2("consumer_fixture", requires=[capability])
+    if requirement != "no_field":
+        consumer["config_schema"]["properties"][endpoints.FLARESOLVERR_PROVIDER_FIELD] = {"type": "string"}
+    if requirement == "named":
+        consumer["extends"] = {"id": managed["id"], "capability": capability}
+    if requirement == "other":
+        consumer["requires"].append(other)
+    _world(tmp_path, monkeypatch, [], {**_installed(managed), **_installed(consumer)})
+    monkeypatch.delenv(endpoints.FLARESOLVERR_ENV, raising=False)
+    monkeypatch.setitem(settings.general, "enabled_providers", ["consumer_fixture"])
+    address = {
+        "unbound": "",
+        "bad_port": "http://127.0.0.1:bad",
+        "port_range": "http://127.0.0.1:65536",
+        "backslash": "http://solver:bad\\@127.0.0.1:8191",
+    }.get(requirement, "http://127.0.0.1:8191")
+    monkeypatch.setitem(settings.endpoints, endpoints.FLARESOLVERR_SETTING_KEY, address)
+
+    before = state.load_state()
+    replacement = {**managed, "version": "2.0.0", "provides": ["replacement.backend.v1"]}
+    expected = [] if requirement == "external" else [("consumer_fixture", other if requirement == "other" else capability)]
+    if requirement == "external":
+        assert service.update_provider(managed["id"], enabled=False)["enabled"] is False
+        assert service.remove_installation(managed["id"]) is True
+        assert state.load_state()["installations"]["consumer_fixture"]["state"] == "active"
+    else:
+        with pytest.raises(ValueError, match="cannot be switched off while consumer_fixture depends"):
+            service.update_provider(managed["id"], enabled=False)
+        with pytest.raises(service.ProviderHubInstallError, match="cannot be removed while consumer_fixture depends"):
+            service.remove_installation(managed["id"])
+    assert closure.broken_by(before, managed["id"], replacement) == expected
 
 
 # --- staged updates and switched-off suppliers count ------------------------------------------------
