@@ -349,7 +349,8 @@ def _login(manifest: dict[str, Any], permissions: tuple[str, ...]) -> dict[str, 
     return {"argv": argv, "flow": flow, "paths": paths}
 
 
-def _field_list(fields: Any, where: str, *, host_keys: frozenset[str] = frozenset()) -> tuple[dict[str, Any], ...]:
+def _field_list(fields: Any, where: str, *, host_keys: frozenset[str] = frozenset(),
+                allow_constraints: bool = False) -> tuple[dict[str, Any], ...]:
     if not isinstance(fields, list):
         raise ManifestValidationError(f"{where} must be a list")
     seen = set()
@@ -371,6 +372,36 @@ def _field_list(fields: Any, where: str, *, host_keys: frozenset[str] = frozense
                                  or item.get("destination") is True):
             raise ManifestValidationError(
                 f"settings field {key} is kept by the host as a plain value and cannot be a secret or an address")
+    declared = {item["key"]: item for item in fields}
+    for item in fields:
+        if "forbidden_if" not in item:
+            continue
+        name = f"{where}.{item['key']}.forbidden_if"
+        if not allow_constraints:
+            raise ManifestValidationError(f"{name} is only supported on translator connection fields")
+        condition = item["forbidden_if"]
+        if (item["type"] not in {"list", "orderable_list"} or item.get("secret") is True
+                or not isinstance(condition, dict) or set(condition) != {"key", "equals"}
+                or not isinstance(condition["key"], str) or not isinstance(condition["equals"], str)
+                or not condition["equals"].strip()):
+            raise ManifestValidationError(f"{name} needs a public list, key and nonempty equals")
+        controller = declared.get(condition["key"], {})
+        choices = controller.get("choices")
+        if controller.get("type") != "choice" or not isinstance(choices, list):
+            raise ManifestValidationError(f"{name} must name a declared choice field")
+        values = set()
+        for choice in choices:
+            if isinstance(choice, dict):
+                title, sets = choice.get("label"), choice.get("sets")
+                if ((title is not None and not isinstance(title, str))
+                        or (sets is not None and not isinstance(sets, dict))):
+                    raise ManifestValidationError(f"{name} controller has an invalid choice")
+                choice = choice.get("value")
+            if not isinstance(choice, str) or not choice.strip() or choice in values:
+                raise ManifestValidationError(f"{name} controller needs distinct nonempty choice values")
+            values.add(choice)
+        if condition["equals"] not in values:
+            raise ManifestValidationError(f"{name} must name a declared choice value")
     return tuple(dict(item) for item in fields)
 
 
@@ -402,7 +433,7 @@ def _settings(manifest: dict[str, Any]) -> tuple[
             backend_endpoints.append((type_id, _endpoints(definition.get("endpoints"))))
             backend_fields.append((type_id, _field_list(
                 definition.get("fields") or [], f"settings.backend_types.{type_id}.fields",
-                host_keys=BACKEND_HOST_FIELD_KEYS)))
+                host_keys=BACKEND_HOST_FIELD_KEYS, allow_constraints=manifest.get("kind") == "translator")))
     return settings_version, fields, tuple(backend_endpoints), tuple(backend_fields)
 
 

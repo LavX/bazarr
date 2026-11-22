@@ -5,6 +5,30 @@ import pytest
 from plugin_platform_helpers import archive_runtime, oci_runtime, provider_manifest_v2, service_manifest
 
 
+@pytest.mark.parametrize("conditional,choices,scope", [
+    (None, ["auto"], "connection"),
+    ({"key": "missing", "equals": "auto"}, ["auto"], "connection"),
+    ({"key": "mode", "equals": "unknown"}, ["auto"], "connection"),
+    ({"key": "mode", "equals": ""}, ["auto", ""], "connection"),
+    ({"key": "mode", "equals": "auto"}, ["auto", None], "connection"),
+    ({"key": "mode", "equals": "auto"}, ["auto", {"value": "manual", "label": []}], "connection"),
+    ({"key": "mode", "equals": "auto"}, ["auto", {"value": "auto"}], "connection"),
+    ({"key": "mode", "equals": "auto"}, ["auto"], "engine"),
+])
+def test_invalid_forbidden_if_conditions_are_refused_before_settings_validation(conditional, choices, scope):
+    from provider_hub.manifest import ManifestValidationError
+    from provider_hub.plugin_manifest import parse_plugin_manifest
+
+    fields = [{"key": "mode", "type": "choice", "choices": choices},
+              {"key": "selection", "type": "list", "forbidden_if": conditional}]
+    settings = {"fields": fields} if scope == "engine" else {
+        "fields": [], "backend_types": {"sample": {"fields": fields}}}
+    manifest = service_manifest("sample", kind="translator", kind_api="bazarr.translator.v1",
+                                settings_version=1, settings=settings)
+    with pytest.raises(ManifestValidationError, match="forbidden_if"):
+        parse_plugin_manifest(manifest)
+
+
 @pytest.mark.parametrize("lower,higher", [
     ("2.8.0-alpha", "2.8.0-alpha.1"),
     ("2.8.0-alpha.1", "2.8.0-alpha.beta"),

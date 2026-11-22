@@ -213,6 +213,23 @@ def validate_values(fields: Sequence[Mapping[str, Any]], values: Mapping[str, An
     return result
 
 
+def connection_constraint_errors(fields: Sequence[Mapping[str, Any]], settings: Mapping[str, Any]) -> dict[str, str]:
+    """Check declared ``forbidden_if`` rules before saving or enabling a connection.
+
+    A public list must be empty when the named choice has the specified value. The caller supplies
+    the merged, validated public settings, with declared defaults applied here for absent values.
+    """
+    values = {field["key"]: field.get("default") for field in fields}
+    values.update(settings)
+    errors = {}
+    for field in fields:
+        key = field["key"]
+        condition = field.get("forbidden_if")
+        if condition and not _is_empty(values[key]) and values[condition["key"]] == condition["equals"]:
+            errors[key] = f"must be empty when {condition['key']} is {condition['equals']}"
+    return errors
+
+
 def validate_draft(fields: Sequence[Mapping[str, Any]], values: Mapping[str, Any]) -> dict[str, str]:
     """The errors in a draft that is not being saved (a model list is asked for while the form is half filled):
     every value it carries must be of its field's type and within its limits, but nothing is required yet."""
