@@ -489,6 +489,18 @@ def _source_kwargs(carrier):
     return {} if context is None else {'source_context': context}
 
 
+def _provider_owner(name, instance=None):
+    owner = getattr(provider_registry, 'owner', None)
+    if owner is None:
+        return None
+    provider_class, generation = owner(name)
+    return (type(instance) if instance is not None else provider_class), generation
+
+
+def _matches_provider_owner(name, owner):
+    return owner is None or provider_registry.owner(name) == owner
+
+
 def _adapt_throttle_callback(callback):
     """Negotiate the optional context once, without retrying callback failures.
 
@@ -508,7 +520,7 @@ def _adapt_throttle_callback(callback):
     if any(item.kind == inspect.Parameter.VAR_KEYWORD for item in parameters.values()):
         return callback
 
-    unsupported = [name for name in ("sports_context", "source_context", "operation", "announce")
+    unsupported = [name for name in ("sports_context", "source_context", "operation", "announce", "provider_owner")
                    if not (name in parameters
                            and parameters[name].kind in (inspect.Parameter.POSITIONAL_OR_KEYWORD,
                                                          inspect.Parameter.KEYWORD_ONLY))]
@@ -518,9 +530,10 @@ def _adapt_throttle_callback(callback):
     unset = object()
 
     @wraps(callback)
-    def legacy(*args, sports_context=unset, source_context=unset, operation=unset, announce=unset, **kwargs):
+    def legacy(*args, sports_context=unset, source_context=unset, operation=unset, announce=unset,
+               provider_owner=unset, **kwargs):
         for name, value in (("sports_context", sports_context), ("source_context", source_context),
-                            ("operation", operation), ("announce", announce)):
+                            ("operation", operation), ("announce", announce), ("provider_owner", provider_owner)):
             if value is not unset and name not in unsupported:
                 kwargs[name] = value
         return callback(*args, **kwargs)
@@ -821,12 +834,12 @@ class SZProviderPool(ProviderPool):
         """Run ``call(provider)``; if the instance was replaced before the call
         reached its worker, run it on the current one instead (once).
 
-        ``invoked``, a list, receives each instance a call was attempted on, so
-        the caller can report the outcome to the one that was actually admitted.
+        ``invoked`` receives each attempted instance and its registry ownership,
+        so the caller can acknowledge the right worker and scope the outcome.
         """
         def attempt(instance):
             if invoked is not None:
-                invoked.append(instance)
+                invoked.append((instance, _provider_owner(name, instance)))
             if getattr(instance, 'hub_proxy', False):
                 return call(instance)
 
@@ -857,10 +870,12 @@ class SZProviderPool(ProviderPool):
         except ProviderRetiredError as error:
             raise ProviderBusyError(f"{name} was being replaced") from error
 
-    def _discard_provider(self, name):
-        """Mark a provider as discarded for this pool, under the lock ``update`` walks the set under."""
-        with self._store_lock:
-            self.discarded_providers.add(name)
+    def _discard_provider(self, name, provider_owner=None):
+        """Discard a provider for this pool while its ownership still matches the failure."""
+        registry_guard = provider_registry.lock if provider_owner is not None else nullcontext()
+        with registry_guard, self._store_lock:
+            if _matches_provider_owner(name, provider_owner):
+                self.discarded_providers.add(name)
 
     def _build_lock(self, name):
         with self._store_lock:
@@ -934,7 +949,7 @@ class SZProviderPool(ProviderPool):
             logger.warning('Admission check for provider %r failed, calling it anyway', name, exc_info=True)
             return True
 
-    def _notify_throttle(self, name, error, **context):
+    def _notify_throttle(self, name, error, *, provider_owner=None, **context):
         """Pass a provider failure to throttle_callback from an error handler.
 
         Returns what the callback returned: for the production callback,
@@ -948,6 +963,11 @@ class SZProviderPool(ProviderPool):
         the provider, dropping a torn-down instance) would be skipped. The
         call is never retried; see _adapt_throttle_callback.
         """
+        if not _matches_provider_owner(name, provider_owner):
+            logger.info('Provider %r reported %s after changing ownership', name, type(error).__name__)
+            return False
+        if provider_owner is not None:
+            context['provider_owner'] = provider_owner
         try:
             return self.throttle_callback(name, error, **context)
         except Exception as callback_error:
@@ -1108,9 +1128,12 @@ class SZProviderPool(ProviderPool):
                 return ProviderSearchResult(provider, subtitles or [], status, reason)
             return subtitles
 
+        def failure_owner():
+            return invoked[-1][1] if invoked else owner
+
         def discard():
             if discard_on_failure:
-                self._discard_provider(provider)
+                self._discard_provider(provider, failure_owner())
 
         logger.debug("Languages requested: %r", languages)
 
@@ -1120,7 +1143,8 @@ class SZProviderPool(ProviderPool):
 
         # The class this search runs on, read once: every check below uses it, so a plugin detached while the
         # search is running is never looked up again and found missing half way through.
-        provider_class = provider_registry[provider]
+        owner = _provider_owner(provider)
+        provider_class = owner[0] if owner is not None else provider_registry[provider]
         if provider_class is None:
             logger.info('Skipping provider %r: it is no longer registered', provider)
             return finish(None, "skipped", "provider_excluded")
@@ -1264,10 +1288,10 @@ class SZProviderPool(ProviderPool):
             # same event two records.
             self._notify_throttle(provider, e, ids=ids, language=list(languages)[0] if len(languages) else None,
                                   sports_context=getattr(video, 'sports_context', None), operation="search",
-                                  announce=True, **_source_kwargs(video))
+                                  announce=True, provider_owner=failure_owner(), **_source_kwargs(video))
+            discard()
             if detailed:
                 return provider_search_failure(provider, e)
-            discard()
 
         except Exception as e:
             ids = {
@@ -1282,15 +1306,15 @@ class SZProviderPool(ProviderPool):
                 _log_unexpected_provider_error(provider, e)
             self._notify_throttle(provider, e, ids=ids, language=list(languages)[0] if len(languages) else None,
                                   sports_context=getattr(video, 'sports_context', None), operation="search",
-                                  announce=True, **_source_kwargs(video))
+                                  announce=True, provider_owner=failure_owner(), **_source_kwargs(video))
+            discard()
             if detailed:
                 return provider_search_failure(provider, e)
-            discard()
 
         finally:
             # After the throttle callback and the discard, so the next request
             # queued on this provider sees them.
-            _outcome_recorded(invoked[-1] if invoked else initialized_provider)
+            _outcome_recorded(invoked[-1][0] if invoked else initialized_provider)
 
     def list_subtitles(self, video, languages):
         """List subtitles.
@@ -1313,6 +1337,7 @@ class SZProviderPool(ProviderPool):
                 logger.debug('Skipping discarded provider %r', name)
                 continue
 
+            owner = _provider_owner(name)
             # list subtitles
             try:
                 provider_subtitles = self.list_subtitles_provider(name, video, languages, discard_on_failure=True)
@@ -1322,7 +1347,7 @@ class SZProviderPool(ProviderPool):
 
             if provider_subtitles is None:
                 logger.info('Discarding provider %s', name)
-                self._discard_provider(name)
+                self._discard_provider(name, owner)
                 continue
 
             # add the subtitles
@@ -1424,6 +1449,7 @@ class SZProviderPool(ProviderPool):
                 logger.debug('Skipping discarded provider %r', name)
                 continue
 
+            owner = _provider_owner(name)
             # Search this provider
             if cancel is None:
                 provider_subtitles = SZProviderPool.list_subtitles_provider(self, name, video, languages,
@@ -1433,7 +1459,7 @@ class SZProviderPool(ProviderPool):
 
             if provider_subtitles is None:
                 logger.info('Discarding provider %s', name)
-                self._discard_provider(name)
+                self._discard_provider(name, owner)
                 continue
 
             if not provider_subtitles:
@@ -1507,7 +1533,8 @@ class SZProviderPool(ProviderPool):
         # A candidate a plugin found is downloaded by that plugin. When the plugin was detached while Bazarr+ ran
         # and the id now names a built-in provider, the built-in cannot read the candidate: it is
         # refused quietly, not handed over to fail and be recorded against a provider that did nothing wrong.
-        registered = provider_registry[subtitle.provider_name]
+        owner = _provider_owner(subtitle.provider_name)
+        registered = owner[0] if owner is not None else provider_registry[subtitle.provider_name]
         if getattr(subtitle, 'hub_proxy', False) and registered is not None and not getattr(
                 registered, 'hub_proxy', False):
             # Plain fields only: a log line must never raise, and the repr of a subtitle reads attributes a
@@ -1538,6 +1565,10 @@ class SZProviderPool(ProviderPool):
         # now holds.
         recorded = False
         recorded_error = None
+        recorded_owner = None
+
+        def failure_owner():
+            return invoked[-1][1] if invoked else owner
 
         # retry downloading on failure until settings' download retry limit hit
         try:
@@ -1601,18 +1632,20 @@ class SZProviderPool(ProviderPool):
                     subtitle.download_error = e
                     if self._notify_throttle(subtitle.provider_name, e, ids=ids, language=subtitle.language,
                                              sports_context=getattr(subtitle, 'sports_context', None),
-                                             operation="download", announce=False,
+                                             operation="download", announce=False, provider_owner=failure_owner(),
                                              **_source_kwargs(subtitle)):
                         recorded = True
                         recorded_error = e
+                        recorded_owner = failure_owner()
 
                 except (rarfile.BadRarFile, MustGetBlacklisted) as e:
                     if self._notify_throttle(subtitle.provider_name, e, ids=ids, language=subtitle.language,
                                              sports_context=getattr(subtitle, 'sports_context', None),
-                                             operation="download", announce=False,
+                                             operation="download", announce=False, provider_owner=failure_owner(),
                                              **_source_kwargs(subtitle)):
                         recorded = True
                         recorded_error = e
+                        recorded_owner = failure_owner()
                     return False
 
                 except Exception as e:
@@ -1623,20 +1656,24 @@ class SZProviderPool(ProviderPool):
                     subtitle.download_error = e
                     if self._notify_throttle(subtitle.provider_name, e, ids=ids, language=subtitle.language,
                                              sports_context=getattr(subtitle, 'sports_context', None),
-                                             operation="download", announce=False,
+                                             operation="download", announce=False, provider_owner=failure_owner(),
                                              **_source_kwargs(subtitle)):
                         recorded = True
                         recorded_error = e
-                    self._discard_provider(subtitle.provider_name)
+                        recorded_owner = failure_owner()
+                    self._discard_provider(subtitle.provider_name, failure_owner())
                     return False
 
                 finally:
                     # After the throttle callback and the discard, so the next
                     # request queued on this provider sees them.
-                    _outcome_recorded(invoked[-1] if invoked else initialized_provider)
+                    _outcome_recorded(invoked[-1][0] if invoked else initialized_provider)
+
+                if not _matches_provider_owner(subtitle.provider_name, failure_owner()):
+                    return False
 
                 if tries == DOWNLOAD_TRIES:
-                    self._discard_provider(subtitle.provider_name)
+                    self._discard_provider(subtitle.provider_name, failure_owner())
                     # The one line already says the provider is out of rotation,
                     # and the discard itself is unchanged, so this stays below
                     # the default filter.
@@ -1648,6 +1685,8 @@ class SZProviderPool(ProviderPool):
                 logger.debug('Errors while downloading subtitle, retrying provider %r in %s seconds',
                              subtitle.provider_name, DOWNLOAD_RETRY_SLEEP)
                 time.sleep(DOWNLOAD_RETRY_SLEEP)
+                if not _matches_provider_owner(subtitle.provider_name, failure_owner()):
+                    return False
 
             # check subtitle validity
             if not subtitle.is_valid():
@@ -1666,7 +1705,8 @@ class SZProviderPool(ProviderPool):
             # whose calls recorded nothing announces nothing, even when the
             # table holds an older entry some other search left for the
             # provider.
-            if recorded and recorded_error is not None:
+            if (recorded and recorded_error is not None
+                    and _matches_provider_owner(subtitle.provider_name, recorded_owner)):
                 self._announce_throttle(subtitle.provider_name, recorded_error, operation="download")
 
     @classmethod
@@ -2002,6 +2042,7 @@ class SZAsyncProviderPool(SZProviderPool):
             return super(SZAsyncProviderPool, self).list_subtitles(video, languages)
 
         subtitles = []
+        owners = {name: _provider_owner(name) for name in self.providers}
 
         with ThreadPoolExecutor(self.max_workers) as executor:
             for provider, provider_subtitles in executor.map(partial(self.list_subtitles_provider,
@@ -2011,7 +2052,7 @@ class SZAsyncProviderPool(SZProviderPool):
                 # discard provider that failed
                 if provider_subtitles is None:
                     logger.info('Discarding provider %s', provider)
-                    self._discard_provider(provider)
+                    self._discard_provider(provider, owners.get(provider))
                     continue
 
                 # add subtitles

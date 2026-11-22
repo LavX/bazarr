@@ -18,7 +18,7 @@ import uuid
 from dataclasses import dataclass
 from decimal import Decimal
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from . import WORKER_ABI_VERSION
 from . import runtime_status
@@ -56,6 +56,7 @@ _STDOUT_QUEUE_MAX_CHUNKS = 64
 # Queued by the reader thread when a response line exceeds the cap, so the
 # consumer kills the worker at the transport layer instead of assembling it.
 _OVERSIZE_RESPONSE = object()
+_CANCELLED_EOF = object()
 
 
 class _BoundedChunks:
@@ -655,9 +656,10 @@ class ProviderWorkerClient:
         with _GROUPS_LOCK:
             self._groups = [*self._live_groups(), self.process.pid]
         self._stdout_queue = _BoundedChunks()
+        client_ref = weakref.ref(self)
         self._stdout_thread = threading.Thread(
             target=self._enqueue_stdout,
-            args=(self.process, self._stdout_queue),
+            args=(self.process, self._stdout_queue, lambda: getattr(client_ref(), "_cancelled", False)),
             daemon=True,
         )
         self._stdout_thread.start()
@@ -838,11 +840,13 @@ class ProviderWorkerClient:
         return None
 
     @staticmethod
-    def _enqueue_stdout(process: subprocess.Popen, stdout_queue: _BoundedChunks) -> None:
+    def _enqueue_stdout(process: subprocess.Popen, stdout_queue: _BoundedChunks,
+                        cancelled: Callable[[], bool] | None = None) -> None:
         stdout = process.stdout
         if stdout is None:
             stdout_queue.put(None)
             return
+        eof = None
         try:
             # Read in bounded chunks (readline(size) stops at a newline or after
             # ``size`` chars) and track the current line's length, so an oversized
@@ -852,6 +856,10 @@ class ProviderWorkerClient:
             while True:
                 chunk = stdout.readline(_READ_CHUNK_CHARS)
                 if not chunk:
+                    # Freeze the cause where stdout closes. The request can
+                    # consume this marker after a later cancellation.
+                    if cancelled is not None and cancelled():
+                        eof = _CANCELLED_EOF
                     break
                 line_len += len(chunk)
                 if line_len > _MAX_RESPONSE_LINE_BYTES:
@@ -866,7 +874,7 @@ class ProviderWorkerClient:
                 if chunk.endswith("\n"):
                     line_len = 0
         finally:
-            stdout_queue.put(None)
+            stdout_queue.put(eof)
 
     @staticmethod
     def _drain_stderr(process: subprocess.Popen) -> None:
@@ -1220,9 +1228,9 @@ class ProviderWorkerClient:
                 chunk = stdout_queue.get(timeout=remaining)
             except queue.Empty:
                 continue
+            if chunk is _CANCELLED_EOF:
+                raise WorkerCancelled("worker closed stdout")
             if chunk is None:
-                if getattr(self, "_cancelled", False):
-                    raise WorkerCancelled("worker closed stdout")
                 return "".join(chunks)
             if chunk is _OVERSIZE_RESPONSE:
                 self._kill_worker()

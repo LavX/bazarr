@@ -58,6 +58,11 @@ class ProviderRegistry(object):
         if self._is_plugin(old) != self._is_plugin(new):
             self._ownership[name] = self._ownership.get(name, 0) + 1
 
+    def owner(self, name):
+        """Read the registered class and its handover stamp together."""
+        with self.lock:
+            return self._providers.get(name), self._ownership.get(name, 0)
+
     def ownership_generation(self, name):
         with self.lock:
             return self._ownership.get(name, 0)

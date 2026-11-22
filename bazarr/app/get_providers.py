@@ -726,7 +726,7 @@ def _failure_class_name(exception):
 
 
 def provider_throttle(name, exception, ids=None, language=None, sports_context=None, wait=True,
-                      operation=None, announce=True, source_context=None):
+                      operation=None, announce=True, source_context=None, provider_owner=None):
     """Record a provider failure in the throttle table.
 
     ``wait`` is the caller's promise about its own deadline. The count gate
@@ -746,6 +746,8 @@ def provider_throttle(name, exception, ids=None, language=None, sports_context=N
     whether a backoff was recorded; False is the caller's signal that there is
     nothing to announce later.
     """
+    if provider_owner is not None and provider_registry.owner(name) != provider_owner:
+        return False
     if isinstance(exception, MustGetBlacklisted) and isinstance(ids, dict) and isinstance(language, Language):
         _handle_mgb(name, exception, ids, language, sports_context, source_context)
         return False
@@ -801,8 +803,8 @@ def provider_throttle(name, exception, ids=None, language=None, sports_context=N
     throttle_until = datetime.datetime.now() + throttle_delta
 
     recorded = False
-    if cls_name not in VALID_COUNT_EXCEPTIONS or throttled_count(name, exception, wait=wait,
-                                                                 operation=operation):
+    if cls_name not in VALID_COUNT_EXCEPTIONS or throttled_count(
+            name, exception, wait=wait, operation=operation, provider_owner=provider_owner):
         if cls_name == 'ValueError' and isinstance(exception.args, tuple) and len(exception.args) and exception.args[
             0].startswith('unsupported pickle protocol'):
             for fn in subliminal_cache_region.backend.all_filenames:
@@ -814,6 +816,11 @@ def provider_throttle(name, exception, ids=None, language=None, sports_context=N
             # caller to announce either.
         else:
             with _THROTTLE_LOCK:
+                # The handover clears this table under the same lock. A write
+                # before that clear belongs to the old owner, and a late write
+                # must still match the class and stamp of the call that failed.
+                if provider_owner is not None and provider_registry.owner(name) != provider_owner:
+                    return False
                 # Two searches can have the same provider in flight and compute
                 # their deadlines before either gets here, so the second writer
                 # is not necessarily the one with the most to say. Keep the
@@ -890,24 +897,20 @@ def _get_traceback_info(exc: Exception):
     return message + extra
 
 
-def throttled_count(name, exception=None, wait=True, operation=None):
-    global throttle_count
-    if name in list(throttle_count.keys()):
-        if 'count' in list(throttle_count[name].keys()):
-            for key, value in throttle_count[name].items():
-                if key == 'count':
-                    value += 1
-                    throttle_count[name]['count'] = value
-        else:
-            throttle_count[name] = {"count": 1, "time": (datetime.datetime.now() + datetime.timedelta(seconds=120))}
-
-    else:
-        throttle_count[name] = {"count": 1, "time": (datetime.datetime.now() + datetime.timedelta(seconds=120))}
-
-    if throttle_count[name]['count'] >= 5:
-        return True
-    if throttle_count[name]['time'] <= datetime.datetime.now():
-        throttle_count[name] = {"count": 1, "time": (datetime.datetime.now() + datetime.timedelta(seconds=120))}
+def throttled_count(name, exception=None, wait=True, operation=None, provider_owner=None):
+    with _THROTTLE_LOCK:
+        if provider_owner is not None and provider_registry.owner(name) != provider_owner:
+            return False
+        now = datetime.datetime.now()
+        entry = throttle_count.setdefault(name, {})
+        entry.setdefault('time', now + datetime.timedelta(seconds=120))
+        count = entry.get('count', 0) + 1
+        entry['count'] = count
+        if count >= 5:
+            return True
+        if entry['time'] <= now:
+            entry.update(count=1, time=now + datetime.timedelta(seconds=120))
+            count = 1
 
     # Respect Retry-After from the exception if available, otherwise default to 5s
     wait_seconds = 5
@@ -922,7 +925,7 @@ def throttled_count(name, exception=None, wait=True, operation=None):
         # Below the default filter: the recorded backoff's own line follows at
         # once and says everything this one would.
         logging.debug("Provider %s throttle count %s of 5, recorded without waiting", name,
-                      throttle_count[name]['count'])
+                      count)
         return True
 
     # While the gate has not tripped, this is the one line for the event: the
@@ -934,7 +937,7 @@ def throttled_count(name, exception=None, wait=True, operation=None):
                     "out until the pool's next refresh",
                     name, f"{operation} failed" if operation else "failed",
                     _provider_failure_words(exception or Exception()), _failure_class_name(exception or Exception()),
-                    throttle_count[name]['count'])
+                    count)
     time.sleep(wait_seconds)
     return False
 
@@ -1065,6 +1068,7 @@ def forget_provider_throttle(name):
     """Drop whatever backoff is recorded for a provider id, of any kind. For an id that now names another class (a
     plugin detached while Bazarr+ runs gives its id back to a built-in): the backoff was the old class's to earn."""
     with _THROTTLE_LOCK:
+        throttle_count.pop(name, None)
         if tp.pop(name, None) is None:
             return False
         set_throttled_providers(tp)

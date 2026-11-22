@@ -1734,15 +1734,20 @@ def test_an_older_call_cannot_end_a_newer_instances_retirement(world, monkeypatc
 
 
 @pytest.mark.parametrize("download", [False, True], ids=["provider-response", "payload-validation"])
-def test_an_independent_worker_failure_is_preserved_during_a_cut(world, monkeypatch, download):
+def test_an_independent_failure_during_cut_is_visible_without_throttling_the_new_owner(world, monkeypatch, download):
+    from app import get_providers
     from provider_hub import detach, service
     from provider_hub.protocol import HubWorkerSubtitle, WorkerProtocolError
     from provider_hub.registry import HubProxyProvider
-    from provider_hub.worker import WorkerError, WorkerResult, _raise_worker_error
+    from provider_hub.worker import WorkerResult, _raise_worker_error
     from subzero.language import Language
+    from subliminal_patch.core_persistent import list_all_subtitles_parallel
+    from subliminal_patch.provider_health import ProviderHealthTracker
 
     started = threading.Event()
-    errors = []
+    outcomes = []
+    health = ProviderHealthTracker()
+    monkeypatch.setattr("subliminal_patch.provider_health.get_tracker", lambda: health)
 
     class RespondingWorker(FakeWorker):
         def request(self, op, payload, **kwargs):
@@ -1755,26 +1760,32 @@ def test_an_independent_worker_failure_is_preserved_during_a_cut(world, monkeypa
     worker = RespondingWorker()
 
     class Plugin(HubProxyProvider):
-        provider_name = PLUGIN
+        provider_name = BUILT_IN
         languages = {Language("eng")}
 
         def __init__(self):
             super().__init__(worker_client=worker)
 
-    world.install()
-    world.registry.register(PLUGIN, Plugin)
-    pool = world.pool()
-    pool.throttle_callback = lambda name, error, **kw: errors.append(error)
+    built_in, _ = _plugin_over_built_in(world, monkeypatch)
+    world.registry.register(BUILT_IN, Plugin)
+    pool = world.pool(BUILT_IN)
+    pool.throttle_callback = get_providers.provider_throttle
     monkeypatch.setattr(detach, "REMOVE_GRACE_SECONDS", 0.01)
-    subtitle = HubWorkerSubtitle(PLUGIN, PLUGIN, "candidate", Language("eng"), {})
+    monkeypatch.setattr(get_providers, "get_providers_auth", lambda: {BUILT_IN: {}})
+    monkeypatch.setattr(get_providers, "tp", {})
+    monkeypatch.setattr(get_providers, "set_throttled_providers", lambda data: None)
+    monkeypatch.setattr(get_providers, "event_stream", lambda **kwargs: None)
+    monkeypatch.setattr(get_providers.settings.general, "enabled_providers", [BUILT_IN])
+    subtitle = HubWorkerSubtitle(BUILT_IN, BUILT_IN, "candidate", Language("eng"), {})
     if download:
         thread, result = _in_thread(pool.download_subtitle, subtitle)
     else:
-        thread, result = _in_thread(_search, pool)
+        thread, result = _in_thread(list_all_subtitles_parallel, [_movie()], {Language("eng")}, pool,
+                                    on_result=health.record, on_outcome=lambda outcome, elapsed: outcomes.append(outcome))
 
     try:
         assert started.wait(WAIT)
-        service.remove_installation(PLUGIN)
+        service.remove_installation(BUILT_IN)
         thread.join(WAIT)
         assert detach.wait_idle(WAIT)
     finally:
@@ -1782,52 +1793,100 @@ def test_an_independent_worker_failure_is_preserved_during_a_cut(world, monkeypa
         thread.join(WAIT)
 
     assert worker.cancels == 1
-    assert len(errors) == 1
+    assert world.registry[BUILT_IN] is built_in
     if download:
         assert result == {"value": False}
-        assert isinstance(errors[0], WorkerProtocolError)
+        assert isinstance(subtitle.download_error, WorkerProtocolError)
     else:
-        assert result["value"].status == "error"
-        assert isinstance(errors[0], WorkerError)
-        assert errors[0].code == "provider"
+        assert [(result.status, result.reason) for result in outcomes] == [("error", "error")]
+    assert BUILT_IN not in get_providers.tp
+    assert BUILT_IN not in health.snapshot()
+    assert BUILT_IN not in pool.discarded_providers
 
 
-@pytest.mark.parametrize("cancelled", [False, True], ids=["worker-crash", "forced-cut"])
-def test_worker_eof_is_classified_at_the_transport_boundary(monkeypatch, cancelled):
+def test_a_throttle_write_rechecks_ownership_after_classifying_the_error(world, monkeypatch):
+    from app import get_providers
+    from provider_hub import detach, service
+    from provider_hub.worker import WorkerError
+
+    _, plugin = _plugin_over_built_in(world, monkeypatch)
+
+    def fail(self, video, languages):
+        raise WorkerError("provider failed")
+
+    monkeypatch.setattr(plugin, "list_subtitles", fail)
+    pool = world.pool(BUILT_IN)
+    pool.throttle_callback = get_providers.provider_throttle
+    monkeypatch.setattr(get_providers, "get_providers_auth", lambda: {BUILT_IN: {}})
+    monkeypatch.setattr(get_providers, "tp", {})
+    monkeypatch.setattr(get_providers, "set_throttled_providers", lambda data: None)
+    monkeypatch.setattr(get_providers, "event_stream", lambda **kwargs: None)
+    monkeypatch.setattr(get_providers.settings.general, "enabled_providers", [BUILT_IN])
+    classifying, write = threading.Event(), threading.Event()
+    throttle_map = get_providers.provider_throttle_map
+
+    def pause_before_write():
+        classifying.set()
+        assert write.wait(WAIT)
+        return throttle_map()
+
+    monkeypatch.setattr(get_providers, "provider_throttle_map", pause_before_write)
+    thread, result = _in_thread(_search, pool, BUILT_IN)
+    try:
+        assert classifying.wait(WAIT)
+        service.remove_installation(BUILT_IN)
+        assert detach.wait_idle(WAIT)
+    finally:
+        write.set()
+        thread.join(WAIT)
+
+    assert result["value"].status == "error"
+    assert BUILT_IN not in get_providers.tp
+
+
+@pytest.mark.parametrize("cancel_timing", ["never", "before_eof", "after_eof"])
+def test_worker_eof_keeps_its_cause_until_the_request_consumes_it(monkeypatch, cancel_timing):
     from io import StringIO
-    from queue import Queue
     from types import SimpleNamespace
 
     from provider_hub import worker
 
-    started = threading.Event()
+    close_stdout, queued_eof, consume_eof = threading.Event(), threading.Event(), threading.Event()
 
-    class ReplyQueue(Queue):
+    class Pipe:
+        def readline(self, size):
+            assert close_stdout.wait(WAIT)
+            return ""
+
+    class ReplyQueue(worker._BoundedChunks):
         def get(self, *args, **kwargs):
-            started.set()
-            return super().get(*args, **kwargs)
+            chunk = super().get(*args, **kwargs)
+            queued_eof.set()
+            assert consume_eof.wait(WAIT)
+            return chunk
 
     client = worker.ProviderWorkerClient(["fake"], provider_id=PLUGIN)
-    stdout = ReplyQueue()
-    client.process = SimpleNamespace(stdin=StringIO(), stdout=object())
-    client._stdout_queue = stdout
-    monkeypatch.setattr(client, "start", lambda: False)
+    process = SimpleNamespace(stdin=StringIO(), stdout=Pipe(), stderr=None, pid=8888)
+    monkeypatch.setattr(worker, "_BoundedChunks", ReplyQueue)
+    monkeypatch.setattr(client, "_spawn", lambda env: process)
     monkeypatch.setattr(client, "_has_exited", lambda process: True)
-    monkeypatch.setattr(client, "_kill_worker", lambda: stdout.put(None))
+    monkeypatch.setattr(client, "_kill_worker", close_stdout.set)
     thread, result = _in_thread(client.request, "search")
     try:
-        assert started.wait(WAIT)
-        if cancelled:
+        assert _wait_for(lambda: client.process is process)
+        if cancel_timing == "before_eof":
             client.cancel()
         else:
-            stdout.put(None)
-        thread.join(WAIT)
+            close_stdout.set()
+        assert queued_eof.wait(WAIT)
+        if cancel_timing == "after_eof":
+            client.cancel()
     finally:
-        if thread.is_alive():
-            stdout.put(None)
-            thread.join(WAIT)
+        close_stdout.set()
+        consume_eof.set()
+        thread.join(WAIT)
 
-    error_type = worker.WorkerCancelled if cancelled else worker.WorkerError
+    error_type = worker.WorkerCancelled if cancel_timing == "before_eof" else worker.WorkerError
     assert type(result["error"]) is error_type
 
 
