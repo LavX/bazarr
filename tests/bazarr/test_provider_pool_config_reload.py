@@ -37,7 +37,7 @@ class _FakeProvider:
 @pytest.fixture
 def registered(monkeypatch):
     _FakeProvider.instances = []
-    monkeypatch.setitem(provider_registry.providers, "fake", _FakeProvider)
+    monkeypatch.setitem(provider_registry, "fake", _FakeProvider)
     yield _FakeProvider
 
 
@@ -90,7 +90,7 @@ def test_a_failed_replacement_leaves_nothing_installed_and_is_retried(registered
         def initialize(self):
             raise RuntimeError("no")
 
-    monkeypatch.setitem(provider_registry.providers, "fake", _Broken)
+    monkeypatch.setitem(provider_registry, "fake", _Broken)
     throttled = []
     pool.throttle_callback = lambda name, error: throttled.append(name)
 
@@ -100,7 +100,7 @@ def test_a_failed_replacement_leaves_nothing_installed_and_is_retried(registered
     assert first.terminated
     assert "fake" not in pool.initialized_providers
 
-    monkeypatch.setitem(provider_registry.providers, "fake", _FakeProvider)
+    monkeypatch.setitem(provider_registry, "fake", _FakeProvider)
     assert pool["fake"].config["token"] == "new"
 
 
@@ -121,7 +121,7 @@ def test_the_replacement_is_built_after_the_old_one_is_torn_down(registered, tmp
             shutil.rmtree(shared, ignore_errors=True)
             super().terminate()
 
-    provider_registry.providers["fake"] = _OwnsSharedState
+    provider_registry.register("fake", _OwnsSharedState)
     pool = SZProviderPool(providers=["fake"], provider_configs={"fake": {"token": "old"}})
     assert pool["fake"].initialized
 
@@ -138,7 +138,7 @@ def test_a_teardown_failure_does_not_throttle_the_healthy_replacement(registered
         def terminate(self):
             raise RuntimeError("teardown blew up")
 
-    monkeypatch.setitem(provider_registry.providers, "fake", _BadTerminate)
+    monkeypatch.setitem(provider_registry, "fake", _BadTerminate)
     pool = SZProviderPool(providers=["fake"], provider_configs={"fake": {"token": "old"}})
     assert pool["fake"].initialized
     throttled = []

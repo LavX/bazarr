@@ -1,9 +1,6 @@
 import { FC, useState } from "react";
 import { Alert, Button, Group, Skeleton, Stack } from "@mantine/core";
-import {
-  usePointersMutation,
-  useTranslationState,
-} from "@/apis/hooks/translation";
+import { usePointersMutation } from "@/apis/hooks/translation";
 import { RestartBanner } from "@/components/hub/RestartBanner";
 import { StatusBadge } from "@/components/hub/StatusBadge";
 import StepLayout from "@/pages/Setup/StepLayout";
@@ -84,9 +81,7 @@ const InstallAction: FC<{
  * its button disabled, with the reason beside it.
  */
 const TranslationStep: FC<WizardStepProps> = ({ onNext, onBack }) => {
-  const loaded = useTranslationState();
-  const aware = useRestartAware(loaded.data);
-  const state = { ...loaded, data: aware.state };
+  const state = useRestartAware();
   const pointers = usePointersMutation();
   const install = useEngineInstall(state.data);
   const [starting, setStarting] = useState(false);
@@ -160,7 +155,7 @@ const TranslationStep: FC<WizardStepProps> = ({ onNext, onBack }) => {
     <StepLayout
       title="Subtitle translation"
       layout="stacked"
-      aside={<RestartBanner count={aware.waiting} />}
+      aside={<RestartBanner count={state.waiting} />}
       description="When no subtitle exists in your language, Bazarr+ can translate one from another language. Pick what does the translating. You can change all of it later on the Translation page."
       actions={
         <Stack gap="sm">
@@ -286,7 +281,10 @@ const TranslationStep: FC<WizardStepProps> = ({ onNext, onBack }) => {
           </section>
 
           <section className={styles.startOption}>
-            {googleInstalled ? (
+            {googleInstalled &&
+            (googleInstalled.plugin !== null ||
+              googleInstalled.removing ||
+              !googleOffer) ? (
               readyEngine(googleInstalled)
             ) : (
               <>

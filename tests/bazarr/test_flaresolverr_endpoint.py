@@ -161,7 +161,7 @@ class TestFill:
             def terminate(self):
                 pass
 
-        monkeypatch.setitem(provider_registry.providers, "alpha", Provider)
+        monkeypatch.setitem(provider_registry, "alpha", Provider)
         properties = {FIELD: {"type": "string"}}
         installations = [_installation("alpha", properties, trusted=True)]
         # A pool built by a release that put the address in the configuration.

@@ -4336,6 +4336,30 @@ def _closure_needs_consent(resolved) -> bool:
     return any(member.plugin.kind != SUBTITLE_PROVIDER for member in resolved.members)
 
 
+def _provider_replacement_delta(state: dict[str, Any], entry: dict[str, Any], resolved: closure.Closure):
+    """An explicit catalog install can also replace a provider release that is already installed."""
+    if catalog_kind_of(entry) != SUBTITLE_PROVIDER:
+        return None
+    provider = (state.get("installations") or {}).get(entry["provider_id"])
+    if (not isinstance(provider, dict) or kind_of(provider) != SUBTITLE_PROVIDER
+            or provider.get("state") == "removed"
+            or not (provider.get("active_version") or provider.get("staged_version"))):
+        return None
+    delta = _update_delta(state, provider, entry, resolved)
+    return delta if delta and delta["needs_consent"] else None
+
+
+def _catalog_install_summary(state: dict[str, Any], entry: dict[str, Any], resolved: closure.Closure,
+                             *, marks: bool = False) -> dict[str, Any]:
+    summary = consent.install_summary(
+        resolved, _source_description(state), consent.sandbox_status() if marks else None)
+    delta = _provider_replacement_delta(state, entry, resolved)
+    if delta:
+        summary["needs_consent"] = True
+        summary["digest"] = consent.digest_of({"install": summary["digest"], "update": delta["digest"]})
+    return summary
+
+
 def install_consent(
     source_id: Any, provider_id: Any, version: Any, entry_key: Any = None, catalog_list: Any = None,
 ) -> dict[str, Any]:
@@ -4345,9 +4369,7 @@ def install_consent(
     state = load_state()
     _key, entry = _requested_entry(
         state, source_id, provider_id, version, entry_key=entry_key, catalog_list=catalog_list)
-    summary = consent.install_summary(
-        _install_closure(state, entry), _source_description(state), consent.sandbox_status())
-    return summary
+    return _catalog_install_summary(state, entry, _install_closure(state, entry), marks=True)
 
 
 def install_needs_consent(
@@ -4357,23 +4379,21 @@ def install_needs_consent(
     state = load_state()
     _key, entry = _requested_entry(
         state, source_id, provider_id, version, entry_key=entry_key, catalog_list=catalog_list)
-    if catalog_kind_of(entry) == SUBTITLE_PROVIDER and not closure.has_needs(entry.get("manifest")):
-        return False
-    return _closure_needs_consent(_install_closure(state, entry))
+    resolved = (closure.Closure() if catalog_kind_of(entry) == SUBTITLE_PROVIDER
+                and not closure.has_needs(entry.get("manifest")) else _install_closure(state, entry))
+    return _closure_needs_consent(resolved) or _provider_replacement_delta(state, entry, resolved) is not None
 
 
 def check_install_consent(
     digest: Any, source_id: Any, provider_id: Any, version: Any, entry_key: Any = None, catalog_list: Any = None,
 ) -> dict[str, Any]:
-    """Refuse an install whose consent digest is missing, when anything it installs is not a subtitle
-    provider, or no longer matches.
+    """Check the summary digest before installing a different kind or expanding a provider's access.
 
-    A subtitle provider with only subtitle providers behind it installs without one, as it always has;
-    when it sends one, it must match too. Returns the summary it checked.
+    A digest sent for any other install must match too. Returns the summary it checked.
     """
     summary = install_consent(source_id, provider_id, version, entry_key=entry_key, catalog_list=catalog_list)
     if digest is None or digest == "":
-        if any(member["kind"] != SUBTITLE_PROVIDER for member in summary["members"]):
+        if summary.get("needs_consent") or any(member["kind"] != SUBTITLE_PROVIDER for member in summary["members"]):
             raise ProviderHubConsentError(CONSENT_MISSING_REASON)
         return summary
     if digest != summary["digest"]:
@@ -4388,22 +4408,23 @@ def install_catalog_entry(
     """Install the entry ``source_id`` lists for ``provider_id`` at ``version``.
 
     ``entry_key`` pins the stored entry a request resolved to, which matters when
-    the source lists the same id and version in both catalog lists. When anything the install adds is not a
-    subtitle provider, ``consent_digest`` is required and must match what the install would add now, so the
-    job refuses a set nobody saw however it was queued.
+    the source lists the same id and version in both catalog lists. An install of another kind or a provider
+    replacement that adds access requires ``consent_digest`` to match the current summary, however it was queued.
     """
     state = load_state()
     _key, entry = _requested_entry(state, source_id, provider_id, version, entry_key=entry_key)
     resolved = None
     if closure.has_needs(entry.get("manifest")) or catalog_kind_of(entry) != SUBTITLE_PROVIDER:
         resolved = _install_closure(state, entry)
-        if consent_digest is None and _closure_needs_consent(resolved):
-            raise ProviderHubConsentError(CONSENT_MISSING_REASON)
     if consent_digest is not None:
         # The set may have changed since the request was accepted, so the job checks it again.
-        shown = consent.install_summary(resolved or _install_closure(state, entry), _source_description(state))
+        shown = _catalog_install_summary(state, entry, resolved or _install_closure(state, entry))
         if shown["digest"] != consent_digest:
             raise ProviderHubConsentError(CONSENT_CHANGED_REASON, changed=True)
+    else:
+        candidate = resolved or closure.Closure()
+        if _closure_needs_consent(candidate) or _provider_replacement_delta(state, entry, candidate):
+            raise ProviderHubConsentError(CONSENT_MISSING_REASON)
     # The plugins it extends or needs are installed first, from the same source, by the same rules.
     members = _stage_closure_members(resolved, source_id, checkpoint) if resolved is not None else []
     try:
@@ -5914,15 +5935,15 @@ def _update_delta(state: dict[str, Any], provider: dict[str, Any], entry: dict[s
     ``marks`` asks the sandbox probe which permissions this host enforces, which only a summary shown to
     a person needs; the digest and the decision do not.
     """
-    if kind_of(provider) == SUBTITLE_PROVIDER and not any(
-            member.reason != "root" and member.plugin.kind != SUBTITLE_PROVIDER for member in resolved.members):
+    # Legacy manifests cannot declare consent facts. A schema 2 update can add them even when it needs no plugins.
+    if entry["manifest"].get("schema_version") == 1:
         return None
     return consent.update_delta(
         state, provider.get("manifest"), entry, resolved, consent.sandbox_status() if marks else None)
 
 
 def update_consent(provider_id: str) -> dict[str, Any] | None:
-    """The consent delta of the update ``apply_update`` would stage, or None when there is no update."""
+    """The consent delta of the update ``apply_update`` would stage, or None for a legacy or unavailable update."""
     provider = get_provider(provider_id, redact=False)
     if not provider or provider.get("origin") == "local":
         return None

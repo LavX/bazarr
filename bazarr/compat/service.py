@@ -41,7 +41,7 @@ _SHOOTER_HASH_RE = re.compile(r"^[0-9a-fA-F]{32}(?:;[0-9a-fA-F]{32}){3}$")
 
 
 def _record_throttle(name, exception, ids=None, language=None, sports_context=None, operation=None,
-                     announce=True):
+                     announce=True, provider_owner=None):
     """Record a provider failure without spending the fanout's wall clock.
 
     ``announce`` defaults the way provider_throttle's own does, so a caller
@@ -59,9 +59,10 @@ def _record_throttle(name, exception, ids=None, language=None, sports_context=No
     retry metadata discarded and a health failure counted against it, all for a
     failure we had already classified correctly.
     """
+    ownership = {} if provider_owner is None else {"provider_owner": provider_owner}
     return provider_throttle(name, exception, ids=ids, language=language,
                              sports_context=sports_context, wait=False,
-                             operation=operation, announce=announce)
+                             operation=operation, announce=announce, **ownership)
 
 
 def _throttle_recorder(generation):
@@ -85,7 +86,8 @@ def _throttle_recorder(generation):
     asks a bad provider once more, where the alternative keeps skipping one the
     user has just fixed.
     """
-    def record(name, exception, ids=None, language=None, sports_context=None, operation=None, announce=True):
+    def record(name, exception, ids=None, language=None, sports_context=None, operation=None, announce=True,
+               provider_owner=None):
         if generation != _pool_generation and (
                 is_credential_throttle_reason(exception.__class__.__name__)):
             logger.info("compat: not recording a %s backoff for %s, the configuration it "
@@ -96,7 +98,8 @@ def _throttle_recorder(generation):
             # only what its own calls recorded.
             return False
         return _record_throttle(name, exception, ids=ids, language=language,
-                                sports_context=sports_context, operation=operation, announce=announce)
+                                sports_context=sports_context, operation=operation, announce=announce,
+                                provider_owner=provider_owner)
 
     return record
 
@@ -139,7 +142,7 @@ def _get_compat_pool(*, restore_available=False):
                 configs = get_providers_auth()
                 for name in missing:
                     try:
-                        _compat_pool.adopt_provider(name, configs.get(name, {}))
+                        _compat_pool.adopt_provider(name, configs)
                     except KeyError:
                         # Registration or the pool's adoption gate can change
                         # after the availability snapshot. Coverage reports it.

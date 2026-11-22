@@ -19,6 +19,7 @@ import type {
   ProviderHubCatalog,
   ProviderHubInstallation,
 } from "@/apis/raw/providerHub";
+import { quietDelta, updateDelta } from "@/components/plugin-consent/fixtures";
 import { forgetPasswordConfirmation } from "@/modules/passwordConfirm";
 import { UpdatesPanel } from "@/pages/Settings/Providers/hub/UpdatesPanel";
 import { customRender, screen, waitFor, within } from "@/tests";
@@ -91,6 +92,26 @@ function mockApplyUpdate() {
   return applied;
 }
 
+function schemaTwoCatalog(legacy: string[], schemaTwo: string[]) {
+  const catalog = catalogFor(...legacy, ...schemaTwo);
+  return {
+    ...catalog,
+    entries: catalog.entries.map((entry) =>
+      schemaTwo.includes(entry.provider_id)
+        ? {
+            ...entry,
+            manifest: {
+              schema_version: 2,
+              id: entry.provider_id,
+              kind: "subtitle_provider",
+              version: entry.version,
+            },
+          }
+        : entry,
+    ),
+  };
+}
+
 function mockFormLogin() {
   return [
     http.get("/api/system/settings", () =>
@@ -117,6 +138,11 @@ async function confirmThePassword(user: ReturnType<typeof userEvent.setup>) {
 describe("UpdatesPanel and the password confirmation", () => {
   beforeEach(() => {
     forgetPasswordConfirmation();
+    server.use(
+      http.get("/api/plugins/updates/consent", () =>
+        HttpResponse.json("No update is available", { status: 404 }),
+      ),
+    );
   });
 
   it("asks for the password before applying a single update", async () => {
@@ -192,6 +218,118 @@ describe("UpdatesPanel and the password confirmation", () => {
       expect(applied).toEqual(["someprovider"]);
     });
     expect(screen.queryByText("Confirm your password")).not.toBeInTheDocument();
+  });
+});
+
+describe("UpdatesPanel and provider update consent", () => {
+  beforeEach(() => {
+    forgetPasswordConfirmation();
+    server.use(
+      http.get("/api/system/settings", () =>
+        HttpResponse.json({ general: {}, auth: { type: null } }),
+      ),
+    );
+  });
+
+  it.each([false, true])(
+    "shows and applies the catalog update with consent (legacy twin: %s)",
+    async (legacyTwin) => {
+      const user = userEvent.setup();
+      const legacyApplied = mockApplyUpdate();
+      const applied: unknown[] = [];
+      const catalog = schemaTwoCatalog([], ["offersub"]);
+      const provider = {
+        ...installed("offersub"),
+        catalog_list: "plugins",
+        manifest: {
+          schema_version: 2,
+          id: "offersub",
+          kind: "subtitle_provider",
+          version: "0.9.0",
+        },
+      };
+      if (legacyTwin)
+        catalog.entries.unshift(catalogFor("offersub").entries[0]);
+      const delta = {
+        ...updateDelta,
+        plugin: {
+          id: "offersub",
+          name: "Some Provider",
+          from_version: "0.9.0",
+          to_version: "1.0.0",
+          kind: "subtitle_provider",
+        },
+        added: {
+          ...updateDelta.added,
+          destinations: ["https://subtitles.example.org:443"],
+          permissions: [{ name: "network", mark: "declared" }],
+        },
+      };
+      server.use(
+        http.get("/api/plugins/updates/consent", ({ request }) =>
+          new URL(request.url).searchParams.get("id") === "offersub"
+            ? HttpResponse.json(delta)
+            : HttpResponse.json("No update is available", { status: 404 }),
+        ),
+        http.get("/api/plugins/installations/offersub", () =>
+          HttpResponse.json(provider),
+        ),
+        http.post("/api/plugins/updates/apply", async ({ request }) => {
+          applied.push(await request.json());
+          return HttpResponse.json({ job_id: null }, { status: 202 });
+        }),
+      );
+      customRender(<UpdatesPanel providers={[provider]} catalog={catalog} />);
+
+      await user.click(
+        await screen.findByRole("button", { name: /apply update/i }),
+      );
+      const dialog = await screen.findByRole("dialog");
+
+      const destination = await within(dialog).findByText(
+        "https://subtitles.example.org:443",
+      );
+      await waitFor(() => expect(destination).toBeVisible());
+      expect(applied).toEqual([]);
+      expect(legacyApplied).toEqual([]);
+      const consent = within(dialog).getByRole("button", { name: "Update" });
+      await waitFor(() => expect(consent).toBeEnabled());
+      await user.click(consent);
+
+      await waitFor(() =>
+        expect(applied).toEqual([{ id: "offersub", consent: delta.digest }]),
+      );
+      expect(legacyApplied).toEqual([]);
+    },
+  );
+
+  it("applies the bulk updates that need no consent and leaves the others for individual review", async () => {
+    const user = userEvent.setup();
+    const applied = mockApplyUpdate();
+    server.use(
+      http.get("/api/plugins/updates/consent", ({ request }) => {
+        const id = new URL(request.url).searchParams.get("id");
+        if (id === "changes") return HttpResponse.json(updateDelta);
+        if (id === "same") return HttpResponse.json(quietDelta);
+        if (id === "legacy" || id === "no-delta")
+          return HttpResponse.json("No update is available", { status: 404 });
+        return HttpResponse.json("Could not read the update", { status: 500 });
+      }),
+    );
+    const schemaTwo = ["changes", "same", "no-delta", "failed-preview"];
+    customRender(
+      <UpdatesPanel
+        providers={["legacy", ...schemaTwo].map(installed)}
+        catalog={schemaTwoCatalog(["legacy"], schemaTwo)}
+      />,
+    );
+
+    await user.click(await screen.findByRole("button", { name: /apply all/i }));
+
+    await waitFor(() =>
+      expect(applied.sort()).toEqual(["legacy", "no-delta", "same"]),
+    );
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
   });
 });
 

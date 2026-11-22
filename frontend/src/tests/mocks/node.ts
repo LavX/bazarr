@@ -14,6 +14,7 @@ const server = setupServer(
   ),
   http.get("/api/system/searches", () => HttpResponse.json([])),
   http.get("/api/system/arr-instances", () => HttpResponse.json([])),
+  http.get("/api/plugins/installations", () => HttpResponse.json({ data: [] })),
   // The movie, episode and sports tables ask which embedded tracks are
   // hidden as soon as they render. Nothing hidden unless a test says so.
   http.get("/api/subtitles/embedded-hidden", () =>

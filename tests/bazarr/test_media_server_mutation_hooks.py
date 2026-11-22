@@ -280,6 +280,41 @@ def test_download_adapters_preserve_distinct_owner_path_and_profile(colliding_me
     assert (args[6] if entry == 'missing' else kwargs['profile_id']) == 22
 
 
+@pytest.mark.parametrize('entry', ['specific', 'missing'])
+def test_movie_download_records_the_processed_subtitle_for_the_selected_owner(colliding_media, monkeypatch, entry):
+    from app.database import TableHistoryMovie
+    from radarr import history
+    from subtitles.mass_download import movies
+    from subtitles.processing import ProcessSubtitlesResult
+
+    state = colliding_media
+    path, subtitle_path = '/upstream/Video.mkv', '/upstream/Video.en.srt'
+    result = ProcessSubtitlesResult('English subtitle downloaded', path, 'en', 'fixture', 100, False,
+                                    'subtitle', subtitle_path, False)
+    monkeypatch.setattr(movies, 'database', state.db)
+    monkeypatch.setattr(history, 'database', state.db)
+    monkeypatch.setattr(history, 'event_stream', Mock())
+    monkeypatch.setattr(movies, 'get_audio_profile_languages', lambda value: [])
+    monkeypatch.setattr(movies, 'get_exclusion_clause', lambda kind: [])
+    monkeypatch.setattr(movies, 'get_providers', lambda: ['fixture'])
+    monkeypatch.setattr(movies, 'generate_subtitles', lambda *args, **kwargs: iter([result]))
+    monkeypatch.setattr(movies, 'jobs_queue', Mock())
+    indexed, notified = Mock(), Mock()
+    monkeypatch.setattr(movies, 'store_subtitles_movie', indexed)
+    monkeypatch.setattr(movies, 'send_notifications_movie', notified)
+
+    if entry == 'specific':
+        assert movies.movie_download_specific_subtitles(
+            42, 'en', 'False', 'False', job_id='download', arr_instance_id=2) == ('', 204)
+    else:
+        movies.movies_download_subtitles(42, job_id='download', arr_instance_id=2)
+
+    row = state.db.query(TableHistoryMovie).one()
+    assert (row.action, row.arr_instance_id, row.movie_id, row.subtitles_path) == (1, 2, 2, subtitle_path)
+    indexed.assert_called_once_with(path, state.video, arr_instance_id=2)
+    notified.assert_called_once_with(42, result.message, arr_instance_id=2)
+
+
 @pytest.mark.parametrize('media_type', ['movie', 'episode'])
 def test_combine_create_and_rebuild_use_exact_owner_and_file(colliding_media, monkeypatch, mutations, media_type):
     from subtitles.tools.combine import main
@@ -604,11 +639,11 @@ def test_actual_manual_download_and_autosync_writes_each_notify_once(colliding_m
         monkeypatch.setattr(download, 'download_best_subtitles', lambda **kwargs: {video: [subtitle]})
         monkeypatch.setattr(download, 'clear_mismatch_for_video', Mock())
         monkeypatch.setattr(download.subliminal, 'region', Mock())
-        result = list(download.generate_subtitles(
+        (result,) = download.generate_subtitles(
             state.video, [('en', 'False', 'False')], 'English', 'None', 'Video',
             'series' if media_type == 'episode' else 'movie', 22, job_id='download', arr_instance_id=2,
-            check_if_still_required=True))
-    assert result
+            check_if_still_required=True)
+    assert result.path == '/upstream/Video.mkv' and result.subs_path == '/upstream/Video.en.srt'
     assert [event.operation for event in mutations] == ['download'] * (2 if automatic_sync else 1)
     assert all(event.video_path == state.video and event.arr_instance_id == 2 and event.media_type == media_type
                for event in mutations)

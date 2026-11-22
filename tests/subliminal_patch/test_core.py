@@ -186,7 +186,7 @@ class _StubProvider:
 def stub_provider(monkeypatch):
     from subliminal_patch.extensions import provider_registry
 
-    monkeypatch.setitem(provider_registry.providers, "stub", _StubProvider)
+    monkeypatch.setitem(provider_registry, "stub", _StubProvider)
     return _StubProvider
 
 
@@ -262,19 +262,13 @@ def test_language_hook_none_keeps_requested_languages(monkeypatch, movies):
             calls.append(languages)
             return []
 
-    original = core.provider_registry.providers.copy()
-    core.provider_registry.providers.clear()
-    core.provider_registry.register("hooked", HookedProvider)
+    monkeypatch.setitem(core.provider_registry, "hooked", HookedProvider)
 
-    try:
-        pool = core.SZProviderPool(["hooked"], language_hook=lambda provider: None)
-        pool.list_subtitles(
-            movies["dune"],
-            {core.Language("eng"), core.Language("spa")},
-        )
-    finally:
-        core.provider_registry.providers.clear()
-        core.provider_registry.providers.update(original)
+    pool = core.SZProviderPool(["hooked"], language_hook=lambda provider: None)
+    pool.list_subtitles(
+        movies["dune"],
+        {core.Language("eng"), core.Language("spa")},
+    )
 
     assert calls == [{core.Language("eng"), core.Language("spa")}]
 
@@ -296,22 +290,16 @@ def test_language_hook_excludes_configured_languages(monkeypatch, movies):
             calls.append(languages)
             return []
 
-    original = core.provider_registry.providers.copy()
-    core.provider_registry.providers.clear()
-    core.provider_registry.register("hooked", HookedProvider)
+    monkeypatch.setitem(core.provider_registry, "hooked", HookedProvider)
 
-    try:
-        pool = core.SZProviderPool(
-            ["hooked"],
-            language_hook=lambda provider: {core.Language("eng")},
-        )
-        pool.list_subtitles(
-            movies["dune"],
-            {core.Language("eng"), core.Language("spa")},
-        )
-    finally:
-        core.provider_registry.providers.clear()
-        core.provider_registry.providers.update(original)
+    pool = core.SZProviderPool(
+        ["hooked"],
+        language_hook=lambda provider: {core.Language("eng")},
+    )
+    pool.list_subtitles(
+        movies["dune"],
+        {core.Language("eng"), core.Language("spa")},
+    )
 
     assert calls == [{core.Language("spa")}]
 

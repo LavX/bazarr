@@ -1,16 +1,25 @@
-import { ReactElement, useCallback, useMemo } from "react";
+import { ReactElement, useCallback, useEffect, useMemo, useRef } from "react";
 import { usePluginInstallations } from "@/apis/hooks/plugins";
-import { useTranslationSummary } from "@/apis/hooks/translation";
+import {
+  useTranslationState,
+  useTranslationSummary,
+} from "@/apis/hooks/translation";
+import type { PluginInstallation } from "@/apis/raw/plugins";
 import {
   PluginCostCaps,
   usePluginConsentFlow,
 } from "@/components/plugin-consent";
-import { installationKind, OFFICIAL_PLUGIN_ID } from "@/pages/PluginHub/model";
+import {
+  installationKind,
+  isRemoving,
+  OFFICIAL_PLUGIN_ID,
+} from "@/pages/PluginHub/model";
 import type {
   RestartChange,
   TranslationAvailableEngine,
   TranslationState,
 } from "@/types/translation";
+import { engineSelectable } from "./model";
 
 /** The kinds of plugin the Translation page is about: engines and their back ends. */
 const TRANSLATION_KINDS = new Set(["translator", "translator_backend"]);
@@ -65,62 +74,196 @@ export function useEngineInstall(
   return { begin, dialog: flow.dialog, busy: flow.busy };
 }
 
-/**
- * The state with each engine whose plugin the server says waits on a restart marked as such, so a
- * finished install reads as "pending restart" and not as a plugin that is broken. The mark comes from the
- * plugin's `needs_restart` and nothing else. `waiting` is how many translator plugins wait on a restart,
- * for the banner, whether or not an engine of theirs is still listed.
- */
-export function useRestartAware(state: TranslationState | undefined): {
-  state: TranslationState | undefined;
-  waiting: number;
-} {
+/** A first lookup can reveal that the cached settings snapshot is already behind. */
+function installationMismatch(
+  state: TranslationState,
+  engineRows: ReadonlyMap<string, PluginInstallation>,
+): boolean {
+  return (
+    state.instances.some((engine) => {
+      if (engine.legacy) return false;
+      const row = engineRows.get(engine.plugin_id);
+      if (!row) return engine.plugin !== null;
+      const pointedTo =
+        state.engine === engine.id || state.fallback_engine === engine.id;
+      if (row.state === "removed") {
+        return engine.plugin?.active === true || pointedTo;
+      }
+      if (row.enabled === false && (pointedTo || engine.configured))
+        return true;
+      return row.active_version
+        ? engine.plugin?.version !== row.active_version
+        : engine.plugin?.active === true;
+    }) ||
+    (state.available_engines ?? []).some((engine) => {
+      const row = engineRows.get(engine.plugin_id);
+      return Boolean(row?.active_version || row?.staged_version);
+    })
+  );
+}
+
+/** Apply installation changes at once and ask for the canonical pointers, settings and catalog offers. */
+export function useRestartAware() {
+  const query = useTranslationState(true, "always");
+  const { data: state, isFetchedAfterMount, refetch } = query;
   const installations = usePluginInstallations();
+  const installationsFetched = installations.isFetchedAfterMount;
+  const previousLifecycle = useRef<string | undefined>(undefined);
+  const installedOnEntry = useRef(new Set<string>());
   // What the restart will do to each plugin that waits on one, read from the installation: a removal is
   // staged as a removed row, an update as a staged release beside an active one, an install as a staged
   // release with nothing active.
-  const ids = useMemo(() => {
+  const snapshot = useMemo(() => {
+    if (!installations.data) return undefined;
     const changes = new Map<string, RestartChange>();
-    for (const item of installations.data ?? []) {
-      if (
-        item.needs_restart !== true ||
-        !TRANSLATION_KINDS.has(installationKind(item))
-      ) {
-        continue;
+    const removing = new Set<string>();
+    const engineRows = new Map<string, PluginInstallation>();
+    const lifecycle = [];
+    const rows = installations.data
+      .filter((item) => TRANSLATION_KINDS.has(installationKind(item)))
+      .sort((a, b) => a.provider_id.localeCompare(b.provider_id));
+    for (const item of rows) {
+      const kind = installationKind(item);
+      if (kind === "translator") {
+        engineRows.set(item.provider_id, item);
       }
-      changes.set(
+      lifecycle.push([
         item.provider_id,
-        item.state === "removed"
-          ? "removal"
-          : item.active_version
-            ? "update"
-            : "install",
-      );
+        kind,
+        item.state,
+        item.active_version,
+        item.staged_version,
+        item.needs_restart === true,
+        item.enabled !== false,
+        item.blocked_reason,
+      ]);
+      if (isRemoving(item)) {
+        removing.add(item.provider_id);
+      }
+      if (item.needs_restart === true) {
+        changes.set(
+          item.provider_id,
+          item.state === "removed"
+            ? "removal"
+            : item.active_version
+              ? "update"
+              : "install",
+        );
+      }
     }
-    return changes;
+    return {
+      changes,
+      removing,
+      engineRows,
+      lifecycle: JSON.stringify(lifecycle),
+    };
   }, [installations.data]);
-  return useMemo(() => {
-    if (ids.size === 0) {
-      return { state, waiting: 0 };
+
+  useEffect(() => {
+    if (!snapshot) return;
+    const previous = previousLifecycle.current;
+    if (previous === undefined) {
+      // Keep track of releases seen while the entry requests are both settling.
+      for (const [id, row] of snapshot.engineRows) {
+        if (row.active_version || row.staged_version)
+          installedOnEntry.current.add(id);
+      }
+      if (!isFetchedAfterMount || !installationsFetched) return;
     }
-    if (!state) {
-      return { state, waiting: ids.size };
+    if (!state || previous === snapshot.lifecycle) return;
+
+    previousLifecycle.current = snapshot.lifecycle;
+    const offers = state.available_engines;
+    // An engine can be gone from the settings before the hub is able to offer it again.
+    const cleanupDuringEntry =
+      previous === undefined &&
+      offers !== undefined &&
+      [...installedOnEntry.current].some((id) => {
+        const row = snapshot.engineRows.get(id);
+        return (
+          !row?.active_version &&
+          !row?.staged_version &&
+          !offers.some((offer) => offer.plugin_id === id)
+        );
+      });
+    installedOnEntry.current.clear();
+    if (
+      previous !== undefined ||
+      cleanupDuringEntry ||
+      installationMismatch(state, snapshot.engineRows)
+    ) {
+      void refetch();
     }
+  }, [snapshot, state, isFetchedAfterMount, installationsFetched, refetch]);
+
+  const freshEntry =
+    query.isSuccess && isFetchedAfterMount && !installationsFetched;
+  const view = useMemo(() => {
+    if (!state || !snapshot) {
+      return { state, waiting: snapshot?.changes.size ?? 0 };
+    }
+    const { changes, removing, engineRows } = snapshot;
     const mark = <T extends { plugin_id: string }>(engine: T): T => {
-      const change = ids.get(engine.plugin_id);
+      const change = changes.get(engine.plugin_id);
       return change ? { ...engine, awaiting_restart: change } : engine;
     };
-    const instances = state.instances.map(mark);
-    const available = state.available_engines?.map(mark);
+    const instances = state.instances.map((engine) => {
+      const marked = mark(engine);
+      if (engine.legacy) return marked;
+      if (removing.has(engine.plugin_id)) return { ...marked, removing: true };
+      const row = engineRows.get(engine.plugin_id);
+      if (row) {
+        return row.enabled === false
+          ? { ...marked, pluginDisabled: true, configured: false }
+          : marked;
+      }
+      // Match the missing-plugin state that a fresh Translation response would report.
+      // Keep the engine instance and its saved connections for a possible reinstall.
+      return {
+        ...marked,
+        plugin: null,
+        schema: null,
+        configured: false,
+        official: false,
+      };
+    });
+    const available = state.available_engines?.flatMap((offer) => {
+      const row = engineRows.get(offer.plugin_id);
+      // A returned catalog offer can outlive a draining row in the pre-entry cache.
+      if (
+        freshEntry &&
+        row?.state === "removed" &&
+        !state.instances.some(
+          (engine) =>
+            engine.plugin_id === offer.plugin_id && engine.plugin?.active,
+        )
+      )
+        return [offer];
+      if (
+        removing.has(offer.plugin_id) ||
+        (row?.active_version && !changes.has(offer.plugin_id))
+      )
+        return [];
+      return [mark(offer)];
+    });
+    const usablePointer = (id: number | null) =>
+      instances.some((engine) => engine.id === id && engineSelectable(engine))
+        ? id
+        : null;
     return {
       state: {
         ...state,
+        engine: usablePointer(state.engine),
+        // The server may pick a different fallback. The refresh will supply it.
+        // eslint-disable-next-line camelcase -- transport name
+        fallback_engine: usablePointer(state.fallback_engine),
         instances,
         ...(available ? { available_engines: available } : {}),
       },
       // Counted from the installations, not from the engines the page lists: a removal that deleted its
       // data has no engine left, and a plugin whose release is still active is in neither list.
-      waiting: ids.size,
+      waiting: changes.size,
     };
-  }, [state, ids]);
+  }, [state, snapshot, freshEntry]);
+  return { ...query, data: view.state, waiting: view.waiting };
 }

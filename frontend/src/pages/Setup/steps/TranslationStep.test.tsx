@@ -2,16 +2,19 @@
 import userEvent from "@testing-library/user-event";
 import { http, HttpResponse } from "msw";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import queryClient from "@/apis/queries";
+import { QueryKeys } from "@/apis/queries/keys";
 import { plainSummary } from "@/components/plugin-consent/fixtures";
 import {
   connection,
   engine,
+  engineInstallations,
   inputsHolding,
   lingarr,
   second,
   SECRET,
 } from "@/pages/Translation/fixtures";
-import { customRender, screen, waitFor, within } from "@/tests";
+import { act, customRender, screen, waitFor, within } from "@/tests";
 import server from "@/tests/mocks/node";
 import type {
   TranslationAvailableEngine,
@@ -82,6 +85,9 @@ function aiEngine(patch: Partial<TranslationEngine> = {}) {
 function serve(state: TranslationState) {
   server.use(
     http.get("/api/translation/state", () => HttpResponse.json(state)),
+    http.get("/api/plugins/installations", () =>
+      HttpResponse.json({ data: engineInstallations(state.instances) }),
+    ),
     http.post(
       "/api/translation/engines/:id/connections",
       async ({ request }) => {
@@ -400,6 +406,234 @@ describe("TranslationStep", () => {
     ).not.toBeInTheDocument();
   });
 
+  it("shows an engine removed while Bazarr+ runs as Removing, with no restart prompt and no repair hint", async () => {
+    serve(
+      firstRun({
+        instances: [
+          aiEngine({
+            plugin: {
+              name: "AI Subtitle Translator",
+              version: "2.2.0",
+              active: false,
+            },
+          }),
+        ],
+        available_engines: [GOOGLE_OFFER],
+      }),
+    );
+    server.use(
+      http.get("/api/plugins/installations", () =>
+        HttpResponse.json({
+          data: [
+            {
+              provider_id: "ai_translator",
+              kind: "translator",
+              state: "removed",
+              active_version: "1.0.0",
+              needs_restart: false,
+            },
+          ],
+        }),
+      ),
+    );
+    customRender(<TranslationStep onNext={onNext} />);
+
+    expect(await screen.findByText("Removing")).toBeVisible();
+    expect(
+      screen.getByText(
+        /This plugin is being removed\. It goes when the calls it is running end/,
+      ),
+    ).toBeVisible();
+    expect(screen.queryByText("Plugin not running")).not.toBeInTheDocument();
+    expect(screen.queryByText(/waiting for a restart/)).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("OpenRouter key")).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Install AI Subtitle Translator" }),
+    ).not.toBeInTheDocument();
+
+    let refreshed = 0;
+    server.use(
+      http.get("/api/translation/state", () => {
+        refreshed++;
+        return HttpResponse.json(
+          firstRun({
+            instances: [
+              aiEngine({ plugin: null, schema: null, official: false }),
+            ],
+            available_engines: [OFFICIAL_OFFER, GOOGLE_OFFER],
+          }),
+        );
+      }),
+      http.get("/api/plugins/installations", () =>
+        HttpResponse.json({ data: [] }),
+      ),
+    );
+    await queryClient.invalidateQueries({
+      queryKey: [QueryKeys.Plugins, "installations"],
+    });
+
+    expect(await screen.findByText("Plugin not running")).toBeVisible();
+    expect(screen.queryByLabelText("OpenRouter key")).not.toBeInTheDocument();
+    await waitFor(() =>
+      expect(
+        screen.getByRole("button", { name: "Install AI Subtitle Translator" }),
+      ).toBeEnabled(),
+    );
+
+    server.use(
+      http.get("/api/plugins/installations", () =>
+        HttpResponse.json({
+          data: [
+            {
+              provider_id: "subtitles",
+              kind: "subtitle_provider",
+              state: "active",
+            },
+          ],
+        }),
+      ),
+    );
+    await act(() =>
+      queryClient.invalidateQueries({
+        queryKey: [QueryKeys.Plugins, "installations"],
+      }),
+    );
+    expect(refreshed).toBe(1);
+  });
+
+  it("refreshes an initially cached engine missing from installations", async () => {
+    let reads = 0;
+    const cached = firstRun();
+    server.use(
+      http.get("/api/translation/state", () => {
+        reads++;
+        return HttpResponse.json(
+          reads === 1
+            ? cached
+            : firstRun({
+                instances: [
+                  aiEngine({ plugin: null, schema: null, official: false }),
+                ],
+                available_engines: [OFFICIAL_OFFER, GOOGLE_OFFER],
+              }),
+        );
+      }),
+      http.get("/api/plugins/installations", () =>
+        HttpResponse.json({ data: [] }),
+      ),
+    );
+    customRender(<TranslationStep onNext={onNext} />);
+
+    await waitFor(() =>
+      expect(
+        screen.getByRole("button", { name: "Install AI Subtitle Translator" }),
+      ).toBeEnabled(),
+    );
+    expect(reads).toBe(2);
+    expect(screen.queryByLabelText("OpenRouter key")).not.toBeInTheDocument();
+  });
+
+  it.each([
+    { when: "before reentry", finishesDuringEntry: false, expectedReads: 2 },
+    {
+      when: "between the entry replies",
+      finishesDuringEntry: true,
+      expectedReads: 3,
+    },
+  ])(
+    "loads the reinstall offer when delete-data removal finishes $when",
+    async ({ finishesDuringEntry, expectedReads }) => {
+      let reads = 0;
+      let finished = false;
+      let returning = false;
+      const installations = Promise.withResolvers<void>();
+      const stateKey = [QueryKeys.Translation, "state"];
+      const installationsKey = [
+        QueryKeys.Plugins,
+        "installations",
+        QueryKeys.All,
+      ];
+      server.use(
+        http.get("/api/translation/state", () => {
+          reads++;
+          return HttpResponse.json(
+            firstRun({
+              instances: [],
+              available_engines: finished
+                ? [OFFICIAL_OFFER, GOOGLE_OFFER]
+                : [GOOGLE_OFFER],
+            }),
+          );
+        }),
+        http.get("/api/plugins/installations", async () => {
+          if (returning) await installations.promise;
+          return HttpResponse.json({
+            data: finished
+              ? []
+              : [
+                  {
+                    provider_id: "ai_translator",
+                    kind: "translator",
+                    state: "removed",
+                    active_version: "2.2.0",
+                    needs_restart: false,
+                  },
+                ],
+          });
+        }),
+      );
+
+      const { unmount } = customRender(<TranslationStep onNext={onNext} />);
+      expect(
+        await screen.findByRole("button", {
+          name: "Install AI Subtitle Translator",
+        }),
+      ).toBeDisabled();
+      await waitFor(() =>
+        expect(queryClient.getQueryState(installationsKey)?.status).toBe(
+          "success",
+        ),
+      );
+      expect(reads).toBe(1);
+      unmount();
+      returning = true;
+      finished = !finishesDuringEntry;
+
+      customRender(<TranslationStep onNext={onNext} />);
+      try {
+        // The cached draining row remains visible to the client until the fresh installation reply.
+        await waitFor(() =>
+          expect(
+            queryClient.getQueryState(stateKey)?.dataUpdateCount,
+          ).toBeGreaterThanOrEqual(2),
+        );
+        if (!finishesDuringEntry) {
+          await waitFor(() =>
+            expect(
+              screen.getByRole("button", {
+                name: "Install AI Subtitle Translator",
+              }),
+            ).toBeEnabled(),
+          );
+        }
+      } finally {
+        finished = true;
+        installations.resolve();
+      }
+      await waitFor(() =>
+        expect(
+          screen.getByRole("button", {
+            name: "Install AI Subtitle Translator",
+          }),
+        ).toBeEnabled(),
+      );
+      await waitFor(() =>
+        expect(queryClient.getQueryData(installationsKey)).toEqual([]),
+      );
+      expect(reads).toBe(expectedReads);
+    },
+  );
+
   it.each([
     [{ state: "staged", active_version: null }, "It is installed. Restart"],
     [
@@ -459,6 +693,25 @@ describe("TranslationStep", () => {
     ]);
     expect(
       screen.queryByRole("button", { name: "Install Google Translate" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("keeps the catalog's Google Translate install action when saved engine data remains", async () => {
+    serve(
+      firstRun({
+        instances: [
+          aiEngine(),
+          { ...second, plugin: null, schema: null, configured: false },
+        ],
+      }),
+    );
+    customRender(<TranslationStep onNext={onNext} />);
+
+    expect(
+      await screen.findByRole("button", { name: "Install Google Translate" }),
+    ).toBeEnabled();
+    expect(
+      screen.queryByRole("button", { name: "Use Google Translate" }),
     ).not.toBeInTheDocument();
   });
 

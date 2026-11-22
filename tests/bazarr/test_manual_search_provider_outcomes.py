@@ -96,7 +96,8 @@ def manual_endpoint(request, monkeypatch):
     }
     for name, count in (("zeta_search", 2), ("alpha_search", 1), ("middle_search", 0)):
         candidates[name] = [Candidate(name, f"candidate-{index}") for index in range(count)]
-    monkeypatch.setattr(core.provider_registry, "providers", registry)
+    for name, provider_class in registry.items():
+        monkeypatch.setitem(core.provider_registry, name, provider_class)
     monkeypatch.setattr(get_providers, "_ensure_provider_hub_registered", lambda: None)
     monkeypatch.setattr(get_providers, "_decrypt_blocked_provider_ids", set)
     monkeypatch.setattr(get_providers, "tp", {})

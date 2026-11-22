@@ -3,7 +3,13 @@
 import pytest
 from flask import Flask
 
-from plugin_platform_helpers import service_manifest, verified_official_source, write_state
+from plugin_platform_helpers import (
+    provider_manifest_v1,
+    provider_manifest_v2,
+    service_manifest,
+    verified_official_source,
+    write_state,
+)
 
 API_KEY = "plugin-consent-test-key"  # pragma: allowlist secret
 KEYED = {"X-API-KEY": API_KEY}
@@ -16,17 +22,19 @@ def _plugin(plugin_id, version="1.0.0", **fields):
 
 
 def _entry(manifest, source="official"):
-    return {"source": source, "source_name": source, "provider_id": manifest["id"], "name": manifest["name"],
+    return {"source": source, "source_name": source, "provider_id": manifest.get("id") or manifest["provider_id"],
+            "name": manifest["name"],
             "version": manifest["version"], "trusted": source == "official", "manifest": manifest,
-            "catalog_list": "plugins"}
+            "catalog_list": "plugins" if manifest["schema_version"] == 2 else "providers"}
 
 
 def _installed(manifest, **fields):
-    row = {"provider_id": manifest["id"], "kind": manifest["kind"], "name": manifest["name"],
+    provider_id = manifest.get("id") or manifest["provider_id"]
+    row = {"provider_id": provider_id, "kind": manifest.get("kind", "subtitle_provider"), "name": manifest["name"],
            "active_version": manifest["version"], "state": "active", "pending_restart": False,
            "source_id": "official", "source_bound": True, "manifest": manifest}
     row.update(fields)
-    return {manifest["id"]: row}
+    return {provider_id: row}
 
 
 @pytest.fixture(autouse=True)
@@ -37,7 +45,10 @@ def sandbox(monkeypatch):
 @pytest.fixture
 def world(tmp_path, monkeypatch, service_kind):
     def build(manifests, installations=None, sources=None):
-        entries = {f"official:plugins:{m['id']}:{m['version']}": _entry(m) for m in manifests}
+        entries = {}
+        for manifest in manifests:
+            entry = _entry(manifest)
+            entries[f"official:{entry['catalog_list']}:{entry['provider_id']}:{entry['version']}"] = entry
         monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(write_state(
             tmp_path / "state.json",
             catalog_sources=sources or {"official": verified_official_source(last_checked_at="2026-01-01T00:00:00Z")},
@@ -355,8 +366,6 @@ def test_the_update_check_lists_what_needs_consent_and_the_route_serves_the_delt
 
 
 def _subtitle_with_service():
-    from plugin_platform_helpers import provider_manifest_v2
-
     helper = _plugin("helper", provides=["translit.v1"])
     subtitle = provider_manifest_v2("closuresub")
     subtitle["requires"] = ["translit.v1"]
@@ -404,7 +413,6 @@ def test_the_subtitle_hub_route_refuses_a_provider_whose_closure_has_another_kin
 
 
 def test_a_plain_subtitle_provider_still_installs_without_consent(world, monkeypatch):
-    from plugin_platform_helpers import provider_manifest_v2
     from provider_hub import service
 
     plain = provider_manifest_v2("plainsub")
@@ -453,7 +461,6 @@ def test_an_update_stages_the_plugins_the_new_release_needs_before_the_plugin(wo
 
 
 def test_an_update_of_a_provider_that_would_pull_in_another_kind_asks_for_consent(world, monkeypatch):
-    from plugin_platform_helpers import provider_manifest_v2
     from provider_hub import service
 
     helper = _plugin("helper", provides=["translit.v1"])
@@ -468,6 +475,163 @@ def test_an_update_of_a_provider_that_would_pull_in_another_kind_asks_for_consen
     refused = service.apply_update("closuresub")
 
     assert staged == [] and "needs your consent" in refused["last_error"]
+
+
+@pytest.mark.parametrize("profile,media_mark", [
+    ({"enabled": True, "state": "enforced"}, "enforced"),
+    ({"enabled": True, "state": "partial"}, "declared"),
+    ({"enabled": True, "state": "pending"}, "declared"),
+    ({"enabled": False, "state": "off"}, "declared"),
+    (None, "declared"),
+])
+def test_the_consent_marks_each_kind_against_its_own_sandbox(world, monkeypatch, profile, media_mark):
+    from provider_hub import service
+
+    helper, subtitle = _subtitle_with_service()
+    helper["permissions"] = ["network"]
+    subtitle["permissions"] = ["media_read", "network"]
+    old = provider_manifest_v2("closuresub", "0.9.0")
+    world([helper, subtitle], _installed(old))
+    monkeypatch.setattr("provider_hub.consent.sandbox_status", lambda: {**SANDBOX, "providers": profile})
+    expected = [{"name": "media_read", "mark": media_mark}, {"name": "network", "mark": "declared"}]
+
+    summary = _summary("closuresub")
+    delta = service.update_consent("closuresub")
+
+    assert summary["members"][0]["permissions"] == [{"name": "network", "mark": "enforced"}]
+    assert summary["members"][1]["permissions"] == expected
+    assert summary["permissions"] == expected
+    assert delta["added"]["permissions"] == expected
+    assert delta["added"]["plugins"][0]["permissions"] == [{"name": "network", "mark": "enforced"}]
+
+
+@pytest.mark.parametrize("fields,section", [
+    ({"endpoints": ["https://subtitles.example.org:443"]}, "destinations"),
+    ({"permissions": ["media_read"]}, "permissions"),
+    ({"runtime": {"artifact": "archive", "process": "worker"}, "platforms": ["linux-x86_64"]}, "binaries"),
+])
+def test_a_schema_two_provider_update_asks_again_before_staging(client, world, monkeypatch, fields, section):
+    from provider_hub import jobs, service
+    from provider_hub.compatibility import AVAILABLE_RUNTIMES, HostFacts
+
+    monkeypatch.setattr(service, "current_host", lambda: HostFacts(
+        None, "linux-x86_64", AVAILABLE_RUNTIMES | {("archive", "worker")}))
+    old = provider_manifest_v2("offersub")
+    new = provider_manifest_v2("offersub", "1.1.0", **fields)
+    _update_world(world, old, new)
+    staged = []
+    queued = []
+    monkeypatch.setattr(service, "stage_install",
+                        lambda manifest, **kwargs: staged.append(manifest["version"]) or {"state": "staged"})
+    monkeypatch.setattr(jobs, "_enqueue", lambda label, func, kwargs: queued.append(kwargs) or "job-1")
+
+    details = service.check_updates(kind="subtitle_provider")["details"]
+    preview = client.get("/api/plugins/updates/consent?id=offersub", headers=KEYED)
+
+    assert details["needs_consent"] == ["offersub"]
+    assert preview.status_code == 200 and preview.json["needs_consent"] is True
+    assert preview.json["added"][section]
+    assert "needs your consent" in service.apply_update("offersub")["last_error"]
+    assert "needs your consent" in service.apply_update("offersub", consent_digest="sha256:" + "0" * 64)["last_error"]
+    assert staged == []
+
+    accepted = client.post("/api/plugins/updates/apply", json={"id": "offersub", "consent": preview.json["digest"]},
+                           headers=KEYED)
+    assert accepted.status_code == 202
+    assert queued[0]["consent"] == preview.json["digest"]
+    service.apply_update("offersub", consent_digest=queued[0]["consent"])
+    assert staged == ["1.1.0"]
+
+
+@pytest.mark.parametrize("manifest,expected_preview", [(provider_manifest_v1, 404), (provider_manifest_v2, 200)])
+def test_a_provider_update_with_no_new_access_still_stages_without_consent(
+    client, world, monkeypatch, manifest, expected_preview,
+):
+    from provider_hub import service
+
+    _update_world(world, manifest("offersub"), manifest("offersub", "1.1.0"))
+    staged = []
+    monkeypatch.setattr(service, "stage_install",
+                        lambda manifest, **kwargs: staged.append(manifest["version"]) or {"state": "staged"})
+
+    preview = client.get("/api/plugins/updates/consent?id=offersub", headers=KEYED)
+    assert preview.status_code == expected_preview
+    if expected_preview == 200:
+        assert preview.json["needs_consent"] is False
+    assert service.check_updates(kind="subtitle_provider")["details"]["needs_consent"] == []
+    service.apply_update("offersub")
+
+    assert staged == ["1.1.0"]
+
+
+def test_a_provider_moving_to_schema_two_asks_for_its_new_permissions(world, monkeypatch):
+    from provider_hub import service
+
+    old = provider_manifest_v1("offersub")
+    new = provider_manifest_v2("offersub", "1.1.0", permissions=["network"])
+    _update_world(world, old, new)
+    staged = []
+    monkeypatch.setattr(service, "stage_install", lambda manifest, **kwargs: staged.append(manifest["version"]))
+
+    delta = service.update_consent("offersub")
+    assert delta["needs_consent"] is True
+    assert delta["added"]["permissions"] == [{"name": "network", "mark": "declared"}]
+    assert "needs your consent" in service.apply_update("offersub")["last_error"]
+    assert staged == []
+
+
+def test_an_explicit_provider_replacement_needs_current_consent(client, world, monkeypatch):
+    from provider_hub import jobs, service
+
+    old = provider_manifest_v2("offersub")
+    new = provider_manifest_v2("offersub", "1.1.0", permissions=["network"])
+    _update_world(world, old, new)
+    staged = []
+    queued = []
+    monkeypatch.setattr(service, "stage_install",
+                        lambda manifest, **kwargs: staged.append(manifest["version"]) or {"state": "staged"})
+    monkeypatch.setattr(jobs, "_enqueue", lambda label, func, kwargs: queued.append(kwargs) or "job-1")
+    body = {"source": "official", "id": "offersub", "version": "1.1.0"}
+    url = "/api/plugins/catalog/consent?source=official&id=offersub&version=1.1.0"
+
+    preview = client.get(url, headers=KEYED)
+    assert preview.status_code == 200 and preview.json["needs_consent"] is True
+    assert preview.json["permissions"] == [{"name": "network", "mark": "declared"}]
+    assert client.post("/api/plugins/installations", json=body, headers=KEYED).status_code == 400
+    legacy = client.post("/api/provider-hub/installations", json={**body, "provider_id": "offersub"}, headers=KEYED)
+    assert legacy.status_code == 400 and "consent is required" in legacy.get_data(as_text=True)
+    assert queued == []
+    with pytest.raises(service.ProviderHubConsentError, match="needs your consent"):
+        service.install_catalog_entry("official", "offersub", "1.1.0")
+    assert staged == []
+
+    approved = client.post("/api/plugins/installations", json={**body, "consent": preview.json["digest"]}, headers=KEYED)
+    assert approved.status_code == 202 and queued[0]["consent"] == preview.json["digest"]
+
+    changed = {**new, "endpoints": ["https://subtitles.example.org:443"]}
+    _update_world(world, old, changed)
+    with pytest.raises(service.ProviderHubConsentError, match="changed since it was shown"):
+        service.install_catalog_entry("official", "offersub", "1.1.0", consent_digest=queued[0]["consent"])
+    assert staged == []
+
+    current = client.get(url, headers=KEYED)
+    assert current.json["digest"] != preview.json["digest"]
+    service.install_catalog_entry("official", "offersub", "1.1.0", consent_digest=current.json["digest"])
+    assert staged == ["1.1.0"]
+
+
+def test_reinstalling_the_same_provider_release_needs_no_new_consent(world, monkeypatch):
+    from provider_hub import service
+
+    manifest = provider_manifest_v2("offersub", permissions=["network"])
+    world([manifest], _installed(manifest))
+    staged = []
+    monkeypatch.setattr(service, "stage_install", lambda release, **kwargs: staged.append(release["version"]))
+
+    assert service.install_needs_consent("official", "offersub", "1.0.0") is False
+    service.install_catalog_entry("official", "offersub", "1.0.0")
+
+    assert staged == ["1.0.0"]
 
 
 def test_an_update_blocked_by_an_expired_catalog_says_so(world, monkeypatch):

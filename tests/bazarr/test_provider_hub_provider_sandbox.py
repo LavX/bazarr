@@ -299,11 +299,11 @@ def test_a_provider_worker_reads_media_and_cannot_change_it(host, client):
 def test_source_search_and_download_get_one_read_only_file_per_request(host, client, source_db, monkeypatch):
     from media_sources import repository
     from media_sources.context import resolve_item
-    from provider_hub import capabilities
+    from provider_hub import capabilities, registry
     from provider_hub.registry import HubProxyProvider
     from provider_hub.state import OFFICIAL_CATALOG_REPO, OFFICIAL_CATALOG_SOURCE_ID
     from subliminal.video import Movie
-    from subliminal_patch.core import ProviderItemExcludedError
+    from subliminal_patch.core import ProviderCallInterruptedError, ProviderItemExcludedError
 
     _enforcing_kernel(spawn_module.MIN_ENFORCED_ABI)
     source_id, library_id, root = add_source(source_db, host["root"])
@@ -403,6 +403,25 @@ def test_source_search_and_download_get_one_read_only_file_per_request(host, cli
     moved_video.source_context = resolve_item(item_id, source_db)
     assert len(proxy.list_subtitles(moved_video, [])) == 1
     assert_excluded(video)
+
+    # The ownership handover can cut the admitted call between the archive
+    # response and member selection. Its typed interruption must survive.
+    archive_worker = client()
+    archive_proxy = Embedded(worker_client=archive_worker, **proxy.config)
+    [archive_subtitle] = archive_proxy.list_subtitles(moved_video, [])
+    unpack = registry.worker_download_to_content
+
+    def cut_before_selection(*args, **kwargs):
+        archive_worker.cancel()
+        return unpack(*args, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(registry, "worker_download_to_content", cut_before_selection)
+        with pytest.raises(ProviderCallInterruptedError):
+            archive_proxy.download_subtitle(archive_subtitle)
+    assert archive_worker.process.poll() is not None
+    assert archive_worker.launcher_cleanup_state() == "confirmed"
+
     row["trusted"] = False
     assert_excluded(moved_video)
     row["trusted"] = True
@@ -487,7 +506,8 @@ def _standalone_file(host):
 def test_refused_source_item_keeps_ordinary_searches_in_the_same_pool(host, client, monkeypatch):
     from provider_hub.registry import HubProxyProvider
     from subliminal.video import Movie
-    from subliminal_patch.core import SZProviderPool, provider_registry
+    from subliminal_patch import core
+    from subliminal_patch.extensions import ProviderRegistry
     from subzero.language import Language
 
     monkeypatch.setattr("provider_hub.sandbox.provider_profile_enabled", lambda: False)
@@ -504,10 +524,12 @@ def test_refused_source_item_keeps_ordinary_searches_in_the_same_pool(host, clie
             return grant
 
     name = LocalProvider.provider_name
-    monkeypatch.setitem(provider_registry.providers, name, LocalProvider)
+    provider_registry = ProviderRegistry()
+    provider_registry.register(name, LocalProvider)
+    monkeypatch.setattr(core, "provider_registry", provider_registry)
     errors = []
-    pool = SZProviderPool(providers=[name], provider_configs={name: {"op": "catalog"}},
-                          throttle_callback=lambda *args, **kwargs: errors.append(args))
+    pool = core.SZProviderPool(providers=[name], provider_configs={name: {"op": "catalog"}},
+                               throttle_callback=lambda *args, **kwargs: errors.append(args))
     source_video = Movie(str(grant.path), "Source movie")
     source_video.source_context = object()
     arr_video = Movie(str(host["media"] / "film.mkv"), "Arr movie")
