@@ -1,13 +1,17 @@
 /* eslint-disable camelcase -- API field names. */
+import { useState } from "react";
 import { act } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { http, HttpResponse } from "msw";
 import { describe, expect, it, vi } from "vitest";
+import { useArrInstances } from "@/apis/hooks/arrInstances";
 import { mediaSourcesKey } from "@/apis/hooks/mediaSources";
 import { useSportsAvailability } from "@/apis/hooks/sports";
 import queryClient from "@/apis/queries";
 import { QueryKeys } from "@/apis/queries/keys";
 import type { SourceAvailability } from "@/apis/raw/mediaSources";
 import { makeInstance } from "@/pages/Settings/Connections/__tests__/fixtures";
+import InstanceCard from "@/pages/Settings/Connections/InstanceCard";
 import { useRoutes } from "@/Router";
 import type { CustomRouteObject } from "@/Router/type";
 import { customRender, screen, waitFor } from "@/tests";
@@ -180,6 +184,116 @@ function MediaPage({ group, path }: { group: string; path?: string }) {
   return page?.element;
 }
 
+function ConnectionsToExcluded() {
+  const { data: instances } = useArrInstances();
+  const [excluded, setExcluded] = useState(false);
+  if (excluded) return <MediaPage group="blacklist" path="series" />;
+  const instance = instances?.[0];
+  return (
+    instance && (
+      <>
+        <InstanceCard
+          instance={instance}
+          onEdit={() => undefined}
+          onDelete={() => undefined}
+        />
+        <button type="button" onClick={() => setExcluded(true)}>
+          Open Excluded
+        </button>
+      </>
+    )
+  );
+}
+
+it.each(["succeeds", "fails"] as const)(
+  "uses the confirmed disable while the instance list refresh %s",
+  async (outcome) => {
+    const user = userEvent.setup();
+    const instance = makeInstance({ enabled: true });
+    const updated = { ...instance, enabled: false, api_key_set: false };
+    const { promise: refresh, resolve: releaseRefresh } =
+      Promise.withResolvers<void>();
+    let patched = false;
+    const refreshStarted = vi.fn();
+    const excluded = vi.fn();
+    server.use(
+      http.get("/api/system/settings", () =>
+        HttpResponse.json({
+          general: { use_sonarr: true },
+          media_sources: { visible: true },
+        }),
+      ),
+      http.get("/api/system/arr-instances", async () => {
+        if (!patched) return HttpResponse.json([instance]);
+        refreshStarted();
+        await refresh;
+        return outcome === "fails"
+          ? HttpResponse.json(
+              { message: "Instance list unavailable" },
+              { status: 503 },
+            )
+          : HttpResponse.json([updated]);
+      }),
+      http.patch("/api/system/arr-instances/42", async ({ request }) => {
+        expect(await request.json()).toEqual({ enabled: false });
+        patched = true;
+        return HttpResponse.json(updated);
+      }),
+      http.get("/api/system/status", () => HttpResponse.json({ data: {} })),
+      http.get("/api/badges", () => HttpResponse.json({})),
+      http.get("/api/system/media-sources", () =>
+        HttpResponse.json({
+          data: [],
+          availability: { series: RETAINED, movie: ABSENT, sports: ABSENT },
+        }),
+      ),
+      http.all("/api/episodes/blacklist", () => {
+        excluded();
+        return HttpResponse.json({ data: [] });
+      }),
+    );
+    customRender(<ConnectionsToExcluded />);
+    const listKey = [QueryKeys.ArrInstances];
+    try {
+      await user.click(
+        await screen.findByRole("switch", { name: "Disable instance" }),
+      );
+      await waitFor(() => expect(refreshStarted).toHaveBeenCalled());
+      expect(
+        await screen.findByRole("switch", { name: "Enable instance" }),
+      ).not.toBeChecked();
+      expect(queryClient.getQueryData(listKey)).toEqual([
+        { ...instance, enabled: false },
+      ]);
+
+      await user.click(screen.getByRole("button", { name: "Open Excluded" }));
+      expect(
+        await screen.findByRole("link", { name: "Connections" }),
+      ).toBeInTheDocument();
+      expect(
+        screen.queryByRole("button", { name: "Remove All" }),
+      ).not.toBeInTheDocument();
+
+      releaseRefresh();
+      await waitFor(() =>
+        expect(queryClient.getQueryState(listKey)?.fetchStatus).toBe("idle"),
+      );
+      expect(queryClient.getQueryState(listKey)?.status).toBe(
+        outcome === "fails" ? "error" : "success",
+      );
+      expect(
+        screen.getByRole("link", { name: "Connections" }),
+      ).toBeInTheDocument();
+      expect(
+        screen.queryByRole("button", { name: "Remove All" }),
+      ).not.toBeInTheDocument();
+      expect(excluded).not.toHaveBeenCalled();
+    } finally {
+      releaseRefresh();
+    }
+  },
+);
+
 it.each([
   ["series", undefined, "sonarr", "/api/series"],
   ["movies", undefined, "radarr", "/api/movies"],
@@ -291,8 +405,10 @@ describe.each([
     ])(
       "handles $mode without granting folder sources Arr privileges",
       async ({ record, legacy, visible, accessible }) => {
+        const user = userEvent.setup();
         const requestArr = vi.fn();
         const requestExcluded = vi.fn();
+        const removeAll = vi.fn();
         server.use(
           http.get("/api/system/settings", () =>
             HttpResponse.json({
@@ -331,17 +447,46 @@ describe.each([
           http.get("/api/badges", () => HttpResponse.json({})),
           http.all(endpoint, ({ request }) => {
             requestExcluded(request.method);
-            return HttpResponse.json({ data: [] });
+            if (request.method === "DELETE") {
+              removeAll(new URL(request.url).searchParams.get("all"));
+              return new HttpResponse(null, { status: 204 });
+            }
+            return HttpResponse.json({
+              data: [
+                {
+                  id: 72,
+                  arr_instance_id: 42,
+                  title: "Fixture movie",
+                  radarrId: 72,
+                  seriesTitle: "Fixture series",
+                  episodeTitle: "Fixture episode",
+                  episode_number: "1x1",
+                  sonarrSeriesId: 72,
+                  provider: "fixture-provider",
+                  subs_id: "fixture-release",
+                  language: {
+                    name: "English",
+                    code2: "en",
+                    code3: "eng",
+                    forced: false,
+                    hi: false,
+                  },
+                  timestamp: "now",
+                  parsed_timestamp: "01/24/25 01:38:03",
+                },
+              ],
+            });
           }),
         );
         customRender(<MediaPage group="blacklist" path={path} />);
         if (accessible) {
           expect(
-            await screen.findByRole("button", { name: "Remove All" }),
+            await screen.findByText("fixture-provider"),
           ).toBeInTheDocument();
-          await waitFor(() =>
-            expect(requestExcluded).toHaveBeenCalledWith("GET"),
-          );
+          const action = screen.getByRole("button", { name: "Remove All" });
+          expect(action).toBeEnabled();
+          await user.click(action);
+          await waitFor(() => expect(removeAll).toHaveBeenCalledWith("true"));
         } else {
           expect(
             await screen.findByRole("link", { name: "Connections" }),

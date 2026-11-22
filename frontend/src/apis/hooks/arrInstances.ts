@@ -5,6 +5,7 @@ import { AxiosError } from "axios";
 import { QueryKeys } from "@/apis/queries/keys";
 import api from "@/apis/raw";
 import type {
+  ArrInstance,
   ArrInstanceCreate,
   ArrInstanceDeleteConflict,
   ArrInstanceTest,
@@ -155,8 +156,21 @@ export function useUpdateArrInstance({
       ({ id, body }: { id: number; body: ArrInstanceUpdate }) =>
         api.arrInstances.update(id, body),
     ),
-    onSuccess: () => {
-      client.invalidateQueries({ queryKey: arrKey });
+    onSuccess: async (updated, { id, body }) => {
+      if (
+        typeof body.enabled === "boolean" &&
+        typeof updated?.enabled === "boolean"
+      ) {
+        const { enabled } = updated;
+        // A confirmed disable must reach route guards before a list refresh.
+        await client.cancelQueries({ queryKey: arrKey, exact: true });
+        client.setQueryData<ArrInstance[]>(arrKey, (instances) =>
+          instances?.map((instance) =>
+            instance.id === id ? { ...instance, enabled } : instance,
+          ),
+        );
+      }
+      void client.invalidateQueries({ queryKey: arrKey });
     },
     onError: (error) => {
       if (inlineErrors) {
