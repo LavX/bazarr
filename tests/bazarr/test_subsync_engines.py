@@ -401,6 +401,43 @@ def test_sync_passes_framerate_setting_to_alass(monkeypatch, tmp_path, schema_se
     assert commands[0][4:] == (['-g'] if no_fix_framerate else [])
 
 
+def test_sync_subtitles_reads_current_framerate_setting_and_honors_explicit_values(
+        monkeypatch, tmp_path, schema_session):
+    from app import database as db_module
+    from subtitles import sync as sync_module
+    from subtitles.tools.subsyncer import SubSyncer
+
+    monkeypatch.setattr(db_module, 'database', schema_session)
+    monkeypatch.setattr('subtitles.tools.subsyncer.shutil.which', lambda executable: '/usr/bin/alass')
+    monkeypatch.setattr(SubSyncer, '_alass_environment', lambda self: {})
+    monkeypatch.setattr(SubSyncer, '_log_sync_history', lambda self, **kwargs: None)
+    commands = []
+
+    def run(command, **kwargs):
+        commands.append(command)
+        _write(pathlib.Path(command[3]), 'synced')
+        return subprocess.CompletedProcess(command, 0, stdout='', stderr='')
+
+    monkeypatch.setattr('subtitles.tools.subsyncer.subprocess.run', run)
+    video = tmp_path / 'Movie.mkv'
+    video.touch()
+    for index, (setting, explicit, expected) in enumerate([
+        (True, None, True), (False, None, False),
+        (True, False, False), (False, True, True),
+    ]):
+        monkeypatch.setattr(sync_module.settings.subsync, 'no_fix_framerate', setting)
+        subtitle = tmp_path / f'Movie{index}.en.srt'
+        _write(subtitle, 'original')
+        options = {} if explicit is None else {'no_fix_framerate': explicit}
+        assert sync_module.sync_subtitles(
+            video_path=str(video), srt_path=str(subtitle), srt_lang='en', forced=False, hi=False,
+            percent_score=0, force_sync=True, enabled_engines=['alass'], output_mode='overwrite',
+            track_job_progress=False, callback=lambda: None, **options,
+        ) is True
+        assert commands[-1][4:] == (['-g'] if expected else [])
+    assert len(commands) == 4
+
+
 def test_autosubsync_engine_uses_python_api_without_multiprocessing(monkeypatch, tmp_path):
     from subtitles.tools.subsyncer import SubSyncer
 
@@ -513,6 +550,7 @@ def test_sync_subtitles_queue_path_has_only_signature_locals(mocker):
                 inspect.getmodule(caller_frame.f_code).__dict__[caller_frame.f_code.co_name]
             )
             caller_signature.bind(**caller_frame.f_locals)
+            assert caller_frame.f_locals['no_fix_framerate'] is None
             return 42
 
     mocker.patch.object(sync_module, 'jobs_queue', IntrospectingJobsQueue())
