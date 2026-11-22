@@ -214,6 +214,34 @@ def test_manual_search_still_builds_an_unmatched_episode_video(source_db, tmp_pa
     assert video.series == "Mystery Show"
     assert video.season is None and video.episode is None
 
+    from subliminal_patch import core
+    from subliminal_patch.providers.legendasdivx import LegendasdivxProvider
+    from subzero.language import Language
+
+    monkeypatch.setattr(LegendasdivxProvider, 'initialize', lambda self: None)
+    monkeypatch.setattr(LegendasdivxProvider, 'terminate', lambda self: None)
+    file_searches = []
+
+    class FileProvider(LegendasdivxProvider):
+        def list_subtitles(self, video, languages):
+            file_searches.append(video.original_path)
+            return []
+
+    monkeypatch.setattr(core, 'provider_registry',
+                        {'legendasdivx': LegendasdivxProvider, 'embeddedsubtitles': FileProvider})
+    configuration = {provider: {'username': None, 'password': None}
+                     for provider in ('legendasdivx', 'embeddedsubtitles')}
+    failures = []
+    with core.SZProviderPool(list(configuration), configuration,
+                             throttle_callback=lambda *args, **kwargs: failures.append(args)) as pool:
+        result = pool.list_subtitles_provider('legendasdivx', video, {Language('por')}, detailed=True)
+        assert (result.status, result.reason) == ('skipped', 'unsupported_media')
+        assert not pool.discarded_providers
+        file_result = pool.list_subtitles_provider('embeddedsubtitles', video, {Language('por')}, detailed=True)
+        assert file_result.status == 'empty'
+    assert not failures
+    assert file_searches == [str(path)]
+
 
 def test_confirmed_identities_reach_provider_video(source_db, tmp_path, metadata, monkeypatch):
     from media_sources.context import resolve_item
@@ -241,6 +269,10 @@ def test_confirmed_identities_reach_provider_video(source_db, tmp_path, metadata
     assert (movie_video.year, movie_video.tmdb_id, movie_video.imdb_id) == (2016, 81, "tt2543164")
     assert (episode_video.year, episode_video.series_tmdb_id, episode_video.series_tvdb_id) == (2017, 82, 334824)
     assert episode_video.tmdb_id is None and episode_video.tvdb_id is None
+    from provider_hub.protocol import video_to_payload
+
+    payload = video_to_payload(episode_video)
+    assert (payload['series_tmdb_id'], payload['tmdb_id']) == (82, None)
 
 
 def test_identification_search_uses_original_titles_and_reports_incomplete_results(monkeypatch):
@@ -303,6 +335,8 @@ def test_movie_candidate_choice_does_not_depend_on_details_being_online(source_d
     saved = client.patch(f"/api/sources/items/{row.id}", json={"candidate_id": 101}, headers=HEADERS)
     assert saved.status_code == 200
     assert (saved.json["tmdb_id"], saved.json["year"], saved.json["identity_source"]) == ("101", "1996", "user")
+    repeated = client.patch(f"/api/sources/items/{row.id}", json={"candidate_id": 101}, headers=HEADERS)
+    assert repeated.status_code == 200 and repeated.json == saved.json
 
 
 def test_show_folder_identity_takes_precedence_over_misleading_file_names(source_db, tmp_path, metadata):
@@ -368,3 +402,93 @@ def test_real_world_episode_names_have_safe_search_coordinates(source_db, tmp_pa
     items = lib.items()
     assert {name: (items[str(path)].identity_state, items[str(path)].season, items[str(path)].episode)
             for name, path in paths.items()} == names
+
+
+def test_upgrade_repairs_legacy_coordinates_without_promoting_multi_episode_files(source_db, tmp_path, metadata,
+                                                                                 client):
+    from media_sources import repository
+    from test_media_sources_schema import POSTERS, _migration, _run
+
+    lib = Lib(source_db, tmp_path)
+    multi = stamped_video(lib.root / "Show" / "Show.S01E01-E03.mkv")
+    single = stamped_video(lib.root / "Show" / "Show.S01E04.mkv")
+    lib.scan()
+    items = lib.items()
+    group_id = lib.group("Show").id
+    engine = source_db.get_bind()
+    _run(engine, _migration(POSTERS).downgrade)
+    repository.update_item(items[str(multi)].id, source_db, identity_state="unmatched", season=1, episode=1)
+    repository.update_item(items[str(single)].id, source_db, identity_state="unmatched", season=1, episode=4)
+    _run(engine, _migration(POSTERS).upgrade)
+
+    before = lib.items()
+    assert (before[str(multi)].season, before[str(multi)].episode) == (None, None)
+    # A show correction can happen before the first post-upgrade scan.
+    assert client.patch(f"/api/sources/groups/{group_id}", json={"title": "Correct Show"},
+                        headers=HEADERS).status_code == 200
+    assert lib.scan().unchanged == 2
+    items = lib.items()
+    assert (items[str(multi)].identity_state, items[str(multi)].season, items[str(multi)].episode) == (
+        "unmatched", None, None)
+    assert (items[str(single)].identity_state, items[str(single)].season, items[str(single)].episode) == (
+        "parsed", 1, 4)
+    assert not items[str(multi)].identify_pending and not items[str(single)].identify_pending
+
+
+def test_cancelling_after_show_reidentification_keeps_its_episodes_consistent(source_db, tmp_path, metadata,
+                                                                                 monkeypatch):
+    from app.jobs_queue import JobCancelled
+    from media_sources import repository, scanner
+
+    _, shows, _, _ = metadata
+    lib = Lib(source_db, tmp_path)
+    episode = stamped_video(lib.root / "Crash" / "Crash.S01E01.mkv")
+    stamped_video(lib.root / "Zulu" / "Zulu.S01E01.mkv")
+    shows["Crash"] = response(status="unavailable")
+    lib.scan()
+    assert lib.items()[str(episode)].identity_state == "parsed"
+    shows["Crash"] = response(items=[title(201, "Crash", 2008), title(202, "Crash", 2023)])
+
+    became_ambiguous = False
+    update = repository.update_group
+
+    def observe(*args, **kwargs):
+        nonlocal became_ambiguous
+        result = update(*args, **kwargs)
+        if kwargs.get("identity_state") == "ambiguous":
+            became_ambiguous = True
+        return result
+
+    def cancel():
+        if became_ambiguous:
+            raise JobCancelled()
+
+    monkeypatch.setattr(repository, "update_group", observe)
+    with pytest.raises(JobCancelled):
+        scanner.run_scan(lib.source_id, lib.library_id, cancel=cancel)
+    assert lib.group("Crash").identity_state == "ambiguous"
+    assert lib.items()[str(episode)].identity_state == "ambiguous"
+
+
+def test_overlapping_candidate_submissions_return_the_same_saved_override(source_db, tmp_path, metadata,
+                                                                         client, monkeypatch):
+    from discover import metadata as discover
+
+    movies, _, _, _ = metadata
+    lib = Lib(source_db, tmp_path, content_kind="movie")
+    path = stamped_video(lib.root / "Collision.mkv")
+    movies["Collision"] = response(items=[title(301, "Collision", 2012), title(302, "Collision", 2006)])
+    lib.scan()
+    url = f"/api/sources/items/{lib.items()[str(path)].id}"
+    body = {"candidate_id": 301}
+    overlap = []
+
+    def details(candidate_id):
+        monkeypatch.setattr(discover, 'movie_details', lambda _: response())
+        overlap.append(client.patch(url, json=body, headers=HEADERS))
+        return response()
+
+    monkeypatch.setattr(discover, 'movie_details', details)
+    first = client.patch(url, json=body, headers=HEADERS)
+    assert first.status_code == overlap[0].status_code == 200
+    assert first.json == overlap[0].json

@@ -17,6 +17,11 @@ def upgrade():
                        "WHERE kind = 'movie' AND identity_source = 'filename' AND parsed_title IS NOT NULL"))
     op.execute(sa.text("UPDATE table_source_groups SET identify_pending = 1 "
                        "WHERE kind = 'show' AND identity_source = 'filename'"))
+    # The earlier scanner kept the first number even when the file contained
+    # several episodes. Quarantine any such coordinates until a fresh parse.
+    op.execute(sa.text("UPDATE table_source_items SET season = NULL, episode = NULL, identify_pending = 1 "
+                       "WHERE kind = 'episode' AND identity_source = 'filename' AND identity_state = 'unmatched' "
+                       "AND (season IS NOT NULL OR episode IS NOT NULL)"))
 
 
 def downgrade():

@@ -1078,6 +1078,14 @@ class SZProviderPool(ProviderPool):
             logger.info('Skipping provider %r: it is no longer registered', provider)
             return finish(None, "skipped", "provider_excluded")
 
+        # A source episode can be present without a single season/episode pair.
+        # Only the file-based providers can use that input safely.
+        if (isinstance(video, Episode) and getattr(video, 'source_context', None) is not None
+                and (video.season is None or video.episode is None)
+                and provider not in ('embeddedsubtitles', 'whisperai')):
+            logger.info('Skipping provider %r: source episode has no unique season and episode', provider)
+            return finish([], "skipped", "unsupported_media")
+
         # check video validity
         if not provider_class.check(video):
             logger.info('Skipping provider %r: not a valid video', provider)

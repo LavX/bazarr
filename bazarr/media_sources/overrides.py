@@ -42,12 +42,16 @@ def _pick(row, candidate_id):
                  if candidate['id'] == candidate_id), None)
 
 
+def _already_selected(row, candidate_id):
+    return row.identity_source == 'user' and row.tmdb_id == str(candidate_id)
+
+
 def override_identity(row_id, body, *, group=False):
     getter = repository.get_group if group else repository.get_item
     update = repository.update_group if group else repository.update_item
     if not isinstance(body, dict) or not body:
         raise SourceError('Provide a JSON object with an identity correction.')
-    candidate = None
+    candidate_id = candidate = None
     if 'candidate_id' in body:
         candidate_id = body['candidate_id']
         if len(body) != 1 or type(candidate_id) is not int or candidate_id < 1:
@@ -55,11 +59,13 @@ def override_identity(row_id, body, *, group=False):
         current = getter(row_id)
         if current is None:
             raise SourceError('No such source item or group.', 404, 'not_found')
-        if current.kind not in ('movie', 'show') or not (candidate := _pick(current, candidate_id)):
-            raise SourceError('Choose a TMDB candidate listed for this title.')
-        # The provider request must not hold a database lock. Recheck the
-        # selection when writing, in case a scan updated the candidate list.
-        values = identify.candidate_identity(candidate, current.kind, user=True)
+        if current.kind not in ('movie', 'show'):
+            raise SourceError('This item does not have a TMDB candidate list.')
+        if not _already_selected(current, candidate_id):
+            if not (candidate := _pick(current, candidate_id)):
+                raise SourceError('Choose a TMDB candidate listed for this title.')
+            # Recheck the selection when writing. The lookup runs before the transaction.
+            values = identify.candidate_identity(candidate, current.kind, user=True)
 
     with source_transaction() as connection:
         previous = getter(row_id, connection) if not group else None
@@ -70,8 +76,10 @@ def override_identity(row_id, body, *, group=False):
             raise SourceError('No such source item or group.', 404, 'not_found')
         if row.kind == 'episode' and (previous is None or row.group_id != previous.group_id):
             raise SourceError('The episode moved during the identity correction. Try again.', 409, 'conflict')
-        if candidate is not None:
-            if _pick(row, candidate_id) != candidate:
+        if candidate_id is not None:
+            if _already_selected(row, candidate_id):
+                return row
+            if candidate is None or _pick(row, candidate_id) != candidate:
                 raise SourceError('The candidate list changed. Refresh the title and choose again.', 409, 'conflict')
         else:
             allowed = {'title', 'year'}

@@ -902,6 +902,13 @@ def _identify_pending(source, kind, library, decisions, cancel, session):
     if library.content_kind != 'series':
         return
 
+    for row in repository.pending_episode_parses(library.id, session):
+        if cancel is not None:
+            cancel()
+        values = identify.identify_item('series', row.path, row.group_key, row.group_state)
+        values.pop('external_id', None)
+        repository.update_item(row.id, session, owner_library_id=library.id, only_automatic=True, **values)
+
     for group in repository.library_groups(library.id, session):
         if cancel is not None:
             cancel()
@@ -926,7 +933,11 @@ def _identify_pending(source, kind, library, decisions, cancel, session):
             values['external_id'] = hints.external_id
         changes = {key: value for key, value in values.items() if getattr(group, key) != value}
         if changes:
-            repository.update_group(group.id, session, owner_library_id=library.id, only_automatic=True, **changes)
+            with source_transaction(session) as connection:
+                updated = repository.update_group(group.id, connection, owner_library_id=library.id,
+                                                  only_automatic=True, **changes)
+                if updated:
+                    repository.sync_episode_identities(connection, group_id=group.id)
 
     with source_transaction(session) as connection:
         repository.sync_episode_identities(connection, library_id=library.id)

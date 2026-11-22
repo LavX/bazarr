@@ -276,6 +276,18 @@ def pending_movies(library_id, target=None):
         .where(Items.c.library_id == library_id, Items.c.kind == 'movie', Items.c.identify_pending == 1)).all()
 
 
+def _episode_needs_reparse():
+    return sa.and_(Items.c.identity_source == 'filename', Items.c.identity_state == 'unmatched',
+                   Items.c.season.is_(None), Items.c.episode.is_(None), Items.c.identify_pending == 1)
+
+
+def pending_episode_parses(library_id, target=None):
+    return _target(target).execute(
+        sa.select(Items.c.id, Items.c.path, Groups.c.group_key, Groups.c.identity_state.label('group_state'))
+        .select_from(Items.join(Groups, Items.c.group_id == Groups.c.id))
+        .where(Items.c.library_id == library_id, Items.c.kind == 'episode', _episode_needs_reparse())).all()
+
+
 def group_episode_paths(group_id, target=None):
     return _target(target).execute(
         sa.select(Items.c.path).where(Items.c.group_id == group_id, Items.c.kind == 'episode')).scalars().all()
@@ -290,7 +302,9 @@ def sync_episode_identities(connection, *, library_id=None, group_id=None, item_
 
     group = sa.select(Groups).where(Groups.c.id == Items.c.group_id)
     group_state = group.with_only_columns(Groups.c.identity_state).scalar_subquery()
-    pending = sa.case((Items.c.identity_source == 'user', 0),
+    # Keep unlocated legacy rows queued until their filenames have been parsed,
+    # including when someone corrects the show before its next scan.
+    pending = sa.case((Items.c.identity_source == 'user', 0), (_episode_needs_reparse(), 1),
                       else_=group.with_only_columns(Groups.c.identify_pending).scalar_subquery())
     state = sa.case(
         (sa.or_(Items.c.season.is_(None), Items.c.episode.is_(None), group_state == 'unmatched'), 'unmatched'),
