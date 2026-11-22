@@ -93,11 +93,11 @@ Evidence, and how each decision fails closed:
   listing itself complete (children lists readable, the ``/proc`` scan not capped
   and no record skipped), under ``max_processes``. A live process that denies the
   read, a cut listing or a reader that fails make the sample ``truncated``, which
-  counts as over the limit; only a root that vanished reads as no sample. The one
-  exception is a reading taken as the worker is being ended (its session closed, or the
-  pool's own stop under way): a tree on its way out reads as unreadable, and that is not
-  evidence about its size, so the reading is dropped and the error that ended the worker
-  stands. The folder-budget reading follows the same rule.
+  counts as over the limit; only a root that vanished reads as no sample. A descendant
+  that leaves the tree during a read prompts one new walk of the same root. When a sample
+  is cut short as the worker is being ended (its session closed or the pool's own stop
+  under way), the pool drops the reading and reports the error that ended the worker.
+  The folder-budget reading follows the same teardown rule.
 * "Teardown complete" (``_teardown_confirmed``): only a close job or a stuck pass
   that confirmed "process gone" reaches it, and the entry reads as stopped (and
   starts anything) only when none of its workers is still being torn down.
@@ -591,6 +591,10 @@ class _ProcOverflow(OSError):
     """A /proc file or directory of a worker's process is bigger than any honest one: not read to the end."""
 
 
+class _ProcessTreeChanged(Exception):
+    """A descendant exited or changed identity after it was listed."""
+
+
 # What one /proc file of a worker's process may cost before it counts as unreadable. A worker
 # controls how many mappings, descriptors and threads it has, so none of these listings is
 # trusted to be small.
@@ -786,7 +790,8 @@ def _parent_map(limit: int = PARENT_MAP_LIMIT, budget: "SampleBudget | None" = N
     return tree, complete
 
 
-def _process_tree(root: int, max_processes: int, budget: "SampleBudget | None" = None) -> tuple[list[int], bool]:
+def _process_tree(root: int, max_processes: int, budget: "SampleBudget | None" = None, *,
+                  parents: dict[int, int] | None = None) -> tuple[list[int], bool]:
     """The root and its descendants, and whether that list may be incomplete.
 
     Incomplete when the walk stopped at ``max_processes``, when a children list
@@ -816,10 +821,37 @@ def _process_tree(root: int, max_processes: int, budget: "SampleBudget | None" =
             if kid in seen:
                 continue
             if len(seen) < max_processes:
+                if parents is not None and budget is not None and not budget.keep():
+                    return seen, True
                 seen.append(kid)
+                if parents is not None:
+                    parents[kid] = current
             else:
                 incomplete = True
     return seen, incomplete
+
+
+def _proc_identity(pid: int, budget: SampleBudget) -> tuple[int, int]:
+    """The current parent and start time of a PID from one bounded read of its stat record."""
+    path = "/proc/%d/stat" % pid
+    if budget.expired():
+        raise _ProcOverflow(path)
+    with open(path, "rb") as handle:
+        data = handle.read(PROC_LINE_LIMIT + 1)
+    if len(data) > PROC_LINE_LIMIT or not budget.spend(1, len(data)):
+        raise _ProcOverflow(path)
+    try:
+        fields = data.rsplit(b")", 1)[1].split()
+        return int(fields[1]), int(fields[19])
+    except (ValueError, IndexError) as error:
+        raise OSError("invalid process stat record: %s" % path) from error
+
+
+def _descendant_identity(pid: int, budget: SampleBudget) -> tuple[int, int]:
+    try:
+        return _proc_identity(pid, budget)
+    except (FileNotFoundError, ProcessLookupError) as error:
+        raise _ProcessTreeChanged from error
 
 
 def read_process_tree_memory(pid: int, max_processes: int = 256, skip_fds=(),
@@ -839,18 +871,48 @@ def read_process_tree_memory(pid: int, max_processes: int = 256, skip_fds=(),
     worker. ``skip_fds`` names processes whose descriptor directory is not read (the
     pool's own non-dumpable launcher, which hides it from its own user by design).
 
-    ``budget`` is the sweep's shared allowance for reading this worker's /proc (one is made when
-    none is given); when it runs out the sample is ``truncated``.
+    A descendant can exit or be reparented while the tree is being read. Discard that snapshot
+    and walk the live root once more, using the same ``budget`` (made here when none is given).
+    When the allowance runs out the sample is ``truncated``.
     """
     if not os.path.isdir("/proc/self"):
         return None
     if budget is None:
         budget = SampleBudget()
+    try:
+        _, root_start = _proc_identity(pid, budget)
+        for attempt in range(2):
+            if attempt and _proc_identity(pid, budget)[1] != root_start:
+                return None  # the original root is gone
+            try:
+                return _read_process_tree_memory_once(pid, root_start, max_processes, skip_fds, budget)
+            except _ProcessTreeChanged:
+                if budget.expired():
+                    break
+    except (FileNotFoundError, ProcessLookupError):
+        return None  # only the root's reads can raise these here
+    except OSError:
+        pass  # unreadable identity or exhausted allowance
+    return MemorySample(bytes=0, rss_bytes=0, processes=0, source="error", truncated=True)
+
+
+def _read_process_tree_memory_once(pid: int, root_start: int, max_processes: int,
+                                   skip_fds, budget: SampleBudget) -> MemorySample | None:
+    parents: dict[int, int] = {}
+    members, truncated = _process_tree(pid, max_processes, budget, parents=parents)
+    identities: dict[int, tuple[int, int]] = {}
+    for member in members[1:]:
+        if not budget.keep():
+            raise _ProcOverflow("process identities")
+        identity = _descendant_identity(member, budget)
+        if identity[0] != parents[member]:
+            raise _ProcessTreeChanged
+        identities[member] = identity
+
     total = 0
     rss_total = 0
     counted = 0
     source = "smaps_rollup"
-    members, truncated = _process_tree(pid, max_processes, budget)
     for member in members:
         if budget.exhausted:
             truncated = True
@@ -867,11 +929,9 @@ def read_process_tree_memory(pid: int, max_processes: int = 256, skip_fds=(),
             # whose own /proc entry has vanished is not part of the tree any more.
             try:
                 values = _read_kb("/proc/%d/status" % member, "VmRSS", budget=budget)
-            except (FileNotFoundError, ProcessLookupError):
-                continue
             except OSError:
-                # Alive (it was listed, and its entry is there) but closed to us:
-                # its memory is unknown, so the total is only a floor.
+                # Unknown until the identity checks below. A live process whose
+                # status cannot be read makes the sample incomplete.
                 truncated = True
                 continue
             used = rss = values.get("VmRSS")
@@ -886,6 +946,13 @@ def read_process_tree_memory(pid: int, max_processes: int = 256, skip_fds=(),
     if held:
         total += held
         rss_total += held
+    # Verify the same process identities after the memory and descriptor walks. A PID reused
+    # between those walks must not contribute a stranger's readings or replace a vanished child.
+    if _proc_identity(pid, budget)[1] != root_start:
+        return None
+    for member, identity in identities.items():
+        if _descendant_identity(member, budget) != identity:
+            raise _ProcessTreeChanged
     truncated = truncated or held_incomplete or budget.exhausted
     if not counted:
         # Nothing readable. If nothing was seen at all the process is gone; if
