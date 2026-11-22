@@ -1,5 +1,6 @@
 import { ReactElement, useCallback, useRef, useState } from "react";
 import { showNotification } from "@mantine/notifications";
+import { isAxiosError } from "axios";
 import { usePluginApplyUpdate, usePluginInstall } from "@/apis/hooks/plugins";
 import api from "@/apis/raw";
 import { withInlineErrors } from "@/apis/raw/inlineWrites";
@@ -13,7 +14,7 @@ import { needsPassword, reasonOf } from "./refusal";
 export interface PluginConsentFlow {
   /**
    * Start an install or an update. The dialog opens for an install, except for a subtitle provider
-   * whose closure adds no plugin of another kind, which installs as it always has. An update opens it
+   * whose closure adds no plugin of another kind and whose replacement adds no access. An update opens it
    * only when the server says it adds a destination, a permission, a program or a plugin, and
    * otherwise goes ahead on its own, with the digest the server gave.
    */
@@ -37,10 +38,13 @@ export interface PluginConsentFlow {
 export function usePluginConsentFlow({
   onDone,
   onClosed,
+  onUpdateWithoutPreview,
   costCaps,
 }: {
   onDone?: (target: PluginConsentTarget) => void;
   onClosed?: () => void;
+  /** The legacy provider update action, used when the canonical preview returns 404. */
+  onUpdateWithoutPreview?: (id: string) => Promise<void>;
   costCaps?: PluginCostCaps;
 } = {}): PluginConsentFlow {
   const [target, setTarget] = useState<PluginConsentTarget | null>(null);
@@ -85,6 +89,7 @@ export function usePluginConsentFlow({
             ).catch(() => null);
             if (
               summary &&
+              !summary.needs_consent &&
               summary.members.every(
                 (member) => member.kind === SUBTITLE_PROVIDER_KIND,
               )
@@ -110,7 +115,20 @@ export function usePluginConsentFlow({
         }
         const delta = await withInlineErrors(() =>
           api.plugins.updateConsent(next.pluginId),
-        );
+        ).catch(async (error) => {
+          if (
+            onUpdateWithoutPreview &&
+            isAxiosError(error) &&
+            error.response?.status === 404
+          ) {
+            await onUpdateWithoutPreview(next.pluginId);
+            return;
+          }
+          throw error;
+        });
+        if (!delta) {
+          return;
+        }
         if (delta.needs_consent) {
           setTarget(next);
           return;
@@ -139,7 +157,7 @@ export function usePluginConsentFlow({
         setUpdating(null);
       }
     },
-    [applyUpdate, gated, install, onDone],
+    [applyUpdate, gated, install, onDone, onUpdateWithoutPreview],
   );
 
   const dialog = (

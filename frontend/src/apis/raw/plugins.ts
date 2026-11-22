@@ -61,6 +61,8 @@ export interface PluginConsentSummary {
   binaries: PluginBinary[];
   download_size: number | null;
   memory_request: number | null;
+  /** True when this explicit install would replace a provider and add access. */
+  needs_consent?: boolean;
   digest: string;
 }
 
