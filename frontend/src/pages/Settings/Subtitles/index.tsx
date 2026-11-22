@@ -637,8 +637,8 @@ const SettingsSubtitlesView: FunctionComponent = () => {
               settingKey="settings-subsync-no_fix_framerate"
             ></Check>
             <Message>
-              If specified, subsync will not attempt to correct a framerate
-              mismatch between reference and subtitles.
+              When enabled, FFsubsync will not correct a framerate mismatch, and
+              ALASS will not guess the framerate.
             </Message>
             <Check
               label="Golden-Section Search"

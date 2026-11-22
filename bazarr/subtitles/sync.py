@@ -347,7 +347,7 @@ def sync_subtitles(video_path,
                    job_id=None,
                    max_offset_seconds=None,
                    gss=settings.subsync.gss,
-                   no_fix_framerate=settings.subsync.no_fix_framerate,
+                   no_fix_framerate=None,
                    reference=None,
                    force_sync=False,
                    output_mode=None,
@@ -428,6 +428,8 @@ def sync_subtitles(video_path,
         (_, use_subsync_threshold, subsync_threshold,
          enabled_engines, max_offset_seconds) = _resolve_subsync_overrides(
             arr_instance_id, _is_series_item(sonarr_episode_id, source), enabled_engines, max_offset_seconds)
+        if no_fix_framerate is None:
+            no_fix_framerate = settings.subsync.no_fix_framerate
         progress_total = _sync_progress_total(enabled_engines)
 
         def report(message, value=None, total=None, name=None):

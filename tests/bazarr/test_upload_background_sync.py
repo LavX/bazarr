@@ -475,7 +475,7 @@ def test_real_index_and_settings_stay_with_the_upload_owner(upload_flow, schema_
     monkeypatch.setattr(settings.subsync, "output_mode", "keep_all")
     external_calls = []
 
-    def external(self, engine, output_path, video_path):
+    def external(self, engine, output_path, video_path, no_fix_framerate):
         external_calls.append(engine)
         output_path.write_text("1\n00:00:03,000 --> 00:00:04,000\nSynced\n")
         return {"offset_seconds": 16, "framerate_scale_factor": 1}
@@ -877,7 +877,7 @@ def test_review_editor_write_cannot_be_lost_at_sync_publication(upload_flow, mon
             elif operation == "manual-sync":
                 from subtitles.tools import subsyncer
 
-                def external(self, engine, output_path, video_path):
+                def external(self, engine, output_path, video_path, no_fix_framerate):
                     output_path.write_text(user_text)
                     return {"offset_seconds": 0}
 
@@ -1615,7 +1615,7 @@ def test_review_deleting_one_engine_destination_preserves_other_engine_publicati
     flow = upload_flow
     monkeypatch.setattr(settings.subsync, "enabled_engines", ["ffsubsync", "alass"])
     monkeypatch.setattr(settings.subsync, "output_mode", "keep_all")
-    monkeypatch.setattr(subsyncer.SubSyncer, "_run_external_engine", lambda self, engine, output_path, video_path:
+    monkeypatch.setattr(subsyncer.SubSyncer, "_run_external_engine", lambda self, engine, output_path, video_path, no_fix_framerate:
                         (output_path.write_text("Other engine output") and {"offset_seconds": 0}))
     flow.submit("movie")
     _, thread = flow.start()

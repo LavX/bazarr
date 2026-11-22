@@ -373,7 +373,7 @@ class SubSyncer:
             if log_dir_path:
                 shutil.rmtree(log_dir_path, ignore_errors=True)
 
-    def _run_external_engine(self, engine, output_path, video_path):
+    def _run_external_engine(self, engine, output_path, video_path, no_fix_framerate):
         if engine == 'autosubsync':
             return self._run_autosubsync_engine(output_path=output_path, video_path=video_path)
 
@@ -386,6 +386,8 @@ class SubSyncer:
 
         reference = self.reference if self.reference and os.path.isfile(self.reference) else video_path
         command = [executable, reference, self.srtin, str(output_path)]
+        if engine == 'alass' and no_fix_framerate:
+            command.append('-g')
         try:
             completed = subprocess.run(
                 command,
@@ -652,7 +654,10 @@ class SubSyncer:
                     arr_instance_id=arr_instance_id,
                 )
             else:
-                raw_result = self._run_external_engine(engine=engine, output_path=output_path, video_path=video_path)
+                raw_result = self._run_external_engine(
+                    engine=engine, output_path=output_path, video_path=video_path,
+                    no_fix_framerate=no_fix_framerate,
+                )
             # The engines search unconstrained, so the maximum offset is enforced here.
             # Raising leaves the runner to delete the engine output, keep the original
             # subtitle and move on to the next engine.

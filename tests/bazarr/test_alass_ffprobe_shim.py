@@ -154,11 +154,12 @@ def _alass_call(calls):
 
 
 @pytest.mark.skipif(os.name != "posix", reason="the launcher is a POSIX shell script")
-def test_alass_is_run_against_the_shim(recorded_alass_run, tmp_path):
+@pytest.mark.parametrize("no_fix_framerate", [False, True])
+def test_alass_is_run_against_the_shim(recorded_alass_run, tmp_path, no_fix_framerate):
     syncer, calls = recorded_alass_run
 
     syncer._run_external_engine(engine="alass", output_path=tmp_path / "out.srt",
-                                video_path=str(tmp_path / "video.mkv"))
+                                video_path=str(tmp_path / "video.mkv"), no_fix_framerate=no_fix_framerate)
 
     call = _alass_call(calls)
     env = call["env"]
@@ -168,8 +169,10 @@ def test_alass_is_run_against_the_shim(recorded_alass_run, tmp_path):
     assert os.access(launcher, os.X_OK), f"{launcher} is not executable, alass cannot run it"
     # The rest of the environment is alass's own, not a two-variable replacement for it.
     assert env["PATH"] == os.environ["PATH"]
-    # And the invocation itself is untouched.
-    assert call["command"][0] == "/usr/bin/alass"
+    assert call["command"] == [
+        "/usr/bin/alass", str(tmp_path / "video.mkv"), str(tmp_path / "sub.srt"),
+        str(tmp_path / "out.srt"), *(["-g"] if no_fix_framerate else []),
+    ]
 
 
 @pytest.mark.skipif(os.name != "posix", reason="the launcher is a POSIX shell script")
@@ -257,7 +260,7 @@ def test_alass_runs_unshimmed_when_ffprobe_cannot_be_found(recorded_alass_run, m
     monkeypatch.setattr(module, "get_binary", raising)
 
     syncer._run_external_engine(engine="alass", output_path=tmp_path / "out.srt",
-                                video_path=str(tmp_path / "video.mkv"))
+                                video_path=str(tmp_path / "video.mkv"), no_fix_framerate=False)
 
     env = _alass_call(calls)["env"]
     assert "ALASS_FFPROBE_PATH" not in env
@@ -318,7 +321,7 @@ def test_an_operator_configured_ffprobe_override_is_kept(recorded_alass_run, mon
     syncer, calls = recorded_alass_run
 
     syncer._run_external_engine(engine="alass", output_path=tmp_path / "out.srt",
-                                video_path=str(tmp_path / "video.mkv"))
+                                video_path=str(tmp_path / "video.mkv"), no_fix_framerate=False)
 
     env = _alass_call(calls)["env"]
     assert env["BAZARR_ALASS_REAL_FFPROBE"] == "/opt/custom/ffprobe"
