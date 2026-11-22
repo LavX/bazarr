@@ -91,7 +91,7 @@ RUN --mount=type=cache,target=/root/.cache/pip \
 COPY scripts/release/catalog_floor.py /opt/catalog_floor.py
 COPY bazarr/provider_hub/signing.py bazarr/provider_hub/signing_roots.py /opt/provider_hub/
 COPY bazarr/provider_hub/__init__.py bazarr/provider_hub/bundle.py bazarr/provider_hub/bundled_wheels.py \
-     bazarr/provider_hub/manifest.py bazarr/provider_hub/migration.py bazarr/provider_hub/plugin_manifest.py \
+     bazarr/provider_hub/compatibility.py bazarr/provider_hub/manifest.py bazarr/provider_hub/migration.py bazarr/provider_hub/plugin_manifest.py \
      bazarr/provider_hub/revocation.py bazarr/provider_hub/seed.py \
      bazarr/provider_hub/venv.py bazarr/provider_hub/versions.py /opt/provider_hub/
 COPY bazarr/provider_hub/kinds/__init__.py bazarr/provider_hub/kinds/service.py \
@@ -211,12 +211,13 @@ RUN chmod 0555 /app/bazarr/catalog_floor \
 COPY bazarr.py ./
 COPY bazarr ./bazarr
 
-# Verify that the seed produced by the build stage matches the final interpreter.
-RUN PYTHONPATH=/app/bazarr/bazarr python -B -c \
-    'from pathlib import Path; from provider_hub.seed import check_image_interpreter; check_image_interpreter(Path("catalog_floor"))'
-
 RUN test -n "${BAZARR_VERSION}" && test -n "${VCS_REF}" && test -n "${BUILD_DATE}" \
     || { echo 'BAZARR_VERSION, VCS_REF and BUILD_DATE are required build args' >&2; exit 1; }
+
+# Verify the seed against the final interpreter and stamped host version.
+RUN PYTHONPATH=/app/bazarr/bazarr python -B -c \
+    'import sys; from pathlib import Path; from provider_hub.seed import check_image_interpreter; check_image_interpreter(Path("catalog_floor"), sys.argv[1])' \
+    "${BAZARR_VERSION}"
 
 # Write version to VERSION file so bazarr/main.py can read it
 RUN echo "${BAZARR_VERSION}" > /app/bazarr/VERSION

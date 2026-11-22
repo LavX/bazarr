@@ -15,7 +15,7 @@ import sysconfig
 import tempfile
 import venv
 
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -23,6 +23,7 @@ from typing import Any
 from . import revocation
 from .bundle import BundleValidationError, verify_bundle_tree
 from .bundled_wheels import verified_wheels_dir
+from .compatibility import AVAILABLE_RUNTIMES, HostFacts, evaluate, evaluate_runtime, host_platform
 from .kinds.translator import TranslatorKind
 from .manifest import (
     BUNDLE_MANIFEST_FILE,
@@ -43,7 +44,7 @@ from .venv import (
     validated_bundle_path,
     validated_interpreter,
 )
-from .versions import version_key
+from .versions import host_version_key, version_key
 
 logger = logging.getLogger(__name__)
 
@@ -106,6 +107,11 @@ def _validate(raw: dict[str, Any], plugin: bool, *, building: bool) -> Validated
 def _file_sha(path: Path) -> str:
     with path.open("rb") as stream:
         return hashlib.file_digest(stream, "sha256").hexdigest()
+
+
+def _seed_host(version: str | None = None) -> HostFacts:
+    return HostFacts(version if version is not None else os.environ.get("BAZARR_VERSION"),
+                     host_platform(), AVAILABLE_RUNTIMES)
 
 
 def _interpreter_facts() -> dict[str, Any]:
@@ -194,15 +200,24 @@ def build(
         for raw, plugin in _catalog_manifests(document, repo, commit, signed=signed_catalog is not None)
         if revocation.lookup(revocations, manifest_provider_id(raw), raw.get("version")) is None
     ]
-    if signed_catalog is not None and not any(plugin for _raw, plugin in manifests):
-        raise SeedError(f"the signed catalog has no usable {GOOGLE_PLUGIN_ID} release")
+    host = _seed_host()
+    compatible_manifests = []
+    for raw, plugin in manifests:
+        manifest = _validate(raw, plugin, building=True)
+        compatible, reason = evaluate_runtime(parse_plugin_manifest(raw), host)
+        if compatible:
+            compatible_manifests.append((manifest, plugin))
+        else:
+            logger.info("Skipping seed release %s %s: %s", manifest.provider_id, manifest.version, reason)
+    if signed_catalog is not None and not any(plugin for _manifest, plugin in compatible_manifests):
+        raise SeedError(f"the signed catalog has no usable {GOOGLE_PLUGIN_ID} release for this target")
     environments: dict[str, str] = {}
     releases = []
     skipped = []
     skipped_envs = set()
     seen = set()
-    for raw, plugin in manifests:
-        manifest = _validate(raw, plugin, building=True)
+    for manifest, plugin in compatible_manifests:
+        raw = manifest.raw
         release_key = manifest.provider_id, manifest.version
         if release_key in seen:
             raise SeedError(f"duplicate seed release: {manifest.provider_id} {manifest.version}")
@@ -274,14 +289,33 @@ def _index(snapshot) -> dict[str, Any]:
     return index
 
 
-def check_image_interpreter(root: Path) -> None:
-    """Check the final image's host interpreter against the build stage."""
+def check_image_interpreter(root: Path, version: str | None = None) -> None:
+    """Check the final interpreter and signed Google runtime against the build stage."""
     from .floor import load_floor
 
     snapshot = load_floor(root)
     if snapshot is None:
         raise SeedError("the image has no catalog floor")
-    _index(snapshot)
+    index = _index(snapshot)
+    google_entries = [
+        entry for entry in index["releases"] if manifest_provider_id(entry["manifest"]) == GOOGLE_PLUGIN_ID
+    ]
+    signed = snapshot.signed_catalog()
+    if signed is None:
+        if google_entries:
+            raise SeedError("the Google runtime has no verified signed catalog")
+        return
+    if version is not None and host_version_key(version) is None:
+        raise SeedError("the signed runtime seed needs a valid Bazarr+ version")
+    host = _seed_host(version)
+    revocations = revocation.parse(signed.get(revocation.FIELD_NAME))
+    for raw, plugin in _catalog_manifests(signed, snapshot.repo, snapshot.commit, signed=True):
+        if not plugin or revocation.lookup(revocations, GOOGLE_PLUGIN_ID, raw.get("version")) is not None:
+            continue
+        for entry in google_entries:
+            if _same_manifest(raw, entry["manifest"]) and evaluate_runtime(parse_plugin_manifest(raw), host)[0]:
+                return
+    raise SeedError(f"the image has no {GOOGLE_PLUGIN_ID} release compatible with its Bazarr+ version")
 
 
 def _same_manifest(left: dict[str, Any], right: dict[str, Any]) -> bool:
@@ -297,11 +331,8 @@ def _same_manifest(left: dict[str, Any], right: dict[str, Any]) -> bool:
 
 
 def _seed_release(snapshot, index: dict[str, Any], entry: dict[str, Any], raw: dict[str, Any], plugin: bool) -> Release:
-    from .compatibility import AVAILABLE_RUNTIMES, HostFacts, evaluate, host_platform
-
     manifest = _validate(raw, plugin, building=False)
-    host = HostFacts(os.environ.get("BAZARR_VERSION"), host_platform(), AVAILABLE_RUNTIMES)
-    compatible, reason = evaluate(parse_plugin_manifest(raw), host)
+    compatible, reason = evaluate(parse_plugin_manifest(raw), _seed_host())
     if not compatible:
         raise SeedError(reason)
     runtime_root = snapshot.root / RUNTIME_DIR
@@ -322,7 +353,9 @@ def _seed_release(snapshot, index: dict[str, Any], entry: dict[str, Any], raw: d
     return Release(manifest, bundle, interpreter, True)
 
 
-def _seed_releases(plugin_id: str, exact_version: str | None = None) -> Iterable[Release]:
+def _seed_releases(
+    plugin_id: str, exact_version: str | None = None, requested: dict[str, Any] | None = None,
+) -> Iterable[Release]:
     from .floor import FloorError, _usable_floor
 
     snapshot = _usable_floor()
@@ -338,6 +371,7 @@ def _seed_releases(plugin_id: str, exact_version: str | None = None) -> Iterable
             for raw, plugin in _catalog_manifests(document, snapshot.repo, snapshot.commit, signed=signed is not None)
             if manifest_provider_id(raw) == plugin_id
             and (exact_version is None or raw["version"] == exact_version)
+            and (requested is None or _same_manifest(raw, requested))
             and revocation.lookup(revocations, plugin_id, raw["version"]) is None
         }
         matching = sorted(
@@ -365,25 +399,30 @@ def select_release(
     plugin_id: str,
     *,
     config_candidate: tuple[ValidatedManifest, str, str] | None = None,
+    requested: dict[str, Any] | None = None,
+    usable: Callable[[Release], bool] | None = None,
 ) -> Release | None:
-    """Choose the highest valid release, preferring the config root on ties."""
+    """Choose the highest valid release, or resolve the exact requested manifest."""
+
     from .env_registry import _adoptable
 
     config = None
     if config_candidate is not None:
         manifest, bundle_path, python_path = config_candidate
-        if manifest.provider_id == plugin_id:
-            bundle = validated_bundle_path(config_root, bundle_path)
-            interpreter = validated_interpreter(config_root, python_path)
-            if (bundle is not None and interpreter is not None and interpreter.is_file()
-                    and os.access(interpreter, os.X_OK) and _adoptable(interpreter.parent.parent, manifest)):
-                try:
+        if manifest.provider_id == plugin_id and (requested is None or _same_manifest(manifest.raw, requested)):
+            try:
+                bundle = validated_bundle_path(config_root, bundle_path)
+                interpreter = validated_interpreter(config_root, python_path)
+                if (bundle is not None and interpreter is not None and interpreter.is_file()
+                        and os.access(interpreter, os.X_OK) and _adoptable(interpreter.parent.parent, manifest)):
                     verify_bundle_tree(manifest, bundle)
-                except (BundleValidationError, OSError) as error:
-                    logger.warning("The config release for %s is not usable: %s", plugin_id, error)
-                else:
                     config = Release(manifest, bundle, interpreter, False)
-    seed = next(_seed_releases(plugin_id), None)
+            except (OSError, ValueError) as error:
+                logger.warning("The config release for %s is not usable: %s", plugin_id, error)
+    if config is not None and usable is not None and not usable(config):
+        config = None
+    seeded = _seed_releases(plugin_id, requested=requested)
+    seed = next((release for release in seeded if usable is None or usable(release)), None)
     if config is not None and (seed is None or version_key(config.manifest.version) >= version_key(seed.manifest.version)):
         return config
     return seed
@@ -415,3 +454,18 @@ def resolve_paths(
                 and Path(bundle_path) == release.bundle and Path(python_path) == release.interpreter):
             return release.bundle, release.interpreter
     return None
+
+
+def is_runtime_path(path: str | Path) -> bool:
+    """Whether a worker path names the image runtime, even when its seed is invalid."""
+    from .floor import floor_root
+
+    root = floor_root()
+    if root is None:
+        return False
+    absolute = Path(os.path.abspath(path))
+    try:
+        runtime = root.resolve() / RUNTIME_DIR
+    except OSError:
+        runtime = Path(os.path.abspath(root)) / RUNTIME_DIR
+    return absolute.is_relative_to(runtime)

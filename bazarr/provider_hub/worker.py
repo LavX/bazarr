@@ -402,28 +402,45 @@ class ProviderLayout:
     config_dir: Path
 
 
-def provider_layout(command, cwd, env, provider_id) -> ProviderLayout | None:
+def provider_layout(command, cwd, env, provider_id, *, strict_seed: bool = False) -> ProviderLayout | None:
     """The layout of a hub provider worker, or None for any other process this client starts.
 
     Only the real runner, started by an interpreter the hub built, with a bundle named in its
     environment, is a provider worker. Anything else (a fixture, a script a test writes) runs as
     it always did.
     """
+    seeded = False
     try:
         if not command or len(command) < 2 or os.path.abspath(str(command[-1])) != _RUNNER_PATH:
             return None
         bundle = (env or {}).get("BAZARR_PROVIDER_HUB_BUNDLE") or cwd
         if not bundle:
             return None
+        from . import seed
+
+        seeded = seed.is_runtime_path(bundle) or seed.is_runtime_path(command[0])
+
         from app.get_args import args
 
         from .state import provider_hub_dir
         from .venv import validated_interpreter
 
         hub_dir = Path(provider_hub_dir())
-        interpreter = validated_interpreter(hub_dir, command[0])
-        if interpreter is None:
-            return None
+        if seeded:
+            try:
+                manifest = json.loads((env or {}).get("BAZARR_PROVIDER_HUB_MANIFEST", ""))
+                paths = seed.resolve_paths(hub_dir, manifest, bundle, command[0]) if isinstance(manifest, dict) else None
+            except (OSError, ValueError, TypeError):
+                paths = None
+            if paths is None or (cwd is not None and Path(cwd) != paths[0]):
+                if strict_seed:
+                    raise WorkerError("the seeded provider bundle and interpreter could not be verified")
+                return None
+            bundle, interpreter = paths
+        else:
+            interpreter = validated_interpreter(hub_dir, command[0])
+            if interpreter is None:
+                return None
         key = _SAFE_KEY.sub("_", provider_id or "temporary").lstrip(".") or "temporary"
         return ProviderLayout(
             key=key[:64],
@@ -433,7 +450,11 @@ def provider_layout(command, cwd, env, provider_id) -> ProviderLayout | None:
             hub_dir=hub_dir,
             config_dir=Path(args.config_dir),
         )
-    except Exception:
+    except WorkerError:
+        raise
+    except Exception as error:
+        if strict_seed and seeded:
+            raise WorkerError("the seeded provider bundle and interpreter could not be verified") from error
         logger.debug("Provider Hub: could not work out the sandbox layout of a worker", exc_info=True)
         return None
 
@@ -699,10 +720,10 @@ class ProviderWorkerClient:
 
     def _sandbox_profile(self):
         """A callable that starts the sandboxed worker, or None when this start is unsandboxed."""
+        provider_id = getattr(self, "provider_id", None)
+        layout = provider_layout(self.command, self.cwd, self.env, provider_id, strict_seed=True)
         if getattr(self, "_sandbox_failed_open", False):
             return None
-        provider_id = getattr(self, "provider_id", None)
-        layout = provider_layout(self.command, self.cwd, self.env, provider_id)
         if layout is None:
             if _is_provider_runner(self.command, self.env):
                 from .sandbox import note_provider_unsandboxed, provider_profile_enabled

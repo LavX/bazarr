@@ -23,8 +23,6 @@ import sys
 from dataclasses import dataclass
 from typing import Any, Callable, Iterable
 
-from secret_store.scrub import scrub_text
-
 from .manifest import ManifestValidationError
 from .plugin_manifest import ANY_PLATFORM, PYTHON_BUNDLE, STDIO_WORKER, PluginManifest, parse_plugin_manifest
 from .versions import host_version_key, version_key
@@ -51,6 +49,8 @@ def refusal_text(text: Any) -> str:
     The cut comes second so a credential is masked whole before any of it can
     fall at the boundary, where a half of it would no longer match a pattern.
     """
+    from secret_store.scrub import scrub_text
+
     return scrub_text(str(text))[:REFUSAL_TEXT_MAX_CHARS]
 
 
@@ -147,6 +147,11 @@ def evaluate(plugin: PluginManifest, host: HostFacts) -> tuple[bool, str | None]
     kind = kind_for_api(plugin.kind_api)
     if kind is None or kind.name != plugin.kind:
         return False, f"this Bazarr+ does not support {plugin.kind_api}"
+    return evaluate_runtime(plugin, host)
+
+
+def evaluate_runtime(plugin: PluginManifest, host: HostFacts) -> tuple[bool, str | None]:
+    """Check runtime requirements after the caller has validated the plugin kind."""
     if not host_meets(host.version, plugin.min_host_version):
         return False, f"needs Bazarr+ {plugin.min_host_version} or later"
     if ANY_PLATFORM not in plugin.platforms and host.platform not in plugin.platforms:

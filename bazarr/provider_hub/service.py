@@ -31,10 +31,10 @@ from secret_store.registry import SECRET_DESCRIPTOR_KEY as SECRET_DESCRIPTORS_KE
 from secret_store.scrub import mask_credential_refusal, scrub_job_secrets, scrub_text
 
 from .manifest import ManifestValidationError, manifest_provider_id, validate_manifest
-from .kinds import (ATTACH_LIVE, ATTACH_ON_RESTART, DETACH_LIVE, SUBTITLE_PROVIDER, UnknownKindError, catalog_kind_of, get_kind, kind_for_api,
+from .kinds import (ATTACH_LIVE, ATTACH_ON_RESTART, DETACH_LIVE, SUBTITLE_PROVIDER, TRANSLATOR, UnknownKindError, catalog_kind_of, get_kind, kind_for_api,
                     kind_of, known_kinds)
 from .kinds import subtitle_provider as provider_kind
-from . import catalog_feed, closure, consent, detach, dev_source, floor, releases, revocation
+from . import catalog_feed, closure, consent, detach, dev_source, floor, releases, revocation, seed
 from .bundle import verify_bundle_tree
 from .compatibility import (
     CATALOG_LIST_PLUGINS, CATALOG_LIST_PROVIDERS, HostFacts, current_host, entry_compatibility, refusal_text,
@@ -54,6 +54,7 @@ from .state import (
     ORIGIN_BUNDLED,
     catalog_source_for_entry,
     load_state,
+    load_state_strict,
     mutate_state,
     provider_hub_dir,
     running_installations,
@@ -1191,10 +1192,16 @@ def list_catalog(auto_refresh: bool = False) -> dict[str, Any]:
         refresh_catalog()
         state = load_state()
     sources = state.get("catalog_sources") or {}
+    official = sources.get(OFFICIAL_CATALOG_SOURCE_ID) or {}
+    unsigned_floor = (official.get("catalog_status") == floor.CATALOG_STATUS_BUNDLED
+                      and floor.signed_context(official) is None)
     host = current_host()
     entries = []
     for entry in (state.get("catalog_entries") or {}).values():
         if isinstance(entry, dict):
+            if (unsigned_floor and entry.get("source") == OFFICIAL_CATALOG_SOURCE_ID
+                    and entry.get("catalog_list") == CATALOG_LIST_PLUGINS):
+                continue
             # Named from the source record as it is now. Marked when its source
             # may not install it, or when this Bazarr+ cannot run it.
             source = catalog_source_for_entry(sources, entry)
@@ -2968,10 +2975,6 @@ def test_provider_connection(provider_id: str) -> dict[str, Any] | None:
                 raise ProviderHubInstallError("active bundle path is missing")
             if not python_path:
                 raise ProviderHubInstallError("provider Python path is missing")
-            interpreter = validated_interpreter(provider_hub_dir(), python_path)
-            if interpreter is None:
-                raise ProviderHubInstallError("provider Python path is not one of the hub's environments")
-
             trusted = bool(provider.get("trusted", False))
             manifest = validate_manifest(
                 manifest_data,
@@ -2980,12 +2983,18 @@ def test_provider_connection(provider_id: str) -> dict[str, Any] | None:
                     trusted,
                 ),
             )
-            bundle_path = validated_bundle_path(provider_hub_dir(), active_path)
-            if bundle_path is None:
+            root = provider_hub_dir()
+            runtime = seed.resolve_paths(root, manifest.raw, active_path, python_path)
+            if runtime is None:
+                if seed.is_runtime_path(active_path) or seed.is_runtime_path(python_path):
+                    env_registry.mark_needs_repair(provider_id, python_path)
+                    raise ProviderHubInstallError("the active bundle and Python environment could not be verified")
+                if validated_interpreter(root, python_path) is None:
+                    raise ProviderHubInstallError("provider Python path is not one of the hub's environments")
                 env_registry.mark_needs_repair(provider_id, python_path)
                 raise ProviderHubInstallError("active bundle path is not one of the hub's bundles")
-            _remove_bundle_runtime_artifacts(bundle_path)
-            verify_bundle_tree(manifest, bundle_path)
+            bundle_path, interpreter = runtime
+            _verify_bundle_for_run(manifest, bundle_path)
 
             runner = Path(__file__).with_name("worker_runner.py")
             client = ProviderWorkerClient(
@@ -3491,6 +3500,15 @@ def _install_refusal(
     if source_id != OFFICIAL_CATALOG_SOURCE_ID and str(provider_id) in _reserved_provider_ids(state):
         return RESERVED_ID_REASON
     if source_id == OFFICIAL_CATALOG_SOURCE_ID:
+        source = (state.get("catalog_sources") or {}).get(source_id) or {}
+        if source.get("catalog_status") == floor.CATALOG_STATUS_BUNDLED:
+            document = floor.signed_context(source)
+            if document is None and kind != SUBTITLE_PROVIDER:
+                return "the bundled plugin catalog no longer verifies"
+            if document is not None:
+                revoked = revocation.lookup(revocation.parse(document.get(revocation.FIELD_NAME)), provider_id, version)
+                if revoked is not None:
+                    return _revocation_text(revocation.refusal, revoked, name or provider_id, version, "installed")
         return _supply_refusal(state)
     return None
 
@@ -3809,6 +3827,23 @@ def _bundled_wheels_argument(validated, bundle_path: Path) -> dict[str, Path]:
     return {"bundle_path": bundle_path} if declared_wheels(validated) else {}
 
 
+_ANY_INSTALLATION = object()
+
+
+def _running_release_candidate(installation, kind):
+    if not isinstance(installation, dict) or not installation.get("active_version"):
+        return None
+    raw = installation.get("manifest")
+    paths = installation.get("active_path"), installation.get("python_path")
+    if not isinstance(raw, dict) or not all(isinstance(path, str) and path for path in paths):
+        return None
+    try:
+        manifest = kind.validate_manifest(raw, bool(installation.get("trusted", False)))
+    except ManifestValidationError:
+        return None
+    return manifest, *paths
+
+
 def _stage_validated(
     validated,
     source_trusted: bool,
@@ -3819,8 +3854,14 @@ def _stage_validated(
     install_timeout: float | None = None,
     checkpoint=None,
     catalog_list: str | None = None,
+    ready_release: seed.Release | None = None,
+    expected_installation: Any = _ANY_INSTALLATION,
 ) -> dict[str, Any]:
-    """Shared install core: stage the bundle, build the venv, smoke-test, record.
+    """Shared install core: prepare the release, smoke-test, record.
+
+    A verified runtime pair can be staged directly. A seeded release stays
+    outside the writable environment registry and the list of files to clean up.
+    When boot supplies an expected installation, a concurrent change wins.
 
     ``bundle_stager(validated, deadline) -> Path`` decides where the bundle comes
     from (catalog fetch vs already-extracted local files). ``install_timeout``, when
@@ -3844,6 +3885,8 @@ def _stage_validated(
     if revoked:
         raise ProviderHubInstallError(revoked)
     existing = (state.get("installations") or {}).get(validated.provider_id)
+    if expected_installation is not _ANY_INSTALLATION and existing != expected_installation:
+        raise ProviderHubInstallError(f"{validated.provider_id} changed while the seed was being chosen")
     if isinstance(existing, dict) and kind_of(existing) != validated.kind:
         # An installation's kind never changes: the id already belongs to a
         # plugin of another kind, and replacing it would hand that plugin's
@@ -3873,15 +3916,24 @@ def _stage_validated(
     ) as job, pin_scope():
         try:
             deadline = None if install_timeout is None else time.monotonic() + max(0.0, install_timeout)
-            step("Downloading the provider")
-            bundle_path = bundle_stager(validated, deadline)
-            staged.append(bundle_path)
-            step("Installing the provider's dependencies")
-            install_remaining = None if deadline is None else max(0.0, deadline - time.monotonic())
-            env_path = PluginEnvironment(provider_hub_dir()).install(
-                validated, timeout=install_remaining, **_bundled_wheels_argument(validated, bundle_path))
-            staged.append(env_path)
-            staged_python_path = python_executable(env_path)
+            if ready_release is not None:
+                step("Checking the prepared release")
+                paths = seed.resolve_paths(provider_hub_dir(), validated.raw, ready_release.bundle, ready_release.interpreter)
+                if paths is None:
+                    raise ProviderHubInstallError("the prepared release could not be verified")
+                bundle_path, staged_python_path = paths
+                if not ready_release.seeded:
+                    env_path = staged_python_path.parent.parent
+            else:
+                step("Downloading the provider")
+                bundle_path = bundle_stager(validated, deadline)
+                staged.append(bundle_path)
+                step("Installing the provider's dependencies")
+                install_remaining = None if deadline is None else max(0.0, deadline - time.monotonic())
+                env_path = PluginEnvironment(provider_hub_dir()).install(
+                    validated, timeout=install_remaining, **_bundled_wheels_argument(validated, bundle_path))
+                staged.append(env_path)
+                staged_python_path = python_executable(env_path)
             step("Checking that the provider starts")
             smoke_timeout = None
             if deadline is not None:
@@ -3908,7 +3960,9 @@ def _stage_validated(
 
             def record_failed_install(state: dict[str, Any]) -> dict[str, Any]:
                 installations = state.setdefault("installations", {})
-                current = installations.get(validated.provider_id, existing)
+                current = installations.get(validated.provider_id)
+                if expected_installation is not _ANY_INSTALLATION and current != expected_installation:
+                    return dict(current or {})
                 installation = _failed_installation(
                     validated, current, install_error, source_trusted, origin, source_id, catalog_list, state
                 )
@@ -3925,7 +3979,9 @@ def _stage_validated(
             # What the row was before this write, to put back if the install is refused after it.
             before_staging.clear()
             before_staging["row"] = copy.deepcopy(installations.get(validated.provider_id))
-            current = installations.get(validated.provider_id, existing)
+            current = installations.get(validated.provider_id)
+            if expected_installation is not _ANY_INSTALLATION and current != expected_installation:
+                raise ProviderHubInstallError(f"{validated.provider_id} changed while the seed was being checked")
             if is_fresh and isinstance(current, dict) and current.get("state") == "removed":
                 # The row of a plugin removed in this run still carries its saved settings and keys. They go to the
                 # same plugin from the same source and to nobody else, so a package from another source, or an
@@ -3950,7 +4006,8 @@ def _stage_validated(
             installations[validated.provider_id] = installation
             # The environment passed the worker check, so it is now the one
             # recorded for this dependency set (a no-op when it already is).
-            env_registry.register_environment(state, environment_fingerprint(validated), env_path)
+            if env_path is not None:
+                env_registry.register_environment(state, environment_fingerprint(validated), env_path)
             # The plugin's secret paths join the persisted set now, so a
             # credential configured through the settings card is encrypted
             # at rest from the first save and stays covered after removal.
@@ -3958,8 +4015,11 @@ def _stage_validated(
             return dict(installation)
 
         try:
-            with env_registry.recording_environment(env_path):
+            if env_path is None:
                 installation = mutate_state(record_staged_install)
+            else:
+                with env_registry.recording_environment(env_path):
+                    installation = mutate_state(record_staged_install)
         except env_registry.EnvironmentGone as error:
             raise ProviderHubInstallError(str(error)) from error
         except ProviderHubInstallError:
@@ -4081,6 +4141,20 @@ def stage_install(
     origin = "catalog"
     manifest_source = validated.raw.get("source") if isinstance(validated.raw, dict) else None
     catalog_url = manifest_source.get("catalog_url") if isinstance(manifest_source, dict) else None
+    ready_release = None
+    source = (state.get("catalog_sources") or {}).get(source_id)
+    official = source_trusted and source_id == OFFICIAL_CATALOG_SOURCE_ID and isinstance(source, dict)
+    if (official and catalog_list == CATALOG_LIST_PLUGINS and source.get("catalog_status") == floor.CATALOG_STATUS_BUNDLED
+            and floor.signed_context(source) is None):
+        raise ProviderHubInstallError("the bundled plugin catalog no longer verifies")
+    if official and not source.get("dev_ref"):
+        existing = (state.get("installations") or {}).get(validated.provider_id)
+        config_candidate = None
+        if isinstance(existing, dict) and existing.get("source_id") == source_id and kind_of(existing) == kind.name:
+            config_candidate = _running_release_candidate(existing, kind)
+        ready_release = seed.select_release(
+            provider_hub_dir(), validated.provider_id, config_candidate=config_candidate, requested=validated.raw,
+        )
     mirror_channel = _bundle_mirror_channel(state, source_id)
     token = _BUNDLE_MIRROR_CHANNEL.set(mirror_channel)
     try:
@@ -4096,11 +4170,62 @@ def stage_install(
             install_timeout=install_timeout,
             checkpoint=checkpoint,
             catalog_list=catalog_list,
+            ready_release=ready_release,
         )
     finally:
         _BUNDLE_MIRROR_CHANNEL.reset(token)
         if mirror_channel is not None:
             _persist_transport()
+
+
+def activate_google_seed() -> bool:
+    """Start Google's verified image release at boot, or keep a valid config release.
+
+    The translator startup code decides whether the engine is wanted. This
+    function stages only the designated Google release and uses normal
+    activation. Baked trust is read-only and no fetched catalog is needed.
+    """
+    plugin_id = seed.GOOGLE_PLUGIN_ID
+    kind = get_kind(TRANSLATOR)
+    state = load_state_strict()
+    official = (state.get("catalog_sources") or {}).get(OFFICIAL_CATALOG_SOURCE_ID) or {}
+    if official.get("dev_ref") or official.get("enabled") is False:
+        return False
+    existing = (state.get("installations") or {}).get(plugin_id)
+    if isinstance(existing, dict) and (
+        existing.get("state") in ("staged", "removed") or not kind.is_enabled(existing)
+        or kind_of(existing) != TRANSLATOR or existing.get("source_id") != OFFICIAL_CATALOG_SOURCE_ID
+        or not existing.get("trusted") or (existing.get("origin") or "catalog") != "catalog"
+    ):
+        return False
+
+    config = _running_release_candidate(existing, kind)
+
+    def usable(release: seed.Release) -> bool:
+        manifest = release.manifest
+        if _revocation_refusal(state, plugin_id, manifest.version, manifest.name):
+            return False
+        if not release.seeded:
+            return True
+        entry = {"source": OFFICIAL_CATALOG_SOURCE_ID, "manifest": manifest.raw}
+        needs = _closure_of(state, entry) if closure.has_needs(manifest.raw) else closure.Closure()
+        if not needs.resolved or any(member.plugin_id != plugin_id for member in needs.members):
+            return False
+        if config is None:
+            return True
+        delta = consent.update_delta(state, config[0].raw, entry, needs)
+        return not delta["needs_consent"]
+
+    chosen = seed.select_release(provider_hub_dir(), plugin_id, config_candidate=config, usable=usable)
+    if chosen is None:
+        return False
+    if not chosen.seeded or (config is not None and (str(chosen.bundle), str(chosen.interpreter)) == config[1:]):
+        return True
+    _stage_validated(
+        chosen.manifest, True, "catalog", OFFICIAL_CATALOG_SOURCE_ID, None,
+        catalog_list=CATALOG_LIST_PLUGINS, ready_release=chosen, expected_installation=existing,
+    )
+    return activate_release(plugin_id, at_boot=True).activated
 
 
 def _find_catalog_entry(
@@ -4926,14 +5051,16 @@ def _verified_staged_release(provider_id: str, installation: dict[str, Any], rev
     staged_python_path = installation.get("staged_python_path")
     if not staged_path or not staged_python_path:
         raise ProviderHubInstallError("staged bundle or python path is missing")
-    staged_interpreter = validated_interpreter(provider_hub_dir(), staged_python_path)
-    if staged_interpreter is None:
-        raise ProviderHubInstallError("staged python path is not one of the hub's environments")
-    staged_bundle_path = validated_bundle_path(provider_hub_dir(), staged_path)
-    if staged_bundle_path is None:
+    root = provider_hub_dir()
+    runtime = seed.resolve_paths(root, manifest.raw, staged_path, staged_python_path)
+    if runtime is None:
+        if seed.is_runtime_path(staged_path) or seed.is_runtime_path(staged_python_path):
+            raise ProviderHubInstallError("the staged bundle and Python environment could not be verified")
+        if validated_interpreter(root, staged_python_path) is None:
+            raise ProviderHubInstallError("staged python path is not one of the hub's environments")
         raise ProviderHubInstallError("staged bundle path is not one of the hub's bundles")
-    _remove_bundle_runtime_artifacts(staged_bundle_path)
-    verify_bundle_tree(manifest, staged_bundle_path)
+    staged_bundle_path, staged_interpreter = runtime
+    _verify_bundle_for_run(manifest, staged_bundle_path)
     kind.smoke_test(manifest, staged_bundle_path, staged_interpreter)
     return manifest
 
@@ -5176,12 +5303,11 @@ def rollback_release(provider_id: str, consent_digest: str | None = None) -> Act
     try:
         kind = get_kind(kind_of(row))
         manifest = kind.validate_manifest(target.manifest, bool(row.get("trusted", False)))
-        bundle = validated_bundle_path(provider_hub_dir(), target.bundle_path)
-        interpreter = validated_interpreter(provider_hub_dir(), target.python_path)
-        if (bundle is None or interpreter is None or not Path(bundle).is_dir() or not Path(interpreter).exists()
+        runtime = seed.resolve_paths(provider_hub_dir(), manifest.raw, target.bundle_path, target.python_path)
+        if (runtime is None or not runtime[0].is_dir() or not runtime[1].exists()
                 or (target.bundle_digest and manifest.bundle_sha256 != target.bundle_digest)):
             raise ProviderHubInstallError("not on disk")
-        verify_bundle_tree(manifest, bundle)
+        verify_bundle_tree(manifest, runtime[0])
     except Exception as error:
         raise ProviderHubInstallError(
             f"{name} v{target.version} is no longer on disk, or no longer matches what it was, "

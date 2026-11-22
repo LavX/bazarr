@@ -70,6 +70,12 @@ else:
         logging.exception("Unable to start the translation runtime after the migrations")
     upgrade_languages_profile_values()
     fix_languages_profiles_with_duplicate_ids()
+    try:
+        if getattr(settings.translator, "runtime_v2", False) is True:
+            from subtitles.tools.translate.runtime.startup import start_google_from_seed
+            start_google_from_seed()
+    except Exception:  # pragma: no cover - the engine must not prevent startup
+        logging.exception("Unable to start the seeded Google Translate engine")
     activate_staged_installations()
     try:
         # A removal staged in the last run is finished by now: clear what the removed translators left.

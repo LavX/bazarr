@@ -108,7 +108,7 @@ def _interpreter_matches(env_dir: Path) -> bool:
     """Whether the venv was made by the running interpreter's minor version."""
     try:
         text = (env_dir / "pyvenv.cfg").read_text(encoding="utf-8")
-    except OSError:
+    except (OSError, UnicodeError):
         return False
     for line in text.splitlines():
         key, _, value = line.partition("=")
@@ -149,7 +149,7 @@ def _requirements_match(env_dir: Path, manifest) -> bool:
         lines = (env_dir / "requirements.txt").read_text(encoding="utf-8").splitlines()
     except FileNotFoundError:
         return not wanted
-    except OSError:
+    except (OSError, UnicodeError):
         return False
     return {line.strip() for line in lines if line.strip()} == wanted
 

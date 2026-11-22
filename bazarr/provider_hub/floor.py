@@ -368,6 +368,17 @@ def seed_candidate(source: dict[str, Any], entries: dict[str, Any]) -> tuple[dic
     return {key: value for key, value in document.items() if key != "plugins"}, floor.commit
 
 
+def signed_context(source: dict[str, Any]) -> dict[str, Any] | None:
+    """Recheck the signed catalog behind a cached bundled source."""
+    marker = source.get("floor_seed")
+    if not isinstance(marker, dict):
+        return None
+    snapshot = _usable_floor()
+    if snapshot is None or marker.get("commit") != snapshot.commit:
+        return None
+    return snapshot.signed_catalog()
+
+
 def trust_source(source: dict[str, Any]) -> None:
     """Trust the official source for the release's own catalog."""
     source["trusted"] = True
