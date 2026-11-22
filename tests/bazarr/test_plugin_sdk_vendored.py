@@ -6,6 +6,7 @@ protocol files must match the host's, it must use only the standard library,
 and a plugin must run on it in an isolated interpreter the way a worker does.
 """
 import ast
+import importlib
 import importlib.util
 import json
 import re
@@ -239,6 +240,62 @@ def test_a_plugin_runs_on_the_vendored_copy_in_an_isolated_interpreter(tmp_path)
     assert result.returncode == 0, result.stdout + result.stderr
     last = result.stdout.strip().splitlines()[-1]
     assert last.startswith("OK structure") and "cancel" in last[3:].split(","), result.stdout
+
+
+def test_a_cleanup_overrun_retires_the_vendored_worker(tmp_path, monkeypatch):
+    plugin = '''
+import asyncio
+from pathlib import Path
+from bazarr_plugin_sdk.translator.v1 import TranslatorPlugin
+
+class Plugin(TranslatorPlugin):
+    async def translate(self, request, ctx):
+        started = asyncio.Event()
+
+        async def left_behind():
+            started.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                Path(request["marker"]).write_text("cleanup started", encoding="utf-8")
+                await asyncio.Event().wait()
+
+        self.left_behind = asyncio.create_task(left_behind())
+        await started.wait()
+        return {"finished": True}
+'''
+    (tmp_path / "stalled_plugin.py").write_text(textwrap.dedent(plugin), encoding="utf-8")
+    marker = tmp_path / "cleanup"
+    prefix = "bazarr_plugin_sdk"
+    saved_modules = {name: module for name, module in sys.modules.items() if name == prefix or name.startswith(prefix + ".")}
+    for name in saved_modules:
+        del sys.modules[name]
+    monkeypatch.syspath_prepend(str(DIST))
+    try:
+        runner = importlib.import_module("bazarr_plugin_sdk.runner")
+        testing = importlib.import_module("bazarr_plugin_sdk.testing")
+        assert Path(runner.__file__).resolve().parent == PACKAGE
+        host = testing.ProcessHost("stalled_plugin:Plugin", paths=[tmp_path], sdk_root=DIST)
+        try:
+            host.wait_ready(timeout=10)
+            response = host.request("translate", {"request": {"marker": str(marker)}}, wait=20)
+            assert response.value == {"finished": True}, response.value
+            assert marker.read_text(encoding="utf-8") == "cleanup started"
+            assert host.process.wait(timeout=10) == runner.EXIT_ABANDONED
+            assert host.bye.wait(5)
+        finally:
+            try:
+                if host.process.poll() is None:
+                    host.process.kill()
+                host.process.wait(timeout=5)
+            finally:
+                host.close(timeout=5)
+        assert "retiring the worker, left running: cancel_remaining_tasks" in host.stderr_text, host.stderr_text
+    finally:
+        for name in list(sys.modules):
+            if name == prefix or name.startswith(prefix + "."):
+                del sys.modules[name]
+        sys.modules.update(saved_modules)
 
 
 def _runner_constant(name):
