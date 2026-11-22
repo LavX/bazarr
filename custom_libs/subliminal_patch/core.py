@@ -649,7 +649,7 @@ class SZProviderPool(ProviderPool):
         self._store_lock = threading.RLock()
         # Operation counts and pending cleanup for detached built-ins, by instance.
         self._active_built_in_calls = {}
-        self._retiring_built_ins = set()
+        self._retiring_built_ins = defaultdict(set)
         self._built_in_retirement_ended = threading.Condition(self._store_lock)
 
         #: One lock per provider name, held while an instance of it is built, so
@@ -844,7 +844,7 @@ class SZProviderPool(ProviderPool):
                     calls[token] -= 1
                     if calls[token] == 0:
                         del calls[token]
-                        terminate = name in self._retiring_built_ins
+                        terminate = token in self._retiring_built_ins.get(name, ())
                 if terminate:
                     self._finish_built_in_retirement(name, instance)
 
@@ -1013,8 +1013,9 @@ class SZProviderPool(ProviderPool):
             provider = self.detach_provider(name, lambda cached: not getattr(cached, 'hub_proxy', False))
             if provider is None:
                 return
-            self._retiring_built_ins.add(name)
-            if id(provider) in self._active_built_in_calls:
+            token = id(provider)
+            self._retiring_built_ins[name].add(token)
+            if token in self._active_built_in_calls:
                 return
         self._finish_built_in_retirement(name, provider)
 
@@ -1023,8 +1024,11 @@ class SZProviderPool(ProviderPool):
             self._terminate_provider(name, provider)
         finally:
             with self._built_in_retirement_ended:
-                self._retiring_built_ins.remove(name)
-                self._built_in_retirement_ended.notify_all()
+                pending = self._retiring_built_ins[name]
+                pending.remove(id(provider))
+                if not pending:
+                    del self._retiring_built_ins[name]
+                    self._built_in_retirement_ended.notify_all()
 
     @staticmethod
     def _terminate_provider(name, provider):

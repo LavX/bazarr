@@ -48,7 +48,7 @@ def _provider_class(name, worker, *, gate=None, started=None, record=None):
     """A plugin class whose calls wait on ``gate`` (or are cut), recording each one that ran to its end."""
     from subzero.language import Language
     from provider_hub.registry import HubProxyProvider
-    from provider_hub.worker import WorkerError
+    from provider_hub.worker import WorkerCancelled
 
     def wait_for_gate():
         if started is not None:
@@ -57,7 +57,7 @@ def _provider_class(name, worker, *, gate=None, started=None, record=None):
             return
         while not gate.is_set():
             if worker.killed.is_set():
-                raise WorkerError("worker closed stdout")
+                raise WorkerCancelled("worker closed stdout")
             time.sleep(0.01)
 
     class Plugin(HubProxyProvider):
@@ -1663,6 +1663,172 @@ def test_the_release_window_built_in_finishes_before_its_replacement_initializes
     assert outcome["value"].status == "empty"
     clean = built["value"]
     assert clean is not old and clean.config == {"password": "own"}
+
+
+def test_an_older_call_cannot_end_a_newer_instances_retirement(world, monkeypatch):
+    from provider_hub import registry
+
+    first_started, second_started = threading.Event(), threading.Event()
+    first_done, second_done = threading.Event(), threading.Event()
+    replacement_waiting = threading.Event()
+    terminated = []
+    built_in = _built_in_class(BUILT_IN)
+
+    class Searching(built_in):
+        def __init__(self, password):
+            self.password = password
+
+        def initialize(self):
+            if self.password == "own":
+                assert "second" in terminated
+
+        def list_subtitles(self, video, languages):
+            started, done = {"first": (first_started, first_done), "second": (second_started, second_done)}[self.password]
+            started.set()
+            assert done.wait(WAIT)
+            return []
+
+        def terminate(self):
+            terminated.append(self.password)
+
+    world.registry.register(BUILT_IN, Searching)
+    pool = world.pool(BUILT_IN)
+    pool.provider_configs[BUILT_IN] = {"password": "first"}
+    monkeypatch.setattr("app.get_providers.get_providers_auth", lambda: {BUILT_IN: {"password": "own"}})
+    wait = pool._built_in_retirement_ended.wait
+
+    def note_waiting(*args):
+        replacement_waiting.set()
+        return wait(*args)
+
+    monkeypatch.setattr(pool._built_in_retirement_ended, "wait", note_waiting)
+    first, first_result = _in_thread(_search, pool, BUILT_IN)
+    second = replacement = None
+    try:
+        assert first_started.wait(WAIT)
+        pool.provider_configs.update({BUILT_IN: {"password": "second"}})
+        assert terminated == ["first"]
+        second, second_result = _in_thread(_search, pool, BUILT_IN)
+        assert second_started.wait(WAIT)
+        registry.release_provider_id(BUILT_IN)
+        replacement, built = _in_thread(pool.__getitem__, BUILT_IN)
+        assert replacement_waiting.wait(WAIT)
+
+        first_done.set()
+        first.join(WAIT)
+
+        assert first_result["value"].status == "empty"
+        assert terminated == ["first"]
+    finally:
+        first_done.set()
+        second_done.set()
+        first.join(WAIT)
+        if second is not None:
+            second.join(WAIT)
+        if replacement is not None:
+            replacement.join(WAIT)
+
+    assert second_result["value"].status == "empty"
+    assert terminated == ["first", "second"]
+    assert built["value"].password == "own"
+
+
+@pytest.mark.parametrize("download", [False, True], ids=["provider-response", "payload-validation"])
+def test_an_independent_worker_failure_is_preserved_during_a_cut(world, monkeypatch, download):
+    from provider_hub import detach, service
+    from provider_hub.protocol import HubWorkerSubtitle, WorkerProtocolError
+    from provider_hub.registry import HubProxyProvider
+    from provider_hub.worker import WorkerError, WorkerResult, _raise_worker_error
+    from subzero.language import Language
+
+    started = threading.Event()
+    errors = []
+
+    class RespondingWorker(FakeWorker):
+        def request(self, op, payload, **kwargs):
+            started.set()
+            assert self.killed.wait(WAIT)
+            if op == "download":
+                return WorkerResult(ok=True, payload={}, events=[])
+            _raise_worker_error({"code": "provider", "class_name": "RuntimeError", "message": "provider failed"})
+
+    worker = RespondingWorker()
+
+    class Plugin(HubProxyProvider):
+        provider_name = PLUGIN
+        languages = {Language("eng")}
+
+        def __init__(self):
+            super().__init__(worker_client=worker)
+
+    world.install()
+    world.registry.register(PLUGIN, Plugin)
+    pool = world.pool()
+    pool.throttle_callback = lambda name, error, **kw: errors.append(error)
+    monkeypatch.setattr(detach, "REMOVE_GRACE_SECONDS", 0.01)
+    subtitle = HubWorkerSubtitle(PLUGIN, PLUGIN, "candidate", Language("eng"), {})
+    if download:
+        thread, result = _in_thread(pool.download_subtitle, subtitle)
+    else:
+        thread, result = _in_thread(_search, pool)
+
+    try:
+        assert started.wait(WAIT)
+        service.remove_installation(PLUGIN)
+        thread.join(WAIT)
+        assert detach.wait_idle(WAIT)
+    finally:
+        worker.killed.set()
+        thread.join(WAIT)
+
+    assert worker.cancels == 1
+    assert len(errors) == 1
+    if download:
+        assert result == {"value": False}
+        assert isinstance(errors[0], WorkerProtocolError)
+    else:
+        assert result["value"].status == "error"
+        assert isinstance(errors[0], WorkerError)
+        assert errors[0].code == "provider"
+
+
+@pytest.mark.parametrize("cancelled", [False, True], ids=["worker-crash", "forced-cut"])
+def test_worker_eof_is_classified_at_the_transport_boundary(monkeypatch, cancelled):
+    from io import StringIO
+    from queue import Queue
+    from types import SimpleNamespace
+
+    from provider_hub import worker
+
+    started = threading.Event()
+
+    class ReplyQueue(Queue):
+        def get(self, *args, **kwargs):
+            started.set()
+            return super().get(*args, **kwargs)
+
+    client = worker.ProviderWorkerClient(["fake"], provider_id=PLUGIN)
+    stdout = ReplyQueue()
+    client.process = SimpleNamespace(stdin=StringIO(), stdout=object())
+    client._stdout_queue = stdout
+    monkeypatch.setattr(client, "start", lambda: False)
+    monkeypatch.setattr(client, "_has_exited", lambda process: True)
+    monkeypatch.setattr(client, "_kill_worker", lambda: stdout.put(None))
+    thread, result = _in_thread(client.request, "search")
+    try:
+        assert started.wait(WAIT)
+        if cancelled:
+            client.cancel()
+        else:
+            stdout.put(None)
+        thread.join(WAIT)
+    finally:
+        if thread.is_alive():
+            stdout.put(None)
+            thread.join(WAIT)
+
+    error_type = worker.WorkerCancelled if cancelled else worker.WorkerError
+    assert type(result["error"]) is error_type
 
 
 @pytest.mark.parametrize("detailed", [True, False])

@@ -29,7 +29,9 @@ from .state import active_installations, blocked_installations, provider_hub_dir
 from . import runtime_status
 from .env_registry import env_dir_of
 from .venv import hold_environment, validated_bundle_path, validated_interpreter
-from .worker import ProviderWorkerClient, release_when_gone, RequestNotAdmitted, WorkerBusy, WorkerError, worker_command
+from .worker import (
+    ProviderWorkerClient, RequestNotAdmitted, WorkerBusy, WorkerCancelled, WorkerError, release_when_gone, worker_command,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -129,8 +131,6 @@ class HubProxyProvider(Provider):
     #: proxy admits no new operation and never starts a worker.
     _retired = False
     _active_operations = 0
-    #: Set before a forced stop so an interrupted call does not report a provider failure.
-    _cut = False
     #: Set by whichever path stops this proxy's worker first, so only one does.
     _stopping = False
 
@@ -184,12 +184,8 @@ class HubProxyProvider(Provider):
             self._active_operations += 1
         try:
             yield
-        except Exception as error:
-            with _PROXY_LOCK:
-                cut = self._cut
-            if cut:
-                raise ProviderCallInterruptedError(self.provider_name) from error
-            raise
+        except WorkerCancelled as error:
+            raise ProviderCallInterruptedError(self.provider_name) from error
         finally:
             with _PROXY_LOCK:
                 self._active_operations -= 1
@@ -798,8 +794,6 @@ def _drain_instance(instance, release, grace: float | None = None) -> None:
                        getattr(instance, "provider_name", "?"), grace)
         if callable(cancel):
             try:
-                with _PROXY_LOCK:
-                    instance._cut = True
                 cancel()
             except Exception:
                 logger.exception("Provider Hub: could not cut the calls of %s", getattr(instance, "provider_name", "?"))
