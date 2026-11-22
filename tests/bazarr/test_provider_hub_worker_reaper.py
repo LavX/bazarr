@@ -427,3 +427,55 @@ def test_an_exited_provider_worker_stays_registered_until_its_cleanup_is_confirm
     cleanup[0] = "confirmed"
     client.stop_if_idle(0)
     assert live_workers(plugin_id) == []
+
+
+def test_windows_tracks_the_process_handle_and_retries_after_a_worker_exits(monkeypatch, tmp_path):
+    import ctypes
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+
+    from provider_hub import worker
+    from provider_hub.sandbox import activity
+
+    running = [True]
+    born = [42]
+    handle = object()
+
+    def get_times(checked, created, *_):
+        assert checked is handle
+        created._obj.dwLowDateTime = born[0]
+        return 1
+
+    kernel = SimpleNamespace(
+        OpenProcess=Mock(return_value=handle),
+        GetProcessTimes=Mock(side_effect=get_times),
+        WaitForSingleObject=Mock(side_effect=lambda checked, timeout: 0x102 if running[0] else 0),
+        CloseHandle=Mock(return_value=1),
+    )
+    monkeypatch.setattr(ctypes, "WinDLL", lambda name, **kwargs: kernel, raising=False)
+    monkeypatch.setattr(activity, "is_windows", lambda: True)
+    monkeypatch.setattr(activity, "_root", activity._directory(tmp_path))
+    process = SimpleNamespace(pid=321, poll=lambda: None if running[0] else 0)
+    assert activity.start_worker(lambda: process) is process
+    assert process.activity_record.is_file()
+    assert activity.previous_workers_stopped(tmp_path)
+    monkeypatch.setattr(activity, "_owner", "second-run")
+    assert not activity.previous_workers_stopped(tmp_path)
+
+    client = worker.ProviderWorkerClient([], provider_id="alpha")
+    client.process = process
+    client._groups = [process.pid]
+    assert not worker._client_gone(client, 0)
+    running[0] = False
+    assert worker._client_gone(client, 0)
+    assert activity.previous_workers_stopped(tmp_path)
+    assert not process.activity_record.exists()
+    kernel.WaitForSingleObject.assert_called_with(handle, 0)
+    kernel.CloseHandle.assert_called_with(handle)
+
+    running[0] = True
+    assert activity.start_worker(lambda: process) is process
+    monkeypatch.setattr(activity, "_owner", "third-run")
+    born[0] = 43  # the PID now belongs to a different process
+    assert activity.previous_workers_stopped(tmp_path)
+    assert not process.activity_record.exists()

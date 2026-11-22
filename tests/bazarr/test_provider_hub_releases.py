@@ -1902,7 +1902,7 @@ def test_boot_waits_for_the_previous_workers_before_finishing_uninstall(data_rel
 
     outcomes = [sweep.SweptSession(1, (), "survivors")]
     monkeypatch.setattr(detach, "snapshot_workers", lambda provider_id: [])
-    monkeypatch.setattr(sweep, "sweep_leftovers", lambda config: sweep.SweepResult(sessions=outcomes))
+    monkeypatch.setattr(sweep, "sweep_leftovers", lambda config, **kwargs: sweep.SweepResult(sessions=outcomes))
     service.activate_staged_installations()
     assert old.exists()
     assert load_state()["installations"]["exampleservice"]["pending_restart"]
@@ -1977,3 +1977,61 @@ def test_a_failed_restage_clears_the_stage_it_replaced(data_release, service_kin
     with pytest.raises(service.ProviderHubInstallError, match="sample check failed"):
         service._stage_validated(validation, True, "catalog", "official", stage)
     assert not folder.exists()
+
+
+def test_boot_activation_waits_until_previous_workers_release_the_active_data(
+        data_release, service_kind, monkeypatch):
+    from provider_hub.kinds import ATTACH_LIVE
+    from provider_hub.state import load_state
+
+    service, new, old = data_release
+    service._stage_validated(service_kind.validate_manifest(new, True), True, "catalog", "official",
+                             lambda manifest, deadline: Path(_bundle(manifest.provider_id, manifest.version)))
+    old_file = old / "settings"
+    old_file.write_text("last write from v1")
+    monkeypatch.setattr(service, "_previous_workers_stopped", lambda: False)
+    assert service.activate_staged_installations() == []
+    row = load_state()["installations"]["exampleservice"]
+    assert row["active_version"] == "1.0.0" and row["staged_version"] == "1.1.0"
+    assert old_file.read_text() == "last write from v1"
+
+    service_kind.attach_policy = ATTACH_LIVE
+    assert not service.activate_release("exampleservice").activated
+    assert load_state()["installations"]["exampleservice"]["active_version"] == "1.0.0"
+
+    monkeypatch.setattr(service, "_previous_workers_stopped", lambda: True)
+    assert service.activate_staged_installations() == ["exampleservice"]
+    row = load_state()["installations"]["exampleservice"]
+    assert row["active_version"] == "1.1.0"
+
+
+def test_keep_retry_does_not_replace_the_already_retained_active_data_with_legacy_home(staged, monkeypatch):
+    from provider_hub import datadir, service
+    from provider_hub.state import provider_hub_dir
+
+    root = provider_hub_dir()
+    plugin_id, key = "alpha", "a" * 32
+    active = datadir.release_path(root, plugin_id, key)
+    legacy = datadir.legacy_data_path(root, plugin_id)
+    for folder, value in ((active, "latest data"), (legacy, "old data")):
+        folder.mkdir(parents=True)
+        (folder / "sample").write_text(value)
+    row = _row(plugin_id, active="1.0.0", active_data_key=key)
+    original_remove = datadir.remove
+
+    with monkeypatch.context() as interruption:
+        def fail_on_legacy(path):
+            if path == legacy:
+                raise OSError("simulated legacy cleanup failure")
+            return original_remove(path)
+
+        interruption.setattr(datadir, "remove", fail_on_legacy)
+        with pytest.raises(OSError):
+            service._settle_release_data(plugin_id, row, True)
+    kept = active.parent / "kept"
+    assert not active.exists() and legacy.exists()
+    assert (kept / "sample").read_text() == "latest data"
+
+    service._settle_release_data(plugin_id, row, True)
+    assert not legacy.exists()
+    assert (kept / "sample").read_text() == "latest data"

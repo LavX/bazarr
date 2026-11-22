@@ -18,6 +18,7 @@ from pathlib import Path, PurePosixPath, PureWindowsPath
 
 ARCHIVE_DIR = "plugin_data"
 OMISSIONS_ARCHIVE = "plugin_data_omitted.json"
+RESTORE_APPLIED_MARKER = ".applied"
 QUIESCE_TIMEOUT = 15 * 60
 # Keep an archive's database snapshot and data folders on the same side of an activation or removal.
 release_lock = threading.RLock()
@@ -444,7 +445,7 @@ def restore_backup(source: Path, root: Path) -> None:
     wanted = {(plugin_id, key) for plugin_id, key, *_ in _release_folders(document, previous)}
     # This marker is written only after every swap. Until then the original
     # trees live beside their destinations, including if Bazarr exits midway.
-    committed = source / ".applied"
+    committed = source / RESTORE_APPLIED_MARKER
     folders = []
     for plugin in sorted(source.iterdir()):
         if plugin == committed:
@@ -476,7 +477,6 @@ def restore_backup(source: Path, root: Path) -> None:
                 if _checked_directory(target):
                     target.rename(stage / "old")
                 (stage / "new").rename(target)
-            committed.touch(exist_ok=False)
         except BaseException:
             for _, target, stage in reversed(folders):
                 try:
@@ -484,6 +484,9 @@ def restore_backup(source: Path, root: Path) -> None:
                 except (OSError, DataFolderError):
                     logger.exception("Could not put the original plugin folder back at %s; kept in %s", target, stage)
             raise
+        # Once written, the marker decides the retry. An interruption in or
+        # after this step must not undo swaps that may already be committed.
+        committed.touch(exist_ok=False)
     for _, _, stage in folders:
         if _checked_directory(stage):
             remove(stage)

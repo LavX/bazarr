@@ -893,12 +893,15 @@ def _start_plain(command: list, **kwargs: Any) -> "WorkerProcess":
     ``poll``, ``wait`` or ``communicate`` without the group becoming
     unaddressable. Without an anchor the worker leads its own session instead.
     """
+    from . import activity
+
     anchor = _start_anchor()
     try:
         if anchor is not None:
-            process = WorkerProcess(command, process_group=anchor.pid, **kwargs)
+            process = activity.start_worker(
+                lambda: WorkerProcess(command, process_group=anchor.pid, **kwargs), group=anchor.pid)
         else:
-            process = WorkerProcess(command, start_new_session=True, **kwargs)
+            process = activity.start_worker(lambda: WorkerProcess(command, start_new_session=True, **kwargs))
     except BaseException:
         if anchor is not None:
             _finish_anchor(anchor)
@@ -1692,8 +1695,11 @@ def _start(
         # Plain Popen, no preexec_fn. The launcher gets an empty environment:
         # nothing from the host's reaches it, and so nothing reaches the worker
         # except what the spec lists (the owner marker among it).
+        command = [python, "-I", "-S", "-B", str(LAUNCHER_PATH), str(spec_fd), str(life_r), str(status_w)]
+        if marker is not None:
+            command.append("--owner=" + marker)
         process = LauncherProcess(
-            [python, "-I", "-S", "-B", str(LAUNCHER_PATH), str(spec_fd), str(life_r), str(status_w)],
+            command,
             lifeline=life_w,
             status=status_r,
             env={},

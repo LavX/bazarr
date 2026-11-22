@@ -97,6 +97,7 @@ def backup_env(monkeypatch, tmp_path):
     (config_dir / 'config' / 'config.yaml').write_text('general:\n  port: 6767\n', encoding='utf-8')
     _write_marker_database(config_dir / 'db' / 'bazarr.db', 'live')
 
+    monkeypatch.setattr('provider_hub.sandbox.sweep.previous_workers_stopped', lambda config: True)
     monkeypatch.setattr(backup_module, 'args', SimpleNamespace(config_dir=str(config_dir)))
     monkeypatch.setattr(settings.backup, 'folder', str(config_dir / 'backup'))
     monkeypatch.setattr(backup_module, 'event_stream', lambda *a, **kw: None)
@@ -712,13 +713,14 @@ def test_a_configuration_that_cannot_be_put_in_place_stops_the_start(backup_env,
 
     assert backup_env.stops == [EXIT_RESTORE_ERROR]
     assert backup_env.restarts == []
-    # The configuration from the backup is kept for the operator to put in place.
+    # The staged configuration is retained for the next startup.
     staged = backup_env.config_dir / 'config' / 'config.yaml.restore'
     with open(staged, encoding='utf-8') as handle:
         saved = yaml.safe_load(handle)
     assert saved['general']['port'] == 7000
     assert saved['auth']['session_generation'] > 0
-    assert f'kept at {staged}: copy it over {dest_config}' in caplog.text
+    assert f'kept at {staged}' in caplog.text
+    assert (backup_env.restore_dir / backup_env.module._RESTORE_HANDOFF).is_file()
 
 
 def test_a_start_with_nothing_to_restore_goes_on(backup_env, monkeypatch):
@@ -1505,8 +1507,9 @@ def test_a_failed_plugin_restore_keeps_the_pending_input_and_all_original_folder
     assert (datadir.release_path(root, "beta", "b" * 32) / "sample").read_text() == "beta original"
 
 
+@pytest.mark.parametrize("interruption", ["before_config_swap", "after_config_swap", "after_handoff"])
 def test_plugin_restore_retries_the_handoff_without_restoring_sqlite_twice(
-        backup_env, monkeypatch, tmp_path, service_kind):
+        backup_env, monkeypatch, tmp_path, service_kind, interruption):
     import sqlalchemy as sa
 
     from plugin_platform_helpers import service_manifest
@@ -1551,14 +1554,34 @@ def test_plugin_restore_retries_the_handoff_without_restoring_sqlite_twice(
 
         monkeypatch.setattr(backup_env.module, "_restore_database", restore_once)
         with monkeypatch.context() as interrupted:
+            real_replace = os.replace
+            staged_config = backup_env.config_dir / "config" / "config.yaml.restore"
+
+            def replace_config(source, destination):
+                if os.fspath(source) != str(staged_config):
+                    return real_replace(source, destination)
+                if interruption == "before_config_swap":
+                    raise OSError("simulated config swap failure")
+                real_replace(source, destination)
+                raise SystemExit(41)
+
             def exit_after_handoff():
                 raise SystemExit(41)
 
-            interrupted.setattr(backup_env.module, "_clear_restore_directory", exit_after_handoff)
-            with pytest.raises(SystemExit):
-                backup_env.module.restore_from_backup()
-        assert (backup_env.restore_dir / "pending_plugin_data").is_dir()
-        assert not (backup_env.restore_dir / datadir.ARCHIVE_DIR).exists()
+            if interruption == "after_handoff":
+                interrupted.setattr(backup_env.module, "_clear_restore_directory", exit_after_handoff)
+            else:
+                interrupted.setattr(os, "replace", replace_config)
+            if interruption == "before_config_swap":
+                assert not backup_env.module.restore_from_backup()
+                assert backup_env.stops == [backup_env.module.EXIT_RESTORE_ERROR]
+            else:
+                with pytest.raises(SystemExit):
+                    backup_env.module.restore_from_backup()
+        if interruption == "after_handoff":
+            assert (backup_env.restore_dir / "pending_plugin_data").is_dir()
+        else:
+            assert (backup_env.restore_dir / datadir.ARCHIVE_DIR).is_dir()
         assert (folder / "sample").read_text() == "written after backup"
 
         assert backup_env.module.restore_from_backup()
@@ -1614,3 +1637,86 @@ def test_a_failed_rollback_rename_leaves_the_original_for_the_next_start(backup_
     assert saved.read_text() == "backup"
     assert not journal.exists()
     assert not source.exists()
+
+
+def test_interrupting_plugin_restore_after_commit_keeps_the_new_folder(backup_env, monkeypatch, tmp_path):
+    import json
+    from pathlib import Path
+
+    from plugin_platform_helpers import service_manifest
+    from provider_hub import datadir
+
+    root = tmp_path / "provider_hub"
+    key = "a" * 32
+    target = datadir.release_path(root, "alpha", key)
+    target.mkdir(parents=True)
+    (target / "sample").write_text("original")
+    pending = backup_env.restore_dir / "pending_plugin_data"
+    source = pending / "alpha" / key
+    source.mkdir(parents=True)
+    (source / "sample").write_text("restored")
+    state_path = root / "state.json"
+    state_path.write_text(json.dumps({"installations": {"alpha": {
+        "active_version": "1.0.0", "active_data_key": key,
+        "manifest": service_manifest("alpha", permissions=["data_dir"])}}}))
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(state_path))
+    real_touch = Path.touch
+
+    with monkeypatch.context() as interruption:
+        def interrupt_after_touch(path, *args, **kwargs):
+            real_touch(path, *args, **kwargs)
+            if path.name == datadir.RESTORE_APPLIED_MARKER:
+                raise SystemExit(41)
+
+        interruption.setattr(Path, "touch", interrupt_after_touch)
+        with pytest.raises(SystemExit):
+            backup_env.module.apply_pending_plugin_restore()
+    assert (target / "sample").read_text() == "restored"
+
+    # Only cleanup remains. Even a failed writer check must not cause a
+    # second swap or a rollback of data that has already committed.
+    monkeypatch.setattr("provider_hub.sandbox.sweep.previous_workers_stopped", lambda config: False)
+    backup_env.module.apply_pending_plugin_restore()
+    assert (target / "sample").read_text() == "restored"
+    assert not pending.exists()
+
+
+def test_pending_plugin_restore_waits_for_the_previous_worker(backup_env, monkeypatch, tmp_path):
+    import json
+
+    from plugin_platform_helpers import service_manifest
+    from provider_hub import datadir
+
+    root = tmp_path / "provider_hub"
+    key = "a" * 32
+    target = datadir.release_path(root, "alpha", key)
+    target.mkdir(parents=True)
+    (target / "sample").write_text("in use")
+    source = backup_env.restore_dir / "pending_plugin_data" / "alpha" / key
+    source.mkdir(parents=True)
+    (source / "sample").write_text("restored")
+    state_path = root / "state.json"
+    state_path.write_text(json.dumps({"installations": {"alpha": {
+        "active_version": "1.0.0", "active_data_key": key,
+        "manifest": service_manifest("alpha", permissions=["data_dir"])}}}))
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(state_path))
+
+    monkeypatch.setattr("provider_hub.sandbox.sweep.previous_workers_stopped", lambda config: False)
+    backup_env.module.apply_pending_plugin_restore()
+    assert backup_env.stops == [backup_env.module.EXIT_RESTORE_ERROR]
+    assert (target / "sample").read_text() == "in use"
+    assert source.exists()
+
+    monkeypatch.setattr("provider_hub.sandbox.sweep.previous_workers_stopped", lambda config: True)
+    backup_env.module.apply_pending_plugin_restore()
+    assert (target / "sample").read_text() == "restored"
+    assert not source.exists()
+
+
+def test_startup_clears_completed_plugin_data_staging_without_replaying_it(backup_env):
+    applied = backup_env.restore_dir / ".applied_plugin_data"
+    applied.mkdir()
+    (applied / "old-extraction").write_text("already applied")
+
+    backup_env.module.apply_pending_plugin_restore()
+    assert not applied.exists()

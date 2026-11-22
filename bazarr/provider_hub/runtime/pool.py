@@ -3499,6 +3499,9 @@ class WorkerPool:
             # anchor that somebody else reaped leaves a group nobody can vouch for.
             return False
         if not isinstance(process, LauncherProcess):
+            from provider_hub.sandbox import activity
+
+            activity.forget(process)
             return True
         if process.returncode < 0:
             return False

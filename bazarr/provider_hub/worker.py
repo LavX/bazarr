@@ -311,7 +311,12 @@ def _client_gone(client, budget: float) -> bool:
     # A worker started through the launcher has descendants that left its process group, which only the
     # launcher's own cleanup reaches. Its word that the cleanup finished is what lets the hold go.
     state = getattr(client, "launcher_cleanup_state", None)
-    return state is None or state() == "confirmed"
+    if state is not None and state() != "confirmed":
+        return False
+    from .sandbox import activity
+
+    activity.forget(process)
+    return True
 
 
 # How the wait for a leftover process paces itself. It starts at the cadence a quick exit is
@@ -708,11 +713,12 @@ class ProviderWorkerClient:
             except Exception as error:
                 self._blocked(f"the ruleset could not be prepared: {error}")
                 raise WorkerError(f"the sandbox could not be prepared, so the provider was not started: {error}") from error
+        from .sandbox import activity
         from .sandbox.spawn import OWNER_VARIABLE, owner_marker
 
         if marker := owner_marker():
             env = {**env, OWNER_VARIABLE: marker}
-        return subprocess.Popen(
+        return activity.start_worker(lambda: subprocess.Popen(
             self.command,
             cwd=self.cwd,
             env=env,
@@ -721,7 +727,7 @@ class ProviderWorkerClient:
             stderr=subprocess.PIPE,
             text=True,
             start_new_session=True,
-        )
+        ))
 
     def _sandbox_profile(self):
         """A callable that starts the sandboxed worker, or None when this start is unsandboxed."""
@@ -1054,9 +1060,15 @@ class ProviderWorkerClient:
         A worker's children can outlive it, and they run from the same
         environment, so the environment is not free until every group is empty,
         including the groups of workers an earlier respawn replaced. Checked for
-        at most ``ceiling`` seconds. Always true where process groups do not
-        exist or no worker was ever started.
+        at most ``ceiling`` seconds. On Windows the child process handle
+        proves exit. Always true if no worker was ever started.
         """
+        from .sandbox import activity
+
+        if activity.is_windows():
+            # Windows Popen retains the actual process handle. There is
+            # no POSIX group to check or signal by the child's PID.
+            return self.process is None or self.process.poll() is not None
         deadline = time.monotonic() + ceiling
         while True:
             if not self._live_groups():

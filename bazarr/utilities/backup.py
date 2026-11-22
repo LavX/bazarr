@@ -793,28 +793,10 @@ def restore_from_backup():
             _clear_restore_directory()
         return False
 
-    try:
-        os.replace(staged_config_path, dest_config_path)
-    except OSError:
-        # The database is the restored one now, so going on with the start
-        # would run it with the configuration it was never paired with. The
-        # staged copy is kept, because it is the one file the operator needs.
-        logging.exception('The database was restored but the configuration could not be put in place. '
-                          'Bazarr is stopping so it does not run the restored database with the '
-                          'configuration that was already here. The configuration from the backup is '
-                          'kept at %s: copy it over %s, then start Bazarr again.',
-                          staged_config_path, dest_config_path)
-        _clear_restore_directory()
-        stop_bazarr(EXIT_RESTORE_ERROR)
-        return False
-
-    from provider_hub.state import provider_hub_dir
-
+    # Pin the fact that the database was restored while the original
+    # configuration is still in place. A retry must never run pg_restore
+    # against a connection loaded from the replacement configuration.
     extracted = restore / datadir.ARCHIVE_DIR
-    try:
-        secret_paths.restore_backup_history(restore / secret_paths.HISTORY_ARCHIVE, provider_hub_dir())
-    except (OSError, ValueError, AttributeError):
-        logging.exception('The plugin field history from the backup could not be restored.')
     try:
         staging = restore / (_RESTORE_HANDOFF + ".tmp")
         staging.write_text("data" if extracted.exists() else "no-data", encoding="ascii")
@@ -827,21 +809,35 @@ def restore_from_backup():
 
 
 def _finish_database_restore(restore, handoff):
-    """Finish moving staged data after the database and configuration are in place."""
+    """Install the configuration and stage plugin data after the database is in place."""
+    from provider_hub.state import provider_hub_dir
+
     extracted = restore / datadir.ARCHIVE_DIR
     pending = restore / _PLUGIN_RESTORE_PENDING
+    config = Path(args.config_dir) / "config" / "config.yaml"
+    staged = config.with_suffix(".yaml.restore")
     try:
         dataset = handoff.read_text(encoding="ascii")
+        if dataset not in {"data", "no-data"}:
+            raise OSError("The database restore marker could not be read")
+        try:
+            secret_paths.restore_backup_history(restore / secret_paths.HISTORY_ARCHIVE, provider_hub_dir())
+        except (OSError, ValueError, AttributeError):
+            logging.exception('The plugin field history from the backup could not be restored.')
+        if staged.is_file():
+            # A successful atomic swap consumes the staged file. On retry
+            # its absence means the restored config is already installed.
+            os.replace(staged, config)
+        elif not config.is_file():
+            raise OSError("The restored configuration is missing")
         if dataset == "data":
             if extracted.is_dir():
                 datadir.remove(pending)
                 extracted.rename(pending)
             elif not pending.is_dir():
                 raise OSError("The plugin data staged for restore is missing")
-        elif dataset == "no-data":
-            datadir.remove(pending)
         else:
-            raise OSError("The database restore marker could not be read")
+            datadir.remove(pending)
         if (restore / datadir.OMISSIONS_ARCHIVE).is_file():
             logging.warning('Some release data was omitted when this backup was taken. Its folders will be left as they are.')
         _clear_restore_directory()
@@ -850,7 +846,9 @@ def _finish_database_restore(restore, handoff):
             raise OSError("The staged database or configuration could not be cleared")
         handoff.unlink()
     except (OSError, UnicodeError):
-        logging.exception('The database and configuration are restored. Bazarr will retry the remaining restore steps.')
+        logging.exception('The database is restored. Bazarr will retry the remaining restore steps on startup. '
+                          'Any configuration still waiting to be installed is kept at %s. Plugin data remains '
+                          'staged in %s.', staged, restore)
         stop_bazarr(EXIT_RESTORE_ERROR)
         return False
     logging.info('Database and configuration restored. Bazarr will restart before applying plugin data.')
@@ -864,12 +862,16 @@ def _finish_database_restore(restore, handoff):
 def apply_pending_plugin_restore():
     """Complete the backup restore using the database opened from the restored config."""
     pending = Path(get_restore_path()) / _PLUGIN_RESTORE_PENDING
+    applied = pending.with_name(_APPLIED_PLUGIN_DATA)
     if not pending.exists() and not pending.is_symlink():
+        _clear_applied_plugin_data(applied)
         return
+    from provider_hub.sandbox.sweep import previous_workers_stopped
     from provider_hub.state import provider_hub_dir
 
-    applied = pending.with_name(_APPLIED_PLUGIN_DATA)
     try:
+        if not (pending / datadir.RESTORE_APPLIED_MARKER).is_file() and not previous_workers_stopped(args.config_dir):
+            raise BackupError("Previous plugin workers are still active or their shutdown could not be verified")
         datadir.restore_backup(pending, provider_hub_dir())
         datadir.remove(applied)
         pending.rename(applied)
@@ -877,11 +879,15 @@ def apply_pending_plugin_restore():
         logging.exception('Plugin data restore failed. The staged data remains available and Bazarr will retry it at startup.')
         stop_bazarr(EXIT_RESTORE_ERROR)
         return
+    _clear_applied_plugin_data(applied)
+    logging.info('Plugin data restored successfully.')
+
+
+def _clear_applied_plugin_data(applied):
     try:
         datadir.remove(applied)
     except OSError:
         logging.warning('Could not clear the completed plugin data restore.', exc_info=True)
-    logging.info('Plugin data restored successfully.')
 
 
 def prepare_restore(filename):

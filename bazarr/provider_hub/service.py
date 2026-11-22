@@ -5049,7 +5049,7 @@ def _abandon_if_still_staged(provider_id: str, version: Any, message: str) -> No
     mutate_state(drop)
 
 
-def _wait_for_data_activation(provider_id: str, installation) -> str:
+def _wait_for_data_activation(provider_id: str, installation, *, previous_run: bool = False) -> str:
     message = "The plugin is still busy; the update will be tried again later."
 
     def note_retry(state):
@@ -5057,6 +5057,8 @@ def _wait_for_data_activation(provider_id: str, installation) -> str:
         if (isinstance(row, dict) and row.get("staged_version") == installation.get("staged_version")
                 and row.get("staged_data_key") == installation.get("staged_data_key")):
             row["data_activation_waiting"] = True
+            if previous_run:
+                row["data_worker_cleanup_pending"] = True
             row["last_error"] = message
 
     mutate_state(note_retry)
@@ -5124,6 +5126,10 @@ def activate_release(provider_id: str, *, at_boot: bool = False) -> Activation:
         live = False
     if not at_boot and not live:
         return Activation(provider_id, ACTIVATION_WAITING, target_version, previous_version)
+    if (not at_boot and installation.get("data_worker_cleanup_pending")
+            and _has_removable_data(provider_id, installation) and not _previous_workers_stopped()):
+        message = _wait_for_data_activation(provider_id, installation)
+        return Activation(provider_id, ACTIVATION_WAITING, target_version, previous_version, message)
 
     with record_job(
         "activate",
@@ -5459,7 +5465,12 @@ def activate_staged_installations() -> list[str]:
                 continue
             # One plugin that cannot be handled never keeps the others from starting.
             try:
-                if installation.get("data_worker_cleanup_pending") and _has_removable_data(provider_id, installation):
+                has_previous_data = (
+                    installation.get("data_worker_cleanup_pending") or installation.get("data_activation_waiting")
+                    or installation.get("staged_data_rollback")
+                    or (not removal and _active_data_path(provider_id, installation) is not None)
+                )
+                if has_previous_data and _has_removable_data(provider_id, installation):
                     from .worker import _client_gone
 
                     if previous_stopped is None:
@@ -5468,6 +5479,8 @@ def activate_staged_installations() -> list[str]:
                             _client_gone(client, 0) for client in detach.snapshot_workers(provider_id)):
                         logging.getLogger(__name__).warning(
                             "Keeping %s data in place until its previous workers are confirmed stopped", provider_id)
+                        if not removal:
+                            _wait_for_data_activation(provider_id, installation, previous_run=True)
                         continue
                 if removal:
                     if _finish_removal(provider_id):
@@ -5900,13 +5913,10 @@ def _has_removable_data(provider_id: str, installation) -> bool:
 
 
 def _previous_workers_stopped() -> bool:
-    """A deferred data removal still needs proof after the app has restarted."""
-    from .sandbox.sweep import sweep_leftovers
+    """Use the same prior-process evidence for activation, uninstall and restore."""
+    from .sandbox.sweep import previous_workers_stopped
 
-    result = sweep_leftovers(provider_hub_dir().parent)
-    return (result.supported and not result.truncated
-            and all(session.outcome == "ended" for session in result.sessions))
-
+    return previous_workers_stopped(provider_hub_dir().parent)
 
 
 def _settle_release_data(provider_id: str, installation, keep_data: bool) -> None:
@@ -5923,12 +5933,14 @@ def _settle_release_data(provider_id: str, installation, keep_data: bool) -> Non
     # packages that predate the data_dir permission.
     active = _active_data_path(provider_id, installation) if installation.get("active_data_key") else None
     kept = folder / "kept"
-    if (installation.get("active_version") and active is not None
-            and active.is_dir() and not active.is_symlink() and not active.is_junction()):
-        folder.mkdir(parents=True, exist_ok=True, mode=0o700)
-        datadir.remove(kept)
-        active.rename(kept)
-        if legacy is not None:
+    if installation.get("active_version") and active is not None:
+        if active.is_dir() and not active.is_symlink() and not active.is_junction():
+            folder.mkdir(parents=True, exist_ok=True, mode=0o700)
+            datadir.remove(kept)
+            active.rename(kept)
+        # On retry a missing active path can mean the rename already ran.
+        # The older HOME may still need cleaning, but must not displace kept.
+        if kept.is_dir() and not kept.is_symlink() and not kept.is_junction() and legacy is not None:
             datadir.remove(legacy)
     elif installation.get("active_version") and legacy is not None and legacy.is_dir():
         datadir.remove(kept)
