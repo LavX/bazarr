@@ -160,14 +160,11 @@ def reserved_settings_sections() -> set[str]:
     return _bazarr_settings_sections() - _provider_owned_settings_sections()
 
 
-def _validate_provider_id(value: str, built_in_provider_ids: set[str]) -> str:
-    if not _PROVIDER_ID_RE.match(value):
-        raise ManifestValidationError("provider_id must use lowercase provider id syntax")
+def _check_provider_ownership(value: str, built_in_provider_ids: set[str]) -> None:
     if value in built_in_provider_ids:
         raise ManifestValidationError(f"provider_id {value!r} shadows a built-in provider")
     if value in reserved_settings_sections():
         raise ManifestValidationError(f"provider_id {value!r} is reserved by a Bazarr settings section")
-    return value
 
 
 def _validate_file_path(path: str, python_only: bool = True) -> str:
@@ -378,7 +375,15 @@ def manifest_provider_id(manifest: Any) -> str:
 
 
 def validate_manifest(manifest: dict[str, Any], built_in_provider_ids: set[str] | None = None) -> ValidatedManifest:
-    built_in_provider_ids = built_in_provider_ids or set()
+    return _validate_provider_bundle(manifest, built_in_provider_ids or set())
+
+
+def validate_provider_bundle(manifest: dict[str, Any]) -> ValidatedManifest:
+    """Validate provider bundle fields independently of runtime settings ownership."""
+    return _validate_provider_bundle(manifest, None)
+
+
+def _validate_provider_bundle(manifest: dict[str, Any], built_in_provider_ids: set[str] | None) -> ValidatedManifest:
     manifest = _require_mapping(manifest, "manifest")
 
     schema_version = manifest.get("schema_version")
@@ -387,10 +392,11 @@ def validate_manifest(manifest: dict[str, Any], built_in_provider_ids: set[str] 
     elif schema_version != 1:
         raise ManifestValidationError("schema_version must be 1 or 2")
 
-    provider_id = _validate_provider_id(
-        _require_text(manifest.get("provider_id"), "provider_id"),
-        built_in_provider_ids,
-    )
+    provider_id = _require_text(manifest.get("provider_id"), "provider_id")
+    if not _PROVIDER_ID_RE.match(provider_id):
+        raise ManifestValidationError("provider_id must use lowercase provider id syntax")
+    if built_in_provider_ids is not None:
+        _check_provider_ownership(provider_id, built_in_provider_ids)
     name = _require_text(manifest.get("name"), "name")
     version = _require_text(manifest.get("version"), "version")
     # version becomes a filesystem path component (bundle dir, venv dir);

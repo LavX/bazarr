@@ -68,8 +68,8 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 # ancestor of it, checks every file against the lock and the catalog's own
 # pins, and writes the files read-only. This stage's cache key is the lock and
 # the script, so a rebuild with an unchanged lock reuses the layer and the
-# bytes stay identical. Other stages that need the same catalog commit read the
-# same lock.
+# bytes stay identical. This stage also derives the runtime bundles and shared
+# environments from those verified bytes for the image's target architecture.
 #
 # When the lock pins the catalog's signed feed, the script verifies it with the
 # application's own verifier and root (signing.py and signing_roots.py, copied
@@ -90,12 +90,19 @@ RUN --mount=type=cache,target=/root/.cache/pip \
 
 COPY scripts/release/catalog_floor.py /opt/catalog_floor.py
 COPY bazarr/provider_hub/signing.py bazarr/provider_hub/signing_roots.py /opt/provider_hub/
+COPY bazarr/provider_hub/__init__.py bazarr/provider_hub/bundle.py bazarr/provider_hub/bundled_wheels.py \
+     bazarr/provider_hub/manifest.py bazarr/provider_hub/migration.py bazarr/provider_hub/plugin_manifest.py \
+     bazarr/provider_hub/revocation.py bazarr/provider_hub/seed.py \
+     bazarr/provider_hub/venv.py bazarr/provider_hub/versions.py /opt/provider_hub/
+COPY bazarr/provider_hub/kinds/__init__.py bazarr/provider_hub/kinds/service.py \
+     bazarr/provider_hub/kinds/subtitle_provider.py bazarr/provider_hub/kinds/translator.py /opt/provider_hub/kinds/
 COPY docker/catalog-pin.lock.json /opt/catalog-pin.lock.json
 
 RUN python -I /opt/catalog_floor.py build \
         --lock /opt/catalog-pin.lock.json \
         --signing-dir /opt/provider_hub \
-        --dest /catalog_floor \
+        --dest /app/bazarr/catalog_floor \
+        --runtime-seed \
         --expect-root-owner
 
 # =============================================================================
@@ -188,13 +195,14 @@ COPY custom_libs ./custom_libs
 COPY migrations ./migrations
 
 # The catalog release floor lives beside the application tree, outside the
-# /config volume, root-owned and read-only: files 0444, directories 0555. The
-# top directory is created by the COPY, so its mode is set explicitly, and then
-# every mode and owner is asserted. Nothing at runtime writes here.
-COPY --from=catalog-floor /catalog_floor ./catalog_floor
+# /config volume, root-owned and read-only: files 0444, directories and
+# runtime environment executables 0555. Set the top directory's mode after
+# the COPY and assert every mode and owner. Runtime never writes here.
+COPY --from=catalog-floor /app/bazarr/catalog_floor ./catalog_floor
 RUN chmod 0555 /app/bazarr/catalog_floor \
     && test -z "$(find /app/bazarr/catalog_floor ! -user root -print -quit)" \
-    && test -z "$(find /app/bazarr/catalog_floor -type f ! -perm 0444 -print -quit)" \
+    && test -z "$(find /app/bazarr/catalog_floor -type f ! -perm 0444 \
+        \( ! -path '/app/bazarr/catalog_floor/runtime/shared_envs/*' -o ! -perm 0555 \) -print -quit)" \
     && test -z "$(find /app/bazarr/catalog_floor -type d ! -perm 0555 -print -quit)" \
     && test -z "$(find /app/bazarr/catalog_floor ! -type f ! -type d -print -quit)" \
     && test -f /app/bazarr/catalog_floor/catalog.json
@@ -202,6 +210,10 @@ RUN chmod 0555 /app/bazarr/catalog_floor \
 # Copy main application code (changes most frequently - keep at end)
 COPY bazarr.py ./
 COPY bazarr ./bazarr
+
+# Verify that the seed produced by the build stage matches the final interpreter.
+RUN PYTHONPATH=/app/bazarr/bazarr python -B -c \
+    'from pathlib import Path; from provider_hub.seed import check_image_interpreter; check_image_interpreter(Path("catalog_floor"))'
 
 RUN test -n "${BAZARR_VERSION}" && test -n "${VCS_REF}" && test -n "${BUILD_DATE}" \
     || { echo 'BAZARR_VERSION, VCS_REF and BUILD_DATE are required build args' >&2; exit 1; }

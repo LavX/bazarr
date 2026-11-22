@@ -332,7 +332,13 @@ class HubProxyProvider(Provider):
         if manifest is None or not bundle_path:
             return
         try:
-            verify_bundle_tree(manifest, bundle_path)
+            if getattr(self.__class__, "uses_seed", False):
+                from .seed import resolve_paths
+
+                if resolve_paths(provider_hub_dir(), manifest.raw, bundle_path, self.python_path) is None:
+                    raise ValueError("the catalog runtime seed no longer verifies")
+            else:
+                verify_bundle_tree(manifest, bundle_path)
         except Exception as error:
             try:
                 from .env_registry import mark_needs_repair
@@ -497,13 +503,23 @@ def _make_provider_class(manifest, worker_client=None, installation=None):
     if worker_client is not None:
         attrs["worker_client"] = worker_client
     if installation is not None:
-        if installation.active_path:
-            bundle = validated_bundle_path(provider_hub_dir(), installation.active_path)
+        root = provider_hub_dir()
+        if installation.active_path and getattr(installation, "python_path", None):
+            from .seed import resolve_paths
+
+            resolved = resolve_paths(root, manifest.raw, installation.active_path, installation.python_path)
+            if resolved is None:
+                raise ValueError("the installed bundle and interpreter are not a valid runtime pair")
+            bundle, interpreter = resolved
+            attrs.update(bundle_path=str(bundle), python_path=str(interpreter),
+                         uses_seed=validated_bundle_path(root, bundle) is None)
+        elif installation.active_path:
+            bundle = validated_bundle_path(root, installation.active_path)
             if bundle is None:
                 raise ValueError(f"the bundle {installation.active_path} is not one of the hub's bundles")
             attrs["bundle_path"] = str(bundle)
-        if getattr(installation, "python_path", None):
-            interpreter = validated_interpreter(provider_hub_dir(), installation.python_path)
+        elif getattr(installation, "python_path", None):
+            interpreter = validated_interpreter(root, installation.python_path)
             if interpreter is None:
                 # Never run a plugin from an interpreter the hub did not build.
                 raise ValueError(f"the interpreter {installation.python_path} is not one of the hub's environments")

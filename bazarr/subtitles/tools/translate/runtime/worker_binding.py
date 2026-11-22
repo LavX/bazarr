@@ -114,7 +114,7 @@ class TranslatorWorkers:
         """The release that is active now, with the interpreter and bundle the Plugin Hub vouches for, or None when
         the plugin is not installed, was held back at boot or has nothing it can run. Whether it is switched on is
         decided before a request gets here (the gate and the settings service)."""
-        from provider_hub.venv import validated_bundle_path, validated_interpreter
+        from provider_hub.seed import resolve_paths
 
         if not isinstance(plugin_id, str) or not _PLUGIN_ID.match(plugin_id):
             return None
@@ -126,12 +126,11 @@ class TranslatorWorkers:
         if (not isinstance(module, str) or not isinstance(name, str) or not _ENTRY_PART.match(module)
                 or not _CLASS_NAME.match(name)):
             return None
-        hub = self._hub_dir()
-        bundle = validated_bundle_path(hub, installation.active_path)
-        interpreter = validated_interpreter(hub, installation.python_path)
-        if bundle is None or interpreter is None:
+        paths = resolve_paths(self._hub_dir(), dict(manifest), installation.active_path, installation.python_path)
+        if paths is None:
             return None
-        return Resolved(plugin_id, Path(interpreter), Path(bundle), f"{module}:{name}", manifest)
+        bundle, interpreter = paths
+        return Resolved(plugin_id, interpreter, bundle, f"{module}:{name}", manifest)
 
     def _manifest(self, plugin_id: str) -> Mapping[str, Any] | None:
         installation = self._installation_for(plugin_id)
