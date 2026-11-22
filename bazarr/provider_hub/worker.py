@@ -496,7 +496,7 @@ def provider_spec(layout: ProviderLayout, command, cwd, env, *, source_media: So
     """
     from .sandbox import capabilities
     from .provider_roots import (
-        backup_folders, binary_folders, configured_media_roots, media_root_folders, own_ports, program_folders,
+        backup_folders, binary_folders, media_overlaps_runtime, media_root_folders, own_ports, program_folders,
         source_file_is_shielded, source_tool_paths,
     )
     from .runtime.environment import worker_environment
@@ -554,17 +554,9 @@ def provider_spec(layout: ProviderLayout, command, cwd, env, *, source_media: So
     if source_media is not None:
         if policy.identities.get(str(source_media.path)) != source_media.identity:
             raise PolicyError("the source media file changed while preparing its read grant")
-        media_roots = {source_media.root, *configured_media_roots()}
-        media_identities = {source_media.identity}
-        for root in media_roots:
-            info = root.stat()
-            media_identities.add((info.st_dev, info.st_ino))
-        for grant in (*policy.read_only, *policy.read_write, *policy.execute_files):
-            runtime = Path(grant)
-            if policy.identities.get(grant) in media_identities or any(
-                root.is_relative_to(runtime) or runtime.is_relative_to(root) for root in media_roots
-            ):
-                raise PolicyError("a configured media library overlaps a provider runtime location")
+        runtime_grants = (*policy.read_only, *policy.read_write, *policy.execute_files)
+        if media_overlaps_runtime(source_media, runtime_grants, policy.identities):
+            raise PolicyError("a configured media library overlaps a provider runtime location")
     environment = worker_environment(
         "subtitle_provider",
         home=data,

@@ -545,7 +545,30 @@ def test_scoped_policy_refuses_other_configured_media_under_a_runtime_grant(host
         )
 
 
+@pytest.mark.parametrize("matching_ancestor", ["media", "runtime"])
+def test_scoped_policy_checks_the_identity_of_the_opposite_ancestor(host, source_db, monkeypatch, matching_ancestor):
+    from media_sources import repository
+
+    grant = _standalone_file(host)
+    runtime = host["root"] / "application-runtime" / "tooling"
+    runtime.mkdir(parents=True)
+    monkeypatch.setattr(policy_module, "SYSTEM_READ_PATHS", (*policy_module.SYSTEM_READ_PATHS, str(runtime)))
+    identity = repository.folder_identity
+    if matching_ancestor == "media":
+        ancestor, endpoint = grant.root.parent, runtime
+    else:
+        ancestor, endpoint = runtime.parent, grant.root
+    monkeypatch.setattr(repository, "folder_identity",
+                        lambda path: identity(endpoint) if path == ancestor else identity(path))
+
+    with pytest.raises(policy_module.PolicyError, match="configured media library overlaps"):
+        worker_module.provider_spec(
+            host["layout"], worker_command(sys.executable, RUNNER), host["bundle"], {}, source_media=grant,
+        )
+
+
 def test_scoped_tools_use_the_host_layout_and_only_existing_executables(host, monkeypatch):
+    import hashlib
     import platform
     from utilities import binaries
 
@@ -554,18 +577,37 @@ def test_scoped_tools_use_the_host_layout_and_only_existing_executables(host, mo
     monkeypatch.setattr(_provider_roots.shutil, "which", lambda name: str(host["stub"]) if name == "ffmpeg" else None)
     machine = Path(platform.system()) / platform.machine()
     managed = host["config"] / "managed" / "bin" / machine
-    nonexec = managed / "ffmpeg" / "ffprobe"
+    managed_tool = managed / "ffmpeg" / "ffprobe"
     fallback = legacy / machine / "ffmpeg" / "ffprobe"
     unrelated = managed.parent / "other-architecture" / "mediainfo" / "mediainfo"
-    for path in (nonexec, fallback, unrelated):
+    for path in (managed_tool, fallback, unrelated):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("fixture tool", encoding="utf-8")
-        path.chmod(0o600 if path == nonexec else 0o700)
+        path.chmod(0o600 if path == managed_tool else 0o700)
 
     assert set(_provider_roots.source_tool_paths(host["config"])) == {host["stub"], fallback}
-    for invalid in (nonexec, nonexec.parent):
+    for invalid in (managed_tool, managed_tool.parent):
         with pytest.raises(policy_module.PolicyError, match="not an executable regular file"):
             policy_module.SandboxPolicy.for_interpreter(sys.executable, execute_files=[invalid])
+
+    def checksum(path):
+        return hashlib.md5(Path(path).read_bytes(), usedforsecurity=False).hexdigest()
+
+    managed_tool.write_text("stale managed binary", encoding="utf-8")
+    managed_tool.chmod(0o700)
+    monkeypatch.setattr(binaries, "binaries_dir", lambda: str(host["config"] / "managed" / "bin"))
+    monkeypatch.setattr(binaries, "which", lambda name: None)
+    monkeypatch.setattr(binaries, "md5", checksum)
+    monkeypatch.setattr(binaries, "get_binaries_from_json", lambda: [{
+        "system": machine.parts[0], "machine": machine.parts[1], "directory": "ffmpeg",
+        "name": "ffprobe", "checksum": checksum(fallback),
+    }])
+    monkeypatch.setattr(binaries.requests, "get", lambda *args, **kwargs: pytest.fail("fixture must not download tools"))
+
+    assert binaries.get_binary("ffprobe") == str(fallback)
+    assert set(_provider_roots.source_tool_paths(host["config"])) == {host["stub"], managed_tool, fallback}
+    managed_tool.write_bytes(fallback.read_bytes())
+    assert binaries.get_binary("ffprobe") == str(managed_tool)
 
 
 @pytest.mark.parametrize(("enabled", "probe", "reason"), [

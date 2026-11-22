@@ -14,6 +14,7 @@ import platform
 import shutil
 import stat
 import sys
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -128,8 +129,8 @@ def source_tool_paths(config_dir: Path) -> list[Path]:
         for root in roots:
             tool = executable(root / system / machine / directory / name, below=root.resolve())
             if tool is not None:
+                # The application picks the managed or legacy copy by checksum.
                 found[tool] = None
-                break
     return list(found)
 
 
@@ -143,6 +144,39 @@ def configured_media_roots() -> set[Path]:
         if path.is_absolute() and path.is_dir():
             found.add(path.resolve())
     return found
+
+
+def media_overlaps_runtime(media: SourceMediaFile, grants: tuple[str, ...],
+                           recorded: Mapping[str, tuple[int, int]]) -> bool:
+    """Compare each configured root with runtime endpoints and their ancestors."""
+    from media_sources.repository import folder_identity
+
+    libraries = {media.root, *configured_media_roots()}
+    runtime = {Path(grant) for grant in grants}
+    if any(root.is_relative_to(grant) or grant.is_relative_to(root) for root in libraries for grant in runtime):
+        return True
+
+    identities: dict[Path, tuple[int, int] | None] = {
+        Path(grant): recorded[grant] for grant in grants if grant in recorded
+    }
+
+    def identity(path: Path) -> tuple[int, int] | None:
+        if path not in identities:
+            identities[path] = folder_identity(path)
+        return identities[path]
+
+    library_ids = {identity(root) for root in libraries}
+    if None in library_ids:
+        raise OSError("a configured media library could not be checked")
+    runtime_ids = {key for grant in runtime if (key := identity(grant)) is not None}
+    if media.identity in runtime_ids or library_ids & runtime_ids:
+        return True
+    # Match an endpoint to an ancestor in the opposite set. Two siblings
+    # share ancestors without either library containing a runtime grant.
+    return (
+        any(identity(parent) in library_ids for grant in runtime for parent in grant.parents)
+        or any(identity(parent) in runtime_ids for root in libraries for parent in root.parents)
+    )
 
 
 def source_file_is_shielded(path: Path, shields: list[Path], protected_files: list[Path]) -> bool:
