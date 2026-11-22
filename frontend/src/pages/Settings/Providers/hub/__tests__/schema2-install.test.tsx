@@ -313,6 +313,46 @@ describe("updating an installed provider whose catalog entry is schema 2", () =>
     );
     expect(installed()).toEqual([]);
   });
+
+  it("asks for consent when the specific catalog entry is a replacement that adds access", async () => {
+    summary = {
+      ...noConsent,
+      needs_consent: true,
+      destinations: ["https://subtitles.example.org:443"],
+      digest: "sha256:provider-replacement",
+    };
+    server.use(
+      http.get("/api/plugins/updates/consent", () =>
+        HttpResponse.json("No update is available", { status: 404 }),
+      ),
+    );
+    const user = userEvent.setup();
+    customRender(
+      <MarketplacePanel
+        catalog={catalog("plain", 2)}
+        providers={[installedRow("plain")]}
+      />,
+    );
+
+    await user.click(await screen.findByRole("button", { name: /^update$/i }));
+    const dialog = await screen.findByRole("dialog");
+    const destination = await within(dialog).findByText(
+      "https://subtitles.example.org:443",
+    );
+    await waitFor(() => expect(destination).toBeVisible());
+    expect(installed()).toEqual([]);
+    const agree = within(dialog).getByRole("button", { name: "Update" });
+    await waitFor(() => expect(agree).toBeEnabled());
+    await user.click(agree);
+
+    await waitFor(() => expect(installed()).toHaveLength(1));
+    expect(installed()[0].body).toMatchObject({
+      source: "official",
+      id: "plain",
+      version: "1.0.0",
+      consent: summary.digest,
+    });
+  });
 });
 
 describe("the probe for an update's consent", () => {

@@ -13,7 +13,7 @@ import { needsPassword, reasonOf } from "./refusal";
 export interface PluginConsentFlow {
   /**
    * Start an install or an update. The dialog opens for an install, except for a subtitle provider
-   * whose closure adds no plugin of another kind, which installs as it always has. An update opens it
+   * whose closure adds no plugin of another kind and whose replacement adds no access. An update opens it
    * only when the server says it adds a destination, a permission, a program or a plugin, and
    * otherwise goes ahead on its own, with the digest the server gave.
    */
@@ -85,6 +85,7 @@ export function usePluginConsentFlow({
             ).catch(() => null);
             if (
               summary &&
+              !summary.needs_consent &&
               summary.members.every(
                 (member) => member.kind === SUBTITLE_PROVIDER_KIND,
               )

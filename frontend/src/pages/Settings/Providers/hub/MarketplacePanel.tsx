@@ -261,9 +261,7 @@ export const MarketplacePanel: FunctionComponent<MarketplacePanelProps> = ({
         setStarting(cardKey(entry.source, entry.provider_id));
         void (async () => {
           try {
-            // An update asks for the delta only where the server has one, which is when it adds a plugin of
-            // another kind. For an ordinary provider it has none (a 404), and the new release is installed as
-            // it always was, with the digest of what it adds.
+            // Use the bound catalog update where one is offered. Otherwise ask about installing this exact entry.
             let hasDelta = false;
             if (installed?.active_version) {
               try {
