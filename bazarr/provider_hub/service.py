@@ -2983,6 +2983,9 @@ def test_provider_connection(provider_id: str) -> dict[str, Any] | None:
                     trusted,
                 ),
             )
+            refusal = seed.runtime_refusal(manifest.raw)
+            if refusal:
+                raise ProviderHubInstallError(refusal)
             root = provider_hub_dir()
             runtime = seed.resolve_paths(root, manifest.raw, active_path, python_path)
             if runtime is None:
@@ -5046,6 +5049,9 @@ def _verified_staged_release(provider_id: str, installation: dict[str, Any], rev
     staged_python_path = installation.get("staged_python_path")
     if not staged_path or not staged_python_path:
         raise ProviderHubInstallError("staged bundle or python path is missing")
+    refusal = seed.runtime_refusal(manifest.raw, revocations)
+    if refusal:
+        raise ProviderHubInstallError(refusal)
     root = provider_hub_dir()
     runtime = seed.resolve_paths(root, manifest.raw, staged_path, staged_python_path)
     if runtime is None:
@@ -5449,6 +5455,9 @@ def reconcile_plugin_environments() -> dict[str, list[str]]:
         return get_kind(kind_of(row)).validate_manifest(raw, bool(row.get("trusted", False)))
 
     def probe(validated, bundle_path: Path, python_path: Path) -> None:
+        refusal = seed.runtime_refusal(validated.raw)
+        if refusal:
+            raise ProviderHubInstallError(refusal)
         get_kind(kind_of(validated)).smoke_test(validated, bundle_path, python_path)
 
     return env_registry.reconcile_environments(

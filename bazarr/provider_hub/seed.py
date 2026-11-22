@@ -394,8 +394,12 @@ def _seed_releases(
             logger.warning("The catalog runtime seed for %s %s is not used: %s", plugin_id, raw["version"], error)
 
 
-def _runtime_refusal(raw: dict[str, Any], revocations: tuple[revocation.Revocation, ...]) -> str | None:
+def runtime_refusal(
+    raw: dict[str, Any], revocations: tuple[revocation.Revocation, ...] | None = None,
+) -> str | None:
     """Check rules that apply equally to config and image releases."""
+    if revocations is None:
+        revocations = revocation.runtime_entries()
     try:
         plugin = parse_plugin_manifest(raw)
     except ManifestValidationError as error:
@@ -427,7 +431,7 @@ def select_release(
         manifest, bundle_path, python_path = config_candidate
         if manifest.provider_id == plugin_id and (requested is None or _same_manifest(manifest.raw, requested)):
             try:
-                refusal = _runtime_refusal(manifest.raw, revocations)
+                refusal = runtime_refusal(manifest.raw, revocations)
                 if refusal:
                     raise SeedError(refusal)
                 bundle = validated_bundle_path(config_root, bundle_path)
@@ -461,7 +465,7 @@ def resolve_paths(
     bundle = validated_bundle_path(config_root, bundle_path)
     interpreter = validated_interpreter(config_root, python_path)
     revocations = revocation.runtime_entries()
-    refusal = _runtime_refusal(manifest, revocations)
+    refusal = runtime_refusal(manifest, revocations)
     if refusal:
         logger.warning("The runtime for %s is not used: %s", manifest_provider_id(manifest), refusal)
         return None

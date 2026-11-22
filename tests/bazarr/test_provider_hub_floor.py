@@ -1452,14 +1452,17 @@ def test_opt_in_provider_activates_after_the_real_application_migration(
     from app.config import settings
     from app.startup import prepare_database_and_plugins
     from flask import Flask
-    from provider_hub import registry, sandbox
-    from sqlalchemy import create_engine
+    from provider_hub import registry, releases, sandbox, state
+    from sqlalchemy import create_engine, select
     from sqlalchemy.orm import scoped_session, sessionmaker
     from subliminal_patch.extensions import provider_registry
 
     _unreachable(monkeypatch)
     _no_network(monkeypatch, hub)
     monkeypatch.delenv("BAZARR_DISABLE_PROVIDER_AUTOINSTALL", raising=False)
+    monkeypatch.delenv("BAZARR_PROVIDER_HUB_STATE", raising=False)
+    state_snapshot = tmp_path / "database-hub" / "state.json"
+    monkeypatch.setattr(state, "state_file", lambda: state_snapshot)
     monkeypatch.setattr(settings.general, "provider_hub_auto_install", True)
     monkeypatch.setattr(settings.general, "enabled_providers", ["exampleother"])
     monkeypatch.setattr(settings.general, "disabled_providers", ["embeddedsubtitles"])
@@ -1492,7 +1495,7 @@ def test_opt_in_provider_activates_after_the_real_application_migration(
         db.init_db()
         with engine.connect() as connection:
             assert not MigrationContext.configure(connection).get_current_heads()
-        assert hub.load_state()["installations"] == {}
+        assert not state_snapshot.exists()
         assert prepare_database_and_plugins(Flask(__name__))
         assert len(checked) == 2  # install smoke and activation smoke
         _, launches, confined = provider_sandbox_probes
@@ -1500,6 +1503,12 @@ def test_opt_in_provider_activates_after_the_real_application_migration(
         print(f"Provider startup launches after migrations through verified Landlock: {len(launches)}")
         row, = hub.load_state()["installations"].values()
         assert row["state"] == "active" and Path(row["active_path"]).is_relative_to(runtime_snapshot)
+        with engine.connect() as connection:
+            release = connection.execute(select(releases.releases_table).where(
+                releases.releases_table.c.plugin_id == "exampleother",
+            )).mappings().one()
+        assert release["state"] == "active" and release["bundle_path"] == row["active_path"]
+        assert state_snapshot.is_file()
         assert "exampleother" in provider_registry.names()
         assert settings.general.enabled_providers == ["exampleother"]
         assert settings.general.disabled_providers == ["embeddedsubtitles"]
@@ -1760,3 +1769,92 @@ def test_runtime_checks_keep_host_supported_config_service_pairs_available(tmp_p
     host = HostFacts("2.8.0", "linux-x86_64", frozenset({("oci", "daemon")}), in_container=True)
     monkeypatch.setattr(seed, "current_host", lambda: host)
     assert seed.resolve_paths(root, manifest, bundle, interpreter) == (bundle, interpreter)
+
+
+@pytest.mark.parametrize("denial", ["host_version", "baked_revocation", None])
+def test_reconciliation_applies_release_policy_before_smoke_testing_shared_config_env(
+    denial, hub, tmp_path, monkeypatch, keys,
+):
+    from plugin_platform_helpers import provider_manifest_v2
+    from provider_hub.manifest import validate_manifest
+    from provider_hub.state import save_state
+    from provider_hub.venv import environment_fingerprint
+
+    monkeypatch.setenv("BAZARR_VERSION", "2.8.0")
+    revoked = [{"id": "examplehub", "version": "1.0.0"}] if denial == "baked_revocation" else None
+    _build_runtime_snapshot(tmp_path, monkeypatch, keys, revocations=revoked)
+    raw = provider_manifest_v2("examplehub", file_payloads={"provider.py": PROVIDER_FILE})
+    if denial == "host_version":
+        raw["min_host_version"] = "3.0.0"
+    root = hub.provider_hub_dir()
+    original_python = root / "envs" / "examplehub" / "1.0.0" / "legacy" / "bin" / "python"
+    shared_python = root / "shared_envs" / "fixture" / "bin" / "python"
+    for interpreter in (original_python, shared_python):
+        interpreter.parent.mkdir(parents=True)
+        interpreter.touch()
+    bundle = root / "bundles" / "examplehub" / "1.0.0" / FLOOR_COMMIT
+    bundle.mkdir(parents=True)
+    (bundle / "provider.py").write_bytes(PROVIDER_FILE)
+    state = hub.load_state()
+    state["installations"]["examplehub"] = {
+        "provider_id": "examplehub", "state": "active", "active_version": "1.0.0",
+        "manifest": raw, "active_path": str(bundle), "python_path": str(original_python),
+    }
+    key = environment_fingerprint(validate_manifest(raw))
+    state["plugin_envs"] = {key: {"path": str(shared_python.parent.parent)}}
+    save_state(state)
+    probes = []
+    monkeypatch.setattr(hub, "_smoke_validate_worker", lambda *_args: probes.append(True))
+
+    assert hub.reconcile_plugin_environments()["repointed"] == ([] if denial else ["examplehub"])
+    assert probes == ([] if denial else [True])
+    if denial == "host_version":
+        result = hub.test_provider_connection("examplehub")
+        assert not result["ok"] and "needs Bazarr+ 3.0.0" in result["message"]
+        assert not hub.load_state()["installations"]["examplehub"].get("needs_repair")
+
+
+@pytest.mark.parametrize("enabled", [True, False])
+def test_refused_first_activation_preserves_owner_settings_for_a_retired_provider(
+    enabled, hub, monkeypatch,
+):
+    from app.config import settings
+    from plugin_platform_helpers import provider_manifest_v2
+    from provider_hub import registry
+    from provider_hub.manifest import validate_manifest
+    from provider_hub.startup import start_after_migrations
+    from provider_hub.state import save_state
+
+    provider_id = "argenteamdump"
+    monkeypatch.setenv("BAZARR_DISABLE_PROVIDER_AUTOINSTALL", "true")
+    monkeypatch.setenv("BAZARR_VERSION", "2.8.0")
+    monkeypatch.setattr(settings.general, "enabled_providers", [provider_id] if enabled else [])
+    monkeypatch.setattr(settings.general, "disabled_providers", [] if enabled else [provider_id])
+    monkeypatch.setattr(settings.general, "provider_priorities", {provider_id: 70})
+    saved_section = {"username": "fixture-owner"}
+    monkeypatch.setattr(settings, provider_id, saved_section, raising=False)
+    monkeypatch.setattr(registry, "_REGISTRATION_INCOMPLETE", set())
+    monkeypatch.setattr("app.config.write_config", lambda: True)
+    removed = []
+    monkeypatch.setattr("app.config.remove_settings_section", removed.append)
+    monkeypatch.setattr(hub, "_smoke_validate_worker", lambda *_a: pytest.fail("incompatible provider was started"))
+
+    raw = provider_manifest_v2(provider_id, min_host_version="3.0.0")
+    root = hub.provider_hub_dir()
+    bundle = root / "bundles" / provider_id / "1.0.0" / FLOOR_COMMIT
+    interpreter = root / "shared_envs" / "fixture" / "bin" / "python"
+    installation = hub._staged_installation(
+        validate_manifest(raw), {}, bundle, interpreter, True, source_id="official", catalog_list="plugins",
+    )
+    state = hub.load_state()
+    state["installations"][provider_id] = installation
+    save_state(state)
+
+    assert start_after_migrations()
+    failed = hub.load_state()["installations"][provider_id]
+    assert failed["state"] == "failed" and not failed.get("active_version")
+    assert "needs Bazarr+ 3.0.0" in failed["last_error"]
+    assert settings.general.enabled_providers == ([provider_id] if enabled else [])
+    assert settings.general.disabled_providers == ([] if enabled else [provider_id])
+    assert settings.general.provider_priorities == {provider_id: 70}
+    assert getattr(settings, provider_id) == saved_section and provider_id not in removed

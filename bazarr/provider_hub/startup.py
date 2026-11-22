@@ -59,8 +59,17 @@ def start_after_migrations() -> bool:
     # are not "gone": nothing below may drop their ids or their settings. When the set
     # cannot be read, nothing is dropped at all.
     try:
+        from provider_hub.kinds import SUBTITLE_PROVIDER, kind_of
         from provider_hub.registry import registration_incomplete, settings_cleanup_plan
-        registration_incomplete_ids = registration_incomplete()
+        from provider_hub.state import load_state_strict
+
+        installations = load_state_strict().get("installations", {})
+        awaiting_activation = {
+            provider_id for provider_id, row in installations.items()
+            if isinstance(row, dict) and kind_of(row) == SUBTITLE_PROVIDER
+            and row.get("state") in ("staged", "failed") and not row.get("active_version")
+        }
+        registration_incomplete_ids = registration_incomplete() | awaiting_activation
     except Exception:  # pragma: no cover - hub failures must not prevent startup
         registration_ok = False
         logger.exception("Unable to read which Provider Hub providers failed to register")
@@ -97,7 +106,6 @@ def start_after_migrations() -> bool:
         write_config()
     else:
         logger.warning("Skipping provider list cleanup because Provider Hub registration failed")
-
 
     # Initialize provider_priorities if not exists
     if not hasattr(settings.general, 'provider_priorities') or not settings.general.provider_priorities:
