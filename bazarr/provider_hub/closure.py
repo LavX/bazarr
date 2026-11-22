@@ -321,8 +321,8 @@ def dependents(
     """The ids of installed plugins that depend on ``plugin_id``.
 
     A plugin depends on another when it extends it, or requires a capability the other provides and
-    no other enabled plugin provides. That is judged twice, on what runs now and on what runs after the
-    next restart, each with one consistent set of releases: a staged update that drops a capability stops
+    neither an external binding nor another enabled plugin supplies. That is judged on what runs now and
+    after the next restart, each with one consistent set of releases. A staged update that drops a capability stops
     supplying it after the restart, and one that adds it does not supply it before. With ``enabled_only``,
     plugins that are switched off do not count, which is the rule for switching a dependency off;
     removing one counts every installed dependent. ``enabled`` overrides, by id, whether a plugin counts as
@@ -354,7 +354,8 @@ def dependents(
                 continue
             depends = consumer.extends is not None and consumer.extends.plugin_id == plugin_id
             for capability in consumer.requires:
-                if depends or capability not in target.provides or capability in consumer.provides:
+                if (depends or capability not in target.provides or capability in consumer.provides
+                        or has_external_binding(consumer, capability)):
                     continue
                 # A plugin that is switched off supplies nothing.
                 elsewhere = False
@@ -379,7 +380,7 @@ def broken_by(state: dict[str, Any], plugin_id: str, replacement: dict[str, Any]
     ``replacement`` is the manifest that would become its staged release, and None means its staged release
     goes away and its active one is what runs after the restart. A dependent counts when it relies on a
     capability this plugin supplies after the next restart (or, for ``extends``, on it as the parent), the
-    change drops that capability, and no other enabled plugin supplies it. Returns ``(dependent id,
+    change drops that capability, and there is no suitable alternative. Returns ``(dependent id,
     capability)`` pairs, sorted.
     """
     installed = installed_plugins(state)
@@ -408,7 +409,8 @@ def broken_by(state: dict[str, Any], plugin_id: str, replacement: dict[str, Any]
         for capability, parent in needs:
             if capability not in current.provides or (after is not None and capability in after.provides):
                 continue
-            if not parent and _supplied_elsewhere(installed, capability, (plugin_id, other_id)):
+            if not parent and (has_external_binding(consumer, capability)
+                               or _supplied_elsewhere(installed, capability, (plugin_id, other_id))):
                 continue
             broken.add((other_id, capability))
     return sorted(broken)

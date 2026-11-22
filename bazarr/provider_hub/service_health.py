@@ -9,6 +9,7 @@ a request.
 
 Results live in memory and are tied to the address they were measured against by a hash, so an address that was
 changed shows no result until it is tested, and no address is kept here.
+An address with credentials stays untested because the probe only supports credential-free URLs.
 """
 from __future__ import annotations
 
@@ -18,6 +19,7 @@ import threading
 import time
 
 from typing import Any, Callable, Mapping
+from urllib.parse import urlsplit
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +39,14 @@ def _checks() -> Mapping[str, Callable[[str], dict]]:
     from . import endpoints
 
     return {endpoints.FLARESOLVERR_CAPABILITY: endpoints.check_flaresolverr_address}
+
+
+def _has_userinfo(address: str) -> bool:
+    try:
+        parts = urlsplit(address)
+    except ValueError:
+        return False
+    return parts.username is not None or parts.password is not None
 
 
 def _key(capability: str, address: str) -> str:
@@ -60,8 +70,10 @@ def _public(result: Mapping[str, Any]) -> dict[str, Any]:
     return out
 
 
-def record(capability: str, address: str, result: Mapping[str, Any]) -> dict[str, Any]:
-    """Keep the answer of a check of ``address``. Replaces the capability's earlier answer."""
+def record(capability: str, address: str, result: Mapping[str, Any]) -> dict[str, Any] | None:
+    """Keep the check's answer. A credentialed address refused by Test stays untested."""
+    if result.get("code") == "invalid_address" and _has_userinfo(address):
+        return None
     public = _public(result)
     with _lock:
         _records[capability] = {"key": _key(capability, address), "result": public, "at": time.monotonic()}
@@ -90,6 +102,8 @@ def note_use(capability: str, address: str) -> threading.Thread | None:
     wants to wait for it.
     """
     try:
+        if _has_userinfo(address):
+            return None
         check = _checks().get(capability)
         if check is None or not _stale(capability, address):
             return None

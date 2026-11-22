@@ -419,6 +419,30 @@ class TestRemoteBinding:
 
         assert service_health.last(CAPABILITY, address)["state"] == "unreachable"
 
+    def test_using_an_authenticated_address_skips_the_background_health_check(self, monkeypatch):
+        address = "http://fixture:placeholder@127.0.0.1:8191"
+        settings = _settings(address)
+        monkeypatch.setattr(service_health, "_checks", lambda: {CAPABILITY: endpoints.check_flaresolverr_address})
+
+        assert service_health.note_use(CAPABILITY, address) is None
+
+        with capabilities.open_lease(CAPABILITY, _installation(trusted=True), settings, owner="a") as lease:
+            assert lease.url() == address
+        report = capabilities.resolve(CAPABILITY, _installation(trusted=True), settings).as_dict()
+        assert report["external"] and report["ready"] and "health" not in report
+
+    def test_the_explicit_test_of_an_authenticated_address_leaves_health_unknown(self, monkeypatch):
+        address = "http://fixture:placeholder@127.0.0.1:8191"
+        settings = _settings(address)
+        monkeypatch.setattr("app.ui._resolve_and_validate_constrained",
+                            lambda url: pytest.fail("an authenticated address must be refused before resolution"))
+
+        result = endpoints.run_flaresolverr_test("", settings)
+
+        assert result["code"] == "invalid_address"
+        report = capabilities.resolve(CAPABILITY, _installation(trusted=True), settings).as_dict()
+        assert report["external"] and report["ready"] and "health" not in report
+
     def test_the_root_and_the_v1_endpoint_are_one_service(self):
         service_health.record(CAPABILITY, "http://solver.lan:8191/v1", {"ok": True, "code": "ok"})
 
@@ -494,10 +518,10 @@ class TestRemoteBinding:
         monkeypatch.setattr(service_health, "_checks", lambda: {CAPABILITY: broken})
 
         with caplog.at_level(logging.WARNING):
-            service_health.note_use(CAPABILITY, "http://user:pw@solver.lan:8191").join(WAIT)
+            service_health.note_use(CAPABILITY, ADDRESS).join(WAIT)
 
-        assert "pw@" not in caplog.text and "RuntimeError" in caplog.text
-        assert service_health.last(CAPABILITY, "http://user:pw@solver.lan:8191")["state"] == "unreachable"
+        assert ADDRESS not in caplog.text and "RuntimeError" in caplog.text
+        assert service_health.last(CAPABILITY, ADDRESS)["state"] == "unreachable"
 
 
 # --------------------------------------------------------------------------- what a call holds

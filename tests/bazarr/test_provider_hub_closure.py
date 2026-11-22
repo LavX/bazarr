@@ -336,6 +336,44 @@ def test_a_capability_another_installed_plugin_also_provides_leaves_each_removab
     assert remove_installation("first") is True
 
 
+@pytest.mark.parametrize("requirement", ["external", "unbound", "named", "other", "no_field"])
+def test_managed_service_guards_accept_only_a_matching_external_binding(tmp_path, monkeypatch, requirement):
+    from app.config import settings
+    from provider_hub import closure, endpoints, service, state
+    from provider_hub.kinds.service import SERVICE_KIND_API
+
+    capability = endpoints.FLARESOLVERR_CAPABILITY
+    other = "fixture.backend.v1"
+    managed = service_manifest("managed_fixture", kind="service", kind_api=SERVICE_KIND_API,
+                               provides=[capability, other], **oci_runtime())
+    consumer = provider_manifest_v2("consumer_fixture", requires=[capability])
+    if requirement != "no_field":
+        consumer["config_schema"]["properties"][endpoints.FLARESOLVERR_PROVIDER_FIELD] = {"type": "string"}
+    if requirement == "named":
+        consumer["extends"] = {"id": managed["id"], "capability": capability}
+    if requirement == "other":
+        consumer["requires"].append(other)
+    _world(tmp_path, monkeypatch, [], {**_installed(managed), **_installed(consumer)})
+    monkeypatch.delenv(endpoints.FLARESOLVERR_ENV, raising=False)
+    monkeypatch.setitem(settings.general, "enabled_providers", ["consumer_fixture"])
+    address = "" if requirement == "unbound" else "http://127.0.0.1:8191"
+    monkeypatch.setitem(settings.endpoints, endpoints.FLARESOLVERR_SETTING_KEY, address)
+
+    before = state.load_state()
+    replacement = {**managed, "version": "2.0.0", "provides": ["replacement.backend.v1"]}
+    expected = [] if requirement == "external" else [("consumer_fixture", other if requirement == "other" else capability)]
+    if requirement == "external":
+        assert service.update_provider(managed["id"], enabled=False)["enabled"] is False
+        assert service.remove_installation(managed["id"]) is True
+        assert state.load_state()["installations"]["consumer_fixture"]["state"] == "active"
+    else:
+        with pytest.raises(ValueError, match="cannot be switched off while consumer_fixture depends"):
+            service.update_provider(managed["id"], enabled=False)
+        with pytest.raises(service.ProviderHubInstallError, match="cannot be removed while consumer_fixture depends"):
+            service.remove_installation(managed["id"])
+    assert closure.broken_by(before, managed["id"], replacement) == expected
+
+
 # --- staged updates and switched-off suppliers count ------------------------------------------------
 
 
