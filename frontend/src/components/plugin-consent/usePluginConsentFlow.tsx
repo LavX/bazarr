@@ -1,5 +1,6 @@
 import { ReactElement, useCallback, useRef, useState } from "react";
 import { showNotification } from "@mantine/notifications";
+import { isAxiosError } from "axios";
 import { usePluginApplyUpdate, usePluginInstall } from "@/apis/hooks/plugins";
 import api from "@/apis/raw";
 import { withInlineErrors } from "@/apis/raw/inlineWrites";
@@ -37,10 +38,13 @@ export interface PluginConsentFlow {
 export function usePluginConsentFlow({
   onDone,
   onClosed,
+  onUpdateWithoutPreview,
   costCaps,
 }: {
   onDone?: (target: PluginConsentTarget) => void;
   onClosed?: () => void;
+  /** The legacy provider update action, used when the canonical preview returns 404. */
+  onUpdateWithoutPreview?: (id: string) => Promise<void>;
   costCaps?: PluginCostCaps;
 } = {}): PluginConsentFlow {
   const [target, setTarget] = useState<PluginConsentTarget | null>(null);
@@ -111,7 +115,20 @@ export function usePluginConsentFlow({
         }
         const delta = await withInlineErrors(() =>
           api.plugins.updateConsent(next.pluginId),
-        );
+        ).catch(async (error) => {
+          if (
+            onUpdateWithoutPreview &&
+            isAxiosError(error) &&
+            error.response?.status === 404
+          ) {
+            await onUpdateWithoutPreview(next.pluginId);
+            return;
+          }
+          throw error;
+        });
+        if (!delta) {
+          return;
+        }
         if (delta.needs_consent) {
           setTarget(next);
           return;
@@ -140,7 +157,7 @@ export function usePluginConsentFlow({
         setUpdating(null);
       }
     },
-    [applyUpdate, gated, install, onDone],
+    [applyUpdate, gated, install, onDone, onUpdateWithoutPreview],
   );
 
   const dialog = (

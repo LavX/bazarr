@@ -12,7 +12,6 @@ import api from "@/apis/raw";
 import { withInlineErrors } from "@/apis/raw/inlineWrites";
 import type {
   ProviderHubCatalog,
-  ProviderHubCatalogEntry,
   ProviderHubInstallation,
 } from "@/apis/raw/providerHub";
 import { EmptyState } from "@/components/hub/EmptyState";
@@ -23,7 +22,6 @@ import {
 import { useGatedAction } from "@/components/modals/PasswordConfirmModal";
 import { usePluginConsentFlow } from "@/components/plugin-consent";
 import { notification } from "@/modules/notification";
-import { isSchemaTwo } from "@/pages/Settings/Providers/hub/components/SchemaTwoDetails";
 import { UpdateCard } from "@/pages/Settings/Providers/hub/components/UpdateCard";
 import styles from "@/components/hub/hub.module.scss";
 
@@ -43,74 +41,38 @@ export const UpdatesPanel: FunctionComponent<UpdatesPanelProps> = ({
   const applyUpdate = useProviderHubApplyUpdate();
   const checkUpdates = useProviderHubCheckUpdates();
   const runGated = useGatedAction();
-  const { begin, dialog, updating, busy } = usePluginConsentFlow();
 
   const [applyingIds, setApplyingIds] = useState<Set<string>>(new Set());
   const [applyingAll, setApplyingAll] = useState(false);
 
   const stagedRows = summary.pendingRestart;
-  const availableRows = useMemo(
-    () =>
-      summary.available.flatMap((provider) => {
-        const latest = getLatestCatalogEntry(
-          catalog,
-          provider.provider_id,
-          provider.source_id ?? null,
-        );
-        return latest ? [{ provider, latest }] : [];
-      }),
-    [catalog, summary.available],
-  );
+  const availableRows = summary.available;
 
   // The backend gates an update behind the password confirmation, so the
   // apply runs through the gated action: with login on and no live window the
   // prompt appears here rather than as a refusal toast after the request.
-  const applyOne = useCallback(
-    async (
-      provider: ProviderHubInstallation,
-      latest: ProviderHubCatalogEntry,
-    ) => {
-      const id = provider.provider_id;
-      if (isSchemaTwo(latest)) {
-        await begin({ action: "update", pluginId: id, name: provider.name });
-        return;
-      }
+  const applyWithoutPreview = useCallback(
+    async (id: string) => {
       await runGated(async () => {
-        setApplyingIds((prev) => {
-          if (prev.has(id)) return prev;
-          const next = new Set(prev);
-          next.add(id);
-          return next;
-        });
-        try {
-          await applyUpdate.mutateAsync(id);
-        } catch {
-          // swallow: cleanup runs in finally
-        } finally {
-          setApplyingIds((prev) => {
-            if (!prev.has(id)) return prev;
-            const next = new Set(prev);
-            next.delete(id);
-            return next;
-          });
-        }
+        await applyUpdate.mutateAsync(id).catch(() => undefined);
       }, "apply this provider update");
     },
-    [applyUpdate, begin, runGated],
+    [applyUpdate, runGated],
   );
+  const { begin, dialog, updating, busy } = usePluginConsentFlow({
+    onUpdateWithoutPreview: applyWithoutPreview,
+  });
 
   // One password confirmation covers the batch. Each update that adds access needs individual consent.
   const applyAll = useCallback(async () => {
-    const candidates = availableRows.filter(
-      ({ provider }) => !applyingIds.has(provider.provider_id),
-    );
+    const candidates = availableRows
+      .map((row) => row.provider_id)
+      .filter((id) => !applyingIds.has(id));
     if (candidates.length === 0) return;
     setApplyingAll(true);
     try {
       const previews = await Promise.all(
-        candidates.map(async ({ provider, latest }) => {
-          const id = provider.provider_id;
-          if (!isSchemaTwo(latest)) return { id, status: "ready" };
+        candidates.map(async (id) => {
           try {
             const delta = await withInlineErrors(() =>
               api.plugins.updateConsent(id),
@@ -249,12 +211,22 @@ export const UpdatesPanel: FunctionComponent<UpdatesPanelProps> = ({
                 </Button>
               </Group>
               <div className={styles.cardGrid}>
-                {availableRows.map(({ provider, latest }) => (
+                {availableRows.map((provider) => (
                   <UpdateCard
                     key={provider.provider_id}
                     provider={provider}
-                    latest={latest}
-                    onApply={() => void applyOne(provider, latest)}
+                    latest={getLatestCatalogEntry(
+                      catalog,
+                      provider.provider_id,
+                      provider.source_id ?? null,
+                    )}
+                    onApply={(id) =>
+                      void begin({
+                        action: "update",
+                        pluginId: id,
+                        name: provider.name,
+                      })
+                    }
                     isApplying={
                       applyingIds.has(provider.provider_id) ||
                       updating === provider.provider_id
