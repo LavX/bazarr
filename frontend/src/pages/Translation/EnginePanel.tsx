@@ -19,6 +19,7 @@ import type {
 import {
   backendLabel,
   engineName,
+  engineSelectable,
   engineStatus,
   engineUnavailable,
   hasBackends,
@@ -170,7 +171,7 @@ const EnginePanel: FunctionComponent<EnginePanelProps> = ({
       ? (pointers.chosen.engine ?? null)
       : state.engine;
   const chosen = engines.some(
-    (item) => item.id === requested && !engineUnavailable(item),
+    (item) => item.id === requested && engineSelectable(item),
   )
     ? requested
     : null;
@@ -179,7 +180,7 @@ const EnginePanel: FunctionComponent<EnginePanelProps> = ({
       ? (pointers.chosen.fallback_engine ?? null)
       : state.fallback_engine;
   const fallbackChoices = engines.filter(
-    (item) => item.id !== chosen && !engineUnavailable(item),
+    (item) => item.id !== chosen && engineSelectable(item),
   );
   const toId = (value: string | null) =>
     value === null || value === NONE ? null : Number(value);
@@ -201,7 +202,7 @@ const EnginePanel: FunctionComponent<EnginePanelProps> = ({
           id={id}
           name={group}
           checked={chosen === engine.id}
-          disabled={unavailable}
+          disabled={!engineSelectable(engine)}
           aria-describedby={`${id}-text`}
           onChange={() => pointers.choose({ engine: engine.id })}
         />

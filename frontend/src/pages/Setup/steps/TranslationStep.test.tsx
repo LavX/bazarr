@@ -533,6 +533,62 @@ describe("TranslationStep", () => {
     expect(screen.queryByLabelText("OpenRouter key")).not.toBeInTheDocument();
   });
 
+  it("loads the reinstall offer on return after a delete-data removal finishes", async () => {
+    let reads = 0;
+    let finished = false;
+    server.use(
+      http.get("/api/translation/state", () => {
+        reads++;
+        return HttpResponse.json(
+          firstRun({
+            instances: [],
+            available_engines: finished
+              ? [OFFICIAL_OFFER, GOOGLE_OFFER]
+              : [GOOGLE_OFFER],
+          }),
+        );
+      }),
+      http.get("/api/plugins/installations", () =>
+        HttpResponse.json({
+          data: finished
+            ? []
+            : [
+                {
+                  provider_id: "ai_translator",
+                  kind: "translator",
+                  state: "removed",
+                  active_version: "2.2.0",
+                  needs_restart: false,
+                },
+              ],
+        }),
+      ),
+    );
+
+    const { unmount } = customRender(<TranslationStep onNext={onNext} />);
+    expect(
+      await screen.findByRole("button", {
+        name: "Install AI Subtitle Translator",
+      }),
+    ).toBeDisabled();
+    expect(reads).toBe(1);
+    unmount();
+    finished = true;
+    // The Plugin Hub can observe cleanup before the user returns to Translation.
+    queryClient.setQueryData(
+      [QueryKeys.Plugins, "installations", QueryKeys.All],
+      [],
+    );
+
+    customRender(<TranslationStep onNext={onNext} />);
+    await waitFor(() =>
+      expect(
+        screen.getByRole("button", { name: "Install AI Subtitle Translator" }),
+      ).toBeEnabled(),
+    );
+    expect(reads).toBe(2);
+  });
+
   it.each([
     [{ state: "staged", active_version: null }, "It is installed. Restart"],
     [

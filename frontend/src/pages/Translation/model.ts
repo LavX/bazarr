@@ -138,9 +138,12 @@ export const engineUnavailable = (engine: TranslationEngine) =>
   engine.awaiting_restart === "removal" ||
   (!engine.legacy && engine.plugin === null);
 
+export const engineSelectable = (engine: TranslationEngine) =>
+  !engineUnavailable(engine) && !engine.pluginDisabled;
+
 /** Whether there is something to run: an engine's plugin, or Bazarr+ itself for an engine it runs. */
 export const canRun = (engine: TranslationEngine) =>
-  !engineUnavailable(engine) &&
+  engineSelectable(engine) &&
   (engine.legacy === true || engine.plugin?.active === true);
 
 export interface Status {
@@ -196,6 +199,13 @@ export function engineStatus(engine: TranslationEngine): Status {
       tone: "warning",
       label: "Removing",
       next: "This plugin is being removed. It goes when the calls it is running end, or after a few minutes.",
+    };
+  }
+  if (engine.pluginDisabled && !engineUnavailable(engine)) {
+    return {
+      tone: "neutral",
+      label: "Plugin off",
+      next: "Turn it on in the Plugin Hub to use this engine.",
     };
   }
   // A removal waits on the restart whether or not the plugin still runs until then.

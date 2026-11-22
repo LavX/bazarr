@@ -2736,6 +2736,99 @@ describe("Translation page, an engine installed and waiting for a restart", () =
     ).toBeGreaterThan(0);
     expect(screen.queryByText(/waiting for a restart/)).not.toBeInTheDocument();
   });
+
+  it("clears a primary disabled in the Plugin Hub and keeps its settings and update available", async () => {
+    const response = gate();
+    let holdResponse = false;
+    const ai = engine({
+      plugin: { ...engine().plugin!, update_version: "2.3.0" },
+    });
+    state = {
+      ...state,
+      instances: [second, lingarr(), ai],
+    };
+    server.use(
+      http.get("/api/translation/state", async () => {
+        if (holdResponse) await response.opened;
+        return HttpResponse.json(state);
+      }),
+    );
+    const group = await showPage();
+    const primary = within(group).getByRole("radio", {
+      name: /AI Subtitle Translator/,
+    });
+    const none = within(group).getByRole("radio", { name: "None" });
+    expect(primary).toBeChecked();
+    await waitFor(() =>
+      expect(
+        queryClient.getQueryState([
+          QueryKeys.Plugins,
+          "installations",
+          QueryKeys.All,
+        ])?.status,
+      ).toBe("success"),
+    );
+    const refreshInstallations = () =>
+      queryClient.invalidateQueries({
+        queryKey: [QueryKeys.Plugins, "installations"],
+      });
+    holdResponse = true;
+    try {
+      waitingFor({
+        state: "active",
+        active_version: "2.2.0",
+        enabled: false,
+        needs_restart: false,
+      });
+      await refreshInstallations();
+      await waitFor(() => expect(none).toBeChecked());
+      expect(primary).toBeDisabled();
+      expect(primary).not.toBeChecked();
+      expect(within(group).getByText("Plugin off")).toBeVisible();
+      expect(
+        within(group).getByText(/Turn it on in the Plugin Hub/),
+      ).toBeVisible();
+      expect(
+        within(group).getByRole("link", { name: "Update available" }),
+      ).toHaveAttribute("href", "/plugin-hub?tab=updates");
+      expect(
+        screen.getByLabelText("Turn AI Subtitle Translator on or off"),
+      ).toBeEnabled();
+      expect(
+        screen.getByRole("heading", { name: "Engine settings" }),
+      ).toBeVisible();
+      expect(
+        within(group).getByRole("radio", { name: /Lingarr/ }),
+      ).toBeEnabled();
+    } finally {
+      // The settings service still reports an installed release, with saved values and no selected pointer.
+      state = {
+        ...state,
+        engine: null,
+        instances: [second, lingarr(), { ...ai, configured: false }],
+      };
+      response.open();
+    }
+
+    await waitFor(() =>
+      expect(
+        queryClient.getQueryData<TranslationState>([
+          QueryKeys.Translation,
+          "state",
+        ])?.engine,
+      ).toBeNull(),
+    );
+    state = { ...state, instances: [second, lingarr(), ai] };
+    waitingFor({
+      state: "active",
+      active_version: "2.2.0",
+      enabled: true,
+      needs_restart: false,
+    });
+    await refreshInstallations();
+    await waitFor(() => expect(primary).toBeEnabled());
+    expect(none).toBeChecked();
+  });
 });
 
 describe("Translation page, a row whose switch is being written", () => {

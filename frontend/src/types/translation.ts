@@ -44,6 +44,8 @@ export interface TranslationEngine {
    * calls the plugin already took are done, and nothing can be done with the engine meanwhile.
    */
   removing?: boolean;
+  /** Set from the Plugin Hub installation switch. The engine settings can still be edited. */
+  pluginDisabled?: boolean;
   plugin_id: string;
   name: string;
   official: boolean;

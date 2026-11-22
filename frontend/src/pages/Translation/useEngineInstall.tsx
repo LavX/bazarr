@@ -1,7 +1,7 @@
 import { ReactElement, useCallback, useEffect, useMemo, useRef } from "react";
 import { usePluginInstallations } from "@/apis/hooks/plugins";
 import {
-  type useTranslationState,
+  useTranslationState,
   useTranslationSummary,
 } from "@/apis/hooks/translation";
 import type { PluginInstallation } from "@/apis/raw/plugins";
@@ -19,7 +19,7 @@ import type {
   TranslationAvailableEngine,
   TranslationState,
 } from "@/types/translation";
-import { engineUnavailable } from "./model";
+import { engineSelectable } from "./model";
 
 /** The kinds of plugin the Translation page is about: engines and their back ends. */
 const TRANSLATION_KINDS = new Set(["translator", "translator_backend"]);
@@ -84,13 +84,13 @@ function installationMismatch(
       if (engine.legacy) return false;
       const row = engineRows.get(engine.plugin_id);
       if (!row) return engine.plugin !== null;
+      const pointedTo =
+        state.engine === engine.id || state.fallback_engine === engine.id;
       if (row.state === "removed") {
-        return (
-          engine.plugin?.active === true ||
-          state.engine === engine.id ||
-          state.fallback_engine === engine.id
-        );
+        return engine.plugin?.active === true || pointedTo;
       }
+      if (row.enabled === false && (pointedTo || engine.configured))
+        return true;
       return row.active_version
         ? engine.plugin?.version !== row.active_version
         : engine.plugin?.active === true;
@@ -103,13 +103,9 @@ function installationMismatch(
 }
 
 /** Apply installation changes at once and ask for the canonical pointers, settings and catalog offers. */
-export function useRestartAware({
-  data: state,
-  refetch,
-}: Pick<ReturnType<typeof useTranslationState>, "data" | "refetch">): {
-  state: TranslationState | undefined;
-  waiting: number;
-} {
+export function useRestartAware() {
+  const query = useTranslationState(true, "always");
+  const { data: state, isFetchedAfterMount, refetch } = query;
   const installations = usePluginInstallations();
   const previousLifecycle = useRef<string | undefined>(undefined);
   // What the restart will do to each plugin that waits on one, read from the installation: a removal is
@@ -164,7 +160,11 @@ export function useRestartAware({
   useEffect(() => {
     if (!snapshot || !state) return;
     const previous = previousLifecycle.current;
-    if (previous === snapshot.lifecycle) return;
+    if (
+      previous === snapshot.lifecycle ||
+      (previous === undefined && !isFetchedAfterMount)
+    )
+      return;
     previousLifecycle.current = snapshot.lifecycle;
     if (
       previous !== undefined ||
@@ -172,9 +172,9 @@ export function useRestartAware({
     ) {
       void refetch();
     }
-  }, [snapshot, state, refetch]);
+  }, [snapshot, state, isFetchedAfterMount, refetch]);
 
-  return useMemo(() => {
+  const view = useMemo(() => {
     if (!state || !snapshot) {
       return { state, waiting: snapshot?.changes.size ?? 0 };
     }
@@ -187,7 +187,12 @@ export function useRestartAware({
       const marked = mark(engine);
       if (engine.legacy) return marked;
       if (removing.has(engine.plugin_id)) return { ...marked, removing: true };
-      if (engineRows.has(engine.plugin_id)) return marked;
+      const row = engineRows.get(engine.plugin_id);
+      if (row) {
+        return row.enabled === false
+          ? { ...marked, pluginDisabled: true, configured: false }
+          : marked;
+      }
       // Match the missing-plugin state that a fresh Translation response would report.
       // Keep the engine instance and its saved connections for a possible reinstall.
       return {
@@ -207,7 +212,7 @@ export function useRestartAware({
       )
       .map(mark);
     const usablePointer = (id: number | null) =>
-      instances.some((engine) => engine.id === id && !engineUnavailable(engine))
+      instances.some((engine) => engine.id === id && engineSelectable(engine))
         ? id
         : null;
     return {
@@ -225,4 +230,5 @@ export function useRestartAware({
       waiting: changes.size,
     };
   }, [state, snapshot]);
+  return { ...query, data: view.state, waiting: view.waiting };
 }

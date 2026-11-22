@@ -9,10 +9,7 @@ import {
 } from "@fortawesome/free-solid-svg-icons";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import { useAppTitle } from "@/apis/hooks/site";
-import {
-  useTranslationState,
-  useTranslationSummary,
-} from "@/apis/hooks/translation";
+import { useTranslationSummary } from "@/apis/hooks/translation";
 import { RestartBanner } from "@/components/hub/RestartBanner";
 import type {
   TranslationCapability,
@@ -95,9 +92,8 @@ const EngineTab: FunctionComponent<{
 /** Translation: the engine, its back ends, the defaults and what has been translated. */
 const TranslationView: FunctionComponent = () => {
   useDocumentTitle(`Translation - ${useAppTitle()}`);
-  const loaded = useTranslationState();
-  const { isLoading, error, refetch, isFetching } = loaded;
-  const { state: data, waiting } = useRestartAware(loaded);
+  const { data, isLoading, error, refetch, isFetching, waiting } =
+    useRestartAware();
   // The server says what it can do beyond the settings. Nothing is asked of, or shown for, a route it
   // does not list.
   const can = (capability: TranslationCapability) =>
