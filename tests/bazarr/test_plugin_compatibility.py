@@ -29,6 +29,19 @@ def test_invalid_forbidden_if_conditions_are_refused_before_settings_validation(
         parse_plugin_manifest(manifest)
 
 
+def test_a_reorder_only_field_cannot_declare_forbidden_if():
+    from provider_hub.manifest import ManifestValidationError
+    from provider_hub.plugin_manifest import parse_plugin_manifest
+
+    fields = [{"key": "mode", "type": "choice", "choices": ["auto"]},
+              {"key": "selection", "type": "orderable_list", "items": ["sample"],
+               "forbidden_if": {"key": "mode", "equals": "auto"}}]
+    manifest = service_manifest("sample", kind="translator", kind_api="bazarr.translator.v1", settings_version=1,
+                                settings={"fields": [], "backend_types": {"sample": {"fields": fields}}})
+    with pytest.raises(ManifestValidationError, match="forbidden_if"):
+        parse_plugin_manifest(manifest)
+
+
 @pytest.mark.parametrize("lower,higher", [
     ("2.8.0-alpha", "2.8.0-alpha.1"),
     ("2.8.0-alpha.1", "2.8.0-alpha.beta"),
