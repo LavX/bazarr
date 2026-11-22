@@ -5,9 +5,9 @@
 # The gate runs against a frozen copy of origin/development's Remove HI implementation,
 # vendored under tests/bazarr/fixtures/hi_reference and checked by hash.
 #
-# The rules work on plain text exactly as origin/development has them. Only cues whose
-# markup is simple (whole-line pairs of <i>, <b>, <u>, <font> or SSA override tags) are
-# handed to the rules with that markup removed, and wrapped again afterwards. So:
+# The rules work on plain text exactly as origin/development has them. Supported
+# styles around full lines or leading labels and cue-level alignment are set aside,
+# then restored on surviving text. So:
 #
 # * plain cues must produce output byte-identical to origin/development, and every
 #   output must be a string: a load failure fails the gate instead of comparing as equal;
@@ -254,7 +254,8 @@ _REVIEW_MULTILINE = [
 ]
 # Markup the layer does not take apart. Each must come out exactly as development makes it.
 _UNKNOWN_CUES = [
-    ["{\\an8}♪ la la ♪"], ["Hello <i>there</i>"], ["<i>a <b>b</b> c</i>"],
+    ["Hello <i>there</i>"], ["<i>a <b>b</b> c</i>"],
+    ["<i>LAUGHING</b>"], ["<s>LAUGHING"], ["<i />LAUGHING</i>"],
     ["<i>♪ Music ♪", "<font color=\"#fff\">Hello</font></i>"],
     ["<i>[door creaks]", "I know you're in there (knocking)</i>"], ["<i>♪ la", "</i>"],
     ["<i>unclosed"], ["<i>a</i> <i>b</i>"], ["<i></i>"], ["<i>   </i>"], ["<b></b>", "Hallo."],
@@ -579,6 +580,240 @@ def test_wrapped_bracket_line_is_removed_whole(cue, render):
     assert "Hallo." in out
 
 
+@pytest.mark.parametrize("plain, styled, expected", [
+    ("JOHN: Where is it?", "<i>JOHN:</i> Where is it?", ["Where is it?"]),
+    ("- JOHN: Hello.", "- <i>JOHN:</i> Hello.", ["Hello."]),
+    ("JOHN: Hello.", "<i>JOHN</i>: Hello.", ["Hello."]),
+    ("JOHN : Hello.", "<i>JOHN</i> : Hello.", ["Hello."]),
+    ("John: We can go.", "<b><i>John:</i></b> We can go.", ["We can go."]),
+    ("WOMAN: Hello.", "<s>WOMAN:</s> Hello.", ["Hello."]),
+    ("[sighs] WOMAN: Hello.", "<s>[sighs] WOMAN: Hello.</s>", ["Hello."]),
+    ("LAUGHING", "<s>LAUGHING</s>", None),
+    ("COUGHING", "< i >COUGHING< / i >", None),
+    ("LAUGHING", r"{\an8}LAUGHING", None),
+    ("[door creaks]", r"{\an8}<i>[door creaks]</i>", None),
+    ("♪ Some lyric ♪", r"{\an8}♪ Some lyric ♪", None),
+    ("♪♪", r"{\an8}<s>♪♪</s>", None),
+    ("LAUGHING Where is it?", r"{\an8}<i>LAUGHING Where is it?</i>", ["Where is it?"]),
+])
+def test_tagged_hi_cue_matches_its_plain_form(plain, styled, expected, render):
+    for text in (plain, styled):
+        output = render(_pair_srt([text]), ["remove_HI"])
+        cue = _cue_text(output)
+        assert ([_visible(line) for line in cue] if cue is not None else None) == expected
+        assert "Hallo." in output
+
+
+@pytest.mark.parametrize("plain, styled", [
+    ("I left the door open.", "I left the <s>door</s> open."),
+    ("I heard someone laughing.", r"{\an8}I heard someone < i >laughing< / i >."),
+    ("Keep the door open.", "<i>Keep the <s>door</s> open.</i>"),
+    ("The plan: we stay.", "<i>The plan:</i> we stay."),
+])
+def test_dialogue_survives_mid_line_markup(plain, styled, render):
+    for text in (plain, styled):
+        cue = _cue_text(render(_pair_srt([text]), ["remove_HI"]))
+        assert cue is not None
+        assert [_visible(line) for line in cue] == [plain]
+
+
+@pytest.mark.parametrize("styled, expected", [
+    ("<s><i>JOHN:</i> Hello.</s>", "<s>Hello.</s>"),
+    ("<i>The plan:</i> we stay.", "<i>The plan:</i> we stay."),
+    ("OPEN THE <s>DOOR</s>", "OPEN THE <s>DOOR</s>"),
+])
+def test_styles_are_kept_on_surviving_dialogue(styled, expected, render):
+    output = render(_pair_srt([styled]), ["remove_HI"])
+    assert _cue_text(output) == [expected]
+
+
+@pytest.mark.parametrize("opening, closing", [
+    ("<s>", "</s>"),
+    ("< i >", "< / i >"),
+    (r"{\an8}", ""),
+])
+def test_caps_dialogue_is_kept_in_mostly_uppercase_subtitle(opening, closing, render):
+    line = "OPEN THE DOOR"
+    srt = _srt_from_cues([[opening + line + closing] for _ in range(12)])
+    output = render(srt, ["remove_HI"])
+    assert [_visible(lines[0]) for _, _, lines in _parse_srt(output)] == [line] * 12
+
+
+@pytest.mark.parametrize("route", ROUTES)
+@pytest.mark.parametrize("first_line, dialogue, keep_first_line", [
+    ("LAUGHING", "Hello there.", False),
+    ("LAUGHING", "Do <i>not</i> leave.", False),
+    ("OPEN THE DOOR", "Do <i>not</i> leave.", True),
+    ("- OPEN THE DOOR", "Do <i>not</i> leave.", True),
+])
+@pytest.mark.parametrize("alignment", [r"{\an1}", r"{\an8}"])
+def test_positioning_is_kept_on_the_first_surviving_line(route, first_line, dialogue, keep_first_line,
+                                                        alignment, tmp_path):
+    srt = _pair_srt([alignment + first_line, dialogue])
+    sm = SubtitleModifications()
+    if route == "content":
+        assert sm.load(content=srt, language=Language("eng"), mods=["remove_HI"])
+    else:
+        path = tmp_path / "positioned.srt"
+        path.write_text(srt, encoding="utf-8")
+        assert sm.load(fn=str(path), language=Language("eng"), mods=["remove_HI"])
+    sm.modify("remove_HI")
+    if route == "file":
+        dialogue = dialogue.replace("<i>", r"{\i1}").replace("</i>", r"{\i0}")
+    expected = [alignment + first_line, dialogue] if keep_first_line else [alignment + dialogue]
+    assert _cue_text(sm.f.to_string("srt", keep_ssa_tags=True)) == expected
+
+
+@pytest.mark.parametrize("dialogue", ["Hello there.", "Do <i>not</i> leave."])
+@pytest.mark.parametrize("alignment", [r"{\an1}", r"{\an8}"])
+def test_default_srt_rendering_preserves_dialogue_without_alignment_override(dialogue, alignment, render):
+    # The SRT writer omits SSA alignment by default. The mod only owns removal
+    # of the HI line, while serializers that support the override can retain it.
+    output = render(_pair_srt([alignment + "LAUGHING", dialogue]), ["remove_HI"])
+    assert _cue_text(output) == [dialogue]
+
+
+@pytest.mark.parametrize("lines, expected", [
+    (["(door creaks)", "(footsteps)"], None),
+    (["<i>(door creaks)</i>", "<i>(footsteps)</i>"], None),
+    (["[DRAMATIC ORCHESTRAL", "MUSIC PLAYING]"], None),
+    (["[door opens] [DRAMATIC ORCHESTRAL", "MUSIC PLAYING]"], None),
+    (["♪ When the night has come", "And the land is dark"], ["And the land is dark"]),
+    (["♪ We can sing ♪ in the morning", "we can dance through the night", "and we can do it all again ♪"], None),
+    (["Look at the keypad.", "#1 is the top button."], ["Look at the keypad.", "#1 is the top button."]),
+    (["♪ Some lyrics ♪", "Do <i>not</i> leave."], ["Do <i>not</i> leave."]),
+    (["<i>♪ Some lyrics ♪</i>", "<i>Do not leave.</i>"], ["<i>Do not leave.</i>"]),
+    (["OPEN THE DOOR", "Do <i>not</i> leave."], ["OPEN THE DOOR", "Do <i>not</i> leave."]),
+    (["- OPEN THE DOOR", "Do <i>not</i> leave."], ["- OPEN THE DOOR", "Do <i>not</i> leave."]),
+    (["- <i>JOHN:</i> Hello.", "Do not leave."], ["Hello.", "Do not leave."]),
+])
+def test_aligned_multiline_cues_remove_only_supported_hi_content(lines, expected, render):
+    srt = _pair_srt([r"{\an8}" + lines[0], *lines[1:]])
+    output = render(srt, ["remove_HI"])
+    assert _cue_text(output) == expected
+    assert "Hallo." in output
+
+
+@pytest.mark.parametrize("lines", [
+    ["[door creaks]", "Please stay here.", "[footsteps]"],
+    ["♪", "Please stay here."],
+    ["Please stay here.", "♪"],
+    ["Please stay here.", "Lyrics ♪"],
+])
+@pytest.mark.parametrize("mods", MODS)
+def test_aligned_multiline_hi_cannot_remove_separate_speech(lines, mods, render):
+    if "Lyrics ♪" in lines and "keep_lyrics" in mods[0]:
+        expected = ["Please stay here.", "Lyrics ♪"]
+    else:
+        expected = ["Please stay here."]
+    output = render(_pair_srt([r"{\an8}" + lines[0], *lines[1:]]), mods)
+    assert _cue_text(output) == expected
+    assert "Hallo." in output
+
+
+@pytest.mark.parametrize("lines, word, default_lines, kept_lines", [
+    pytest.param(["♪ First song ♫", "Please stay here.", "♪ Next song ♪"], "stay", (1,), (0, 1, 2),
+                 id="separate-lyrics"),
+    pytest.param(["♪ First song ♫", "Please stay here.", "Next song ♪"], "stay", (1,), (0, 1, 2),
+                 id="first-line-complete"),
+    pytest.param(["♪ First song", "Please stay here.", "♪ Next song ♪"], "stay", (1,), (0, 1, 2),
+                 id="last-line-complete"),
+    pytest.param(["♪ We can sing tonight", "and dance till dawn ♪"], "sing", (), (0, 1), id="spanning-notes"),
+    pytest.param(["♪", "Do not leave.", "♪"], "not", (1,), (1,), id="bare-notes"),
+    pytest.param(["* We can sing tonight", "and dance all night *"], "sing", (), (0, 1), id="spanning-stars"),
+    pytest.param(["# We can sing tonight", "and dance all night #"], "sing", (), (0, 1), id="spanning-hashes"),
+])
+@pytest.mark.parametrize("inline", [False, True], ids=["plain", "inline-style"])
+@pytest.mark.parametrize("keep_lyrics", [False, True], ids=["remove-lyrics", "keep-lyrics"])
+def test_aligned_lyrics_respect_visible_marker_boundaries(lines, word, default_lines, kept_lines,
+                                                        inline, keep_lyrics, render):
+    if inline:
+        lines = [line.replace(word, f"<i>{word}</i>") for line in lines]
+    expected = [lines[i] for i in (kept_lines if keep_lyrics else default_lines)]
+    mods = MODS[1] if keep_lyrics else MODS[0]
+    output = render(_pair_srt([r"{\an8}" + lines[0], *lines[1:]]), mods)
+    assert _cue_text(output) == (expected or None)
+    assert "Hallo." in output
+
+
+@pytest.mark.parametrize("mods", MODS)
+def test_aligned_lyrics_do_not_join_separate_spans_over_dialogue(mods, render):
+    lines = ["♪ I will wait for you", "Until morning ♪", "Please stay here.",
+             "♪ The sun will rise", "And we will be free <i>♪</i>"]
+    expected = lines if mods == MODS[1] else ["Please stay here."]
+    output = render(_pair_srt([r"{\an8}" + lines[0], *lines[1:]]), mods)
+    assert _cue_text(output) == expected
+    assert "Hallo." in output
+
+
+@pytest.mark.parametrize("mods", MODS)
+@pytest.mark.parametrize("key", ["*", "#"])
+def test_alignment_and_inline_styles_cannot_turn_a_keypad_key_into_a_lyric(key, mods, render):
+    lines = [f"{key} To repeat this menu,", f"press <i>{key}</i>"]
+    output = render(_pair_srt([r"{\an8}" + lines[0], lines[1]]), mods)
+    assert _cue_text(output) == lines
+    assert "Hallo." in output
+
+
+@pytest.mark.parametrize("mods", MODS)
+def test_legacy_marks_cannot_enclose_dialogue_across_a_styled_lyric_line(mods, render):
+    lines = ["# Press one for English.", "<i>♪ Hold music ♪</i>", "To repeat this menu, press #"]
+    expected = lines if mods == MODS[1] else [lines[0], lines[2]]
+    output = render(_pair_srt([r"{\an8}" + lines[0], *lines[1:]]), mods)
+    assert _cue_text(output) == expected
+    assert "Hallo." in output
+
+
+@pytest.mark.parametrize("mods", MODS)
+def test_legacy_marks_with_styled_punctuation_do_not_enclose_speech(mods, render):
+    speech = "To repeat this menu, press #"
+    output = render(_pair_srt([r"{\an8}# <i>!</i>", speech]), mods)
+    lines = _cue_text(output)
+    assert lines is not None
+    assert lines[-1] == speech
+    assert "Hallo." in output
+
+
+@pytest.mark.parametrize("mods", MODS)
+@pytest.mark.parametrize("mark", ["#", "*"])
+@pytest.mark.parametrize("styled", [False, True], ids=["plain", "styled"])
+def test_standalone_legacy_mark_breaks_an_aligned_lyric_span(mark, styled, mods, render):
+    first = f"{mark} Press one for English."
+    last = f"To repeat this menu, press {mark}"
+    middle = f"{mark} <i> </i>" if styled else mark
+    output = render(_pair_srt([r"{\an8}" + first, middle, last]), mods)
+    lines = _cue_text(output)
+    assert lines is not None
+    assert lines[0] == first
+    assert lines[-1] == last
+
+
+def test_default_srt_alignment_policy_matches_reference(development_libs, tmp_path):
+    jobs = [(_pair_srt([r"{\an8}Hello there."]), ["remove_HI"])]
+    reference = _development_outputs(development_libs, tmp_path, jobs)
+    current = _current_outputs(jobs, tmp_path)
+    _assert_all_loaded(reference, jobs, "development")
+    _assert_all_loaded(current, jobs, "current")
+    assert reference == current
+    assert all(_cue_text(output) == ["Hello there."] for output in current[0])
+
+
+def test_quoted_less_than_attribute_keeps_unrelated_caps_dialogue(render):
+    line = "WE ARE GOING NOW THE PLAN IS ON"
+    dialogue = "OPEN THE DOOR"
+    srt = _srt_from_cues([[f'<s title="a < b">{line}</s>']] * 5 + [[dialogue]])
+    output = render(srt, ["remove_HI"])
+    assert [_visible(lines[0]) for _, _, lines in _parse_srt(output)] == [line] * 5 + [dialogue]
+
+
+def test_malformed_html_attributes_cannot_hide_dialogue(render):
+    cue = '<s title=">I heard it.<s title=" broken=>LAUGHING</s>'
+    output = render(_pair_srt([cue]), ["remove_HI"])
+    lines = _cue_text(output)
+    assert lines is not None
+    assert "I heard it." in " ".join(lines)
+
+
 def test_content_route_keeps_only_the_wrapped_dialogue_line():
     # Content route only: the file route cannot write bold back (see _expected_wrapper).
     # The bracket line goes, and its tags go with it. The dialogue line keeps its own tags.
@@ -637,9 +872,10 @@ def test_remove_hi_keeps_tagged_text_with_hash(cue, line, render):
 @pytest.mark.parametrize("cue, dialogue", [
     ("<i>♪ Music ♪\n<font color=\"#ffffff\">Hello there.</font></i>", "Hello there."),
     ("<i>♪ Music ♪\nWe're #1!</i>", "We're #1!"),
+    ("{\\an8}♪ Some lyrics ♪\nDo <i>not</i> leave.", "Do not leave."),
+    ("{\\an8}<i>♪ Some lyrics ♪</i>\n<i>Do not leave.</i>", "Do not leave."),
 ])
-def test_tagged_multiline_cue_with_declined_markup_keeps_dialogue(cue, dialogue, render):
-    # These cues are not whole-line wraps, so they reach development's rules unchanged.
+def test_tagged_multiline_music_cue_keeps_dialogue(cue, dialogue, render):
     out = render(_cue(cue), ["remove_HI"])
     assert dialogue in _visible(out)
     assert "Hallo." in out
