@@ -584,6 +584,7 @@ def test_wrapped_bracket_line_is_removed_whole(cue, render):
     ("JOHN: Where is it?", "<i>JOHN:</i> Where is it?", ["Where is it?"]),
     ("- JOHN: Hello.", "- <i>JOHN:</i> Hello.", ["Hello."]),
     ("JOHN: Hello.", "<i>JOHN</i>: Hello.", ["Hello."]),
+    ("JOHN : Hello.", "<i>JOHN</i> : Hello.", ["Hello."]),
     ("John: We can go.", "<b><i>John:</i></b> We can go.", ["We can go."]),
     ("WOMAN: Hello.", "<s>WOMAN:</s> Hello.", ["Hello."]),
     ("[sighs] WOMAN: Hello.", "<s>[sighs] WOMAN: Hello.</s>", ["Hello."]),
@@ -639,8 +640,10 @@ def test_caps_dialogue_is_kept_in_mostly_uppercase_subtitle(opening, closing, re
 
 
 @pytest.mark.parametrize("route", ROUTES)
-def test_positioning_is_kept_when_the_first_line_is_removed(route, tmp_path):
-    srt = _pair_srt([r"{\an8}LAUGHING", "Hello there."])
+@pytest.mark.parametrize("dialogue", ["Hello there.", "Do <i>not</i> leave."])
+@pytest.mark.parametrize("alignment", [r"{\an1}", r"{\an8}"])
+def test_positioning_is_kept_when_the_first_line_is_removed(route, dialogue, alignment, tmp_path):
+    srt = _pair_srt([alignment + "LAUGHING", dialogue])
     sm = SubtitleModifications()
     if route == "content":
         assert sm.load(content=srt, language=Language("eng"), mods=["remove_HI"])
@@ -649,14 +652,18 @@ def test_positioning_is_kept_when_the_first_line_is_removed(route, tmp_path):
         path.write_text(srt, encoding="utf-8")
         assert sm.load(fn=str(path), language=Language("eng"), mods=["remove_HI"])
     sm.modify("remove_HI")
-    assert _cue_text(sm.f.to_string("srt", keep_ssa_tags=True)) == [r"{\an8}Hello there."]
+    if route == "file":
+        dialogue = dialogue.replace("<i>", r"{\i1}").replace("</i>", r"{\i0}")
+    assert _cue_text(sm.f.to_string("srt", keep_ssa_tags=True)) == [alignment + dialogue]
 
 
-def test_default_srt_rendering_preserves_dialogue_without_alignment_override(render):
+@pytest.mark.parametrize("dialogue", ["Hello there.", "Do <i>not</i> leave."])
+@pytest.mark.parametrize("alignment", [r"{\an1}", r"{\an8}"])
+def test_default_srt_rendering_preserves_dialogue_without_alignment_override(dialogue, alignment, render):
     # The SRT writer omits SSA alignment by default. The mod only owns removal
     # of the HI line, while serializers that support the override can retain it.
-    output = render(_pair_srt([r"{\an8}LAUGHING", "Hello there."]), ["remove_HI"])
-    assert _cue_text(output) == ["Hello there."]
+    output = render(_pair_srt([alignment + "LAUGHING", dialogue]), ["remove_HI"])
+    assert _cue_text(output) == [dialogue]
 
 
 def test_default_srt_alignment_policy_matches_reference(development_libs, tmp_path):
@@ -667,6 +674,14 @@ def test_default_srt_alignment_policy_matches_reference(development_libs, tmp_pa
     _assert_all_loaded(current, jobs, "current")
     assert reference == current
     assert all(_cue_text(output) == ["Hello there."] for output in current[0])
+
+
+def test_quoted_less_than_attribute_keeps_unrelated_caps_dialogue(render):
+    line = "WE ARE GOING NOW THE PLAN IS ON"
+    dialogue = "OPEN THE DOOR"
+    srt = _srt_from_cues([[f'<s title="a < b">{line}</s>']] * 5 + [[dialogue]])
+    output = render(srt, ["remove_HI"])
+    assert [_visible(lines[0]) for _, _, lines in _parse_srt(output)] == [line] * 5 + [dialogue]
 
 
 def test_malformed_html_attributes_cannot_hide_dialogue(render):
@@ -736,9 +751,9 @@ def test_remove_hi_keeps_tagged_text_with_hash(cue, line, render):
     ("<i>♪ Music ♪\n<font color=\"#ffffff\">Hello there.</font></i>", "Hello there."),
     ("<i>♪ Music ♪\nWe're #1!</i>", "We're #1!"),
     ("{\\an8}♪ Some lyrics ♪\nDo <i>not</i> leave.", "Do not leave."),
+    ("{\\an8}<i>♪ Some lyrics ♪</i>\n<i>Do not leave.</i>", "Do not leave."),
 ])
-def test_tagged_multiline_cue_with_declined_markup_keeps_dialogue(cue, dialogue, render):
-    # These cues are not whole-line wraps, so they reach development's rules unchanged.
+def test_tagged_multiline_music_cue_keeps_dialogue(cue, dialogue, render):
     out = render(_cue(cue), ["remove_HI"])
     assert dialogue in _visible(out)
     assert "Hallo." in out

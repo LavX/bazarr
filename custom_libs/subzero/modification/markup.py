@@ -7,17 +7,18 @@ styles on surviving text and keeps leading SSA alignment on the surviving cue.
 """
 import re
 
-# Attributes may hold quoted values with a > in them, as in <font title="a>b">.
-# Require complete attribute assignments and disallow a new tag inside a value.
+# Allow angle brackets inside quoted values and require complete attribute
+# assignments so an apparent opener cannot consume malformed attributes.
 _STYLE_OPEN = re.compile(
     r"<[ \t]*(?i:(i|b|u|s|font))"
-    r"""(?:[ \t]+[a-zA-Z_:][a-zA-Z0-9_.:-]*[ \t]*=[ \t]*(?:"[^"<]*"|'[^'<]*'|[^ \t<>"'=`]+))*"""
+    r"""(?:[ \t]+[a-zA-Z_:][a-zA-Z0-9_.:-]*[ \t]*=[ \t]*(?:"[^"]*"|'[^']*'|[^ \t<>"'=`]+))*"""
     r"[ \t]*>|\{\\([iusb])1\}"
 )
 _STYLE_CLOSE = re.compile(r"<[ \t]*/[ \t]*(?i:(i|b|u|s|font))[ \t]*>|\{\\([iusb])0\}")
 _STYLE_CLOSE_AT_END = re.compile(r"(?:%s)$" % _STYLE_CLOSE.pattern)
 _SSA_ALIGNMENT = re.compile(r"\{\\an[1-9]\}")
 _SPEAKER_PREFIX = re.compile(r"[ \t]*(?:-[ \t]*)?")
+_SPEAKER_COLON = re.compile(r"[ \t]*:")
 # Any tag or override that the layer does not take apart.
 _ANY_MARKUP = re.compile(r"<|\{\\")
 
@@ -27,12 +28,13 @@ LINE_BREAK = r"\N"
 class EntryMarkup(object):
     """The text being processed and the markup set aside for each line and cue."""
 
-    def __init__(self, plain, opens, closes, labels, alignment):
+    def __init__(self, plain, opens, closes, labels, alignment, entry_for_rules=None):
         self.plain = plain
         self.opens = opens
         self.closes = closes
         self.labels = labels
         self.alignment = alignment
+        self.entry_for_rules = entry_for_rules
 
     def rewrap(self, lines, origins):
         """Wrap each output line in the tags of the input line it came from."""
@@ -81,10 +83,11 @@ def _unwrap_leading_label(text):
             return None
         offset = closing.end()
     if not label.endswith(":"):
-        if text[offset:offset + 1] != ":":
+        colon = _SPEAKER_COLON.match(text, offset)
+        if colon is None:
             return None
-        label += ":"
-        offset += 1
+        label += colon.group()
+        offset = colon.end()
     suffix = text[offset:]
     if _ANY_MARKUP.search(suffix):
         return None
@@ -132,8 +135,10 @@ def unwrap_entry(text):
     for line in lines:
         unwrapped = _unwrap_line(line)
         if unwrapped is None:
-            # Keep the original cue intact for the entry-wide rules if we cannot
-            # interpret all its markup.
+            if alignment:
+                # Expose line text without changing what the entry-wide rules match.
+                return EntryMarkup(body, [""] * len(lines), [""] * len(lines),
+                                   [None] * len(lines), alignment, entry_for_rules=text)
             return None
         plain, open_tags, close_tags, label = unwrapped
         plain_lines.append(plain)
@@ -142,4 +147,7 @@ def unwrap_entry(text):
         labels.append(label)
     if not (alignment or any(opens) or any(labels)):
         return None
-    return EntryMarkup(LINE_BREAK.join(plain_lines), opens, closes, labels, alignment)
+    # Removing alignment can expose a leading music mark to a rule that removes
+    # the whole cue. Keep that rule's input unchanged when other lines may be dialogue.
+    entry_for_rules = text if alignment and len(lines) > 1 else None
+    return EntryMarkup(LINE_BREAK.join(plain_lines), opens, closes, labels, alignment, entry_for_rules)
