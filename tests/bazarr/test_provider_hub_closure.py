@@ -336,7 +336,9 @@ def test_a_capability_another_installed_plugin_also_provides_leaves_each_removab
     assert remove_installation("first") is True
 
 
-@pytest.mark.parametrize("requirement", ["external", "unbound", "named", "other", "no_field", "bad_port", "port_range"])
+@pytest.mark.parametrize("requirement", [
+    "external", "unbound", "named", "other", "no_field", "bad_port", "port_range", "backslash",
+])
 def test_managed_service_guards_accept_only_a_matching_external_binding(tmp_path, monkeypatch, requirement):
     from app.config import settings
     from provider_hub import closure, endpoints, service, state
@@ -360,6 +362,7 @@ def test_managed_service_guards_accept_only_a_matching_external_binding(tmp_path
         "unbound": "",
         "bad_port": "http://127.0.0.1:bad",
         "port_range": "http://127.0.0.1:65536",
+        "backslash": "http://solver:bad\\@127.0.0.1:8191",
     }.get(requirement, "http://127.0.0.1:8191")
     monkeypatch.setitem(settings.endpoints, endpoints.FLARESOLVERR_SETTING_KEY, address)
 

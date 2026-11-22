@@ -58,8 +58,8 @@ def normalize_endpoint_url(value) -> str:
     if not isinstance(value, str):
         return ""
     text = value.strip()
-    # urlsplit removes these characters before parsing, which can hide a malformed port.
-    if not text or any(char in text for char in "\r\n\t"):
+    # Parsers can disagree about backslashes and silently discard whitespace or controls.
+    if not text or "\\" in text or any(char.isspace() or ord(char) < 32 for char in text):
         return ""
     try:
         parts = urlsplit(text)
@@ -607,7 +607,7 @@ def check_flaresolverr_address(address) -> dict:
     text = address.strip() if isinstance(address, str) else ""
     if not text:
         return _address_result("invalid_address", "empty")
-    if len(text) > ADDRESS_TEST_MAX_LENGTH or "\\" in text or any(char.isspace() or ord(char) < 32 for char in text):
+    if len(text) > ADDRESS_TEST_MAX_LENGTH or not normalize_endpoint_url(text):
         return _address_result("invalid_address")
     try:
         parsed = _validate_test_base_url(text)

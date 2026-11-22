@@ -258,6 +258,36 @@ class TestValidator:
         validator.validate(fake)
         assert fake.endpoints.flaresolverr_v1_url == ""
 
+    def test_startup_clears_a_rejected_legacy_address_without_logging_userinfo(self, tmp_path):
+        import os
+        import subprocess
+        from pathlib import Path
+
+        import yaml
+
+        config_path = tmp_path / "config" / "config.yaml"
+        config_path.parent.mkdir()
+        config_path.write_text(yaml.safe_dump(_settings("http://fixture_user:fixture_password\\@127.0.0.1:8191")),
+                               encoding="utf-8")
+        repo = Path(__file__).resolve().parents[2]
+        env = {
+            "PATH": os.environ.get("PATH", ""),
+            "BAZARR_CONFIG_DIR": str(tmp_path),
+            "NO_CLI": "true",
+            "PYTHONPATH": os.pathsep.join(map(str, (repo / "bazarr", repo / "custom_libs"))),
+            "PYTHONDONTWRITEBYTECODE": "1",
+            "XDG_CACHE_HOME": str(tmp_path / "cache"),
+        }
+        result = subprocess.run(
+            [sys.executable, "-c", "from app.config import settings; assert settings.endpoints.flaresolverr_v1_url == ''"],
+            env=env, cwd=repo, capture_output=True, text=True, timeout=60,
+        )
+
+        output = result.stdout + result.stderr
+        assert "fixture_user" not in output and "fixture_password" not in output
+        assert result.returncode == 0, output
+        assert "VALIDATOR RESET: endpoints.flaresolverr_v1_url from '[redacted]'" in output
+
 
 class _FakeUpdate:
     def values(self, **_kwargs):
