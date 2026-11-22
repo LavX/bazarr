@@ -107,7 +107,9 @@ export function useRestartAware() {
   const query = useTranslationState(true, "always");
   const { data: state, isFetchedAfterMount, refetch } = query;
   const installations = usePluginInstallations();
+  const installationsFetched = installations.isFetchedAfterMount;
   const previousLifecycle = useRef<string | undefined>(undefined);
+  const installedOnEntry = useRef(new Set<string>());
   // What the restart will do to each plugin that waits on one, read from the installation: a removal is
   // staged as a removed row, an update as a staged release beside an active one, an install as a staged
   // release with nothing active.
@@ -158,27 +160,52 @@ export function useRestartAware() {
   }, [installations.data]);
 
   useEffect(() => {
-    if (!snapshot || !state) return;
+    if (!snapshot) return;
     const previous = previousLifecycle.current;
-    if (
-      previous === snapshot.lifecycle ||
-      (previous === undefined && !isFetchedAfterMount)
-    )
-      return;
+    if (previous === undefined) {
+      // Keep track of releases seen while the entry requests are both settling.
+      for (const [id, row] of snapshot.engineRows) {
+        if (row.active_version || row.staged_version)
+          installedOnEntry.current.add(id);
+      }
+      if (!isFetchedAfterMount || !installationsFetched) return;
+    }
+    if (!state || previous === snapshot.lifecycle) return;
+
     previousLifecycle.current = snapshot.lifecycle;
+    const offers = state.available_engines;
+    // An engine can be gone from the settings before the hub is able to offer it again.
+    const cleanupDuringEntry =
+      previous === undefined &&
+      offers !== undefined &&
+      [...installedOnEntry.current].some((id) => {
+        const row = snapshot.engineRows.get(id);
+        return (
+          !row?.active_version &&
+          !row?.staged_version &&
+          !offers.some((offer) => offer.plugin_id === id)
+        );
+      });
+    installedOnEntry.current.clear();
     if (
       previous !== undefined ||
+      cleanupDuringEntry ||
       installationMismatch(state, snapshot.engineRows)
     ) {
       void refetch();
     }
-  }, [snapshot, state, isFetchedAfterMount, refetch]);
+  }, [snapshot, state, isFetchedAfterMount, installationsFetched, refetch]);
 
+  // The entry reply from Translation is newer than a pre-entry installation cache.
+  const visibleSnapshot =
+    query.isSuccess && isFetchedAfterMount && !installationsFetched
+      ? undefined
+      : snapshot;
   const view = useMemo(() => {
-    if (!state || !snapshot) {
-      return { state, waiting: snapshot?.changes.size ?? 0 };
+    if (!state || !visibleSnapshot) {
+      return { state, waiting: visibleSnapshot?.changes.size ?? 0 };
     }
-    const { changes, removing, engineRows } = snapshot;
+    const { changes, removing, engineRows } = visibleSnapshot;
     const mark = <T extends { plugin_id: string }>(engine: T): T => {
       const change = changes.get(engine.plugin_id);
       return change ? { ...engine, awaiting_restart: change } : engine;
@@ -229,6 +256,6 @@ export function useRestartAware() {
       // data has no engine left, and a plugin whose release is still active is in neither list.
       waiting: changes.size,
     };
-  }, [state, snapshot]);
+  }, [state, visibleSnapshot]);
   return { ...query, data: view.state, waiting: view.waiting };
 }

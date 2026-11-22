@@ -2805,7 +2805,18 @@ describe("Translation page, an engine installed and waiting for a restart", () =
       state = {
         ...state,
         engine: null,
-        instances: [second, lingarr(), { ...ai, configured: false }],
+        instances: [
+          second,
+          lingarr(),
+          {
+            ...ai,
+            configured: false,
+            connections: ai.connections.map((item) => ({
+              ...item,
+              usable: false,
+            })),
+          },
+        ],
       };
       response.open();
     }
