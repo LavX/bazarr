@@ -270,7 +270,7 @@ class Plugin(TranslatorPlugin):
     saved_modules = {name: module for name, module in sys.modules.items() if name == prefix or name.startswith(prefix + ".")}
     for name in saved_modules:
         del sys.modules[name]
-    monkeypatch.syspath_prepend(str(DIST))
+    monkeypatch.setattr(sys, "path", [str(DIST), *sys.path])
     try:
         runner = importlib.import_module("bazarr_plugin_sdk.runner")
         testing = importlib.import_module("bazarr_plugin_sdk.testing")
