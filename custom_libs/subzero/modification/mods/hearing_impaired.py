@@ -60,26 +60,31 @@ def _lyric_boundaries(line):
     return (start.group(1)[-1] if start else None, end.group(1)[-1] if end else None)
 
 
-def _has_spanning_lyric_marks(lines, marks):
+def _spanning_lyric_mark(lines):
     if any(line is None for line in lines):
-        return False
+        return None
     opening, first_end = _lyric_boundaries(lines[0])
     last_start, closing = _lyric_boundaries(lines[-1])
-    return (opening in marks and opening == closing
+    if (opening is not None and opening == closing
             and first_end is None and last_start is None
             and _HI_CONTENT_RE.search(lines[0]) is not None
             and _HI_CONTENT_RE.search(lines[-1]) is not None
-            and not any(any(_lyric_boundaries(line)) for line in lines[1:-1]))
+            and not any(any(_lyric_boundaries(line)) for line in lines[1:-1])):
+        return opening
+    return None
 
 
 def spanning_lyric_entry(visible_lines, source_entry, alignment):
-    if _has_spanning_lyric_marks(visible_lines, _LYRIC_NOTES):
+    mark = _spanning_lyric_mark(visible_lines)
+    if mark in _LYRIC_NOTES:
         return LINE_BREAK.join(visible_lines)
-    # An asterisk or hash exposed by unwrapping styles may be spoken content.
-    # Verify legacy boundaries in the source and use the existing raw match.
-    source_lines = source_entry.removeprefix(alignment).split(LINE_BREAK)
-    if _has_spanning_lyric_marks(source_lines, _LEGACY_LYRIC_MARKS):
-        return source_entry
+    if mark in _LEGACY_LYRIC_MARKS:
+        # Verify the same delimiters in the source. Only visible text can
+        # establish that they surround words and no independent lyric lines.
+        source_lines = source_entry.removeprefix(alignment).split(LINE_BREAK)
+        if (_lyric_boundaries(source_lines[0]) == (mark, None)
+                and _lyric_boundaries(source_lines[-1]) == (None, mark)):
+            return source_entry
     return None
 
 

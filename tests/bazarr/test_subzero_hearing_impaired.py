@@ -755,6 +755,25 @@ def test_alignment_and_inline_styles_cannot_turn_a_keypad_key_into_a_lyric(key, 
     assert "Hallo." in output
 
 
+@pytest.mark.parametrize("mods", MODS)
+def test_legacy_marks_cannot_enclose_dialogue_across_a_styled_lyric_line(mods, render):
+    lines = ["# Press one for English.", "<i>♪ Hold music ♪</i>", "To repeat this menu, press #"]
+    expected = lines if mods == MODS[1] else [lines[0], lines[2]]
+    output = render(_pair_srt([r"{\an8}" + lines[0], *lines[1:]]), mods)
+    assert _cue_text(output) == expected
+    assert "Hallo." in output
+
+
+@pytest.mark.parametrize("mods", MODS)
+def test_legacy_marks_with_styled_punctuation_do_not_enclose_speech(mods, render):
+    speech = "To repeat this menu, press #"
+    output = render(_pair_srt([r"{\an8}# <i>!</i>", speech]), mods)
+    lines = _cue_text(output)
+    assert lines is not None
+    assert lines[-1] == speech
+    assert "Hallo." in output
+
+
 def test_default_srt_alignment_policy_matches_reference(development_libs, tmp_path):
     jobs = [(_pair_srt([r"{\an8}Hello there."]), ["remove_HI"])]
     reference = _development_outputs(development_libs, tmp_path, jobs)
