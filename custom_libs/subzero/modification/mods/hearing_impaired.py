@@ -37,25 +37,33 @@ class CapsCueProcessor(NReProcessor):
 # as real content rather than pure decoration.
 _HI_CONTENT_RE = re.compile(r'[^\W_]', re.UNICODE)
 _MUSIC_SYMBOL_RE = re.compile(r'[*#¶♫♪]')
-_MUSIC_PREFIX_RE = re.compile(r"[-\s>~]*" + _MUSIC_SYMBOL_RE.pattern + "+")
-_BRACKET_SPAN = r"[ \t]*-?[ \t]*(?:\[[^\[\]]+\]|\([^()]+\))"
-_BRACKETED_CUE_RE = re.compile(rf"{_BRACKET_SPAN}(?:[ \t]*{re.escape(LINE_BREAK)}{_BRACKET_SPAN})*[ \t]*")
+_LYRIC_MARK = r"[¶♫♪]"
+_MUSIC_PREFIX_RE = re.compile(rf"[-\s>~]*{_LYRIC_MARK}+")
+_LINE_MUSIC_MARK_RE = re.compile(rf"^[-\s>~]*{_LYRIC_MARK}|{_LYRIC_MARK}[)\]]?$")
+_BRACKET_SPAN = r"(?:-[ \t]*)?(?:\[[^\[\]]+\]|\([^()]+\))"
+_BRACKET_GAP = rf"(?:[ \t]|{re.escape(LINE_BREAK)})*"
+_BRACKETED_CUE_RE = re.compile(rf"{_BRACKET_GAP}{_BRACKET_SPAN}(?:{_BRACKET_GAP}{_BRACKET_SPAN})*{_BRACKET_GAP}")
 # SSA/ASS override tags ({\i1}, {\an8}, {\c&H..&}, ...) carry letters/digits that
 # must not be mistaken for lyric content when testing a line.
 _OVERRIDE_TAG_RE = re.compile(r'\{[^}]*\}')
 
 
 def has_whole_cue_hi_span(entry):
-    """Whether an understood aligned cue has a bracket group or open lyric covering it."""
+    """Whether brackets or paired lyric marks enclose an understood aligned cue."""
     if _BRACKETED_CUE_RE.fullmatch(entry):
         return True
 
-    first_line = entry.partition(LINE_BREAK)[0]
+    first_line, _, remaining = entry.partition(LINE_BREAK)
     marker = _MUSIC_PREFIX_RE.match(first_line)
     if marker is None:
         return False
-    lyric = first_line[marker.end():]
-    return _HI_CONTENT_RE.search(lyric) is not None and _MUSIC_SYMBOL_RE.search(lyric) is None
+    opening_mark = marker.group()[-1]
+    first_lyric = first_line[marker.end():].rstrip()
+    last_line = remaining.rsplit(LINE_BREAK, 1)[-1].rstrip()
+    return (_HI_CONTENT_RE.search(first_lyric) is not None
+            and not first_lyric.endswith(opening_mark)
+            and last_line.endswith(opening_mark)
+            and _HI_CONTENT_RE.search(last_line) is not None)
 
 
 class MusicEntryProcessor(NReProcessor):
@@ -76,7 +84,7 @@ class MusicEntryProcessor(NReProcessor):
     subtitle convention and are removed earlier by HI_brackets.
     See https://github.com/LavX/bazarr/issues/225
     """
-    def process(self, content, debug=False, keep_lyrics=None, **kwargs):
+    def process(self, content, debug=False, keep_lyrics=None, line_scoped=False, **kwargs):
         if keep_lyrics:
             text = content or ""
             # Only music-note lines are in this processor's scope; leave anything
@@ -90,6 +98,10 @@ class MusicEntryProcessor(NReProcessor):
             # letters/digits (e.g. {\i1}) are not counted as content.
             stripped = _OVERRIDE_TAG_RE.sub('', text)
             return content if _HI_CONTENT_RE.search(stripped) else ""
+        if line_scoped and not _LINE_MUSIC_MARK_RE.search(content):
+            # A line exposed by removing alignment needs a lyric mark of its own.
+            # Legacy # and * matches would mistake ordinary dialogue for music.
+            return content
         return super(MusicEntryProcessor, self).process(content, debug=debug, **kwargs)
 
 

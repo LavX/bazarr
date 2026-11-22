@@ -389,7 +389,7 @@ class SubtitleModifications(object):
 
                     try:
                         line = mod.modify(line.strip(), entry=rule_entry, debug=self.debug, parent=self,
-                                          index=index, procs=["last_process"], **args)
+                                          index=index, procs=["last_process"], line_scoped=line_scoped, **args)
                     except EmptyEntryError:
                         if self.debug:
                             logger.debug(u"%d: %s: %r -> ''", index, identifier, rule_entry)
