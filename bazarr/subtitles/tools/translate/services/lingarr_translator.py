@@ -23,7 +23,7 @@ from utilities.path_mappings import path_mappings  # noqa: F401
 
 from ..runtime.legacy_engines import request_target
 from ..core.translator_utils import (add_translator_info, create_process_result, get_title,
-                                     translation_write_kwargs)
+                                     record_source_translation, translation_write_kwargs)
 
 logger = logging.getLogger(__name__)
 
@@ -37,7 +37,7 @@ class LingarrTranslatorService:
     def __init__(self, source_srt_file, dest_srt_file, lang_obj, to_lang, from_lang, media_type,
                  video_path, orig_to_lang, forced, hi, sonarr_series_id, sonarr_episode_id,
                  radarr_id, arr_instance_id=None, sports_operation=None, cancel=None,
-                 expected_destination_versions=()):
+                 expected_destination_versions=(), source=None):
         self.source_srt_file = source_srt_file
         self.dest_srt_file = dest_srt_file
         self.lang_obj = lang_obj
@@ -55,6 +55,7 @@ class LingarrTranslatorService:
         # unique together with it, so every media lookup below carries it.
         self.arr_instance_id = arr_instance_id
         self.sports_operation = sports_operation
+        self.source = source
         self.cancel = cancel
         # The destination's versions as the queueing sighting found them; an
         # empty tuple means this translation was not queued by an auto path and
@@ -71,10 +72,11 @@ class LingarrTranslatorService:
         try:
             with staged_subtitle_write(self.video_path, self.dest_srt_file,
                                        on_publish=publication_callback(self.media_type, self.video_path,
-                                                                       'translate', self.arr_instance_id),
+                                                                       'translate', self.arr_instance_id,
+                                                                       **({'source': self.source} if self.source else {})),
                                        source_paths=(self.source_srt_file,),
                                        before_publish=lambda: jobs_queue.update_job_progress(job_id=job_id),
-                                       allow_empty=not bool(self.sports_operation),
+                                       allow_empty=self.sports_operation is None and self.source is None,
                                        **translation_write_kwargs(self, job_id)) as temporary:
                 jobs_queue.update_job_progress(job_id=job_id, progress_max=1, progress_message=self.source_srt_file)
 
@@ -83,7 +85,7 @@ class LingarrTranslatorService:
                 lines_list_len = len(lines_list)
 
                 if lines_list_len == 0:
-                    if self.sports_operation:
+                    if self.sports_operation is not None or self.source is not None:
                         raise RuntimeError('Lingarr source has no subtitle cues')
                     logger.debug('No lines to translate in subtitle file')
                     return self.dest_srt_file
@@ -123,9 +125,10 @@ class LingarrTranslatorService:
             result = create_process_result(message, self.video_path, self.orig_to_lang, self.forced, self.hi,
                                            self.dest_srt_file, self.media_type,
                                            **({"sports_context": self.sports_operation.context}
-                                              if self.sports_operation else {}))
+                                              if self.sports_operation else {}),
+                                           **({"source": self.source} if self.source else {}))
 
-            if finish_translation(self, result):
+            if record_source_translation(self.source, result) or finish_translation(self, result):
                 return self.dest_srt_file
             if self.media_type == 'episode':
                 history_log(action=6,
@@ -250,7 +253,8 @@ class LingarrTranslatorService:
                 radarr_id=self.radarr_id,
                 sonarr_series_id=self.sonarr_series_id,
                 sonarr_episode_id=self.sonarr_episode_id,
-                arr_instance_id=self.arr_instance_id
+                arr_instance_id=self.arr_instance_id,
+                **({"source": self.source} if self.source else {}),
             )
 
             if self.media_type == 'episode':

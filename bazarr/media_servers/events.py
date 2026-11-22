@@ -15,6 +15,7 @@ class SubtitleMutation:
     subtitle_path: str
     operation: str
     arr_instance_id: int | None = None
+    source_item_id: int | None = None
 
 
 def notify_subtitle_mutation(event: SubtitleMutation) -> None:
@@ -23,12 +24,15 @@ def notify_subtitle_mutation(event: SubtitleMutation) -> None:
     notify(event)
 
 
-def publication_callback(media_type, video_path, operation, arr_instance_id=None):
+def publication_callback(media_type, video_path, operation, arr_instance_id=None, *, source=None):
+    if source is not None:
+        media_type = source.publication_type
     media_type = {'series': 'episode', 'movies': 'movie'}.get(media_type, media_type)
 
     def published(subtitle_path):
         notify_subtitle_mutation(SubtitleMutation(media_type, video_path, str(subtitle_path),
-                                                  operation, arr_instance_id))
+                                                  operation, arr_instance_id,
+                                                  source.item_id if source is not None else None))
     return published
 
 
@@ -54,11 +58,12 @@ def _subtitle_fingerprint(path):
 
 
 @contextmanager
-def observe_subtitle_change(media_type, video_path, subtitle_path, operation, arr_instance_id=None):
+def observe_subtitle_change(media_type, video_path, subtitle_path, operation, arr_instance_id=None, *, source=None):
     """Account for a configured postprocessor that may rewrite or remove this file."""
     before = _subtitle_fingerprint(subtitle_path)
     try:
         yield
     finally:
         if before != _subtitle_fingerprint(subtitle_path):
-            publication_callback(media_type, video_path, operation, arr_instance_id)(subtitle_path)
+            publication_callback(media_type, video_path, operation, arr_instance_id,
+                                 **({'source': source} if source is not None else {}))(subtitle_path)

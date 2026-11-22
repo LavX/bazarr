@@ -4,6 +4,7 @@ import logging
 import os
 import srt
 import datetime
+from contextlib import contextmanager
 
 from typing import Union
 from types import SimpleNamespace
@@ -105,12 +106,52 @@ def translation_write_kwargs(translator, job_id):
 
         return dict(sports_write_kwargs(translator, job_id))
     captured = getattr(translator, 'expected_destination_versions', ())
-    return {'expected_versions': captured} if captured else {}
+    kwargs = {'expected_versions': captured} if captured else {}
+    source = getattr(translator, 'source', None)
+    if source is not None:
+        from media_sources.indexer import SourceOutputOwnerIndex
+
+        @contextmanager
+        def publication():
+            current_translation_source(source, translator.video_path)
+            yield
+        kwargs.update(publication_guard=publication, ownership_index=SourceOutputOwnerIndex())
+    return kwargs
 
 
-def create_process_result(message, video_path, orig_to_lang, forced, hi, dest_srt_file, media_type, sports_context=None):
+def current_translation_source(source, video_path):
+    """Check that the queued translation still belongs to this source file."""
+    from media_sources.context import SourceItemGone, resolve_item
+    from subtitles.tools.subsync_engines import SubtitleSourceChanged
+
+    try:
+        current = resolve_item(source.item_id)
+    except SourceItemGone:
+        raise SubtitleSourceChanged('The source item was removed while the translation waited') from None
+    if (current.path, current.source_id, current.kind) != (video_path, source.source_id, source.kind):
+        raise SubtitleSourceChanged('The source item moved while the translation waited')
+    return current
+
+
+def record_source_translation(source, result):
+    """Record an action-6 row when the translation belongs to a source item."""
+    if source is None:
+        return False
+    from media_sources.history import history_log_source
+
+    history_log_source(6, source, result)
+    return True
+
+
+def create_process_result(message, video_path, orig_to_lang, forced, hi, dest_srt_file, media_type,
+                          sports_context=None, source=None):
     """Create a ProcessSubtitlesResult object with common parameters."""
-    if sports_context is not None:
+    if source is not None:
+        def prr(path):
+            return path
+        score_type = 'episode' if source.kind == 'episode' else 'movie'
+        score = int((settings.translator.default_score / 100) * MAX_SCORES[score_type])
+    elif sports_context is not None:
         from sportarr.subtitles import reverse_path
         def prr(path):
             return reverse_path(sports_context, path)
@@ -195,7 +236,11 @@ def _scope(statement, table, arr_instance_id):
     return statement.where(table.arr_instance_id == arr_instance_id)
 
 
-def get_description(media_type, radarr_id, sonarr_series_id, arr_instance_id=None, sports_context=None):
+def get_description(media_type, radarr_id, sonarr_series_id, arr_instance_id=None, sports_context=None,
+                    source=None):
+    if source is not None:
+        from media_sources.context import source_item_title
+        return source_item_title(source)
     if sports_context is not None:
         from sportarr.profile_hooks import metadata
         return metadata(sports_context)[1]
@@ -240,8 +285,12 @@ def get_title(
         sonarr_series_id: Union[int, None] = None,
         sonarr_episode_id: Union[int, None] = None,
         arr_instance_id: Union[int, None] = None,
-        sports_context=None
+        sports_context=None,
+        source=None
 ) -> str:
+    if source is not None:
+        from media_sources.context import source_item_title
+        return source_item_title(source)
     if sports_context is not None:
         from sportarr.profile_hooks import metadata
         return metadata(sports_context)[0]

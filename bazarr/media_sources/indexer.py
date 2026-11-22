@@ -228,3 +228,14 @@ def index_item(item_id, target=None, ownership_index=None):
             item.failed_attempts))
     repository.write_item_index(item_id, str(listing), missing_text, target)
     return listing
+
+
+
+def index_and_notify_item(source):
+    """Refresh a source item's subtitles and the views that show it."""
+    from app.event_handler import event_stream
+
+    if index_item(source.item_id) is not None:
+        event_stream(type='source-item', payload=source.item_id)
+        if source.group_id is not None:
+            event_stream(type='source-group', payload=source.group_id)

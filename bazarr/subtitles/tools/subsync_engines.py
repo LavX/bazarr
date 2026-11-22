@@ -158,7 +158,7 @@ def subtitle_write_locks(video_path, *paths, cancel=None):
 
 
 @contextmanager
-def subtitle_mutation(video_path, *paths, invalidate_outputs=True):
+def subtitle_mutation(video_path, *paths, invalidate_outputs=True, ownership_index=None):
     """Coordinate exact local writes and invalidate pending publications.
 
     Network and engine work stays outside. Indexers share this coordinator for
@@ -174,14 +174,17 @@ def subtitle_mutation(video_path, *paths, invalidate_outputs=True):
                     directory = os.path.normcase(os.path.realpath(os.path.dirname(path)))
                     states[directory].changed(path)
                     if invalidate_outputs:
-                        quarantine_sync_outputs_after_mutation(video_path, path)
+                        if ownership_index is None:
+                            quarantine_sync_outputs_after_mutation(video_path, path)
+                        else:
+                            quarantine_sync_outputs_after_mutation(video_path, path, ownership_index)
 
 
 @contextmanager
 def staged_subtitle_write(video_path, destination, before_publish=None, allow_empty=False,
                           source_paths=(), after_publish=None, on_publish=None,
                           publication_guard=None, cancel=None, expected_versions=(),
-                          after_write=None):
+                          after_write=None, ownership_index=None):
     """Compute privately, then publish only while source and destination are current."""
     with subtitle_write_locks(video_path, destination, *source_paths,
                               **({} if cancel is None else {'cancel': cancel})) as states:
@@ -203,7 +206,8 @@ def staged_subtitle_write(video_path, destination, before_publish=None, allow_em
             raise OSError('Subtitle writer did not produce a nonempty file')
         with subtitle_write_locks(video_path, destination, *source_paths,
                                   **({} if cancel is None else {'cancel': cancel})):
-            with subtitle_mutation(video_path, destination):
+            with subtitle_mutation(video_path, destination,
+                                   **({'ownership_index': ownership_index} if ownership_index is not None else {})):
                 with publication_guard() if publication_guard is not None else nullcontext():
                     validate_subtitle_versions(expected_versions)
                     if before_publish:
@@ -262,12 +266,14 @@ def validate_subtitle_versions(snapshots):
 
 
 def write_subtitle_file(video_path, destination, content, written_paths=None,
-                        on_publish=None, publication_guard=None, after_write=None):
+                        on_publish=None, publication_guard=None, after_write=None, ownership_index=None):
     """Write one saver output atomically and record that exact successful path."""
     with staged_subtitle_write(video_path, destination, on_publish=on_publish,
                               publication_guard=publication_guard, after_write=after_write,
                               after_publish=(lambda: written_paths.append(destination))
-                              if written_paths is not None else None) as temporary:
+                              if written_paths is not None else None,
+                              **({'ownership_index': ownership_index} if ownership_index is not None else {})
+                              ) as temporary:
         with open(temporary, 'wb') as handle:
             handle.write(content)
 

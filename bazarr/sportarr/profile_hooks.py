@@ -481,7 +481,7 @@ def translate_from_existing(context, target_code, cancel=None, translation_gate=
             module="subtitles.tools.translate.main",
             func="translate_subtitles_file",
             args=[],
-            kwargs=translate_kwargs,
+            kwargs={**translate_kwargs, 'source': None},
     ):
         return False
     translate_subtitles_file(**translate_kwargs)

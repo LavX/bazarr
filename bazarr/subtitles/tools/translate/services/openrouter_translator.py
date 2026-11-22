@@ -21,7 +21,7 @@ from sonarr.history import history_log
 from app.jobs_queue import jobs_queue, JobCancelled, JobFailed
 
 from ..core.translator_utils import (add_translator_info, create_process_result, get_title,
-                                     translation_write_kwargs)
+                                     record_source_translation, translation_write_kwargs)
 from .auth import get_translator_auth_headers
 from .sidecar_errors import describe_sidecar_refusal, redact_service_text, MAX_REFUSAL_LENGTH
 
@@ -250,7 +250,7 @@ class OpenRouterTranslatorService:
     def __init__(self, source_srt_file, dest_srt_file, lang_obj, to_lang, from_lang, media_type,
                  video_path, orig_to_lang, forced, hi, sonarr_series_id, sonarr_episode_id,
                  radarr_id, arr_instance_id=None, sports_operation=None, cancel=None,
-                 expected_destination_versions=()):
+                 expected_destination_versions=(), source=None):
         self.source_srt_file = source_srt_file
         self.dest_srt_file = dest_srt_file
         self.lang_obj = lang_obj
@@ -268,6 +268,7 @@ class OpenRouterTranslatorService:
         # unique together with it, so every media lookup below carries it.
         self.arr_instance_id = arr_instance_id
         self.sports_operation = sports_operation
+        self.source = source
         self.cancel = cancel
         # The destination's versions as the queueing sighting found them; an
         # empty tuple means this translation was not queued by an auto path and
@@ -328,10 +329,11 @@ class OpenRouterTranslatorService:
         try:
             with staged_subtitle_write(self.video_path, self.dest_srt_file,
                                        on_publish=publication_callback(self.media_type, self.video_path,
-                                                                       'translate', self.arr_instance_id),
+                                                                       'translate', self.arr_instance_id,
+                                                                       **({'source': self.source} if self.source else {})),
                                        source_paths=(self.source_srt_file,),
                                        before_publish=lambda: jobs_queue.update_job_progress(job_id=job_id),
-                                       allow_empty=not bool(self.sports_operation),
+                                       allow_empty=self.sports_operation is None and self.source is None,
                                        **translation_write_kwargs(self, job_id)) as temporary:
                 subs = pysubs2.load(self.source_srt_file, encoding='utf-8')
                 lines_list: List[str] = [x.plaintext for x in subs]
@@ -371,9 +373,10 @@ class OpenRouterTranslatorService:
                 message += f' Some lines may remain in the source language. {self.partial_error}'
             result = create_process_result(message, self.video_path, self.orig_to_lang, self.forced, self.hi, self.dest_srt_file, self.media_type,
                                            **({"sports_context": self.sports_operation.context}
-                                              if self.sports_operation else {}))
+                                              if self.sports_operation else {}),
+                                           **({"source": self.source} if self.source else {}))
 
-            if finish_translation(self, result):
+            if record_source_translation(self.source, result) or finish_translation(self, result):
                 return self.dest_srt_file
             if self.media_type == 'episode':
                 history_log(action=6,
@@ -433,11 +436,12 @@ class OpenRouterTranslatorService:
             sonarr_episode_id=self.sonarr_episode_id,
             arr_instance_id=self.arr_instance_id,
             **({"sports_context": self.sports_operation.context}
-               if self.sports_operation else {})
+               if self.sports_operation else {}),
+            **({"source": self.source} if self.source else {}),
         )
 
         api_media_type = "Episode" if self.media_type == 'episode' else "Movie"
-        arr_media_id = self.sonarr_series_id if self.media_type == 'episode' else self.radarr_id or 0
+        arr_media_id = (self.sonarr_series_id if self.media_type == 'episode' else self.radarr_id) or 0
 
         extra = {} if self.sports_operation else {"arrMediaId": arr_media_id, "mediaType": api_media_type}
         return self.submit_content(lines_list, source_lang, target_lang, title,

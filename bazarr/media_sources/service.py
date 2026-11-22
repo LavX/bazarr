@@ -375,7 +375,7 @@ def _label(item_id):
     return item.title if item is not None else str(item_id)
 
 
-def search_source_item(item_id, job_id=None):
+def search_source_item(item_id, job_id=None, *, translation_gate=True):
     """Search the missing subtitles of one source item. Called without a job id it queues itself."""
     if not job_id:
         return jobs_queue.add_job_from_function(f"Searching subtitles for {_label(item_id)}", is_progress=True)
@@ -420,16 +420,22 @@ def search_source_item(item_id, job_id=None):
     title = context.group_title if context.kind == 'episode' and context.group_title else context.title
 
     from subtitles.download import generate_subtitles
+    from app.notifier import send_notifications_source
+
     downloaded = 0
     try:
         for result in generate_subtitles(context.path, languages, audio_language, str(context.scene_name), title,
                                          context.media_type, context.profile_id, check_if_still_required=True,
-                                         job_id=job_id, source=context):
+                                         job_id=job_id, source=context,
+                                         **({} if translation_gate else {'auto_translate': False})):
             if not result:
                 continue
-            index_item(item_id)
             history_log_source(1, context, result)
             downloaded += 1
+            try:
+                send_notifications_source(context, result.message)
+            except Exception:
+                logging.exception('BAZARR could not send a notification for source item %s', item_id)
     except OSError as error:
         raise JobFailed(f'Unable to save the subtitles file: {error}', reason='save_failed') from error
     jobs_queue.update_job_progress(

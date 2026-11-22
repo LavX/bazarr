@@ -33,6 +33,8 @@ class SourceItemContext:
     scene_name: Optional[str] = None
     audio_language: Optional[str] = None
     identity_source: str = 'filename'  # 'user' when the user set the identity: it outranks the file name
+    group_id: Optional[int] = None
+    series_year: Optional[int] = None
 
     @property
     def media_type(self):
@@ -56,6 +58,16 @@ def _provider_title(item):
     if item.kind == 'sports_event' and item.part_name:
         return f'{item.title} {item.part_name}'
     return item.title
+
+
+def source_item_title(source: SourceItemContext) -> str:
+    """Describe a source file with its show or league when available."""
+    parts = [source.group_title] if source.group_title else []
+    if source.kind == 'episode' and source.season is not None and source.episode is not None:
+        parts.append(f'S{source.season:02d}E{source.episode:02d}')
+    if source.title:
+        parts.append(source.title)
+    return ' - '.join(parts)
 
 
 def resolve_item(item_id, target=None) -> SourceItemContext:
@@ -83,4 +95,5 @@ def resolve_item(item_id, target=None) -> SourceItemContext:
         series_imdb_id=group.imdb_id if is_episode and group is not None else None,
         series_tvdb_id=group.tvdb_id if is_episode and group is not None else None,
         publication_type=_PUBLICATION[item.kind], scene_name=item.scene_name,
-        audio_language=item.audio_language, identity_source=item.identity_source)
+        audio_language=item.audio_language, identity_source=item.identity_source, group_id=item.group_id,
+        series_year=_year(group.year) if is_episode and group is not None else None)
