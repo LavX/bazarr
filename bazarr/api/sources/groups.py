@@ -3,7 +3,7 @@
 from flask import request
 from flask_restx import Namespace, Resource
 
-from media_sources import identify, overrides, repository
+from media_sources import identify, overrides, repository, service
 from media_sources.service import SourceError
 
 from ..utils import authenticate
@@ -35,13 +35,17 @@ class SourceGroup(Resource):
         return group_to_dict(row)
 
     @authenticate
-    @api_ns_sources_groups.response(400, 'Invalid identity correction')
+    @api_ns_sources_groups.response(400, 'Invalid identity correction or language profile')
     @api_ns_sources_groups.response(404, 'No such group')
     @api_ns_sources_groups.response(409, 'The match candidates changed while editing')
     def patch(self, group_id):
-        """Correct a source group's identity"""
+        """Correct a source group's identity or change its language profile"""
+        body = request.get_json(silent=True)
         try:
-            row = overrides.override_identity(group_id, request.get_json(silent=True), group=True)
+            if isinstance(body, dict) and 'profile_id' in body:
+                row = service.update_group_profile(group_id, body)
+            else:
+                row = overrides.override_identity(group_id, body, group=True)
         except SourceError as error:
             return {"error": error.code, "message": str(error)}, error.status
         return group_to_dict(row)

@@ -2,9 +2,8 @@
 """Listing the subtitles beside a source item and working out which languages it still lacks.
 
 The listing uses the shared helpers the movie indexer uses, with paths taken as stored: a source item's path is
-already the Bazarr-visible one, so nothing is mapped in either direction. It writes by item id and checks that
-exactly one row changed. This covers the external subtitles and the profile rules (cutoff, forced, HI); embedded
-tracks and the audio-language rules come with the media analysis.
+already the Bazarr-visible one, so nothing is mapped in either direction. The source item's own probe cache
+supplies embedded tracks and audio languages for the profile rules.
 """
 import ast
 import logging
@@ -15,17 +14,22 @@ import sqlalchemy as sa
 from subliminal_patch import core, search_external_subtitles
 
 from app.config import settings
-from app.database import get_profile_cutoff, get_profiles_list
+from app.database import get_audio_profile_languages, get_profile_cutoff, get_profiles_list
 from languages.custom_lang import CustomLanguage
 from languages.get_languages import alpha2_from_alpha3, get_language_set
 from subtitles.adaptive_searching import is_search_given_up
+from subtitles.indexer.entries import embedded_entry, normalize_codec
 from subtitles.indexer.utils import (add_combined_outputs, add_sync_engine_outputs, get_external_subtitles_path,
-                                     guess_external_subtitles, subtitle_language_with_combined_modifier, subtitle_language_with_sync_modifier)
+                                     guess_external_subtitles, normalize_subtitle_language_variant,
+                                     partition_embedded_entries, subtitle_language_with_combined_modifier,
+                                     subtitle_language_with_sync_modifier)
 from subtitles.tools.subsync_engines import SyncOutputOwnerIndex, _normalized_media_stem, subtitle_write_locks
 from utilities.helper import get_subtitle_destination_folder, get_target_folder
+from utilities.video_analyzer import audio_languages_from_metadata, embedded_subtitles_from_metadata
 
 from . import repository
-from .db import handle
+from .analysis import local_stat, probe_item, read_metadata, streams
+from .db import handle, source_transaction
 
 
 class SourceOutputOwnerIndex(SyncOutputOwnerIndex):
@@ -199,6 +203,45 @@ def effective_profile_id(item, group=None, library=None):
     return None
 
 
+def _missing(item, listing, audio_language, target):
+    group = repository.get_group(item.group_id, target) if item.group_id is not None else None
+    library = repository.get_library(item.library_id, target)
+    profile_id = effective_profile_id(item, group, library)
+    if profile_id is None:
+        return []
+    audio_codes = {entry['code2'] for entry in get_audio_profile_languages(audio_language)}
+    return compute_missing_subtitles(
+        get_profiles_list(profile_id=profile_id), get_profile_cutoff(profile_id=profile_id), listing,
+        item.failed_attempts, matches_audio=lambda language: language['language'] in audio_codes)
+
+
+def _embedded_listing(data):
+    if not settings.general.use_embedded_subs:
+        return []
+    ignored = {
+        'pgs': settings.general.ignore_pgs_subs,
+        'vobsub': settings.general.ignore_vobsub_subs,
+        'ass': settings.general.ignore_ass_subs,
+    }
+    listing = []
+    for language, forced, hi, codec, *title in embedded_subtitles_from_metadata(data):
+        code = alpha2_from_alpha3(language)
+        if code and not ignored.get(normalize_codec(codec)):
+            code = normalize_subtitle_language_variant(code, forced=forced, hi=hi)
+            listing.append(embedded_entry(code, codec, *title))
+    return listing
+
+
+def _file_version(item):
+    return item.path, item.file_ino, item.file_size, item.file_mtime_ns, item.indexed_at
+
+
+def _file_signature(stat):
+    if stat is None:
+        return None
+    return stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns
+
+
 def index_item(item_id, target=None, ownership_index=None):
     """Rebuild the subtitle listing and the missing languages of one item and store them by id.
 
@@ -208,23 +251,73 @@ def index_item(item_id, target=None, ownership_index=None):
     if item is None:
         logging.info('BAZARR source item %s no longer exists; its subtitles were not indexed', item_id)
         return None
-    if not os.path.exists(item.path):
+    stat = local_stat(item.path)
+    if stat is None:
         logging.debug("BAZARR this file doesn't seem to exist or isn't accessible: %s", item.path)
+        return None
+    if item.file_mtime_ns is not None and (item.file_size, item.file_mtime_ns) != (stat.st_size, stat.st_mtime_ns):
+        logging.warning('BAZARR source file changed since its scan: %s', item.path)
         return None
     try:
         previous = ast.literal_eval(item.subtitles) if item.subtitles else []
-        listing = list_external_subtitles(item.path, previous, ownership_index)
+        external = list_external_subtitles(item.path, previous, ownership_index)
     except Exception:
         logging.exception('BAZARR unable to index external subtitles for this file %s', item.path)
         return None
 
-    group = repository.get_group(item.group_id, target) if item.group_id is not None else None
-    library = repository.get_library(item.library_id, target)
-    profile_id = effective_profile_id(item, group, library)
-    missing_text = '[]'
-    if profile_id:
-        missing_text = str(compute_missing_subtitles(
-            get_profiles_list(profile_id=profile_id), get_profile_cutoff(profile_id=profile_id), listing,
-            item.failed_attempts))
-    repository.write_item_index(item_id, str(listing), missing_text, target)
-    return listing
+    data, blob = probe_item(item, stat)
+    if _file_signature(local_stat(item.path)) != _file_signature(stat):
+        logging.warning('BAZARR source file changed during analysis: %s', item.path)
+        return None
+
+    with source_transaction(target) as connection:
+        # A scan can overlap a settings or profile refresh. Resolve the profile while
+        # holding the same item lock as the refresh, after the slow file reads.
+        current = repository.get_item(item_id, connection, for_update=True)
+        if current is None or _file_version(current) != _file_version(item):
+            logging.warning('BAZARR source item %s changed during indexing', item_id)
+            return None
+        listing = _embedded_listing(data) + external
+        values = {}
+        audio_language = current.audio_language
+        if blob is not None:
+            parsed = streams(data)
+            video_track = (parsed.get('video') or [{}])[0]
+            audio_track = (parsed.get('audio') or [{}])[0]
+            audio_language = str(audio_languages_from_metadata(data, current.path))
+            values = dict(ffprobe_cache=blob, audio_language=audio_language, audio_codec=audio_track.get('codec'),
+                          video_codec=video_track.get('codec'), resolution=video_track.get('resolution'))
+        missing = _missing(current, listing, audio_language, connection)
+        repository.write_item_index(item_id, str(listing), str(missing), connection, **values)
+        return listing
+
+
+def recalculate_missing_subtitles(*, library_id=None, group_id=None, cancel=None):
+    """Re-evaluate profile and settings rules against stored tracks, without a folder walk or probe."""
+    items = repository.Items
+    scope = []
+    if library_id is not None:
+        scope.append(items.c.library_id == library_id)
+    if group_id is not None:
+        scope.append(items.c.group_id == group_id)
+    item_ids = handle().execute(sa.select(items.c.id).where(*scope, items.c.subtitles.is_not(None))).scalars().all()
+    for item_id in item_ids:
+        if cancel is not None:
+            cancel()
+        with source_transaction() as connection:
+            item = repository.get_item(item_id, connection, for_update=True)
+            if item is None or item.subtitles is None:
+                continue
+            if ((library_id is not None and library_id != item.library_id)
+                    or (group_id is not None and group_id != item.group_id)):
+                continue
+            external = [entry for entry in ast.literal_eval(item.subtitles) if entry[1]]
+            data = read_metadata(item.ffprobe_cache)
+            embedded = []
+            if settings.general.use_embedded_subs:
+                embedded = _embedded_listing(data) if data else partition_embedded_entries(item.subtitles)[0]
+            listing = embedded + external
+            subtitles = str(listing)
+            missing = str(_missing(item, listing, item.audio_language, connection))
+            if (subtitles, missing) != (item.subtitles, item.missing_subtitles):
+                repository.write_item_index(item_id, subtitles, missing, connection, indexed=False)

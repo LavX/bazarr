@@ -14,6 +14,7 @@ from sqlalchemy.exc import IntegrityError
 from app.database import get_audio_profile_languages, get_profiles_list
 from app.get_providers import get_providers
 from app.jobs_queue import JobFailed, jobs_queue
+from subtitles.indexer.missing_refresh import queue_missing_subtitles_recalculation
 
 from . import identity, paths, repository
 from .context import SourceItemGone, resolve_item
@@ -234,9 +235,29 @@ def update_library(source_id, library_id, payload, session=None):
         values['name'] = payload['name']
     if values:
         repository.update_library(library_id, session, **values)
+        if 'profile_id' in values and values['profile_id'] != library.profile_id:
+            queue_missing_subtitles_recalculation(source_scope={'library_id': library_id})
         if 'enabled' in values:
             refresh_tasks()
     return describe_library(library_id, session)
+
+
+def update_group_profile(group_id, payload, session=None):
+    """Set or clear a source group's profile and refresh its items after the write."""
+    if not isinstance(payload, dict) or payload.keys() != {'profile_id'}:
+        raise SourceError('A group profile edit requires profile_id')
+    group = repository.get_group(group_id, session)
+    if group is None:
+        raise SourceError('No such group', 404, 'not_found')
+    profile_id = _profile_id(payload)
+    if profile_id != group.profile_id:
+        if not repository.update_group(group_id, session, profile_id=profile_id):
+            raise SourceError('No such group', 404, 'not_found')
+        queue_missing_subtitles_recalculation(source_scope={'group_id': group_id})
+        group = repository.get_group(group_id, session)
+    if group is None:
+        raise SourceError('No such group', 404, 'not_found')
+    return group
 
 
 def delete_library(source_id, library_id, session=None):
@@ -414,7 +435,7 @@ def search_source_item(item_id, job_id=None):
         jobs_queue.update_job_progress(job_id=job_id, progress_value='max', progress_message='All providers throttled')
         return None
 
-    audio_languages = get_audio_profile_languages(context.audio_language)
+    audio_languages = get_audio_profile_languages(item.audio_language)
     audio_language = audio_languages[0]['name'] if audio_languages else 'None'
     # For an episode the title the providers get is the show's.
     title = context.group_title if context.kind == 'episode' and context.group_title else context.title

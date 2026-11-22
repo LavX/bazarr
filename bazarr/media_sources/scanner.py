@@ -788,9 +788,11 @@ def _write_path_only(library, decisions, result, session, cancel, outer_releases
 
     def update(connection, row, found, identified):
         values = _item_values(found, identified, keep_identity=row.identity_source == 'user')
-        # The file changed: its codec cache described the old content.
         protected = (identified.keys() & values.keys()) - {'scene_name'}
-        return _update_scanned_item(row, connection, ffprobe_cache=None, protect_user=protected, **values)
+        # The cached streams and subtitle index describe the previous file.
+        values.update(ffprobe_cache=None, audio_language=None, audio_codec=None, video_codec=None, resolution=None,
+                      subtitles=None, missing_subtitles=None, indexed_at=None)
+        return _update_scanned_item(row, connection, protect_user=protected, **values)
 
     local = [entry for entry in pending if entry[1].path not in decisions.foreign_to_close]
     for batch in _chunks(local):
