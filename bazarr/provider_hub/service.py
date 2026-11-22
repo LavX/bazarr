@@ -5726,25 +5726,20 @@ def check_updates(*, kind: str | None = None) -> dict[str, Any]:
             if not active_version:
                 continue
             catalog_list = _installed_catalog_list(installation)
-            latest = _latest_catalog_manifest(
+            update = _latest_catalog_update(
                 state, provider_id, active_version, _bound_source_id(installation), catalog_list,
                 installed_kind=kind_of(installation),
             )
-            refusal_floor = active_version
-            if isinstance(latest, dict) and latest.get("version"):
-                refusal_floor = latest["version"]
+            latest_version = update[0]["manifest"].get("version") if update is not None else None
             refusal = _refused_update_reason(
-                state, provider_id, refusal_floor, _bound_source_id(installation), catalog_list,
+                state, provider_id, latest_version or active_version, _bound_source_id(installation), catalog_list,
                 installed_kind=kind_of(installation))
             if refusal:
                 refusals.append(f"{installation.get('name') or provider_id}: {refusal}")
-            if not isinstance(latest, dict):
-                continue
-            latest_version = latest.get("version")
-            if not latest_version:
+            if update is None or not latest_version:
                 continue
             available += 1
-            delta = _update_delta(state, installation, latest, _bound_source_id(installation))
+            delta = _update_delta(state, installation, *update)
             if delta and delta["needs_consent"]:
                 needs_consent.append(provider_id)
             display_name = installation.get("name") or provider_id
@@ -5783,18 +5778,19 @@ def _offerable_as_update(entry: dict[str, Any], installed_kind: str) -> bool:
     return catalog_kind_of(entry) == installed_kind
 
 
-def _latest_catalog_manifest(
+def _latest_catalog_update(
     state: dict[str, Any], provider_id: str, active_version: Any, source_id: str | None,
     catalog_list: str | None = None, installed_kind: str = SUBTITLE_PROVIDER,
-) -> dict[str, Any] | None:
-    """The newest version ``source_id`` lists for ``provider_id`` that this host can
-    run. An install updates only from the source it is bound to, so an install with
-    none gets no update, and a reserved id is updated only from the official one.
-    ``catalog_list`` is the list the install came from: a version that list holds is
-    never taken from the other one."""
+) -> tuple[dict[str, Any], closure.Closure] | None:
+    """The newest admissible update entry and the dependency closure that qualified it.
+
+    An install updates only from its bound source and prefers the catalog list it came from.
+    Keep the selected closure for consent and staging, since service bindings can change at any time.
+    """
     if source_id is None or _install_refusal(state, source_id, provider_id, installed_kind):
         return None
     host = current_host()
+    resolved_entries: dict[int, closure.Closure] = {}
 
     def usable(entry: dict[str, Any]) -> bool:
         if not _offerable_as_update(entry, installed_kind):
@@ -5807,14 +5803,26 @@ def _latest_catalog_manifest(
             get_kind(catalog_kind_of(entry)).validate_manifest(manifest, bool(entry.get("trusted", False)))
         except ValueError:
             return False
-        return (entry.get("origin") != ORIGIN_BUNDLED and _host_refusal(entry, host) is None
-                and _closure_refusal(state, entry, host) is None
-                and not closure.broken_by(state, provider_id, entry["manifest"]))
+        if entry.get("origin") == ORIGIN_BUNDLED or _host_refusal(entry, host) is not None:
+            return False
+        resolved = _closure_of(state, entry, host) if closure.has_needs(manifest) else closure.Closure()
+        if not resolved.resolved or closure.broken_by(state, provider_id, manifest):
+            return False
+        resolved_entries[id(entry)] = resolved
+        return True
 
     entry = select_entry(
         _stored_manifest_entries(state), provider_id,
         usable=usable, source_id=source_id, above_version=active_version, catalog_list=catalog_list)
-    return entry["manifest"] if entry else None
+    return (entry, resolved_entries[id(entry)]) if entry is not None else None
+
+
+def _latest_catalog_manifest(
+    state: dict[str, Any], provider_id: str, active_version: Any, source_id: str | None,
+    catalog_list: str | None = None, installed_kind: str = SUBTITLE_PROVIDER,
+) -> dict[str, Any] | None:
+    update = _latest_catalog_update(state, provider_id, active_version, source_id, catalog_list, installed_kind)
+    return update[0]["manifest"] if update is not None else None
 
 
 def offered_update_version(provider_id: str) -> str | None:
@@ -5899,22 +5907,13 @@ def _refused_update_reason(
             or (closure.breaks_text(provider_id, entry["manifest"].get("version"), broken) if broken else None))
 
 
-def _update_delta(state: dict[str, Any], provider: dict[str, Any], manifest: dict[str, Any],
-                  source_id: str | None, *, marks: bool = False) -> dict[str, Any] | None:
-    """What updating ``provider`` to ``manifest`` adds, as ``consent.update_delta`` reads it.
+def _update_delta(state: dict[str, Any], provider: dict[str, Any], entry: dict[str, Any],
+                  resolved: closure.Closure, *, marks: bool = False) -> dict[str, Any] | None:
+    """What updating ``provider`` to the selected entry with this closure adds.
 
     ``marks`` asks the sandbox probe which permissions this host enforces, which only a summary shown to
     a person needs; the digest and the decision do not.
     """
-    if kind_of(provider) == SUBTITLE_PROVIDER and not closure.has_needs(manifest):
-        # The Subtitle Hub has no consent step: a provider's update has always been applied as offered.
-        return None
-    found = _find_catalog_entry(state, source_id, manifest_provider_id(manifest), manifest.get("version"),
-                                manifest=manifest)
-    if found is None:
-        return None
-    entry = found[1]
-    resolved = _closure_of(state, entry)
     if kind_of(provider) == SUBTITLE_PROVIDER and not any(
             member.reason != "root" and member.plugin.kind != SUBTITLE_PROVIDER for member in resolved.members):
         return None
@@ -5929,10 +5928,10 @@ def update_consent(provider_id: str) -> dict[str, Any] | None:
         return None
     state = load_state()
     source_id = _bound_source_id(provider)
-    manifest = _latest_catalog_manifest(
+    update = _latest_catalog_update(
         state, provider_id, provider.get("active_version") or provider.get("staged_version"), source_id,
         _installed_catalog_list(provider), installed_kind=kind_of(provider))
-    return _update_delta(state, provider, manifest, source_id, marks=True) if isinstance(manifest, dict) else None
+    return _update_delta(state, provider, *update, marks=True) if update is not None else None
 
 
 def apply_update(provider_id: str, checkpoint=None, consent_digest: str | None = None) -> dict[str, Any] | None:
@@ -5945,7 +5944,7 @@ def apply_update(provider_id: str, checkpoint=None, consent_digest: str | None =
     state = load_state()
     source_id = _bound_source_id(provider)
     catalog_list = _installed_catalog_list(provider)
-    manifest = _latest_catalog_manifest(
+    update = _latest_catalog_update(
         state,
         provider_id,
         provider.get("active_version") or provider.get("staged_version"),
@@ -5953,7 +5952,7 @@ def apply_update(provider_id: str, checkpoint=None, consent_digest: str | None =
         catalog_list,
         installed_kind=kind_of(provider),
     )
-    if not isinstance(manifest, dict):
+    if update is None:
         message = _refused_update_reason(
             state,
             provider_id,
@@ -5964,22 +5963,20 @@ def apply_update(provider_id: str, checkpoint=None, consent_digest: str | None =
         ) or (_supply_refusal(state) if source_id == OFFICIAL_CATALOG_SOURCE_ID else None) \
             or "No update manifest is available"
         return _record_failed_update(provider_id, provider, message)
+    entry, resolved = update
     # An update that adds a destination, a permission, a binary or a plugin asks again first.
-    delta = _update_delta(state, provider, manifest, source_id)
+    delta = _update_delta(state, provider, entry, resolved)
     if delta and delta["needs_consent"] and consent_digest != delta["digest"]:
         return _record_failed_update(provider_id, provider, consent.delta_text(delta))
     members: list[str] = []
-    if closure.has_needs(manifest):
+    if len(resolved.members) > 1:
         # A plugin the new release needs is staged first, as an install does.
-        found = _find_catalog_entry(state, source_id, manifest_provider_id(manifest), manifest.get("version"),
-                                    manifest=manifest)
-        if found is not None:
-            try:
-                members = _stage_closure_members(_closure_of(state, found[1]), source_id, checkpoint)
-            except ProviderHubInstallError as error:
-                return _record_failed_update(provider_id, provider, refusal_text(error))
+        try:
+            members = _stage_closure_members(resolved, source_id, checkpoint)
+        except ProviderHubInstallError as error:
+            return _record_failed_update(provider_id, provider, refusal_text(error))
     try:
-        return stage_install(manifest, checkpoint=checkpoint, source_id=source_id)
+        return stage_install(entry["manifest"], checkpoint=checkpoint, source_id=source_id)
     except ProviderHubSettingsError:
         raise
     except ProviderHubInstallError:

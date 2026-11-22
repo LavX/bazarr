@@ -162,11 +162,54 @@ def test_install_and_update_use_a_matching_external_service(
         staged.clear()
         service.apply_update("consumer_fixture")
         assert staged == [("consumer_fixture", "2.0.0")]
+    else:
+        refused = service.apply_update("consumer_fixture")
+        assert "no plugin this Bazarr+ can install provides" in refused["last_error"]
+        assert staged == []
 
 
-def test_a_recorded_disabled_service_can_be_replaced_by_the_configured_address(monkeypatch):
+def test_an_update_only_stages_the_dependencies_checked_for_consent(tmp_path, monkeypatch):
     from app.config import settings
-    from provider_hub import closure, endpoints
+    from provider_hub import endpoints, service
+    from provider_hub.compatibility import HostFacts
+    from provider_hub.kinds.service import SERVICE_KIND_API
+
+    capability = endpoints.FLARESOLVERR_CAPABILITY
+    managed = service_manifest("managed_fixture", kind="service", kind_api=SERVICE_KIND_API,
+                               provides=[capability], **oci_runtime())
+    old = provider_manifest_v2("consumer_fixture")
+    new = provider_manifest_v2("consumer_fixture", "2.0.0", requires=[capability])
+    new["config_schema"]["properties"][endpoints.FLARESOLVERR_PROVIDER_FIELD] = {"type": "string"}
+    _world(tmp_path, monkeypatch, [managed, new], _installed(
+        old, source_bound=True, source_id="official", catalog_list="plugins"))
+    host = HostFacts(None, "linux-x86_64", frozenset({("python", "worker"), ("oci", "daemon")}), in_container=True)
+    monkeypatch.setattr(service, "current_host", lambda: host)
+    monkeypatch.delenv(endpoints.FLARESOLVERR_ENV, raising=False)
+    monkeypatch.setitem(settings.endpoints, endpoints.FLARESOLVERR_SETTING_KEY, "http://127.0.0.1:8191")
+    staged = []
+    monkeypatch.setattr(service, "stage_install", lambda manifest, **kwargs: staged.append(manifest["id"]) or manifest)
+
+    original_delta = service._update_delta
+
+    def clear_address_after_check(*args, **kwargs):
+        delta = original_delta(*args, **kwargs)
+        monkeypatch.setitem(settings.endpoints, endpoints.FLARESOLVERR_SETTING_KEY, "")
+        return delta
+
+    monkeypatch.setattr(service, "_update_delta", clear_address_after_check)
+
+    service.apply_update("consumer_fixture")
+
+    assert staged == ["consumer_fixture"]
+
+    # A new attempt sees the changed binding and asks before adding the managed service.
+    refused = service.apply_update("consumer_fixture")
+    assert "needs your consent" in refused["last_error"] and staged == ["consumer_fixture"]
+
+
+def test_a_configured_address_clears_the_boot_hold_from_a_disabled_service(tmp_path, monkeypatch):
+    from app.config import settings
+    from provider_hub import endpoints, service, state
     from provider_hub.kinds.service import SERVICE_KIND_API
 
     capability = endpoints.FLARESOLVERR_CAPABILITY
@@ -176,12 +219,21 @@ def test_a_recorded_disabled_service_can_be_replaced_by_the_configured_address(m
     consumer["config_schema"]["properties"][endpoints.FLARESOLVERR_PROVIDER_FIELD] = {"type": "string"}
     rows = {**_installed(managed, enabled=False), **_installed(consumer, supplied_by={capability: managed["id"]})}
     monkeypatch.delenv(endpoints.FLARESOLVERR_ENV, raising=False)
-    monkeypatch.setitem(settings.endpoints, endpoints.FLARESOLVERR_SETTING_KEY, "http://127.0.0.1:8191")
+    monkeypatch.setitem(settings.general, "enabled_providers", ["consumer_fixture"])
+    monkeypatch.setitem(settings.endpoints, endpoints.FLARESOLVERR_SETTING_KEY, "")
+    held = _boot(tmp_path, monkeypatch, rows)["consumer_fixture"]
+    assert held["blocked"] and held["last_error"] == held["blocked_reason"]
 
-    assert closure.unmet_needs(rows) == {}
+    monkeypatch.setitem(settings.endpoints, endpoints.FLARESOLVERR_SETTING_KEY, "http://127.0.0.1:8191")
+    service.activate_staged_installations()
+    released = state.load_state()["installations"]["consumer_fixture"]
+
+    assert "blocked" not in released and "blocked_reason" not in released and "blocked_cause" not in released
+    assert released["last_error"] is None
 
     monkeypatch.setitem(settings.endpoints, endpoints.FLARESOLVERR_SETTING_KEY, "")
-    assert closure.unmet_needs(rows) == {"consumer_fixture": ["managed_fixture (flaresolverr.v1)"]}
+    service.activate_staged_installations()
+    assert state.load_state()["installations"]["consumer_fixture"]["blocked"]
 
 
 def test_a_plugin_cycle_does_not_resolve(tmp_path, monkeypatch, service_kind):
