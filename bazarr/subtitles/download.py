@@ -32,7 +32,7 @@ from languages.get_languages import alpha3_from_alpha2
 from .mismatch import clear_mismatch_for_video, report_release_type_mismatch
 from .pool import update_pools, _get_pool
 from .utils import get_video, _get_lang_obj, _get_scores
-from .processing import process_subtitle
+from .processing import describe_subtitle_download, process_subtitle
 
 
 class SourceMissingLanguagesUnavailable(OSError):
@@ -220,6 +220,7 @@ def generate_subtitles(path, languages, audio_language, sceneName, title, media_
                                 written_paths = []
                                 writer = partial(write_subtitle_file, path, written_paths=written_paths,
                                                  on_publish=publish)
+                                writer_options = {}
                                 owner_kwargs = {}
                                 if source is not None:
                                     writer = partial(_write_source_download, path, source=source,
@@ -229,6 +230,14 @@ def generate_subtitles(path, languages, audio_language, sceneName, title, media_
                                                      wanted_profile=wanted_profile, upgrade=source_upgrade,
                                                      video_version=video_version,
                                                      destination_setting=destination_setting)
+                                    if source_upgrade is not None:
+                                        def write_upgrade(subtitle, destination, content):
+                                            _retain_hash_match_fields(subtitle)
+                                            result = describe_subtitle_download(
+                                                subtitle, media_type, path, destination, max_score, is_upgrade=True)
+                                            return writer(destination, content, upgrade_result=result)
+
+                                        writer_options['write_subtitle_with_metadata'] = write_upgrade
                                     if is_upgrade and source_upgrade is None:
                                         from media_sources.indexer import SourcePublicationOwnerIndex
 
@@ -240,7 +249,7 @@ def generate_subtitles(path, languages, audio_language, sceneName, title, media_
                                                                  chmod=chmod,
                                                                  formats=subtitle_formats,
                                                                  path_decoder=force_unicode,
-                                                                 write_subtitle=writer)
+                                                                 write_subtitle=writer, **writer_options)
                                 if is_upgrade and source_upgrade is None and previous_subtitles_to_delete and written_paths and (
                                         os.path.normcase(os.path.realpath(previous_subtitles_to_delete)) not in
                                         {os.path.normcase(os.path.realpath(written)) for written in written_paths}):
@@ -286,10 +295,7 @@ def generate_subtitles(path, languages, audio_language, sceneName, title, media_
                                                          arr_instance_id=arr_instance_id)
                             languages_that_landed = []
                             for subtitle in saved_subtitles:
-                                if "hash" in subtitle.matches:
-                                    # make matches set cleaner for history purpose when hash matches
-                                    subtitle.matches = {match for match in subtitle.matches
-                                                        if match in ("hash", "hearing_impaired")}
+                                _retain_hash_match_fields(subtitle)
                                 processed_subtitle = process_subtitle(subtitle=subtitle, media_type=media_type,
                                                                       audio_language=audio_language,
                                                                       is_upgrade=is_upgrade, is_manual=False,
@@ -336,6 +342,11 @@ def _get_language_obj(languages):
         language_set.add(lang_obj)
 
     return language_set
+
+
+def _retain_hash_match_fields(subtitle):
+    if "hash" in subtitle.matches:
+        subtitle.matches = {match for match in subtitle.matches if match in ("hash", "hearing_impaired")}
 
 
 def _wanted_source_can_publish(source, language, stamp, profile, *, target=None):
@@ -443,7 +454,7 @@ def _source_subtitle_destination_setting():
 
 def _write_source_download(video_path, destination, content, *, source, language, recheck_missing, is_upgrade,
                            written_paths, on_publish, wanted_stamp=None, wanted_profile=None, upgrade=None,
-                           video_version=None, destination_setting=None):
+                           video_version=None, destination_setting=None, upgrade_result=None):
     """Publish the actual provider-selected file only while its destination is still eligible."""
     from media_sources.indexer import SourcePublicationOwnerIndex
     from media_sources.translation import prepare_source_sidecars
@@ -516,6 +527,10 @@ def _write_source_download(video_path, destination, content, *, source, language
                     current, external_subtitles=prepared, target=connection):
                 raise SubtitleDestinationChanged('The source language is no longer missing')
             yield
+            if upgrade is not None:
+                from media_sources.history import history_log_source
+
+                history_log_source(3, current, upgrade_result, upgraded_from_id=upgrade.original_id, target=connection)
 
     try:
         with ExitStack() as files:

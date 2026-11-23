@@ -257,8 +257,10 @@ def _change_after_ownership_preparation(monkeypatch, change):
 
 @pytest.mark.parametrize(('failure_step', 'same_name'), [
     ('remove old', False), ('publish new', False), ('commit guard', False), ('commit guard', True),
+    ('insert history', False), ('insert history', True),
 ])
 def test_failed_source_replacement_leaves_upgrade_retryable(world, monkeypatch, failure_step, same_name):
+    from media_sources import repository
     from media_sources.history import get_upgradable_source_subtitles
     from media_sources.indexer import index_item
     from subtitles import download, upgrade
@@ -306,6 +308,11 @@ def test_failed_source_replacement_leaves_upgrade_retryable(world, monkeypatch, 
             assert not world.published
             raise sa.exc.OperationalError('COMMIT', None, OSError('Lost the connection during commit'))
 
+    def fail_history_insert(connection, cursor, statement, parameters, context, executemany):
+        if statement.lstrip().lower().startswith(f'insert into {repository.History.name.lower()}'):
+            failures.append('insert history')
+            raise sa.exc.OperationalError(statement, None, OSError('Unable to record the upgrade'))
+
     with monkeypatch.context() as failure:
         if failure_step == 'remove old':
             failure.setattr(download.os, 'remove', fail_original_removal)
@@ -323,11 +330,15 @@ def test_failed_source_replacement_leaves_upgrade_retryable(world, monkeypatch, 
         engine = world.db.get_bind()
         if failure_step == 'commit guard':
             sa.event.listen(engine, 'commit', fail_guard_commit)
+        elif failure_step == 'insert history':
+            sa.event.listen(engine, 'before_cursor_execute', fail_history_insert)
         try:
             upgrade.upgrade_source_subtitles(job_id=10)
         finally:
             if failure_step == 'commit guard':
                 sa.event.remove(engine, 'commit', fail_guard_commit)
+            elif failure_step == 'insert history':
+                sa.event.remove(engine, 'before_cursor_execute', fail_history_insert)
 
     assert failures == [failure_step]
     if failure_step == 'commit guard':
@@ -343,7 +354,10 @@ def test_failed_source_replacement_leaves_upgrade_retryable(world, monkeypatch, 
     assert get_upgradable_source_subtitles() == {first: None}
 
     upgrade.upgrade_source_subtitles(job_id=11)
-    assert record_rows(world.db) == [(first, 1, None), (first + 1, 3, first)]
+    original_row, replacement_row = record_rows(world.db)
+    assert original_row == (first, 1, None)
+    assert replacement_row[0] > first
+    assert replacement_row[1:] == (3, first)
     assert destination.read_bytes() == pipeline.CONTENT
     if not same_name:
         assert not original.exists()

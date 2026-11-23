@@ -2563,7 +2563,8 @@ SUBTITLE_FORMAT_EXTENSIONS = {
 
 
 def save_subtitles(file_path, subtitles, single=False, directory=None, chmod=None, formats=("srt",),
-                   tags=None, path_decoder=None, debug_mods=False, write_subtitle=None):
+                   tags=None, path_decoder=None, debug_mods=False, write_subtitle=None, *,
+                   write_subtitle_with_metadata=None):
     """Save subtitles on filesystem.
 
     Subtitles are saved in the order of the list. If a subtitle with a language has already been saved, other subtitles
@@ -2580,6 +2581,7 @@ def save_subtitles(file_path, subtitles, single=False, directory=None, chmod=Non
     :param str directory: path to directory where to save the subtitles, default is next to the video.
     :param write_subtitle: optional callback receiving each exact destination and encoded content.
         Returning False declines that file.
+    :param write_subtitle_with_metadata: optional writer also receiving the selected subtitle object as its first argument.
     :return: the saved subtitles
     :rtype: list of :class:`~subliminal.subtitle.Subtitle`
 
@@ -2629,6 +2631,8 @@ def save_subtitles(file_path, subtitles, single=False, directory=None, chmod=Non
 
         subtitle.storage_path = subtitle_path
 
+        writer = (partial(write_subtitle_with_metadata, subtitle)
+                  if write_subtitle_with_metadata is not None else write_subtitle)
         written_path = None
         declined = False
         for format in formats:
@@ -2639,9 +2643,9 @@ def save_subtitles(file_path, subtitles, single=False, directory=None, chmod=Non
             logger.debug(u"Saving %r to %r", subtitle, subtitle_path)
             content = subtitle.get_modified_content(format=format, debug=debug_mods)
             if content:
-                if write_subtitle is not None:
+                if writer is not None:
                     # A writer can reject a destination after the provider has returned.
-                    if write_subtitle(subtitle_path, content) is False:
+                    if writer(subtitle_path, content) is False:
                         declined = True
                         continue
                 else:

@@ -323,6 +323,36 @@ def _postprocessing_config(media_type, arr_instance_id):
     return use_pp, cmd, use_threshold, threshold
 
 
+def describe_subtitle_download(subtitle, media_type, video_path, subtitles_path, max_score, *,
+                               is_upgrade=False, is_manual=False, source_indexed=False):
+    """Describe a selected subtitle without running postprocessing."""
+    language_code3 = _get_download_code3(subtitle)
+    downloaded_language = language_from_alpha3(language_code3)
+    if subtitle.language.hi:
+        modifier_string = " HI"
+    elif subtitle.language.forced:
+        modifier_string = " forced"
+    else:
+        modifier_string = ""
+    if is_upgrade:
+        action = "upgraded"
+    elif is_manual:
+        action = "manually downloaded"
+    else:
+        action = "downloaded"
+
+    percent_score = round(subtitle.score * 100 / max_score, 2)
+    ai_label = " AI-translated" if getattr(subtitle, "ai_translated", False) is True else ""
+    message = (f"{downloaded_language}{modifier_string}{ai_label} subtitles {action} from {subtitle.provider_name} "
+               f"with a score of {percent_score}%.")
+    return ProcessSubtitlesResult(
+        message=message, reversed_path=video_path, downloaded_language_code2=alpha2_from_alpha3(language_code3),
+        downloaded_provider=subtitle.provider_name, score=subtitle.score, forced=subtitle.language.forced,
+        subtitle_id=subtitle.id, reversed_subtitles_path=subtitles_path, hearing_impaired=subtitle.language.hi,
+        matched=list(subtitle.matches or []), not_matched=_get_not_matched(subtitle, media_type),
+        ai_translated=getattr(subtitle, 'ai_translated', False) is True, source_indexed=source_indexed)
+
+
 def process_subtitle(subtitle, media_type, audio_language, path, max_score, is_upgrade=False, is_manual=False,
                      job_id=None, arr_instance_id=None, *,
                      context=None, validate=None, cancel=None, publication_guard=None, auto_translate=True,
@@ -339,41 +369,18 @@ def process_subtitle(subtitle, media_type, audio_language, path, max_score, is_u
     uploader = subtitle.uploader
     release_info = subtitle.release_info
     downloaded_language_code3 = _get_download_code3(subtitle)
-
     downloaded_language = language_from_alpha3(downloaded_language_code3)
     downloaded_language_code2 = alpha2_from_alpha3(downloaded_language_code3)
     audio_language_code2 = alpha2_from_language(audio_language)
     audio_language_code3 = alpha3_from_language(audio_language)
     downloaded_path = subtitle.storage_path
     subtitle_id = subtitle.id
-    if subtitle.language.hi:
-        modifier_string = " HI"
-    elif subtitle.language.forced:
-        modifier_string = " forced"
-    else:
-        modifier_string = ""
-    logging.debug(f'BAZARR Subtitles file saved to disk: {downloaded_path}')  # noqa: G004
-    if is_upgrade:
-        action = "upgraded"
-    elif is_manual:
-        action = "manually downloaded"
-    else:
-        action = "downloaded"
-
     percent_score = round(subtitle.score * 100 / max_score, 2)
-    ai_label = " AI-translated" if getattr(subtitle, "ai_translated", False) is True else ""
-    message = (f"{downloaded_language}{modifier_string}{ai_label} subtitles {action} from {downloaded_provider} with a score of "
-               f"{percent_score}%.")
+    logging.debug(f'BAZARR Subtitles file saved to disk: {downloaded_path}')  # noqa: G004
 
     def processed_result(video_path, subtitles_path, *, source_indexed=False):
-        return ProcessSubtitlesResult(message=message, reversed_path=video_path,
-                                      downloaded_language_code2=downloaded_language_code2,
-                                      downloaded_provider=downloaded_provider, score=subtitle.score,
-                                      forced=subtitle.language.forced, subtitle_id=subtitle_id,
-                                      reversed_subtitles_path=subtitles_path, hearing_impaired=subtitle.language.hi,
-                                      matched=list(subtitle.matches or []), not_matched=_get_not_matched(subtitle, media_type),
-                                      ai_translated=getattr(subtitle, 'ai_translated', False) is True,
-                                      source_indexed=source_indexed)
+        return describe_subtitle_download(subtitle, media_type, video_path, subtitles_path, max_score,
+                                          is_upgrade=is_upgrade, is_manual=is_manual, source_indexed=source_indexed)
 
     sync_checker = _defaul_sync_checker
     logging.debug("Sync checker: %s", sync_checker)

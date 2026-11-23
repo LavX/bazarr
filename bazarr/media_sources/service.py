@@ -600,11 +600,9 @@ def _download_source_subtitles(context, item, languages, job_id, *, translation_
                                          **({} if translation_gate else {'auto_translate': False})):
             if not result:
                 continue
-            with source_transaction() as connection:
-                if upgrade is None:
+            if upgrade is None:
+                with source_transaction() as connection:
                     history_log_source(1, context, result, target=connection)
-                else:
-                    history_log_source(3, context, result, upgraded_from_id=upgrade.original_id, target=connection)
             downloaded.append(result.language_code)
             current = resolve_same_item(context)
             if current is None:
