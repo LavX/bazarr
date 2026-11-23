@@ -430,6 +430,16 @@ class TranslationJobs:
         return self._transition(job_id, (QUEUED,), None, _queue_job_id=expected_queue_job_id,
                                 queue_job_id=queue_job_id)
 
+    def replace_stale_queue_attachment(self, job, queue_job_id: int | None) -> bool:
+        """Let an admitted worker take over the reservation of a removed queue job."""
+        previous = job.queue_job_id
+        if job.state != QUEUED or previous is None or queue_job_id is None:
+            return False
+        if (self._queue.status(previous) in ('pending', 'running')
+                or self._queue.status(queue_job_id) != 'running'):
+            return False
+        return self.attach_queue_job(job.id, queue_job_id, expected_queue_job_id=previous)
+
     def requeue(self, job_id: int, queue_job_id: int | None = None, *, only_if_due: bool = False,
                 retry_snapshot: tuple[datetime, datetime | None] | None = None) -> bool:
         """A job awaiting its retry goes back on the queue. Its checkpoints stop counting down."""

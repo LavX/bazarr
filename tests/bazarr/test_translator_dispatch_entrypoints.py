@@ -761,7 +761,9 @@ def test_a_paused_editor_retry_cannot_activate_a_newer_hold(env, monkeypatch, ed
     assert (env.last_job().id, env.last_job().state) == (active_id, "completed")
 
 
-@pytest.mark.parametrize("attachment", ["own", "competing", "due-retry", "late-original", "late-immediate"])
+@pytest.mark.parametrize("attachment", [
+    "own", "competing", "due-retry", "late-original", "late-immediate", "removed", "live-owner",
+])
 def test_native_dispatch_preserves_its_claim_when_attachment_arrives_late(
         env, media, monkeypatch, editor_runtime_queue, attachment):
     from threading import Event, Thread, current_thread
@@ -792,6 +794,29 @@ def test_native_dispatch_preserves_its_claim_when_attachment_arrives_late(
         assert jobs.await_retry(old_id, "rate_limited", "later", retry_at=datetime.now() - timedelta(seconds=1))
 
     first = _request(main, video_path=str(media.video), source_srt_file=str(media.source))
+    if attachment in ("removed", "live-owner"):
+        args, kwargs = attachments[-1]
+        if attachment == "removed":
+            attach(*args, **kwargs)
+            assert queue.remove_job_from_pending_queue(first)
+            second = _request(main, video_path=str(media.video), source_srt_file=str(media.source))
+        else:
+            second = _request(main, video_path=str(media.video), source_srt_file=str(media.source),
+                              metadata={"title": "Another request while the owner is pending"})
+            attach(*args, **kwargs)
+            live = queue._reserve_next_job()
+            assert live.job_id == first and live.status == "pending"
+        job = queue._reserve_next_job()
+        assert job.job_id == second != first and env.last_job().queue_job_id == first
+        assert queue._run_job(job)
+        if attachment == "live-owner":
+            assert not media.dest.exists() and env.last_job().queue_job_id == first
+            assert queue._run_job(live)
+        assert media.dest.is_file() and "[fr] One" in media.dest.read_text()
+        args, kwargs = attachments[-1]
+        attach(*args, **kwargs)
+        assert env.last_job().state == "completed"
+        return
     if attachment == "competing":
         second = _request(main, video_path=str(media.video), source_srt_file=str(media.source),
                           metadata={"title": "A second copy of the same request"})

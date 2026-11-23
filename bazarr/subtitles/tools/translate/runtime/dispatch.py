@@ -356,7 +356,11 @@ class Dispatcher:
         row = jobs.active_for(spec.source_key, spec.target_key)
         picked = spec.pinned_connection_id
         if row is not None and row.queue_job_id not in (None, spec.queue_job_id):
-            return None
+            # The replacement can start before its enqueue callback attaches it.
+            jobs.replace_stale_queue_attachment(row, spec.queue_job_id)
+            row = jobs.get(row.id)
+            if row is not None and row.queue_job_id not in (None, spec.queue_job_id):
+                return None
         if row is not None and picked is not None and row.pinned_connection_id != picked \
                 and row.state in (QUEUED, AWAITING_RETRY):
             # A new pick replaces the one the job has: the old job ends superseded and its checkpoints go.
