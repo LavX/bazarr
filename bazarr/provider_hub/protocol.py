@@ -105,6 +105,9 @@ class HubWorkerSubtitle(Subtitle):
 
 
 def language_to_payload(language) -> dict[str, Any]:
+    if isinstance(language, str):
+        # Stream refiners put ISO 639-3 codes in Video.audio_languages.
+        language = Language(language)
     return {
         "alpha3": getattr(language, "alpha3", None),
         "alpha2": getattr(language, "alpha2", None),
