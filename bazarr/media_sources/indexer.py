@@ -144,7 +144,7 @@ class SourcePublicationOwnerIndex(SourceOutputOwnerIndex):
         return directory != media_directory
 
     @contextmanager
-    def publication(self, source, prepare=None, *, destination=None):
+    def publication(self, source, prepare=None, *, destination=None, release=None):
         """Keep slow ownership and subtitle discovery outside the writer transaction."""
         for _ in range(2):
             self._loaded = False
@@ -162,7 +162,7 @@ class SourcePublicationOwnerIndex(SourceOutputOwnerIndex):
                     sleep(delay)
                 publishing = False
                 try:
-                    with source_item_publication(source, shared=shared) as (current, connection):
+                    with source_item_publication(source, shared=shared, release=release) as (current, connection):
                         if destination_setting != (settings.general.subfolder, get_subtitle_destination_folder()):
                             break
                         if shared and current is not None and self._prepared_paths != self._source_owner_paths(connection):

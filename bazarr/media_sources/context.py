@@ -8,7 +8,7 @@ from typing import Optional
 from sqlalchemy import text
 
 from . import repository
-from .db import source_transaction
+from .db import lock_source_release, source_transaction
 
 
 class SourceItemGone(LookupError):
@@ -143,9 +143,11 @@ def _same_context(source, current):
 
 
 @contextmanager
-def source_item_publication(source, *, shared=False):
+def source_item_publication(source, *, shared=False, release=None):
     """Keep the captured item stable through an atomic subtitle publication."""
     with source_transaction() as connection:
+        if release is not None:
+            lock_source_release(connection, release)
         shared_postgres = shared and connection.dialect.name == 'postgresql'
         item = repository.get_item(source.item_id, connection, for_update=True, nowait=shared_postgres)
         if item is not None and shared_postgres:

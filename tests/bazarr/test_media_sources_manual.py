@@ -659,3 +659,81 @@ def test_blacklist_cannot_delete_a_different_items_subtitle(client, arr_library,
     assert arr_library.scalar(sa.select(sa.func.count()).select_from(repository.Blacklist)) == 0
     assert arr_library.scalar(sa.select(sa.func.count()).select_from(repository.History)) == 0
     assert writes == []
+
+
+@pytest.mark.parametrize('same_release', [True, False], ids=['same-release', 'different-release'])
+def test_postgres_release_exclusion_orders_writes_across_different_items(
+        client, arr_library, writes, isolated_jobs, tmp_path, monkeypatch, same_release):
+    from time import monotonic, sleep
+
+    from media_sources import indexer, manual as source_manual, repository
+    from subtitles import manual
+
+    if arr_library.get_bind().dialect.name != 'postgresql':
+        pytest.skip('SQLite serializes source write transactions itself')
+    downloading = _item(arr_library, tmp_path, 'movie', folder='downloads')
+    excluding = _item(arr_library, tmp_path, 'movie', folder='exclusions')
+    download_path = Path(downloading.path).with_suffix('.en.srt')
+    exclude_path = Path(excluding.path).with_suffix('.en.srt')
+    exclude_path.write_bytes(pipeline.CONTENT)
+    indexer.index_item(excluding.item_id)
+
+    payload, release = _search_for_download(client, monkeypatch, downloading)
+    excluded_release = release if same_release else f'{release}-other'
+    monkeypatch.setattr(manual, 'download_subtitles', lambda subtitles, pool: None)
+    response = client.post(f'/api/sources/items/{downloading.item_id}/manual', headers=HEADERS, json=payload)
+    job = isolated_jobs._reserve_next_job()
+    assert job.job_id == response.get_json()['job_id']
+
+    after_check, allow_write = Event(), Event()
+    publisher_pid = []
+    real_blacklist = source_manual.get_blacklist_source
+
+    def after_blacklist_read(kind, target=None):
+        result = real_blacklist(kind, target)
+        if isinstance(target, sa.engine.Connection):
+            # Hold the real transaction after its blacklist read, just before the atomic file replacement.
+            publisher_pid.append(target.scalar(sa.text('SELECT pg_backend_pid()')))
+            after_check.set()
+            assert allow_write.wait(15), 'Timed out waiting for the exclusion transaction'
+        return result
+
+    monkeypatch.setattr(source_manual, 'get_blacklist_source', after_blacklist_read)
+    exclusion_client = client.application.test_client()
+
+    def exclude():
+        return exclusion_client.post(f'/api/sources/items/{excluding.item_id}/blacklist', headers=HEADERS, json={
+            'subtitles_path': str(exclude_path), 'language': 'en', 'provider': payload['provider'],
+            'subs_id': excluded_release,
+        })
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        writing = executor.submit(isolated_jobs._run_job, job)
+        try:
+            assert after_check.wait(15), job.error
+            removing = executor.submit(exclude)
+            if same_release:
+                until = monotonic() + 8
+                waiting = sa.text("""SELECT EXISTS (
+                    SELECT 1 FROM pg_locks WHERE locktype = 'advisory' AND NOT granted
+                    AND :publisher = ANY(pg_blocking_pids(pid)))""")
+                while not removing.done() and monotonic() < until:
+                    if arr_library.scalar(waiting, {'publisher': publisher_pid[0]}):
+                        break
+                    sleep(0.02)
+                assert not removing.done(), 'The other item committed the exclusion after the final save check'
+                assert arr_library.scalar(waiting, {'publisher': publisher_pid[0]})
+                assert exclude_path.exists()
+            else:
+                assert removing.result(timeout=8).status_code == 204
+                assert not download_path.exists()
+        finally:
+            allow_write.set()
+        assert writing.result(timeout=15), job.error
+        assert removing.result(timeout=15).status_code == 204
+
+    assert download_path.read_bytes() == pipeline.CONTENT
+    assert not exclude_path.exists()
+    row = arr_library.execute(sa.select(repository.Blacklist)).one()
+    assert (row.item_id, row.subs_id) == (excluding.item_id, excluded_release)
+    assert [event.operation for event in writes] == (['download', 'delete'] if same_release else ['delete', 'download'])
