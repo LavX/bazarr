@@ -11,9 +11,9 @@ import pysubs2
 from .aligner import detect_mode
 
 
-def _load_subtitle(path):
+def _load_subtitle(path, read_bytes=None):
     """Prefer declared Unicode encodings and valid UTF-8 over legacy guesses."""
-    raw = Path(path).read_bytes()
+    raw = Path(path).read_bytes() if read_bytes is None else read_bytes(path)
     # UTF-32 LE shares the UTF-16 LE prefix, so check its longer BOM first.
     if raw.startswith((BOM_UTF32_LE, BOM_UTF32_BE)):
         text = raw.decode("utf-32")
@@ -33,7 +33,7 @@ def _load_subtitle(path):
     return pysubs2.SSAFile.from_file(StringIO(text, newline=None))
 
 
-def compose(primary_path, secondary_paths, format):
+def compose(primary_path, secondary_paths, format, *, read_bytes=None):
     """Compose primary + 1-2 secondaries into one SRT or ASS file.
 
     Returns the file contents as bytes (UTF-8, no BOM, LF line endings).
@@ -44,8 +44,8 @@ def compose(primary_path, secondary_paths, format):
     if not secondary_paths or len(secondary_paths) > 2:
         raise ValueError("secondary_paths must have 1 or 2 entries")
 
-    primary = _load_subtitle(primary_path)
-    secondaries = [_load_subtitle(p) for p in secondary_paths]
+    primary = _load_subtitle(primary_path, read_bytes)
+    secondaries = [_load_subtitle(path, read_bytes) for path in secondary_paths]
 
     modes = []
     aligned_secondaries = []

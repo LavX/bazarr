@@ -131,3 +131,21 @@ def attach_for(queue_job_id, source_key: str, to_lang: str, forced: bool = False
         jobs.requeue(row.id, queue_job_id)
     else:
         jobs.attach_queue_job(row.id, queue_job_id)
+
+
+
+def cancel_waiting_for(queue_job_id, source_key, to_lang, forced, hi, reason):
+    """Retire a refused source request without ending a replacement queue job."""
+    from app.database import database
+
+    try:
+        jobs = TranslationJobs(database)
+        row = jobs.active_for(source_key, target_key(to_lang, forced, hi))
+        if row is None or not jobs.cancel_waiting(row.id, queue_job_id, reason):
+            return
+        history = HistoryStore(database)
+        ledger_id = str(row.id)
+        if history.get_by_job(ledger_id) is not None:
+            history.finish_job(ledger_id, "cancelled", error_class="source_changed", error_detail=reason)
+    except Exception:
+        logger.exception("Could not retire a source translation that was no longer current")

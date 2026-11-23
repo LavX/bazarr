@@ -249,7 +249,9 @@ def _relocated(event):
 
 
 def _metadata(event):
-    return resolution.media_metadata(event.media_type, event.video_path, event.arr_instance_id)
+    source = ({'source_item_id': event.source_item_id, 'source_created_at': event.source_created_at}
+              if event.source_item_id is not None else {})
+    return resolution.media_metadata(event.media_type, event.video_path, event.arr_instance_id, **source)
 
 
 def _client(server, snapshot):
@@ -305,9 +307,9 @@ class RefreshDispatcher:
         media_type = {"series": "episode", "movies": "movie"}.get(event.media_type, event.media_type)
         if media_type not in {"movie", "episode", "sports"} or event.operation not in _OPERATIONS:
             return
-        event = SubtitleMutation(media_type, str(_media_path(event.video_path)), event.subtitle_path,
-                                 event.operation, event.arr_instance_id)
-        key = (media_type, _media_path(event.video_path), event.arr_instance_id)
+        event = replace(event, media_type=media_type, video_path=str(_media_path(event.video_path)))
+        key = (media_type, _media_path(event.video_path), event.arr_instance_id,
+               event.source_item_id, event.source_created_at)
         with self.condition, self.configuration.lock:
             self._prune_deleted()
             for snapshot in self.configuration.list():

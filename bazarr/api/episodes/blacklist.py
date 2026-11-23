@@ -1,6 +1,7 @@
 # coding=utf-8
 
-from flask_restx import Resource, Namespace, reqparse, fields, marshal
+from flask_restx import Resource, Namespace, reqparse, fields
+from sqlalchemy import Text
 
 from app.database import TableEpisodes, TableShows, TableBlacklist, database, select
 from subtitles.tools.delete import delete_subtitles
@@ -9,9 +10,10 @@ from sonarr.blacklist import blacklist_log, blacklist_delete_all, blacklist_dele
 from subtitles.mass_download import episode_download_subtitles
 from app.event_handler import event_stream
 from api.swaggerui import subtitles_language_model, job_queued_model
-from utilities.pretty_date import pretty_date
+from media_sources.blacklist import add_blacklist_delete_arguments, delete_blacklist, list_blacklist
+from media_sources.union import add_source_arguments
 
-from ..utils import authenticate, postprocess
+from ..utils import authenticate
 
 api_ns_episodes_blacklist = Namespace('Episodes Blacklist', description='List, add or remove subtitles to or from '
                                                                         'episodes blacklist')
@@ -22,6 +24,8 @@ class EpisodesBlacklist(Resource):
     get_request_parser = reqparse.RequestParser()
     get_request_parser.add_argument('start', type=int, required=False, default=0, help='Paging start integer')
     get_request_parser.add_argument('length', type=int, required=False, default=-1, help='Paging length integer')
+
+    add_source_arguments(get_request_parser)
 
     get_language_model = api_ns_episodes_blacklist.model('subtitles_language_model', subtitles_language_model)
 
@@ -46,12 +50,9 @@ class EpisodesBlacklist(Resource):
     def get(self):
         """List blacklisted episodes subtitles"""
         args = self.get_request_parser.parse_args()
-        start = args.get('start')
-        length = args.get('length')
-
         stmt = select(TableShows.id,
                       TableShows.title.label('seriesTitle'),
-                      TableEpisodes.season.concat('x').concat(TableEpisodes.episode).label('episode_number'),
+                      TableEpisodes.season.cast(Text).concat('x').concat(TableEpisodes.episode.cast(Text)).label('episode_number'),
                       TableEpisodes.title.label('episodeTitle'),
                       TableEpisodes.sonarrSeriesId,
                       TableBlacklist.arr_instance_id,
@@ -61,24 +62,8 @@ class EpisodesBlacklist(Resource):
                       TableBlacklist.timestamp) \
             .select_from(TableBlacklist) \
             .join(TableShows, onclause=TableBlacklist.series_id == TableShows.id) \
-            .join(TableEpisodes, onclause=TableBlacklist.episode_id == TableEpisodes.id) \
-            .order_by(TableBlacklist.timestamp.desc())
-        if length > 0:
-            stmt = stmt.limit(length).offset(start)
-
-        return marshal([postprocess({
-            'id': x.id,
-            'arr_instance_id': x.arr_instance_id,
-            'seriesTitle': x.seriesTitle,
-            'episode_number': x.episode_number,
-            'episodeTitle': x.episodeTitle,
-            'sonarrSeriesId': x.sonarrSeriesId,
-            'provider': x.provider,
-            'subs_id': x.subs_id,
-            'language': x.language,
-            'timestamp': pretty_date(x.timestamp),
-            'parsed_timestamp': x.timestamp.strftime('%x %X')
-        }) for x in database.execute(stmt).all()], self.get_response_model, envelope='data')
+            .join(TableEpisodes, onclause=TableBlacklist.episode_id == TableEpisodes.id)
+        return list_blacklist(database, args, stmt, TableBlacklist, 'episode', self.get_response_model)
 
     post_request_parser = reqparse.RequestParser()
     post_request_parser.add_argument('seriesid', type=int, required=True, help='Series ID')
@@ -151,6 +136,8 @@ class EpisodesBlacklist(Resource):
     delete_request_parser.add_argument('arr_instance_id', type=int, required=False,
                                        help='Owning Sonarr instance id (#156)')
 
+    add_blacklist_delete_arguments(delete_request_parser)
+
     @authenticate
     @api_ns_episodes_blacklist.doc(parser=delete_request_parser)
     @api_ns_episodes_blacklist.response(204, 'Success')
@@ -158,11 +145,6 @@ class EpisodesBlacklist(Resource):
     def delete(self):
         """Delete an episodes subtitles from blacklist"""
         args = self.delete_request_parser.parse_args()
-        if args.get("all") == "true":
-            blacklist_delete_all()
-        else:
-            provider = args.get('provider')
-            subs_id = args.get('subs_id')
-            blacklist_delete(provider=provider, subs_id=subs_id,
-                             arr_instance_id=args.get('arr_instance_id'))
-        return '', 204
+        refusal = delete_blacklist(args, session=database, kind='episode', arr_table=TableBlacklist,
+                                   delete_one=blacklist_delete, delete_all=blacklist_delete_all)
+        return refusal or ('', 204)

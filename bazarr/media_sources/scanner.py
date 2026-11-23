@@ -21,6 +21,7 @@ from app.jobs_queue import JobCancelled, JobFailed, jobs_queue
 
 from . import groups as group_rules
 from . import identify, identity, repository
+from .analysis import UNKNOWN_STREAM_COLUMNS, read_metadata, stamp_index
 from .db import source_transaction
 from .indexer import SourceOutputOwnerIndex, index_item
 from .kinds import UnknownSourceKind, get_kind
@@ -31,6 +32,7 @@ BATCH_SIZE = 500
 MAX_PATH_BYTES = 2600
 # A scan that started this long ago and never finished is taken for a crashed one, not a running one.
 STALE_SCAN_HOURS = 6
+INVALIDATED_FILE_INDEX = UNKNOWN_STREAM_COLUMNS | dict(subtitles=None, missing_subtitles=None, indexed_at=None)
 
 
 @dataclass
@@ -374,7 +376,8 @@ def _write_library(library, decisions, plan, group_identities, group_for_dir, re
         with source_transaction(session) as connection:
             def update_group(group_id, connection, **values):
                 identity_fields = group_identities.get(group_id, {}).keys() & values.keys()
-                write = repository.update_show_identity if identity_fields else repository.update_group
+                write = (repository.update_show_identity if identity_fields and library.content_kind == 'series'
+                         else repository.update_group)
                 write(group_id, connection, owner_library_id=library.id, protect_user=identity_fields, **values)
 
             group_rules.apply_plan(plan, connection, update_group, group_identities)
@@ -480,7 +483,8 @@ def _plan_groups(groups, matching, dev_changed, roots):
     identities = {}
     for group_id in plan.reidentify:
         directory = plan.move.get(group_id) or groups[group_id].group_key
-        identities[group_id] = identify.identify_group(directory)
+        identify_directory = identify.identify_league if groups[group_id].kind == 'league' else identify.identify_group
+        identities[group_id] = identify_directory(directory)
     return plan, identities
 
 
@@ -583,10 +587,13 @@ def _create_groups(library, decisions, group_for_dir, session):
     needed.update(found.group_key for found in decisions.new)
     needed = sorted(path for path in needed if path is not None and path not in group_for_dir)
     created = {}
+    sports = library.content_kind == 'sports'
+    identify_directory = identify.identify_league if sports else identify.identify_group
+    group_kind = 'league' if sports else 'show'
     for batch in _chunks(needed):
         values = []
         for directory in batch:
-            identified = identify.identify_group(directory)
+            identified = identify_directory(directory)
             state = group_rules.stat_directory(directory)
             carried = _carried_settings(directory, decisions, state, session)
             values.append((directory, {**identified, 'dir_dev': state.dev, 'dir_ino': state.ino, **carried}))
@@ -595,7 +602,7 @@ def _create_groups(library, decisions, group_for_dir, session):
                 extra = dict(extra)
                 title = extra.pop('title')
                 created[directory] = repository.create_group(
-                    source_id=library.source_id, library_id=library.id, kind='show', group_key=directory,
+                    source_id=library.source_id, library_id=library.id, kind=group_kind, group_key=directory,
                     title=title, target=connection, **extra)
     return created
 
@@ -622,16 +629,40 @@ _EPISODE_STATE_FIELDS = frozenset(('group_id', 'identity_state', 'identity_sourc
                                    'season', 'episode'))
 
 
-def _update_scanned_item(row, connection, *, reparse=False, **values):
+def _index_after_file_change(row, found):
+    before = identity.stored_content_stamp(row)
+    after = identity.file_content_stamp(found)
+    data = read_metadata(row.ffprobe_cache)
+    cached = data.get('source_file')
+    if cached == after:
+        # A search may already have indexed the file before admission changed.
+        return {}
+    device_changed = before[0] is not None and before[0] != after[0]
+    if device_changed and before[2:] == after[2:] and (row.path == found.path or before[1] == after[1]):
+        # Admission accepted a remount. Only a cache tied to that admission can
+        # take the new device/inode; unstamped caches will be probed on use.
+        if cached == before:
+            return {'ffprobe_cache': stamp_index(data, after)}
+        if cached is None:
+            return {}
+    return INVALIDATED_FILE_INDEX
+
+
+def _update_scanned_item(row, connection, *, reparse=False, found=None, **values):
     episode_identity = row.kind == 'episode' and not _EPISODE_STATE_FIELDS.isdisjoint(values)
     previous_group_id = row.group_id if episode_identity else None
 
     def save():
-        if reparse:
+        stamp_changed = found is not None and identity.stored_content_stamp(row) != identity.file_content_stamp(found)
+        if reparse or stamp_changed:
             current = repository.get_item(row.id, connection, for_update=True)
-            if (current is None or current.group_id != row.group_id or current.path != row.path
-                    or current.scene_name is not None):
+            if current is None:
                 return None
+            if reparse and (current.group_id != row.group_id or current.path != row.path
+                            or current.scene_name is not None):
+                return None
+            if stamp_changed:
+                values.update(_index_after_file_change(current, found))
         if repository.update_item(row.id, connection, owner_library_id=row.library_id,
                                   previous_group_id=previous_group_id, **values):
             return row.id
@@ -660,7 +691,7 @@ def _write_unchanged(decisions, group_for_dir, grouped, result, session, cancel)
                 group_id = None if decisions.conservative else _group_of(found, group_for_dir)
                 if grouped and group_id is not None and row.group_id != group_id:
                     values['group_id'] = group_id
-                if _update_scanned_item(row, connection, **values):
+                if _update_scanned_item(row, connection, found=found, **values):
                     result.item_ids.append(row.id)
                     result.unchanged += 1
         if cancel is not None:
@@ -754,7 +785,7 @@ def _write_final_path(library, entry, grouped, decisions, connection, releases):
         displaced = _delete_owned(decisions.admission_displaced.get(found.path), connection)
         values.update(source_id=library.source_id, library_id=library.id)
     protected = (identified.keys() & values.keys()) - {'scene_name'}
-    updated = _update_scanned_item(row, connection, protect_user=protected, **values)
+    updated = _update_scanned_item(row, connection, found=found, protect_user=protected, **values)
     if handover:
         if not updated:
             raise _ForeignClaimChanged
@@ -788,9 +819,8 @@ def _write_path_only(library, decisions, result, session, cancel, outer_releases
 
     def update(connection, row, found, identified):
         values = _item_values(found, identified, keep_identity=row.identity_source == 'user')
-        # The file changed: its codec cache described the old content.
         protected = (identified.keys() & values.keys()) - {'scene_name'}
-        return _update_scanned_item(row, connection, ffprobe_cache=None, protect_user=protected, **values)
+        return _update_scanned_item(row, connection, found=found, protect_user=protected, **values)
 
     local = [entry for entry in pending if entry[1].path not in decisions.foreign_to_close]
     for batch in _chunks(local):
@@ -823,7 +853,7 @@ def _write_path_only(library, decisions, result, session, cancel, outer_releases
 
 def _insert_new(library, decisions, group_for_dir, result, session, cancel, outer_releases):
     inserted = []
-    item_kind = 'movie' if library.content_kind == 'movie' else 'episode'
+    item_kind = {'movie': 'movie', 'series': 'episode', 'sports': 'sports_event'}[library.content_kind]
     for batch in _chunks(decisions.new):
         _insert_batch(batch, library, item_kind, group_for_dir, result, session, inserted, decisions,
                       outer_releases)

@@ -8,6 +8,10 @@ import os
 
 from subliminal import Episode, Movie
 
+from subtitles.refiners.ffprobe import refine_from_metadata
+
+from . import repository
+from .analysis import cached_metadata, local_stat, streams
 from .context import SourceItemContext
 
 
@@ -43,9 +47,9 @@ def refine_from_source(path, video, source: SourceItemContext):
         if source.kind == 'sports_event':
             # What get_sports_video does: the event's own title and year, never a movie id.
             video.title = source.title
-            if source.year:
-                video.year = source.year
+            video.year = source.year
             video.imdb_id = None
+            video.tmdb_id = None
             try:
                 video.size = os.path.getsize(path)
             except OSError:
@@ -58,4 +62,13 @@ def refine_from_source(path, video, source: SourceItemContext):
                 video.imdb_id = source.imdb_id
             if source.tmdb_id or authoritative:
                 video.tmdb_id = int(source.tmdb_id) if source.tmdb_id else None
+    stat = local_stat(path)
+    if stat is not None:
+        item = repository.get_item(source.item_id)
+        if item is not None and item.path == path:
+            data = cached_metadata(item, stat)
+            refine_from_metadata(video, data)
+            duration = streams(data).get('duration')
+            if duration is not None:
+                video.duration = duration.total_seconds() if hasattr(duration, 'total_seconds') else duration
     return video
