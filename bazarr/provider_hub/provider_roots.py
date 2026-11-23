@@ -91,6 +91,9 @@ def source_media_file(context) -> SourceMediaFile | None:
         return None
     if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
         return None
+    identity = (info.st_dev, info.st_ino)
+    if context.pinned_file_identity is not None and identity != context.pinned_file_identity:
+        return None
     for root in map(Path, roots):
         if not root.is_absolute() or root == Path(root.anchor) or not path.is_relative_to(root):
             continue
@@ -99,7 +102,7 @@ def source_media_file(context) -> SourceMediaFile | None:
         except (OSError, ValueError):
             continue
         if local != Path(local.anchor) and real != local and real.is_relative_to(local) and local.is_dir():
-            return SourceMediaFile(real, (info.st_dev, info.st_ino), local)
+            return SourceMediaFile(real, identity, local)
     return None
 
 

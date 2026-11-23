@@ -1,13 +1,18 @@
 /* eslint-disable camelcase */
 
 import { showNotification } from "@mantine/notifications";
+import { act } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { http, HttpResponse } from "msw";
 import { describe, expect, it, vi } from "vitest";
+import queryClient from "@/apis/queries";
+import { QueryKeys } from "@/apis/queries/keys";
+import type { MediaSource, SourceLibrary } from "@/apis/raw/mediaSources";
 import { customRender, screen, waitFor, within } from "@/tests";
 import server from "@/tests/mocks/node";
 import { makeInstance } from "./__tests__/fixtures";
 import SettingsConnectionsView from "./index";
+import { CONNECTION_TABS } from "./tabs";
 
 // A spy that still shows the toast, so the page behaves as it does for real.
 vi.mock("@mantine/notifications", async (importOriginal) => {
@@ -84,6 +89,196 @@ it("switches to Jellyfin and shows its instance list", async () => {
   expect(await screen.findByText("Use Jellyfin")).toBeInTheDocument();
   expect(await screen.findByText("Jellyfin instances")).toBeInTheDocument();
   expect(screen.getByRole("switch", { name: "Enabled" })).toBeInTheDocument();
+});
+
+describe("Local folders", () => {
+  afterEach(() => window.history.replaceState(null, "", "/"));
+
+  function openFolders(visible: boolean) {
+    window.history.replaceState(null, "", "/#folders");
+    server.use(
+      http.get("/api/system/settings", () =>
+        HttpResponse.json({ general: {}, media_sources: { visible } }),
+      ),
+    );
+  }
+
+  it("follows the shared tab order and opens the folders hash directly", async () => {
+    openFolders(true);
+    server.use(
+      http.get("/api/system/media-sources", ({ request }) => {
+        expect(new URL(request.url).searchParams.get("availability")).toBe("1");
+        return HttpResponse.json({ data: [] });
+      }),
+    );
+    customRender(<SettingsConnectionsView />);
+    expect(
+      await screen.findByRole("tab", { name: "Local folders" }),
+    ).toHaveAttribute("aria-selected", "true");
+    const expectedNames = {
+      sonarr: "Sonarr",
+      radarr: "Radarr",
+      sportarr: "Sportarr",
+      folders: "Local folders",
+      plex: "Plex",
+      jellyfin: "Jellyfin",
+      emby: "Emby",
+      silo: "Silo",
+      seerr: "Seerr",
+    };
+    expect(screen.getAllByRole("tab").map((tab) => tab.textContent)).toEqual(
+      CONNECTION_TABS.map((tab) => expectedNames[tab]),
+    );
+    expect(
+      await screen.findByText("No folder sources yet"),
+    ).toBeInTheDocument();
+  });
+
+  it("leaves the tab hidden and falls back to Sonarr when the switch is off", async () => {
+    openFolders(false);
+    const getSources = vi.fn();
+    server.use(
+      http.get("/api/system/media-sources", () => {
+        getSources();
+        return HttpResponse.json({ data: [] });
+      }),
+    );
+    customRender(<SettingsConnectionsView />);
+    expect(await screen.findByRole("tab", { name: "Sonarr" })).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
+    expect(
+      screen.queryByRole("tab", { name: "Local folders" }),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByText("No folder sources yet")).not.toBeInTheDocument();
+    expect(getSources).not.toHaveBeenCalled();
+  });
+
+  it("updates scan results, edits library settings, and confirms source removal", async () => {
+    openFolders(true);
+    const user = userEvent.setup();
+    const library: SourceLibrary = {
+      id: 12,
+      locator: "/media/series",
+      content_kind: "series",
+      profile_id: null,
+      enabled: true,
+      last_scan_status: null,
+      last_scan_message: null,
+    };
+    let source: MediaSource | undefined = {
+      id: 11,
+      kind: "folder",
+      name: "Local series",
+      enabled: true,
+      scan_frequency_hours: 12,
+      libraries: [library],
+    };
+    let libraryPatch: unknown;
+    let sourcePatch: unknown;
+    const scan = vi.fn();
+    const remove = vi.fn();
+    server.use(
+      http.get("/api/system/media-sources", () =>
+        HttpResponse.json({ data: source ? [source] : [] }),
+      ),
+      http.post("/api/system/media-sources/11/scan", () => {
+        scan();
+        return HttpResponse.json({ job_id: 77 }, { status: 202 });
+      }),
+      http.patch("/api/system/media-sources/11", async ({ request }) => {
+        sourcePatch = await request.json();
+        if (source) source.enabled = false;
+        return HttpResponse.json(source);
+      }),
+      http.patch(
+        "/api/system/media-sources/11/libraries/12",
+        async ({ request }) => {
+          libraryPatch = await request.json();
+          library.enabled = false;
+          return HttpResponse.json(library);
+        },
+      ),
+      http.delete("/api/system/media-sources/11", () => {
+        remove();
+        source = undefined;
+        return new HttpResponse(null, { status: 204 });
+      }),
+    );
+    customRender(<SettingsConnectionsView />);
+    await user.click(await screen.findByRole("button", { name: "Scan now" }));
+    await waitFor(() => expect(scan).toHaveBeenCalledOnce());
+    library.last_scan_status = "ok";
+    library.last_scan_message = "Found 3 episodes";
+    await act(async () => {
+      queryClient.setQueryData(
+        [QueryKeys.System, QueryKeys.Jobs],
+        [{ job_id: 77, status: "completed" }],
+      );
+    });
+    expect(await screen.findByText("Scan complete")).toBeInTheDocument();
+    expect(screen.getByText("Found 3 episodes")).toBeInTheDocument();
+
+    await user.click(
+      screen.getByRole("button", { name: "Actions for library /media/series" }),
+    );
+    await user.click(
+      await screen.findByRole("menuitem", { name: "Edit library" }),
+    );
+    const edit = await screen.findByRole("dialog", { name: "Edit library" });
+    expect(
+      within(edit).getByRole("textbox", { name: "Folder path" }),
+    ).toHaveAttribute("readonly");
+    expect(
+      within(edit).getByRole("combobox", { name: "Content kind" }),
+    ).toBeDisabled();
+    await user.click(
+      within(edit).getByRole("switch", { name: "Library enabled" }),
+    );
+    await user.click(within(edit).getByRole("button", { name: "Save" }));
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Scan now" })).toBeDisabled(),
+    );
+    expect(libraryPatch).toEqual({ enabled: false, profile_id: null });
+
+    await user.click(screen.getByRole("button", { name: "Edit source" }));
+    const editSource = await screen.findByRole("dialog", {
+      name: "Edit folder source",
+    });
+    await user.click(
+      within(editSource).getByRole("switch", { name: "Source enabled" }),
+    );
+    await user.click(within(editSource).getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(editSource).not.toBeInTheDocument());
+    expect(sourcePatch).toEqual({
+      name: "Local series",
+      enabled: false,
+      scan_frequency_hours: 12,
+    });
+    expect(screen.getByText("/media/series")).toBeInTheDocument();
+
+    await user.click(
+      screen.getByRole("button", { name: "More actions for Local series" }),
+    );
+    await user.click(
+      await screen.findByRole("menuitem", { name: "Remove source" }),
+    );
+    const dialog = await screen.findByRole("dialog", { name: "Remove source" });
+    expect(
+      within(dialog).getByText(
+        /keeps the subtitle history, blacklist entries/i,
+      ),
+    ).toBeInTheDocument();
+    expect(remove).not.toHaveBeenCalled();
+    await user.click(
+      within(dialog).getByRole("button", { name: "Remove source" }),
+    );
+    expect(
+      await screen.findByText("No folder sources yet"),
+    ).toBeInTheDocument();
+    expect(remove).toHaveBeenCalledOnce();
+  });
 });
 
 describe("deleting an instance that owns a synced library", () => {

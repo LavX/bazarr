@@ -37,6 +37,7 @@ import Language from "@/components/bazarr/Language";
 import PlayOnMenu from "@/components/PlayOnMenu";
 import StateIcon from "@/components/StateIcon";
 import TextPopover from "@/components/TextPopover";
+import FolderMediaNotice from "@/pages/views/FolderMediaNotice";
 import HistoryView from "@/pages/views/HistoryView";
 import SportsActivityFilters from "@/pages/views/SportsActivityFilters";
 
@@ -52,6 +53,7 @@ export const SPORTS_HISTORY_ACTIONS: [string, string][] = [
   ["5", "Synced"],
   ["6", "Translated"],
   ["8", "Extracted"],
+  ["9", "Manual score"],
 ];
 
 // An exclusion deletes a file, so it asks first. Same wording the old combined
@@ -74,7 +76,7 @@ const SportsPlayCell = ({
 );
 
 const SportsHistoryView: FunctionComponent = () => {
-  const { enabled, isLoading } = useSportsAvailability();
+  const { activity, arrEnabled, isLoading } = useSportsAvailability();
   const [params] = useSearchParams();
   const owner = params.get("instance")
     ? Number(params.get("instance"))
@@ -196,12 +198,22 @@ const SportsHistoryView: FunctionComponent = () => {
       {
         header: "Info",
         accessorKey: "description",
-        cell: ({ row: { original } }) =>
-          original.description ? (
-            <TextPopover text={original.description}>
+        cell: ({ row: { original } }) => {
+          const {
+            action,
+            description,
+            subtitles_path: subtitlesPath,
+          } = original;
+          const text =
+            action === 9 && subtitlesPath
+              ? [description, subtitlesPath].filter(Boolean).join(" ")
+              : description;
+          return text ? (
+            <TextPopover text={text}>
               <FontAwesomeIcon size="sm" icon={faInfoCircle} />
             </TextPopover>
-          ) : null,
+          ) : null;
+        },
       },
       {
         header: "Upgradable",
@@ -247,7 +259,8 @@ const SportsHistoryView: FunctionComponent = () => {
   );
 
   if (isLoading) return null;
-  if (!enabled) {
+  if (!arrEnabled && activity) return <FolderMediaNotice />;
+  if (!arrEnabled) {
     return (
       <Container px={0} fluid>
         <Text p="md">

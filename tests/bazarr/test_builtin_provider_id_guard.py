@@ -103,6 +103,7 @@ PINNED_RESERVED_SETTINGS_SECTIONS = frozenset({
     "general",
     "jellyfin",
     "log",
+    "media_sources",
     "ocr",
     "omdb",
     "plex",

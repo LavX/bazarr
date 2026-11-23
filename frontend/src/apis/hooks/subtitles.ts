@@ -163,10 +163,12 @@ export function useSubtitleScoreOverride() {
         path: form.path,
         language: "",
       });
-      scheduleSubtitleScoresRefresh(
-        client,
-        form.type === "episode" ? QueryKeys.Series : QueryKeys.Movies,
-      );
+      if (form.type !== "sports") {
+        scheduleSubtitleScoresRefresh(
+          client,
+          form.type === "episode" ? QueryKeys.Series : QueryKeys.Movies,
+        );
+      }
     },
   });
 }

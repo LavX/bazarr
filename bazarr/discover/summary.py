@@ -561,6 +561,7 @@ def _library_component(instances):
     here to restate the shape of the library would cost more than it tells.
     """
     from app.database import TableEpisodes, TableHistory, TableHistoryMovie, TableMovies, TableShows
+    from .library import source_items, source_titles
 
     def count(table, where=None):
         statement = select(func.count()).select_from(table)
@@ -570,9 +571,12 @@ def _library_component(instances):
     # and fold a disabled Sonarr's shows into the total the reader is told they
     # have, so only live owners count.
     columns = [
-        count(TableShows, _owned(TableShows, "sonarr", instances)).label("series"),
-        count(TableMovies, _owned(TableMovies, "radarr", instances)).label("movies"),
-        count(TableEpisodes, _owned(TableEpisodes, "sonarr", instances)).label("episodes"),
+        (count(TableShows, _owned(TableShows, "sonarr", instances))
+         + source_titles("show", func.count()).scalar_subquery()).label("series"),
+        (count(TableMovies, _owned(TableMovies, "radarr", instances))
+         + source_titles("movie", func.count()).scalar_subquery()).label("movies"),
+        (count(TableEpisodes, _owned(TableEpisodes, "sonarr", instances))
+         + source_items("episode", func.count()).scalar_subquery()).label("episodes"),
         # What this Bazarr went and found. Upgrades and manual downloads count
         # because the install did the work; an upload does not, because the
         # reader did, and "subtitles fetched" would be crediting it wrongly.

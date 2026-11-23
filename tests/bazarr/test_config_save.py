@@ -2264,7 +2264,7 @@ def test_a_missing_subtitles_input_queues_the_recalculation_only_once_saved(monk
 
     queued = []
     monkeypatch.setattr(missing_refresh, "queue_missing_subtitles_recalculation",
-                        lambda *a, **kw: queued.append(True))
+                        lambda *a, **kw: queued.append(True) or 1)
     monkeypatch.setattr(config, "write_config", lambda: outcome != "unwritable")
     monkeypatch.setattr(config, "validate_log_regex", lambda: None)
 
@@ -2643,8 +2643,10 @@ def _record_save_side_effects(monkeypatch, fail=None):
     by `fail` raises once it has been recorded.
     """
     from app import config
+    from media_sources import repository
 
     effects = []
+    monkeypatch.setattr(repository, "has_sources", lambda: False)
 
     def record(effect):
         effects.append(effect)
@@ -2662,7 +2664,7 @@ def _record_save_side_effects(monkeypatch, fail=None):
     monkeypatch.setitem(sys.modules, "radarr.sync.movies", SimpleNamespace(
         update_movies=lambda: record("radarr sync")))
     monkeypatch.setitem(sys.modules, "subtitles.indexer.missing_refresh", SimpleNamespace(
-        queue_missing_subtitles_recalculation=lambda *_a, **_kw: record("missing subtitles recalculation")))
+        queue_missing_subtitles_recalculation=lambda *_a, **_kw: record("missing subtitles recalculation") or 1))
     monkeypatch.setattr(config, "region", SimpleNamespace(delete=lambda key: record(f"clear {key}")))
     monkeypatch.setitem(sys.modules, "app.get_providers", SimpleNamespace(
         reset_throttled_providers=lambda **_kw: record("throttled providers")))

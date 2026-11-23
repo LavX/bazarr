@@ -1,10 +1,12 @@
 import userEvent from "@testing-library/user-event";
 import { http, HttpResponse } from "msw";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import queryClient from "@/apis/queries";
 import type { MediaServerKind } from "@/apis/raw/mediaServers";
-import { customRender, screen, waitFor } from "@/tests";
+import { customRender, screen, waitFor, within } from "@/tests";
 import server from "@/tests/mocks/node";
 import OnboardingWizardView from "./OnboardingWizard";
+import wizardStyles from "./OnboardingWizard.module.scss";
 
 const navigate = vi.fn();
 
@@ -56,6 +58,7 @@ function serialize(row: Row) {
 
 function stageBackend() {
   server.use(
+    http.get("/api/system/status", () => HttpResponse.json({ data: {} })),
     http.get("/api/system/media-server-instances", ({ request }) => {
       const kind = new URL(request.url).searchParams.get("kind");
       return HttpResponse.json({
@@ -122,6 +125,26 @@ function stageBackend() {
       HttpResponse.json({ data: { general: {}, translator: {} } }),
     ),
   );
+}
+
+function deferDisconnect() {
+  let release!: () => void;
+  const pending = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const started = vi.fn();
+  server.use(
+    http.delete(
+      "/api/system/media-server-instances/:id",
+      async ({ params }) => {
+        started();
+        await pending;
+        rows = rows.filter((row) => row.id !== params.id);
+        return new HttpResponse(null, { status: 204 });
+      },
+    ),
+  );
+  return { release, started };
 }
 
 /** Land the shell on the media server picker, library path. */
@@ -236,8 +259,9 @@ describe("media server selection", () => {
 
   // Saving never waits for a Test, so Back used to call a server saved with a
   // wrong key "Connected" while Finish said the connection was not tested.
-  it("saves a server, flips one switch, and shows it saved on the picker", async () => {
+  it("saves a server, completes Connect after Requests writes nothing, and shows it saved on the picker", async () => {
     const user = userEvent.setup();
+    localStorage.setItem("bazarr.onboarding.intent", "discover");
     customRender(<OnboardingWizardView />);
 
     await screen.findByRole("heading", { name: /^media servers$/i });
@@ -265,6 +289,38 @@ describe("media server selection", () => {
       await screen.findByRole("heading", { name: /^requests$/i }),
     ).toBeInTheDocument();
 
+    await user.click(
+      screen.getByRole("button", { name: /continue without requests/i }),
+    );
+    await screen.findByRole("heading", { name: /subtitle languages/i });
+
+    // Saving removes the generated server step. Its completed phase must
+    // survive that removal when Requests contributes no write of its own.
+    expect(creates).toHaveLength(1);
+    expect(settingsWrites).toEqual([
+      { "settings-general-use_jellyfin": "true" },
+    ]);
+    const progress = screen.getByRole("progressbar", {
+      name: "Setup progress",
+    });
+    expect(within(progress).queryByText("2")).not.toBeInTheDocument();
+    expect(
+      // eslint-disable-next-line testing-library/no-node-access
+      progress.querySelectorAll(
+        `.${wizardStyles.dotDone} svg[data-icon="check"]`,
+      ),
+    ).toHaveLength(2);
+    expect(progress).not.toHaveAttribute(
+      "aria-valuetext",
+      expect.stringContaining("skipped: Connect"),
+    );
+    const currentDot = within(progress).getByText("3");
+    expect(currentDot).toHaveClass(wizardStyles.dotActive);
+    expect(currentDot).not.toHaveClass(wizardStyles.dotDone);
+    expect(currentDot).not.toHaveClass(wizardStyles.dotSkipped);
+
+    await user.click(screen.getByRole("button", { name: /^back$/i }));
+    await screen.findByRole("heading", { name: /^requests$/i });
     await user.click(screen.getByRole("button", { name: /^back$/i }));
     await screen.findByRole("heading", { name: /^media servers$/i });
     expect(await screen.findByText("Not tested")).toBeInTheDocument();
@@ -276,6 +332,291 @@ describe("media server selection", () => {
     expect(
       screen.getByRole("button", { name: /^disconnect$/i }),
     ).toBeInTheDocument();
+  });
+
+  it.each([
+    { control: "Back", destination: /^sportarr$/i },
+    { control: "Do this later", destination: /^requests$/i },
+  ])(
+    "keeps $control usable while a server disconnect is pending",
+    async ({ control, destination }) => {
+      rows = [{ id: "saved-jellyfin", kind: "jellyfin", name: "Attic" }];
+      const { release: releaseDisconnect, started: disconnectStarted } =
+        deferDisconnect();
+      let releaseSwitch!: () => void;
+      heldSwitch = new Promise<void>((resolve) => {
+        releaseSwitch = resolve;
+      });
+      const user = userEvent.setup();
+      customRender(<OnboardingWizardView />);
+
+      await user.click(
+        await screen.findByRole("button", { name: /^disconnect$/i }),
+      );
+      await user.click(screen.getByRole("button", { name: /^disconnect$/i }));
+      await waitFor(() => expect(disconnectStarted).toHaveBeenCalledOnce());
+
+      const openLeaveConfirmation = async () => {
+        const setUpLater = screen.getByRole("button", { name: "Set up later" });
+        expect(setUpLater).toBeEnabled();
+        await user.click(setUpLater);
+        const dialog = await screen.findByRole("dialog", {
+          name: "Leave setup?",
+        });
+        const leave = within(dialog).getByRole("button", {
+          name: "Leave setup",
+        });
+        expect(leave).toBeDisabled();
+        await user.click(leave);
+        expect(settingsWrites).toEqual([]);
+        expect(navigate).not.toHaveBeenCalledWith("/");
+        return dialog;
+      };
+
+      try {
+        const dialog = await openLeaveConfirmation();
+        await user.click(
+          within(dialog).getByRole("button", { name: "Keep going" }),
+        );
+        await waitFor(() =>
+          expect(screen.queryByRole("dialog")).not.toBeInTheDocument(),
+        );
+        const leaveStep = screen.getByRole("button", { name: control });
+        expect(leaveStep).toBeEnabled();
+        await user.click(leaveStep);
+        await screen.findByRole("heading", { name: destination });
+        expect(rows).toHaveLength(1);
+        if (control === "Back") {
+          await user.click(
+            screen.getByRole("button", { name: /continue without sportarr/i }),
+          );
+          await screen.findByRole("heading", { name: /^media servers$/i });
+          const continuePicker = screen.getByRole("button", {
+            name: /continue without a server/i,
+          });
+          expect(continuePicker).toBeDisabled();
+          await user.click(continuePicker);
+          expect(
+            screen.getByRole("heading", { name: /^media servers$/i }),
+          ).toBeInTheDocument();
+          expect(disconnectStarted).toHaveBeenCalledOnce();
+          expect(rows).toHaveLength(1);
+          await user.click(screen.getByRole("button", { name: "Back" }));
+          await screen.findByRole("heading", { name: destination });
+        }
+        const nextDialog = await openLeaveConfirmation();
+        releaseDisconnect();
+        await waitFor(() => expect(rows).toEqual([]));
+        await waitFor(() => expect(switchWriteAttempts).toBe(1));
+        // DELETE has landed, but leaving still waits for its refresh write.
+        const leave = within(nextDialog).getByRole("button", {
+          name: "Leave setup",
+        });
+        expect(leave).toBeDisabled();
+        await user.click(leave);
+        expect(settingsWrites).toEqual([]);
+        expect(navigate).not.toHaveBeenCalledWith("/");
+      } finally {
+        releaseDisconnect();
+        releaseSwitch();
+      }
+
+      await waitFor(() => expect(rows).toEqual([]));
+      await waitFor(() =>
+        expect(settingsWrites).toEqual([
+          { "settings-general-use_jellyfin": "false" },
+        ]),
+      );
+      expect(
+        screen.getByRole("heading", { name: destination, hidden: true }),
+      ).toBeInTheDocument();
+      const leave = screen.getByRole("button", { name: "Leave setup" });
+      await waitFor(() => expect(leave).toBeEnabled());
+      await user.click(leave);
+      await waitFor(() =>
+        expect(settingsWrites).toEqual([
+          { "settings-general-use_jellyfin": "false" },
+          { "settings-general-setup_complete": "true" },
+        ]),
+      );
+      await waitFor(() => expect(navigate).toHaveBeenCalledWith("/"));
+    },
+  );
+
+  it("keeps a queued server refreshing when an older disconnect finishes after its form saves", async () => {
+    rows = [{ id: "saved-jellyfin", kind: "jellyfin", name: "Attic" }];
+    const { release: releaseDisconnect, started: disconnectStarted } =
+      deferDisconnect();
+    const user = userEvent.setup();
+    customRender(<OnboardingWizardView />);
+
+    await user.click(
+      await screen.findByRole("button", { name: /add another jellyfin/i }),
+    );
+    await user.click(screen.getByRole("button", { name: /^disconnect$/i }));
+    await user.click(screen.getByRole("button", { name: /^disconnect$/i }));
+    await waitFor(() => expect(disconnectStarted).toHaveBeenCalledOnce());
+
+    try {
+      await user.click(screen.getByRole("button", { name: "Do this later" }));
+      await screen.findByRole("heading", { name: /^jellyfin$/i });
+      await user.type(
+        screen.getByLabelText(/server url/i),
+        "http://10.0.0.10:8096",
+      );
+      await user.type(screen.getByLabelText(/api key/i), "replacement-key");
+      await user.click(
+        screen.getByRole("button", { name: /connect jellyfin/i }),
+      );
+      await screen.findByRole("heading", { name: /^requests$/i });
+      expect(rows).toHaveLength(2);
+      expect(settingsWrites).toEqual([
+        { "settings-general-use_jellyfin": "true" },
+      ]);
+    } finally {
+      releaseDisconnect?.();
+    }
+
+    await waitFor(() => expect(rows).toHaveLength(1));
+    await user.click(screen.getByRole("button", { name: "Back" }));
+    await screen.findByRole("heading", { name: /^media servers$/i });
+    await waitFor(() =>
+      expect(screen.queryByText("Attic")).not.toBeInTheDocument(),
+    );
+    await waitFor(() =>
+      expect(
+        screen.getByRole("button", { name: /continue without a server/i }),
+      ).toBeEnabled(),
+    );
+    expect(creates).toHaveLength(1);
+    expect(settingsWrites).toEqual([
+      { "settings-general-use_jellyfin": "true" },
+    ]);
+  });
+
+  it("enables the new server after an earlier disconnect switch-off finishes", async () => {
+    rows = [{ id: "saved-jellyfin", kind: "jellyfin", name: "Attic" }];
+    const { release: releaseDisconnect, started: disconnectStarted } =
+      deferDisconnect();
+    let releaseSwitchOff: (() => void) | undefined;
+    const pendingSwitchOff = new Promise<void>((resolve) => {
+      releaseSwitchOff = resolve;
+    });
+    const switchStarted = vi.fn();
+    server.use(
+      http.post("/api/system/settings", async ({ request }) => {
+        const written = Object.fromEntries(
+          (await request.formData()).entries(),
+        );
+        switchStarted(written);
+        if (written["settings-general-use_jellyfin"] === "false") {
+          await pendingSwitchOff;
+        }
+        settingsWrites.push(written);
+        return new HttpResponse(null, { status: 204 });
+      }),
+    );
+    const user = userEvent.setup();
+    customRender(<OnboardingWizardView />);
+    await user.click(
+      await screen.findByRole("button", { name: /add another jellyfin/i }),
+    );
+    await user.click(screen.getByRole("button", { name: /^disconnect$/i }));
+    await user.click(screen.getByRole("button", { name: /^disconnect$/i }));
+    await waitFor(() => expect(disconnectStarted).toHaveBeenCalledOnce());
+
+    try {
+      await user.click(screen.getByRole("button", { name: "Do this later" }));
+      await screen.findByRole("heading", { name: /^jellyfin$/i });
+      await user.type(
+        screen.getByLabelText(/server url/i),
+        "http://10.0.0.10:8096",
+      );
+      await user.type(screen.getByLabelText(/api key/i), "replacement-key");
+      releaseDisconnect?.();
+      await waitFor(() =>
+        expect(switchStarted).toHaveBeenCalledWith({
+          "settings-general-use_jellyfin": "false",
+        }),
+      );
+      await user.click(
+        screen.getByRole("button", { name: /connect jellyfin/i }),
+      );
+      await waitFor(() => expect(rows).toHaveLength(1));
+      await waitFor(() => expect(creates).toHaveLength(1));
+      expect(switchStarted).toHaveBeenCalledOnce();
+      expect(settingsWrites).toEqual([]);
+      expect(
+        screen.getByRole("heading", { name: /^jellyfin$/i }),
+      ).toBeInTheDocument();
+    } finally {
+      releaseDisconnect?.();
+      releaseSwitchOff?.();
+    }
+
+    await waitFor(() =>
+      expect(settingsWrites).toEqual([
+        { "settings-general-use_jellyfin": "false" },
+        { "settings-general-use_jellyfin": "true" },
+      ]),
+    );
+    await screen.findByRole("heading", { name: /^requests$/i });
+  });
+
+  it("prevents a duplicate disconnect after Back while keeping another saved row usable", async () => {
+    rows = [
+      { id: "saved-jellyfin", kind: "jellyfin", name: "Attic" },
+      { id: "saved-sibling", kind: "jellyfin", name: "Den" },
+    ];
+    const { release: releaseDisconnect, started: disconnectStarted } =
+      deferDisconnect();
+    const user = userEvent.setup();
+    customRender(<OnboardingWizardView />);
+    const disconnects = await screen.findAllByRole("button", {
+      name: /^disconnect$/i,
+    });
+    await user.click(disconnects[0]);
+    await user.click(
+      screen.getAllByRole("button", { name: /^disconnect$/i })[0],
+    );
+    await waitFor(() => expect(disconnectStarted).toHaveBeenCalledOnce());
+
+    try {
+      await user.click(screen.getByRole("button", { name: "Back" }));
+      await screen.findByRole("heading", { name: /^sportarr$/i });
+      await user.click(
+        screen.getByRole("button", { name: /continue without sportarr/i }),
+      );
+      await screen.findByRole("heading", { name: /^media servers$/i });
+      const [disconnect, siblingDisconnect] = screen.getAllByRole("button", {
+        name: /^disconnect$/i,
+      });
+      await user.click(disconnect);
+      expect(disconnectStarted).toHaveBeenCalledOnce();
+      expect(disconnect).toBeDisabled();
+      expect(siblingDisconnect).toBeEnabled();
+      await user.click(siblingDisconnect);
+      expect(screen.getByText(/Disconnect Den\?/)).toBeInTheDocument();
+      await user.click(screen.getByRole("button", { name: "Keep it" }));
+      expect(disconnectStarted).toHaveBeenCalledOnce();
+      expect(screen.getByRole("button", { name: "Back" })).toBeEnabled();
+      expect(
+        screen.getByRole("button", { name: "Do this later" }),
+      ).toBeEnabled();
+    } finally {
+      releaseDisconnect?.();
+    }
+    await waitFor(() =>
+      expect(rows).toEqual([
+        { id: "saved-sibling", kind: "jellyfin", name: "Den" },
+      ]),
+    );
+    await waitFor(() =>
+      expect(
+        screen.getByRole("button", { name: /continue without a server/i }),
+      ).toBeEnabled(),
+    );
+    expect(settingsWrites).toEqual([]);
   });
 
   it("calls a server connected on the picker once its Test passed", async () => {
@@ -453,6 +794,66 @@ describe("media server selection", () => {
     release?.();
     await waitFor(() => expect(settingsWrites).toHaveLength(1));
     expect(creates).toHaveLength(1);
+  });
+
+  it("does not re-enable a deleted row when its configure step retries during disconnect", async () => {
+    refuseSwitch = true;
+    const user = userEvent.setup();
+    customRender(<OnboardingWizardView />);
+
+    await connectJellyfin(user);
+    await screen.findByText(/master switch could not be turned on/i);
+    refuseSwitch = false;
+    const { release: releaseDisconnect, started: disconnectStarted } =
+      deferDisconnect();
+    let releaseSwitch!: () => void;
+    heldSwitch = new Promise<void>((resolve) => {
+      releaseSwitch = resolve;
+    });
+
+    await user.click(screen.getByRole("button", { name: "Back" }));
+    await user.click(
+      await screen.findByRole("button", { name: /^disconnect$/i }),
+    );
+    await user.click(screen.getByRole("button", { name: /^disconnect$/i }));
+    await waitFor(() => expect(disconnectStarted).toHaveBeenCalledOnce());
+
+    try {
+      await user.click(screen.getByRole("button", { name: "Do this later" }));
+      await screen.findByRole("heading", { name: /^jellyfin$/i });
+      expect(screen.getByRole("button", { name: "Back" })).toBeEnabled();
+      expect(
+        screen.getByRole("button", { name: "Do this later" }),
+      ).toBeEnabled();
+
+      releaseDisconnect();
+      await waitFor(() => expect(switchWriteAttempts).toBe(2));
+      expect(rows).toEqual([]);
+      await user.click(
+        screen.getByRole("button", {
+          name: /turn on jellyfin and continue/i,
+        }),
+      );
+      expect(
+        screen.getByText(/master switch could not be turned on/i),
+      ).toBeInTheDocument();
+      expect(creates).toHaveLength(1);
+    } finally {
+      releaseDisconnect();
+      releaseSwitch();
+    }
+
+    await waitFor(() => expect(queryClient.isMutating()).toBe(0));
+    expect(settingsWrites).toEqual([
+      { "settings-general-use_jellyfin": "false" },
+    ]);
+    await screen.findByRole("heading", { name: /^media servers$/i });
+    await user.click(
+      screen.getByRole("button", { name: /continue without a server/i }),
+    );
+    await screen.findByRole("heading", { name: /^requests$/i });
+    expect(switchWriteAttempts).toBe(2);
+    expect(rows).toEqual([]);
   });
 
   it("drops the draft when the row it already wrote is disconnected", async () => {

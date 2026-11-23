@@ -3,7 +3,10 @@ import { createMemoryRouter, RouterProvider } from "react-router";
 import { focusManager } from "@tanstack/react-query";
 import userEvent from "@testing-library/user-event";
 import { http, HttpResponse } from "msw";
-import { afterEach, beforeEach, expect, it } from "vitest";
+import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import { METADATA_QUERY_KEY } from "@/apis/hooks/discover";
+import queryClient from "@/apis/queries";
+import * as searchJob from "@/contexts/searchJob";
 import { AllProviders } from "@/providers";
 import { act, rawRender, screen, waitFor, within } from "@/tests";
 import { discoverSearchJob } from "@/tests/discoverSearchJob";
@@ -163,6 +166,9 @@ beforeEach(() => {
     ),
     http.get("/api/discover/metadata/shows/100/seasons/2/episodes/1", () =>
       HttpResponse.json({ data: { ...envelope, episode: resolved() } }),
+    ),
+    http.get("/api/discover/copies", () =>
+      HttpResponse.json({ items: [], truncated: false, owning_titles: 0 }),
     ),
     discoverSearchJob(async ({ request }) => {
       searches.push(await request.json());
@@ -339,6 +345,197 @@ it.each(["unverified", "conflict"])(
         ),
       ).toBeInTheDocument();
       expect(searches).toEqual([]);
+    }
+  },
+);
+
+it.each([false, true])(
+  "reconciles a delayed feed episode during manual entry (corrected: %s)",
+  async (corrected) => {
+    let finishDetails: () => void = () => undefined;
+    const pending = new Promise<void>((resolve) => {
+      finishDetails = resolve;
+    });
+    const details = {
+      ...resolved(),
+      ...(corrected ? { title: "Corrected title" } : {}),
+    };
+    server.use(
+      http.get(
+        "/api/discover/metadata/shows/100/seasons/2/episodes/1",
+        async () => {
+          await pending;
+          return HttpResponse.json({ data: { ...envelope, episode: details } });
+        },
+      ),
+    );
+    const { user } = browse();
+    try {
+      await user.click(
+        await screen.findByRole("button", { name: /Northern Light.*Home/ }),
+      );
+      await user.click(
+        await screen.findByRole("button", { name: "Search options" }),
+      );
+      await user.click(
+        await screen.findByRole("button", {
+          name: "Enter episode numbers manually",
+        }),
+      );
+      const episode = screen.getByRole("textbox", { name: "Episode" });
+      await user.clear(episode);
+      await user.type(episode, "5");
+      const confirmation = screen.getByRole("checkbox", {
+        name: /I confirm this series IMDb ID/,
+      });
+      await user.click(confirmation);
+      const find = screen.getByRole("button", { name: "Find subtitles" });
+      expect(find).toBeDisabled();
+      finishDetails();
+      if (corrected) {
+        const accept = await screen.findByRole("button", {
+          name: "Use current episode details",
+        });
+        expect(find).toBeDisabled();
+        await user.click(accept);
+      }
+      await waitFor(() => expect(find).toBeEnabled());
+      expect(episode).toHaveValue("5");
+      expect(confirmation).toBeChecked();
+      await user.click(find);
+      await waitFor(() => expect(searches).toHaveLength(1));
+      expect(searches[0]).toMatchObject({
+        season: 2,
+        episode: 5,
+        manual_confirmed: true,
+        episode_identity: details,
+      });
+    } finally {
+      finishDetails();
+    }
+  },
+);
+
+it.each([false, true])(
+  "reconciles an active manual search after a stale-parent recent episode refetch (corrected: %s)",
+  async (corrected) => {
+    let details = {
+      ...resolved(),
+      target_season: 2,
+      target_episode: 1,
+      show_tvdb_id: 999,
+    };
+    const resultStarted = Promise.withResolvers<void>();
+    const searchPending = Promise.withResolvers<void>();
+    const following = vi.spyOn(searchJob, "followSearch");
+    server.use(
+      http.get(
+        "/api/system/status",
+        () => new HttpResponse(null, { status: 503 }),
+      ),
+      http.get(
+        "/api/discover/summary",
+        () => new HttpResponse(null, { status: 503 }),
+      ),
+      http.get("/api/discover/metadata/shows/100/seasons/2/episodes/1", () =>
+        HttpResponse.json({ data: { ...envelope, episode: details } }),
+      ),
+      http.get("/api/system/jobs/result", async () => {
+        resultStarted.resolve();
+        await searchPending.promise;
+        // Continue to the shared handler's completed search response.
+      }),
+      discoverSearchJob(async ({ request }) => {
+        const context = await request.json();
+        searches.push(context);
+        return HttpResponse.json({
+          search_id: "recent-manual",
+          context: { ...(context as object), matching_mode: "title" },
+          status: "complete",
+          checked_at: new Date().toISOString(),
+          attempted_at: new Date().toISOString(),
+          cache_status: "fresh",
+          coverage: {
+            complete: true,
+            configured_count: 1,
+            completed_count: 1,
+            providers: [],
+          },
+          results: [],
+        });
+      }),
+    );
+    const { user } = browse();
+    try {
+      await user.click(
+        await screen.findByRole("button", { name: /Northern Light.*Home/ }),
+      );
+      await screen.findByDisplayValue("1. Home");
+      await user.click(
+        screen.getByRole("button", { name: "Enter episode numbers manually" }),
+      );
+      await user.click(
+        screen.getByRole("checkbox", { name: /I confirm this series IMDb ID/ }),
+      );
+      await user.click(screen.getByRole("button", { name: "Find subtitles" }));
+      await waitFor(() => expect(searches).toHaveLength(1));
+      await resultStarted.promise;
+      expect(searches[0]).toEqual({
+        media_type: "episode",
+        imdb_id: "tt1234567",
+        show_id: 100,
+        season: 2,
+        episode: 1,
+        title: "Northern Light",
+        year: 2020,
+        language: "eng",
+        manual_confirmed: true,
+        refresh: false,
+      });
+
+      details = corrected
+        ? { ...details, title: "Corrected title" }
+        : { ...details, show_tvdb_id: 998 };
+      await act(() =>
+        queryClient.invalidateQueries({ queryKey: METADATA_QUERY_KEY }),
+      );
+      if (corrected) {
+        await screen.findByRole("button", {
+          name: "Use current episode details",
+        });
+      } else {
+        expect(
+          screen.getByRole("button", { name: "Finding subtitles" }),
+        ).toBeVisible();
+      }
+
+      searchPending.resolve();
+      await waitFor(() => expect(following).toHaveBeenCalledTimes(1));
+      await act(async () => {
+        await Promise.allSettled([following.mock.results[0].value]);
+      });
+      if (corrected) {
+        expect(
+          screen.queryByText(/No subtitles matched this title and language/),
+        ).not.toBeInTheDocument();
+        expect(
+          screen.getByRole("button", { name: "Find subtitles" }),
+        ).toBeDisabled();
+        await user.click(
+          screen.getByRole("button", { name: "Use current episode details" }),
+        );
+        await user.click(
+          screen.getByRole("button", { name: "Find subtitles" }),
+        );
+        await waitFor(() => expect(searches).toHaveLength(2));
+        expect(searches[1]).toEqual(searches[0]);
+      }
+      expect(
+        await screen.findByText(/No subtitles matched this title and language/),
+      ).toBeInTheDocument();
+    } finally {
+      searchPending.resolve();
+      following.mockRestore();
     }
   },
 );

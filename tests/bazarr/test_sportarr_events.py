@@ -1014,7 +1014,8 @@ def test_listing_batches_owned_sync_state_with_bounded_queries(library, monkeypa
     assert data[3]['sync_status']['en']['synced'] is False
     assert (running.reads, pending.reads) == (1, 1)
     assert len(statements) <= 8
-    assert sum('table_history_sports' in statement for statement in statements) == 1
+    # One batched lookup each for sync status and current manual scores.
+    assert sum('table_history_sports' in statement for statement in statements) == 2
 
 
 def test_populated_event_listing_attaches_sync_status(library, monkeypatch, tmp_path):

@@ -14,12 +14,14 @@ from sqlalchemy.exc import IntegrityError
 from app.database import get_audio_profile_languages, get_profiles_list
 from app.get_providers import get_providers
 from app.jobs_queue import JobFailed, jobs_queue
+from subtitles.indexer.missing_refresh import queue_missing_subtitles_recalculation
 
 from . import identity, paths, repository
+from .analysis import index_matches_file, local_stat, source_search_probes
 from .context import SourceItemGone, resolve_item
 from .db import source_transaction
 from .history import history_log_source
-from .indexer import index_item
+from .indexer import index_item, index_saved_subtitle
 from .kinds import UnknownSourceKind, get_kind
 from .schedule import refresh_tasks
 
@@ -140,7 +142,21 @@ def create_source(payload, session=None):
 
 
 def list_sources(session=None):
-    return [describe_source(source.id, session) for source in repository.list_sources(session)]
+    return [description for source in repository.list_sources(session)
+            if (description := describe_source(source.id, session)) is not None]
+
+
+def source_availability(sources, session=None):
+    retained = repository.retained_activity_by_kind(session)
+    by_kind = {kind: {'browsable': False, 'searchable': False, 'retained': retained[kind]}
+               for kind in repository.CONTENT_KINDS}
+    for source in sources:
+        for library in source['libraries']:
+            kind = by_kind[library['content_kind']]
+            kind['browsable'] = True
+            if source['enabled'] and library['enabled']:
+                kind['searchable'] = True
+    return by_kind
 
 
 def validate_path(payload, session=None):
@@ -233,10 +249,31 @@ def update_library(source_id, library_id, payload, session=None):
             raise SourceError('name must be text')
         values['name'] = payload['name']
     if values:
-        repository.update_library(library_id, session, **values)
+        if not repository.update_library(library_id, session, **values):
+            raise SourceError('No such library', 404, 'not_found')
+        if 'profile_id' in values:
+            queue_missing_subtitles_recalculation(source_scope={'library_id': library_id})
         if 'enabled' in values:
             refresh_tasks()
     return describe_library(library_id, session)
+
+
+def update_group_profile(group_id, payload, session=None):
+    """Set or clear a source group's profile and refresh its items after the write."""
+    if not isinstance(payload, dict) or payload.keys() != {'profile_id'}:
+        raise SourceError('A group profile edit requires profile_id')
+    group = repository.get_group(group_id, session)
+    if group is None:
+        raise SourceError('No such group', 404, 'not_found')
+    profile_id = _profile_id(payload)
+    if profile_id != group.profile_id:
+        if not repository.update_group(group_id, session, profile_id=profile_id):
+            raise SourceError('No such group', 404, 'not_found')
+        queue_missing_subtitles_recalculation(source_scope={'group_id': group_id})
+        group = repository.get_group(group_id, session)
+    if group is None:
+        raise SourceError('No such group', 404, 'not_found')
+    return group
 
 
 def delete_library(source_id, library_id, session=None):
@@ -379,7 +416,11 @@ def search_source_item(item_id, job_id=None):
     """Search the missing subtitles of one source item. Called without a job id it queues itself."""
     if not job_id:
         return jobs_queue.add_job_from_function(f"Searching subtitles for {_label(item_id)}", is_progress=True)
+    with source_search_probes(item_id):
+        return _search_source_item(item_id, job_id)
 
+
+def _search_source_item(item_id, job_id):
     try:
         context = resolve_item(item_id)
     except SourceItemGone as error:
@@ -393,17 +434,29 @@ def search_source_item(item_id, job_id=None):
         jobs_queue.update_job_progress(job_id=job_id, progress_value='max',
                                        progress_message='No language profile: nothing to search for')
         return None
-    if not os.path.exists(context.path):
-        raise JobFailed(f"The file is missing: {context.path}", reason='missing_file')
-
     item = repository.get_item(item_id)
-    if item is not None and item.missing_subtitles is None:
-        # Indexing for this item is incomplete, so it is done again.
-        index_item(item_id)
-        item = repository.get_item(item_id)
     if item is None:
-        # Deleted between resolving it and reading it.
         raise JobFailed('The item no longer exists', reason='not_found')
+    stat = local_stat(item.path)
+    if stat is None:
+        raise JobFailed(f"The file is missing: {item.path}", reason='missing_file')
+    if item.path != context.path:
+        raise JobFailed('The source file moved while the search was starting. Try again.', reason='conflict')
+    if item.missing_subtitles is None or not index_matches_file(item, stat):
+        # The scanner still owns admission and re-identification. Refresh the tracks
+        # and wanted languages of the file at this path for the immediate search.
+        if index_item(item_id, keep_index_on_probe_failure=True) is None:
+            raise JobFailed('The source subtitle index could not be refreshed. Try again.', reason='conflict')
+        item = repository.get_item(item_id)
+        if item is None:
+            raise JobFailed('The item no longer exists', reason='not_found')
+        try:
+            refreshed = resolve_item(item_id)
+        except SourceItemGone as error:
+            raise JobFailed('The item no longer exists', reason='not_found') from error
+        if refreshed.path != context.path or item.path != context.path:
+            raise JobFailed('The source file moved while the search was starting. Try again.', reason='conflict')
+        context = refreshed
     languages = _missing_languages(item)
     jobs_queue.update_job_progress(job_id=job_id, progress_max=len(languages), progress_message=context.title)
     if not languages:
@@ -414,7 +467,7 @@ def search_source_item(item_id, job_id=None):
         jobs_queue.update_job_progress(job_id=job_id, progress_value='max', progress_message='All providers throttled')
         return None
 
-    audio_languages = get_audio_profile_languages(context.audio_language)
+    audio_languages = get_audio_profile_languages(item.audio_language)
     audio_language = audio_languages[0]['name'] if audio_languages else 'None'
     # For an episode the title the providers get is the show's.
     title = context.group_title if context.kind == 'episode' and context.group_title else context.title
@@ -427,8 +480,11 @@ def search_source_item(item_id, job_id=None):
                                          job_id=job_id, source=context):
             if not result:
                 continue
-            index_item(item_id)
-            history_log_source(1, context, result)
+            if getattr(result, 'source_indexed', False) is not True:
+                # Retry an incomplete listing, including results from outside shared processing.
+                index_saved_subtitle(item_id, expected_path=context.path)
+            with source_transaction() as connection:
+                history_log_source(1, context, result, target=connection)
             downloaded += 1
     except OSError as error:
         raise JobFailed(f'Unable to save the subtitles file: {error}', reason='save_failed') from error
