@@ -119,10 +119,12 @@ class SourcePublicationOwnerIndex(SourceOutputOwnerIndex):
     def __init__(self):
         super().__init__()
         self._prepared_paths = None
+        self._prepared_source_owners = None
 
     def _load_owners(self):
         self._prepared_paths = self._source_owner_paths(None)
-        owners = self._map_source_owners(self._prepared_paths)
+        self._prepared_source_owners = self._map_source_owners(self._prepared_paths)
+        owners = {key: paths.copy() for key, paths in self._prepared_source_owners.items()}
         for key, paths in SyncOutputOwnerIndex._load_owners().items():
             owners.setdefault(key, set()).update(paths)
         return owners
@@ -144,12 +146,13 @@ class SourcePublicationOwnerIndex(SourceOutputOwnerIndex):
         return directory != media_directory
 
     @contextmanager
-    def publication(self, source, prepare=None, *, destination=None):
-        """Keep slow ownership and subtitle discovery outside the writer transaction."""
+    def publication(self, source, prepare=None, *, destination=None, recheck_paths=()):
+        """Prepare discovery before locking, then recheck requested upgrade paths during publication."""
         for _ in range(2):
             self._loaded = False
             self._owners = {}
             self._prepared_paths = None
+            self._prepared_source_owners = None
             destination_setting = settings.general.subfolder, get_subtitle_destination_folder()
             prepared = prepare() if prepare is not None else None
             shared = self._needs_registry_guard(source, destination, destination_setting[1])
@@ -167,6 +170,17 @@ class SourcePublicationOwnerIndex(SourceOutputOwnerIndex):
                             break
                         if shared and current is not None and self._prepared_paths != self._source_owner_paths(connection):
                             break
+                        if shared and current is not None and recheck_paths:
+                            # Upgrades may overwrite one path and retire another. Recheck both
+                            # against Arr owners committed since preparation on this connection.
+                            self._owners = {key: paths.copy() for key, paths in self._prepared_source_owners.items()}
+                            for key, paths in SyncOutputOwnerIndex._load_owners(connection).items():
+                                self._owners.setdefault(key, set()).update(paths)
+                            self._loaded = True
+                            for path in dict.fromkeys(recheck_paths):
+                                if not sync_output_owner_is_unique(current.path, path, ownership_index=self):
+                                    raise SourcePublicationOwnersChanged(
+                                        'The source upgrade subtitle does not have one media owner')
                         if current is not None:
                             state = repository.item_state(current.item_id, connection)
                             if (state is None or not state.source_enabled or not state.library_enabled

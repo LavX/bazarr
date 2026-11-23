@@ -44,6 +44,8 @@ def upgrade_subtitles(wait_for_completion=False):
 
 
 def upgrade_source_subtitles(job_id=None, wait_for_completion=False):
+    if not settings.general.upgrade_subs:
+        return None
     if not job_id:
         return jobs_queue.add_job_from_function("Trying to upgrade source subtitles", is_progress=True,
                                                 wait_for_completion=wait_for_completion, return_existing=True)

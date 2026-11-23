@@ -642,12 +642,13 @@ def upgrade_source_subtitle(candidate, job_id):
         return
     upgrade = SourceSubtitleUpgrade(
         history_id=candidate.id, original_id=candidate.upgradedFromId or candidate.id,
-        minimum_score=int(candidate.score or 0) + 1, subtitles_path=candidate.subtitles_path,
+        minimum_score=int(candidate.score or 0) + 1, language=candidate.language,
+        subtitles_path=candidate.subtitles_path,
         subtitle_version=version, video_stamp=stamp, profile=deepcopy(profile))
     if not upgrade.can_publish(context):
         return
 
-    language, is_forced, is_hi = parse_language_string(candidate.language)
+    language, is_forced, is_hi = parse_language_string(upgrade.language)
     if is_hi == 'True' and not _is_hi_required(language, context.profile_id):
         is_hi = 'False'
     context = replace(context, wanted_file_stamp=stamp)

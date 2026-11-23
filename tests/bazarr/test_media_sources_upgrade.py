@@ -1,4 +1,5 @@
 """Source upgrades and opt-in history statistics on SQLite and PostgreSQL."""
+import json
 from datetime import datetime, timedelta
 from pathlib import Path
 from unittest.mock import Mock
@@ -161,6 +162,9 @@ def test_scheduled_job_replaces_source_file_and_preserves_original_history(world
     assert record_rows(world.db) == [(history_id, 1, None), (history_id + 1, 3, history_id)]
     assert target.read_bytes() == pipeline.CONTENT
     assert original == target or not original.exists()
+    assert [event.subtitle_path for event in world.published] == [
+        str(path) for path in dict.fromkeys((target, original))
+    ]
     assert get_upgradable_source_subtitles() == {history_id + 1: history_id}
     assert repository.get_item(context.item_id).missing_subtitles == '[]'
 
@@ -172,11 +176,9 @@ def record_rows(db):
     return db.execute(sa.select(table.id, table.action, table.upgradedFromId).order_by(table.id)).all()
 
 
-@pytest.mark.parametrize('change', ['subtitle', 'monitoring', 'other destination', 'arr owner', 'arr owner after prepare'])
-def test_upgrade_preserves_files_when_eligibility_changes_during_download(world, monkeypatch, change):
-    from app.config import settings
-    from app.database import TableArrInstances, TableMovies
-    from media_sources import indexer, repository
+@pytest.mark.parametrize('failure_step', ['remove old', 'publish new'])
+def test_failed_source_replacement_leaves_upgrade_retryable(world, monkeypatch, failure_step):
+    from media_sources.history import get_upgradable_source_subtitles
     from media_sources.indexer import index_item
     from subtitles import download, upgrade
 
@@ -189,15 +191,90 @@ def test_upgrade_preserves_files_when_eligibility_changes_during_download(world,
     first = _history(world.db, world.source_id, context.item_id, media, original, language='en:hi')
     monkeypatch.setattr(upgrade, 'get_providers', lambda: ['fake'])
     monkeypatch.setattr(upgrade, 'jobs_queue', Mock())
+    pipeline._download(monkeypatch)
+    remove = download.os.remove
+    replace = download.os.replace
+    failures = []
+
+    def fail_original_removal(path, *args, **kwargs):
+        if Path(path) == original:
+            failures.append('remove old')
+            raise PermissionError('Cannot remove the old sidecar')
+        return remove(path, *args, **kwargs)
+
+    def fail_destination_publication(source, target, *args, **kwargs):
+        if Path(target) == destination:
+            failures.append('publish new')
+            raise PermissionError('Cannot publish the new sidecar')
+        return replace(source, target, *args, **kwargs)
+
+    with monkeypatch.context() as failure:
+        if failure_step == 'remove old':
+            failure.setattr(download.os, 'remove', fail_original_removal)
+            # A failed retirement must never make recovery depend on deleting the new file.
+            real_unlink = download.os.unlink
+
+            def fail_destination_cleanup(path, *args, **kwargs):
+                if Path(path) == destination:
+                    raise PermissionError('Cannot remove the new sidecar')
+                return real_unlink(path, *args, **kwargs)
+
+            failure.setattr(download.os, 'unlink', fail_destination_cleanup)
+        else:
+            failure.setattr(download.os, 'replace', fail_destination_publication)
+        upgrade.upgrade_source_subtitles(job_id=10)
+
+    assert failures == [failure_step]
+    assert record_rows(world.db) == [(first, 1, None)]
+    assert original.read_bytes() == b'Old subtitle'
+    assert not destination.exists()
+    assert not list(media.parent.glob('.bazarr-replaced-*'))
+    assert not world.published
+    assert get_upgradable_source_subtitles() == {first: None}
+
+    upgrade.upgrade_source_subtitles(job_id=11)
+    assert record_rows(world.db) == [(first, 1, None), (first + 1, 3, first)]
+    assert destination.read_bytes() == pipeline.CONTENT
+    assert not original.exists()
+
+
+@pytest.mark.parametrize('change', [
+    'subtitle', 'monitoring', 'other destination', 'arr owner', 'arr owner after prepare',
+    'shared Arr owner after prepare', 'mapped shared Arr owner after prepare', 'history score', 'history superseded',
+])
+def test_upgrade_preserves_files_when_eligibility_changes_during_download(world, monkeypatch, change):
+    from app.config import settings
+    from app.database import TableArrInstances, TableMovies
+    from media_sources import indexer, repository
+    from media_sources.indexer import index_item
+    from subtitles import download, upgrade
+
+    context = pipeline._movie(world)
+    media = Path(context.path)
+    shared = 'shared Arr' in change
+    mapped = change == 'mapped shared Arr owner after prepare'
+    folder = pipeline._custom_folder(world, monkeypatch, world.tmp_path) if shared else media.parent
+    destination = folder / media.with_suffix('.en.srt').name
+    original = destination if mapped else folder / media.with_suffix('.en.hi.srt').name
+    arr_path = video(world.tmp_path / 'arr' / media.name) if shared else media
+    stored_arr_path = '/remote/Arr Movie.mkv' if mapped else str(arr_path)
+    mappings = [[stored_arr_path, str(arr_path)]] if mapped else []
+    original.write_bytes(b'Old subtitle')
+    index_item(context.item_id)
+    first = _history(world.db, world.source_id, context.item_id, media, original,
+                     language='en' if mapped else 'en:hi')
+    monkeypatch.setattr(upgrade, 'get_providers', lambda: ['fake'])
+    monkeypatch.setattr(upgrade, 'jobs_queue', Mock())
 
     def claim():
         monkeypatch.setattr(settings.general, 'use_radarr', True)
         world.db.execute(sa.insert(TableArrInstances).values(
-            id=42, kind='radarr', name='Cinema', stable_key='cinema', port=9800, enabled=1, path_mappings='[]'))
+            id=42, kind='radarr', name='Cinema', stable_key='cinema', port=9800, enabled=1,
+            path_mappings=json.dumps(mappings)))
         world.db.execute(sa.insert(TableMovies).values(
-            id=73, arr_instance_id=42, radarrId=9000, title='Film', path=context.path, tmdbId='73'))
+            id=73, arr_instance_id=42, radarrId=9000, title='Film', path=stored_arr_path, tmdbId='73'))
 
-    if change == 'arr owner after prepare':
+    if change == 'arr owner after prepare' or shared:
         publication = indexer.source_item_publication
 
         def claim_at_registry_lock(source, **kwargs):
@@ -215,15 +292,28 @@ def test_upgrade_preserves_files_when_eligibility_changes_during_download(world,
             destination.write_bytes(b'Manual replacement')
         elif change == 'arr owner':
             claim()
+        elif change == 'history score':
+            history = repository.History
+            world.db.execute(history.update().where(history.c.id == first).values(score=90))
+        elif change == 'history superseded':
+            _history(world.db, world.source_id, context.item_id, media, original, language='en:hi', action=2)
         return {next(iter(videos)): [pipeline.FakeSubtitle()]}
 
-    monkeypatch.setattr(download, 'download_best_subtitles', provider)
+    download_attempt = Mock(side_effect=provider)
+    monkeypatch.setattr(download, 'download_best_subtitles', download_attempt)
     upgrade.upgrade_source_subtitles(job_id=10)
-    assert record_rows(world.db) == [(first, 1, None)]
+    download_attempt.assert_called_once()
+    if shared:
+        assert world.db.scalar(sa.select(TableMovies.path)) == stored_arr_path
+    expected_history = [(first, 1, None)]
+    if change == 'history superseded':
+        expected_history.append((first + 1, 2, None))
+    assert record_rows(world.db) == expected_history
     assert original.read_bytes() == (b'Manual edit' if change == 'subtitle' else b'Old subtitle')
+    assert not world.published
     if change == 'other destination':
         assert destination.read_bytes() == b'Manual replacement'
-    else:
+    elif destination != original:
         assert not destination.exists()
 
 

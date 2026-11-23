@@ -14,7 +14,8 @@ from contextlib import contextmanager
 
 from subzero.language import Language
 from subliminal_patch.core import save_subtitles
-from subtitles.tools.subsync_engines import (SubtitleDestinationChanged, subtitle_write_locks,
+from subtitles.tools.subsync_engines import (SubtitleDestinationChanged, SubtitleSourceChanged, subtitle_write_locks,
+                                             _report_subtitle_publication, quarantine_sync_outputs_after_mutation,
                                              regular_subtitle_version, subtitle_mutation,
                                              sync_output_owner_is_unique, write_subtitle_file)
 from subliminal_patch.core_persistent import download_best_subtitles
@@ -346,6 +347,42 @@ def check_missing_languages_source(source, *, stored=False, external_subtitles=N
     return _get_language_obj(languages=candidates)
 
 
+@contextmanager
+def _retire_source_subtitle(path, expected_version):
+    """Remove the old filename before publication and restore it if publication fails."""
+    from subtitles.new_subtitle import _backup_for_replacement, _discard, _restore_backup
+
+    try:
+        backup = _backup_for_replacement(path, expected_version=expected_version)
+    except (OSError, SubtitleSourceChanged) as error:
+        raise SubtitleDestinationChanged(f'Unable to back up the previous source subtitle: {error}') from error
+    if backup is None:
+        raise SubtitleDestinationChanged('The previous subtitle disappeared during publication')
+
+    try:
+        if regular_subtitle_version(path) != expected_version:
+            raise SubtitleDestinationChanged('The previous subtitle changed during publication')
+        os.remove(path)
+    except OSError as error:
+        _discard(backup)
+        raise SubtitleDestinationChanged(f'Unable to retire the previous source subtitle: {error}') from error
+    except BaseException:
+        _discard(backup)
+        raise
+
+    try:
+        yield
+    except BaseException:
+        try:
+            if not _restore_backup(backup, path):
+                logging.error('BAZARR could not restore %s because the path is occupied. Kept %s', path, backup)
+        except OSError:
+            logging.exception('BAZARR could not restore %s from %s', path, backup)
+        raise
+    else:
+        _discard(backup)
+
+
 def _write_source_download(video_path, destination, content, *, source, language, recheck_missing, is_upgrade,
                            written_paths, on_publish, wanted_stamp=None, wanted_profile=None, upgrade=None):
     """Publish the actual provider-selected file only while its destination is still eligible."""
@@ -357,6 +394,7 @@ def _write_source_download(video_path, destination, content, *, source, language
     old_path = upgrade.subtitles_path if upgrade is not None else None
     same_destination = old_path is not None and os.path.normcase(os.path.realpath(old_path)) == (
         os.path.normcase(os.path.realpath(destination)))
+    remove_previous = old_path is not None and not same_destination
     registry_destination = destination
     if old_path is not None and os.path.dirname(old_path) != os.path.dirname(video_path):
         registry_destination = old_path
@@ -367,7 +405,7 @@ def _write_source_download(video_path, destination, content, *, source, language
         if old_path is not None:
             if arr_claim_blocks_wanted(source):
                 raise SubtitleDestinationChanged('Arr claimed the source video during the upgrade search')
-            if not same_destination and not sync_output_owner_is_unique(
+            if remove_previous and not sync_output_owner_is_unique(
                     video_path, old_path, ownership_index=ownership_index):
                 raise SubtitleDestinationChanged('The previous subtitle does not have one media owner')
         if not sync_output_owner_is_unique(video_path, destination, ownership_index=ownership_index):
@@ -378,7 +416,9 @@ def _write_source_download(video_path, destination, content, *, source, language
 
     @contextmanager
     def publication():
-        with ownership_index.publication(source, prepare, destination=registry_destination) as (
+        recheck_paths = (destination, old_path) if upgrade is not None else ()
+        with ownership_index.publication(source, prepare, destination=registry_destination,
+                                         recheck_paths=recheck_paths) as (
                 current, connection, external_subtitles):
             if current is None or current.path != video_path:
                 raise SubtitleDestinationChanged('The source item moved or was removed')
@@ -394,22 +434,27 @@ def _write_source_download(video_path, destination, content, *, source, language
             elif recheck_missing and language not in check_missing_languages_source(
                     current, external_subtitles=external_subtitles, target=connection):
                 raise SubtitleDestinationChanged('The source language is no longer missing')
-            yield
-            if old_path is not None and not same_destination:
-                try:
-                    with subtitle_mutation(video_path, old_path, ownership_index=ownership_index):
-                        if regular_subtitle_version(old_path) == upgrade.subtitle_version:
-                            os.remove(old_path)
-                            on_publish(old_path)
-                except OSError:
-                    logging.exception('BAZARR unable to remove superseded source subtitle: %s', old_path)
+            if remove_previous:
+                with subtitle_mutation(video_path, old_path, invalidate_outputs=False):
+                    with _retire_source_subtitle(old_path, upgrade.subtitle_version):
+                        yield
+                quarantine_sync_outputs_after_mutation(video_path, old_path, ownership_index)
+            else:
+                yield
 
     try:
-        write_subtitle_file(video_path, destination, content, written_paths=written_paths, on_publish=on_publish,
+        # Report a new filename only once the previous subtitle has been removed.
+        write_subtitle_file(video_path, destination, content,
+                            written_paths=None if remove_previous else written_paths,
+                            on_publish=None if remove_previous else on_publish,
                             publication_guard=publication, ownership_index=ownership_index)
     except SubtitleDestinationChanged as error:
         logging.info('BAZARR skipped saving a subtitle for source item %s: %s', source.item_id, error)
         return False
+    if remove_previous:
+        written_paths.append(destination)
+        _report_subtitle_publication(on_publish, destination)
+        _report_subtitle_publication(on_publish, old_path)
     return True
 
 

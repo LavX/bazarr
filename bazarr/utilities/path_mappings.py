@@ -147,7 +147,7 @@ def _apply_mapping(path, mapping, reverse):
     return path
 
 
-def _instance_path_mapping(arr_instance_id, media_type):
+def _instance_path_mapping(arr_instance_id, media_type, *, target=None):
     """Return the per-instance [remote, local] mapping list for ``arr_instance_id``
     (#156), or None when the instance has no path_mappings configured.
 
@@ -163,14 +163,21 @@ def _instance_path_mapping(arr_instance_id, media_type):
     """
     if arr_instance_id is None:
         return None
-    try:
-        from app.database import database
-        from arr_instances.repository import ArrInstanceRepository
+    if target is not None:
+        from app.database import TableArrInstances, select
 
-        row = ArrInstanceRepository(database).get(arr_instance_id)
-        if row is None or not row.path_mappings:
+        stored_mapping = target.execute(select(TableArrInstances.path_mappings).where(
+            TableArrInstances.id == arr_instance_id)).scalar_one_or_none()
+    try:
+        if target is None:
+            from app.database import database
+            from arr_instances.repository import ArrInstanceRepository
+
+            row = ArrInstanceRepository(database).get(arr_instance_id)
+            stored_mapping = row.path_mappings if row is not None else None
+        if not stored_mapping:
             return None
-        parsed = json.loads(row.path_mappings)
+        parsed = json.loads(stored_mapping)
     except Exception:
         logging.debug('BAZARR could not load per-instance path_mappings for instance %s', arr_instance_id)
         return None

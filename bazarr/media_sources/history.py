@@ -24,6 +24,19 @@ from .db import handle
 from .wanted import arr_claim_blocks_wanted, automatic_items
 
 
+def _stored_subtitles(raw):
+    """Read usable subtitle entries without letting corrupt stored data break a page or job."""
+    try:
+        entries = ast.literal_eval(raw) if raw else []
+    except (ValueError, SyntaxError, TypeError, MemoryError, RecursionError):
+        return []
+    if not isinstance(entries, list):
+        return []
+    return [(entry[0], entry[1]) for entry in entries
+            if isinstance(entry, (list, tuple)) and len(entry) >= 2 and isinstance(entry[0], str)
+            and (entry[1] is None or isinstance(entry[1], str))]
+
+
 def _source_upgrade_query():
     from subtitles.upgrade import (EMBEDDED_SOURCE_ACTION, UPLOAD_ACTION, _FILE_WRITING_ACTIONS,
                                    _ai_translated_subtitles_are_upgrade_candidates,
@@ -100,7 +113,7 @@ def source_upgrade_candidates(*, item_ids=None, history_ids=None, target=None, c
     for row in session.execute(query.order_by(repository.History.c.id)):
         if not _language_still_desired(row.language, row.profile_id):
             continue
-        paths = {entry[1] for entry in ast.literal_eval(row.subtitles or '[]') if entry[1]}
+        paths = {entry[1] for entry in _stored_subtitles(row.subtitles) if entry[1]}
         if row.subtitles_path in paths and regular_subtitle_version(row.subtitles_path) is not None:
             candidates.append(row)
     return candidates
@@ -115,7 +128,7 @@ def source_subtitle_summary(items):
     """Enrich a page of source items using only its item IDs and stored local paths."""
     from api.utils import chunked, lowest_subtitle_scores
 
-    by_id = {item.id: item.subtitles for item in items}
+    by_id = {item.id: repr(_stored_subtitles(item.subtitles)) for item in items}
     session = handle()
     scores = lowest_subtitle_scores(session, by_id, repository.History.c.item_id, repository.History.c)
     upgradable_ids = set()
@@ -130,6 +143,7 @@ class SourceSubtitleUpgrade:
     history_id: int
     original_id: int
     minimum_score: int
+    language: str
     subtitles_path: str
     subtitle_version: tuple
     video_stamp: tuple
@@ -141,8 +155,13 @@ class SourceSubtitleUpgrade:
                 or regular_subtitle_version(self.subtitles_path) != self.subtitle_version
                 or arr_claim_blocks_wanted(source, target=target)):
             return False
-        return bool(source_upgrade_candidates(item_ids=[source.item_id], history_ids=[self.history_id],
-                                              target=target, check_arr_path=False))
+        candidates = source_upgrade_candidates(item_ids=[source.item_id], history_ids=[self.history_id],
+                                               target=target, check_arr_path=False)
+        return any(
+            row.subtitles_path == self.subtitles_path and row.language == self.language
+            and (row.upgradedFromId or row.id) == self.original_id and int(row.score or 0) + 1 == self.minimum_score
+            for row in candidates
+        )
 
 
 def _snapshot(context: SourceItemContext, item, source):

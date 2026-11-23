@@ -76,8 +76,9 @@ def regular_subtitle_version(path):
     return _subtitle_file_version(entry) if stat.S_ISREG(entry.st_mode) else None
 
 
-def read_regular_subtitle(path, expected_version, *, max_bytes=None):
-    """Read the same ordinary file the caller approved, without waiting on a stream."""
+@contextmanager
+def open_regular_subtitle(path, expected_version):
+    """Open the same ordinary file the caller approved, without waiting on a stream."""
     if expected_version is None or regular_subtitle_version(path) != expected_version:
         raise SubtitleSourceChanged('The subtitle input is no longer an approved regular file')
     flags = os.O_RDONLY | getattr(os, 'O_BINARY', 0) | getattr(os, 'O_NONBLOCK', 0) | getattr(os, 'O_NOFOLLOW', 0)
@@ -88,9 +89,15 @@ def read_regular_subtitle(path, expected_version, *, max_bytes=None):
                 or regular_subtitle_version(path) != expected_version):
             raise SubtitleSourceChanged('The subtitle input changed before it was opened')
         with open(descriptor, 'rb', closefd=False) as handle:
-            return handle.read() if max_bytes is None else handle.read(max_bytes)
+            yield handle
     finally:
         os.close(descriptor)
+
+
+def read_regular_subtitle(path, expected_version, *, max_bytes=None):
+    """Read the same ordinary file the caller approved."""
+    with open_regular_subtitle(path, expected_version) as handle:
+        return handle.read() if max_bytes is None else handle.read(max_bytes)
 
 
 class SubtitlePublication:
@@ -376,13 +383,14 @@ class SyncOutputOwnerIndex:
         self._owners = {}
 
     @staticmethod
-    def _load_owners():
+    def _load_owners(target=None):
         from app.database import database, select, TableEpisodes, TableMovies, TableSportsEvents, TableArrInstances
         from utilities.helper import get_target_folder
-        from utilities.path_mappings import path_mappings
+        from utilities.path_mappings import _apply_mapping, _instance_path_mapping, path_mappings
         from utilities.path_mappings import apply_sports_mapping, read_sports_mappings
 
         owners = {}
+        instance_mappings = {}
         for table, media_type in ((TableEpisodes, 'episode'), (TableMovies, 'movie'),
                                   (TableSportsEvents, 'sports')):
             query = select(table.path, table.arr_instance_id)
@@ -390,14 +398,26 @@ class SyncOutputOwnerIndex:
                 query = query.add_columns(TableArrInstances.path_mappings).join(
                     TableArrInstances, table.arr_instance_id == TableArrInstances.id).where(
                     TableArrInstances.kind == 'sportarr')
-            for row in database.execute(query).all():
+            for row in (database if target is None else target).execute(query).all():
                 if not row.path:
                     continue
                 # Disabled sports owners retain physical files. They still reserve
                 # shared outputs, without authorizing any operation on those rows.
-                mapped_path = (apply_sports_mapping(row.path, read_sports_mappings(row.path_mappings))
-                               if media_type == 'sports' else path_mappings.path_replace_instance(
-                                   row.path, row.arr_instance_id, media_type))
+                if media_type == 'sports':
+                    mapped_path = apply_sports_mapping(row.path, read_sports_mappings(row.path_mappings))
+                elif target is None:
+                    mapped_path = path_mappings.path_replace_instance(row.path, row.arr_instance_id, media_type)
+                else:
+                    key = row.arr_instance_id, media_type
+                    if key not in instance_mappings:
+                        instance_mappings[key] = _instance_path_mapping(*key, target=target)
+                    mapping = instance_mappings[key]
+                    if mapping is not None:
+                        mapped_path = _apply_mapping(row.path, mapping, reverse=False)
+                    elif media_type == 'movie':
+                        mapped_path = path_mappings.path_replace_movie(row.path)
+                    else:
+                        mapped_path = path_mappings.path_replace(row.path)
                 mapped = os.path.normcase(os.path.realpath(mapped_path))
                 folders = {os.path.dirname(mapped)}
                 custom_folder = get_target_folder(mapped, create=False)
