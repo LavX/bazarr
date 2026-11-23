@@ -18,6 +18,7 @@ import {
   faExclamationTriangle,
 } from "@fortawesome/free-solid-svg-icons";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
+import { useLegacyTranslationSaveGuard } from "@/apis/hooks/translation";
 import { useTestTranslator } from "@/apis/hooks/translator";
 import { TranslatorStatusPanelWithFormContext } from "@/components/TranslatorStatus";
 import {
@@ -264,8 +265,9 @@ const TestConnectionButton: FunctionComponent = () => {
 };
 
 const SettingsTranslatorView: FunctionComponent = () => {
+  const { disabled, canSave } = useLegacyTranslationSaveGuard();
   return (
-    <Layout name="AI Translator">
+    <Layout name="AI Translator" saveDisabled={disabled} canSave={canSave}>
       {/* Zone 1: Translator Engine */}
       <Group justify="space-between" align="flex-start" mt="lg" wrap="wrap">
         <Stack gap="xs">

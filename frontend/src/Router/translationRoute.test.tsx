@@ -1,15 +1,31 @@
 /* eslint-disable camelcase -- transport names. */
 import { FunctionComponent } from "react";
+import userEvent from "@testing-library/user-event";
 import { http, HttpResponse } from "msw";
-import { expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import { useSystemStatus } from "@/apis/hooks/system";
+import queryClient from "@/apis/queries";
+import { QueryKeys } from "@/apis/queries/keys";
+import api from "@/apis/raw";
 import { groupRoutes } from "@/App/Navbar";
+import { latestWhatsNewVersion } from "@/data/whatsNew";
+import { engine, engineInstallations } from "@/pages/Translation/fixtures";
 import { AllProviders } from "@/providers";
-import { useRoutes } from "@/Router";
+import { Router, useRoutes } from "@/Router";
 import TranslationGate from "@/Router/TranslationGate";
 import type { CustomRouteObject } from "@/Router/type";
-import { customRender, rawRender, screen, waitFor } from "@/tests";
+import {
+  act,
+  cleanup,
+  customRender,
+  fireEvent,
+  rawRender,
+  screen,
+  waitFor,
+} from "@/tests";
 import server from "@/tests/mocks/node";
+import { setAuthenticated, setOnlineStatus } from "@/utilities/event";
+import { WHATS_NEW_SEEN_KEY } from "@/utilities/whatsNew";
 
 // The Translation page belongs to the v2 translation runtime. With the switch
 // off it is not in the navigation and its address is Not Found. The route
@@ -17,7 +33,8 @@ import server from "@/tests/mocks/node";
 // match by position, so a route that appears only once the status has answered
 // would make every later route draw its neighbour on a page opened by address.
 function Routes() {
-  const top: CustomRouteObject[] = useRoutes()[0].children ?? [];
+  const [{ children }] = useRoutes();
+  const top: CustomRouteObject[] = children ?? [];
   const settings = top.find((route) => route.path === "settings");
   const navigation = groupRoutes(top).flatMap((group) =>
     group.items.map((item) => item.path),
@@ -61,6 +78,13 @@ function showRoutes() {
   );
 }
 
+function StatusFetchObserver() {
+  const { isFetching } = useSystemStatus();
+  return (
+    <span data-testid="status-fetch">{isFetching ? "fetching" : "idle"}</span>
+  );
+}
+
 const list = (id: string) =>
   (screen.getByTestId(id).textContent ?? "").split(",");
 
@@ -87,7 +111,7 @@ it("keeps it out on a status that predates the field, after the status has arriv
   expect(list("navigation")).not.toContain("translation");
 });
 
-it("shows it as a first-level entry in the System group once the switch is on, with the old page still in Settings", async () => {
+it("shows it as a first-level entry in the System group once the switch is on, without a Settings entry", async () => {
   showStatus(true);
   showRoutes();
   expect(await screen.findByText("status loaded")).toBeInTheDocument();
@@ -97,7 +121,7 @@ it("shows it as a first-level entry in the System group once the switch is on, w
   expect(navigation.indexOf("translation")).toBe(
     navigation.indexOf("plugin-hub") + 1,
   );
-  expect(list("settings")).toContain("translator");
+  expect(list("settings")).not.toContain("translator");
   expect(list("settings")).not.toContain("translation");
 });
 
@@ -143,4 +167,534 @@ it("lists the Plugin Hub directly after Subtitle Hub whatever the switch says", 
   expect(navigation.indexOf("plugin-hub")).toBe(
     navigation.indexOf("subtitle-hub") + 1,
   );
+});
+
+describe("Translation addresses in the mounted application router", () => {
+  const injectedEnvironment = window.Bazarr;
+  const bookmarks = [
+    { path: "translator", base: "" },
+    { path: "translation", base: "" },
+    { path: "translator", base: "/bazarr" },
+    { path: "translation", base: "/bazarr" },
+  ];
+  const deepLink = "?tab=defaults&from=bookmark#backend-2";
+  const statusKey = [QueryKeys.System, "status"];
+
+  const pendingPath = (path: string) =>
+    path === "translation" ? "/translation" : "/settings/translator";
+
+  afterEach(() => {
+    cleanup();
+    window.history.replaceState(null, "", "/");
+    window.Bazarr = injectedEnvironment;
+    localStorage.removeItem(WHATS_NEW_SEEN_KEY);
+    setAuthenticated(false);
+  });
+
+  function showApplication(address: string, base = "") {
+    const instances = [engine()];
+    server.use(
+      http.get("/api/system/settings", () =>
+        HttpResponse.json({
+          general: { theme: "light", setup_complete: true },
+          auth: { type: "form" },
+          translator: {
+            default_score: 50,
+            min_source_score: 90,
+            translator_type: "gemini",
+            gemini_model: "gemini-saved",
+          },
+        }),
+      ),
+      http.get("/api/system/jobs", () => HttpResponse.json({ data: [] })),
+      http.get("/api/discover/metadata/status", () =>
+        HttpResponse.json({ data: { configured: false } }),
+      ),
+      http.get("/api/translation/state", () =>
+        HttpResponse.json({
+          enabled: true,
+          engine: 1,
+          fallback_engine: null,
+          instances,
+        }),
+      ),
+      http.get("/api/plugins/installations", () =>
+        HttpResponse.json({ data: engineInstallations(instances) }),
+      ),
+    );
+    window.Bazarr = { baseUrl: base, canUpdate: false, hasUpdate: false };
+    window.history.replaceState(null, "", `${base}${address}`);
+    setAuthenticated(true);
+    localStorage.setItem(WHATS_NEW_SEEN_KEY, latestWhatsNewVersion);
+    rawRender(
+      <AllProviders>
+        <StatusFetchObserver />
+        <Router />
+      </AllProviders>,
+    );
+  }
+
+  it.each(bookmarks)(
+    "redirects $base/settings/$path to Translation with its query and fragment when v2 is on",
+    async ({ path, base }) => {
+      showStatus(true);
+      showApplication(`/settings/${path}${deepLink}`, base);
+
+      expect(
+        await screen.findByRole("tab", { name: "Defaults" }),
+      ).toHaveAttribute("aria-selected", "true");
+      expect(window.location.pathname).toBe(`${base}/translation`);
+      expect(window.location.search).toBe("?tab=defaults&from=bookmark");
+      expect(window.location.hash).toBe("#backend-2");
+      expect(screen.queryByText("Translator Engine")).not.toBeInTheDocument();
+    },
+  );
+
+  it.each(["", "/bazarr"])(
+    "opens a direct %s/translation bookmark on its requested tab",
+    async (base) => {
+      showStatus(true);
+      showApplication(`/translation${deepLink}`, base);
+
+      expect(
+        await screen.findByRole("tab", { name: "Defaults" }),
+      ).toHaveAttribute("aria-selected", "true");
+      expect(window.location.pathname).toBe(`${base}/translation`);
+      expect(window.location.search).toBe("?tab=defaults&from=bookmark");
+      expect(window.location.hash).toBe("#backend-2");
+    },
+  );
+
+  it.each([
+    { runtime: false, base: "" },
+    { runtime: undefined, base: "" },
+    { runtime: false, base: "/bazarr" },
+    { runtime: undefined, base: "/bazarr" },
+  ])(
+    "keeps legacy settings at $base/settings/translator when v2 is $runtime",
+    async ({ runtime, base }) => {
+      showStatus(runtime);
+      showApplication(`/settings/translator${deepLink}`, base);
+
+      expect(await screen.findByText("Translator Engine")).toBeVisible();
+      expect(window.location.pathname).toBe(`${base}/settings/translator`);
+      expect(window.location.search).toBe("?tab=defaults&from=bookmark");
+      expect(window.location.hash).toBe("#backend-2");
+      expect(
+        screen.queryByRole("tab", { name: "Defaults" }),
+      ).not.toBeInTheDocument();
+    },
+  );
+
+  it("blocks saving a mounted draft during reconnect until legacy mode is confirmed", async () => {
+    const submitted: Record<string, FormDataEntryValue>[] = [];
+    showStatus(false);
+    showApplication("/settings/translator");
+    const model = await screen.findByRole("textbox", { name: "Gemini model" });
+    await waitFor(() => expect(model).toHaveValue("gemini-saved"));
+    const user = userEvent.setup();
+    await user.type(model, "-draft");
+    const save = await screen.findByRole("button", {
+      name: "Save 1 pending change",
+    });
+
+    await act(async () => setOnlineStatus(true));
+    await act(async () => setOnlineStatus(false));
+    const requested = Promise.withResolvers<void>();
+    const response = Promise.withResolvers<void>();
+    server.use(
+      http.get("/api/system/status", async () => {
+        requested.resolve();
+        await response.promise;
+        return HttpResponse.json({ data: { translation_runtime_v2: false } });
+      }),
+      http.post("/api/system/settings", async ({ request }) => {
+        submitted.push(
+          Object.fromEntries((await request.formData()).entries()),
+        );
+        return HttpResponse.json({});
+      }),
+    );
+    try {
+      await act(async () => setOnlineStatus(true));
+      await requested.promise;
+      await waitFor(() =>
+        expect(screen.getByTestId("status-fetch")).toHaveTextContent(
+          "fetching",
+        ),
+      );
+      expect(screen.getByRole("textbox", { name: "Gemini model" })).toBe(model);
+      expect(model).toHaveValue("gemini-saved-draft");
+      expect(save).toBeDisabled();
+      fireEvent.click(save);
+      fireEvent.keyDown(document, { key: "s", ctrlKey: true });
+      if (!(save instanceof HTMLButtonElement) || !save.form) {
+        throw new Error("Save button is not associated with a form");
+      }
+      fireEvent.submit(save.form);
+      await act(async () => new Promise((resolve) => setTimeout(resolve, 20)));
+      expect(submitted).toHaveLength(0);
+
+      response.resolve();
+      await waitFor(() => expect(save).toBeEnabled());
+      await user.click(save);
+      await waitFor(() => expect(submitted).toHaveLength(1));
+      expect(submitted[0]["settings-translator-gemini_model"]).toBe(
+        "gemini-saved-draft",
+      );
+    } finally {
+      response.resolve();
+    }
+  });
+
+  it.each([false, undefined])(
+    "keeps a mounted legacy draft through a background status refresh when v2 is %s",
+    async (runtime) => {
+      showStatus(runtime);
+      showApplication("/settings/translator");
+      const model = await screen.findByRole("textbox", {
+        name: "Gemini model",
+      });
+      await waitFor(() => expect(model).toHaveValue("gemini-saved"));
+      const user = userEvent.setup();
+      await user.type(model, "-draft");
+      expect(
+        await screen.findByRole("button", { name: "Save 1 pending change" }),
+      ).toBeVisible();
+
+      const requested = Promise.withResolvers<void>();
+      const response = Promise.withResolvers<void>();
+      server.use(
+        http.get("/api/system/status", async () => {
+          requested.resolve();
+          await response.promise;
+          return HttpResponse.json({
+            data:
+              runtime === undefined ? {} : { translation_runtime_v2: runtime },
+          });
+        }),
+      );
+      let refreshed: Promise<void> | undefined;
+
+      try {
+        await act(async () => {
+          refreshed = queryClient.refetchQueries({ queryKey: statusKey });
+          await requested.promise;
+        });
+        await waitFor(() =>
+          expect(screen.getByTestId("status-fetch")).toHaveTextContent(
+            "fetching",
+          ),
+        );
+
+        expect(screen.getByRole("textbox", { name: "Gemini model" })).toBe(
+          model,
+        );
+        expect(model).toHaveValue("gemini-saved-draft");
+        expect(
+          screen.getByRole("button", { name: "Save 1 pending change" }),
+        ).toBeVisible();
+
+        response.resolve();
+        await act(async () => {
+          await refreshed;
+        });
+        await waitFor(() =>
+          expect(screen.getByTestId("status-fetch")).toHaveTextContent("idle"),
+        );
+
+        expect(screen.getByRole("textbox", { name: "Gemini model" })).toBe(
+          model,
+        );
+        expect(model).toHaveValue("gemini-saved-draft");
+        expect(
+          screen.getByRole("button", { name: "Save 1 pending change" }),
+        ).toBeVisible();
+        expect(window.location.pathname).toBe("/settings/translator");
+      } finally {
+        response.resolve();
+        await refreshed;
+      }
+    },
+  );
+
+  it.each(["ready", "unavailable", "failed"] as const)(
+    "closes an admitted legacy form when its background status refresh is %s",
+    async (outcome) => {
+      showStatus(false);
+      showApplication(`/settings/translator${deepLink}`);
+      const model = await screen.findByRole("textbox", {
+        name: "Gemini model",
+      });
+      await waitFor(() => expect(model).toHaveValue("gemini-saved"));
+      const user = userEvent.setup();
+      await user.type(model, "-draft");
+      expect(
+        await screen.findByRole("button", { name: "Save 1 pending change" }),
+      ).toBeVisible();
+
+      const requested = Promise.withResolvers<void>();
+      const response = Promise.withResolvers<void>();
+      server.use(
+        http.get("/api/system/status", async () => {
+          requested.resolve();
+          await response.promise;
+          if (outcome === "failed") {
+            return HttpResponse.json(
+              { message: "Status unavailable" },
+              { status: 503 },
+            );
+          }
+          return HttpResponse.json({
+            data:
+              outcome === "ready"
+                ? { translation_runtime_v2: true }
+                : { translation_runtime_v2_unavailable: true },
+          });
+        }),
+      );
+      let refreshed: Promise<void> | undefined;
+
+      try {
+        await act(async () => {
+          refreshed = queryClient.refetchQueries({ queryKey: statusKey });
+          await requested.promise;
+        });
+        await waitFor(() =>
+          expect(screen.getByTestId("status-fetch")).toHaveTextContent(
+            "fetching",
+          ),
+        );
+        expect(screen.getByRole("textbox", { name: "Gemini model" })).toBe(
+          model,
+        );
+        expect(model).toHaveValue("gemini-saved-draft");
+
+        response.resolve();
+        await act(async () => {
+          await refreshed;
+        });
+
+        if (outcome === "ready") {
+          expect(
+            await screen.findByRole("tab", { name: "Defaults" }),
+          ).toHaveAttribute("aria-selected", "true");
+        } else {
+          const retry = await screen.findByRole("button", {
+            name: "Try again",
+          });
+          expect(screen.getByRole("alert")).toHaveTextContent(
+            outcome === "failed"
+              ? "Bazarr+ did not answer"
+              : "Translation runtime unavailable",
+          );
+          if (outcome === "failed") {
+            expect(queryClient.getQueryData(statusKey)).toEqual({
+              translation_runtime_v2: false,
+            });
+          }
+          expect(
+            screen.queryByRole("textbox", { name: "Gemini model" }),
+          ).not.toBeInTheDocument();
+          expect(
+            screen.queryByRole("button", { name: "Save 1 pending change" }),
+          ).not.toBeInTheDocument();
+
+          showStatus(true);
+          await user.click(retry);
+          expect(
+            await screen.findByRole("tab", { name: "Defaults" }),
+          ).toHaveAttribute("aria-selected", "true");
+        }
+        expect(screen.queryByText("Translator Engine")).not.toBeInTheDocument();
+        expect(window.location.pathname).toBe("/translation");
+        expect(window.location.search).toBe("?tab=defaults&from=bookmark");
+        expect(window.location.hash).toBe("#backend-2");
+      } finally {
+        response.resolve();
+        await refreshed;
+      }
+    },
+  );
+
+  it.each([
+    { runtime: false, base: "" },
+    { runtime: undefined, base: "" },
+    { runtime: false, base: "/bazarr" },
+    { runtime: undefined, base: "/bazarr" },
+  ])(
+    "keeps the former $base/settings/translation address gated when v2 is $runtime",
+    async ({ runtime, base }) => {
+      showStatus(runtime);
+      showApplication(`/settings/translation${deepLink}`, base);
+
+      expect(await screen.findByText(/Page not found/)).toBeVisible();
+      expect(window.location.pathname).toBe(`${base}/translation`);
+      expect(window.location.search).toBe("?tab=defaults&from=bookmark");
+      expect(window.location.hash).toBe("#backend-2");
+      expect(screen.queryByText("Translator Engine")).not.toBeInTheDocument();
+      expect(
+        screen.queryByRole("tab", { name: "Defaults" }),
+      ).not.toBeInTheDocument();
+    },
+  );
+
+  it.each(bookmarks)(
+    "keeps $base/settings/$path gated while waiting for status",
+    async ({ path, base }) => {
+      showStatus(true);
+      const status = Promise.withResolvers<void>();
+      const requested = Promise.withResolvers<void>();
+      server.use(
+        http.get("/api/system/status", async () => {
+          requested.resolve();
+          await status.promise;
+          return HttpResponse.json({ data: { translation_runtime_v2: true } });
+        }),
+      );
+      showApplication(`/settings/${path}${deepLink}`, base);
+
+      try {
+        await requested.promise;
+        // The shell proves settings have arrived while system status is still pending.
+        await screen.findByRole("button", { name: "Settings" });
+        await waitFor(() =>
+          expect(window.location.pathname).toBe(`${base}${pendingPath(path)}`),
+        );
+        expect(window.location.search).toBe("?tab=defaults&from=bookmark");
+        expect(window.location.hash).toBe("#backend-2");
+        expect(screen.queryByText("Translator Engine")).not.toBeInTheDocument();
+        expect(screen.queryByText(/Page not found/)).not.toBeInTheDocument();
+        expect(
+          screen.queryByRole("tab", { name: "Defaults" }),
+        ).not.toBeInTheDocument();
+        status.resolve();
+        expect(
+          await screen.findByRole("tab", { name: "Defaults" }),
+        ).toHaveAttribute("aria-selected", "true");
+        expect(window.location.pathname).toBe(`${base}/translation`);
+        expect(window.location.search).toBe("?tab=defaults&from=bookmark");
+        expect(window.location.hash).toBe("#backend-2");
+      } finally {
+        status.resolve();
+      }
+    },
+  );
+
+  it.each(bookmarks)(
+    "keeps $base/settings/$path gated after an uncached status failure and can retry",
+    async ({ path, base }) => {
+      showStatus(true);
+      server.use(
+        http.get("/api/system/status", () =>
+          HttpResponse.json({ message: "Status unavailable" }, { status: 503 }),
+        ),
+      );
+      showApplication(`/settings/${path}${deepLink}`, base);
+
+      const retry = await screen.findByRole("button", { name: "Try again" });
+      expect(screen.getByRole("alert")).toBeVisible();
+      expect(window.location.pathname).toBe(`${base}${pendingPath(path)}`);
+      expect(window.location.search).toBe("?tab=defaults&from=bookmark");
+      expect(window.location.hash).toBe("#backend-2");
+      expect(screen.queryByText("Translator Engine")).not.toBeInTheDocument();
+      expect(screen.queryByText(/Page not found/)).not.toBeInTheDocument();
+      expect(
+        screen.queryByRole("tab", { name: "Defaults" }),
+      ).not.toBeInTheDocument();
+
+      showStatus(true);
+      fireEvent.click(retry);
+
+      expect(
+        await screen.findByRole("tab", { name: "Defaults" }),
+      ).toHaveAttribute("aria-selected", "true");
+      expect(window.location.pathname).toBe(`${base}/translation`);
+      expect(window.location.search).toBe("?tab=defaults&from=bookmark");
+      expect(window.location.hash).toBe("#backend-2");
+      expect(screen.queryByText("Translator Engine")).not.toBeInTheDocument();
+    },
+  );
+
+  it.each(["translator", "translation"])(
+    "redirects /settings/%s to a recoverable error when v2 is enabled but unavailable",
+    async (path) => {
+      showStatus(true);
+      server.use(
+        http.get("/api/system/status", () =>
+          HttpResponse.json({
+            data: { translation_runtime_v2_unavailable: true },
+          }),
+        ),
+      );
+      showApplication(`/settings/${path}${deepLink}`, "/bazarr");
+
+      const retry = await screen.findByRole("button", { name: "Try again" });
+      expect(screen.getByRole("alert")).toHaveTextContent(
+        "Translation runtime unavailable",
+      );
+      expect(window.location.pathname).toBe("/bazarr/translation");
+      expect(window.location.search).toBe("?tab=defaults&from=bookmark");
+      expect(window.location.hash).toBe("#backend-2");
+      expect(screen.queryByText("Translator Engine")).not.toBeInTheDocument();
+      expect(screen.queryByText(/Page not found/)).not.toBeInTheDocument();
+      expect(
+        screen.queryByRole("tab", { name: "Defaults" }),
+      ).not.toBeInTheDocument();
+
+      showStatus(true);
+      fireEvent.click(retry);
+
+      expect(
+        await screen.findByRole("tab", { name: "Defaults" }),
+      ).toHaveAttribute("aria-selected", "true");
+    },
+  );
+
+  it("keeps cached legacy settings closed during a stale status refresh and its failure", async () => {
+    showStatus(false);
+    await queryClient.fetchQuery({
+      queryKey: statusKey,
+      queryFn: () => api.system.status(),
+    });
+    await queryClient.invalidateQueries({ queryKey: statusKey });
+
+    const requested = Promise.withResolvers<void>();
+    const fail = Promise.withResolvers<void>();
+    server.use(
+      http.get("/api/system/status", async () => {
+        requested.resolve();
+        await fail.promise;
+        return HttpResponse.json(
+          { message: "Status unavailable" },
+          { status: 503 },
+        );
+      }),
+    );
+    showApplication(`/settings/translator${deepLink}`);
+
+    try {
+      await requested.promise;
+      await screen.findByRole("button", { name: "Settings" });
+      expect(screen.queryByText("Translator Engine")).not.toBeInTheDocument();
+
+      fail.resolve();
+      const retry = await screen.findByRole("button", { name: "Try again" });
+      expect(queryClient.getQueryData(statusKey)).toEqual({
+        translation_runtime_v2: false,
+      });
+      expect(screen.queryByText("Translator Engine")).not.toBeInTheDocument();
+      expect(window.location.pathname).toBe("/settings/translator");
+
+      showStatus(true);
+      fireEvent.click(retry);
+
+      expect(
+        await screen.findByRole("tab", { name: "Defaults" }),
+      ).toHaveAttribute("aria-selected", "true");
+      expect(window.location.pathname).toBe("/translation");
+    } finally {
+      fail.resolve();
+    }
+  });
 });

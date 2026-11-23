@@ -1,3 +1,4 @@
+import { useEffect, useRef } from "react";
 import {
   keepPreviousData,
   notifyManager,
@@ -28,6 +29,56 @@ const summaryKey = [QueryKeys.Translation, "summary"] as const;
 export function useTranslationRuntime(): boolean {
   const { data } = useSystemStatus();
   return data?.translation_runtime_v2 === true;
+}
+
+export function useTranslationRouteStatus() {
+  const { data, isSuccess, fetchStatus, isError, error, isFetching, refetch } =
+    useSystemStatus();
+  // A first visit still waits for stale cached status to be verified.
+  const legacyConfirmed = useRef(false);
+  let runtime: "ready" | "unavailable" | "legacy" | undefined;
+
+  if (isSuccess) {
+    if (data.translation_runtime_v2 === true) {
+      runtime = "ready";
+    } else if (data.translation_runtime_v2_unavailable === true) {
+      runtime = "unavailable";
+    } else if (fetchStatus === "idle" || legacyConfirmed.current) {
+      // Keep admitted legacy forms mounted during background refreshes.
+      runtime = "legacy";
+    }
+  }
+
+  useEffect(() => {
+    legacyConfirmed.current = runtime === "legacy";
+  }, [runtime]);
+
+  return { runtime, isError, error, isFetching, refetch };
+}
+
+export function useLegacyTranslationSaveGuard() {
+  const { data, isSuccess, fetchStatus } = useSystemStatus();
+  const queryClient = useQueryClient();
+  const canSave = () => {
+    const state = queryClient.getQueryState<typeof data>([
+      QueryKeys.System,
+      "status",
+    ]);
+    return (
+      state?.status === "success" &&
+      state.fetchStatus === "idle" &&
+      state.data?.translation_runtime_v2 !== true &&
+      state.data?.translation_runtime_v2_unavailable !== true
+    );
+  };
+  return {
+    disabled:
+      !isSuccess ||
+      fetchStatus !== "idle" ||
+      data?.translation_runtime_v2 === true ||
+      data?.translation_runtime_v2_unavailable === true,
+    canSave,
+  };
 }
 
 /**

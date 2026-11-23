@@ -487,29 +487,124 @@ def test_a_body_that_is_not_an_object_is_refused(world):
     assert response.status_code == 400
 
 
-def test_the_system_status_names_the_switch_only_while_it_is_on(world, monkeypatch):
+@pytest.fixture
+def system_status(monkeypatch, schema_session):
+    from types import SimpleNamespace
+
+    from api import api_bp
+    from app import database
     from app.config import settings
+    from subtitles.tools.translate import runtime
+
+    monkeypatch.setattr(settings.auth, "apikey", API_KEY)
+    monkeypatch.setitem(settings.translator, "runtime_v2", True)
+    monkeypatch.setitem(settings.translator, "openrouter_api_key", SECRET)
+    monkeypatch.setattr(database, "engine", schema_session.bind)
+    monkeypatch.setattr(database, "database", schema_session)
+    monkeypatch.setattr(runtime, "_tables_present", False)
+    monkeypatch.setattr(runtime, "_absent_until", 0.0)
+    clock = [100.0]
+    monkeypatch.setattr(runtime, "time", SimpleNamespace(monotonic=lambda: clock[0]))
+    app = Flask(__name__)
+    app.register_blueprint(api_bp)
+    client = app.test_client()
 
     def status():
-        response = world.client.get("/api/system/status", headers={"X-API-KEY": API_KEY})
+        response = client.get("/api/system/status", headers={"X-API-KEY": API_KEY})
+        assert response.status_code == 200
+        assert SECRET not in response.get_data(as_text=True)
+        assert "translator" not in response.json["data"]
+        assert "runtime_v2" not in response.json["data"]
         return response.json["data"]
 
-    monkeypatch.setitem(settings.translator, "runtime_v2", True)
-    assert status()["translation_runtime_v2"] is True
-    monkeypatch.setattr(world.runtime, "runtime_v2_enabled", lambda: False)
-    assert "translation_runtime_v2" not in status()
+    return SimpleNamespace(get=status, client=client, runtime=runtime, clock=clock, session=schema_session)
 
 
-def test_the_status_reads_the_setting_before_it_touches_the_runtime(world, monkeypatch):
+def test_the_system_status_advertises_the_runtime_only_when_its_real_tables_are_ready(system_status):
+    status = system_status.get()
+    assert status["translation_runtime_v2"] is True
+    assert "translation_runtime_v2_unavailable" not in status
+
+
+@pytest.mark.parametrize("failure", ["missing_table", "inspection_error"])
+def test_the_system_status_distinguishes_unavailable_tables_and_recovers(system_status, monkeypatch, failure):
+    from app.database import TableTranslatorCheckpoint
+
+    table = TableTranslatorCheckpoint.__table__
+    engine = system_status.session.bind
+    with monkeypatch.context() as broken:
+        if failure == "missing_table":
+            table.drop(engine)
+        else:
+            import sqlalchemy
+
+            def unavailable(_engine):
+                raise RuntimeError(SECRET)
+
+            broken.setattr(sqlalchemy, "inspect", unavailable)
+        status = system_status.get()
+        assert "translation_runtime_v2" not in status
+        assert status["translation_runtime_v2_unavailable"] is True
+
+    if failure == "missing_table":
+        table.create(engine)
+    system_status.clock[0] += system_status.runtime.ABSENT_RECHECK_SECONDS + 1
+    recovered = system_status.get()
+    assert recovered["translation_runtime_v2"] is True
+    assert "translation_runtime_v2_unavailable" not in recovered
+
+
+@pytest.mark.parametrize("failure", ["predicate_error", "import_error"])
+def test_the_system_status_marks_a_runtime_failure_unavailable_and_recovers(system_status, monkeypatch, failure):
+    import builtins
+
+    with monkeypatch.context() as broken:
+        if failure == "predicate_error":
+            def unavailable():
+                raise RuntimeError(SECRET)
+
+            broken.setattr(system_status.runtime, "runtime_v2_enabled", unavailable)
+        else:
+            real_import = builtins.__import__
+
+            def unavailable(name, *args, **kwargs):
+                if name == "subtitles.tools.translate.runtime":
+                    raise ImportError(SECRET)
+                return real_import(name, *args, **kwargs)
+
+            broken.setattr(builtins, "__import__", unavailable)
+        status = system_status.get()
+        assert "translation_runtime_v2" not in status
+        assert status["translation_runtime_v2_unavailable"] is True
+
+    recovered = system_status.get()
+    assert recovered["translation_runtime_v2"] is True
+    assert "translation_runtime_v2_unavailable" not in recovered
+
+
+@pytest.mark.parametrize("switch", [False, None, 1, "true"])
+def test_the_status_reads_the_setting_before_it_touches_the_runtime(system_status, monkeypatch, switch):
     from app.config import settings
 
+    calls = []
+
     def explode():
+        calls.append(True)
         raise AssertionError("the runtime was asked with the switch off")
 
-    monkeypatch.setitem(settings.translator, "runtime_v2", False)
-    monkeypatch.setattr(world.runtime, "runtime_v2_enabled", explode)
-    response = world.client.get("/api/system/status", headers={"X-API-KEY": API_KEY})
-    assert response.status_code == 200 and "translation_runtime_v2" not in response.json["data"]
+    monkeypatch.setitem(settings.translator, "runtime_v2", switch)
+    monkeypatch.setattr(system_status.runtime, "runtime_v2_enabled", explode)
+    status = system_status.get()
+    assert "translation_runtime_v2" not in status
+    assert "translation_runtime_v2_unavailable" not in status
+    assert calls == []
+
+
+def test_the_system_status_requires_authentication_before_checking_runtime(system_status, monkeypatch):
+    calls = []
+    monkeypatch.setattr(system_status.runtime, "runtime_v2_enabled", lambda: calls.append(True))
+    assert system_status.client.get("/api/system/status").status_code == 401
+    assert calls == []
 
 
 def test_the_package_lists_the_typed_api_beside_the_history_routes():

@@ -23,7 +23,7 @@ import {
 } from "@fortawesome/free-solid-svg-icons";
 import { useBadges } from "@/apis/hooks";
 import { useMediaNavigation } from "@/apis/hooks/site";
-import { useTranslationRuntime } from "@/apis/hooks/translation";
+import { useTranslationRouteStatus } from "@/apis/hooks/translation";
 import App from "@/App";
 import { Lazy } from "@/components/async";
 import Authentication from "@/pages/Authentication";
@@ -48,7 +48,6 @@ import SettingsNotificationsView from "@/pages/Settings/Notifications";
 import SettingsProvidersView from "@/pages/Settings/Providers";
 import SettingsSchedulerView from "@/pages/Settings/Scheduler";
 import SettingsSubtitlesView from "@/pages/Settings/Subtitles";
-import SettingsTranslatorView from "@/pages/Settings/Translator";
 import SettingsUIView from "@/pages/Settings/UI";
 import OnboardingWizardView from "@/pages/Setup/OnboardingWizard";
 import Sports from "@/pages/Sports";
@@ -68,6 +67,9 @@ import ArrMediaRoute from "./ArrMediaRoute";
 import Redirector from "./Redirector";
 import { RouterNames } from "./RouterNames";
 import TranslationGate from "./TranslationGate";
+import TranslationSettingsRoute, {
+  TranslationRedirect,
+} from "./TranslationSettingsRoute";
 import { CustomRouteObject } from "./type";
 
 const StatisticsView = lazy(() => import("@/pages/Statistics"));
@@ -92,8 +94,9 @@ export function useRoutes(): CustomRouteObject[] {
     radarrBadges,
     sportarrBadges,
   } = useMediaNavigation();
-  // The Translation page exists only while the v2 translation runtime is on.
-  const translationRuntime = useTranslationRuntime();
+  const { runtime } = useTranslationRouteStatus();
+  const translationReady = runtime === "ready";
+  const showLegacyTranslator = runtime === "legacy";
 
   return useMemo(
     () => [
@@ -306,7 +309,7 @@ export function useRoutes(): CustomRouteObject[] {
             // Out of the navigation while the runtime is off; the gate makes
             // its address Not Found. See TranslationGate for why the route
             // itself is always here.
-            hidden: !translationRuntime,
+            hidden: !translationReady,
             element: (
               <TranslationGate>
                 <TranslationView />
@@ -380,13 +383,14 @@ export function useRoutes(): CustomRouteObject[] {
               {
                 path: "translator",
                 name: "AI Translator",
-                element: <SettingsTranslatorView></SettingsTranslatorView>,
+                hidden: !showLegacyTranslator,
+                element: <TranslationSettingsRoute />,
               },
               {
                 // The page lived under Settings while it was being built.
                 path: "translation",
                 hidden: true,
-                element: <Navigate to="/translation" replace />,
+                element: <TranslationRedirect />,
               },
               {
                 path: "external",
@@ -548,7 +552,8 @@ export function useRoutes(): CustomRouteObject[] {
       sonarrBadges,
       radarrBadges,
       sportarrBadges,
-      translationRuntime,
+      translationReady,
+      showLegacyTranslator,
     ],
   );
 }
