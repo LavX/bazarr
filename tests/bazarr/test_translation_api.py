@@ -481,6 +481,23 @@ def test_the_options_route_falls_back_to_free_text_without_a_source(world):
     assert world.call("post", path, {"field": 5}).status_code == 400
 
 
+@pytest.mark.parametrize("items,expected", [
+    ([{"value": "local-model", "label": "Loaded model"},
+      {"id": "priced-model", "name": "Priced model", "price_input_per_million": 1.25}],
+     [{"id": "local-model", "name": "Loaded model"},
+      {"id": "priced-model", "name": "Priced model", "price_input_per_million": 1.25}]),
+    ([], []),
+    ([None, {"label": "Missing ID"}], []),
+])
+def test_the_options_route_normalizes_worker_choices_and_allows_text_when_empty(world, items, expected):
+    world.sources.append(lambda *_args: {"items": items})
+    response = world.call("post", f"engines/{world.instance.id}/options",
+                          {"field": "model", "backend_type": "openai_compatible"})
+    assert response.status_code == 200
+    assert response.json["available"] is bool(expected)
+    assert response.json["items"] == expected
+
+
 def test_a_body_that_is_not_an_object_is_refused(world):
     response = world.client.patch(f"/api/translation/engines/{world.instance.id}", headers={"X-API-KEY": API_KEY},
                                   data="[1]", content_type="application/json")

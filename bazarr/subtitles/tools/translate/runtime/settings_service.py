@@ -899,7 +899,21 @@ class TranslatorSettingsService:
         answer = source(instance_id, backend_type, field_key, clean) if source is not None else None
         if not answer or not isinstance(answer.get("items"), list):
             return unavailable
-        return {"available": True, "items": answer["items"], "reason": ""}
+        items = []
+        for choice in answer["items"]:
+            if not isinstance(choice, Mapping):
+                continue
+            model_id = choice.get("id", choice.get("value"))
+            if not isinstance(model_id, str) or not model_id.strip():
+                continue
+            # SDK choices use value/label, while the editor reads id/name.
+            name = choice.get("name", choice.get("label"))
+            item = {key: value for key, value in choice.items() if key not in {"value", "label", "name"}}
+            item["id"] = model_id
+            if isinstance(name, str) and name.strip():
+                item["name"] = name
+            items.append(item)
+        return {"available": True, "items": items, "reason": ""} if items else unavailable
 
     # --------------------------------------------------------------- test
     def test_connection(self, connection_id: int, payload: Any = None) -> dict[str, Any]:
