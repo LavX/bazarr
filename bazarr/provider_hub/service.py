@@ -1471,41 +1471,49 @@ def _recheck_installed_trust(state: dict[str, Any], ancestry: _OfficialAncestry)
     answer changes an install; a check that fails is repeated next time.
     """
     built_in_ids = None
-    for provider_id, row in (state.get("installations") or {}).items():
-        if not isinstance(row, dict):
-            continue
+
+    def recheck(provider_id, row, manifest):
+        nonlocal built_in_ids
         if row.get("origin") == "local":
             row["source_bound"] = True
-            continue
-        manifest = row.get("staged_manifest")
-        if not isinstance(manifest, dict):
-            manifest = row.get("manifest")
+            return
         origin = manifest.get("source") if isinstance(manifest, dict) else None
         origin = origin if isinstance(origin, dict) else {}
         if not row.get("source_bound"):
             if not row.get("trusted"):
                 _bind_by_evidence(row, manifest, origin, state)
-                continue
+                return
             # Only the official source ever made an install trusted.
             row["source_bound"] = True
             row["source_id"] = OFFICIAL_CATALOG_SOURCE_ID
         if not (row.get("trusted") or row.get("demoted_commit")):
-            continue
+            return
         if built_in_ids is None:
             built_in_ids = _built_in_provider_ids()
         shadows = str(provider_id) in built_in_ids
         if origin.get("repo") != OFFICIAL_CATALOG_REPO:
             if row.get("trusted"):
                 _demote_installation(row, _FOREIGN_REPO_NOTE, shadows, for_commit=False)
-            continue
+            return
         verdict, reason = ancestry.check(origin.get("commit"))
         if verdict is None:
-            continue
+            return
         if verdict and row.get("demoted_commit"):
             row.update(trusted=True, source_id=OFFICIAL_CATALOG_SOURCE_ID,
                        demoted_commit=False, trust_note=None)
         elif not verdict and row.get("trusted"):
             _demote_installation(row, _commit_demotion_note(reason), shadows, for_commit=True)
+
+    for provider_id, row in (state.get("installations") or {}).items():
+        if not isinstance(row, dict):
+            continue
+        staged = row.get("staged_manifest")
+        active = row.get("manifest")
+        recheck(provider_id, row, staged if isinstance(staged, dict) else active)
+        previous = row.get("previous_source")
+        if (isinstance(staged, dict) and isinstance(previous, dict)
+                and (previous.get("trusted") or previous.get("demoted_commit"))):
+            recheck(provider_id, previous, active)
 
 
 def _normalize_catalog_manifest(manifest: dict[str, Any], source: dict[str, Any], commit: str) -> dict[str, Any]:
@@ -1904,8 +1912,8 @@ def refresh_catalog(source_ids: set[str] | None = None, checkpoint=None) -> dict
                     if key not in refreshed_entry_keys:
                         del entries[key]
             if source_ids is None or OFFICIAL_CATALOG_SOURCE_ID in source_ids:
-                _recheck_installed_trust(state, ancestry)
                 _hold_revoked_installations(state)
+                _recheck_installed_trust(state, ancestry)
             if _fallback_setting_on():
                 _store_transport(state)
             ok_sources = sources_count - len(failed_sources)
@@ -2156,6 +2164,7 @@ def _redact_installation(installation: dict[str, Any]) -> dict[str, Any]:
     _clear_staged_data(redacted)
     redacted.pop("delete_release_data", None)
     redacted.pop("data_worker_cleanup_pending", None)
+    redacted.pop("previous_source", None)
     provider_id = redacted.get("provider_id")
     if provider_id:
         # enabled_providers in config.yaml is the source of truth; the stored
@@ -3674,10 +3683,12 @@ def _abandon_staged_catalog_list(installation: dict[str, Any]) -> None:
         installation.pop("catalog_list", None)
 
 
-def _abandon_staged_release(installation: dict[str, Any], message: str) -> None:
+def _abandon_staged_release(state: dict[str, Any], plugin_id: str,
+                            installation: dict[str, Any], message: str) -> None:
     """Drop a staged release that will not activate and record why. The active release, if any, stays."""
     installation["last_error"] = message
     _abandon_staged_catalog_list(installation)
+    _restore_active_source(state, plugin_id, installation)
     installation["staged_version"] = None
     installation["staged_path"] = None
     installation["staged_python_path"] = None
@@ -3691,18 +3702,15 @@ def _abandon_staged_release(installation: dict[str, Any], message: str) -> None:
     installation[releases.FAIL_STAGED] = message
 
 
-def _drop_revoked_staged(installations: dict[str, Any], revocations: tuple[revocation.Revocation, ...]) -> bool:
-    """Drop each staged release the revocation list names, so it never activates. Returns whether any row changed."""
-    changed = False
-    for plugin_id, row in installations.items():
+def _drop_revoked_staged(state: dict[str, Any], revocations: tuple[revocation.Revocation, ...]) -> None:
+    """Drop each staged release the revocation list names, so it never activates."""
+    for plugin_id, row in state["installations"].items():
         if not isinstance(row, dict) or row.get("state") != "staged" or not row.get("staged_version"):
             continue
         found = revocation.lookup(revocations, plugin_id, row.get("staged_version"))
         if found is not None:
-            _abandon_staged_release(row, _revocation_text(
+            _abandon_staged_release(state, plugin_id, row, _revocation_text(
                 revocation.refusal, found, row.get("name") or plugin_id, row["staged_version"], "installed"))
-            changed = True
-    return changed
 
 
 def _hold_revoked_installations(state: dict[str, Any]) -> None:
@@ -3716,7 +3724,7 @@ def _hold_revoked_installations(state: dict[str, Any]) -> None:
     installations = state.setdefault("installations", {})
     revocations = _revocations(state)
     # A revoked staged release goes first, so the text and the restart cue are decided on what is left.
-    _drop_revoked_staged(installations, revocations)
+    _drop_revoked_staged(state, revocations)
     _mark_revoked_installations(installations, revocations)
 
 
@@ -3756,6 +3764,50 @@ def _active_release_owned(state, row, release: releases.SlotIdentity | None) -> 
     return (release is not None and _same_release_owner(state, release, release.source_id, release.origin)
             and (release.origin == "local" or release.catalog_registration is not None
                  or row.get("trust_note") != _SOURCE_REMOVED_NOTE))
+
+
+_INSTALLATION_SOURCE_FIELDS = ("source_id", "origin", "source_bound", "trusted", "trust_note", "demoted_commit")
+
+
+def _installation_source(row: dict[str, Any]) -> dict[str, Any]:
+    return {key: row[key] for key in _INSTALLATION_SOURCE_FIELDS if key in row}
+
+
+def _restore_active_source(state, plugin_id, row) -> None:
+    """Restore the active release's recorded binding when a stage is discarded."""
+    previous = row.pop("previous_source", None)
+    if not row.get("active_version"):
+        return
+    active = _release_slots(state, plugin_id).get(releases.ACTIVE)
+    if active is None and not isinstance(state, releases.StateDocument):
+        return
+    if not _active_release_owned(state, row, active):
+        removed = (row.get("trust_note") == _SOURCE_REMOVED_NOTE
+                   or (active is not None and active.catalog_registration is not None))
+        note = _SOURCE_REMOVED_NOTE if removed else _UNKNOWN_SOURCE_NOTE
+        row.update(source_id=None, origin="catalog", source_bound=True, trusted=False, trust_note=note)
+        row.pop("demoted_commit", None)
+        return
+    owner = active.source_id, active.origin
+    if isinstance(previous, dict) and (
+            (previous.get("source_id"), previous.get("origin")) == owner or (
+                active.source_id == OFFICIAL_CATALOG_SOURCE_ID and previous.get("source_id") is None
+                and previous.get("trust_note") and previous.get("source_bound"))):
+        row.pop("demoted_commit", None)
+        row.pop("trust_note", None)
+        row.update(_installation_source(previous))
+        row["trusted"] = bool(previous.get("trusted"))
+    else:
+        # Old stages did not save the active release's trust decision.
+        if (row.get("source_id"), row.get("origin")) != owner and not (
+                active.source_id == OFFICIAL_CATALOG_SOURCE_ID and row.get("demoted_commit")):
+            row.update(source_id=active.source_id, origin=active.origin)
+            row.pop("demoted_commit", None)
+            row.pop("trust_note", None)
+        row["trusted"] = False
+    row["source_bound"] = True
+    if active.source_id != OFFICIAL_CATALOG_SOURCE_ID:
+        row["trusted"] = False
 
 
 def _active_data_path(plugin_id: str, row) -> Path | None:
@@ -3802,6 +3854,9 @@ def _staged_installation(
         previous_list = existing.get("previous_catalog_list") if restaged else existing.get("catalog_list")
         if previous_list:
             previous = {"previous_catalog_list": previous_list}
+        previous_source = existing.get("previous_source") if restaged else _installation_source(existing)
+        if previous_source:
+            previous["previous_source"] = previous_source
     return {
         **_catalog_list_field(catalog_list),
         **previous,
@@ -3868,11 +3923,15 @@ def _failed_installation(
         if installation.get("state") == "staged":
             # A restage that fails drops the staged update the row still holds.
             _abandon_staged_catalog_list(installation)
+            if state is not None:
+                _restore_active_source(state, validated.provider_id, installation)
+            installation["state"] = "active"
         installation["last_error"] = message
         installation["staged_version"] = None
         installation["staged_path"] = None
         installation["staged_python_path"] = None
         installation["staged_manifest"] = None
+        installation.pop("staged_supplied_by", None)
         _clear_staged_data(installation)
         # The restart a refresh asked for, to stop a revoked release, is still to come after a failed update.
         installation["pending_restart"] = bool(installation.get("revoked_restart"))
@@ -4149,6 +4208,8 @@ def _stage_validated(
                 # Which installed plugin supplies each capability it needs, kept with the release.
                 installation["staged_supplied_by"] = closure.supplier_map(state, plugin, validated.provider_id)
             installations[validated.provider_id] = installation
+            if isinstance(state, releases.StateDocument):
+                state.staging_install = validated.provider_id
             # The environment passed the worker check, so it is now the one
             # recorded for this dependency set (a no-op when it already is).
             if env_path is not None:
@@ -5258,8 +5319,9 @@ def _same_staged_release(row: Any, expected: dict[str, Any]) -> bool:
 
 
 def _staged_catalog_changed(state, row, stage) -> bool:
-    return (stage is not None and stage.origin == "catalog" and stage.source_id is not None
-            and not _same_release_owner(state, stage, row.get("source_id"), "catalog"))
+    source_id = row.get("source_id")
+    return (stage is not None and (stage.source_id is not None or source_id is not None)
+            and not _same_release_owner(state, stage, source_id, row.get("origin")))
 
 
 def _fail_staged_activation(provider_id, installation, stage, job, message, error) -> bool:
@@ -5273,10 +5335,7 @@ def _fail_staged_activation(provider_id, installation, stage, job, message, erro
         slots = _release_slots(state, provider_id)
         if not _same_staged_release(row, installation) or slots.get(releases.STAGED) != stage:
             return False
-        _abandon_staged_release(row, message)
-        active = slots.get(releases.ACTIVE)
-        if row.get("source_id") is None and _active_release_owned(state, row, active):
-            row.update(source_id=active.source_id, origin=active.origin)
+        _abandon_staged_release(state, provider_id, row, message)
         _persist_job(failed, state)
         return True
 
@@ -5542,6 +5601,7 @@ def activate_release(provider_id: str, *, at_boot: bool = False) -> Activation:
             row.pop("delete_release_data", None)
             row.pop("data_worker_cleanup_pending", None)
             row.pop("previous_catalog_list", None)
+            row.pop("previous_source", None)
             row["manifest"] = manifest.raw
             row["supplied_by"] = row.pop("staged_supplied_by", None) or {}
             row["state"] = "active"
@@ -5551,6 +5611,9 @@ def activate_release(provider_id: str, *, at_boot: bool = False) -> Activation:
             row["last_error"] = None
             row.pop("needs_repair", None)
             row["activated_at"] = utcnow_iso()
+            if isinstance(state, releases.StateDocument) and staged_release is not None and not same_owner:
+                # The old active slot may have identical files, even when it belongs to a different registration.
+                state.promoting_stage = provider_id
             if attention:
                 row["last_error"] = attention
             if previous_version and not at_boot and active_data is None:
@@ -5751,6 +5814,9 @@ def rollback_release(provider_id: str, consent_digest: str | None = None) -> Act
         refusal = _rollback_needs_refusal(state, plugin, provider_id, name, target)
         if refusal:
             raise ProviderHubInstallError(refusal)
+        current["previous_source"] = _installation_source(current)
+        if current.get("catalog_list"):
+            current["previous_catalog_list"] = current["catalog_list"]
         current.update(
             staged_version=target.version, staged_path=target.bundle_path, staged_python_path=target.python_path,
             staged_manifest=target.manifest, state="staged", pending_restart=True, last_error=None)
@@ -6174,6 +6240,9 @@ def remove_installation(provider_id: str, *, ignoring_dependents: frozenset[str]
             if not item.get("active_version"):
                 del installations[provider_id]
                 return "removed_pending"
+            if item.get("staged_version"):
+                _abandon_staged_catalog_list(item)
+                _restore_active_source(state, provider_id, item)
             item["state"] = "removed"
             # A kind that stops a release while Bazarr+ runs needs no restart to finish this: the release is
             # detached right after, and the row goes once its calls are done. The row stays marked removed until
@@ -6185,6 +6254,7 @@ def remove_installation(provider_id: str, *, ignoring_dependents: frozenset[str]
             item["staged_path"] = None
             item["staged_python_path"] = None
             item["staged_manifest"] = None
+            item.pop("staged_supplied_by", None)
             _clear_staged_data(item)
             item["last_error"] = None
             item["delete_release_data"] = not keep_data

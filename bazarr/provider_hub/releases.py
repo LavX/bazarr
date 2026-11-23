@@ -331,6 +331,8 @@ class StateDocument(dict):
 
     retained_releases: tuple[dict[str, Any], ...] = ()
     adopting_staged_data: tuple[str, str | None] | None = None
+    staging_install: str | None = None
+    promoting_stage: str | None = None
 
     def __init__(self, data: dict[str, Any]):
         super().__init__(data)
@@ -462,10 +464,16 @@ def split(data: dict[str, Any], rows: list[dict[str, Any]], *, now: str | None =
         existing = by_plugin.get(plugin_id, [])
         claimed: set[int] = set()
 
-        def find(slot: _Slot, states: tuple[str, ...]) -> dict[str, Any] | None:
+        def find(slot: _Slot, states: tuple[str, ...], *, for_install: bool = False) -> dict[str, Any] | None:
             for state in states:
                 for release in existing:
                     if release["id"] not in claimed and release["state"] == state and _matches(release, slot):
+                        if for_install and (
+                                (release.get("source_id"), release.get("origin"))
+                                != (row.get("source_id"), row.get("origin"))
+                                or not matches_catalog_registration(
+                                    data, row.get("source_id"), _field_value(release, _CATALOG_REGISTRATION))):
+                            continue
                         return release
             return None
 
@@ -520,10 +528,13 @@ def split(data: dict[str, Any], rows: list[dict[str, Any]], *, now: str | None =
                         or staged_release.get("origin") != row.get("origin")):
                     raise ReleaseTransitionError("the staged release changed before its data key could be recorded")
             else:
-                staged_release = find(staged, (STAGED, RETIRED))
+                staged_release = find(staged, (STAGED, RETIRED),
+                                      for_install=getattr(data, "staging_install", None) == plugin_id)
             settle(staged, staged_release, STAGED, source_id=rebound_source)
         if active is not None:
-            settle(active, find(active, (ACTIVE, STAGED, DRAINING, RETIRED)), ACTIVE)
+            states = ((STAGED, ACTIVE, DRAINING, RETIRED) if getattr(data, "promoting_stage", None) == plugin_id
+                      else (ACTIVE, STAGED, DRAINING, RETIRED))
+            settle(active, find(active, states), ACTIVE)
         # What the slots no longer name.
         for release in existing:
             if release["id"] in claimed:
