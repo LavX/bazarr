@@ -73,7 +73,8 @@ class RunningCall(Protocol):
 
 class WorkerPort(Protocol):
     def submit(self, plugin_id: str, request: dict, secrets: Mapping[str, str] | None, *, context: Any,
-               on_progress: Callable[[dict], None] | None) -> RunningCall: ...
+               on_progress: Callable[[dict], None] | None,
+               before_send: Callable[[], None] | None = None) -> RunningCall: ...
 
     def abandon(self, plugin_id: str) -> None:
         """Take the plugin's worker out of service once the jobs it holds are done: it ignored a cancel."""
@@ -96,7 +97,7 @@ class WorkerPort(Protocol):
 class UnboundWorkers:
     """The port before anything is bound: no translator worker exists yet."""
 
-    def submit(self, plugin_id, request, secrets, *, context, on_progress):
+    def submit(self, plugin_id, request, secrets, *, context, on_progress, before_send=None):
         from provider_hub.runtime.pool import PoolCodes, PoolUnavailable
 
         raise PoolUnavailable("no translator worker is bound for this plugin", code=PoolCodes.UNAVAILABLE)
@@ -206,11 +207,12 @@ class PoolWorkers:
                 return  # not recorded: the next submission tries again
             self._ports[key] = wanted
 
-    def submit(self, plugin_id, request, secrets, *, context, on_progress):
+    def submit(self, plugin_id, request, secrets, *, context, on_progress, before_send=None):
         key = self._ensure(plugin_id)
         self._follow_ports(plugin_id, key)
         handle = self._pool.submit(key, TRANSLATE_OP, {"request": request}, secrets=dict(secrets) or None,
-                                   on_progress=on_progress, context=context)
+                                   on_progress=on_progress, context=context,
+                                   **({"before_send": before_send} if before_send is not None else {}))
         with self._lock:
             detached = plugin_id in self._withdrawn
         if detached:

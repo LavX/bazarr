@@ -91,7 +91,7 @@ def stream_token_lifetime(duration_seconds=None):
     return lifetime
 
 
-def mint_stream_token(media_type, media_id, arr_instance_id, audio_track, lifetime_seconds):
+def mint_stream_token(media_type, media_id, arr_instance_id, audio_track, lifetime_seconds, *, source_scope=None):
     """Mint a token binding one media item, arr instance and audio track.
 
     The start time and the player parameter are not bound, so a new
@@ -108,6 +108,8 @@ def mint_stream_token(media_type, media_id, arr_instance_id, audio_track, lifeti
         't': int(audio_track),
         'e': int(time.time()) + int(lifetime_seconds),
     }
+    if source_scope is not None:
+        payload['s'] = source_scope
     p_bytes = json.dumps(payload, sort_keys=True, separators=(',', ':')).encode()
     sig = hmac.new(_signing_key(), p_bytes, hashlib.sha256).digest()
     return base64.urlsafe_b64encode(p_bytes + b'.' + sig).decode().rstrip('=')

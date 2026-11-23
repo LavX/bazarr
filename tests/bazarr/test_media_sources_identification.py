@@ -724,6 +724,7 @@ def test_a_pending_movie_retries_using_its_saved_filename_parse(source_db, tmp_p
 def test_manual_source_job_hashes_scores_and_saves_a_shooter_result(source_db, tmp_path, metadata, monkeypatch, caplog):
     from types import SimpleNamespace
 
+    from app import event_handler
     from app.config import settings
     from media_servers import dispatcher
     from media_sources import indexer, repository, service
@@ -737,6 +738,9 @@ def test_manual_source_job_hashes_scores_and_saves_a_shooter_result(source_db, t
 
     caplog.set_level('DEBUG', logger='subliminal_patch')
     english = Language('eng')
+    events = []
+    # This test runs the worker without starting the Flask Socket.IO server.
+    monkeypatch.setattr(event_handler.socketio, 'emit', lambda event, payload: events.append((event, payload)))
     monkeypatch.setattr(indexer, 'get_language_set', lambda: {english})
     monkeypatch.setitem(settings.general, 'skip_hashing', False)
     monkeypatch.setitem(settings.general, 'single_language', False)
@@ -760,6 +764,7 @@ def test_manual_source_job_hashes_scores_and_saves_a_shooter_result(source_db, t
     lib.scan()
     item = lib.items()[str(path)]
     assert item.identity_state == 'unmatched' and item.missing_subtitles == "['en']"
+    assert item.group_id is not None
 
     requests = []
     content = b'1\n00:00:01,000 --> 00:00:02,000\nA matching subtitle.\n'
@@ -779,6 +784,11 @@ def test_manual_source_job_hashes_scores_and_saves_a_shooter_result(source_db, t
 
     assert requests == [(english, str(path), hash_shooter(path))]
     assert path.with_suffix('.en.srt').read_bytes() == content
+    source_events = [(event, payload) for event, payload in events if payload['type'] in ('source-item', 'source-group')]
+    assert source_events == [
+        ('data', {'type': 'source-item', 'action': 'update', 'payload': item.id}),
+        ('data', {'type': 'source-group', 'action': 'update', 'payload': item.group_id}),
+    ]
     (saved,) = source_db.execute(repository.History.select()).all()
     scores = DEFAULT_SCORES['episode']
     assert saved.item_id == item.id and saved.provider == 'shooter'

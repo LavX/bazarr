@@ -33,7 +33,7 @@ interface TimingToolsPanelProps {
     format: string;
     encoding: string;
   } | null;
-  onApplySyncedContent: (content: string) => void;
+  onApplySyncedContent: (content: string) => boolean | void;
   onClose: () => void;
 }
 
@@ -570,7 +570,7 @@ function AutoSyncTab({
     format: string;
     encoding: string;
   } | null;
-  onApplySyncedContent: (content: string) => void;
+  onApplySyncedContent: (content: string) => boolean | void;
 }) {
   const [maxOffset, setMaxOffset] = useState("120");
   const [gss, setGss] = useState(false);
@@ -578,9 +578,10 @@ function AutoSyncTab({
   const [vad, setVad] = useState("");
   const [syncing, setSyncing] = useState(false);
   const [progressMsg, setProgressMsg] = useState("");
-  const [engineResults, setEngineResults] = useState<
-    SyncEngineContentResult[] | null
-  >(null);
+  const [engineResults, setEngineResults] = useState<{
+    results: SyncEngineContentResult[];
+    applyContent: TimingToolsPanelProps["onApplySyncedContent"];
+  } | null>(null);
   const [selectedEngine, setSelectedEngine] = useState<string | null>(null);
 
   const isSyncOutput = isSyncOutputLanguageKey(language);
@@ -672,14 +673,19 @@ function AutoSyncTab({
                 )
               : [];
             if (results.length > 1) {
-              setEngineResults(results);
+              setEngineResults({ results, applyContent: onApplySyncedContent });
               setSelectedEngine(results[0].engine);
               setProgressMsg("");
               setSyncing(false);
               return;
             }
 
-            onApplySyncedContent(results[0]?.content ?? pollResult.content);
+            if (
+              onApplySyncedContent(
+                results[0]?.content ?? pollResult.content,
+              ) === false
+            )
+              return;
             showNotification({
               message: "Sync complete, cues updated",
               color: "green",
@@ -764,11 +770,11 @@ function AutoSyncTab({
 
   const applySelectedEngineResult = useCallback(() => {
     if (!engineResults || !selectedEngine) return;
-    const selected = engineResults.find(
+    const selected = engineResults.results.find(
       (item) => item.engine === selectedEngine,
     );
     if (!selected) return;
-    onApplySyncedContent(selected.content);
+    if (engineResults.applyContent(selected.content) === false) return;
     showNotification({
       message: `${syncEngineLabel(selected.engine)} result loaded into editor`,
       color: "green",
@@ -776,7 +782,7 @@ function AutoSyncTab({
     });
     setEngineResults(null);
     setSelectedEngine(null);
-  }, [engineResults, selectedEngine, onApplySyncedContent]);
+  }, [engineResults, selectedEngine]);
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
@@ -798,7 +804,7 @@ function AutoSyncTab({
             onChange={setSelectedEngine}
           >
             <Stack gap="xs">
-              {engineResults?.map((result) => (
+              {engineResults?.results.map((result) => (
                 <Radio
                   key={result.engine}
                   value={result.engine}
