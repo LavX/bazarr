@@ -102,6 +102,14 @@ function escapeRegExp(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
+function parseSubtitleContent(data: { format: string; content: string }) {
+  try {
+    return getParser(data.format as SubtitleFormat).parse(data.content);
+  } catch {
+    return null;
+  }
+}
+
 export function findActiveCueIndex(cues: Cue[], playbackTimeMs: number) {
   return cues.findIndex(
     (cue) => playbackTimeMs >= cue.startMs && playbackTimeMs <= cue.endMs,
@@ -148,6 +156,8 @@ export default function EditorPage() {
     isLoading,
     error,
     isPlaceholderData,
+    isFetching,
+    refetch: refetchSubtitle,
   } = useSubtitleContent(
     mediaType,
     mediaId ? Number(mediaId) : undefined,
@@ -168,14 +178,10 @@ export default function EditorPage() {
   const fromEmbedded = data?.source === "embedded";
 
   // Parse the fetched content
-  const parseResult = useMemo<ParseResult | null>(() => {
-    if (!data) return null;
-    try {
-      return getParser(data.format as SubtitleFormat).parse(data.content);
-    } catch {
-      return null;
-    }
-  }, [data]);
+  const parseResult = useMemo(
+    () => (data ? parseSubtitleContent(data) : null),
+    [data],
+  );
 
   // Combined outputs (en:combined-hu) stack languages at shared timestamps. For
   // ASS that means one positioned cue per language, so we suppress the QC
@@ -199,6 +205,7 @@ export default function EditorPage() {
   // (e.g. draft recovery) re-evaluate once the document is loaded.
   const [loaded, setLoaded] = useState(false);
   const etagRef = useRef<string>("");
+  const [saveConflictKey, setSaveConflictKey] = useState<string | null>(null);
 
   // Reset when switching to a different subtitle. The track inside the video
   // and the file that shares its language key are two subtitles, and so are
@@ -213,6 +220,7 @@ export default function EditorPage() {
     source,
     codec,
   ]);
+  const hasSaveConflict = saveConflictKey === subtitleKey;
   // A preview belongs to this visit to the subtitle and the cues it submitted.
   const syncDocument = useMemo(
     () => ({ subtitleKey, cues: docState.cues }),
@@ -231,6 +239,7 @@ export default function EditorPage() {
       loadedRef.current = false;
       setLoaded(false);
       setCreatedSuccessfully(false);
+      setSaveConflictKey(null);
       prevSubtitleKeyRef.current = subtitleKey;
     }
   }, [subtitleKey]);
@@ -240,11 +249,15 @@ export default function EditorPage() {
   // never loaded as the new one.
   useEffect(() => {
     if (parseResult && !loadedRef.current && !isPlaceholderData) {
+      // For source files the tag belongs to the cues loaded into the editor.
+      if (mediaType === "source") {
+        etagRef.current = queryResult?.etag?.replace(/^"|"$/g, "") ?? "";
+      }
       dispatch({ type: "LOAD", cues: parseResult.cues });
       loadedRef.current = true;
       setLoaded(true);
     }
-  }, [parseResult, isPlaceholderData]);
+  }, [parseResult, isPlaceholderData, mediaType, queryResult?.etag]);
 
   // Auto-save to localStorage on every change (debounced 2s)
   const autoSaveKey = buildEditorAutosaveKey(
@@ -344,14 +357,12 @@ export default function EditorPage() {
     if (autoSaveKey) removeStoredValue(autoSaveKey);
   }, [autoSaveKey]);
 
-  // Keep etagRef in sync whenever the query result changes (initial load,
-  // refetch after POST create, etc.). Backend sends ETag with quotes,
-  // e.g. '"abc123"'. Strip them so the If-Match header works correctly.
+  // Keep legacy ETags in sync on refetches, including after POST create.
   useEffect(() => {
-    if (queryResult?.etag) {
+    if (mediaType !== "source" && queryResult?.etag) {
       etagRef.current = queryResult.etag.replace(/^"|"$/g, "");
     }
-  }, [queryResult?.etag]);
+  }, [mediaType, queryResult?.etag]);
 
   // Selection state
   const [selectedIndex, setSelectedIndex] = useState(0);
@@ -439,6 +450,8 @@ export default function EditorPage() {
 
   // Save mutations
   const saveMutation = useSubtitleSave();
+  const sourceSaveDisabled =
+    mediaType === "source" && (hasSaveConflict || saveMutation.isPending);
   const createMutation = useSubtitleCreate();
 
   // Save As modal state
@@ -510,6 +523,7 @@ export default function EditorPage() {
 
   // Navigation blocker for unsaved changes
   const blocker = useBlocker(docState.dirty);
+  const pendingSaveNavRef = useRef<string | null>(null);
 
   // Browser beforeunload warning for unsaved changes
   useEffect(() => {
@@ -624,7 +638,15 @@ export default function EditorPage() {
   const handleSave = useCallback(() => {
     // Until the subtitle this URL names has loaded, the document is the one
     // the editor just left, and saving it here would write it under this name.
-    if (!mediaType || !mediaId || !language || isPlaceholderData) return;
+    if (
+      !mediaType ||
+      !mediaId ||
+      !language ||
+      isPlaceholderData ||
+      sourceSaveDisabled
+    ) {
+      return;
+    }
 
     // Commit any uncommitted text from the detail pane textarea before
     // serializing. This handles the case where the user typed text and
@@ -733,8 +755,17 @@ export default function EditorPage() {
             // eslint-disable-next-line @typescript-eslint/no-explicit-any
             const status = (err as any)?.response?.status;
             if (status === 412) {
-              // ETag mismatch: file was modified externally.
-              // Force save by retrying without ETag (skip conflict check).
+              if (mediaType === "source") {
+                if (
+                  currentSyncDocumentRef.current?.subtitleKey === subtitleKey
+                ) {
+                  pendingSaveNavRef.current = null;
+                  setSaveConflictKey(subtitleKey);
+                }
+                return;
+              }
+
+              // Preserve the legacy overwrite retry for Arr and Sports files.
               saveMutation.mutate(
                 {
                   mediaType,
@@ -798,6 +829,8 @@ export default function EditorPage() {
     encoding,
     isNewSubtitle,
     isPlaceholderData,
+    sourceSaveDisabled,
+    subtitleKey,
     saveMutation,
     createMutation,
     autoSaveKey,
@@ -807,6 +840,39 @@ export default function EditorPage() {
     finishCreate,
     scopedArrInstanceId,
   ]);
+
+  const handleReloadConflictedSubtitle = async () => {
+    const documentBeforeReload = currentSyncDocumentRef.current;
+    const refreshed = await refetchSubtitle();
+    if (currentSyncDocumentRef.current?.subtitleKey !== subtitleKey) return;
+    if (currentSyncDocumentRef.current !== documentBeforeReload) {
+      showNotification({
+        message:
+          "The subtitle was edited during reload. Your edits are still unsaved.",
+        color: "yellow",
+      });
+      return;
+    }
+
+    const latest = refreshed.isSuccess ? refreshed.data : undefined;
+    const parsed = latest ? parseSubtitleContent(latest.data) : null;
+    if (!latest || !parsed) {
+      showNotification({
+        title: "Could not reload the subtitle",
+        message: "Your edits are still unsaved. Try reloading again.",
+        color: "red",
+      });
+      return;
+    }
+
+    etagRef.current = latest.etag?.replace(/^"|"$/g, "") ?? "";
+    dispatch({ type: "LOAD", cues: parsed.cues });
+    setSelectedIndex(0);
+    setMultiSelect(new Set());
+    setSaveConflictKey(null);
+    setRecoveryAvailable(null);
+    if (autoSaveKey) removeStoredValue(autoSaveKey);
+  };
 
   // Subtitle language switcher
   const [pendingLangSwitch, setPendingLangSwitch] = useState<string | null>(
@@ -829,7 +895,6 @@ export default function EditorPage() {
   );
 
   // Navigate after save completes (dirty becomes false while pendingLangSwitch is set)
-  const pendingSaveNavRef = useRef<string | null>(null);
   useEffect(() => {
     if (pendingSaveNavRef.current && !docState.dirty) {
       const target = pendingSaveNavRef.current;
@@ -843,11 +908,11 @@ export default function EditorPage() {
   }, [docState.dirty, navigate, editorPath]);
 
   const handleSwitchSave = useCallback(() => {
-    if (!pendingLangSwitch) return;
+    if (!pendingLangSwitch || sourceSaveDisabled) return;
     pendingSaveNavRef.current = pendingLangSwitch;
     setPendingLangSwitch(null);
     handleSave();
-  }, [pendingLangSwitch, handleSave]);
+  }, [pendingLangSwitch, sourceSaveDisabled, handleSave]);
 
   const handleSwitchDrop = useCallback(() => {
     if (!pendingLangSwitch) return;
@@ -1944,7 +2009,7 @@ export default function EditorPage() {
   }
 
   // Real error (not "create new" mode)
-  if (error && !isNewSubtitle) {
+  if (error && !isNewSubtitle && !hasSaveConflict) {
     return (
       <Alert color="red" title="Error" m="md">
         {error.message || "Failed to load subtitle content"}
@@ -1953,7 +2018,7 @@ export default function EditorPage() {
   }
 
   // Parse failure (only when we have data but parsing failed)
-  if (data && !parseResult) {
+  if (data && !parseResult && !hasSaveConflict) {
     return (
       <Alert color="red" title="Parse Error" m="md">
         Failed to parse subtitle file
@@ -2133,6 +2198,7 @@ export default function EditorPage() {
         format={format}
         language={data?.language ?? language ?? ""}
         canSaveAs={mediaType !== "source"}
+        saveDisabled={sourceSaveDisabled}
         bookmarkFilterActive={bookmarkFilterActive}
         bookmarkCount={bookmarkedIds.size}
         onToggleBookmarkFilter={() => setBookmarkFilterActive((v) => !v)}
@@ -2140,6 +2206,31 @@ export default function EditorPage() {
         translating={translating}
         referenceActive={referenceCueList.length > 0}
       />
+
+      {hasSaveConflict && (
+        <Alert
+          color="yellow"
+          title="Subtitle changed on disk"
+          m="xs"
+          style={{ flexShrink: 0 }}
+        >
+          <Group gap="sm" justify="space-between">
+            <Text size="sm">
+              Your edits are still here. Reloading replaces them with the latest
+              file.
+            </Text>
+            <Button
+              size="xs"
+              variant="light"
+              color="yellow"
+              loading={isFetching}
+              onClick={handleReloadConflictedSubtitle}
+            >
+              Discard edits and reload
+            </Button>
+          </Group>
+        </Alert>
+      )}
 
       {/* Auto-save recovery banner */}
       {recoveryAvailable?.key === autoSaveKey && (
@@ -2676,7 +2767,12 @@ export default function EditorPage() {
           >
             Discard
           </Button>
-          <Button size="xs" color="green" onClick={handleSwitchSave}>
+          <Button
+            size="xs"
+            color="green"
+            onClick={handleSwitchSave}
+            disabled={sourceSaveDisabled}
+          >
             Save
           </Button>
         </Group>
