@@ -48,6 +48,8 @@ def item_to_dict(item):
         'imdb_id': item.imdb_id, 'tmdb_id': item.tmdb_id, 'tvdb_id': item.tvdb_id,
         'profile_id': item.profile_id, 'monitored': bool(item.monitored), 'arr_shadow': bool(item.arr_shadow),
         'file_size': item.file_size, 'scene_name': item.scene_name,
+        **({'server_missing': bool(item.server_missing), 'external_id': item.external_id}
+           if item.external_id is not None else {}),
         'subtitles': _listing(item.subtitles), 'missing_subtitles': _listing(item.missing_subtitles),
         'indexed_at': item.indexed_at.isoformat() if item.indexed_at else None,
         **({'event_date': item.event_date, 'round': item.episode, 'part_number': item.part_number or None,

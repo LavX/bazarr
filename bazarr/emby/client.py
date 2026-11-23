@@ -105,6 +105,22 @@ class EmbyClient:
     def __exit__(self, *_args):
         self.close()
 
+    def get_libraries(self):
+        return self.http.request_json('GET', '/Library/VirtualFolders')
+
+    def _fetch_collection_items(self, params):
+        return self.http.request_json('GET', '/Items', params=params)
+
+    def get_item_pages(self, parent_id, item_types, *, cancel=None):
+        from media_servers.item_pages import collect_items
+
+        return collect_items(self._fetch_collection_items, parent_id, item_types, cancel)
+
+    def lookup_item_ids(self, ids):
+        from media_servers.item_pages import find_ids
+
+        return find_ids(self._fetch_collection_items, ids)
+
     def test_connection(self) -> dict:
         info = self.http.request_json("GET", "/System/Info")
         if (not isinstance(info, dict) or not isinstance(info.get("ServerName"), str)

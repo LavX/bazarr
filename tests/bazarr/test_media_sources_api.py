@@ -66,12 +66,12 @@ def test_a_source_is_created_with_its_library_and_root(api):
     ({"name": " "}, "A name is required"),
     ({"name": None}, "A name is required"),
     ({"library": None}, "A library is required"),
-    ({"kind": "jellyfin"}, "No media source kind"),
+    ({"kind": "jellyfin"}, "A saved media server connection is required"),
     ({"kind": "plex"}, "No media source kind"),
     ({"library": {"path": "relative", "content_kind": "movie"}}, "must be absolute"),
     ({"library": {"path": "/definitely/not/there", "content_kind": "movie"}}, "does not exist"),
     ({"library": {"path": "{movies}", "content_kind": "music"}}, "content_kind must be one of"),
-    ({"library": {"path": "{movies}", "content_kind": "sports"}}, "Only movie and series libraries"),
+    ({"library": {"path": "{movies}", "content_kind": "music"}}, "content_kind must be one of"),
     ({"library": {"path": "{movies}", "content_kind": "movie", "profile_id": 99}}, "profile does not exist"),
     ({"scan_frequency_hours": -1}, "scan_frequency_hours"),
     ({"scan_frequency_hours": "6"}, "scan_frequency_hours"),
@@ -576,7 +576,7 @@ def test_editing_the_roots_of_a_server_library_deletes_only_what_is_out_of_scope
     narrow = api.movies / "Only"
     narrow.mkdir()
     deleted = service.change_library_roots(created["id"], library_id, [
-        {"server_path": "/server/only", "local_path": str(narrow)}])
+        {"server_path": "/server/only", "local_path": str(narrow)}], confirmed_removed=2)
 
     # Both files that are still on disk are out of scope and deleted; the one whose path is gone is left alone,
     # so that a mount that moved can have its rows re-pathed by the next scan.

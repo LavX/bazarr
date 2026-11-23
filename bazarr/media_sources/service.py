@@ -16,7 +16,7 @@ from app.get_providers import get_providers
 from app.jobs_queue import JobFailed, jobs_queue
 from subtitles.indexer.missing_refresh import queue_missing_subtitles_recalculation
 
-from . import identity, paths, repository
+from . import paths, repository
 from .analysis import index_matches_file, local_content_stamp, local_stat, source_search_probes
 from .context import SourceItemGone, resolve_item, resolve_same_item
 from .db import source_transaction
@@ -100,11 +100,133 @@ def _overlap_error(path, session):
                           f"sits inside another library's.", 409, 'overlap')
 
 
+def _server_connection(instance_id, kind=None, session=None):
+    from media_servers.http import MediaServerError
+
+    from .kinds.media_server import server_row
+
+    if not isinstance(instance_id, str) or not instance_id:
+        raise SourceError('A saved media server connection is required')
+    try:
+        return server_row(instance_id, kind, session)
+    except MediaServerError as error:
+        raise SourceError('No matching saved Jellyfin or Emby connection', 404, 'not_found') from error
+
+
+def server_libraries(instance_id, session=None):
+    from media_servers.http import MediaServerError
+
+    from .kinds.media_server import library_choices
+
+    connection = _server_connection(instance_id, session=session)
+    try:
+        return library_choices(connection, target=session)
+    except MediaServerError as error:
+        raise SourceError('Could not list libraries from the saved media server connection', 502,
+                          'server_unavailable') from error
+
+
+def _checked_server_roots(roots, content_kind, session, library_id=None):
+    from media_servers.paths import is_media_path, media_paths_equal
+
+    from .kinds.folder import is_storable
+
+    if not isinstance(roots, list) or not roots:
+        raise SourceError('Map at least one server root to a local folder')
+    result = []
+    for root in roots:
+        if (not isinstance(root, dict) or not is_media_path(root.get('server_path'))
+                or not is_storable(root['server_path'])):
+            raise SourceError('Each root needs an absolute server_path')
+        _only(root, ('local_path', 'server_path'), 'adding a server root')
+        remote = root['server_path']
+        check = paths.validate_path(root.get('local_path'), content_kind, target=session, exclude_library_id=library_id,
+                                    include_warnings=False)
+        if check.errors:
+            problem = check.errors[0]
+            raise SourceError(problem.message, 409 if problem.code == 'overlap' else 400, problem.code)
+        if not is_storable(check.path):
+            raise SourceError('The local path cannot be stored')
+        if any(media_paths_equal(previous, remote) or os.path.normcase(local) == os.path.normcase(check.path)
+               for previous, local in result):
+            raise SourceError('Server and local roots must each be unique')
+        result.append((remote, check.path))
+    return result
+
+
+def _server_library_fields(instance_id, library, session):
+    _only(library, ('server_library_id', 'content_kind', 'profile_id', 'roots'), 'adding a server library')
+    locator = library.get('server_library_id')
+    if not isinstance(locator, str) or not locator:
+        raise SourceError('server_library_id is required')
+    chosen = next((item for item in server_libraries(instance_id, session) if item['id'] == locator), None)
+    if chosen is None:
+        raise SourceError('Library not found on the saved media server', 404, 'not_found')
+    content_kind = library.get('content_kind') or chosen['content_kind']
+    if content_kind not in repository.CONTENT_KINDS:
+        raise SourceError(f"content_kind must be one of {', '.join(repository.CONTENT_KINDS)}")
+    return dict(locator=locator, name=chosen['name'], content_kind=content_kind,
+                profile_id=_profile_id(library), roots=library.get('roots', chosen['roots']))
+
+
+def _insert_server_library(source_id, fields, connection):
+    roots = _checked_server_roots(fields['roots'], fields['content_kind'], connection)
+    return repository.create_library(source_id=source_id, locator=fields['locator'], name=fields['name'],
+                                     content_kind=fields['content_kind'], profile_id=fields['profile_id'],
+                                     server_roots=roots, target=connection)
+
+
+def _create_server_source(payload, kind, session):
+    import sqlalchemy as sa
+
+    from app.database import TableMediaServerInstances
+
+    from .kinds.folder import is_storable
+
+    saved = _server_connection(payload.get('media_server_instance_id'), kind, session)
+    instance_id, revision = saved.id, saved.revision
+    name = payload.get('name', saved.name)
+    if not isinstance(name, str) or not name.strip() or '\x00' in name or not is_storable(name):
+        raise SourceError('A name is required')
+    name = name.strip()
+    enabled = _flag(payload.get('enabled', True))
+    frequency = _frequency(payload.get('scan_frequency_hours', 12))
+    library = payload.get('library')
+    if library is not None and not isinstance(library, dict):
+        raise SourceError('library must be an object')
+    fields = _server_library_fields(instance_id, library, session) if library is not None else None
+    table = TableMediaServerInstances.__table__
+    try:
+        with _creation_lock, source_transaction(session) as connection:
+            current = connection.execute(sa.select(table.c.revision).where(
+                table.c.id == instance_id, table.c.kind == kind).with_for_update()).first()
+            if current is None or current.revision != revision:
+                raise SourceError('The saved connection changed. Reload it and try again.', 409, 'connection_changed')
+            if repository.source_for_server(instance_id, connection):
+                raise SourceError('This connection already has a media source', 409, 'source_exists')
+            if repository.name_taken(name, connection):
+                raise SourceError('A media source with that name already exists', 409, 'name_taken')
+            source_id = repository.create_source(kind=kind, name=name, enabled=enabled,
+                                                 scan_frequency_hours=frequency,
+                                                 media_server_instance_id=instance_id, target=connection)
+            if fields is not None:
+                _insert_server_library(source_id, fields, connection)
+    except IntegrityError as error:
+        raise SourceError('The media source could not be created because its configuration changed',
+                          409, 'source_conflict') from error
+    refresh_tasks()
+    return source_id
+
+
 def create_source(payload, session=None):
     """Create a source and its first library in one transaction. Returns the new source id."""
-    _only(payload, ('name', 'kind', 'library', 'enabled', 'scan_frequency_hours'), 'creating a media source')
-    name = payload.get('name')
     kind_name = payload.get('kind') or 'folder'
+    fields = ('name', 'kind', 'library', 'enabled', 'scan_frequency_hours')
+    if kind_name in ('jellyfin', 'emby'):
+        _only(payload, (*fields, 'media_server_instance_id'), 'creating a media server source')
+        return _create_server_source(payload, kind_name, session)
+    _only(payload, fields, 'creating a media source')
+    name = payload.get('name')
     library = payload.get('library')
     if not isinstance(name, str) or not name.strip():
         raise SourceError('A name is required')
@@ -207,12 +329,21 @@ def delete_source(source_id, session=None):
 
 
 def add_library(source_id, payload, session=None):
-    """Add a folder library to a folder source."""
+    """Add one folder or server library to its source."""
     source = repository.get_source(source_id, session)
     if source is None:
         raise SourceError('No such media source', 404, 'not_found')
     if source.kind != 'folder':
-        raise SourceError('Libraries of a media server source come from the server', 400, 'not_folder')
+        fields = _server_library_fields(source.media_server_instance_id, payload, session)
+        try:
+            with _creation_lock, source_transaction(session) as connection:
+                current = repository.get_source(source.id, connection, lock_key=True)
+                if current is None or current.created_at != source.created_at:
+                    raise SourceError('The media source changed. Reload it and try again.', 409, 'source_changed')
+                library_id = _insert_server_library(source_id, fields, connection)
+        except IntegrityError as error:
+            raise SourceError('That server library is already part of this source', 409, 'library_exists') from error
+        return describe_library(library_id, session)
     path, content_kind = _checked_folder(payload, source.kind)
     profile_id = _profile_id(payload)
     with _creation_lock:
@@ -236,6 +367,11 @@ def update_library(source_id, library_id, payload, session=None):
     if 'path' in payload or 'locator' in payload:
         raise SourceError("A folder library's path cannot be edited: remove the library and add a new one", 400,
                           'immutable')
+    if 'roots' in payload:
+        _only(payload, ('roots', 'confirmed_removed'), 'editing server roots')
+        deleted = change_library_roots(source_id, library_id, payload['roots'], session,
+                                       confirmed_removed=payload.get('confirmed_removed'))
+        return {**describe_library(library_id, session), 'removed_items': deleted}
     unknown = set(payload) - {'enabled', 'profile_id', 'name'}
     if unknown:
         raise SourceError(f"Cannot edit {', '.join(sorted(unknown))}")
@@ -286,27 +422,14 @@ def delete_library(source_id, library_id, session=None):
 
 
 def preview_root_edit(library_id, local_paths, session=None):
-    """The rows a root edit would delete: the ones whose path lies under none of ``local_paths`` and whose file is
-    still on disk (the files are there but no longer in the library). Rows whose path is gone are left alone: if
-    a mount moved and the user changed ``local_path`` to follow it, the next scan finds the files under the new
-    root and re-paths those rows with their overrides."""
-    roots = [repository.normalize_path(path) for path in local_paths]
-    out = []
-    for row in repository.library_items(library_id, session):
-        if any(row.path == root or row.path.startswith(root.rstrip(os.sep) + os.sep) for root in roots):
-            continue
-        if not identity.path_is_gone(row.path):
-            out.append(row.id)
-    return out
+    """Only existing files outside every retained local root are removed by a root edit."""
+    roots = [os.path.normcase(repository.normalize_path(path)) for path in local_paths]
+    return [row.id for row in repository.library_items(library_id, session)
+            if not any(repository._inside(os.path.normcase(row.path), root) for root in roots)
+            and os.path.isfile(row.path)]
 
 
-def change_library_roots(source_id, library_id, roots, session=None):
-    """Replace the roots of a media server library. ``roots`` is ``[{server_path, local_path}]``.
-
-    The test runs against the ``local_path`` values after the edit, so an edit that changes only ``server_path``
-    deletes nothing. The out-of-scope rows whose files still exist are deleted in the same transaction as the
-    edit, and a scan of the library is queued at once. Returns how many rows were deleted, for the dialog, which
-    says that history and blacklist rows are kept."""
+def _server_library_for_edit(source_id, library_id, session):
     library = repository.get_library(library_id, session)
     source = repository.get_source(source_id, session)
     if library is None or source is None or library.source_id != source_id:
@@ -314,31 +437,40 @@ def change_library_roots(source_id, library_id, roots, session=None):
     if source.kind == 'folder':
         raise SourceError("A folder library's path cannot be edited: remove the library and add a new one", 400,
                           'immutable')
-    cleaned = []
-    for root in roots:
-        if not isinstance(root, dict) or not isinstance(root.get('local_path'), str) \
-                or not os.path.isabs(root['local_path']):
-            raise SourceError('Each root needs an absolute local_path')
-        local = repository.normalize_path(root['local_path'])
-        if not os.path.isdir(local) or not os.access(local, os.R_OK | os.X_OK):
-            raise SourceError(f'{local} is not a readable folder')
-        clash = repository.overlapping_root(local, session, exclude_library_id=library_id)
-        if clash is not None:
-            raise SourceError(f"{local} overlaps {clash[1]}, a library of the media source {clash[0]}", 409,
-                              'overlap')
-        cleaned.append((root.get('server_path'), local))
-    if not cleaned or len({local for _, local in cleaned}) != len(cleaned):
-        raise SourceError('A library needs at least one root, and no root twice')
-    doomed = preview_root_edit(library_id, [local for _, local in cleaned], session)
-    with source_transaction(session) as connection:
-        repository.replace_roots(library_id, cleaned, connection)
-        repository.delete_items(doomed, connection)
+    return library
+
+
+def preview_library_roots(source_id, library_id, roots, session=None):
+    library = _server_library_for_edit(source_id, library_id, session)
+    checked = _checked_server_roots(roots, library.content_kind, session, library_id)
+    return len(preview_root_edit(library_id, [local for _, local in checked], session))
+
+
+def change_library_roots(source_id, library_id, roots, session=None, *, confirmed_removed=None):
+    """Replace the mappings and remove only the existing files confirmed in the preview."""
+    from .scanner import library_lock
+
+    lock = library_lock(library_id)
+    if not lock.acquire(blocking=False):
+        raise SourceError('This library is scanning. Try again when its scan finishes.', 409, 'library_busy')
+    try:
+        with _creation_lock, source_transaction(session) as connection:
+            library = _server_library_for_edit(source_id, library_id, connection)
+            cleaned = _checked_server_roots(roots, library.content_kind, connection, library_id)
+            doomed = preview_root_edit(library_id, [local for _, local in cleaned], connection)
+            if (confirmed_removed is not None or doomed) and (
+                    type(confirmed_removed) is not int or confirmed_removed != len(doomed)):
+                raise SourceError(f'This change removes {len(doomed)} items. Preview the change and confirm that count.',
+                                  409, 'root_change_confirmation')
+            repository.replace_roots(library_id, cleaned, connection)
+            deleted = repository.delete_items(doomed, connection, owner_library_id=library_id)
+    finally:
+        lock.release()
     try:
         queue_scan(source_id, library_id)
     except SourceError as error:
-        # The edit is committed. A library that is disabled is scanned when it is enabled again.
         logging.info('BAZARR no scan was queued after the roots of library %s changed: %s', library_id, error)
-    return len(doomed)
+    return deleted
 
 
 def describe_source(source_id, session=None):

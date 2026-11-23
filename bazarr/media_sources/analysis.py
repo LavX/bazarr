@@ -97,21 +97,23 @@ def _probe_path(item, stamp, target):
     source = repository.get_source(item.source_id, target)
     if source is None:
         return None
-    if source.kind != 'folder':
-        return item.path
     if not is_video_file(item.path):
         return None
-
     library = repository.get_library(item.library_id, target)
-    if library is None or get_kind(source.kind).validate_library(source, library):
+    if library is None:
         return None
-    # A folder library has one root, stored with the same path as its locator.
-    if not any(root.local_path == library.locator for root in repository.get_roots(item.library_id, target)):
+    roots = repository.get_roots(item.library_id, target)
+    if source.kind == 'folder':
+        if get_kind(source.kind).validate_library(source, library):
+            return None
+        # A folder library has one root, stored with the same path as its locator.
+        roots = [root for root in roots if root.local_path == library.locator]
+    if not roots:
         return None
-    root = os.path.realpath(library.locator, strict=True)
+    real_roots = [os.path.realpath(root.local_path) for root in roots]
     path = os.path.realpath(item.path, strict=True)
     # Pass the checked path to the parser. A resolved .strm would let it read a URL.
-    if not is_video_file(path) or path.lower().endswith('.strm') or not _path_under_any_root(path, [root]):
+    if not is_video_file(path) or path.lower().endswith('.strm') or not _path_under_any_root(path, real_roots):
         return None
     resolved_stat = os.stat(path)
     if not S_ISREG(resolved_stat.st_mode) or _content_stamp(resolved_stat) != stamp:

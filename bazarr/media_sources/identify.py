@@ -6,7 +6,7 @@ import os
 from discover import metadata
 
 from .parse import parse_episode_file, parse_movie_file, parse_show_directory
-from .sports_parse import parse_sports_file
+from .sports_parse import parse_sports_file, season_year
 
 
 _EMPTY_IDENTITY = dict(identity_source='filename', identity_candidates=None, tmdb_id=None, imdb_id=None,
@@ -95,10 +95,25 @@ def identify_item(content_kind, path, group_directory=None, group_state='parsed'
 
     if content_kind == 'sports':
         parsed = parse_sports_file(path, group_directory)
-        return {**_EMPTY_IDENTITY, **_named(parsed.title, parsed.year), 'parsed_title': parsed.parsed_title,
-                'identity_state': parsed.identity_state, 'scene_name': parsed.scene_name,
-                'season': parsed.season, 'episode': parsed.round, 'event_date': parsed.event_date,
-                'part_name': parsed.part_name, 'part_number': parsed.part_number or 0}
+        named = parsed
+        if hints and hints.title:
+            remote_title = hints.title.replace('/', ' ').replace('\\', ' ')
+            named = parse_sports_file(os.path.join(os.path.dirname(path), remote_title + '.mkv'), group_directory)
+        event_date = (hints.premiere_date if hints else None) or parsed.event_date or named.event_date
+        year = parsed.year or (season_year(event_date[:4]) if event_date else None) or named.year
+        round_number = parsed.round if parsed.round is not None else named.round
+        parsed_title = named.parsed_title or parsed.parsed_title
+        part_number = parsed.part_number or named.part_number
+        complete = event_date or (year is not None and round_number is not None)
+        values = {**_EMPTY_IDENTITY, **_named(parsed_title or parsed.title, year), 'parsed_title': parsed_title,
+                  'identity_state': 'parsed' if parsed_title and complete else 'unmatched',
+                  'scene_name': parsed.scene_name, 'season': parsed.season if parsed.season is not None else year,
+                  'episode': round_number, 'event_date': event_date,
+                  'part_name': parsed.part_name or named.part_name, 'part_number': part_number or 0}
+        if hints:
+            values.update(external_id=hints.external_id, imdb_id=hints.imdb_id,
+                          tmdb_id=hints.tmdb_id, tvdb_id=hints.tvdb_id)
+        return values
 
     parsed = parse_episode_file(path, group_directory)
     values = {**_EMPTY_IDENTITY, **_named(parsed.title, parsed.year), 'parsed_title': parsed.parsed_title,
@@ -113,7 +128,7 @@ def identify_item(content_kind, path, group_directory=None, group_state='parsed'
                 values[number] = getattr(hints, number)
         if hints.season is not None and hints.episode is not None:
             values['identity_source'] = 'media_server'
-    if parsed.multi_episode:
+    if parsed.multi_episode and not (hints and hints.season is not None and hints.episode is not None):
         values.update(season=None, episode=None)
     complete = values['season'] is not None and values['episode'] is not None
     values['identity_state'] = episode_state(group_state, complete, values['identity_source'])

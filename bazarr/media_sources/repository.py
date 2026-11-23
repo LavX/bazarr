@@ -65,6 +65,11 @@ def has_sources(target=None):
     return Sources is not None and bool(_target(target).execute(sa.select(sa.exists().select_from(Sources))).scalar())
 
 
+def source_for_server(instance_id, target=None):
+    return _target(target).execute(sa.select(Sources.c.id).where(
+        Sources.c.media_server_instance_id == instance_id).limit(1)).scalar()
+
+
 def name_taken(name, target=None):
     return _target(target).execute(sa.select(Sources.c.id).where(Sources.c.name == name)).first() is not None
 
@@ -78,14 +83,15 @@ def create_source(*, kind, name, enabled=True, scan_frequency_hours=12, media_se
 
 
 def create_library(*, source_id, content_kind, locator, name=None, profile_id=None, enabled=True,
-                   local_roots=None, target=None):
+                   local_roots=None, server_roots=None, target=None):
     """Add a library and its roots. A folder library has exactly one, equal to its locator."""
     now = datetime.now()
     library_id = _insert(target, Libraries, dict(
         source_id=source_id, content_kind=content_kind, locator=locator, name=name, profile_id=profile_id,
         enabled=1 if enabled else 0, created_at=now, updated_at=now))
-    for local_path in local_roots or [locator]:
-        _insert(target, Roots, dict(library_id=library_id, local_path=local_path))
+    roots = server_roots if server_roots is not None else [(None, path) for path in (local_roots or [locator])]
+    for remote, local in roots:
+        _insert(target, Roots, dict(library_id=library_id, local_path=local, server_path=remote))
     return library_id
 
 
@@ -265,7 +271,8 @@ def count_items(*, source_id=None, library_id=None, kind=None, target=None):
 
 
 _MATCH_COLUMNS = ('id', 'path', 'kind', 'group_id', 'source_id', 'library_id', 'file_dev', 'file_ino', 'file_size',
-                  'file_mtime_ns', 'identity_source')
+                  'file_mtime_ns', 'identity_source', 'external_id', 'missing_scans', 'server_missing',
+                  'title', 'year', 'imdb_id', 'tmdb_id', 'tvdb_id', 'episode_title', 'season', 'episode', 'event_date')
 
 
 def library_items(library_id, target=None):

@@ -57,7 +57,8 @@ def _arr_root_folders(target=None):
     return roots
 
 
-def validate_path(path, content_kind='movie', *, source_kind='folder', target=None):
+def validate_path(path, content_kind='movie', *, source_kind='folder', target=None, exclude_library_id=None,
+                  include_warnings=True):
     """Everything the Connections page says about a folder before it is added: the refusals (absolute, existing,
     readable, not ``/``, not overlapping Bazarr+'s configuration folder or a root of another library of any
     source) and the warnings (an arr root folder, a folder that is not writable)."""
@@ -66,12 +67,14 @@ def validate_path(path, content_kind='movie', *, source_kind='folder', target=No
     check.errors.extend(kind.validate_library(None, _Draft(check.path, content_kind)))
     if check.errors:
         return check
-    clash = repository.overlapping_root(check.path, target)
+    clash = repository.overlapping_root(check.path, target, exclude_library_id=exclude_library_id)
     if clash is not None:
         check.errors.append(Problem(
             'overlap', f"This folder overlaps {clash[1]}, a library of the media source {clash[0]}. A folder can "
                        f"belong to one library only: use a folder that neither contains nor sits inside another "
                        f"library's."))
+        return check
+    if not include_warnings:
         return check
     try:
         for name, root in _arr_root_folders(target):
@@ -88,3 +91,25 @@ def validate_path(path, content_kind='movie', *, source_kind='folder', target=No
         check.warnings.append('This folder is not writable. Subtitles are written next to the media, or into the '
                               'configured subfolder.')
     return check
+
+
+class ServerRoots:
+    """Map one library's remote paths using only its own saved roots."""
+
+    def __init__(self, roots):
+        self.rows = [dict(local_path=root.server_path, remote_path=root.local_path,
+                          library_id=root.local_path) for root in roots]
+
+    def resolve(self, server_path):
+        from media_servers.http import MediaServerError
+        from media_servers.paths import map_media_path
+
+        resolved = map_media_path(server_path, self.rows)
+        path, root = resolved['path'], resolved['library_id']
+        real_root = os.path.realpath(root)
+        try:
+            if os.path.commonpath((real_root, os.path.realpath(path))) != real_root:
+                raise MediaServerError('path_invalid')
+        except ValueError:
+            raise MediaServerError('path_invalid') from None
+        return path, root

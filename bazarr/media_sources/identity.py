@@ -163,7 +163,7 @@ def _holds_live(row_path, found):
 
 
 def match_library(found_files, rows, *, ignore_dev, foreign_lookup, library_content_kind,
-                  foreign_vouched=lambda holder, found: True):
+                  foreign_vouched=lambda holder, found: True, by_server_id=False):
     """Match a library's discovered files to its stored rows, over the whole library and before any write.
 
     ``ignore_dev(found)`` says whether a file's root changed device since the last scan. ``foreign_lookup(inodes,
@@ -182,9 +182,29 @@ def match_library(found_files, rows, *, ignore_dev, foreign_lookup, library_cont
     claimed = {}  # path -> the row (or holder) id that claimed it
     matched_rows = set()
 
+    if by_server_id:
+        by_id = {found.hints.external_id: found for found in found_files if found.hints and found.hints.external_id}
+        # Server IDs are scoped to this library. A duplicate stored ID cannot displace the file at home.
+        for row in sorted(rows, key=lambda row: (row.path != getattr(by_id.get(row.external_id), 'path', None),
+                                                 row.id)):
+            found = by_id.get(row.external_id)
+            if found is None or found.path in claimed:
+                continue
+            if row.path == found.path:
+                matches = result.unchanged if identity_holds(row, found, ignore_dev(found)) else result.path_only
+            elif _holds_live(row.path, found):
+                matches = result.alias_unchanged
+            else:
+                matches = result.moved
+            matches.append((row, found))
+            claimed[found.path] = row.id
+            matched_rows.add(row.id)
+
     # Pass 1, identity. A row that still holds the file at its own path comes first, so a file never goes to a
     # row elsewhere while its own row is right there.
     for row in rows:
+        if row.id in matched_rows:
+            continue
         found = by_path.get(row.path)
         if found is not None and found.path not in claimed and identity_holds(row, found, ignore_dev(found)):
             claimed[found.path] = row.id
