@@ -33,7 +33,8 @@ import { WHATS_NEW_SEEN_KEY } from "@/utilities/whatsNew";
 // match by position, so a route that appears only once the status has answered
 // would make every later route draw its neighbour on a page opened by address.
 function Routes() {
-  const top: CustomRouteObject[] = useRoutes()[0].children ?? [];
+  const [{ children }] = useRoutes();
+  const top: CustomRouteObject[] = children ?? [];
   const settings = top.find((route) => route.path === "settings");
   const navigation = groupRoutes(top).flatMap((group) =>
     group.items.map((item) => item.path),
@@ -327,6 +328,10 @@ describe("Translation addresses in the mounted application router", () => {
       expect(save).toBeDisabled();
       fireEvent.click(save);
       fireEvent.keyDown(document, { key: "s", ctrlKey: true });
+      if (!(save instanceof HTMLButtonElement) || !save.form) {
+        throw new Error("Save button is not associated with a form");
+      }
+      fireEvent.submit(save.form);
       await act(async () => new Promise((resolve) => setTimeout(resolve, 20)));
       expect(submitted).toHaveLength(0);
 
