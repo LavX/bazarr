@@ -52,6 +52,7 @@ subliminal.video.Movie.__bases__ = (Video,)
 
 if not getattr(subliminal.video.Episode, '_bazarr_episode_init_patched', False):
     _episode_init = subliminal.video.Episode.__init__
+    _episode_repr = subliminal.video.Episode.__repr__
 
     def episode_init(self, name, series, season, episodes=None, *args, episode=None, **kwargs):
         if episodes is None and episode is not None:
@@ -64,7 +65,14 @@ if not getattr(subliminal.video.Episode, '_bazarr_episode_init_patched', False):
     def set_episode(self, value):
         self.episodes = [value] if value is not None else []
 
+    def episode_repr(self):
+        # A source file can be searched by hash before its episode is known.
+        if self.season is None:
+            return f'<{type(self).__name__} [{self.series}]>'
+        return _episode_repr(self)
+
     subliminal.video.Episode.__init__ = episode_init
+    subliminal.video.Episode.__repr__ = episode_repr
     subliminal.video.Episode.episode = property(get_episode, set_episode)
     subliminal.video.Episode._bazarr_episode_init_patched = True
 

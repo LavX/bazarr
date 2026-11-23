@@ -17,6 +17,7 @@ import itertools
 import rarfile
 import requests
 
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 from functools import partial
 from os import scandir
@@ -31,6 +32,7 @@ from concurrent.futures import as_completed
 from .extensions import provider_registry
 from .exceptions import APIThrottled, MustGetBlacklisted, SubtitleCandidateRejected
 from .score import compute_score, MAX_SCORES
+from subliminal.exceptions import GuessingError
 from subliminal.video import VIDEO_EXTENSIONS, Video, Episode, Movie
 from subliminal.core import ProviderPool, ThreadPoolExecutor, check_video
 
@@ -284,70 +286,55 @@ class _ProviderConfigs(dict):
         super().__init__(*args, **kwargs)
         self._pool = pool
 
-    def update(self, items):
+    @staticmethod
+    def _stale(name, items):
         stamp = getattr(items, 'ownership', None)
-        counts = getattr(provider_registry, 'ownership_generations', None)
-        if stamp is not None and counts is not None:
-            current = counts()
-            stale = {key for key in items if stamp.get(key, 0) != current.get(key, 0)
-                     and provider_registry[key] is not None and not getattr(provider_registry[key], 'hub_proxy', False)}
-            if stale:
-                logger.debug('Not merging settings read before %s changed hands', sorted(stale))
-                items = {key: value for key, value in items.items() if key not in stale}
+        if stamp is not None and provider_registry.ownership_generation(name) != stamp.get(name, 0):
+            logger.debug('Not merging settings read before %s changed hands', name)
+            return True
+        return False
+
+    def update(self, items):
         updated = set()
-        # Restart providers with new configs
-        for key, val in items.items():
-            # Don't restart providers that are not enabled
-            if key not in self._pool.providers:
+        for name, config in items.items():
+            # Check ownership and write together. A restart can do network work,
+            # so it runs after both locks have been released.
+            with getattr(provider_registry, 'lock', nullcontext()), self._pool._store_lock:
+                if self._stale(name, items):
+                    continue
+                current = self.get(name)
+                restart = name in self._pool.providers and current is not None and current != config
+                if restart:
+                    cached = self._pool.initialized_providers.get(name)
+                    current.update(config)
+                    # Refuse an instance that started building with the old settings.
+                    bump_provider_generation(name)
+                else:
+                    _nested_update(self, {name: config})
+            if not restart:
                 continue
 
-            # key: provider's name; val: config dict
-            registered_val = self.get(key)
-
-            if registered_val is None or registered_val == val:
+            updated.add(name)
+            logger.debug("Config changed. Restarting provider: %s", name)
+            # Tear down before rebuilding: EmbeddedSubtitles removes a cache
+            # directory its replacement needs to create, and a Hub proxy owns
+            # a worker that dropping a reference cannot stop.
+            # A handover or another settings save may already have replaced it.
+            self._pool.retire_provider(name, accept=lambda instance: instance is cached)
+            if self._stale(name, items):
                 continue
-
-            updated.add(key)
-
-            # The new dict might be a partial dict
-            registered_val.update(val)
-
-            logger.debug("Config changed. Restarting provider: %s", key)
-
-            # An instance that is being built right now read the old settings.
-            # The change is made above, so a build that starts after this sees
-            # the new ones; this makes the pool refuse the one already running,
-            # which would otherwise be stored and then skipped by every later
-            # update, since the stored config already matches.
-            bump_provider_generation(key)
-
-            # Tear the old instance down before building its replacement.
-            # Dropping the reference releases nothing it owns, and a Provider
-            # Hub provider owns a worker process and the threads pumping its
-            # stdio, so a settings save that touched a config used to leak one
-            # for the life of the process. Order matters as much as the call
-            # does: EmbeddedSubtitles.terminate() removes a cache directory
-            # every instance of it shares, so tearing the old one down last
-            # would delete what the replacement had just created.
-            self._pool.retire_provider(key)
 
             try:
-                self._pool._build_and_install(key, lambda: registered_val)
+                self._pool._build_and_install(name, lambda: self.get(name, {}))
             except Exception as error:
-                # Nothing is installed. The pool initializes on next access, so
-                # a provider that is merely unreachable right now comes back on
-                # its own, with the new config rather than the one the user
-                # just changed away from.
-                self._pool._notify_throttle(key, error)
+                # Nothing is installed. The next access retries initialization
+                # with the current settings.
+                self._pool._notify_throttle(name, error)
 
         if updated:
             logger.debug("Providers with config updates: %s", updated)
         else:
             logger.debug("No provider config updates")
-
-        _nested_update(self, items)
-
-        return None
 
 
 class _Banlist:
@@ -450,6 +437,14 @@ class ProviderExcludedWhileQueuedError(ProviderExcludedError):
     provider excluded once it got there. Handled like any exclusion."""
 
 
+class ProviderItemExcludedError(ProviderExcludedError):
+    """A provider cannot serve this item, but remains usable for others."""
+
+    def __init__(self, provider, reason):
+        super().__init__(provider)
+        self.reason = reason
+
+
 class ProviderBusyError(Exception):
     """A request that could not get its turn on the provider's worker within
     its own timeout. Deliberately not a ProviderExcludedError: an excluded
@@ -462,6 +457,10 @@ class ProviderRetiredError(Exception):
     the call reached its worker. Nothing was sent: the caller asks the pool for
     the current instance and calls that one. Never a provider failure, so it
     records no backoff and no discard."""
+
+
+class ProviderCallInterruptedError(Exception):
+    """The host refused or interrupted an operation across provider retirement."""
 
 
 class ListingStopped(Exception):
@@ -499,6 +498,23 @@ def _source_kwargs(carrier):
     return {} if context is None else {'source_context': context}
 
 
+_provider_attempt_observer = contextvars.ContextVar('provider_attempt_observer', default=None)
+
+
+def _provider_owner(name, instance=None):
+    if instance is not None and hasattr(instance, '_registry_owner'):
+        return instance._registry_owner
+    owner = getattr(provider_registry, 'owner', None)
+    if owner is None:
+        return None
+    provider_class, generation = owner(name)
+    return (type(instance) if instance is not None else provider_class), generation
+
+
+def _matches_provider_owner(name, owner):
+    return owner is None or provider_registry.owner(name) == owner
+
+
 def _adapt_throttle_callback(callback):
     """Negotiate the optional context once, without retrying callback failures.
 
@@ -518,7 +534,7 @@ def _adapt_throttle_callback(callback):
     if any(item.kind == inspect.Parameter.VAR_KEYWORD for item in parameters.values()):
         return callback
 
-    unsupported = [name for name in ("sports_context", "source_context", "operation", "announce")
+    unsupported = [name for name in ("sports_context", "source_context", "operation", "announce", "provider_owner")
                    if not (name in parameters
                            and parameters[name].kind in (inspect.Parameter.POSITIONAL_OR_KEYWORD,
                                                          inspect.Parameter.KEYWORD_ONLY))]
@@ -528,9 +544,10 @@ def _adapt_throttle_callback(callback):
     unset = object()
 
     @wraps(callback)
-    def legacy(*args, sports_context=unset, source_context=unset, operation=unset, announce=unset, **kwargs):
+    def legacy(*args, sports_context=unset, source_context=unset, operation=unset, announce=unset,
+               provider_owner=unset, **kwargs):
         for name, value in (("sports_context", sports_context), ("source_context", source_context),
-                            ("operation", operation), ("announce", announce)):
+                            ("operation", operation), ("announce", announce), ("provider_owner", provider_owner)):
             if value is not unset and name not in unsupported:
                 kwargs[name] = value
         return callback(*args, **kwargs)
@@ -585,6 +602,21 @@ def _hub_candidate_fails_forced_hi(subtitle, hearing_impaired):
     """
     return (hearing_impaired == "force HI" and getattr(subtitle, "hub_proxy", False)
             and subtitle.hearing_impaired is not True)
+
+
+# Verified standalone inputs for legacy providers. A provider can require a
+# hash and still perform coordinate-based searches, as NapiProjekt does.
+_UNLOCATED_EPISODE_FILE_SEARCH = frozenset(('embeddedsubtitles', 'whisperai'))
+_UNLOCATED_EPISODE_HASH_SEARCH = {'shooter': 'shooter', 'napisy24': 'napisy24'}
+
+
+def _accepts_unlocated_episode(provider, provider_class, video):
+    if getattr(provider_class, 'hub_proxy', False):
+        return False
+    hash_key = _UNLOCATED_EPISODE_HASH_SEARCH.get(provider)
+    if hash_key:
+        return bool(video.hashes.get(hash_key))
+    return provider in _UNLOCATED_EPISODE_FILE_SEARCH
 
 
 def _hub_search_languages(provider_class, languages):
@@ -657,6 +689,10 @@ class SZProviderPool(ProviderPool):
         #: either seen by a detach that follows or checked against a replacement
         #: that came first.
         self._store_lock = threading.RLock()
+        # Operation counts and pending cleanup for detached built-ins, by instance.
+        self._active_built_in_calls = {}
+        self._retiring_built_ins = defaultdict(set)
+        self._built_in_retirement_ended = threading.Condition(self._store_lock)
 
         #: One lock per provider name, held while an instance of it is built, so
         #: two lookups that arrive together build one instance between them.
@@ -774,7 +810,7 @@ class SZProviderPool(ProviderPool):
     def __exit__(self, exc_type, exc_value, traceback):
         self.terminate()
 
-    def adopt_provider(self, name, provider_config=None):
+    def adopt_provider(self, name, provider_configs=None):
         """Adopt an eligible member without initializing it or clearing discards."""
         if name not in self.providers:
             # A download can name a provider the pool was not built with, for
@@ -797,11 +833,18 @@ class SZProviderPool(ProviderPool):
                 raise ProviderExcludedError(name)
             if self.adoption_gate is not None and not self.adoption_gate(name):
                 raise ProviderExcludedError(name)
-            if provider_config is not None:
-                # Restore the current complete configuration, including removed
-                # options, without initializing outside the bounded search.
-                self.provider_configs[name] = dict(provider_config)
-            self.providers.append(name)
+            with getattr(provider_registry, 'lock', nullcontext()), self._store_lock:
+                if name not in provider_registry:
+                    raise KeyError(name)
+                if name in self.discarded_providers:
+                    raise ProviderExcludedError(name)
+                if name in self.providers:
+                    return
+                if provider_configs is not None and not self.provider_configs._stale(name, provider_configs):
+                    # Replace the complete configuration so removed options are
+                    # dropped, while leaving initialization to the bounded search.
+                    self.provider_configs[name] = dict(provider_configs.get(name, {}))
+                self.providers.append(name)
 
     def __getitem__(self, name):
         self.adopt_provider(name)
@@ -820,13 +863,36 @@ class SZProviderPool(ProviderPool):
         """Run ``call(provider)``; if the instance was replaced before the call
         reached its worker, run it on the current one instead (once).
 
-        ``invoked``, a list, receives each instance a call was attempted on, so
-        the caller can report the outcome to the one that was actually admitted.
+        ``invoked`` receives each attempted instance and its registry ownership,
+        so the caller can acknowledge the right worker and scope the outcome.
         """
         def attempt(instance):
+            owner = _provider_owner(name, instance)
             if invoked is not None:
-                invoked.append(instance)
-            return call(instance)
+                invoked.append((instance, owner))
+            observe = _provider_attempt_observer.get()
+            if observe is not None:
+                observe(name, owner)
+            if getattr(instance, 'hub_proxy', False):
+                return call(instance)
+
+            token = id(instance)
+            with self._store_lock:
+                if self.initialized_providers.get(name) is not instance:
+                    raise ProviderRetiredError(name)
+                calls = self._active_built_in_calls
+                calls[token] = calls.get(token, 0) + 1
+            try:
+                return call(instance)
+            finally:
+                terminate = False
+                with self._store_lock:
+                    calls[token] -= 1
+                    if calls[token] == 0:
+                        del calls[token]
+                        terminate = token in self._retiring_built_ins.get(name, ())
+                if terminate:
+                    self._finish_built_in_retirement(name, instance)
 
         try:
             return attempt(provider)
@@ -837,10 +903,12 @@ class SZProviderPool(ProviderPool):
         except ProviderRetiredError as error:
             raise ProviderBusyError(f"{name} was being replaced") from error
 
-    def _discard_provider(self, name):
-        """Mark a provider as discarded for this pool, under the lock ``update`` walks the set under."""
-        with self._store_lock:
-            self.discarded_providers.add(name)
+    def _discard_provider(self, name, provider_owner=None):
+        """Discard a provider for this pool while its ownership still matches the failure."""
+        registry_guard = provider_registry.lock if provider_owner is not None else nullcontext()
+        with registry_guard, self._store_lock:
+            if _matches_provider_owner(name, provider_owner):
+                self.discarded_providers.add(name)
 
     def _build_lock(self, name):
         with self._store_lock:
@@ -859,17 +927,22 @@ class SZProviderPool(ProviderPool):
         """
         with self._build_lock(name):
             while True:
-                with self._store_lock:
+                with self._built_in_retirement_ended:
+                    # Some built-ins delete a shared cache when terminated.
+                    # Let the detached instance finish cleanup before building a replacement.
+                    self._built_in_retirement_ended.wait_for(lambda: name not in self._retiring_built_ins)
                     stored = self.initialized_providers.get(name)
                 if stored is not None:
                     return stored
                 generation = provider_generation(name)
                 # Looked up once. A plugin detached while Bazarr+ runs leaves the registry, and a name with no
                 # class is excluded (the quiet answer), never a call on None.
-                provider_class = provider_registry[name]
+                owner = _provider_owner(name)
+                provider_class = owner[0] if owner is not None else provider_registry[name]
                 if provider_class is None:
                     raise ProviderExcludedError(name)
                 provider = provider_class(**config())
+                provider._registry_owner = owner
                 provider.initialize()
                 if self._install_provider(name, provider, generation):
                     return provider
@@ -911,7 +984,7 @@ class SZProviderPool(ProviderPool):
             logger.warning('Admission check for provider %r failed, calling it anyway', name, exc_info=True)
             return True
 
-    def _notify_throttle(self, name, error, **context):
+    def _notify_throttle(self, name, error, *, provider_owner=None, **context):
         """Pass a provider failure to throttle_callback from an error handler.
 
         Returns what the callback returned: for the production callback,
@@ -925,6 +998,11 @@ class SZProviderPool(ProviderPool):
         the provider, dropping a torn-down instance) would be skipped. The
         call is never retried; see _adapt_throttle_callback.
         """
+        if not _matches_provider_owner(name, provider_owner):
+            logger.info('Provider %r reported %s after changing ownership', name, type(error).__name__)
+            return False
+        if provider_owner is not None:
+            context['provider_owner'] = provider_owner
         try:
             return self.throttle_callback(name, error, **context)
         except Exception as callback_error:
@@ -969,10 +1047,10 @@ class SZProviderPool(ProviderPool):
         with self._store_lock:
             self.provider_configs.pop(name, None)
             if config is not None:
-                dict.__setitem__(self.provider_configs, name, dict(config))
+                self.provider_configs[name] = dict(config)
             self.discarded_providers.discard(name)
 
-    def retire_provider(self, name):
+    def retire_provider(self, name, accept=None):
         """Terminate an initialized provider without throttling its name.
 
         Teardown failures are logged rather than routed to throttle_callback:
@@ -980,10 +1058,35 @@ class SZProviderPool(ProviderPool):
         and the instance being discarded misbehaving on its way out is no
         reason to do that to the one replacing it.
         """
-        provider = self.detach_provider(name)
-        if provider is None:
-            return
+        provider = self.detach_provider(name, accept)
+        if provider is not None:
+            self._terminate_provider(name, provider)
 
+    def retire_built_in(self, name):
+        """Detach a built-in and terminate it once its admitted calls finish."""
+        with self._store_lock:
+            provider = self.detach_provider(name, lambda cached: not getattr(cached, 'hub_proxy', False))
+            if provider is None:
+                return
+            token = id(provider)
+            self._retiring_built_ins[name].add(token)
+            if token in self._active_built_in_calls:
+                return
+        self._finish_built_in_retirement(name, provider)
+
+    def _finish_built_in_retirement(self, name, provider):
+        try:
+            self._terminate_provider(name, provider)
+        finally:
+            with self._built_in_retirement_ended:
+                pending = self._retiring_built_ins[name]
+                pending.remove(id(provider))
+                if not pending:
+                    del self._retiring_built_ins[name]
+                    self._built_in_retirement_ended.notify_all()
+
+    @staticmethod
+    def _terminate_provider(name, provider):
         try:
             logger.info('Terminating provider %s', name)
             provider.terminate()
@@ -1047,22 +1150,28 @@ class SZProviderPool(ProviderPool):
         :type video: :class:`~subliminal.video.Video`
         :param languages: languages to search for.
         :type languages: set of :class:`~babelfish.language.Language`
-        :param bool discard_on_failure: the listing loops discard a provider
-            that returns None. With this set it is discarded here, before the
-            outcome is reported to the provider, so a request queued behind
-            this one already sees the discard when it rechecks admission.
+        :param bool discard_on_failure: discard the failed provider before
+            acknowledging its outcome, so queued calls see the discard.
         :return: found subtitles.
         :rtype: list of :class:`~subliminal.subtitle.Subtitle` or None
 
         """
+        observe = _provider_attempt_observer.get()
+        if observe is not None:
+            observe(provider, None)
+        invoked = []
+
         def finish(subtitles=None, status="empty", reason=None):
             if detailed:
                 return ProviderSearchResult(provider, subtitles or [], status, reason)
             return subtitles
 
+        def failure_owner():
+            return invoked[-1][1] if invoked else owner
+
         def discard():
             if discard_on_failure:
-                self._discard_provider(provider)
+                self._discard_provider(provider, failure_owner())
 
         logger.debug("Languages requested: %r", languages)
 
@@ -1072,10 +1181,20 @@ class SZProviderPool(ProviderPool):
 
         # The class this search runs on, read once: every check below uses it, so a plugin detached while the
         # search is running is never looked up again and found missing half way through.
-        provider_class = provider_registry[provider]
+        owner = _provider_owner(provider)
+        provider_class = owner[0] if owner is not None else provider_registry[provider]
         if provider_class is None:
             logger.info('Skipping provider %r: it is no longer registered', provider)
+            discard()
             return finish(None, "skipped", "provider_excluded")
+
+        # A source episode can be present without a single season/episode pair.
+        # Providers that search from the file or its hash can still list results.
+        if (isinstance(video, Episode) and getattr(video, 'source_context', None) is not None
+                and (video.season is None or video.episode is None)
+                and not _accepts_unlocated_episode(provider, provider_class, video)):
+            logger.info('Skipping provider %r: source episode has no unique season and episode', provider)
+            return finish([], "skipped", "unsupported_media")
 
         # check video validity
         if not provider_class.check(video):
@@ -1118,9 +1237,6 @@ class SZProviderPool(ProviderPool):
             self.provider_progress_callback(provider)
 
         initialized_provider = None
-        # Every instance the call was tried on; the last one is the one that
-        # was admitted, and the one whose outcome is reported below.
-        invoked = []
         try:
             try:
                 initialized_provider = self[provider]
@@ -1186,6 +1302,10 @@ class SZProviderPool(ProviderPool):
 
             return finish(out, "success" if out else "empty")
 
+        except ProviderItemExcludedError as error:
+            logger.info('Provider %r was excluded for this item: %s', provider, error.reason)
+            return finish([], "skipped", "provider_excluded")
+
         except ProviderExcludedError:
             # Refused by the worker once the request got its turn: the provider
             # went on backoff or was discarded while it waited. Nothing reached
@@ -1194,6 +1314,9 @@ class SZProviderPool(ProviderPool):
                         'waited for its turn; not searching it', provider)
             discard()
             return finish(None, "skipped", "provider_excluded")
+
+        except ProviderCallInterruptedError:
+            return finish([], "skipped", "provider_excluded")
 
         except ProviderBusyError:
             # A healthy provider serving other searches: no backoff, no
@@ -1213,10 +1336,10 @@ class SZProviderPool(ProviderPool):
             # same event two records.
             self._notify_throttle(provider, e, ids=ids, language=list(languages)[0] if len(languages) else None,
                                   sports_context=getattr(video, 'sports_context', None), operation="search",
-                                  announce=True, **_source_kwargs(video))
+                                  announce=True, provider_owner=failure_owner(), **_source_kwargs(video))
+            discard()
             if detailed:
                 return provider_search_failure(provider, e)
-            discard()
 
         except Exception as e:
             ids = {
@@ -1231,15 +1354,15 @@ class SZProviderPool(ProviderPool):
                 _log_unexpected_provider_error(provider, e)
             self._notify_throttle(provider, e, ids=ids, language=list(languages)[0] if len(languages) else None,
                                   sports_context=getattr(video, 'sports_context', None), operation="search",
-                                  announce=True, **_source_kwargs(video))
+                                  announce=True, provider_owner=failure_owner(), **_source_kwargs(video))
+            discard()
             if detailed:
                 return provider_search_failure(provider, e)
-            discard()
 
         finally:
             # After the throttle callback and the discard, so the next request
             # queued on this provider sees them.
-            _outcome_recorded(invoked[-1] if invoked else initialized_provider)
+            _outcome_recorded(invoked[-1][0] if invoked else initialized_provider)
 
     def list_subtitles(self, video, languages):
         """List subtitles.
@@ -1269,13 +1392,8 @@ class SZProviderPool(ProviderPool):
                 logger.exception("Unexpected language reverse error in %s, skipping", name)
                 continue
 
-            if provider_subtitles is None:
-                logger.info('Discarding provider %s', name)
-                self._discard_provider(name)
-                continue
-
-            # add the subtitles
-            subtitles.extend(provider_subtitles)
+            if provider_subtitles is not None:
+                subtitles.extend(provider_subtitles)
 
         return subtitles
 
@@ -1380,11 +1498,6 @@ class SZProviderPool(ProviderPool):
             else:
                 provider_subtitles = self._list_provider_stoppable(name, video, languages, cancel)
 
-            if provider_subtitles is None:
-                logger.info('Discarding provider %s', name)
-                self._discard_provider(name)
-                continue
-
             if not provider_subtitles:
                 continue
 
@@ -1456,8 +1569,10 @@ class SZProviderPool(ProviderPool):
         # A candidate a plugin found is downloaded by that plugin. When the plugin was detached while Bazarr+ ran
         # and the id now names a built-in provider, the built-in cannot read the candidate: it is
         # refused quietly, not handed over to fail and be recorded against a provider that did nothing wrong.
-        registered = provider_registry[subtitle.provider_name]
-        if getattr(subtitle, 'hub_proxy', False) and registered is not None and not getattr(
+        owner = _provider_owner(subtitle.provider_name)
+        registered = owner[0] if owner is not None else provider_registry[subtitle.provider_name]
+        plugin_candidate = getattr(subtitle, 'hub_proxy', False)
+        if plugin_candidate and registered is not None and not getattr(
                 registered, 'hub_proxy', False):
             # Plain fields only: a log line must never raise, and the repr of a subtitle reads attributes a
             # candidate may not have.
@@ -1465,6 +1580,13 @@ class SZProviderPool(ProviderPool):
                         subtitle.provider_name, getattr(subtitle, 'id', None))
             subtitle.skip_reason = 'provider_excluded'
             return False
+
+        def download_from(instance):
+            # Both the initial lookup and the retry of a retired instance may
+            # have reached the built-in after the registry check above.
+            if plugin_candidate and not getattr(instance, 'hub_proxy', False):
+                raise ProviderCallInterruptedError(subtitle.provider_name)
+            return instance.download_subtitle(subtitle)
 
         logger.info('Downloading subtitle %r', subtitle)
         tries = 0
@@ -1487,6 +1609,10 @@ class SZProviderPool(ProviderPool):
         # now holds.
         recorded = False
         recorded_error = None
+        recorded_owner = None
+
+        def failure_owner():
+            return invoked[-1][1] if invoked else owner
 
         # retry downloading on failure until settings' download retry limit hit
         try:
@@ -1509,13 +1635,21 @@ class SZProviderPool(ProviderPool):
                         subtitle.skip_reason = 'provider_excluded'
                         return False
                     self._call_current(
-                        subtitle.provider_name, initialized_provider,
-                        lambda current: current.download_subtitle(subtitle), invoked,
+                        subtitle.provider_name, initialized_provider, download_from, invoked,
                     )
                     if self.post_download_hook:
                         self.post_download_hook(subtitle)
 
                     break
+                except ProviderItemExcludedError as error:
+                    logger.info('Provider %r was excluded for this item: %s', subtitle.provider_name, error.reason)
+                    subtitle.skip_reason = 'provider_excluded'
+                    return False
+
+                except ProviderCallInterruptedError:
+                    subtitle.skip_reason = 'provider_excluded'
+                    return False
+
                 except ProviderExcludedError:
                     # Refused by the worker once the request got its turn.
                     logger.info('Provider %r was excluded (throttled or discarded) while its request '
@@ -1546,18 +1680,20 @@ class SZProviderPool(ProviderPool):
                     subtitle.download_error = e
                     if self._notify_throttle(subtitle.provider_name, e, ids=ids, language=subtitle.language,
                                              sports_context=getattr(subtitle, 'sports_context', None),
-                                             operation="download", announce=False,
+                                             operation="download", announce=False, provider_owner=failure_owner(),
                                              **_source_kwargs(subtitle)):
                         recorded = True
                         recorded_error = e
+                        recorded_owner = failure_owner()
 
                 except (rarfile.BadRarFile, MustGetBlacklisted) as e:
                     if self._notify_throttle(subtitle.provider_name, e, ids=ids, language=subtitle.language,
                                              sports_context=getattr(subtitle, 'sports_context', None),
-                                             operation="download", announce=False,
+                                             operation="download", announce=False, provider_owner=failure_owner(),
                                              **_source_kwargs(subtitle)):
                         recorded = True
                         recorded_error = e
+                        recorded_owner = failure_owner()
                     return False
 
                 except Exception as e:
@@ -1568,20 +1704,24 @@ class SZProviderPool(ProviderPool):
                     subtitle.download_error = e
                     if self._notify_throttle(subtitle.provider_name, e, ids=ids, language=subtitle.language,
                                              sports_context=getattr(subtitle, 'sports_context', None),
-                                             operation="download", announce=False,
+                                             operation="download", announce=False, provider_owner=failure_owner(),
                                              **_source_kwargs(subtitle)):
                         recorded = True
                         recorded_error = e
-                    self._discard_provider(subtitle.provider_name)
+                        recorded_owner = failure_owner()
+                    self._discard_provider(subtitle.provider_name, failure_owner())
                     return False
 
                 finally:
                     # After the throttle callback and the discard, so the next
                     # request queued on this provider sees them.
-                    _outcome_recorded(invoked[-1] if invoked else initialized_provider)
+                    _outcome_recorded(invoked[-1][0] if invoked else initialized_provider)
+
+                if not _matches_provider_owner(subtitle.provider_name, failure_owner()):
+                    return False
 
                 if tries == DOWNLOAD_TRIES:
-                    self._discard_provider(subtitle.provider_name)
+                    self._discard_provider(subtitle.provider_name, failure_owner())
                     # The one line already says the provider is out of rotation,
                     # and the discard itself is unchanged, so this stays below
                     # the default filter.
@@ -1593,6 +1733,8 @@ class SZProviderPool(ProviderPool):
                 logger.debug('Errors while downloading subtitle, retrying provider %r in %s seconds',
                              subtitle.provider_name, DOWNLOAD_RETRY_SLEEP)
                 time.sleep(DOWNLOAD_RETRY_SLEEP)
+                if not _matches_provider_owner(subtitle.provider_name, failure_owner()):
+                    return False
 
             # check subtitle validity
             if not subtitle.is_valid():
@@ -1611,7 +1753,8 @@ class SZProviderPool(ProviderPool):
             # whose calls recorded nothing announces nothing, even when the
             # table holds an older entry some other search left for the
             # provider.
-            if recorded and recorded_error is not None:
+            if (recorded and recorded_error is not None
+                    and _matches_provider_owner(subtitle.provider_name, recorded_owner)):
                 self._announce_throttle(subtitle.provider_name, recorded_error, operation="download")
 
     @classmethod
@@ -1930,13 +2073,17 @@ class SZAsyncProviderPool(SZProviderPool):
 
     def list_subtitles_provider(self, provider, video, languages, detailed=False, discard_on_failure=False):
         provider_subtitles = None
+        owner = _provider_owner(provider) if discard_on_failure else None
         try:
             if detailed:
-                return super().list_subtitles_provider(provider, video, languages, detailed=True)
+                return super().list_subtitles_provider(provider, video, languages, detailed=True,
+                                                       discard_on_failure=discard_on_failure)
             provider_subtitles = super().list_subtitles_provider(provider, video, languages,
                                                                  discard_on_failure=discard_on_failure)
         except LanguageReverseError:
             logger.exception("Unexpected language reverse error in %s, skipping", provider)
+            if discard_on_failure:
+                self._discard_provider(provider, owner)
             if detailed:
                 return ProviderSearchResult(provider, status="error", reason="language_conversion")
 
@@ -1949,18 +2096,12 @@ class SZAsyncProviderPool(SZProviderPool):
         subtitles = []
 
         with ThreadPoolExecutor(self.max_workers) as executor:
-            for provider, provider_subtitles in executor.map(partial(self.list_subtitles_provider,
+            for _, provider_subtitles in executor.map(partial(self.list_subtitles_provider,
                                                                      discard_on_failure=True), self.providers,
                                                              itertools.repeat(video, len(self.providers)),
                                                              itertools.repeat(languages, len(self.providers))):
-                # discard provider that failed
-                if provider_subtitles is None:
-                    logger.info('Discarding provider %s', provider)
-                    self._discard_provider(provider)
-                    continue
-
-                # add subtitles
-                subtitles.extend(provider_subtitles)
+                if provider_subtitles is not None:
+                    subtitles.extend(provider_subtitles)
 
         return subtitles
 
@@ -2028,7 +2169,8 @@ if is_windows_special_path:
     SZAsyncProviderPool = SZProviderPool
 
 
-def scan_video(path, dont_use_actual_file=False, hints=None, providers=None, skip_hashing=False, hash_from=None):
+def scan_video(path, dont_use_actual_file=False, hints=None, providers=None, skip_hashing=False,
+               hash_from=None, fallback_guess=None):
     """Scan a video from a `path`.
 
     patch:
@@ -2062,7 +2204,12 @@ def scan_video(path, dont_use_actual_file=False, hints=None, providers=None, ski
     guessed_result = guessit(path, options=hints)
 
     logger.debug('GuessIt found: %s', json.dumps(guessed_result, cls=GuessitEncoder, indent=4, ensure_ascii=False))
-    video = Video.fromguess(path, guessed_result)
+    try:
+        video = Video.fromguess(path, guessed_result)
+    except GuessingError:
+        if fallback_guess is None:
+            raise
+        video = Video.fromguess(path, {**fallback_guess, **guessed_result})
     video.hints = hints  # ?
 
     if dont_use_actual_file and not hash_from:

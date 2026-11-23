@@ -90,7 +90,7 @@ class ExampleProvider:
         python_path = sys.executable
         manifest_json = json.dumps(manifest)
 
-    monkeypatch.setitem(provider_registry.providers, "examplehub", FixtureProvider)
+    monkeypatch.setitem(provider_registry, "examplehub", FixtureProvider)
     monkeypatch.setattr(pool, "_pools", {})
     monkeypatch.setattr(pool, "provider_pool", lambda: SZProviderPool)
     monkeypatch.setattr(pool, "get_providers_sorted", lambda: ["examplehub"])

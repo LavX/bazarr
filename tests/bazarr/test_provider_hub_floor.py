@@ -1603,9 +1603,11 @@ def test_signed_seed_checks_google_against_the_stamped_image_version(tmp_path, m
         seed.check_image_interpreter(root, "2.7.1")
 
 
-def test_invalid_seed_worker_cannot_reach_the_unsandboxed_launcher(runtime_snapshot, hub, monkeypatch):
+@pytest.mark.parametrize("mode", ["disabled", "prior-fallback", "source-scoped"])
+def test_invalid_seed_worker_cannot_reach_the_unsandboxed_launcher(runtime_snapshot, hub, tmp_path, monkeypatch, mode):
     from provider_hub import seed
-    from provider_hub.worker import ProviderWorkerClient, WorkerError, worker_command
+    from provider_hub.provider_roots import SourceMediaFile
+    from provider_hub.worker import ProviderWorkerClient, SourceMediaRefused, WorkerError, worker_command
 
     root = hub.provider_hub_dir()
     release = seed.select_release(root, "examplehub")
@@ -1615,10 +1617,25 @@ def test_invalid_seed_worker_cannot_reach_the_unsandboxed_launcher(runtime_snaps
     }
     runner = ROOT / "bazarr" / "provider_hub" / "worker_runner.py"
     env["BAZARR_PROVIDER_HUB_MANIFEST"] = "{}"
-    monkeypatch.setattr("provider_hub.sandbox.provider_profile_enabled", lambda: False)
+    monkeypatch.setattr("provider_hub.sandbox.provider_profile_enabled", lambda: mode != "disabled")
+    monkeypatch.setattr("provider_hub.worker.subprocess.Popen",
+                        lambda *_args, **_kwargs: pytest.fail("unverified seed reached the direct launcher"))
     worker = ProviderWorkerClient(worker_command(release.interpreter, runner), cwd=release.bundle, env=env)
-    with pytest.raises(WorkerError, match="seeded provider bundle and interpreter could not be verified"):
-        worker.start()
+    worker._sandbox_failed_open = mode != "disabled"
+    refusal = "seeded provider bundle and interpreter could not be verified"
+    if mode == "source-scoped":
+        media = tmp_path / "media"
+        media.mkdir()
+        path = media / "movie.mkv"
+        path.write_bytes(b"fixture movie")
+        info = path.stat()
+        source_file = SourceMediaFile(path, (info.st_dev, info.st_ino), media)
+        with pytest.raises(SourceMediaRefused, match=refusal):
+            worker.request("search", source_media=lambda: source_file)
+    else:
+        with pytest.raises(WorkerError, match=refusal):
+            worker.start()
+    assert worker.process is None
 
 
 def test_unsigned_wheel_failure_leaves_the_provider_in_the_catalog(tmp_path, monkeypatch, keys, caplog):

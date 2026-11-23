@@ -164,6 +164,7 @@ def video_to_payload(video) -> dict[str, Any]:
         "imdb_id": getattr(video, "imdb_id", None),
         "series_imdb_id": getattr(video, "series_imdb_id", None),
         "tmdb_id": getattr(video, "tmdb_id", None),
+        "series_tmdb_id": getattr(video, "series_tmdb_id", None),
         "tvdb_id": getattr(video, "tvdb_id", None),
         "series_tvdb_id": getattr(video, "series_tvdb_id", None),
         "anilist_id": getattr(video, "anilist_id", None),
