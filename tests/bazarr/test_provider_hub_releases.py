@@ -3555,6 +3555,69 @@ def test_public_release_activation_owns_smoke_data_until_worker_stop_is_confirme
         assert (active / "settings").read_text() == "active release kept working"
 
 
+@pytest.mark.parametrize("registered", [False, True], ids=["official-catalog", "registered-catalog"])
+def test_a_migrated_keyless_stage_keeps_its_release_id_when_activated(
+        registered, request, service_kind, hub, monkeypatch):
+    from provider_hub import datadir, releases, state_store
+    from provider_hub.state import load_state_strict, mutate_state, provider_hub_dir
+
+    if registered:
+        service, kind, manifest, previous, _ = request.getfixturevalue("catalog_data_owner")
+        source = "catalog-a"
+        previous_settings = "private catalog A data"
+    else:
+        service, manifest, previous = request.getfixturevalue("data_release")
+        kind = service_kind
+        source = "official"
+        previous_settings = "from v1"
+    plugin_id = manifest["id"]
+    document = _stored(hub)
+    document["installations"][plugin_id].update(
+        state="staged", pending_restart=True, staged_version=manifest["version"],
+        staged_path=_bundle(plugin_id, manifest["version"]), staged_python_path=_python(plugin_id),
+        staged_manifest=manifest,
+    )
+    with hub.begin() as connection:
+        connection.execute(sa.text("UPDATE provider_hub_state SET document = :document WHERE id = 1"),
+                           {"document": json.dumps(document)})
+    assert not state_store.list_releases(plugin_id, states=(releases.STAGED,))
+    # The store moves inline legacy fields to the release tables on its next write.
+    mutate_state(lambda state: None)
+    [staged] = state_store.list_releases(plugin_id, states=(releases.STAGED,))
+    assert staged.data_key is None
+    assert staged.source_id == source
+    if registered:
+        registration = releases.catalog_registration(load_state_strict(), source)
+        assert registration and staged.catalog_registration == registration
+    [old_active] = state_store.list_releases(plugin_id, states=(releases.ACTIVE,))
+    # Keep a higher ID so SQLite cannot reuse the stage's ID if activation deletes it.
+    _seed(other=_row("other", active=manifest["version"]))
+    [other] = state_store.list_releases("other")
+
+    def smoke(validated, bundle, interpreter, *, data_dir, timeout=None):
+        settings = data_dir / "settings"
+        assert settings.read_text() == previous_settings
+        settings.write_text("verified legacy migration")
+
+    monkeypatch.setattr(kind, "smoke_test", smoke)
+    assert service.activate_release(plugin_id, at_boot=registered).activated
+
+    [activated] = state_store.list_releases(plugin_id, states=(releases.ACTIVE,))
+    assert (activated.id, activated.created_at) == (staged.id, staged.created_at)
+    assert (activated.source_id, activated.catalog_registration, activated.origin) == (
+        staged.source_id, staged.catalog_registration, staged.origin)
+    assert activated.data_key and activated.data_key != old_active.data_key
+    row = load_state_strict()["installations"][plugin_id]
+    assert row["active_data_key"] == activated.data_key
+    assert not state_store.list_releases(plugin_id, states=(releases.STAGED,))
+    [retired] = state_store.list_releases(plugin_id, states=(releases.RETIRED,))
+    assert (retired.id, retired.data_key) == (old_active.id, old_active.data_key)
+    assert state_store.list_releases("other") == [other]
+    current = datadir.release_path(provider_hub_dir(), plugin_id, activated.data_key)
+    assert (current / "settings").read_text() == "verified legacy migration"
+    assert (previous / "settings").read_text() == previous_settings
+
+
 @pytest.mark.parametrize("boundary", ["rename", "commit"])
 def test_boot_retries_interrupted_data_publication_from_the_saved_stage(
         catalog_data_release, service_kind, hub, monkeypatch, boundary):

@@ -5683,8 +5683,8 @@ def activate_release(provider_id: str, *, at_boot: bool = False) -> Activation:
                 row["active_data_key"] = data_key
             else:
                 row.pop("active_data_key", None)
-            if target is not None and row.get("staged_data_key"):
-                row[releases.PROMOTE_STAGED_DATA] = row["staged_data_key"]
+            if target is not None:
+                row[releases.PROMOTE_STAGED_DATA] = row.get("staged_data_key")
             _clear_staged_data(row)
             row.pop("delete_release_data", None)
             row.pop("data_worker_cleanup_pending", None)

@@ -91,7 +91,7 @@ DRAIN_PREVIOUS = "drain_previous"
 # ``split`` consumes it: that release is kept as failed, or as the previous release again when it came from there.
 # A staged release that leaves its slot for any other reason is forgotten, whatever error the row shows.
 FAIL_STAGED = "fail_staged"
-# The old data key when activation promotes a stage with a freshly verified data directory.
+# The stage's old data key when activation publishes a fresh directory. None marks a keyless stage.
 PROMOTE_STAGED_DATA = "promote_staged_data"
 
 metadata = sa.MetaData()
@@ -460,6 +460,7 @@ def split(data: dict[str, Any], rows: list[dict[str, Any]], *, now: str | None =
             continue
         drain = bool(installation.pop(DRAIN_PREVIOUS, False))
         failure = installation.pop(FAIL_STAGED, None)
+        promote_staged = PROMOTE_STAGED_DATA in installation
         staged_data = installation.pop(PROMOTE_STAGED_DATA, None)
         row = dict(installation)
         active = _slot(row, _ACTIVE_KEYS, True)
@@ -535,11 +536,14 @@ def split(data: dict[str, Any], rows: list[dict[str, Any]], *, now: str | None =
                                       for_install=getattr(data, "staging_install", None) == plugin_id)
             settle(staged, staged_release, STAGED, source_id=rebound_source)
         if active is not None:
-            states = ((STAGED, ACTIVE, DRAINING, RETIRED) if getattr(data, "promoting_stage", None) == plugin_id
-                      else (ACTIVE, STAGED, DRAINING, RETIRED))
-            promoted = (find(replace(active, data_key=staged_data), (STAGED,))
-                        if staged_data is not None and staged is None else None)
-            settle(active, promoted or find(active, states), ACTIVE)
+            if promote_staged and staged is None:
+                # Match the saved stage using its old key and write the active slot with the new key.
+                promoted = find(replace(active, data_key=staged_data), (STAGED,))
+            else:
+                states = ((STAGED, ACTIVE, DRAINING, RETIRED) if getattr(data, "promoting_stage", None) == plugin_id
+                          else (ACTIVE, STAGED, DRAINING, RETIRED))
+                promoted = find(active, states)
+            settle(active, promoted, ACTIVE)
         # What the slots no longer name.
         for release in existing:
             if release["id"] in claimed:
