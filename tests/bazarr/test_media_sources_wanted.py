@@ -3,7 +3,9 @@
 import ast
 import json
 import os
+from contextlib import contextmanager
 from datetime import datetime, timedelta
+from io import BytesIO
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -425,6 +427,108 @@ def test_automatic_search_leaves_a_subtitle_that_arrived_during_provider_search(
     assert destination.read_bytes() == arriving_content
     assert destination.stat().st_mode & 0o777 == 0o600
     assert world.db.execute(sa.select(repository.History.c.id)).all() == []
+
+
+@pytest.mark.parametrize('exclude_at', ['provider', 'publication'])
+def test_wanted_rechecks_a_release_excluded_on_another_source_item(
+        world, everything_uses_the_test_database, monkeypatch, exclude_at):
+    from flask import Flask
+    from api import api_bp
+    from app.config import settings
+    from media_sources import indexer, repository, wanted
+    from media_sources.context import resolve_item
+    from subtitles import download
+
+    context = pipeline._movie(world)
+    other_source, other_library, other_root = add_source(
+        world.db, world.tmp_path, name='Other', folder='Other', profile_id=world.profile)
+    other_path = video(other_root / 'Other.2002.mkv')
+    other_id = add_item(world.db, other_source, other_library, other_path, title='Other', year='2002')
+    sidecar = other_path.with_suffix('.en.srt')
+    sidecar.write_bytes(pipeline.CONTENT)
+    indexer.index_item(other_id)
+    assert repository.get_item(other_id).missing_subtitles == '[]'
+    other = resolve_item(other_id)
+    monkeypatch.setitem(settings.auth, 'apikey', 'synthetic-bazarr-key')
+    monkeypatch.setattr('subtitles.tools.delete.call_external_webhook', Mock())
+    app = Flask(__name__)
+    app.register_blueprint(api_bp)
+    candidate = pipeline.FakeSubtitle()
+    releases = []
+
+    def exclude():
+        response = app.test_client().post(f'/api/sources/items/{other.item_id}/blacklist', headers=HEADERS, json={
+            'subtitles_path': str(sidecar), 'language': 'en', 'provider': candidate.provider_name,
+            'subs_id': candidate.id,
+        })
+        assert response.status_code == 204, response.get_json()
+        assert not sidecar.exists()
+
+    publication = indexer.source_item_publication
+
+    @contextmanager
+    def observe_publication(source, **kwargs):
+        if source.item_id == context.item_id:
+            releases.append(kwargs.get('release'))
+            if exclude_at == 'publication':
+                exclude()
+        with publication(source, **kwargs) as result:
+            yield result
+
+    def download_best(videos, **kwargs):
+        (found,) = videos
+        if exclude_at == 'provider':
+            exclude()
+        return {found: [candidate]}
+
+    monkeypatch.setattr(indexer, 'source_item_publication', observe_publication)
+    monkeypatch.setattr(download, 'download_best_subtitles', download_best)
+    wanted.wanted_search_missing_subtitles_sources(kind='movie', job_id=1)
+
+    assert not Path(context.path).with_suffix('.en.srt').exists()
+    assert releases == [(context.kind, candidate.provider_name, candidate.id)]
+    assert world.db.execute(sa.select(repository.Blacklist.c.item_id)).scalars().all() == [other.item_id]
+    assert world.db.execute(sa.select(repository.History.c.action)).scalars().all() == [0]
+    assert [event.operation for event in world.published] == ['delete']
+
+
+def test_wanted_leaves_a_real_uploaded_language_sibling_before_upload_indexing(world, monkeypatch):
+    import pysubs2
+    from app.database import TableLanguagesProfiles, update_profile_id_list
+    from media_sources import repository, wanted
+    from subtitles import download, upload
+
+    world.db.execute(sa.update(TableLanguagesProfiles).values(originalFormat=1))
+    update_profile_id_list.invalidate()
+    context = pipeline._movie(world)
+    sibling = Path(context.path).with_suffix('.en.ass')
+    content = pysubs2.SSAFile.from_string(pipeline.CONTENT.decode(), format_='srt').to_string('ass').encode()
+    finish_upload = upload._finish_source_upload
+    pending_finish = []
+    monkeypatch.setattr(upload, '_finish_source_upload', lambda *args: pending_finish.append(args))
+
+    def download_best(videos, **kwargs):
+        (found,) = videos
+        result = upload.manual_upload_subtitle(
+            context.path, 'en', False, False, context.media_type, BytesIO(content), 'uploaded.ass', 'None',
+            job_id=1, source=context)
+        assert result == ('', 204)
+        assert sibling.exists()
+        assert repository.get_item(context.item_id).missing_subtitles == "['en']"
+        return {found: [pipeline.FakeSubtitle()]}
+
+    monkeypatch.setattr(download, 'download_best_subtitles', download_best)
+    wanted.wanted_search_missing_subtitles_sources(kind='movie', job_id=1)
+
+    assert sibling.exists()
+    assert not Path(context.path).with_suffix('.en.srt').exists()
+    assert world.db.execute(sa.select(repository.History.c.id)).all() == []
+    assert [event.operation for event in world.published] == ['upload']
+    monkeypatch.setattr(upload, 'sync_subtitles', Mock())
+    (finish_args,) = pending_finish
+    finish_upload(*finish_args)
+    assert repository.get_item(context.item_id).missing_subtitles == '[]'
+    assert world.db.execute(sa.select(repository.History.c.action)).scalars().all() == [4]
 
 
 @pytest.mark.parametrize('change', ['file removed', 'video replaced', 'profile edited', 'arr claimed',
