@@ -1470,7 +1470,8 @@ def test_opt_in_provider_activates_after_the_real_application_migration(
     monkeypatch.setattr(settings.translator, "runtime_v2", False)
     monkeypatch.setattr("app.config.write_config", lambda: True)
     monkeypatch.setattr(hub.PluginEnvironment, "install", lambda *_args, **_kw: pytest.fail("unexpected pip"))
-    monkeypatch.setattr(provider_registry, "providers", provider_registry.providers.copy())
+    original_provider = provider_registry["exampleother"]
+    monkeypatch.setattr(provider_registry, "_ownership", provider_registry._ownership.copy())
     monkeypatch.setattr(registry, "_REGISTERED_PROVIDER_HUB_IDS", set())
     monkeypatch.setattr(registry, "_REGISTRATION_INCOMPLETE", set())
 
@@ -1514,6 +1515,9 @@ def test_opt_in_provider_activates_after_the_real_application_migration(
         assert settings.general.disabled_providers == ["embeddedsubtitles"]
         assert settings.general.provider_priorities == {"exampleother": 60}
     finally:
+        provider_registry.unregister("exampleother")
+        if original_provider is not None:
+            provider_registry.register("exampleother", original_provider)
         session.remove()
         engine.dispose()
 
