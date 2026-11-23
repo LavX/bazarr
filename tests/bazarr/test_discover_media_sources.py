@@ -23,8 +23,7 @@ def archive_provider(providers, monkeypatch, payload, selector=None):
     worker = ArchiveSearchWorker(payload, selector=selector)
     cls = provider_registry[providers.add("discover_source")]
     monkeypatch.setattr(cls, "list_subtitles", HubProxyProvider.list_subtitles)
-    monkeypatch.setattr(cls, "_worker", lambda _: worker)
-    monkeypatch.setattr(cls, "_gated_request", lambda _, operation, body, timeout: worker.request(operation, body, timeout))
+    monkeypatch.setattr(cls, "worker_client", worker, raising=False)
     monkeypatch.setattr("app.jobs_queue.event_stream", lambda **kwargs: None)
     return worker
 
