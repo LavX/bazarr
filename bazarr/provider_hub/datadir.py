@@ -616,7 +616,7 @@ def _login_exclusions(document, root, plugin_id, candidates):
     return tuple(path for group in rules for path in group)
 
 
-def write_backup(archive) -> None:
+def write_backup(archive, *, config_dir) -> None:
     """Add active and previous folders using the same release inventory as the database snapshot."""
     from . import secret_paths, state
     from .kinds import get_kind, kind_of
@@ -645,7 +645,7 @@ def write_backup(archive) -> None:
                     # A deadline makes the check read-only. One proof covers this config directory.
                     previous_stopped = False
                     previous_stopped = sweep.previous_workers_stopped(
-                        root.parent, deadline=time.monotonic() + sweep.SCAN_BUDGET_SECONDS)
+                        config_dir, deadline=time.monotonic() + sweep.SCAN_BUDGET_SECONDS)
                 if not previous_stopped:
                     raise DataFolderError("previous plugin workers could not be confirmed stopped")
                 source = archive_folder(root, plugin_id, key)

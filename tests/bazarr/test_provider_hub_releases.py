@@ -3197,7 +3197,7 @@ def test_backup_checks_previous_workers_before_copying_active_and_retained_data(
     from provider_hub import datadir
     from provider_hub.kinds import ATTACH_ON_RESTART
     from provider_hub.sandbox import sweep
-    from provider_hub.state import load_state, provider_hub_dir
+    from provider_hub.state import load_state
 
     service, new, old = data_release
     service._stage_validated(service_kind.validate_manifest(new, True), True, "catalog", "official",
@@ -3210,9 +3210,10 @@ def test_backup_checks_previous_workers_before_copying_active_and_retained_data(
     keys = [active_key, old.name]
     events = []
     copy = datadir.copy_folder
+    config_dir = tmp_path / "application-config"
 
-    def prove(config_dir, *, deadline):
-        assert config_dir == provider_hub_dir().parent
+    def prove(directory, *, deadline):
+        assert directory == config_dir
         assert deadline > datadir.time.monotonic()
         events.append("previous")
         return previous_stopped
@@ -3231,7 +3232,7 @@ def test_backup_checks_previous_workers_before_copying_active_and_retained_data(
     monkeypatch.setattr(datadir, "copy_folder", copy_release)
     path = tmp_path / "data.zip"
     with ZipFile(path, "w") as archive:
-        datadir.write_backup(archive)
+        datadir.write_backup(archive, config_dir=config_dir)
     with ZipFile(path) as archive:
         if previous_stopped:
             for key in keys:
@@ -3292,20 +3293,22 @@ def test_live_uninstall_waits_for_actual_worker_exit_before_moving_data(data_rel
     assert (old / "settings").read_text() == "from v1"
 
 
-def test_unreadable_historical_exclusions_omit_that_release_data(data_release, tmp_path):
+def test_unreadable_historical_exclusions_omit_that_release_data(data_release, tmp_path, monkeypatch):
     import json
     from zipfile import ZipFile
 
     from provider_hub import datadir
+    from provider_hub.sandbox import sweep
     from provider_hub.state import provider_hub_dir
 
     _, _, old = data_release
     folder = provider_hub_dir() / "manifests" / "exampleservice"
     folder.mkdir(parents=True)
     (folder / "older.json").write_text("unreadable test metadata")
+    monkeypatch.setattr(sweep, "previous_workers_stopped", lambda config, **kwargs: True)
     archive_path = tmp_path / "data.zip"
     with ZipFile(archive_path, "w") as archive:
-        datadir.write_backup(archive)
+        datadir.write_backup(archive, config_dir=tmp_path)
     with ZipFile(archive_path) as archive:
         assert json.loads(archive.read(datadir.OMISSIONS_ARCHIVE)) == [f"exampleservice/{old.name}"]
         assert not any(name.startswith("plugin_data/") for name in archive.namelist())

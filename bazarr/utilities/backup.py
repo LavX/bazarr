@@ -720,7 +720,7 @@ def _write_backup(job_id):
         with ZipFile(backup_file_path, 'w', compression=ZIP_DEFLATED, compresslevel=9) as backupZip:
             backupZip.write(database_backup_file, _database_archive_name())
             backupZip.write(config_file, 'config.yaml')
-            datadir.write_backup(backupZip)
+            datadir.write_backup(backupZip, config_dir=args.config_dir)
     except Exception:
         # Half an archive is worse than none: it lists as a backup and refuses
         # to restore.
