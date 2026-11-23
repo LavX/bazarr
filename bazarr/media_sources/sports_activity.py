@@ -180,9 +180,10 @@ def clear_blacklist(session, scope):
     return removed
 
 
-def remove_blacklist_entry(session, entry_id):
+def remove_blacklist_entry(session, entry_id, removal_key):
     table = repository.Blacklist
-    removed = session.execute(sa.delete(table).where(table.c.item_kind == _KIND, table.c.id == entry_id)).rowcount
+    removed = session.execute(sa.delete(table).where(
+        table.c.item_kind == _KIND, table.c.id == entry_id, table.c.removal_key == removal_key)).rowcount
     if removed:
         event_stream(type='sports')
     return removed == 1
