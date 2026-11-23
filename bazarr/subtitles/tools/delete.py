@@ -1,5 +1,6 @@
 # coding=utf-8
 
+import ast
 import os
 import logging
 from media_servers.events import publication_callback
@@ -23,7 +24,8 @@ from sonarr.notify import notify_sonarr
 from radarr.notify import notify_radarr
 
 
-def _delete_subtitle_file(media_path, subtitle_path, on_publish=None, revalidate=None, after_delete=None):
+def _delete_subtitle_file(media_path, subtitle_path, on_publish=None, revalidate=None, after_delete=None,
+                          ownership_index=None):
     with subtitle_write_locks(media_path, subtitle_path):
         # Under the directory locks, which is where a caller's ownership check
         # has to be re-asked: the sports indexer takes these same locks before
@@ -43,7 +45,8 @@ def _delete_subtitle_file(media_path, subtitle_path, on_publish=None, revalidate
         if on_publish:
             on_publish(subtitle_path)
         state.changed(subtitle_path)
-        quarantine_sync_outputs_after_mutation(media_path, subtitle_path)
+        quarantine_sync_outputs_after_mutation(
+            media_path, subtitle_path, **({'ownership_index': ownership_index} if ownership_index is not None else {}))
         # A caller's record of the removal, such as a blacklist entry, is
         # written only once the file is really gone and while the locks are
         # still held, so a refused or failed deletion records nothing and a
@@ -56,12 +59,13 @@ def _delete_subtitle_file(media_path, subtitle_path, on_publish=None, revalidate
 
 def delete_subtitles(media_type, language, forced, hi, media_path, subtitles_path, sonarr_series_id=None,
                      sonarr_episode_id=None, radarr_id=None, arr_instance_id=None,
-                     sports_event_id=None, revalidate=None, after_delete=None):
+                     sports_event_id=None, revalidate=None, after_delete=None, *, source=None, blacklist=None):
     if not subtitles_path:
         logging.error('No subtitles to delete.')
         return False
 
-    if not os.path.splitext(subtitles_path)[1] in SUBTITLE_EXTENSIONS:  # noqa: E713
+    extension = os.path.splitext(subtitles_path)[1]
+    if (extension.lower() if source is not None else extension) not in SUBTITLE_EXTENSIONS:
         logging.error('BAZARR can only delete subtitles files.')
         return False
 
@@ -73,6 +77,9 @@ def delete_subtitles(media_type, language, forced, hi, media_path, subtitles_pat
     elif forced in [True, 'true', 'True']:
         language_log += ':forced'
         language_string += ' forced'
+
+    if source is not None:
+        return _delete_source_subtitle(source, subtitles_path, language_log, language_string, blacklist)
 
     # Honour the owning instance's per-instance path_mappings (#156): a
     # secondary instance can have a different on-disk prefix, so the delete /
@@ -191,3 +198,57 @@ def delete_subtitles(media_type, language, forced, hi, media_path, subtitles_pat
         )
 
         return True
+
+
+def _delete_source_subtitle(source, subtitle_path, language_code, language_name, blacklist):
+    from media_sources import repository
+    from media_sources.history import blacklist_log_source, history_log_source
+    from media_sources.indexer import SourcePublicationOwnerIndex, index_and_notify_item
+    from media_sources.manual import manual_source_publication
+    from subtitles.tools.delete_ownership import SubtitleDeletionError
+    from subtitles.tools.subsync_engines import SubtitleDestinationChanged
+
+    ownership_index = SourcePublicationOwnerIndex()
+    with subtitle_write_locks(source.path, subtitle_path):
+        def require_indexed(item):
+            try:
+                subtitles = ast.literal_eval(item.subtitles or '[]')
+            except (SyntaxError, ValueError):
+                subtitles = []
+            if not isinstance(subtitles, list) or not any(
+                    isinstance(entry, (list, tuple)) and len(entry) >= 2 and entry[1] == subtitle_path
+                    for entry in subtitles):
+                raise SubtitleDeletionError('This subtitle is not indexed for the source item.', 403)
+
+        item = repository.get_item(source.item_id)
+        if item is None or not source.same_item(item):
+            raise SubtitleDeletionError('The source item moved or was removed.', 409)
+        require_indexed(item)
+        try:
+            release = (source.kind, *blacklist) if blacklist is not None else None
+            with manual_source_publication(source, subtitle_path, ownership_index, release=release) as (
+                    current, connection):
+                require_indexed(repository.get_item(current.item_id, connection))
+                removed = _delete_subtitle_file(
+                    current.path, subtitle_path,
+                    publication_callback(current.publication_type, current.path, 'delete', source=current),
+                    ownership_index=ownership_index)
+                if removed:
+                    result = ProcessSubtitlesResult(
+                        message=f'{language_name} subtitles deleted from disk.', reversed_path=current.path,
+                        downloaded_language_code2=language_code, downloaded_provider=None, score=None,
+                        forced=None, subtitle_id=None, reversed_subtitles_path=subtitle_path, hearing_impaired=None)
+                    history_log_source(0, current, result, target=connection)
+                    if blacklist is not None:
+                        provider, subs_id = blacklist
+                        blacklist_log_source(current, provider, subs_id, language_code, target=connection)
+        except SubtitleDestinationChanged as error:
+            raise SubtitleDeletionError(str(error), 409) from error
+
+    index_and_notify_item(source)
+    if removed:
+        if blacklist is not None:
+            event_stream(type=f'{source.publication_type}-blacklist')
+        call_external_webhook(subtitle_path=subtitle_path, media_path=source.path, language=language_code,
+                              media_type='sports' if source.kind == 'sports_event' else source.media_type)
+    return removed

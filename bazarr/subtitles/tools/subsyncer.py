@@ -2,6 +2,7 @@
 
 import logging
 import os
+from contextlib import contextmanager
 from pathlib import Path
 import shutil
 import subprocess
@@ -31,6 +32,9 @@ from subtitles.tools.subsync_engines import (
     validate_engine_result,
     subtitle_write_lock,
     SubtitlePublication,
+    SubtitleDestinationChanged,
+    SubtitleSourceChanged,
+    sync_output_owner_is_unique,
     subtitle_source_version,
     quarantine_sync_outputs_after_mutation,
 )
@@ -594,7 +598,8 @@ class SubSyncer:
              max_offset_seconds, no_fix_framerate, gss, reference=None, sonarr_series_id=None, sonarr_episode_id=None,
              radarr_id=None, progress_callback=None, job_id=None, force_sync=False, output_mode=None,
              enabled_engines=None, write_history=True, arr_instance_id=None, source_version=None,
-             on_publish=None, validate=None, publication_guard=None, source=None):
+             on_publish=None, validate=None, publication_guard=None, source=None,
+             *, expected_source_version=None, on_overwrite_version=None):
         self.reference = video_path
         self.srtin = srt_path
         self.progress_callback = progress_callback
@@ -670,17 +675,39 @@ class SubSyncer:
             return raw_result
 
         runner = SubsyncEngineRunner()
-        # A source item's generated outputs are owned by the source tables: asking the arr index about it would
-        # read the arr tables, and would find no owner for the item.
         owner_index = {}
+        source_guard = {}
+        cleanup_outputs = output_mode == OUTPUT_MODE_OVERWRITE and source_version is None
         if source is not None:
-            from media_sources.indexer import SourceOutputOwnerIndex
-            owner_index = {'ownership_index': SourceOutputOwnerIndex()}
+            from media_sources.indexer import SourcePublicationOwnerIndex
+
+            owners = SourcePublicationOwnerIndex()
+            owner_index = {'ownership_index': owners}
+
+            @contextmanager
+            def guarded_destination(destination):
+                def prepare():
+                    for path in {srt_path, str(destination)}:
+                        if not sync_output_owner_is_unique(video_path, path, ownership_index=owners):
+                            raise SubtitleDestinationChanged('The source sync destination has no unique owner')
+
+                with owners.publication(source, prepare, destination=destination,
+                                        cleanup_outputs=cleanup_outputs) as (current, _, _):
+                    if current is None or current.path != video_path:
+                        raise SubtitleSourceChanged('The source item moved or was removed')
+                    yield
+
+            source_guard['destination_guard'] = guarded_destination
         publication_lock = subtitle_write_lock(video_path, os.path.dirname(srt_path))
         publication = source_version
         if publication is None:
             with publication_lock:
-                publication = SubtitlePublication(video_path, srt_path, subtitle_source_version(srt_path),
+                if expected_source_version is not None:
+                    version = expected_source_version
+                    owner_index['regular_source'] = True
+                else:
+                    version = subtitle_source_version(srt_path)
+                publication = SubtitlePublication(video_path, srt_path, version,
                                                   **owner_index)
 
         def publish():
@@ -700,9 +727,10 @@ class SubSyncer:
                 publication_lock=publication_lock,
                 on_publish=on_publish,
                 **({'publication_guard': publication_guard} if publication_guard is not None else {}),
-                after_publish=(lambda: quarantine_sync_outputs_after_mutation(video_path, srt_path,
-                                                                              **owner_index))
-                if output_mode == OUTPUT_MODE_OVERWRITE and source_version is None else None,
+                **({'on_overwrite_version': on_overwrite_version} if on_overwrite_version is not None else {}),
+                **source_guard,
+                after_publish=(lambda: quarantine_sync_outputs_after_mutation(video_path, srt_path))
+                if source is None and cleanup_outputs else None,
             )
         finally:
             # Preserve successful destinations even if a later engine is cancelled.

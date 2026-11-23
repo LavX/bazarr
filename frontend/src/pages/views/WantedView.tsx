@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useState } from "react";
+import { type ReactNode, useCallback, useMemo, useState } from "react";
 import {
   ActionIcon,
   Badge,
@@ -45,7 +45,7 @@ interface LangOption {
   label: string;
 }
 
-interface Props<T extends Wanted.Base> {
+interface Props<T extends Wanted.Base & Wanted.RowOwner & { id: number }> {
   name: string;
   columns: ColumnDef<T>[];
   query: UsePaginationQueryResult<T>;
@@ -67,10 +67,12 @@ interface Props<T extends Wanted.Base> {
   pendingSearchCount?: number;
   searchAll: () => Promise<void>;
   scanAll: () => Promise<void>;
-  getWantedItem: (row: T) => WantedItem;
+  getWantedItem: (row: T) => WantedItem | null;
+  sourceFilter?: ReactNode;
+  arrActions?: boolean;
 }
 
-function WantedView<T extends Wanted.Base>({
+function WantedView<T extends Wanted.Base & Wanted.RowOwner & { id: number }>({
   name,
   columns,
   query,
@@ -91,6 +93,8 @@ function WantedView<T extends Wanted.Base>({
   searchAll,
   scanAll,
   getWantedItem,
+  sourceFilter,
+  arrActions = true,
 }: Props<T>) {
   const dataCount = query.paginationStatus.totalCount;
   const hasTask = useIsAnyActionRunning();
@@ -130,9 +134,10 @@ function WantedView<T extends Wanted.Base>({
   const handleMassTranslate = useCallback(() => {
     if (selectedRows.length === 0) return;
 
-    const items: WantedItem[] = selectedRows.map((row) =>
-      getWantedItem(row.original),
+    const items = selectedRows.flatMap(
+      (row) => getWantedItem(row.original) ?? [],
     );
+    if (items.length === 0) return;
 
     modals.openContextModal(MassTranslateModal, {
       items,
@@ -268,22 +273,27 @@ function WantedView<T extends Wanted.Base>({
           >
             Search All
           </Toolbox.Button>
-          <Toolbox.Button
-            disabled={hasTask || dataCount === 0}
-            onClick={scanAll}
-            icon={faHardDrive}
-          >
-            Scan All
-          </Toolbox.Button>
-          <Toolbox.Button
-            disabled={hasTask || selectedRows.length === 0}
-            onClick={handleMassTranslate}
-            icon={faLanguage}
-          >
-            {`Mass Translate (${selectedRows.length})`}
-          </Toolbox.Button>
+          {arrActions && (
+            <>
+              <Toolbox.Button
+                disabled={hasTask || dataCount === 0}
+                onClick={scanAll}
+                icon={faHardDrive}
+              >
+                Scan All
+              </Toolbox.Button>
+              <Toolbox.Button
+                disabled={hasTask || selectedRows.length === 0}
+                onClick={handleMassTranslate}
+                icon={faLanguage}
+              >
+                {`Mass Translate (${selectedRows.length})`}
+              </Toolbox.Button>
+            </>
+          )}
         </Group>
         <Group gap="xs" className={styles.controls}>
+          {sourceFilter}
           {hasAnyFilterControl && (
             <Tooltip
               label={filtersOpen ? "Hide filters" : "Show filters"}
@@ -533,7 +543,8 @@ function WantedView<T extends Wanted.Base>({
         query={query}
         columns={columns}
         dataFilter={dataFilter}
-        enableRowSelection
+        getRowId={(row) => `${row.origin ?? "arr"}:${row.id}`}
+        enableRowSelection={(row) => row.original.origin !== "source"}
         onRowSelectionChanged={handleRowSelectionChanged}
       ></QueryPageTable>
     </Stack>

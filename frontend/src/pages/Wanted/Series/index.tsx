@@ -11,14 +11,12 @@ import {
   useEpisodeWantedPagination,
   useSeriesAction,
 } from "@/apis/hooks";
-import { useArrInstanceLabels } from "@/apis/hooks/arrInstances";
-import {
-  AudioList,
-  InstanceBadge,
-  ReleaseMismatchBadge,
-} from "@/components/bazarr";
+import { useSourceFilter } from "@/apis/hooks/mediaSources";
+import { AudioList, ReleaseMismatchBadge } from "@/components/bazarr";
 import Language from "@/components/bazarr/Language";
+import SourceBadge from "@/components/bazarr/SourceBadge";
 import { WantedItem } from "@/components/forms/MassTranslateForm";
+import SourceFilter from "@/pages/views/SourceFilter";
 import WantedView from "@/pages/views/WantedView";
 import { BuildKey } from "@/utilities";
 import tableStyles from "@/components/tables/BaseTable.module.scss";
@@ -40,16 +38,27 @@ const WantedSeriesView: FunctionComponent = () => {
     tagFilter.length > 0 ||
     missingLanguage !== null;
 
-  const { data: audioLangs = [] } = useAudioLanguages();
   const {
-    multiInstance,
-    nameById: instanceNameById,
-    defaultId: instanceDefaultId,
-  } = useArrInstanceLabels("sonarr");
-  const query = useEpisodeWantedPagination(hasActiveFilter);
+    includeSources,
+    showBadge,
+    labels,
+    sourceKeys,
+    arrActions,
+    arrNames,
+    defaultArr,
+    selected,
+    onChange,
+  } = useSourceFilter("series", "sonarr");
+  const { data: audioLangs = [] } = useAudioLanguages(true, includeSources);
+  const query = useEpisodeWantedPagination(
+    hasActiveFilter,
+    sourceKeys,
+    includeSources,
+  );
   // The query is typed for the paging wrapper only; this page's endpoint adds the pending count.
   const forcedPending =
-    (query.data as Wanted.EpisodePage | undefined)?.forced_pending ?? 0;
+    (query.data as Wanted.EpisodePage<Wanted.EpisodeRow> | undefined)
+      ?.forced_pending ?? 0;
 
   const langOptions = useMemo(
     () => audioLangs.map((l) => ({ value: l.code2, label: l.name })),
@@ -58,7 +67,7 @@ const WantedSeriesView: FunctionComponent = () => {
 
   // Build client-side filter function
   const dataFilter = useCallback(
-    (item: Wanted.Episode) => {
+    (item: Wanted.EpisodeRow) => {
       if (debouncedSearch) {
         const lowerSearch = debouncedSearch.toLowerCase();
         if (!item.seriesTitle.toLowerCase().includes(lowerSearch)) {
@@ -108,7 +117,7 @@ const WantedSeriesView: FunctionComponent = () => {
     ],
   );
 
-  const columns = useMemo<ColumnDef<Wanted.Episode>[]>(
+  const columns = useMemo<ColumnDef<Wanted.EpisodeRow>[]>(
     () => [
       {
         id: "selection",
@@ -116,13 +125,18 @@ const WantedSeriesView: FunctionComponent = () => {
           return (
             <Checkbox
               id="table-header-selection"
+              disabled={
+                !table.getRowModel().rows.some((row) => row.getCanSelect())
+              }
               indeterminate={table.getIsSomeRowsSelected()}
               checked={table.getIsAllRowsSelected()}
               onChange={table.getToggleAllRowsSelectedHandler()}
             />
           );
         },
-        cell: ({ row: { index, getIsSelected, getToggleSelectedHandler } }) => {
+        cell: ({ row }) => {
+          if (!row.getCanSelect()) return null;
+          const { index, getIsSelected, getToggleSelectedHandler } = row;
           return (
             <Checkbox
               id={`table-cell-${index}`}
@@ -136,15 +150,13 @@ const WantedSeriesView: FunctionComponent = () => {
       {
         header: "Name",
         accessorKey: "seriesTitle",
-        cell: ({
-          row: {
-            original: {
-              series_id: seriesId,
-              seriesTitle,
-              release_mismatch: releaseMismatch,
-            },
-          },
-        }) => {
+        cell: ({ row: { original: item } }) => {
+          const {
+            series_id: seriesId,
+            seriesTitle,
+            release_mismatch: releaseMismatch,
+          } = item;
+          if (item.origin === "source") return seriesTitle;
           const target = `/series/${seriesId}`;
           return (
             <Group gap="xs" wrap="nowrap">
@@ -160,21 +172,20 @@ const WantedSeriesView: FunctionComponent = () => {
           );
         },
       },
-      // Owning Sonarr instance (#156), shown only with more than one Sonarr.
-      // Default instance gets a muted grey badge, others an accent badge.
-      ...(multiInstance
+      ...(showBadge
         ? [
             {
-              id: "instance",
-              header: "Instance",
+              id: "source",
+              header: includeSources ? "Source" : "Instance",
               cell: ({ row: { original } }) => (
-                <InstanceBadge
-                  instanceId={original.arr_instance_id}
-                  defaultId={instanceDefaultId}
-                  nameById={instanceNameById}
+                <SourceBadge
+                  row={original}
+                  labels={labels}
+                  arrNames={arrNames}
+                  defaultArr={defaultArr}
                 />
               ),
-            } as ColumnDef<Wanted.Episode>,
+            } as ColumnDef<Wanted.EpisodeRow>,
           ]
         : []),
       {
@@ -216,19 +227,19 @@ const WantedSeriesView: FunctionComponent = () => {
       {
         header: "Missing",
         accessorKey: "missing_subtitles",
-        cell: ({
-          row: {
-            original: {
-              sonarrSeriesId,
-              sonarrEpisodeId,
-              arr_instance_id: arrInstanceId,
-              missing_subtitles: missingSubtitles,
-            },
-          },
-        }) => {
-          const seriesId = sonarrSeriesId;
-          const episodeId = sonarrEpisodeId;
-
+        cell: ({ row: { original } }) => {
+          const { missing_subtitles: missingSubtitles } = original;
+          if (original.origin === "source") {
+            return (
+              <Group gap="sm">
+                {missingSubtitles.map((item, idx) => (
+                  <Badge key={BuildKey(idx, item.code2)}>
+                    <Language.Text value={item} />
+                  </Badge>
+                ))}
+              </Group>
+            );
+          }
           return (
             <Group gap="sm">
               {missingSubtitles.map((item, idx) => (
@@ -239,9 +250,9 @@ const WantedSeriesView: FunctionComponent = () => {
                   style={{ cursor: "pointer" }}
                   onClick={async () => {
                     await download.mutateAsync({
-                      seriesId,
-                      episodeId,
-                      arrInstanceId,
+                      seriesId: original.sonarrSeriesId,
+                      episodeId: original.sonarrEpisodeId,
+                      arrInstanceId: original.arr_instance_id,
                       form: {
                         language: item.code2,
                         hi: item.hi,
@@ -258,19 +269,23 @@ const WantedSeriesView: FunctionComponent = () => {
         },
       },
     ],
-    [download, multiInstance, instanceNameById, instanceDefaultId],
+    [download, includeSources, showBadge, labels, arrNames, defaultArr],
   );
 
-  const getWantedItem = useCallback((row: Wanted.Episode): WantedItem => {
-    return {
-      type: "episode",
-      sonarrSeriesId: row.sonarrSeriesId,
-      sonarrEpisodeId: row.sonarrEpisodeId,
-      arrInstanceId: row.arr_instance_id,
-      seriesTitle: row.seriesTitle,
-      episodeTitle: row.episodeTitle,
-    };
-  }, []);
+  const getWantedItem = useCallback(
+    (row: Wanted.EpisodeRow): WantedItem | null => {
+      if (row.origin === "source") return null;
+      return {
+        type: "episode",
+        sonarrSeriesId: row.sonarrSeriesId,
+        sonarrEpisodeId: row.sonarrEpisodeId,
+        arrInstanceId: row.arr_instance_id,
+        seriesTitle: row.seriesTitle,
+        episodeTitle: row.episodeTitle,
+      };
+    },
+    [],
+  );
 
   const { mutateAsync } = useSeriesAction();
 
@@ -279,6 +294,15 @@ const WantedSeriesView: FunctionComponent = () => {
       name="Series"
       columns={columns}
       query={query}
+      arrActions={arrActions}
+      sourceFilter={
+        <SourceFilter
+          labels={labels}
+          value={selected}
+          onChange={onChange}
+          includeSources={includeSources}
+        />
+      }
       searchValue={search}
       onSearchChange={setSearch}
       audioLanguages={audioLanguages}
@@ -294,7 +318,10 @@ const WantedSeriesView: FunctionComponent = () => {
       dataFilter={hasActiveFilter ? dataFilter : undefined}
       pendingSearchCount={forcedPending}
       searchAll={async () => {
-        await mutateAsync({ action: "search-wanted" });
+        await mutateAsync({
+          action: "search-wanted",
+          sources: includeSources ? 1 : undefined,
+        });
       }}
       scanAll={async () => {
         await mutateAsync({ action: "scan-wanted" });

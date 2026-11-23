@@ -995,7 +995,8 @@ class SubtitleScoreOverride(Resource):
         return '', 204
 
 
-def postprocess_subtitles(subtitles_path, video_path, media_type, metadata, id, arr_instance_id=None):
+def postprocess_subtitles(subtitles_path, video_path, media_type, metadata, id, arr_instance_id=None,
+                          source=None):
     # apply chmod if required
     chmod = (
         int(settings.general.chmod, 8)
@@ -1027,6 +1028,12 @@ def postprocess_subtitles(subtitles_path, video_path, media_type, metadata, id, 
             logging.warning(
                 "BAZARR refusing to chmod a subtitle outside the video's subtitle folder: %s",
                 subtitles_path)
+
+    if source is not None:
+        from media_sources.indexer import index_and_notify_item
+
+        index_and_notify_item(source)
+        return
 
     if media_type == "sports":
         from subtitles.indexer.sports import store_subtitles_sports

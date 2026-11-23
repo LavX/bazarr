@@ -468,6 +468,7 @@ validators = [
 
     # The folder source screens are opt-in while source pages are being added.
     Validator('media_sources.visible', must_exist=True, default=False, is_type_of=bool),
+    Validator('media_sources.wanted_search_frequency', must_exist=True, default=6, is_type_of=int, gte=1),
 
     # translating section
     Validator('translator.min_source_score', must_exist=True, default=90, is_type_of=int, gte=0, lte=100),
@@ -1839,6 +1840,48 @@ def restore_persisted_settings():
 
 
 _native_settings_save_lock = threading.RLock()
+_subtitle_settings_condition = threading.Condition()
+_subtitle_settings_readers = 0
+_subtitle_settings_writer = None
+
+
+@contextlib.contextmanager
+def pin_subtitle_settings():
+    """Allow concurrent subtitle publications while keeping destination settings stable."""
+    global _subtitle_settings_readers
+    with _subtitle_settings_condition:
+        pinned = _subtitle_settings_writer is None
+        if pinned:
+            _subtitle_settings_readers += 1
+    try:
+        yield pinned
+    finally:
+        if pinned:
+            with _subtitle_settings_condition:
+                _subtitle_settings_readers -= 1
+                _subtitle_settings_condition.notify_all()
+
+
+@contextlib.contextmanager
+def _subtitle_settings_write_guard():
+    """Drain publication readers before taking the configuration write locks."""
+    global _subtitle_settings_writer
+    writer = threading.get_ident()
+    with _subtitle_settings_condition:
+        _subtitle_settings_condition.wait_for(
+            lambda: _subtitle_settings_writer is None or _subtitle_settings_writer == writer)
+        outermost = _subtitle_settings_writer is None
+        _subtitle_settings_writer = writer
+    try:
+        if outermost:
+            with _subtitle_settings_condition:
+                _subtitle_settings_condition.wait_for(lambda: not _subtitle_settings_readers)
+        yield
+    finally:
+        if outermost:
+            with _subtitle_settings_condition:
+                _subtitle_settings_writer = None
+                _subtitle_settings_condition.notify_all()
 
 # What a written save could not finish for the provider logins it changed: the
 # cached logins still to clear, and whether the credential throttles still need
@@ -2818,7 +2861,7 @@ def _save_settings_under_locks(settings_items, switched):
     if any(key in PLEX_ACCOUNT_KEYS for key, _value in items):
         from media_servers.plex_account import ACCOUNT_LOCK
         account_lock = ACCOUNT_LOCK
-    with account_lock, CONFIG_LOCK:
+    with _subtitle_settings_write_guard(), account_lock, CONFIG_LOCK:
         # The destination checks read the stored settings, so they run inside
         # the write boundary, where the checked settings and the written
         # settings are one state: a save that paused between its check and
@@ -3218,7 +3261,7 @@ def _save_settings(settings_items, native_configuration=None, *, strict_metadata
                    'settings-sportarr-full_update', 'settings-sportarr-full_update_day',
                    'settings-sportarr-full_update_hour',
                    'settings-general-wanted_search_frequency', 'settings-general-wanted_search_frequency_movie',
-                   'settings-general-wanted_search_frequency_sports',
+                   'settings-general-wanted_search_frequency_sports', 'settings-media_sources-wanted_search_frequency',
                    'settings-general-upgrade_frequency', 'settings-backup-frequency', 'settings-backup-day',
                    'settings-backup-hour']:
             update_schedule = True

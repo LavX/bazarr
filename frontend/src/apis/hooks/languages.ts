@@ -10,10 +10,11 @@ export function useLanguages(history?: boolean) {
   });
 }
 
-export function useAudioLanguages(enabled = true) {
+export function useAudioLanguages(enabled = true, includeSources = false) {
   return useQuery({
-    queryKey: [QueryKeys.System, QueryKeys.Languages, "audio"],
-    queryFn: () => api.system.audioLanguages(),
+    queryKey: [QueryKeys.System, QueryKeys.Languages, "audio", includeSources],
+    queryFn: () => api.system.audioLanguages(includeSources),
+    placeholderData: undefined,
     staleTime: 60_000,
     enabled,
   });

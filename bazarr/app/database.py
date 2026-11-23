@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import sqlite3
+import uuid
 import flask_migrate
 
 from dogpile.cache import make_region
@@ -53,6 +54,10 @@ def configure_sqlite_connection(dbapi_connection, connection_record):
     # or tooling) - PRAGMA is invalid SQL on PostgreSQL.
     if not isinstance(dbapi_connection, sqlite3.Connection):
         return
+    # SQLite's lower() only folds ASCII. Windows paths also compare non-ASCII letters without case.
+    from utilities.path_case import windows_path_casefold
+
+    dbapi_connection.create_function('unicode_path_casefold', 1, windows_path_casefold, deterministic=True)
     cursor = dbapi_connection.cursor()
     try:
         cursor.execute("PRAGMA journal_mode=WAL")
@@ -1215,6 +1220,7 @@ class TableSourceBlacklist(Base):
     )
 
     id = mapped_column(Integer, primary_key=True, autoincrement=True)
+    removal_key = mapped_column(Text, nullable=False, default=lambda: uuid.uuid4().hex)
     item_id = mapped_column(Integer, ForeignKey('table_source_items.id', ondelete='SET NULL'))
     source_id = mapped_column(Integer, ForeignKey('media_sources.id', ondelete='SET NULL'))
     item_kind = mapped_column(Text, nullable=False)

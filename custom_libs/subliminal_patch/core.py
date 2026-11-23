@@ -42,7 +42,7 @@ except ImportError:
     is_windows_special_path = False
 
 from subliminal_patch.hashes import hash_napiprojekt, hash_opensubtitles, hash_shooter, hash_thesubdb
-from subzero.language import Language, ENDSWITH_LANGUAGECODE_RE, FULL_LANGUAGE_LIST
+from subzero.language import Language, ENDSWITH_LANGUAGECODE_RE, FULL_LANGUAGE_LIST, REGIONAL_LANGUAGE_ALIASES
 
 logger = logging.getLogger(__name__)
 
@@ -58,6 +58,7 @@ REMOVE_CRAP_FROM_FILENAME = re.compile(r"(?i)(?:([\s_-]+(?:obfuscated|scrambled|
                                        r"|asrequested)(?:\[.+\])?)|([\s_-]\w{2,})(\[.+\]))(?=\.\w+$|$)")
 
 SUBTITLE_EXTENSIONS = ('.srt', '.sub', '.smi', '.txt', '.ssa', '.ass', '.mpl', '.vtt')
+EXTERNAL_SUBTITLE_MODIFIERS = ('forced', 'normal', 'default', 'embedded', 'embedded-forced', 'custom', 'hi', 'cc', 'sdh')
 
 _POOL_LIFETIME = datetime.timedelta(hours=12)
 
@@ -2256,7 +2257,22 @@ def scan_video(path, dont_use_actual_file=False, hints=None, providers=None, ski
     return video
 
 
-def _search_external_subtitles(path, languages=None, only_one=False, match_strictness="strict"):
+def external_subtitle_base(stem):
+    """Strip a recognized language tag from a subtitle filename stem."""
+    base, separator, suffix = stem.rpartition('.')
+    if separator and suffix.lower() in REGIONAL_LANGUAGE_ALIASES:
+        return base
+    return ENDSWITH_LANGUAGECODE_RE.sub(
+        lambda match: "" if match.group(1).lower() in FULL_LANGUAGE_LIST else match.group(0), stem)
+
+
+def is_vobsub_pair(filename, regular_names):
+    """A .sub with a companion .idx is a bitmap subtitle."""
+    stem, extension = os.path.splitext(filename.lower())
+    return extension == ".sub" and stem + ".idx" in regular_names
+
+
+def search_external_subtitles_in_directory(path, languages=None, only_one=False, match_strictness="strict"):
     dirpath, filename = os.path.split(path)
     dirpath = dirpath or '.'
     fn_no_ext, fileext = os.path.splitext(filename)
@@ -2281,7 +2297,7 @@ def _search_external_subtitles(path, languages=None, only_one=False, match_stric
         if not INCLUDE_EXOTIC_SUBS and p_ext not in (".srt", ".ass", ".ssa", ".vtt"):
             continue
 
-        if p_ext.lower() == ".sub" and f"{p_root}.idx".lower() in names:
+        if is_vobsub_pair(p, names):
             continue
 
         if p_root.lower() == fn_no_ext_lower:
@@ -2295,7 +2311,7 @@ def _search_external_subtitles(path, languages=None, only_one=False, match_stric
         adv_tag = None
         if len(split_tag) > 1:
             adv_tag = split_tag[1].lower()
-            if adv_tag in ['forced', 'normal', 'default', 'embedded', 'embedded-forced', 'custom', 'hi', 'cc', 'sdh']:
+            if adv_tag in EXTERNAL_SUBTITLE_MODIFIERS:
                 p_root = split_tag[0]
 
         forced = False
@@ -2315,8 +2331,7 @@ def _search_external_subtitles(path, languages=None, only_one=False, match_stric
         p_root = p_root.replace('zh-TW', 'zht')
 
         # remove possible language code for matching
-        p_root_bare = ENDSWITH_LANGUAGECODE_RE.sub(
-            lambda m: "" if str(m.group(1)).lower() in FULL_LANGUAGE_LIST else m.group(0), p_root)
+        p_root_bare = external_subtitle_base(p_root)
 
         p_root_lower = p_root_bare.lower()
         # comparing to both unicode normalization forms to prevent broking stuff and improve indexing on some platforms.
@@ -2381,8 +2396,8 @@ def search_external_subtitles(path, languages=None, only_one=False, match_strict
         logger.debug("external subs: scanning path %s", abspath)
 
         if os.path.isdir(os.path.dirname(abspath)):
-            subtitles.update(_search_external_subtitles(abspath, languages=languages, only_one=only_one,
-                                                        match_strictness=match_strictness))
+            subtitles.update(search_external_subtitles_in_directory(
+                abspath, languages=languages, only_one=only_one, match_strictness=match_strictness))
     logger.debug("external subs: found %s", subtitles)
     return subtitles
 
@@ -2563,7 +2578,8 @@ def save_subtitles(file_path, subtitles, single=False, directory=None, chmod=Non
     :type subtitles: list of :class:`~subliminal.subtitle.Subtitle`
     :param bool single: save a single subtitle, default is to save one subtitle per language.
     :param str directory: path to directory where to save the subtitles, default is next to the video.
-    :param write_subtitle: optional callback receiving each exact destination and encoded content
+    :param write_subtitle: optional callback receiving each exact destination and encoded content.
+        Returning False declines that file.
     :return: the saved subtitles
     :rtype: list of :class:`~subliminal.subtitle.Subtitle`
 
@@ -2613,6 +2629,8 @@ def save_subtitles(file_path, subtitles, single=False, directory=None, chmod=Non
 
         subtitle.storage_path = subtitle_path
 
+        written_path = None
+        declined = False
         for format in formats:
             extension = SUBTITLE_FORMAT_EXTENSIONS.get(format, format)
             if extension != "srt":
@@ -2622,19 +2640,26 @@ def save_subtitles(file_path, subtitles, single=False, directory=None, chmod=Non
             content = subtitle.get_modified_content(format=format, debug=debug_mods)
             if content:
                 if write_subtitle is not None:
-                    write_subtitle(subtitle_path, content)
+                    # A writer can reject a destination after the provider has returned.
+                    if write_subtitle(subtitle_path, content) is False:
+                        declined = True
+                        continue
                 else:
                     if os.path.exists(subtitle_path):
                         os.remove(subtitle_path)
                     with open(subtitle_path, 'wb') as f:
                         f.write(content)
-                subtitle.storage_path = subtitle_path
+                written_path = subtitle.storage_path = subtitle_path
             else:
                 logger.error(u"Something went wrong when getting modified subtitle for %s", subtitle)
 
+        if declined and written_path is None:
+            subtitle.storage_path = None
+            continue
+
         # change chmod if requested
-        if chmod:
-            os.chmod(subtitle_path, chmod)
+        if chmod and written_path is not None:
+            os.chmod(written_path, chmod)
 
         saved_subtitles.append(subtitle)
 

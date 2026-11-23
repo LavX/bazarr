@@ -883,8 +883,6 @@ def test_sports_destination_preserves_native_recorded_owner(
 def test_overwrite_cleanup_releases_owner_transaction_before_library_lookup(
     manual_library, monkeypatch
 ):
-    import time
-    from sqlalchemy.orm import Session
     from app.config import settings
     from app.database import TableArrInstances, TableHistorySports
     from subtitles.tools import subsync_engines
@@ -897,52 +895,69 @@ def test_overwrite_cleanup_releases_owner_transaction_before_library_lookup(
     monkeypatch.setattr(settings.subsync, "use_subsync_movie_threshold", False)
     monkeypatch.setattr(settings.subsync, "enabled_engines", ["ffsubsync"])
     monkeypatch.setattr(settings.subsync, "output_mode", "overwrite")
-    engine_done = []
-    attempts = []
+    db_engine = session.get_bind()
+    destination = folder / "1/subs/event.en.srt"
+    obsolete = subsync_engines.engine_output_path(destination, "ffsubsync")
+    obsolete_bytes = b"1\n00:00:00,000 --> 00:00:01,000\nPrevious sync\n"
+    synced_bytes = []
+    lookup_bytes = []
     blocked = []
-    original = subsync_engines.SyncOutputOwnerIndex._load_owners
+    registry_rows = subsync_engines.SyncOutputOwnerIndex._registry_rows
 
     def engine(self, output_path, **kwargs):
-        Path(output_path).write_text(
-            Path(self.srtin).read_text().replace("Sporting event", "Published sync")
-        )
-        engine_done.append(True)
+        # The initial download already ran its own cleanup. Give the overwrite
+        # a real generated sibling so its cleanup needs the library lookup.
+        obsolete.write_bytes(obsolete_bytes)
+        content = Path(self.srtin).read_bytes().replace(b"Sporting event", b"Published sync")
+        Path(output_path).write_bytes(content)
+        synced_bytes.append(content)
         return {"offset_seconds": 0, "framerate_scale_factor": 1}
 
-    def load_owners():
-        if engine_done and not attempts:
-            other = Session(bind=session.get_bind())
-            started = time.monotonic()
+    def lookup_owners(target=None):
+        if synced_bytes and not lookup_bytes:
+            lookup_bytes.append(destination.read_bytes())
             try:
-                other.execute(
-                    sa.text(
+                with (
+                    db_engine.connect().execution_options(
+                        isolation_level="SERIALIZABLE"
+                    ) as other,
+                    other.begin(),
+                ):
+                    other.exec_driver_sql(
                         "PRAGMA busy_timeout=300"
-                        if other.bind.dialect.name == "sqlite"
-                        else "SET lock_timeout = '300ms'"
+                        if other.dialect.name == "sqlite"
+                        else "SET LOCAL lock_timeout = '300ms'"
                     )
-                )
-                other.execute(
-                    sa.update(TableArrInstances)
-                    .where(TableArrInstances.id == 1)
-                    .values(enabled=0)
-                )
+                    other.execute(
+                        sa.update(TableArrInstances)
+                        .where(TableArrInstances.id == 1)
+                        .values(enabled=0)
+                    )
             except sa.exc.OperationalError as exc:
                 blocked.append(type(exc.orig).__name__)
-            finally:
-                attempts.append(time.monotonic() - started)
-                other.close()
-        return original()
+        return registry_rows(target)
 
     monkeypatch.setattr(SubSyncer, "_run_ffsubsync_engine", engine)
     monkeypatch.setattr(
-        subsync_engines.SyncOutputOwnerIndex, "_load_owners", staticmethod(load_owners)
+        subsync_engines.SyncOutputOwnerIndex,
+        "_registry_rows",
+        staticmethod(lookup_owners),
     )
     candidate = service.manual_search_sports(61, "en", arr_instance_id=1)[0]
     saved = service.manual_download_sports(61, candidate, arr_instance_id=1)
+    assert not blocked
+    assert lookup_bytes == synced_bytes == [destination.read_bytes()]
+    assert b"Published sync" in synced_bytes[0]
+    assert not obsolete.exists()
+    (quarantined,) = destination.parent.glob(".bazarr-sync-obsolete-*.bak")
+    assert quarantined.read_bytes() == obsolete_bytes
     assert saved.publication["published"] is True
     assert saved.publication["index"] == "owner_changed"
-    assert attempts and not blocked
-    assert "Published sync" in (folder / "1/subs/event.en.srt").read_text()
+    with db_engine.connect() as other:
+        enabled = other.scalar(
+            sa.select(TableArrInstances.enabled).where(TableArrInstances.id == 1)
+        )
+    assert enabled == 0
     assert session.execute(sa.select(TableHistorySports)).first() is None
 
 

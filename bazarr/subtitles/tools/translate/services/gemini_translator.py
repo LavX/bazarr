@@ -30,7 +30,7 @@ from subtitles.processing import ProcessSubtitlesResult  # noqa: F401
 from app.jobs_queue import JobCancelled, jobs_queue
 from languages.get_languages import alpha3_from_alpha2, language_from_alpha2, language_from_alpha3  # noqa: F401
 from ..core.translator_utils import (add_translator_info, get_description, create_process_result,
-                                     translation_write_kwargs)
+                                     record_source_translation, require_source_translation, translation_write_kwargs)
 
 logger = logging.getLogger(__name__)
 DEFAULT_GEMINI_BATCH_SIZE = 300
@@ -68,7 +68,7 @@ class GeminiTranslatorService:
     def __init__(self, source_srt_file, dest_srt_file, to_lang, media_type, sonarr_series_id, sonarr_episode_id,
                  radarr_id, forced, hi, video_path, from_lang, orig_to_lang,
                  arr_instance_id=None, sports_operation=None, cancel=None,
-                 expected_destination_versions=(), **kwargs):
+                 expected_destination_versions=(), source=None, source_video_version=None, **kwargs):
         self.source_srt_file = source_srt_file
         self.dest_srt_file = dest_srt_file
         self.to_lang = to_lang
@@ -79,6 +79,8 @@ class GeminiTranslatorService:
         # unique together with it, so every media lookup below carries it.
         self.arr_instance_id = arr_instance_id
         self.sports_operation = sports_operation
+        self.source = source
+        self.source_video_version = source_video_version
         self.cancel = cancel
         self.from_lang = from_lang
         self.video_path = video_path
@@ -136,7 +138,8 @@ class GeminiTranslatorService:
             self.description = get_description(self.media_type, self.radarr_id, self.sonarr_series_id,
                                                arr_instance_id=self.arr_instance_id,
                                                **({"sports_context": self.sports_operation.context}
-                                                  if self.sports_operation else {}))
+                                                  if self.sports_operation else {}),
+                                               **({"source": self.source} if self.source else {}))
 
             if self.input_file:
                 self.progress_file = os.path.join(os.path.dirname(self.input_file), f".{os.path.basename(self.input_file)}.progress")
@@ -144,8 +147,10 @@ class GeminiTranslatorService:
             try:
                 with staged_subtitle_write(self.video_path, self.dest_srt_file,
                                            on_publish=publication_callback(self.media_type, self.video_path,
-                                                                           'translate', self.arr_instance_id),
-                                       source_paths=(self.source_srt_file,),
+                                                                           'translate', self.arr_instance_id,
+                                                                           **({'source': self.source}
+                                                                              if self.source else {})),
+                                           source_paths=(self.source_srt_file,),
                                            before_publish=lambda: jobs_queue.update_job_progress(job_id=job_id),
                                            **translation_write_kwargs(self, job_id)) as temporary:
                     self.output_file = temporary
@@ -156,6 +161,10 @@ class GeminiTranslatorService:
                     self._translate_with_gemini()
                     if self.sports_operation and (not os.path.isfile(temporary) or not os.path.getsize(temporary)):
                         raise RuntimeError("Gemini returned no translated text")
+                    if self.source is not None:
+                        result = pysubs2.load(temporary, encoding='utf-8')
+                        require_source_translation(self.source, (line.plaintext for line in subs),
+                                                   (line.plaintext for line in result))
                     # A partial file says so: the footer is the file's own claim
                     # about itself, and it must not read as a full translation
                     # while source-language cues remain.
@@ -184,9 +193,10 @@ class GeminiTranslatorService:
             result = create_process_result(message, self.video_path, self.orig_to_lang, self.forced, self.hi,
                                            self.dest_srt_file, self.media_type,
                                            **({"sports_context": self.sports_operation.context}
-                                              if self.sports_operation else {}))
+                                              if self.sports_operation else {}),
+                                           **({"source": self.source} if self.source else {}))
 
-            if finish_translation(self, result):
+            if record_source_translation(self.source, result) or finish_translation(self, result):
                 return self.dest_srt_file
             if self.media_type == 'episode':
                 history_log(action=6, sonarr_series_id=self.sonarr_series_id, sonarr_episode_id=self.sonarr_episode_id,

@@ -5,8 +5,10 @@ class BadgesApi extends BaseApi {
     super("/badges");
   }
 
-  async all() {
-    const response = await this.get<Badge>("");
+  async all(includeSources = false) {
+    const response = await this.get<Badge>("", {
+      sources: includeSources ? 1 : undefined,
+    });
     return response;
   }
 }
