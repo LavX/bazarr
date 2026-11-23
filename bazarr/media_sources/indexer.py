@@ -9,7 +9,7 @@ import ast
 import logging
 import os
 import sqlite3
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from functools import partial
 from time import sleep
 
@@ -35,6 +35,8 @@ from subtitles.tools.combine.naming import parse_combined_filename
 from subtitles.tools.combine.rules import _dotted_custom_aliases
 from subtitles.tools.subsync_engines import (SYNC_ENGINE_LANGUAGE_MODIFIERS, SubtitleDestinationChanged,
                                              SubtitleSourceChanged, SyncOutputOwnerIndex, _normalized_media_stem,
+                                             local_subtitle_owner_is_clear, plan_sync_output_cleanup,
+                                             quarantine_sync_outputs_after_mutation,
                                              read_regular_subtitle, regular_subtitle_version, subtitle_write_locks,
                                              sync_engine_from_output_path, sync_output_owner_is_unique)
 from utilities.helper import get_subtitle_destination_folder, get_target_folder
@@ -65,6 +67,8 @@ class SourceOutputOwnerIndex(SyncOutputOwnerIndex):
         stems = super().conflicting_stems(video, subtitle_path)
         stem = _normalized_media_stem(subtitle_path)
         if sync_engine_from_output_path(subtitle_path):
+            if stem == _normalized_media_stem(video):
+                return stems
             stem = stem.rsplit('.', 1)[0]
             stems.add(stem)
             subtitle_path = stem + os.path.splitext(subtitle_path)[1]
@@ -90,22 +94,12 @@ class SourceOutputOwnerIndex(SyncOutputOwnerIndex):
         return self._map_source_owners(self._source_owner_paths(self._target))
 
     @staticmethod
-    def _map_source_owners(paths):
-        custom_folder = get_subtitle_destination_folder()
-        subfolder = settings.general.subfolder
-        absolute_folder = os.path.normcase(os.path.realpath(custom_folder)) if subfolder == 'absolute' else None
+    def _map_source_owners(paths, destination=None):
+        if destination is None:
+            destination = settings.general.subfolder, get_subtitle_destination_folder()
         owners = {}
         for path in paths:
-            mapped = os.path.normcase(os.path.realpath(path))
-            media_directory = os.path.normcase(os.path.realpath(os.path.dirname(path)))
-            folders = {media_directory}
-            if absolute_folder:
-                folders.add(absolute_folder)
-            elif subfolder == 'relative' and custom_folder:
-                folders.add(os.path.normcase(os.path.realpath(os.path.join(media_directory, custom_folder))))
-            stem = _normalized_media_stem(path)
-            for folder in folders:
-                owners.setdefault((folder, stem), set()).add(mapped)
+            SyncOutputOwnerIndex._record_owner(owners, path, destination)
         return owners
 
 
@@ -118,18 +112,52 @@ class SourcePublicationOwnerIndex(SourceOutputOwnerIndex):
 
     def __init__(self):
         super().__init__()
-        self._prepared_paths = None
+        self._prepared_owners = None
+        self._publication_settings = None
+
+    @staticmethod
+    def _settings_snapshot():
+        from utilities.path_mappings import global_sports_mappings, path_mappings
+
+        destination = settings.general.subfolder, get_subtitle_destination_folder()
+        mappings = tuple(tuple(tuple(pair) for pair in rows) for rows in (
+            path_mappings.path_mapping_series, path_mappings.path_mapping_movies, global_sports_mappings()))
+        return destination, mappings
+
+    @staticmethod
+    @contextmanager
+    def _settings_guard():
+        from discover.metadata import CONFIG_LOCK
+
+        # A settings save may need a subtitle coordinator in one of its follow-ups.
+        # A publisher holding that coordinator cannot wait for the settings lock.
+        if not CONFIG_LOCK.acquire(blocking=False):
+            raise SourcePublicationOwnersChanged('Subtitle destinations or path mappings are being saved')
+        try:
+            yield
+        finally:
+            CONFIG_LOCK.release()
+
+    def _registry_snapshot(self, target=None):
+        return self._source_owner_paths(target), self._registry_rows(target)
 
     def _load_owners(self):
-        self._prepared_paths = self._source_owner_paths(None)
-        owners = self._map_source_owners(self._prepared_paths)
-        for key, paths in SyncOutputOwnerIndex._load_owners().items():
+        source_paths, registry_rows = self._registry_snapshot()
+        self._prepared_owners = source_paths, registry_rows
+        destination, mappings = self._publication_settings or self._settings_snapshot()
+        owners = self._map_source_owners(source_paths, destination)
+        for key, paths in self._map_registry_rows(registry_rows, mappings=mappings, destination=destination).items():
             owners.setdefault(key, set()).update(paths)
         return owners
 
+    def subtitle_destination(self):
+        if self._publication_settings is not None:
+            return self._publication_settings[0]
+        return super().subtitle_destination()
+
     def folder_is_shared(self, directory):
         # A relative custom path can also resolve into another video's directory.
-        return bool(get_subtitle_destination_folder())
+        return bool(self.subtitle_destination()[1])
 
     @staticmethod
     def _needs_registry_guard(source, destination, custom_folder):
@@ -144,16 +172,25 @@ class SourcePublicationOwnerIndex(SourceOutputOwnerIndex):
         return directory != media_directory
 
     @contextmanager
-    def publication(self, source, prepare=None, *, destination=None, release=None):
+    def publication(self, source, prepare=None, *, destination=None, cleanup_outputs=False, release=None):
         """Keep slow ownership and subtitle discovery outside the writer transaction."""
         for _ in range(2):
             self._loaded = False
             self._owners = {}
-            self._prepared_paths = None
-            destination_setting = settings.general.subfolder, get_subtitle_destination_folder()
+            self._prepared_owners = None
+            self._publication_settings = self._settings_snapshot()
+            shared = self._needs_registry_guard(source, destination, self._publication_settings[0][1])
+            # Local release mutations use their own advisory lock. Their ownership
+            # depends on the media directory, without any cross-library mappings.
+            pin_settings = shared or release is None
+            if pin_settings:
+                with self._settings_guard():
+                    self._publication_settings = self._settings_snapshot()
+                shared = self._needs_registry_guard(source, destination, self._publication_settings[0][1])
             prepared = prepare() if prepare is not None else None
-            shared = self._needs_registry_guard(source, destination, destination_setting[1])
-            if shared and self._prepared_paths is None:
+            outputs = (plan_sync_output_cleanup(source.path, destination, self, include_combined=True)
+                       if cleanup_outputs else ())
+            if shared and self._prepared_owners is None:
                 raise SourcePublicationOwnersChanged('The shared subtitle owners could not be verified')
             # A scanner with the conflicting lock finishes outside this transaction.
             # Retrying after rollback leaves it free to finish any remaining row writes.
@@ -162,18 +199,26 @@ class SourcePublicationOwnerIndex(SourceOutputOwnerIndex):
                     sleep(delay)
                 publishing = False
                 try:
-                    with source_item_publication(source, shared=shared, release=release) as (current, connection):
-                        if destination_setting != (settings.general.subfolder, get_subtitle_destination_folder()):
+                    options = {'release': release} if release is not None else {}
+                    settings_guard = self._settings_guard() if pin_settings else nullcontext()
+                    with settings_guard, source_item_publication(source, shared=shared, **options) as (
+                            current, connection):
+                        if self._publication_settings != self._settings_snapshot():
                             break
-                        if shared and current is not None and self._prepared_paths != self._source_owner_paths(connection):
+                        if shared and current is not None and self._prepared_owners != self._registry_snapshot(connection):
                             break
                         if current is not None:
                             state = repository.item_state(current.item_id, connection)
                             if (state is None or not state.source_enabled or not state.library_enabled
                                     or not os.path.isfile(current.path)):
                                 current = None
+                        if (current is not None and destination is not None
+                                and not local_subtitle_owner_is_clear(current.path, destination, self)):
+                            raise SourcePublicationOwnersChanged('Another video now owns the subtitle destination')
                         publishing = True
                         yield current, connection, prepared
+                        if current is not None and outputs:
+                            quarantine_sync_outputs_after_mutation(current.path, destination, self, prepared=outputs)
                         return
                 except sa.exc.OperationalError as error:
                     sqlstate = getattr(error.orig, 'sqlstate', None) or getattr(error.orig, 'pgcode', None)
@@ -220,10 +265,10 @@ def list_external_subtitles(path, previous=None, ownership_index=None, *, public
             path_key = os.path.normcase(os.path.abspath(subtitle_path))
             if path_key in actual or path_key in excluded:
                 continue
-            version = regular_subtitle_version(subtitle_path)
-            if version is None:
-                continue
             if publication and not sync_output_owner_is_unique(path, subtitle_path, ownership_index=ownership_index):
+                continue
+            version = regular_subtitle_version(subtitle_path, strict=publication)
+            if version is None:
                 continue
             if version[2] <= MAXIMUM_SUBTITLE_SIZE:
                 try:
@@ -233,12 +278,14 @@ def list_external_subtitles(path, previous=None, ownership_index=None, *, public
                     language = guess_external_subtitles(
                         directory, {subtitle: language}, 'movie', (previous_entry,) if previous_entry else None,
                         path_reverse=os.fspath, read_bytes=read_sample)[subtitle]
-                except SubtitleSourceChanged:
+                except SubtitleSourceChanged as error:
+                    if publication:
+                        raise OSError('A candidate subtitle changed while verifying its language') from error
                     continue
-                except (OSError, UnicodeError):
-                    if not publication:
-                        raise
-                    continue
+                except UnicodeError as error:
+                    if publication:
+                        raise OSError('A candidate subtitle could not be decoded') from error
+                    raise
             entry = _external_subtitle_entry(subtitle, language, subtitle_path, version[2])
             if entry is not None:
                 actual[path_key] = entry

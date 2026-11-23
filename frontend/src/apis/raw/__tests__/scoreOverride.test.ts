@@ -1,7 +1,7 @@
 /* eslint-disable camelcase */
 
 /**
- * The manual score call names the movie or the episode by its own field, and
+ * The manual score call names the movie, episode or event by its own field, and
  * sends exactly one of them, as the endpoint requires.
  */
 
@@ -36,6 +36,7 @@ describe("SubtitlesApi.setScoreOverride", () => {
 
     expect(body.get("radarrMovieId")).toBe("42");
     expect(body.has("sonarrEpisodeId")).toBe(false);
+    expect(body.has("sportsEventId")).toBe(false);
     expect(body.get("subtitlesPath")).toBe("/movies/a.en.srt");
     expect(body.get("score")).toBe("85");
     expect(body.get("arr_instance_id")).toBe("3");
@@ -53,7 +54,27 @@ describe("SubtitlesApi.setScoreOverride", () => {
 
     expect(body.get("sonarrEpisodeId")).toBe("7");
     expect(body.has("radarrMovieId")).toBe(false);
+    expect(body.has("sportsEventId")).toBe(false);
     expect(body.get("score")).toBe("0");
     expect(body.has("arr_instance_id")).toBe(false);
+  });
+
+  it("sends a sports event by its local id with its owner and a zero score", async () => {
+    const body = await capture(() =>
+      api.subtitles.setScoreOverride({
+        type: "sports",
+        id: 61,
+        path: "/sports/race.en.srt",
+        score: 0,
+        arr_instance_id: 42,
+      }),
+    );
+
+    expect(body.get("sportsEventId")).toBe("61");
+    expect(body.get("arr_instance_id")).toBe("42");
+    expect(body.get("subtitlesPath")).toBe("/sports/race.en.srt");
+    expect(body.get("score")).toBe("0");
+    expect(body.has("radarrMovieId")).toBe(false);
+    expect(body.has("sonarrEpisodeId")).toBe(false);
   });
 });

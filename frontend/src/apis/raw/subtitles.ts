@@ -43,10 +43,10 @@ export type BatchAction =
   | "extract"
   | "ocr";
 
-/** One manual score for a listed subtitle file of a movie or an episode. */
+/** One manual score for a listed subtitle file. */
 export interface ScoreOverrideForm {
-  type: "movie" | "episode";
-  /** radarrId for a movie, sonarrEpisodeId for an episode. */
+  type: "movie" | "episode" | "sports";
+  /** radarrId, sonarrEpisodeId, or the local sports event id. */
   id: number;
   path: string;
   /** A whole percentage from 0 to 100. */
@@ -289,8 +289,8 @@ class SubtitlesApi extends BaseApi {
   }
 
   /**
-   * Pin a score from 0 to 100 on one listed subtitle file of a movie or an
-   * episode. `id` is the radarrId or the sonarrEpisodeId, as in a modify form.
+   * Pin a score from 0 to 100 on one listed subtitle file. The id follows
+   * the media type, as in a modify form.
    */
   async setScoreOverride(form: ScoreOverrideForm) {
     await this.post("/score-override", {
@@ -298,6 +298,7 @@ class SubtitlesApi extends BaseApi {
       score: form.score,
       radarrMovieId: form.type === "movie" ? form.id : undefined,
       sonarrEpisodeId: form.type === "episode" ? form.id : undefined,
+      sportsEventId: form.type === "sports" ? form.id : undefined,
       // eslint-disable-next-line camelcase
       arr_instance_id: form.arr_instance_id,
     });

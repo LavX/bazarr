@@ -79,7 +79,12 @@ interface Props extends WizardStepProps {
  * Continue with nothing filled in writes nothing and advances, the same
  * contract as every other optional connection step.
  */
-const InstanceServerForm: FC<Props> = ({ draft, onNext, onBack }) => {
+const InstanceServerForm: FC<Props> = ({
+  draft,
+  onNext,
+  onBack,
+  onWritten,
+}) => {
   const kind = draft.kind;
   const name = kindName(kind);
   const credential = SETUP_CREDENTIAL_LABELS[kind];
@@ -220,7 +225,7 @@ const InstanceServerForm: FC<Props> = ({ draft, onNext, onBack }) => {
       // Held on the draft the way the first save holds it, so a remount during
       // the retry still reports the step busy.
       updateDraft(draft.draftId, { submitting: true });
-      void retrySwitch(kind).then((reason) => {
+      void retrySwitch(kind, savedInstanceId).then((reason) => {
         updateDraft(draft.draftId, { submitting: false });
         if (reason !== null) {
           setFailure(reason);
@@ -255,6 +260,7 @@ const InstanceServerForm: FC<Props> = ({ draft, onNext, onBack }) => {
     // from the render that pressed Continue, so it still shows no saved row.
     let rowRecorded = false;
     void submit([draft], (outcome) => {
+      onWritten?.();
       // The row exists from here on, whatever the master switch write does
       // next, so a remount mid-save finds a draft that knows not to write it
       // again.

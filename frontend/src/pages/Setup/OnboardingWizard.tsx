@@ -25,6 +25,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import { useSettingsMutation } from "@/apis/hooks";
 import { useInstanceName } from "@/apis/hooks/site";
 import { useTranslationRuntime } from "@/apis/hooks/translation";
+import { useMediaServerDisconnectPending } from "./steps/mediaServer/operations";
 import { PHASE_LABELS, type StepOutcome, WIZARD_PHASES } from "./steps/types";
 import { clearPersistedConnectionTests } from "./connectionTests";
 import { settleSetupComplete } from "./setupCompleteCache";
@@ -63,11 +64,14 @@ const OnboardingWizardBody: FunctionComponent = () => {
   const { drafts, clearSelection } = useOnboardingSelection();
   const clearStepDrafts = useClearStepDrafts();
   const stepBusy = useStepBusy();
+  const disconnecting = useMediaServerDisconnectPending();
   const {
     skipped,
+    writtenPhases,
     markSkipped,
     markAnswered,
     markUnwritten,
+    markWritten,
     reset: resetSkipped,
   } = useSkippedSteps();
   const navigate = useNavigate();
@@ -351,13 +355,19 @@ const OnboardingWizardBody: FunctionComponent = () => {
       ? `${current.segment} ${inSegment.findIndex((s) => s.key === current.key) + 1} of ${inSegment.length}`
       : `${inPhase.findIndex((s) => s.key === current.key) + 1} of ${inPhase.length}`;
   const progressText = `${PHASE_LABELS[current.phase]}${showCount ? `, ${counter}` : ""}`;
-  // A phase behind the reader is completed unless everything in it was walked
-  // past with the skip control. It is then visited, which the rail draws as
-  // its number rather than a check: four skipped steps used to show four.
+  // A phase walked past without a confirmed write is visited. A write can
+  // outlive the step that made it, so also check the persisted phase record.
+  // Earlier runs already kept saved server IDs in the picker selection.
+  const savedServer = drafts.some(
+    ({ instanceId, savedInstanceId }) =>
+      instanceId !== undefined || savedInstanceId !== undefined,
+  );
   const skippedPhases = WIZARD_PHASES.filter((phase, position) => {
     const inIt = steps.filter((s) => s.phase === phase);
     return (
       position < phaseIndex &&
+      !writtenPhases.includes(phase) &&
+      !(phase === "connect" && savedServer) &&
       inIt.length > 0 &&
       inIt.every((s) => skipped.includes(s.key))
     );
@@ -416,7 +426,7 @@ const OnboardingWizardBody: FunctionComponent = () => {
   // also fail, and a failed write used to produce nothing at all: no spinner,
   // no message, no navigation, just a button that had apparently done nothing.
   const handleLeave = () => {
-    if (leavePending) {
+    if (leavePending || disconnecting) {
       return;
     }
     setLeaveError(null);
@@ -522,7 +532,12 @@ const OnboardingWizardBody: FunctionComponent = () => {
               >
                 Keep going
               </Button>
-              <Button color="red" onClick={handleLeave} loading={leavePending}>
+              <Button
+                color="red"
+                onClick={handleLeave}
+                loading={leavePending}
+                disabled={disconnecting}
+              >
                 Leave setup
               </Button>
             </Group>
@@ -614,6 +629,11 @@ const OnboardingWizardBody: FunctionComponent = () => {
             <StepComponent
               key={current.key}
               onNext={movesFor(current.key, visit.current.id).next}
+              onWritten={() => {
+                if (!left.current) {
+                  markWritten(current.phase);
+                }
+              }}
               // No Back while the step is finishing work either. Back moves the
               // cursor itself, which unmounts the step before any history guard
               // can see it, and an install that loses its screen still restarts

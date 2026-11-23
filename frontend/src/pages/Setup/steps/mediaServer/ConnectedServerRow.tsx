@@ -1,6 +1,11 @@
-import { FC, useRef, useState } from "react";
+import { FC, useState } from "react";
 import { Alert, Badge, Button, Group, Stack, Text } from "@mantine/core";
 import { showNotification } from "@mantine/notifications";
+import {
+  useIsMutating,
+  useMutation,
+  useQueryClient,
+} from "@tanstack/react-query";
 import { useSettingsMutation } from "@/apis/hooks";
 import { useDeleteMediaServerInstance } from "@/apis/hooks/mediaServers";
 import { usePlexLogoutMutation } from "@/apis/hooks/plex";
@@ -11,6 +16,10 @@ import type {
 import { notification } from "@/modules/notification";
 import { kindName } from "@/pages/Settings/MediaServers/kinds";
 import { readMediaServerTest } from "@/pages/Setup/connectionTests";
+import {
+  MEDIA_SERVER_DISCONNECT_KEY,
+  useSetupMediaServerRefreshes,
+} from "./operations";
 
 // What a row that refreshes is called. It says what Finish will say: saving
 // proves the values were written, and only a passing Test proves they connect.
@@ -35,6 +44,7 @@ interface Props {
   /** Whether this kind's master switch is on. Off means nothing refreshes. */
   kindEnabled?: boolean;
   onDisconnected: (instanceId: string) => void;
+  onWritten?: () => void;
 }
 
 /**
@@ -62,20 +72,20 @@ const ConnectedServerRow: FC<Props> = ({
   ownershipPending = false,
   kindEnabled = true,
   onDisconnected,
+  onWritten,
 }) => {
   const [confirming, setConfirming] = useState(false);
   const [failed, setFailed] = useState(false);
-  // What the kind's switch said before this disconnect started. Signing out
-  // clears use_plex and invalidates the settings, so by the time the switch is
-  // written back the prop reads false whatever it was: the answer has to be
-  // taken before the sign-out, not after it.
-  const enabledBefore = useRef(kindEnabled);
+  const client = useQueryClient();
+  const mutationKey = [MEDIA_SERVER_DISCONNECT_KEY, kind, instance.id];
+  const matchingDisconnect = { mutationKey, exact: true };
+  const pending = useIsMutating(matchingDisconnect) > 0;
   // Both report a failure under the row, so the client's toast stays away.
   const remove = useDeleteMediaServerInstance(kind, instance.id, {
     inlineErrors: true,
   });
   const logout = usePlexLogoutMutation({ inlineErrors: true });
-  const settings = useSettingsMutation();
+  const refreshesOff = useSetupMediaServerRefreshes();
   // The restore below reports its own failure, so it takes a mutation of its
   // own with the hook's and the client's toasts off; with the shared one it
   // said "Save failed" beside its own message. The switch-off write keeps the
@@ -84,66 +94,54 @@ const ConnectedServerRow: FC<Props> = ({
   const refreshes = instance.enabled && kindEnabled;
   const tested = readMediaServerTest(kind, instance.id);
 
-  // mutateAsync with an explicit then and catch, not mutate with callbacks.
-  // TanStack drops a mutate call's own onSuccess and onError once the component
-  // that made the call has unmounted, and pressing Back or Skip mid-disconnect
-  // does exactly that. The delete still ran, so the row was gone from the
-  // database while the draft that wrote it stayed in the wizard and the picker
-  // went on counting it. A promise settles either way. Same reason as the
-  // submit in submit.ts.
-  const deleteRow = () =>
-    remove
-      .mutateAsync(undefined)
-      .then(async () => {
-        setConfirming(false);
-        // The switch goes off only when the last instance of the kind does:
-        // clearing it while a sibling remains would silence a server the
-        // reader never touched. Nothing of this kind is left to refresh once
-        // that write lands, so its failure costs the reader nothing.
-        if (last && !accountOwned) {
-          settings.mutate({ [`settings-general-use_${kind}`]: false });
-        } else if (!last && accountOwned && enabledBefore.current) {
-          // Signing out clears use_plex for the whole kind, and the dispatcher
-          // reads it before any row. The Plex servers the reader added by hand
-          // and kept would stop refreshing along with the account's own, so the
-          // switch is put back once its row is gone, and only if it was on to
-          // begin with: a reader who had turned Plex refreshes off did not ask
-          // for them back by disconnecting an account. The write is waited for
-          // and said out loud when it fails, because those servers are still
-          // standing while the picker reported a clean disconnect and none of
-          // them refreshed. A notification rather than the line below, because
-          // the row this draws is deleted by now, so the list it sits in is
-          // about to drop it and take any message with it.
-          await restore
-            .mutateAsync({ [`settings-general-use_${kind}`]: true })
-            .catch(() =>
-              showNotification(
-                notification.error(
-                  `${kindName(kind)} refreshes are still off`,
-                  `${instance.name || kindName(kind)} is disconnected, but turning ${kindName(kind)} refreshes back on failed, so your other ${kindName(kind)} servers are not refreshing. Turn them on in Settings, Connections.`,
-                ),
+  // Keep the whole operation observable if Back or Skip unmounts the picker.
+  // Record writes in the operation itself, since per-call mutation callbacks
+  // are dropped on unmount.
+  const disconnect = useMutation({
+    mutationKey,
+    mutationFn: async (enabledBefore: boolean) => {
+      if (accountOwned) {
+        // Remove the credential first so a failed delete cannot reconnect the row.
+        await logout.mutateAsync(undefined);
+        onWritten?.();
+      }
+      await remove.mutateAsync(undefined);
+      onWritten?.();
+      setConfirming(false);
+      // The switch goes off only when the last instance of the kind does:
+      // clearing it while a sibling remains would silence a server the
+      // reader never touched. Nothing of this kind is left to refresh once
+      // that write lands, so its failure costs the reader nothing.
+      if (!accountOwned) {
+        await refreshesOff
+          .mutateAsync({ disableIfEmpty: kind })
+          .catch(() => undefined);
+      } else if (!last && accountOwned && enabledBefore) {
+        // Signing out clears use_plex for the whole kind, and the dispatcher
+        // reads it before any row. The Plex servers the reader added by hand
+        // and kept would stop refreshing along with the account's own, so the
+        // switch is put back once its row is gone, and only if it was on to
+        // begin with: a reader who had turned Plex refreshes off did not ask
+        // for them back by disconnecting an account. The write is waited for
+        // and said out loud when it fails, because those servers are still
+        // standing while the picker reported a clean disconnect and none of
+        // them refreshed. A notification rather than the line below, because
+        // the row this draws is deleted by now, so the list it sits in is
+        // about to drop it and take any message with it.
+        await restore
+          .mutateAsync({ [`settings-general-use_${kind}`]: true })
+          .catch(() =>
+            showNotification(
+              notification.error(
+                `${kindName(kind)} refreshes are still off`,
+                `${instance.name || kindName(kind)} is disconnected, but turning ${kindName(kind)} refreshes back on failed, so your other ${kindName(kind)} servers are not refreshing. Turn them on in Settings, Connections.`,
               ),
-            );
-        }
-        onDisconnected(instance.id);
-      })
-      .catch(() => setFailed(true));
-
-  const disconnect = () => {
-    setFailed(false);
-    enabledBefore.current = kindEnabled;
-    if (!accountOwned) {
-      void deleteRow();
-      return;
-    }
-    // Sign out first: once the credential is gone nothing can rebuild the row,
-    // so a delete that fails after it leaves a disconnected server behind
-    // rather than a connected one.
-    void logout
-      .mutateAsync(undefined)
-      .then(() => deleteRow())
-      .catch(() => setFailed(true));
-  };
+            ),
+          );
+      }
+      onDisconnected(instance.id);
+    },
+  });
 
   return (
     <Stack gap="xs">
@@ -169,7 +167,7 @@ const ConnectedServerRow: FC<Props> = ({
             size="compact-sm"
             // Which Plex row the account owns decides whether this signs out
             // or only deletes, so it waits rather than guessing.
-            disabled={ownershipPending}
+            disabled={ownershipPending || pending}
             onClick={() => setConfirming(true)}
           >
             Disconnect
@@ -200,8 +198,14 @@ const ConnectedServerRow: FC<Props> = ({
               <Button
                 color="red"
                 size="compact-sm"
-                loading={remove.isPending || logout.isPending}
-                onClick={disconnect}
+                loading={pending}
+                onClick={() => {
+                  if (client.isMutating(matchingDisconnect) > 0) return;
+                  setFailed(false);
+                  disconnect.mutate(kindEnabled, {
+                    onError: () => setFailed(true),
+                  });
+                }}
               >
                 Disconnect
               </Button>

@@ -27,6 +27,8 @@ from sportarr.subtitles import (
     sports_history,
 )
 from subtitles.language_profiles import profile_item_language_code
+from subtitles.score_override import MANUAL_SCORE_ACTION, manual_score_percent, sports_history_path
+from subtitles.wanted.utils import FILE_REPLACING_ACTIONS
 from utilities.path_mappings import apply_sports_mapping, read_sports_mappings
 from subtitles.tools.subsync_engines import (
     capture_subtitle_versions,
@@ -508,42 +510,57 @@ def _source_score_below_threshold(context, source_lang, source_path=None):
     movie and series paths: those read it at the local subtitle score, which is
     the full scale when the setting is 0 and is let through below the
     threshold when it is above 0. An older provider score for the file the
-    upload replaced no longer applies.
+    upload replaced no longer applies. A manual score changes the score but
+    preserves the upload exemption for the same file.
 
     ``source_path`` is the file the translation will read. The records that
-    count are the ones stored for that file, matched through the instance's path
-    mapping: a language prefix alone also takes in the records of a ``hu:forced``
-    or ``hu:hi`` file, and an upload of one of those says nothing about a plain
-    ``hu`` download. Without a path every record of the language counts.
+    count belong to the event's current video and are stored for that file,
+    matched through the instance's path mapping. A language prefix also takes
+    in the records of a ``hu:forced`` or ``hu:hi`` file. An upload of either
+    says nothing about a plain ``hu`` download. Without a subtitle path every
+    record of the language for the current video counts.
     """
     from app.database import TableHistorySports
 
     rows = database.execute(
-        select(TableHistorySports.score, TableHistorySports.action, TableHistorySports.subtitles_path)
+        select(TableHistorySports.score, TableHistorySports.score_out_of,
+               TableHistorySports.action, sports_history_path(TableHistorySports.subtitles_path).label('subtitles_path'))
         .where(TableHistorySports.event_id == context.event_id)
         .where(TableHistorySports.arr_instance_id == context.arr_instance_id)
+        .where(sports_history_path(TableHistorySports.video_path) == sports_history_path(context.original_path))
         .where(TableHistorySports.language.like(f"{source_lang}%"))
         .where(
             TableHistorySports.score.is_not(None)
-            | (TableHistorySports.action == 4)
+            | TableHistorySports.action.in_(FILE_REPLACING_ACTIONS)
         )
         .order_by(TableHistorySports.timestamp.desc(), TableHistorySports.id.desc())
     ).all()
     if source_path is not None:
         mappings = read_sports_mappings(_instance_mappings(context))
+        local_source = source_path.replace('\\', '/')
         rows = [
             row for row in rows
-            if row.subtitles_path and apply_sports_mapping(row.subtitles_path, mappings) == source_path
+            if row.subtitles_path and apply_sports_mapping(row.subtitles_path, mappings).replace('\\', '/')
+            == local_source
         ]
-    record = rows[0] if rows else None
-    if record is None:
-        return False
-    if record.action == 4:
-        return False
     from subtitles.utils import MAX_SCORES
 
-    pct = round((record.score / MAX_SCORES["movie"]) * 100, 1)
-    return pct < settings.translator.min_source_score
+    for index, record in enumerate(rows):
+        if record.action == 4:
+            return False
+        if record.score is None:
+            continue
+        if record.action == MANUAL_SCORE_ACTION:
+            for origin_index, origin in enumerate(rows):
+                if origin.subtitles_path == record.subtitles_path and origin.action in FILE_REPLACING_ACTIONS:
+                    if origin.action == 4 or origin_index < index:
+                        return False
+                    break
+            pct = manual_score_percent(record.score, record.score_out_of or MAX_SCORES["movie"])
+        else:
+            pct = round((record.score / MAX_SCORES["movie"]) * 100, 1)
+        return pct < settings.translator.min_source_score
+    return False
 
 
 def _already_translated_on_disk(context, target_code):

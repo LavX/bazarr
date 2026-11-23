@@ -133,12 +133,13 @@ describe("ArrStep", () => {
     localStorage.clear();
     setInstances([]);
     setTestState({});
+    deleteMutate.mockResolvedValue(undefined);
     mockedUseCreateArrInstance.mockReturnValue({
       mutate: createMutate,
       isPending: false,
     } as unknown as ReturnType<typeof useCreateArrInstance>);
     mockedUseDeleteArrInstance.mockReturnValue({
-      mutate: deleteMutate,
+      mutateAsync: deleteMutate,
       isPending: false,
     } as unknown as ReturnType<typeof useDeleteArrInstance>);
     mockedUseSettingsMutation.mockReturnValue({
@@ -1056,7 +1057,7 @@ describe("ArrStep", () => {
       screen.getByRole("button", { name: /remove typo sonarr/i }),
     );
 
-    expect(deleteMutate).toHaveBeenCalledWith({ id: 7 }, expect.anything());
+    expect(deleteMutate).toHaveBeenCalledWith({ id: 7 });
   });
 
   it("points a refused remove of a synced instance to Settings, Connections", async () => {
@@ -1073,29 +1074,25 @@ describe("ArrStep", () => {
         ssl: false,
       },
     ]);
-    deleteMutate.mockImplementationOnce(
-      (_vars: unknown, opts?: { onError?: (error: unknown) => void }) => {
-        opts?.onError?.(
-          new AxiosError(
-            "Request failed with status code 409",
-            "ERR_BAD_REQUEST",
-            undefined,
-            undefined,
-            {
-              status: 409,
-              statusText: "CONFLICT",
-              headers: {},
-              config: { headers: new AxiosHeaders() },
-              data: {
-                error: "conflict",
-                message: "cannot delete an instance that still owns rows",
-                // eslint-disable-next-line camelcase -- the server's field name
-                can_remove_library: true,
-              },
-            },
-          ),
-        );
-      },
+    deleteMutate.mockRejectedValueOnce(
+      new AxiosError(
+        "Request failed with status code 409",
+        "ERR_BAD_REQUEST",
+        undefined,
+        undefined,
+        {
+          status: 409,
+          statusText: "CONFLICT",
+          headers: {},
+          config: { headers: new AxiosHeaders() },
+          data: {
+            error: "conflict",
+            message: "cannot delete an instance that still owns rows",
+            // eslint-disable-next-line camelcase -- the server's field name
+            can_remove_library: true,
+          },
+        },
+      ),
     );
 
     customRender(<ArrStep kind="sonarr" onNext={onNext} />);
