@@ -25,9 +25,23 @@ describe("subtitle score refresh", () => {
       const scored = [
         [media, QueryKeys.Range, { all: true, scores: true }],
         [media, QueryKeys.Range, { start: 0, size: 25, scores: true }],
+        [
+          media,
+          "library",
+          { includeSources: true },
+          QueryKeys.Range,
+          { scores: true },
+        ],
       ];
       const unrelated = [
         [media, QueryKeys.Range, { all: true }],
+        [
+          media,
+          "library",
+          { includeSources: true },
+          QueryKeys.Range,
+          { all: true },
+        ],
         [media, QueryKeys.Range, { start: 0, size: 25 }],
         [media, QueryKeys.All],
         [media, 501],

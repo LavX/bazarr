@@ -275,7 +275,7 @@ def _wanted_episode(episode, providers_list, job_id=None, translation_gate=True)
                                 module='subtitles.tools.translate.main',
                                 func='translate_subtitles_file',
                                 args=[],
-                                kwargs=translate_kwargs,
+                                kwargs={**translate_kwargs, 'source': None},
                             ):
                                 continue
                             logging.info(
@@ -422,15 +422,21 @@ def wanted_scan_subtitles_series(job_id=None):
     jobs_queue.update_job_progress(job_id=job_id, progress_message="Scan completed")
 
 
-def wanted_search_missing_subtitles_series(job_id=None, wait_for_completion=False):
+def wanted_search_missing_subtitles_series(job_id=None, wait_for_completion=False, *, active_owners_only=False):
     if not job_id:
         jobs_queue.add_job_from_function("Searching for missing series subtitles", is_progress=True,
                                          wait_for_completion=wait_for_completion)
         return
 
+    if active_owners_only:
+        from media_sources.wanted import arr_wanted_condition
+        active_owners = [arr_wanted_condition('sonarr', TableEpisodes.arr_instance_id)]
+    else:
+        active_owners = []
+
     conditions = [(TableEpisodes.missing_subtitles.is_not(None)),
                   (TableEpisodes.missing_subtitles != '[]')]
-    conditions += get_exclusion_clause('series')
+    conditions += get_exclusion_clause('series') + active_owners
     episodes = database.execute(
         select(TableEpisodes.sonarrSeriesId,
                TableEpisodes.sonarrEpisodeId,
@@ -452,7 +458,7 @@ def wanted_search_missing_subtitles_series(job_id=None, wait_for_completion=Fals
     # from a second, small query under the same exclusions. A flagged episode the first query did
     # return is already in the list; the search reads its flag itself.
     flagged_conditions = [TableEpisodes.forced_search_requested_at.is_not(None)]
-    flagged_conditions += get_exclusion_clause('series')
+    flagged_conditions += get_exclusion_clause('series') + active_owners
     flagged = database.execute(
         select(TableEpisodes.sonarrSeriesId,
                TableEpisodes.sonarrEpisodeId,

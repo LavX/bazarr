@@ -78,6 +78,20 @@ def test_ffsubsync_searches_without_an_offset_window(monkeypatch):
     assert args.max_offset_seconds == UNCONSTRAINED_MAX_OFFSET_SECONDS
 
 
+@pytest.mark.parametrize('reference', ['a:0', 'a:12', 's:10'])
+def test_ffsubsync_uses_the_requested_stream_ordinal(monkeypatch, reference):
+    from subtitles.tools.subsyncer import SubSyncer
+
+    syncer = SubSyncer()
+    syncer.reference, syncer.srtin = '/media/Movie.mkv', '/media/Movie.en.srt'
+    monkeypatch.setattr(SubSyncer, '_ensure_ffmpeg_path', lambda self: '/usr/bin')
+
+    args = syncer._build_ffsubsync_args(output_path='/tmp/out.srt', no_fix_framerate=True, gss=False,
+                                        reference=reference, force_sync=True)
+
+    assert args.reference_stream == reference
+
+
 @pytest.mark.parametrize('debug', [False, True], ids=['normal', 'subsync debug'])
 def test_ffsubsync_keeps_a_log_file_only_for_a_subsync_debug_test_case(monkeypatch, debug):
     """ffsubsync appends to <folder>/ffsubsync.log on every run it is given a folder,

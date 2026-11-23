@@ -134,7 +134,7 @@ describe("Local folders", () => {
     ).toBeInTheDocument();
   });
 
-  it("leaves the tab hidden and falls back to Sonarr when the switch is off", async () => {
+  it("opens the folder tab even when the old setting is off", async () => {
     openFolders(false);
     const getSources = vi.fn();
     server.use(
@@ -144,15 +144,13 @@ describe("Local folders", () => {
       }),
     );
     customRender(<SettingsConnectionsView />);
-    expect(await screen.findByRole("tab", { name: "Sonarr" })).toHaveAttribute(
-      "aria-selected",
-      "true",
-    );
     expect(
-      screen.queryByRole("tab", { name: "Local folders" }),
-    ).not.toBeInTheDocument();
-    expect(screen.queryByText("No folder sources yet")).not.toBeInTheDocument();
-    expect(getSources).not.toHaveBeenCalled();
+      await screen.findByRole("tab", { name: "Local folders" }),
+    ).toHaveAttribute("aria-selected", "true");
+    expect(
+      await screen.findByText("No folder sources yet"),
+    ).toBeInTheDocument();
+    expect(getSources).toHaveBeenCalled();
   });
 
   it("updates scan results, edits library settings, and confirms source removal", async () => {

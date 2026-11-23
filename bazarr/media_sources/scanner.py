@@ -376,7 +376,8 @@ def _write_library(library, decisions, plan, group_identities, group_for_dir, re
         with source_transaction(session) as connection:
             def update_group(group_id, connection, **values):
                 identity_fields = group_identities.get(group_id, {}).keys() & values.keys()
-                write = repository.update_show_identity if identity_fields else repository.update_group
+                write = (repository.update_show_identity if identity_fields and library.content_kind == 'series'
+                         else repository.update_group)
                 write(group_id, connection, owner_library_id=library.id, protect_user=identity_fields, **values)
 
             group_rules.apply_plan(plan, connection, update_group, group_identities)
@@ -482,7 +483,8 @@ def _plan_groups(groups, matching, dev_changed, roots):
     identities = {}
     for group_id in plan.reidentify:
         directory = plan.move.get(group_id) or groups[group_id].group_key
-        identities[group_id] = identify.identify_group(directory)
+        identify_directory = identify.identify_league if groups[group_id].kind == 'league' else identify.identify_group
+        identities[group_id] = identify_directory(directory)
     return plan, identities
 
 
@@ -585,10 +587,13 @@ def _create_groups(library, decisions, group_for_dir, session):
     needed.update(found.group_key for found in decisions.new)
     needed = sorted(path for path in needed if path is not None and path not in group_for_dir)
     created = {}
+    sports = library.content_kind == 'sports'
+    identify_directory = identify.identify_league if sports else identify.identify_group
+    group_kind = 'league' if sports else 'show'
     for batch in _chunks(needed):
         values = []
         for directory in batch:
-            identified = identify.identify_group(directory)
+            identified = identify_directory(directory)
             state = group_rules.stat_directory(directory)
             carried = _carried_settings(directory, decisions, state, session)
             values.append((directory, {**identified, 'dir_dev': state.dev, 'dir_ino': state.ino, **carried}))
@@ -597,7 +602,7 @@ def _create_groups(library, decisions, group_for_dir, session):
                 extra = dict(extra)
                 title = extra.pop('title')
                 created[directory] = repository.create_group(
-                    source_id=library.source_id, library_id=library.id, kind='show', group_key=directory,
+                    source_id=library.source_id, library_id=library.id, kind=group_kind, group_key=directory,
                     title=title, target=connection, **extra)
     return created
 
@@ -848,7 +853,7 @@ def _write_path_only(library, decisions, result, session, cancel, outer_releases
 
 def _insert_new(library, decisions, group_for_dir, result, session, cancel, outer_releases):
     inserted = []
-    item_kind = 'movie' if library.content_kind == 'movie' else 'episode'
+    item_kind = {'movie': 'movie', 'series': 'episode', 'sports': 'sports_event'}[library.content_kind]
     for batch in _chunks(decisions.new):
         _insert_batch(batch, library, item_kind, group_for_dir, result, session, inserted, decisions,
                       outer_releases)

@@ -147,6 +147,105 @@ describe("socketio reducer", () => {
     },
   );
 
+  it("refreshes both Wanted lists and the navigation badge after a source save", () => {
+    reducerFor("source-item").any?.();
+
+    for (const kind of [QueryKeys.Series, QueryKeys.Movies]) {
+      expect(queryClientMock.invalidateQueries).toHaveBeenCalledWith({
+        queryKey: [kind, QueryKeys.Wanted],
+        predicate: expect.any(Function),
+      });
+    }
+    expect(queryClientMock.invalidateQueries).toHaveBeenCalledWith({
+      queryKey: [QueryKeys.System, QueryKeys.Badges],
+    });
+    expect(queryClientMock.invalidateQueries).toHaveBeenCalledWith({
+      queryKey: [QueryKeys.System, QueryKeys.Languages, "audio", true],
+    });
+  });
+
+  it.each(["source-item", "source-group"] as const)(
+    "refreshes source library and detail data after %s events",
+    (event) => {
+      reducerFor(event).any?.();
+      for (const kind of [QueryKeys.Series, QueryKeys.Movies]) {
+        const options = queryClientMock.invalidateQueries.mock.calls
+          .map(([value]) => value)
+          .find(
+            (value) =>
+              value.queryKey[0] === kind && value.queryKey[1] === "library",
+          );
+        expect(options).toBeDefined();
+        expect(
+          options.predicate({
+            queryKey: [kind, "library", { includeSources: true }],
+          }),
+        ).toBe(true);
+        expect(
+          options.predicate({
+            queryKey: [kind, "library", { includeSources: false }],
+          }),
+        ).toBe(false);
+      }
+      expect(queryClientMock.invalidateQueries).toHaveBeenCalledWith({
+        queryKey: ["source-detail"],
+      });
+    },
+  );
+
+  it("refreshes Sports activity containing source rows after a background source save", async () => {
+    const update = reducerFor("source-sports").update as
+      | ((payload: number[]) => void)
+      | undefined;
+    update?.([7]);
+    await vi.waitFor(() =>
+      expect(queryClientMock.invalidateQueries).toHaveBeenCalledWith({
+        queryKey: [QueryKeys.System, QueryKeys.Badges, true],
+        exact: true,
+      }),
+    );
+    const options = queryClientMock.invalidateQueries.mock.calls
+      .map(([value]) => value)
+      .find(({ queryKey }) => queryKey[0] === QueryKeys.Sports);
+    expect(options).toBeDefined();
+    for (const kind of ["leagues", "wanted", "history"]) {
+      expect(
+        options.predicate({
+          queryKey: [QueryKeys.Sports, kind, { includeSources: true }],
+        }),
+      ).toBe(true);
+      for (const [sourceKey, matches] of [
+        ["source:7", true],
+        ["source:8", false],
+        ["arr:3", false],
+      ] as const) {
+        expect(
+          options.predicate({
+            queryKey: [
+              QueryKeys.Sports,
+              kind,
+              { includeSources: true, sourceKeys: [sourceKey] },
+            ],
+          }),
+        ).toBe(matches);
+      }
+      expect(
+        options.predicate({
+          queryKey: [
+            QueryKeys.Sports,
+            kind,
+            { includeSources: true, owner: 3 },
+          ],
+        }),
+      ).toBe(false);
+      expect(
+        options.predicate({
+          queryKey: [QueryKeys.Sports, kind, { includeSources: false }],
+        }),
+      ).toBe(false);
+    }
+  });
+
   it("invalidates the wanted series query for reset-episode-wanted events", () => {
     reducerFor("reset-episode-wanted").any?.();
 

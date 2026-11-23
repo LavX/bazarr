@@ -19,9 +19,8 @@ import { useLanguageProfiles } from "@/apis/hooks/languages";
 import {
   mediaSourceErrorMessage,
   useMediaSources,
-  useWriteMediaSource,
+  useRemoveMediaSource,
 } from "@/apis/hooks/mediaSources";
-import api from "@/apis/raw";
 import type { MediaSource, SourceLibrary } from "@/apis/raw/mediaSources";
 import { Section } from "@/pages/Settings/components";
 import SourceCard from "./SourceCard";
@@ -37,16 +36,10 @@ function RemoveSourceModal({
   target: Removal;
   onClose: () => void;
 }) {
-  const remove = useWriteMediaSource();
+  const remove = useRemoveMediaSource();
   const action = library ? "Remove library" : "Remove source";
   const confirm = () => {
-    remove.mutate(
-      () =>
-        library
-          ? api.mediaSources.removeLibrary(source.id, library.id)
-          : api.mediaSources.remove(source.id),
-      { onSuccess: onClose },
-    );
+    remove.mutate({ source, library }, { onSuccess: onClose });
   };
 
   return (

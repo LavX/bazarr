@@ -10,9 +10,18 @@ import {
   Stack,
 } from "@mantine/core";
 import { useForm } from "@mantine/form";
-import { useSubtitleAction, useSubtitleContents } from "@/apis/hooks";
+import { showNotification } from "@mantine/notifications";
+import {
+  isShownConflict,
+  isShownSubtitleActionError,
+  useSubtitleAction,
+  useSubtitleContent,
+  useSubtitleContents,
+} from "@/apis/hooks";
 import { Selector } from "@/components/inputs";
 import { useModals, withModal } from "@/modules/modals";
+import { notification } from "@/modules/notification";
+import { detectFormat, getParser } from "@/pages/SubtitleEditor/parsers";
 import { useSelectorOptions } from "@/utilities";
 
 function convertToAction(
@@ -36,6 +45,18 @@ const lineStartToTime = (t: SubtitleContents.LineTime) => ({
   ms: Math.round(t.microseconds / 1000),
 });
 
+function millisecondsToLineTime(value: number): SubtitleContents.LineTime {
+  const seconds = Math.floor(value / 1000);
+  return {
+    hours: Math.floor(seconds / 3600),
+    minutes: Math.floor((seconds % 3600) / 60),
+    seconds: seconds % 60,
+    // eslint-disable-next-line camelcase -- Existing subtitle line API shape.
+    total_seconds: seconds,
+    microseconds: Math.round((value % 1000) * 1000),
+  };
+}
+
 interface Props {
   selections: FormType.ModifySubtitle[];
   onSubmit?: VoidFunction;
@@ -45,11 +66,41 @@ const TwoPointFitForm: FunctionComponent<Props> = ({
   selections,
   onSubmit,
 }) => {
-  const { mutate } = useSubtitleAction();
+  const { mutate, mutateAsync, isPending } = useSubtitleAction();
   const modals = useModals();
 
-  const query = useSubtitleContents(selections[0].path);
-  const lines = useMemo(() => query.data ?? [], [query]);
+  const subtitle = selections[0];
+  const isSource = subtitle.type === "source";
+  const pathQuery = useSubtitleContents(subtitle.path, !isSource);
+  const sourceQuery = useSubtitleContent(
+    isSource ? "source" : undefined,
+    subtitle.id,
+    subtitle.sourceLanguage ?? subtitle.language,
+    undefined,
+    undefined,
+    undefined,
+    isSource
+      ? () => subtitle.validateSource?.(true) ?? Promise.resolve()
+      : undefined,
+  );
+  const query = isSource ? sourceQuery : pathQuery;
+  const loading = query.isLoading || (isSource && sourceQuery.isFetching);
+  const lines = useMemo(() => {
+    if (!isSource) return pathQuery.data ?? [];
+    const content = sourceQuery.data?.data;
+    if (!content) return [];
+    return getParser(detectFormat(`subtitle.${content.format}`))
+      .parse(content.content)
+      .cues.map(
+        (cue, index): SubtitleContents.Line => ({
+          index: index + 1,
+          content: cue.text,
+          proprietary: "",
+          start: millisecondsToLineTime(cue.startMs),
+          end: millisecondsToLineTime(cue.endMs),
+        }),
+      );
+  }, [isSource, pathQuery.data, sourceQuery.data]);
 
   const form = useForm({
     initialValues: {
@@ -110,8 +161,8 @@ const TwoPointFitForm: FunctionComponent<Props> = ({
 
   return (
     <form
-      onSubmit={form.onSubmit(({ first, last }) => {
-        if (first.line == null || last.line == null) return;
+      onSubmit={form.onSubmit(async ({ first, last }) => {
+        if (loading || first.line == null || last.line == null) return;
 
         const r = {
           hour: first.line.start.hours,
@@ -127,23 +178,46 @@ const TwoPointFitForm: FunctionComponent<Props> = ({
 
         const action = convertToAction(r, first.to, scale);
 
-        selections.forEach((s) =>
-          mutate({
-            action,
-            form: s,
-          }),
-        );
-
-        onSubmit?.();
-        modals.closeSelf();
+        if (!isSource) {
+          selections.forEach((s) => mutate({ action, form: s }));
+          onSubmit?.();
+          modals.closeSelf();
+          return;
+        }
+        try {
+          await Promise.all(
+            selections.map((s) => mutateAsync({ action, form: s })),
+          );
+          onSubmit?.();
+          modals.closeSelf();
+        } catch (error) {
+          if (!isShownConflict(error) && !isShownSubtitleActionError(error)) {
+            showNotification(
+              notification.error(
+                "Alignment failed",
+                "Unable to align subtitles",
+              ),
+            );
+          }
+        }
       })}
     >
       <LoadingOverlay
-        visible={query.isLoading}
+        visible={loading || (isSource && isPending)}
         zIndex={1000}
         overlayProps={{ radius: "sm", blur: 2 }}
       />
       <Stack>
+        {isSource && query.error && (
+          <Alert color="red" title="Subtitle unavailable">
+            {query.error.message}
+          </Alert>
+        )}
+        {isSource && !loading && !query.error && lines.length < 2 && (
+          <Alert color="yellow">
+            At least two subtitle sentences are needed.
+          </Alert>
+        )}
         <Alert>
           Select two sentences and the time for when they should appear. This
           will fit (offset and scale) every sentence.
@@ -247,7 +321,13 @@ const TwoPointFitForm: FunctionComponent<Props> = ({
         </Card>
 
         <Divider></Divider>
-        <Button disabled={query.isLoading} type="submit">
+        <Button
+          disabled={
+            loading || (isSource && (!!query.error || lines.length < 2))
+          }
+          loading={isSource && isPending}
+          type="submit"
+        >
           Align
         </Button>
       </Stack>

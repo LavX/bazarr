@@ -105,7 +105,7 @@ describe("useEditorJob", () => {
 
 describe("LineTranslationWatcher", () => {
   it("hands each line to the cue it was meant for, so two lines in flight are both kept", async () => {
-    const lines: Array<[number, string]> = [];
+    const lines: Array<[string, string]> = [];
     const done: number[] = [];
     server.use(
       http.get("/api/translator/editor", ({ request }) => {
@@ -124,13 +124,13 @@ describe("LineTranslationWatcher", () => {
     render(
       <>
         {[
-          { jobId: 7, session: "run-a", targetIdx: 2 },
-          { jobId: 8, session: "run-a", targetIdx: 5 },
+          { jobId: 7, session: "run-a", cueId: "cue-two" },
+          { jobId: 8, session: "run-a", cueId: "cue-five" },
         ].map((job) => (
           <LineTranslationWatcher
             key={job.jobId}
             job={job}
-            onLine={(index, line) => lines.push([index, line])}
+            onLine={(cueId, line) => lines.push([cueId, line])}
             onDone={(jobId) => done.push(jobId)}
           />
         ))}
@@ -139,9 +139,9 @@ describe("LineTranslationWatcher", () => {
     );
 
     await waitFor(() => expect(done.sort()).toEqual([7, 8]));
-    expect(lines.sort((a, b) => a[0] - b[0])).toEqual([
-      [2, "translated 7"],
-      [5, "translated 8"],
+    expect(lines.sort()).toEqual([
+      ["cue-five", "translated 8"],
+      ["cue-two", "translated 7"],
     ]);
   });
 });

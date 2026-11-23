@@ -8,7 +8,8 @@ from functools import reduce
 from sqlalchemy import case, func, or_
 
 from app.database import (TableBlacklist, TableBlacklistMovie, TableBlacklistSports, TableHistory,
-                          TableHistoryMovie, TableHistorySports, database, select)
+                          TableHistoryMovie, TableHistorySports, TableSourceBlacklist, TableSourceHistory,
+                          database, select)
 from subliminal_patch.score import MAX_SCORES
 
 from ..utils import authenticate
@@ -106,6 +107,7 @@ class HistoryMetrics(Resource):
     get_request_parser.add_argument('action', type=str, default='All', help='Action type to filter for.')
     get_request_parser.add_argument('provider', type=str, default='All', help='Provider name to filter for.')
     get_request_parser.add_argument('language', type=str, default='All', help='Language to filter for.')
+    get_request_parser.add_argument('sources', type=str, help='Use 1 to include source downloads.')
 
     totals_model = api_ns_history_metrics.model('HistoryMetricsTotals', {
         'downloads': fields.Integer(),
@@ -191,6 +193,9 @@ class HistoryMetrics(Resource):
             # Sports history stores MAX_SCORES['movie'] as its denominator.
             _Source(TableHistorySports, MOVIE_MAX, 'sports', TableBlacklistSports),
         ]
+        if args.get('sources') == '1':
+            denominator = case((TableSourceHistory.item_kind == 'episode', EPISODE_MAX), else_=MOVIE_MAX)
+            sources.append(_Source(TableSourceHistory, denominator, 'sources', TableSourceBlacklist))
 
         for source in sources:
             table = source.table
@@ -331,7 +336,7 @@ class HistoryMetrics(Resource):
             round(1.0 * automatic * 100 / totals['downloads'], 1) if totals['downloads'] else 0.0
         )
 
-        return marshal({
+        response = marshal({
             'totals': totals,
             'byProvider': by_provider,
             'providerReliability': reliability,
@@ -342,3 +347,6 @@ class HistoryMetrics(Resource):
                          for k, v in sorted(per_action.items()) if k is not None],
             'scoreHistogram': [{'bucket': k, 'count': v} for k, v in sorted(histogram.items())],
         }, self.get_response_model)
+        if totals.get('sources'):
+            response['totals']['sources'] = totals['sources']
+        return response

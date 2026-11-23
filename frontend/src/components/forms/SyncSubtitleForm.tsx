@@ -16,8 +16,10 @@ import { faInfoCircle } from "@fortawesome/free-solid-svg-icons";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import {
   isShownConflict,
+  isShownSubtitleActionError,
   useRefTracksByEpisodeId,
   useRefTracksByMovieId,
+  useRefTracksBySourceItemId,
   useRefTracksBySportsEventId,
   useSubtitleAction,
 } from "@/apis/hooks";
@@ -32,7 +34,7 @@ import { syncMaxOffsetSecondsOptions } from "@/pages/Settings/Subtitles/options"
 import { fromPython, toPython } from "@/utilities";
 
 function useReferencedSubtitles(
-  mediaType: "episode" | "movie" | "sports",
+  mediaType: FormType.ModifySubtitle["type"],
   mediaId: number,
   subtitlesPath: string,
   arrInstanceId?: number,
@@ -56,6 +58,11 @@ function useReferencedSubtitles(
     mediaType === "sports",
     arrInstanceId,
   );
+  const sourceData = useRefTracksBySourceItemId(
+    subtitlesPath,
+    mediaId,
+    mediaType === "source",
+  );
 
   // A lookup rather than a nested ternary: the "not episode means movie"
   // shorthand sent every sports event to the Radarr reference query, which
@@ -64,12 +71,17 @@ function useReferencedSubtitles(
     episode: episodeData,
     movie: movieData,
     sports: sportsData,
+    source: sourceData,
   }[mediaType];
 
   const subtitles: GroupedSelectorOptions<string>[] = [];
 
   if (!mediaData.data) {
-    return [];
+    return {
+      options: subtitles,
+      error: mediaData.error,
+      isLoading: mediaData.isLoading,
+    };
   } else {
     if (mediaData.data.audio_tracks.length > 0) {
       const embeddedAudioGroup: GroupedSelectorOptions<string> = {
@@ -121,7 +133,11 @@ function useReferencedSubtitles(
       });
     }
 
-    return subtitles;
+    return {
+      options: subtitles,
+      error: mediaData.error,
+      isLoading: mediaData.isLoading,
+    };
   }
 }
 
@@ -162,12 +178,11 @@ const SyncSubtitleForm: FunctionComponent<Props> = ({
   const subtitlesPath = subtitle.path;
   const arrInstanceId = subtitle.arr_instance_id;
 
-  const subtitles = useReferencedSubtitles(
-    mediaType,
-    mediaId,
-    subtitlesPath,
-    arrInstanceId,
-  );
+  const {
+    options: subtitles,
+    error: referenceError,
+    isLoading: referencesLoading,
+  } = useReferencedSubtitles(mediaType, mediaId, subtitlesPath, arrInstanceId);
 
   const form = useForm<FormValues>({
     initialValues: {
@@ -207,7 +222,7 @@ const SyncSubtitleForm: FunctionComponent<Props> = ({
           modals.closeSelf();
         } catch (error) {
           // A 409 (a file of that name is already there) has its own toast.
-          if (!isShownConflict(error)) {
+          if (!isShownConflict(error) && !isShownSubtitleActionError(error)) {
             showNotification(
               notification.error(
                 "Sync failed",
@@ -227,6 +242,11 @@ const SyncSubtitleForm: FunctionComponent<Props> = ({
         >
           <Text size="sm">{selections.length} subtitles selected</Text>
         </Alert>
+        {mediaType === "source" && referenceError && (
+          <Alert color="red" title="References unavailable">
+            {referenceError.message}
+          </Alert>
+        )}
         <GroupedSelector
           clearable
           disabled={subtitles.length === 0 || selections.length !== 1}
@@ -264,7 +284,13 @@ const SyncSubtitleForm: FunctionComponent<Props> = ({
           />
         </Stack>
         <Divider></Divider>
-        <Button type="submit" loading={isPending}>
+        <Button
+          type="submit"
+          loading={isPending}
+          disabled={
+            mediaType === "source" && (referencesLoading || !!referenceError)
+          }
+        >
           Sync
         </Button>
       </Stack>

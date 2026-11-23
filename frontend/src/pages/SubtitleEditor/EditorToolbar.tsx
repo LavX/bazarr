@@ -47,6 +47,8 @@ interface EditorToolbarProps {
   canRedo: boolean;
   format: string;
   language: string;
+  canSaveAs?: boolean;
+  saveDisabled?: boolean;
   translating?: boolean;
   referenceActive?: boolean;
   bookmarkFilterActive?: boolean;
@@ -75,6 +77,8 @@ export default function EditorToolbar({
   canRedo,
   format,
   language,
+  canSaveAs = true,
+  saveDisabled,
   translating,
   referenceActive,
   bookmarkFilterActive,
@@ -116,6 +120,7 @@ export default function EditorToolbar({
                 size="sm"
                 variant="subtle"
                 color="gray"
+                disabled={saveDisabled}
                 onClick={() => onAction("save")}
                 aria-label="Save"
               >
@@ -159,21 +164,23 @@ export default function EditorToolbar({
               <FontAwesomeIcon icon={faDownload} />
             </ActionIcon>
           </Tooltip>
-          <Tooltip
-            label="Save As (different language)"
-            position="bottom"
-            withArrow
-          >
-            <ActionIcon
-              size="sm"
-              variant="subtle"
-              color="gray"
-              onClick={() => onAction("saveAs")}
-              aria-label="Save As"
+          {canSaveAs && (
+            <Tooltip
+              label="Save As (different language)"
+              position="bottom"
+              withArrow
             >
-              <FontAwesomeIcon icon={faCopy} />
-            </ActionIcon>
-          </Tooltip>
+              <ActionIcon
+                size="sm"
+                variant="subtle"
+                color="gray"
+                onClick={() => onAction("saveAs")}
+                aria-label="Save As"
+              >
+                <FontAwesomeIcon icon={faCopy} />
+              </ActionIcon>
+            </Tooltip>
+          )}
         </Group>
 
         <Divider />

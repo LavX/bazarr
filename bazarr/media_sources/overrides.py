@@ -1,6 +1,9 @@
 # coding=utf-8
 """Apply a user's media identity edit while keeping the filename parse available."""
+from datetime import date
+
 from . import identify, repository
+from .sports_parse import part_details
 from .db import source_transaction
 from .service import SourceError
 
@@ -23,8 +26,9 @@ def _manual_values(body, row):
         year = body['year']
         if isinstance(year, str) and len(year) == 4 and year.isascii() and year.isdecimal():
             year = int(year)
-        if type(year) is not int or not 1800 <= year <= 2200:
-            raise SourceError('Enter a year from 1800 to 2200.')
+        lower, upper = (1900, 2100) if row.kind == 'sports_event' else (1800, 2200)
+        if type(year) is not int or not lower <= year <= upper:
+            raise SourceError(f'Enter a year from {lower} to {upper}.')
         values['year'] = str(year)
     if row.kind == 'episode':
         for name in ('season', 'episode'):
@@ -32,9 +36,45 @@ def _manual_values(body, row):
             if type(number) is not int or not 0 <= number < 2**31:
                 raise SourceError('Enter one season and one episode number.')
             values[name] = number
+    if row.kind == 'sports_event':
+        _sports_values(body, row, values)
     if row.kind == 'movie' and not values.get('year', row.year):
         raise SourceError('A movie identity needs a title and a year.')
     return values
+
+
+def _sports_values(body, row, values):
+    if 'event_date' in body:
+        value = body['event_date']
+        if value is not None:
+            try:
+                day = date.fromisoformat(value)
+                if day.isoformat() != value or not 1900 <= day.year <= 2100:
+                    raise ValueError
+            except (TypeError, ValueError):
+                raise SourceError('Enter an event date as YYYY-MM-DD, from 1900 to 2100.') from None
+            if values.get('year', row.year) is None:
+                values['year'] = str(day.year)
+            if row.season is None and 'season' not in body:
+                values['season'] = day.year
+        values['event_date'] = value
+    for name, column in (('round', 'episode'), ('season', 'season')):
+        if name in body:
+            number = body[name]
+            if number is not None and (type(number) is not int or not 0 <= number < 2**31):
+                raise SourceError(f'Enter a nonnegative integer for the {name}.')
+            values[column] = number
+    if 'part_name' in body:
+        part = body['part_name']
+        if part is not None and (not isinstance(part, str) or len(part.strip()) > 500 or '\0' in part):
+            raise SourceError('Enter a part name with up to 500 characters.')
+        name, number = part_details(part.strip() or None if part is not None else None)
+        values.update(part_name=name, part_number=number or 0)
+    known_title = values.get('title') or row.parsed_title or (row.identity_source == 'user' and row.title)
+    complete = values.get('event_date', row.event_date) or (
+        values.get('year', row.year) and values.get('episode', row.episode) is not None)
+    if not known_title or not complete:
+        raise SourceError('A sports event needs a title and a date, or a title, season year and round.')
 
 
 def _pick(row, candidate_id):
@@ -46,7 +86,7 @@ def _already_selected(row, candidate_id):
     return row.identity_source == 'user' and row.tmdb_id == str(candidate_id)
 
 
-def override_identity(row_id, body, *, group=False):
+def override_identity(row_id, body, *, group=False, expected_kind=None):
     getter = repository.get_group if group else repository.get_item
     if not isinstance(body, dict) or not body:
         raise SourceError('Provide a JSON object with an identity correction.')
@@ -56,7 +96,7 @@ def override_identity(row_id, body, *, group=False):
         if len(body) != 1 or type(candidate_id) is not int or candidate_id < 1:
             raise SourceError('Select one TMDB candidate or enter its identity by hand.')
         current = getter(row_id)
-        if current is None:
+        if current is None or (expected_kind is not None and current.kind != expected_kind):
             raise SourceError('No such source item or group.', 404, 'not_found')
         if current.kind not in ('movie', 'show'):
             raise SourceError('This item does not have a TMDB candidate list.')
@@ -71,7 +111,7 @@ def override_identity(row_id, body, *, group=False):
         if previous is not None and previous.kind == 'episode':
             repository.get_group(previous.group_id, connection, for_update=True)
         row = getter(row_id, connection, for_update=True)
-        if row is None:
+        if row is None or (expected_kind is not None and row.kind != expected_kind):
             raise SourceError('No such source item or group.', 404, 'not_found')
         if row.kind == 'episode' and (previous is None or row.group_id != previous.group_id):
             raise SourceError('The episode moved during the identity correction. Try again.', 409, 'conflict')
@@ -84,7 +124,9 @@ def override_identity(row_id, body, *, group=False):
             allowed = {'title', 'year'}
             if row.kind == 'episode':
                 allowed.update(('season', 'episode'))
-            if row.kind not in ('movie', 'show', 'episode') or body.keys() - allowed:
+            if row.kind == 'sports_event':
+                allowed.update(('event_date', 'round', 'season', 'part_name'))
+            if row.kind not in ('movie', 'show', 'episode', 'sports_event') or body.keys() - allowed:
                 raise SourceError('This title does not support one or more of those identity fields.')
             values = _manual_values(body, row)
         if group:

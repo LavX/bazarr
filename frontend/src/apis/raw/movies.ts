@@ -1,13 +1,18 @@
 import BaseApi from "./base";
+import { blacklistParams, blacklistRemovalRequest } from "./blacklist";
+import { libraryParams, LibraryRow, LibraryScope } from "./library";
 
 class MovieApi extends BaseApi {
   constructor() {
     super("/movies");
   }
 
-  async blacklist() {
-    const response =
-      await this.get<DataWrapper<Blacklist.Movie[]>>("/blacklist");
+  async blacklist(scope: Blacklist.Scope = {}, signal?: AbortSignal) {
+    const response = await this.get<DataWrapper<Blacklist.Movie[]>>(
+      "/blacklist",
+      blacklistParams(scope),
+      signal,
+    );
     return response.data;
   }
 
@@ -15,8 +20,16 @@ class MovieApi extends BaseApi {
     await this.post("/blacklist", form, { radarrid });
   }
 
-  async deleteBlacklist(all?: boolean, form?: FormType.DeleteBlacklist) {
-    await this.delete("/blacklist", form, { all });
+  async blacklistSourceOptions(signal?: AbortSignal) {
+    const response = await this.get<{
+      source_filters?: Blacklist.SourceOption[];
+    }>("/blacklist", { sources: 1, length: 1 }, signal);
+    return response.source_filters ?? [];
+  }
+
+  async deleteBlacklist(removal: Blacklist.Removal) {
+    const { form, params } = blacklistRemovalRequest(removal);
+    await this.delete("/blacklist", form, params);
   }
 
   async movies(ids?: number[]) {
@@ -38,16 +51,31 @@ class MovieApi extends BaseApi {
     return response;
   }
 
+  library(range: Parameter.Range, includeScores: boolean, scope: LibraryScope) {
+    return this.get<DataWrapperWithTotal<LibraryRow<Item.Movie>>>(
+      "",
+      libraryParams(range, includeScores, scope),
+    );
+  }
+
   async modify(form: FormType.ModifyItem) {
     await this.post("", { id: form.id, profileid: form.profileid });
   }
 
-  async wanted(params: Parameter.Range) {
-    const response = await this.get<DataWrapperWithTotal<Wanted.Movie>>(
-      "/wanted",
-      params,
-    );
-    return response;
+  async wanted(
+    params: Parameter.Range,
+    includeSources: false,
+  ): Promise<DataWrapperWithTotal<Wanted.Movie>>;
+  async wanted(
+    params: Wanted.Range,
+    includeSources?: boolean,
+  ): Promise<DataWrapperWithTotal<Wanted.MovieRow>>;
+  async wanted({ sourceKeys, ...params }: Wanted.Range, includeSources = true) {
+    return this.get<DataWrapperWithTotal<Wanted.MovieRow>>("/wanted", {
+      ...params,
+      sources: includeSources ? 1 : undefined,
+      source_key: sourceKeys,
+    });
   }
 
   async wantedBy(radarrid: number[]) {

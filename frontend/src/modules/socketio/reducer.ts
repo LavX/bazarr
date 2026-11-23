@@ -3,6 +3,11 @@ import queryClient from "@/apis/queries";
 import { scheduleEpisodesHistoryRefresh } from "@/apis/queries/episodeHistory";
 import { QueryKeys } from "@/apis/queries/keys";
 import {
+  invalidateSourceSportsReleaseActivity,
+  invalidateSportsSource,
+} from "@/apis/queries/sourceDetails";
+import { invalidateSourceSubtitleDocuments } from "@/apis/queries/sourceSubtitleDocument";
+import {
   scheduleSubtitleScoresRefresh,
   skipScoredRangeQueries,
 } from "@/apis/queries/subtitleScores";
@@ -19,6 +24,47 @@ function invalidateHiddenTracks(mediaType: HiddenTrackMediaType) {
   void queryClient.invalidateQueries({
     queryKey: [QueryKeys.Subtitles, QueryKeys.EmbeddedHidden, mediaType],
   });
+}
+
+function invalidateSourceWanted() {
+  for (const kind of [QueryKeys.Series, QueryKeys.Movies]) {
+    void queryClient.invalidateQueries({
+      queryKey: [kind, QueryKeys.Wanted],
+      predicate: ({ queryKey }) => {
+        const scope = queryKey[2];
+        return (
+          typeof scope === "object" &&
+          scope !== null &&
+          "includeSources" in scope &&
+          scope.includeSources === true
+        );
+      },
+    });
+  }
+  void queryClient.invalidateQueries({
+    queryKey: [QueryKeys.System, QueryKeys.Badges],
+  });
+  void queryClient.invalidateQueries({
+    queryKey: [QueryKeys.System, QueryKeys.Languages, "audio", true],
+  });
+}
+
+function invalidateSourceLibrary() {
+  for (const kind of [QueryKeys.Series, QueryKeys.Movies]) {
+    void queryClient.invalidateQueries({
+      queryKey: [kind, "library"],
+      predicate: ({ queryKey }) => {
+        const scope = queryKey[2];
+        return (
+          typeof scope === "object" &&
+          scope !== null &&
+          "includeSources" in scope &&
+          scope.includeSources === true
+        );
+      },
+    });
+  }
+  void queryClient.invalidateQueries({ queryKey: ["source-detail"] });
 }
 
 const JOBS_KEY = [QueryKeys.System, QueryKeys.Jobs];
@@ -70,8 +116,25 @@ export function createDefaultReducer(): SocketIO.Reducer[] {
       key: "sports",
       any: () => {
         void queryClient.invalidateQueries({ queryKey: [QueryKeys.Sports] });
-        void queryClient.invalidateQueries({ queryKey: [QueryKeys.Badges] });
+        invalidateSourceWanted();
+        void queryClient.invalidateQueries({
+          queryKey: [QueryKeys.System, QueryKeys.Languages, "audio", false],
+        });
         invalidateHiddenTracks("sports");
+      },
+    },
+    {
+      key: "sports-blacklist",
+      any: () => {
+        void invalidateSourceSportsReleaseActivity(queryClient);
+      },
+    },
+    {
+      key: "source-sports",
+      update: (ids) => {
+        for (const sourceId of new Set(ids)) {
+          void invalidateSportsSource(queryClient, { sourceId });
+        }
       },
     },
     {
@@ -332,6 +395,23 @@ export function createDefaultReducer(): SocketIO.Reducer[] {
           queryKey: [QueryKeys.Series, QueryKeys.Episodes, QueryKeys.Blacklist],
         });
       },
+    },
+    {
+      key: "source-item",
+      update: (itemIds) => {
+        void invalidateSourceSubtitleDocuments(queryClient, itemIds);
+      },
+      delete: (itemIds) => {
+        void invalidateSourceSubtitleDocuments(queryClient, itemIds);
+      },
+      any: () => {
+        invalidateSourceWanted();
+        invalidateSourceLibrary();
+      },
+    },
+    {
+      key: "source-group",
+      any: invalidateSourceLibrary,
     },
     {
       key: "reset-episode-wanted",

@@ -127,7 +127,6 @@ def test_movie_blacklist_returns_local_movie_id(schema_session, monkeypatch):
     from app.database import TableBlacklistMovie, TableMovies
 
     monkeypatch.setattr(blacklist, "database", schema_session)
-    monkeypatch.setattr(blacklist, "pretty_date", lambda value: "pretty")
     _stub_language_dependencies(monkeypatch)
 
     schema_session.add(TableMovies(
@@ -156,6 +155,8 @@ def test_movie_blacklist_returns_local_movie_id(schema_session, monkeypatch):
 
     assert result["data"][0]["id"] == 801
     assert result["data"][0]["arr_instance_id"] == 3
+    assert result["data"][0]["parsed_timestamp"] == datetime(2026, 6, 12, 12, 0, 1).strftime("%x %X")
+    assert "origin" not in result["data"][0]
 
 
 def test_episode_blacklist_returns_local_series_id(schema_session, monkeypatch):
@@ -163,7 +164,6 @@ def test_episode_blacklist_returns_local_series_id(schema_session, monkeypatch):
     from app.database import TableBlacklist, TableEpisodes, TableShows
 
     monkeypatch.setattr(blacklist, "database", schema_session)
-    monkeypatch.setattr(blacklist, "pretty_date", lambda value: "pretty")
     _stub_language_dependencies(monkeypatch)
 
     schema_session.add(TableShows(
@@ -205,3 +205,5 @@ def test_episode_blacklist_returns_local_series_id(schema_session, monkeypatch):
 
     assert result["data"][0]["id"] == 1001
     assert result["data"][0]["arr_instance_id"] == 9
+    assert result["data"][0]["parsed_timestamp"] == datetime(2026, 6, 12, 12, 0, 1).strftime("%x %X")
+    assert "origin" not in result["data"][0]

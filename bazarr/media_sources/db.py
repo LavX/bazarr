@@ -5,7 +5,11 @@ The application engine runs in AUTOCOMMIT on both backends, so ``rollback()`` on
 ``begin_nested`` fails on PostgreSQL. A write that must be all or nothing opens a connection of its own with
 a real transaction instead, the way the Sportarr library does.
 """
+import json
 from contextlib import contextmanager
+from hashlib import blake2b
+
+from sqlalchemy import text
 
 from sqlalchemy.engine import Connection
 
@@ -36,3 +40,15 @@ def source_transaction(session=None):
                 # The legacy driver does not begin a transaction for a SELECT: take the write lock first.
                 connection.exec_driver_sql('BEGIN IMMEDIATE')
             yield connection
+
+
+def lock_source_release(connection, release):
+    """Serialize publication and exclusion for one (kind, provider, subtitle ID) until commit.
+
+    Take it before library row locks. SQLite already serializes all source write transactions.
+    """
+    if connection.dialect.name == 'postgresql':
+        identity = tuple(str(value) if value is not None else None for value in release)
+        digest = blake2b(json.dumps(identity).encode('utf-8'), digest_size=8, person=b'source-exclusion')
+        key = int.from_bytes(digest.digest(), 'big', signed=True)
+        connection.execute(text('SELECT pg_advisory_xact_lock(:key)'), {'key': key})

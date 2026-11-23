@@ -722,3 +722,94 @@ describe("Movies score filter", () => {
   });
 });
 /* eslint-enable camelcase */
+
+/* eslint-disable camelcase -- API fixture fields keep their transport names. */
+describe("Movies audio language options", () => {
+  it.each([
+    { library: "standalone", native: false, sources: true },
+    { library: "mixed", native: true, sources: true },
+    { library: "native-only", native: true, sources: false },
+  ])(
+    "shows the available audio languages in a $library library",
+    async ({ native, sources }) => {
+      const requests: (string | null)[] = [];
+      server.use(
+        http.get("/api/system/settings", () =>
+          HttpResponse.json({
+            general: { use_radarr: native },
+            media_sources: { visible: sources },
+          }),
+        ),
+        http.get("/api/system/arr-instances", () =>
+          HttpResponse.json(
+            native
+              ? [{ id: 1, kind: "radarr", name: "Native", enabled: true }]
+              : [],
+          ),
+        ),
+        http.get("/api/system/media-sources", () =>
+          HttpResponse.json({
+            data: sources
+              ? [
+                  {
+                    id: 3,
+                    name: "Folder",
+                    kind: "folder",
+                    enabled: true,
+                    libraries: [
+                      { id: 11, enabled: true, content_kind: "movie" },
+                    ],
+                  },
+                ]
+              : [],
+          }),
+        ),
+        http.get("/api/movies", () =>
+          HttpResponse.json({ data: [], total: 0 }),
+        ),
+        http.get("/api/system/languages/audio", ({ request }) => {
+          const sourceFlag = new URL(request.url).searchParams.get("sources");
+          requests.push(sourceFlag);
+          return HttpResponse.json([
+            ...(native ? [{ code2: "en", name: "English" }] : []),
+            ...(sourceFlag === "1" && sources
+              ? [{ code2: "ja", name: "Japanese" }]
+              : []),
+          ]);
+        }),
+      );
+      const user = userEvent.setup();
+      customRender(<MovieView />);
+      await user.click(
+        await screen.findByRole("button", { name: "Toggle filters" }),
+      );
+      const listbox = await openSelect(user, "Select languages to include...");
+      if (sources) {
+        expect(
+          await within(listbox).findByRole("option", {
+            name: "Japanese",
+            hidden: true,
+          }),
+        ).toBeInTheDocument();
+        expect(requests).toContain("1");
+      } else {
+        expect(
+          within(listbox).queryByRole("option", {
+            name: "Japanese",
+            hidden: true,
+          }),
+        ).toBeNull();
+        expect(requests.length).toBeGreaterThan(0);
+        expect(requests.every((flag) => flag === null)).toBe(true);
+      }
+      if (native)
+        expect(
+          within(listbox).getByRole("option", {
+            name: "English",
+            hidden: true,
+          }),
+        ).toBeInTheDocument();
+    },
+  );
+});
+/* eslint-enable camelcase */

@@ -10,9 +10,12 @@ from datetime import datetime, timedelta
 
 import sqlalchemy as sa
 
+from app.config import settings
+
 from . import repository
 from .db import handle
 from .scanner import STALE_SCAN_HOURS, scan_media_source
+from .wanted import WANTED_JOB_ID, wanted_search_missing_subtitles_sources
 
 JOB_ID = 'scan_media_sources'
 
@@ -63,12 +66,18 @@ def scan_due_media_sources():
 
 
 def configure_source_jobs(aps_scheduler, session=None):
-    """Register the hourly task while an enabled source exists, and remove it when none does."""
+    """Schedule scans and Wanted searches while an enabled source exists."""
     if has_enabled_source(session):
         aps_scheduler.add_job(scan_due_media_sources, 'interval', hours=1, max_instances=1, coalesce=True,
                               misfire_grace_time=15, id=JOB_ID, name='Scan Media Sources', replace_existing=True)
-    elif aps_scheduler.get_job(JOB_ID):
-        aps_scheduler.remove_job(JOB_ID)
+        aps_scheduler.add_job(
+            wanted_search_missing_subtitles_sources, 'interval', hours=settings.media_sources.wanted_search_frequency,
+            max_instances=1, coalesce=True, misfire_grace_time=15, id=WANTED_JOB_ID,
+            name='Search for Missing Source Subtitles', replace_existing=True, kwargs={'wait_for_completion': True})
+    else:
+        for job_id in (JOB_ID, WANTED_JOB_ID):
+            if aps_scheduler.get_job(job_id):
+                aps_scheduler.remove_job(job_id)
 
 
 def refresh_tasks():

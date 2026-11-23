@@ -47,9 +47,9 @@ def refine_from_source(path, video, source: SourceItemContext):
         if source.kind == 'sports_event':
             # What get_sports_video does: the event's own title and year, never a movie id.
             video.title = source.title
-            if source.year:
-                video.year = source.year
+            video.year = source.year
             video.imdb_id = None
+            video.tmdb_id = None
             try:
                 video.size = os.path.getsize(path)
             except OSError:

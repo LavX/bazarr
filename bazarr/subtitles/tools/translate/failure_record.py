@@ -30,19 +30,34 @@ def _now():
     return time.time()
 
 
-def record_failed_translation(arr_instance_id, media_type, media_id, from_lang, to_lang, forced, hi):
+def _key(arr_instance_id, media_type, media_id, from_lang, to_lang, forced, hi, source_created_at):
+    key = (arr_instance_id, media_type, media_id, from_lang, to_lang, forced, hi)
+    if media_type != 'source':
+        return key
+    if source_created_at is None:
+        from media_sources.repository import get_item
+
+        item = get_item(media_id)
+        source_created_at = item.created_at if item is not None else None
+    return (*key, source_created_at)
+
+
+def record_failed_translation(arr_instance_id, media_type, media_id, from_lang, to_lang, forced, hi,
+                              *, source_created_at=None):
     """Remember that translating this variant of this item failed, until it expires.
 
     Called from the translation job's failure path, so an item a scan keeps
     seeing missing stops being offered a job that dies the same way.
     """
+    key = _key(arr_instance_id, media_type, media_id, from_lang, to_lang, forced, hi, source_created_at)
     with _lock:
-        _failures[(arr_instance_id, media_type, media_id, from_lang, to_lang, forced, hi)] = _now()
+        _failures[key] = _now()
 
 
-def translation_recently_failed(arr_instance_id, media_type, media_id, from_lang, to_lang, forced, hi):
+def translation_recently_failed(arr_instance_id, media_type, media_id, from_lang, to_lang, forced, hi,
+                                *, source_created_at=None):
     """Whether this variant of this item failed to translate within the expiry window."""
-    key = (arr_instance_id, media_type, media_id, from_lang, to_lang, forced, hi)
+    key = _key(arr_instance_id, media_type, media_id, from_lang, to_lang, forced, hi, source_created_at)
     with _lock:
         failed_at = _failures.get(key)
         if failed_at is None:
@@ -53,10 +68,12 @@ def translation_recently_failed(arr_instance_id, media_type, media_id, from_lang
         return True
 
 
-def clear_failed_translation(arr_instance_id, media_type, media_id, from_lang, to_lang, forced, hi):
+def clear_failed_translation(arr_instance_id, media_type, media_id, from_lang, to_lang, forced, hi,
+                             *, source_created_at=None):
     """Forget one failure, because that variant's translation succeeded."""
+    key = _key(arr_instance_id, media_type, media_id, from_lang, to_lang, forced, hi, source_created_at)
     with _lock:
-        _failures.pop((arr_instance_id, media_type, media_id, from_lang, to_lang, forced, hi), None)
+        _failures.pop(key, None)
 
 
 def clear_failed_translations():

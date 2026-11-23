@@ -411,7 +411,7 @@ const ArrStep: FC<ArrStepProps> = ({
     }
     setRemoveError(null);
     // The deletion can settle after the reader goes Back or skips this step.
-    void remove.mutateAsync({ id: existing.id }).then(
+    void remove.mutateAsync({ id: existing.id, kind: existing.kind }).then(
       () => {
         onWritten?.();
         setConfirmRemove(false);

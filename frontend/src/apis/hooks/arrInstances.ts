@@ -19,6 +19,12 @@ import { inlineWhen } from "@/apis/raw/inlineWrites";
 import { useSystemSettings } from "./system";
 
 const arrKey = [QueryKeys.ArrInstances];
+const mixedBadgesKey = [QueryKeys.System, QueryKeys.Badges, true];
+const wantedBadgeFields = {
+  radarr: ["movies", "source_movies"],
+  sonarr: ["episodes", "source_episodes"],
+  sportarr: ["sports"],
+} as const;
 
 export function getArrInstanceErrorMessage(error: unknown, fallback: string) {
   if (error instanceof AxiosError) {
@@ -72,7 +78,6 @@ export function isArrMediaRouteEnabled(
   instances: ArrInstance[] | undefined,
 ) {
   if (!settings?.general?.[`use_${kind}`]) return false;
-  if (!settings.media_sources?.visible) return true;
   if (!instances) return false;
 
   const available = getArrInstanceAvailability(kind, instances);
@@ -124,6 +129,9 @@ export function useArrInstanceLabels(kind: ArrKind) {
       // are shown as a dim dash so only 2nd-instance items stand out.
       defaultId: ofKind.find((i) => i.is_default)?.id ?? null,
       options: ofKind.map((i) => ({ value: String(i.id), label: i.name })),
+      enabledOptions: ofKind
+        .filter((i) => i.enabled)
+        .map((i) => ({ value: i.id, label: i.name })),
     };
   }, [data, kind]);
 }
@@ -192,12 +200,28 @@ export function useUpdateArrInstance({
       ) {
         const { enabled } = updated;
         // A confirmed disable must reach route guards before a list refresh.
-        await client.cancelQueries({ queryKey: arrKey, exact: true });
+        await Promise.all([
+          client.cancelQueries({ queryKey: arrKey, exact: true }),
+          client.cancelQueries({ queryKey: mixedBadgesKey, exact: true }),
+        ]);
+        // The previous subtotal may include the old Arr owner or exclude its shadows.
+        client.setQueryData<Partial<Badge>>(mixedBadgesKey, (badge) => {
+          if (!badge) return undefined;
+          const current = { ...badge };
+          for (const field of wantedBadgeFields[updated.kind]) {
+            delete current[field];
+          }
+          return current;
+        });
         client.setQueryData<ArrInstance[]>(arrKey, (instances) =>
           instances?.map((instance) =>
             instance.id === id ? { ...instance, enabled } : instance,
           ),
         );
+        void client.invalidateQueries({
+          queryKey: mixedBadgesKey,
+          exact: true,
+        });
       }
       void client.invalidateQueries({ queryKey: arrKey });
     },
@@ -224,16 +248,27 @@ export function useDeleteArrInstance({
     mutationKey: [...arrKey, QueryKeys.Actions, "delete"],
     mutationFn: inlineWhen(
       inlineErrors,
-      ({ id, removeLibrary }: { id: number; removeLibrary?: boolean }) =>
-        api.arrInstances.remove(id, removeLibrary),
+      ({
+        id,
+        removeLibrary,
+      }: {
+        id: number;
+        kind: ArrKind;
+        removeLibrary?: boolean;
+      }) => api.arrInstances.remove(id, removeLibrary),
     ),
-    onSuccess: () => {
+    onSuccess: async (_, { kind }) => {
       showNotification({ color: "green", message: "Instance deleted" });
-      client.invalidateQueries({ queryKey: arrKey });
       // Deleting a kind's last instance switches that kind off on the server.
-      void client.invalidateQueries({
-        queryKey: [QueryKeys.System, QueryKeys.Settings],
-      });
+      await Promise.all([
+        client.invalidateQueries({ queryKey: arrKey }),
+        client.invalidateQueries({
+          queryKey: [QueryKeys.System, QueryKeys.Settings],
+        }),
+        ...(kind === "sportarr"
+          ? [client.invalidateQueries({ queryKey: [QueryKeys.Sports] })]
+          : []),
+      ]);
     },
     onError: (error) => {
       // A 409 (the instance still owns synced media, or its library sync is

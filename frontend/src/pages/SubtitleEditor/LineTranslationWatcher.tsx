@@ -10,7 +10,7 @@ export interface LineTranslationJob {
   /** The backend run the job was queued under. */
   session: string | undefined;
   /** The cue the translated line lands on. */
-  targetIdx: number;
+  cueId: string;
 }
 
 /**
@@ -25,19 +25,19 @@ export default function LineTranslationWatcher({
   onDone,
 }: {
   job: LineTranslationJob;
-  onLine: (targetIdx: number, line: string) => void;
+  onLine: (cueId: string, line: string) => void;
   onDone: (jobId: number) => void;
 }) {
   const followed = useEditorJob(job.jobId, job.session);
   const finished = isTerminalJob(followed);
-  const { jobId, targetIdx } = job;
+  const { jobId, cueId } = job;
   useEffect(() => {
     if (!finished) return;
     let active = true;
     readEditorTranslation(jobId)
       .then((state) => {
         const line = state.status === "completed" ? state.lines?.[0]?.line : "";
-        if (active && line) onLine(targetIdx, line);
+        if (active && line) onLine(cueId, line);
       })
       .catch(() => undefined)
       .finally(() => {
@@ -46,6 +46,6 @@ export default function LineTranslationWatcher({
     return () => {
       active = false;
     };
-  }, [finished, jobId, targetIdx, onLine, onDone]);
+  }, [finished, jobId, cueId, onLine, onDone]);
   return null;
 }

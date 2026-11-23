@@ -7,11 +7,12 @@ import itertools
 from dateutil import rrule
 from flask_restx import Resource, Namespace, reqparse, fields, marshal
 from functools import reduce
+from sqlalchemy import func
 
-from app.database import TableHistory, TableHistoryMovie, TableHistorySports, database, select
+from app.database import TableHistory, TableHistoryMovie, TableHistorySports, TableSourceHistory, database, select
 
 from ..utils import authenticate
-from .metrics import language_matches
+from .metrics import ACQUISITION_ACTIONS, language_matches
 
 api_ns_history_stats = Namespace('History Statistics', description='Get history statistics')
 
@@ -25,6 +26,7 @@ class HistoryStats(Resource):
     get_request_parser.add_argument('action', type=str, default='All', help='Action type to filter for.')
     get_request_parser.add_argument('provider', type=str, default='All', help='Provider name to filter for.')
     get_request_parser.add_argument('language', type=str, default='All', help='Language name to filter for')
+    get_request_parser.add_argument('sources', type=str, help='Use 1 to include source downloads.')
 
     series_data_model = api_ns_history_stats.model('history_series_stats_data_model', {
         'date': fields.String(),
@@ -158,5 +160,20 @@ class HistoryStats(Resource):
         sorted_data_movies = sorted(data_movies, key=lambda i: i['date'])
         sorted_data_sports = sorted(data_sports, key=lambda i: i['date'])
 
-        return marshal({'series': sorted_data_series, 'movies': sorted_data_movies,
-                        'sports': sorted_data_sports}, self.get_response_model)
+        response = marshal({'series': sorted_data_series, 'movies': sorted_data_movies,
+                            'sports': sorted_data_sports}, self.get_response_model)
+        if args.get('sources') == '1':
+            table = TableSourceHistory
+            filters = [table.timestamp.between(past, now)]
+            filters.append(table.action.in_(ACQUISITION_ACTIONS) if action == 'All' else table.action == action)
+            if provider != 'All':
+                filters.append(table.provider == provider)
+            if language != 'All':
+                filters.append(language_matches(table.language, language))
+            day = func.date(table.timestamp)
+            counts = {str(row.date): row.count for row in database.execute(
+                select(day.label('date'), func.count().label('count')).where(*filters).group_by(day))}
+            if counts:
+                dates = sorted({row['date'] for row in sorted_data_series} | counts.keys())
+                response['sources'] = [{'date': day, 'count': counts.get(day, 0)} for day in dates]
+        return response

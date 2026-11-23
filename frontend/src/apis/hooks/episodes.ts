@@ -9,6 +9,7 @@ import { invalidateEpisodeHistory } from "@/apis/queries/episodeHistory";
 import { usePaginationQuery } from "@/apis/queries/hooks";
 import { episodesHistoryKey, QueryKeys } from "@/apis/queries/keys";
 import api from "@/apis/raw";
+import { useDeleteBlacklistMutation } from "./blacklistMutations";
 import { whenJobFinishes } from "./jobWatch";
 
 const cacheEpisodes = (client: QueryClient, episodes: Item.Episode[]) => {
@@ -41,19 +42,39 @@ export function useEpisodesBySeriesId(id: number) {
   return query;
 }
 
-export function useEpisodeWantedPagination(fetchAll = false) {
+export function useEpisodeWantedPagination(
+  fetchAll = false,
+  sourceKeys: MediaSourceKey[] = [],
+  includeSources = false,
+) {
   return usePaginationQuery(
-    [QueryKeys.Series, QueryKeys.Wanted],
-    (param) => api.episodes.wanted(param),
-    true,
+    [QueryKeys.Series, QueryKeys.Wanted, { sourceKeys, includeSources }],
+    (param) =>
+      api.episodes.wanted(
+        {
+          ...param,
+          sourceKeys: sourceKeys.length ? sourceKeys : undefined,
+        },
+        includeSources,
+      ),
+    false,
     fetchAll,
+    true,
+    false,
+    true,
   );
 }
 
-export function useEpisodeBlacklist() {
+export function useEpisodeBlacklist(scope: Blacklist.Scope = {}) {
   return useQuery({
-    queryKey: [QueryKeys.Series, QueryKeys.Episodes, QueryKeys.Blacklist],
-    queryFn: () => api.episodes.blacklist(),
+    queryKey: [
+      QueryKeys.Series,
+      QueryKeys.Episodes,
+      QueryKeys.Blacklist,
+      scope,
+    ],
+    queryFn: ({ signal }) => api.episodes.blacklist(scope, signal),
+    placeholderData: undefined,
   });
 }
 
@@ -104,19 +125,10 @@ export function useEpisodeAddBlacklist() {
 }
 
 export function useEpisodeDeleteBlacklist() {
-  const client = useQueryClient();
-  return useMutation({
-    mutationKey: [QueryKeys.Series, QueryKeys.Episodes, QueryKeys.Blacklist],
-
-    mutationFn: (param: { all?: boolean; form?: FormType.DeleteBlacklist }) =>
-      api.episodes.deleteBlacklist(param.all, param.form),
-
-    onSuccess: () => {
-      void client.invalidateQueries({
-        queryKey: [QueryKeys.Series, QueryKeys.Episodes, QueryKeys.Blacklist],
-      });
-    },
-  });
+  return useDeleteBlacklistMutation(
+    [QueryKeys.Series, QueryKeys.Episodes, QueryKeys.Blacklist],
+    (removal) => api.episodes.deleteBlacklist(removal),
+  );
 }
 
 export function useEpisodeHistoryPagination(includeEmbedded = false) {

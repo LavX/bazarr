@@ -15,6 +15,7 @@ import { faSearch } from "@fortawesome/free-solid-svg-icons";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import { useServerSearch } from "@/apis/hooks";
 import { useArrInstanceLabels } from "@/apis/hooks/arrInstances";
+import { sourceSearchRoute } from "@/apis/raw/system";
 import { InstanceBadge } from "@/components/bazarr";
 import { useDebouncedValue } from "@/utilities";
 
@@ -24,6 +25,7 @@ type SearchResultItem = {
   link: string;
   poster: string | null;
   type: string;
+  origin?: "arr" | "source";
   instanceId?: number;
 };
 
@@ -35,6 +37,17 @@ function useSearch(query: string) {
     () =>
       data?.map((v) => {
         const { link, label, poster, type, value } = (() => {
+          if (v.origin === "source") {
+            const kind = sourceSearchRoute[v.source_kind];
+            return {
+              poster: v.poster,
+              link: `/${kind}/source/${v.id}`,
+              type: v.source_kind === "league" ? "sports" : v.source_kind,
+              label: v.year ? `${v.title} (${v.year})` : v.title,
+              value: `source:${v.source_kind}:${v.id}`,
+            };
+          }
+
           if (v.sonarrSeriesId) {
             // Route by the canonical local id (#156); fall back to the upstream
             // id for safety. Equal on a single default instance.
@@ -84,6 +97,7 @@ function useSearch(query: string) {
           poster: poster,
           label: label,
           type: type,
+          origin: v.origin,
           link: link,
           instanceId: v.arr_instance_id,
         };
@@ -161,7 +175,7 @@ const Search: FunctionComponent = () => {
               <Text size={isMobile ? "xs" : "md"} lineClamp={3}>
                 {result?.label}
               </Text>
-              {instanceLabels.multiInstance && (
+              {result?.origin !== "source" && instanceLabels.multiInstance && (
                 <InstanceBadge
                   instanceId={result?.instanceId}
                   defaultId={instanceLabels.defaultId}

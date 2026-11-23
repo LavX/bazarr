@@ -4,7 +4,19 @@ import type { SubtitleSyncStatus } from "@/utilities/subtitles";
 import BaseApi from "./base";
 import client from "./client";
 
-export interface SportsLeague {
+export interface SportsSourceFields {
+  origin?: "arr" | "source";
+  source_key?: MediaSourceKey;
+  source_name?: string | null;
+  source_kind?: MediaSourceKind | null;
+  source_id?: number | null;
+  source_library_id?: number;
+  identity_state?: Wanted.SourceRow["identity_state"];
+  source_item_id?: number | null;
+  source_group_id?: number | null;
+}
+
+export interface SportsLeague extends SportsSourceFields {
   id: number;
   arr_instance_id: number;
   sportarrLeagueId: number;
@@ -27,7 +39,7 @@ export interface SportsLeague {
   missingLanguageCount: number;
 }
 
-export interface SportsEventReference {
+export interface SportsEventReference extends SportsSourceFields {
   id: number;
   arr_instance_id: number;
   league_id: number;
@@ -96,8 +108,9 @@ export interface SportsDownloadResult {
   job_id: number | null;
 }
 
-export interface SportsRecord {
+export interface SportsRecord extends SportsSourceFields {
   id: number;
+  removal_key?: string;
   arr_instance_id: number;
   league_id: number;
   event_id: number;
@@ -159,6 +172,8 @@ export interface SportsJobStatus {
   } | null;
 }
 export interface SportsFilters {
+  includeSources?: boolean;
+  sourceKeys?: MediaSourceKey[];
   owner?: number;
   eventId?: number;
   /** Restrict to one league's events; the league toolbox History button sets it. */
@@ -190,6 +205,8 @@ class SportsApi extends BaseApi {
     return this.get<{ data: (SportsEvent | SportsRecord)[]; total: number }>(
       `/${kind}`,
       {
+        sources: filters.includeSources ? 1 : undefined,
+        "source_key[]": filters.sourceKeys,
         arr_instance_id: filters.owner,
         event_id: filters.eventId,
         league_id: filters.leagueId,
@@ -211,6 +228,22 @@ class SportsApi extends BaseApi {
       })
     ).data;
   }
+  excludeSourceHistory(
+    historyId: number,
+    row: {
+      source_id: number;
+      source_item_id: number;
+      provider: string;
+      subs_id: string;
+      language: string;
+    },
+  ) {
+    return this.postRaw(`/history/${historyId}/blacklist`, row, {
+      sources: 1,
+      origin: "source",
+    });
+  }
+
   async removeExclusion(owner: number, id?: number) {
     return (
       await this.delete<{ removed: boolean | number }>(
@@ -220,8 +253,53 @@ class SportsApi extends BaseApi {
       )
     ).data;
   }
-  list(owner?: number, start = 0, length = 100) {
+  async removeSourceExclusion(
+    scope:
+      | { id: number; removalKey: string }
+      | { sourceKey: MediaSourceKey }
+      | { all: true },
+  ) {
+    if ("sourceKey" in scope && !scope.sourceKey.startsWith("source:"))
+      throw new Error("Select a source first");
+    const entry = "id" in scope;
+    return (
+      await this.delete<{ removed: boolean | number }>(
+        entry ? `/blacklist/${scope.id}` : "/blacklist",
+        undefined,
+        entry
+          ? {
+              sources: 1,
+              origin: "source",
+              source_blacklist_key: scope.removalKey,
+            }
+          : {
+              sources: 1,
+              "source_key[]":
+                "sourceKey" in scope ? [scope.sourceKey] : undefined,
+            },
+      )
+    ).data;
+  }
+
+  async sourceWanted(sourceKeys: MediaSourceKey[]) {
+    if (
+      sourceKeys.length === 0 ||
+      sourceKeys.some((key) => !key.startsWith("source:"))
+    ) {
+      throw new Error("Select at least one source");
+    }
+    return (
+      await this.postRaw<SportsJob>(
+        "/wanted",
+        {},
+        { sources: 1, "source_key[]": sourceKeys },
+      )
+    ).data;
+  }
+  list(owner?: number, start = 0, length = 100, filters: SportsFilters = {}) {
     return this.get<{ data: SportsLeague[]; total: number }>("/leagues", {
+      sources: filters.includeSources ? 1 : undefined,
+      "source_key[]": filters.sourceKeys,
       arr_instance_id: owner,
       start,
       length,

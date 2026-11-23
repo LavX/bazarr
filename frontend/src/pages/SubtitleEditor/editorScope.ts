@@ -102,7 +102,7 @@ export function createFieldsForLanguageKey(key: string): {
 /** Where View and Edit open a subtitle row. */
 export function subtitleEditorUrl(
   action: "preview" | "edit",
-  mediaType: "movie" | "episode" | "sports",
+  mediaType: "movie" | "episode" | "sports" | "source",
   mediaId: number,
   language: string,
   options: {
@@ -142,6 +142,9 @@ export function editorBreadcrumb(
   arrInstanceId?: number,
 ): EditorBreadcrumb {
   const scope = arrInstanceId === undefined ? "" : `?instance=${arrInstanceId}`;
+  if (mediaType === "source") {
+    return { listPath: "/discover", listLabel: "Discover" };
+  }
   if (mediaType === "sports") {
     return {
       listPath: "/sports",

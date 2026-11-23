@@ -1,6 +1,6 @@
 # coding=utf-8
 
-from flask_restx import Resource, Namespace, reqparse, fields, marshal
+from flask_restx import Resource, Namespace, reqparse, fields
 
 from app.database import TableMovies, TableBlacklistMovie, database, select
 from subtitles.tools.delete import delete_subtitles
@@ -9,9 +9,10 @@ from radarr.blacklist import blacklist_log_movie, blacklist_delete_all_movie, bl
 from subtitles.mass_download import movies_download_subtitles
 from app.event_handler import event_stream
 from api.swaggerui import subtitles_language_model
-from utilities.pretty_date import pretty_date
+from media_sources.blacklist import add_blacklist_delete_arguments, delete_blacklist, list_blacklist
+from media_sources.union import add_source_arguments
 
-from ..utils import authenticate, postprocess
+from ..utils import authenticate
 
 api_ns_movies_blacklist = Namespace('Movies Blacklist', description='List, add or remove subtitles to or from '
                                                                     'movies blacklist')
@@ -22,6 +23,8 @@ class MoviesBlacklist(Resource):
     get_request_parser = reqparse.RequestParser()
     get_request_parser.add_argument('start', type=int, required=False, default=0, help='Paging start integer')
     get_request_parser.add_argument('length', type=int, required=False, default=-1, help='Paging length integer')
+
+    add_source_arguments(get_request_parser)
 
     get_language_model = api_ns_movies_blacklist.model('subtitles_language_model', subtitles_language_model)
 
@@ -44,9 +47,6 @@ class MoviesBlacklist(Resource):
     def get(self):
         """List blacklisted movies subtitles"""
         args = self.get_request_parser.parse_args()
-        start = args.get('start')
-        length = args.get('length')
-
         stmt = (
             select(TableMovies.id,
                    TableMovies.title,
@@ -57,25 +57,8 @@ class MoviesBlacklist(Resource):
                    TableBlacklistMovie.language,
                    TableBlacklistMovie.timestamp)
             .select_from(TableBlacklistMovie)
-            .join(TableMovies)
-            .order_by(TableBlacklistMovie.timestamp.desc()))
-        # Pagination must be applied to the statement, not the executed Result
-        # (a Result has no .limit()). Pre-existing bug: paginated requests 500'd.
-        if length > 0:
-            stmt = stmt.limit(length).offset(start)
-        data = database.execute(stmt)
-
-        return marshal([postprocess({
-            'id': x.id,
-            'arr_instance_id': x.arr_instance_id,
-            'title': x.title,
-            'radarrId': x.radarrId,
-            'provider': x.provider,
-            'subs_id': x.subs_id,
-            'language': x.language,
-            'timestamp': pretty_date(x.timestamp),
-            'parsed_timestamp': x.timestamp.strftime('%x %X'),
-        }) for x in data.all()], self.get_response_model, envelope='data')
+            .join(TableMovies))
+        return list_blacklist(database, args, stmt, TableBlacklistMovie, 'movie', self.get_response_model)
 
     post_request_parser = reqparse.RequestParser()
     post_request_parser.add_argument('radarrid', type=int, required=True, help='Radarr ID')
@@ -145,18 +128,17 @@ class MoviesBlacklist(Resource):
     delete_request_parser.add_argument('arr_instance_id', type=int, required=False,
                                        help='Owning Radarr instance id (#156)')
 
+    add_blacklist_delete_arguments(delete_request_parser)
+
     @authenticate
     @api_ns_movies_blacklist.doc(parser=delete_request_parser)
+    @api_ns_movies_blacklist.response(400, 'Incomplete source exclusion identity')
+    @api_ns_movies_blacklist.response(409, 'The source exclusion changed or was removed')
     @api_ns_movies_blacklist.response(204, 'Success')
     @api_ns_movies_blacklist.response(401, 'Not Authenticated')
     def delete(self):
         """Delete a movies subtitles from blacklist"""
         args = self.delete_request_parser.parse_args()
-        if args.get("all") == "true":
-            blacklist_delete_all_movie()
-        else:
-            provider = args.get('provider')
-            subs_id = args.get('subs_id')
-            blacklist_delete_movie(provider=provider, subs_id=subs_id,
-                                   arr_instance_id=args.get('arr_instance_id'))
-        return '', 200
+        refusal = delete_blacklist(args, session=database, kind='movie', arr_table=TableBlacklistMovie,
+                                   delete_one=blacklist_delete_movie, delete_all=blacklist_delete_all_movie)
+        return refusal or ('', 200)

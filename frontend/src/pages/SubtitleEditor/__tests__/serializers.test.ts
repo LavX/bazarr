@@ -1,5 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { getParser } from "@/pages/SubtitleEditor/parsers";
+import {
+  getParser,
+  parseReplacementSubtitle,
+} from "@/pages/SubtitleEditor/parsers";
 import { getSerializer } from "@/pages/SubtitleEditor/serializers";
 import type { Cue, ParseResult } from "@/pages/SubtitleEditor/types";
 
@@ -280,27 +283,124 @@ describe("ASS serializer", () => {
     expect(dialogueLine).not.toContain("\nLine two");
   });
 
-  it("patches existing rawText lines, preserving style/margins", () => {
-    const rawLine =
-      "Dialogue: 0,0:00:01.00,0:00:04.00,CustomStyle,Speaker,0010,0020,0030,karaoke,Original text";
-    const cue = makeCue(2000, 5000, "Updated text", rawLine);
-    const result = makeResult("ass", [cue]);
+  it("patches existing dialogue, preserving style and margins", () => {
+    const result = getParser("ass").parse(
+      [
+        customHeader,
+        "[Events]",
+        "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text",
+        "Dialogue: 0,0:00:01.00,0:00:04.00,CustomStyle, Speaker ,0010,0020,0030,karaoke,Original text",
+      ].join("\n"),
+    );
+    const [cue] = result.cues;
+    cue.startMs = 2000;
+    cue.endMs = 5000;
+    cue.text = "Updated text";
     const output = serializer.serialize(result);
 
-    const dialogueLine = output
-      .split("\n")
-      .find((l) => l.startsWith("Dialogue:"));
-    expect(dialogueLine).toBeDefined();
-    // Timing updated
-    expect(dialogueLine).toContain("0:00:02.00");
-    expect(dialogueLine).toContain("0:00:05.00");
-    // Text updated
-    expect(dialogueLine).toContain("Updated text");
-    // Style, Name, Margins, Effect preserved
-    expect(dialogueLine).toContain("CustomStyle");
-    expect(dialogueLine).toContain("Speaker");
-    expect(dialogueLine).toContain("0010");
-    expect(dialogueLine).toContain("karaoke");
+    expect(output.split("\n")).toContain(
+      "Dialogue: 0,0:00:02.00,0:00:05.00,CustomStyle, Speaker ,0010,0020,0030,karaoke,Updated text",
+    );
+  });
+
+  describe("ordinary ASS saves of compact dialogue", () => {
+    const parser = getParser("ass");
+    const serializer = getSerializer("ass");
+    const legacyText =
+      "{\\i1}Pack\rwater, maps, matches, rope, gloves, boots, a compass, and a radio.{\\i0}";
+    const replyText = "{\\pos(320,50)}Already packed.\\nReady when you are.";
+    const content = [
+      "[Script Info]",
+      "ScriptType: v4.00+",
+      "Title: Trail briefing",
+      "",
+      "[V4+ Styles]",
+      "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding",
+      "Style: Radio,Arial,22,&H0000FFFF,&H000000FF,&H00000000,&H00000000,0,0,0,0,100,100,0,0,1,2,2,2,10,10,10,1",
+      "Style: Default,Arial,20,&H00FFFFFF,&H000000FF,&H00000000,&H00000000,0,0,0,0,100,100,0,0,1,2,2,2,10,10,10,1",
+      "",
+      "[Events]",
+      "Format: End, Style, Start, Text",
+      `Dialogue: 0:00:04.0,Radio,0:00:01.00,${legacyText}`,
+      `Dialogue: 0:00:07.00,Default,0:00:05.00,${replyText}`,
+    ].join("\n");
+
+    it.each([
+      {
+        name: "compact",
+        format: "Layer, Start, End, Style, Text",
+        edited: "3,0:00:01.00,0:00:04.00,Radio,Original",
+        untouched: "7,0:00:05.00,0:00:07.00,Default,Neighbor",
+        savedEdited: "3,0:00:01.00,0:00:04.00,Radio,,0,0,0,,Updated",
+        savedUntouched: "7,0:00:05.00,0:00:07.00,Default,,0,0,0,,Neighbor",
+      },
+      {
+        name: "canonical",
+        format:
+          "Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text",
+        edited:
+          "3,0:00:01.00,0:00:04.00,Radio,Speaker,0010,0020,0030,karaoke,Original",
+        untouched:
+          "7,0:00:05.00,0:00:07.00,Default,Other,0040,0050,0060,scroll,Neighbor",
+        savedEdited:
+          "3,0:00:01.00,0:00:04.00,Radio,Speaker,0010,0020,0030,karaoke,Updated",
+        savedUntouched:
+          "7,0:00:05.00,0:00:07.00,Default,Other,0040,0050,0060,scroll,Neighbor",
+      },
+    ])("preserves fields under an indented $name declaration", (fixture) => {
+      const opened = parser.parse(
+        [
+          "[Events]",
+          `  Format: ${fixture.format}`,
+          `Dialogue: ${fixture.edited}`,
+          `Dialogue: ${fixture.untouched}`,
+        ].join("\n"),
+      );
+      opened.cues[0].text = "Updated";
+
+      const saved = serializer.serialize(opened);
+      expect(saved.split("\n")).toContain(`Dialogue: ${fixture.savedEdited}`);
+      expect(saved.split("\n")).toContain(
+        `Dialogue: ${fixture.savedUntouched}`,
+      );
+    });
+
+    it("writes the edited comma-rich cue and retains its formatted neighbor", () => {
+      const opened = parser.parse(content);
+      expect(opened.cues[0].text).toContain("Pack\rwater, maps, matches");
+      opened.cues[0].startMs = 1500;
+      opened.cues[0].text = "Pack water, maps, and a radio.\nMeet at dawn.";
+
+      const saved = serializer.serialize(opened);
+      expect(saved).toContain("Style: Radio,Arial,22");
+      expect(saved).toContain(
+        "Dialogue: 0,0:00:01.50,0:00:04.0,Radio,,0,0,0,,Pack water, maps, and a radio.\\NMeet at dawn.",
+      );
+      expect(saved).toContain(
+        `Dialogue: 0,0:00:05.00,0:00:07.00,Default,,0,0,0,,${replyText}`,
+      );
+      expect(parseReplacementSubtitle("ass", saved).cues).toMatchObject([
+        { startMs: 1500, endMs: 4000, text: opened.cues[0].text },
+        { startMs: 5000, endMs: 7000, text: opened.cues[1].text },
+      ]);
+    });
+
+    it("retains the untouched formatted cue with a bare CR when editing its neighbor", () => {
+      const opened = parser.parse(content);
+      opened.cues[1].text = "Meet you at the trailhead.";
+
+      const saved = serializer.serialize(opened);
+      expect(saved).toContain(
+        `Dialogue: 0,0:00:01.00,0:00:04.0,Radio,,0,0,0,,${legacyText}`,
+      );
+      expect(parser.parse(saved).cues).toMatchObject([
+        { startMs: 1000, endMs: 4000, text: opened.cues[0].text },
+        { startMs: 5000, endMs: 7000, text: "Meet you at the trailhead." },
+      ]);
+      expect(() => parseReplacementSubtitle("ass", saved)).toThrow(
+        "Invalid ASS line ending",
+      );
+    });
   });
 
   it("returns empty cues with just header and events format", () => {
@@ -337,7 +437,7 @@ describe("ASS serializer", () => {
       "",
       "[Events]",
       "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text",
-      "Dialogue: 0,0:00:01.00,0:00:04.00,Default,,0000,0000,0000,,Hello world",
+      "  Dialogue: 2,0:00:01.00,0:00:04.00,Default,,0000,0000,0000,,Hello world",
       "Dialogue: 0,0:01:00.50,0:01:03.00,Default,,0000,0000,0000,,Second line",
     ].join("\n");
 
@@ -346,6 +446,9 @@ describe("ASS serializer", () => {
     const serialized = serializer.serialize(parsed);
     const reparsed = parser.parse(serialized);
 
+    expect(serialized).toContain(
+      "Dialogue: 2,0:00:01.00,0:00:04.00,Default,,0000,0000,0000,,Hello world",
+    );
     expect(reparsed.cues).toHaveLength(parsed.cues.length);
     for (let i = 0; i < parsed.cues.length; i++) {
       expect(reparsed.cues[i].startMs).toBe(parsed.cues[i].startMs);

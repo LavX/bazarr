@@ -24,15 +24,51 @@ import {
 } from "@/apis/raw/subtitles";
 import { notification } from "@/modules/notification";
 import { filenameFromContentDisposition, saveBlobAs } from "@/utilities/files";
-import { waitForJobs } from "@/utilities/jobs";
+import { waitForJob, waitForJobs } from "@/utilities/jobs";
 import { hiddenTrackOutcome } from "@/utilities/subtitles";
+
+const shownSubtitleActionErrors = new WeakSet<Error>();
+
+/** Whether the action hook has already shown this failure to the user. */
+export function isShownSubtitleActionError(error: unknown): boolean {
+  return error instanceof Error && shownSubtitleActionErrors.has(error);
+}
+
+function refreshSourceSubtitleOwner(client: QueryClient, id: number) {
+  return Promise.all([
+    client.invalidateQueries({ queryKey: ["source-detail"] }),
+    client.invalidateQueries({
+      queryKey: [QueryKeys.Subtitles, "content", "source", id],
+    }),
+    client.invalidateQueries({
+      queryKey: [QueryKeys.Subtitles, "source", id],
+    }),
+    client.invalidateQueries({
+      predicate: ({ queryKey }) =>
+        (queryKey[0] === QueryKeys.Movies ||
+          queryKey[0] === QueryKeys.Series) &&
+        queryKey.some(
+          (part) =>
+            typeof part === "object" &&
+            part !== null &&
+            "includeSources" in part &&
+            part.includeSources === true,
+        ),
+    }),
+    client.invalidateQueries({
+      queryKey: [QueryKeys.System, QueryKeys.Badges],
+    }),
+  ]).then(() => undefined);
+}
 
 /** Refresh the tables a subtitle of this media type is listed in. */
 function refreshSubtitleOwner(
   client: ReturnType<typeof useQueryClient>,
   form: FormType.ModifySubtitle,
 ) {
-  if (form.type === "episode") {
+  if (form.type === "source") {
+    void refreshSourceSubtitleOwner(client, form.id);
+  } else if (form.type === "episode") {
     void client.invalidateQueries({ queryKey: [QueryKeys.Episodes, form.id] });
     void client.invalidateQueries({ queryKey: [QueryKeys.Series] });
   } else if (form.type === "sports") {
@@ -76,12 +112,37 @@ export function useSubtitleAction() {
     // A translation's 409 is the translation gate's refusal, which its callers
     // show with useTranslationRefusal; every other action's 409 shows here.
     onError: (error, param) => {
-      if (param.action !== "translate") {
+      if (param.form.type === "source") {
+        if (param.action === "translate" && isShownConflict(error)) return;
+        shownSubtitleActionErrors.add(error);
+        showNotification(notification.error("Not started", error.message));
+      } else if (param.action !== "translate") {
         toastConflict("Not started")(error);
       }
     },
 
     onSuccess: (data, param) => {
+      if (param.form.type === "source") {
+        const refresh = () => refreshSourceSubtitleOwner(client, param.form.id);
+        if (typeof data?.job_id === "number") {
+          void waitForJob(client, data.job_id, data.session).then(
+            () => {
+              void refresh();
+            },
+            (error: Error) => {
+              void refresh();
+              showNotification(
+                notification.error(
+                  "Subtitle tool did not finish",
+                  error.message,
+                ),
+              );
+            },
+          );
+          return;
+        }
+        return refresh();
+      }
       const refresh = () => {
         // TODO: Query less
         const { type, id } = param.form;
@@ -392,11 +453,12 @@ export function useSubtitleInfos(names: string[]) {
   });
 }
 
-export function useSubtitleContents(subtitlePath: string) {
+export function useSubtitleContents(subtitlePath: string, enabled = true) {
   return useQuery({
     queryKey: [QueryKeys.Subtitles, subtitlePath],
     queryFn: () => api.subtitles.contents(subtitlePath),
     staleTime: Infinity,
+    enabled,
   });
 }
 
@@ -499,6 +561,26 @@ export function useRefTracksBySportsEventId(
   });
 }
 
+export function useRefTracksBySourceItemId(
+  subtitlesPath: string,
+  sourceItemId: number,
+  isSource: boolean,
+) {
+  return useQuery({
+    queryKey: [
+      QueryKeys.Subtitles,
+      "source",
+      sourceItemId,
+      "references",
+      subtitlesPath,
+    ],
+    queryFn: () =>
+      api.subtitles.getRefTracksBySourceItemId(subtitlesPath, sourceItemId),
+    enabled: isSource,
+    retry: false,
+  });
+}
+
 export function useUpgradableItems() {
   return useQuery({
     queryKey: [QueryKeys.Subtitles, "upgradable"],
@@ -584,7 +666,7 @@ async function waitForBatchChildren(client: QueryClient, batchJobId: number) {
   }
 }
 
-export function useSubtitleContent(
+function subtitleContentQueryKey(
   mediaType: string | undefined,
   mediaId: number | undefined,
   language: string | undefined,
@@ -592,23 +674,43 @@ export function useSubtitleContent(
   source?: SubtitleSource,
   codec?: string,
 ) {
+  // The source and the row's codec go last, so invalidating the key without
+  // them still reaches both the file and every embedded track of a language.
+  return [
+    QueryKeys.Subtitles,
+    "content",
+    mediaType,
+    mediaId,
+    language,
+    arrInstanceId,
+    source ?? null,
+    codec ?? null,
+  ] as const;
+}
+
+export function useSubtitleContent(
+  mediaType: string | undefined,
+  mediaId: number | undefined,
+  language: string | undefined,
+  arrInstanceId?: number,
+  source?: SubtitleSource,
+  codec?: string,
+  validateSource?: () => Promise<void>,
+) {
   return useQuery({
-    // The source and the row's codec go last, so invalidating the key without
-    // them still reaches both the file and every embedded track of a language.
-    queryKey: [
-      QueryKeys.Subtitles,
-      "content",
+    queryKey: subtitleContentQueryKey(
       mediaType,
       mediaId,
       language,
       arrInstanceId,
-      source ?? null,
-      codec ?? null,
-    ],
-    queryFn: () => {
+      source,
+      codec,
+    ),
+    queryFn: async () => {
       if (!mediaType || mediaId === undefined || !language) {
         throw new Error("Missing parameters");
       }
+      if (mediaType === "source") await validateSource?.();
       return api.subtitles.getContent(
         mediaType,
         mediaId,
@@ -619,8 +721,16 @@ export function useSubtitleContent(
       );
     },
     enabled: !!mediaType && mediaId !== undefined && !!language,
-    staleTime: 5 * 60 * 1000,
+    staleTime: mediaType === "source" && validateSource ? 0 : 5 * 60 * 1000,
+    ...(mediaType === "source" && { placeholderData: () => undefined }),
     retry: (failureCount, error) => {
+      if (
+        mediaType === "source" &&
+        validateSource &&
+        !(error instanceof AxiosError)
+      ) {
+        return false;
+      }
       // A 4xx is an answer, not a hiccup: 404 is a subtitle that does not
       // exist yet, and 415 or 422 is an embedded track that is not text.
       // Asking again would only run ffmpeg again.
@@ -635,6 +745,7 @@ export function useSubtitleContent(
 }
 
 export function useSubtitleSave() {
+  const client = useQueryClient();
   return useMutation({
     mutationKey: [QueryKeys.Subtitles, "save"],
     mutationFn: (params: {
@@ -655,11 +766,62 @@ export function useSubtitleSave() {
         params.etag,
         params.arrInstanceId,
       ),
-    onSuccess: () => {
-      // Do NOT invalidate the content query here. The editor already has
-      // the content (it just saved it) and the PUT response provides the
-      // new ETag. Invalidating would trigger a refetch that races with
-      // the ETag update and causes 412 on the next save.
+    onSuccess: async (result, params) => {
+      if (params.mediaType !== "source") return;
+      const queryKey = subtitleContentQueryKey(
+        params.mediaType,
+        params.mediaId,
+        params.language,
+        params.arrInstanceId,
+      );
+      const queryState = client.getQueryState(queryKey);
+      const wasFetching = queryState?.fetchStatus === "fetching";
+      const originalEtag = params.etag?.replace(/^"|"$/g, "");
+      const savedEtag = result.etag?.replace(/^"|"$/g, "");
+      // A background read may still contain the version before this save.
+      // Cancel it before pairing the saved text with its new version, and
+      // finish before the editor clears dirty and checks the cached version.
+      await client.cancelQueries({ queryKey, exact: true });
+      // A read may already have established that this file was deleted after
+      // the PUT wrote it. Preserve that HTTP error until an authoritative read
+      // succeeds, rather than replacing it with the delayed save response.
+      if (
+        queryState?.status === "error" ||
+        client.getQueryState(queryKey)?.status === "error"
+      ) {
+        void client.invalidateQueries({ queryKey, exact: true });
+        return;
+      }
+      const savedSize =
+        params.encoding.toLowerCase().replace(/[-_]/g, "") === "utf8"
+          ? new TextEncoder().encode(params.content).byteLength
+          : undefined;
+      const previous =
+        client.getQueryData<
+          Awaited<ReturnType<typeof api.subtitles.getContent>>
+        >(queryKey);
+      const cachedEtag = previous?.etag?.replace(/^"|"$/g, "");
+      // A different revision was read after the PUT wrote its file but
+      // before its response arrived. Keep that external replacement.
+      const externalRevision =
+        cachedEtag && cachedEtag !== originalEtag && cachedEtag !== savedEtag;
+      if (previous && !externalRevision) {
+        client.setQueryData(queryKey, {
+          ...previous,
+          data: {
+            ...previous.data,
+            content: params.content,
+            encoding: params.encoding,
+            ...(savedSize !== undefined && { size: savedSize }),
+          },
+          etag: result.etag,
+        });
+      }
+      // Recheck canceled reads for external changes, and fetch the byte size
+      // for encodings the browser cannot encode.
+      if (wasFetching || savedSize === undefined) {
+        void client.invalidateQueries({ queryKey, exact: true });
+      }
     },
   });
 }

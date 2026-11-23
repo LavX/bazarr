@@ -37,7 +37,7 @@ const ScoreOverrideForm: FunctionComponent<Props> = ({
     <form
       onSubmit={form.onSubmit(({ score }) => {
         selections.forEach((s) => {
-          if (!s.path) return;
+          if (!s.path || s.type === "source") return;
           mutate({
             type: s.type,
             id: s.id,

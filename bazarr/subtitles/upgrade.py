@@ -36,7 +36,57 @@ def upgrade_subtitles(wait_for_completion=False):
     if use_radarr:
         upgrade_movies_subtitles(wait_for_completion=wait_for_completion)
 
+    from media_sources.schedule import has_enabled_source
+    if has_enabled_source():
+        upgrade_source_subtitles(wait_for_completion=wait_for_completion)
+
     logging.info('BAZARR Finished searching for Subtitles to upgrade. Check History for more information.')
+
+
+def upgrade_source_subtitles(job_id=None, wait_for_completion=False, item_id=None, history_id=None,
+                             expected_item=None, expected_subtitles=()):
+    if not settings.general.upgrade_subs:
+        if job_id and item_id is not None:
+            jobs_queue.publish_job_result(job_id, {'upgraded': 0})
+        return None
+    if not job_id:
+        return jobs_queue.add_job_from_function("Trying to upgrade source subtitles", is_progress=True,
+                                                wait_for_completion=wait_for_completion, return_existing=True)
+    from media_sources import shadows
+    from media_sources.history import source_upgrade_candidates
+    from media_sources.service import upgrade_source_subtitle
+    from media_sources.wanted import notify_wanted_changes
+
+    jobs_queue.raise_if_cancelled(job_id)
+    if item_id is None:
+        refreshed = shadows.revalidate_shadows()
+        if refreshed['cleared'] or refreshed['refreshed']:
+            notify_wanted_changes()
+    else:
+        from media_sources.service import source_upgrade_item_stamp
+
+        if expected_item is None or source_upgrade_item_stamp(item_id) != expected_item:
+            jobs_queue.publish_job_result(job_id, {'upgraded': 0})
+            return None
+    candidates = source_upgrade_candidates(item_ids=[item_id] if item_id is not None else None,
+                                           history_ids=[history_id] if history_id is not None else None)
+    pinned = {row_id: (path, version) for row_id, path, version in expected_subtitles}
+    if item_id is not None:
+        candidates = [row for row in candidates if row.id in pinned]
+    upgraded = 0
+    jobs_queue.update_job_progress(job_id=job_id, progress_max=len(candidates))
+    for i, candidate in enumerate(candidates, start=1):
+        jobs_queue.raise_if_cancelled(job_id)
+        jobs_queue.update_job_progress(job_id=job_id, progress_value=i, progress_message=candidate.item_title)
+        if not get_providers():
+            logging.info("BAZARR All providers are throttled")
+            break
+        if upgrade_source_subtitle(candidate, job_id, expected_subtitle=pinned.get(candidate.id)):
+            upgraded += 1
+    jobs_queue.update_job_progress(job_id=job_id, progress_value='max')
+    jobs_queue.update_job_name(job_id=job_id, new_job_name='Tried to upgrade source subtitles')
+    if item_id is not None:
+        jobs_queue.publish_job_result(job_id, {'upgraded': upgraded})
 
 
 def upgrade_episodes_subtitles(job_id=None, sonarr_series_ids=None, sonarr_series_filters=None,

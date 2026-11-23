@@ -15,19 +15,27 @@ function stripHtml(html: string): string {
 }
 
 export const smiParser: SubtitleParser = {
-  parse(content: string): ParseResult {
-    const text = content.replace(/^\uFEFF/, "").replace(/\r\n/g, "\n");
+  parse(content, { strict } = {}): ParseResult {
+    const normalized = content.replace(/^\uFEFF/, "").replace(/\r\n/g, "\n");
 
-    if (!text.trim()) {
+    if (!normalized.trim()) {
       return { metadata: { format: "smi" }, cues: [] };
     }
 
+    const text = strict
+      ? normalized.replace(/<!--[\s\S]*?-->/g, "")
+      : normalized;
+
     // Find all SYNC tags with their start times and collect text between them
-    const syncPattern = /<SYNC\s+Start\s*=\s*(\d+)\s*>/gi;
+    const syncPattern = /<SYNC\b(?:\s+Start\s*=\s*(\d+)\s*>)?/gi;
     const syncs: { startMs: number; index: number }[] = [];
     let match: RegExpExecArray | null;
 
     while ((match = syncPattern.exec(text)) !== null) {
+      if (match[1] === undefined) {
+        if (strict) throw new Error("Invalid SAMI cue timing");
+        continue;
+      }
       syncs.push({
         startMs: parseInt(match[1], 10),
         index: match.index + match[0].length,
@@ -68,6 +76,14 @@ export const smiParser: SubtitleParser = {
         endMs,
         text: displayText,
       });
+    }
+
+    if (
+      strict &&
+      !cues.length &&
+      !/^<SAMI\b[^>]*>[\s\S]*<\/SAMI>$/i.test(text.trim())
+    ) {
+      throw new Error("Invalid SAMI document");
     }
 
     return {

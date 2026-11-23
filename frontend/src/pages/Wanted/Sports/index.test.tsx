@@ -228,7 +228,15 @@ it.each([
       http.get("/api/system/arr-instances", () => HttpResponse.json(instances)),
       http.get("/api/system/media-sources", () =>
         HttpResponse.json({
-          data: [],
+          data: [
+            {
+              id: 7,
+              kind: "folder",
+              name: "Sports Folder",
+              enabled: false,
+              libraries: [{ content_kind: "sports", enabled: true }],
+            },
+          ],
           availability: {
             series: absent,
             movie: absent,
@@ -236,20 +244,22 @@ it.each([
           },
         }),
       ),
-      http.get("/api/sports/wanted", () => {
-        requested("wanted");
+      http.get("/api/sports/wanted", ({ request }) => {
+        requested("wanted", new URL(request.url).searchParams.get("sources"));
         return HttpResponse.json({ data: [], total: 0 });
       }),
       http.get("/api/system/languages/audio", () => {
         requested("audio");
         return HttpResponse.json([]);
       }),
+      http.get("/api/system/status", () => HttpResponse.json({ data: {} })),
     );
     customRender(<WantedSportsView />);
     expect(
-      await screen.findByRole("link", { name: "Connections" }),
+      await screen.findByText("No missing Sports subtitles"),
     ).toBeInTheDocument();
-    expect(requested).not.toHaveBeenCalled();
+    await waitFor(() => expect(requested).toHaveBeenCalledWith("wanted", "1"));
+    expect(requested).not.toHaveBeenCalledWith("audio");
   },
 );
 

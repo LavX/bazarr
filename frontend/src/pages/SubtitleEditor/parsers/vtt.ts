@@ -2,10 +2,10 @@ import type { ParseResult } from "@/pages/SubtitleEditor/types";
 import type { SubtitleParser } from "./index";
 import { cueId } from "./uuid";
 
-function parseTimestamp(raw: string): number {
+function parseTimestamp(raw: string): number | null {
   // HH:MM:SS.mmm or MM:SS.mmm
   const match = raw.trim().match(/^(?:(\d+):)?(\d+):(\d+)\.(\d+)$/);
-  if (!match) return 0;
+  if (!match) return null;
   const [, h, m, s, ms] = match;
   return (
     parseInt(h ?? "0", 10) * 3600000 +
@@ -16,7 +16,7 @@ function parseTimestamp(raw: string): number {
 }
 
 export const vttParser: SubtitleParser = {
-  parse(content: string): ParseResult {
+  parse(content, { strict } = {}): ParseResult {
     const text = content.replace(/^\uFEFF/, "").replace(/\r\n/g, "\n");
 
     if (!text.trim()) {
@@ -26,6 +26,9 @@ export const vttParser: SubtitleParser = {
     const lines = text.split("\n");
 
     // Verify WEBVTT header
+    if (strict && !/^WEBVTT(?:[ \t].*)?$/.test(lines[0].trim())) {
+      throw new Error("Invalid WebVTT header");
+    }
     if (!lines[0].trim().startsWith("WEBVTT")) {
       return { metadata: { format: "vtt" }, cues: [] };
     }
@@ -69,9 +72,18 @@ export const vttParser: SubtitleParser = {
     const cues = [];
     const blocks = text.split(/\n\n+/);
 
-    for (const block of blocks) {
-      const blockLines = block.trim().split("\n");
-      if (blockLines.length < 2) continue;
+    for (const [index, block] of blocks.entries()) {
+      if (strict && index === 0) {
+        if (block.includes("-->"))
+          throw new Error("Missing WebVTT header separator");
+        continue;
+      }
+      if (strict && index === blocks.length - 1 && !block.trim()) continue;
+      // A final newline terminates the last line. Spaces and tabs are payload.
+      const blockLines = (
+        strict ? block.replace(/\n$/, "") : block.trim()
+      ).split("\n");
+      if (!strict && blockLines.length < 2) continue;
 
       // Find the timestamp line
       let tsLineIdx = -1;
@@ -81,7 +93,12 @@ export const vttParser: SubtitleParser = {
           break;
         }
       }
-      if (tsLineIdx === -1) continue;
+      if (tsLineIdx === -1) {
+        if (strict && !/^(?:NOTE|STYLE|REGION)(?:\s|$)/.test(block.trim())) {
+          throw new Error("Missing WebVTT cue timing");
+        }
+        continue;
+      }
 
       const tsLine = blockLines[tsLineIdx];
       // Split on --> but the right side may have positioning info
@@ -94,14 +111,33 @@ export const vttParser: SubtitleParser = {
 
       const startMs = parseTimestamp(leftTs);
       const endMs = parseTimestamp(rightTs);
-      const cueText = blockLines.slice(tsLineIdx + 1).join("\n");
+      const cueLines = blockLines.slice(tsLineIdx + 1);
+      const cueText = cueLines.join("\n");
 
-      if (!cueText.trim() && startMs === 0 && endMs === 0) continue;
+      if (
+        strict &&
+        (tsLineIdx > 1 ||
+          startMs === null ||
+          endMs === null ||
+          rightPart.includes("-->"))
+      ) {
+        throw new Error("Invalid WebVTT cue timing");
+      }
+      if (strict && cueText.includes("-->")) {
+        throw new Error("Unexpected timing arrow in WebVTT cue text");
+      }
+      if (
+        !strict &&
+        !cueText.trim() &&
+        (startMs ?? 0) === 0 &&
+        (endMs ?? 0) === 0
+      )
+        continue;
 
       cues.push({
         id: cueId(),
-        startMs,
-        endMs,
+        startMs: startMs ?? 0,
+        endMs: endMs ?? 0,
         text: cueText,
       });
     }

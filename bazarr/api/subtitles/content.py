@@ -9,7 +9,7 @@ from contextlib import nullcontext
 from datetime import datetime, timedelta
 from media_servers.events import publication_callback
 
-from flask import make_response, jsonify, request
+from flask import current_app, make_response, jsonify, request
 from flask_restx import Resource, Namespace
 from werkzeug.utils import secure_filename
 
@@ -24,10 +24,12 @@ from sonarr.history import history_log
 from subtitles.indexer.movies import store_subtitles_movie
 from subtitles.indexer.series import store_subtitles
 from subtitles.processing import ProcessSubtitlesResult
+from subtitles.encoding import decode_subtitle_bytes
 from subtitles.new_subtitle import (SubtitleFileExists, write_new_subtitle,
                                     apply_subtitle_chmod as _apply_subtitle_chmod,
                                     write_bytes_atomically as _write_bytes_atomically)
-from subtitles.tools.subsync_engines import subtitle_mutation, subtitle_write_locks
+from subtitles.tools.subsync_engines import (SubtitleDestinationChanged, SubtitleSourceChanged,
+                                             regular_subtitle_version, subtitle_mutation, subtitle_write_locks)
 from utilities.helper import get_target_folder
 from utilities.path_mappings import path_mappings
 
@@ -202,6 +204,15 @@ def resolve_subtitle_path(media_type, media_id, language_code, arr_instance_id=N
     """
     if not _is_valid_language_code(language_code):
         return 'Invalid language code', 400
+
+    if media_type == 'source':
+        from media_sources.subtitle_tools import SourceToolError
+
+        try:
+            source, subtitle = _resolve_source_subtitle(media_id, language_code, arr_instance_id)
+        except SourceToolError as error:
+            return str(error), error.status
+        return subtitle.path, _source_metadata(source)
 
     metadata = {}
     if media_type == 'episode':
@@ -555,6 +566,42 @@ def resolve_subtitle_path(media_type, media_id, language_code, arr_instance_id=N
     return resolved_subtitle_path, metadata
 
 
+def _resolve_source_subtitle(item_id, language, arr_instance_id=None):
+    from media_sources.subtitle_tools import SourceToolError, indexed_sidecar, tool_item
+
+    if not _is_valid_language_code(language):
+        raise SourceToolError('Invalid language code', 400)
+    source, item = tool_item(item_id, arr_instance_id)
+    return source, indexed_sidecar(source, item, language=language)
+
+
+def _source_metadata(source):
+    return {
+        'mediaTitle': source.group_title or source.title,
+        'mediaId': source.item_id,
+        'episodeId': source.item_id if source.group_id is not None else None,
+        'episodeTitle': source.title if source.group_id is not None else None,
+        'mediaPath': source.path,
+        'sourceKind': source.kind,
+        'arrInstanceId': None,
+    }
+
+
+def _source_etag(source, version):
+    return hashlib.sha256(repr((source.item_id, source.created_at, version)).encode()).hexdigest()
+
+
+def _matches_source_etag(if_match, etag):
+    # The editor sends a bare tag. Other clients can send the quoted GET ETag.
+    if if_match in (etag, f'"{etag}"'):
+        return True
+    # Flask-Compress 1.25 appends the configured gzip coding to strong GET ETags.
+    if current_app.config.get('COMPRESS_ALGORITHM') == 'gzip':
+        gzip_etag = f'{etag}:gzip'
+        return if_match in (gzip_etag, f'"{gzip_etag}"')
+    return False
+
+
 def read_subtitle_file(path):
     """Read a subtitle file and detect its encoding.
 
@@ -569,33 +616,7 @@ def read_subtitle_file(path):
         raise ValueError(f'Subtitle file too large ({file_size} bytes, max {MAX_FILE_SIZE})')
 
     with open(path, 'rb') as f:
-        raw = f.read()
-
-    # BOM detection
-    if raw.startswith(b'\xef\xbb\xbf'):
-        return raw[3:].decode('utf-8'), 'utf-8-sig'
-    if raw.startswith(b'\xff\xfe'):
-        return raw[2:].decode('utf-16-le'), 'utf-16-le'
-    if raw.startswith(b'\xfe\xff'):
-        return raw[2:].decode('utf-16-be'), 'utf-16-be'
-
-    # Try UTF-8
-    try:
-        return raw.decode('utf-8'), 'utf-8'
-    except UnicodeDecodeError:
-        pass
-
-    # charset_normalizer
-    try:
-        import charset_normalizer
-        result = charset_normalizer.from_bytes(raw).best()
-        if result is not None:
-            return str(result), result.encoding
-    except Exception:
-        pass
-
-    # Fallback
-    return raw.decode('cp1252', errors='replace'), 'cp1252'
+        return decode_subtitle_bytes(f.read())
 
 
 def detect_subtitle_format(path):
@@ -650,6 +671,22 @@ def _history_paths_for_local_subtitle(media_type, subtitle_path, arr_instance_id
 
 
 def _latest_sync_history_for_path(media_type, media_id, subtitle_path, arr_instance_id=None):
+    if media_type == 'source':
+        from media_sources.db import handle
+        from media_sources.repository import History
+        from media_sources.subtitle_tools import SOURCE_SUBTITLE_EDITED_ACTION
+
+        history = History.c
+        edit = History.alias('source_subtitle_edit').c
+        edited_after_sync = select(edit.id).where(
+            edit.item_id == history.item_id, edit.subtitles_path == history.subtitles_path,
+            edit.action == SOURCE_SUBTITLE_EDITED_ACTION,
+            (edit.timestamp > history.timestamp)
+            | ((edit.timestamp == history.timestamp) & (edit.id > history.id)),
+        ).exists()
+        return handle().execute(select(history.timestamp, edited_after_sync.label('edited_after_sync')).where(
+            history.item_id == media_id, history.action == 5, history.subtitles_path == subtitle_path,
+        ).order_by(history.timestamp.desc(), history.id.desc()).limit(1)).first()
     history_paths = _history_paths_for_local_subtitle(media_type, subtitle_path, arr_instance_id)
     if media_type == 'sports':
         query = (
@@ -743,6 +780,8 @@ def get_subtitle_sync_status(media_type, media_id, language_code, arr_instance_i
     edited_after_sync = bool(
         last_sync_timestamp and last_modified > last_sync_timestamp + SYNC_STATUS_MTIME_SKEW
     )
+    if media_type == 'source' and latest_sync:
+        edited_after_sync = edited_after_sync or latest_sync.edited_after_sync
     active_job = _active_sync_job_for_path(subtitle_path)
 
     return {
@@ -918,7 +957,11 @@ def _get_media_metadata(media_type, media_id, arr_instance_id=None):
 
 
 def _get_subtitle_content(media_type, media_id, language_code, arr_instance_id=None):
-    """Shared handler for episode and movie subtitle content."""
+    """Shared handler for subtitle content."""
+    if media_type == 'source':
+        if _request_source() is not None:
+            return 'Source items support external subtitle content only', 400
+        return _get_source_subtitle_content(media_id, language_code, arr_instance_id)
     source = _request_source()
     if source is not None:
         if source != EMBEDDED_SOURCE:
@@ -984,8 +1027,48 @@ def _get_subtitle_content(media_type, media_id, language_code, arr_instance_id=N
     return response
 
 
+def _get_source_subtitle_content(item_id, language, arr_instance_id):
+    from media_sources.subtitle_tools import SourceToolError
+
+    try:
+        source, subtitle = _resolve_source_subtitle(item_id, language, arr_instance_id)
+        raw = subtitle.read(max_bytes=MAX_FILE_SIZE + 1)
+    except SourceToolError as error:
+        return str(error), error.status
+    except (OSError, SubtitleSourceChanged):
+        return 'The source subtitle changed while it was being opened', 409
+    if len(raw) > MAX_FILE_SIZE:
+        return f'Subtitle file too large (max {MAX_FILE_SIZE} bytes)', 413
+    etag = _source_etag(source, subtitle.version)
+    if request.headers.get('If-None-Match', '').strip('"') == etag:
+        return '', 304
+    try:
+        content, encoding = decode_subtitle_bytes(raw)
+    except UnicodeDecodeError:
+        return 'Invalid subtitle encoding', 422
+    response = make_response(jsonify({
+        **_source_metadata(source), 'content': content, 'encoding': encoding,
+        'format': detect_subtitle_format(subtitle.path), 'language': language,
+        'size': len(raw), 'lastModified': subtitle.version[3] / 1_000_000_000,
+    }))
+    response.headers['ETag'] = f'"{etag}"'
+    response.headers['X-Content-Type-Options'] = 'nosniff'
+    return response
+
+
 def _save_subtitle_content(media_type, media_id, language_code, arr_instance_id=None):
-    """Pin Sports identity before resolving any subtitle paths for the edit."""
+    """Pin source and Sports identity before editing a subtitle."""
+    if media_type == 'source':
+        from media_sources.subtitle_tools import SourceSubtitleTool, SourceToolError
+
+        if _request_source() is not None:
+            return 'Source items support external subtitle content only', 400
+        try:
+            source, subtitle = _resolve_source_subtitle(media_id, language_code, arr_instance_id)
+            operation = SourceSubtitleTool.capture(source, subtitle)
+        except SourceToolError as error:
+            return str(error), error.status
+        return _save_subtitle_content_guarded(media_type, media_id, language_code, source_tool=operation)
     if media_type != 'sports':
         return _save_subtitle_content_guarded(media_type, media_id, language_code, arr_instance_id)
 
@@ -1014,13 +1097,15 @@ def _save_subtitle_content(media_type, media_id, language_code, arr_instance_id=
 
 
 def _save_subtitle_content_guarded(media_type, media_id, language_code, arr_instance_id=None,
-                                   sports_operation=None):
-    """Shared editor write, with the optional owned Sports publication boundary."""
-    result = resolve_subtitle_path(media_type, media_id, language_code, arr_instance_id=arr_instance_id)
-    if isinstance(result[1], int):
-        return result[0], result[1]
-
-    subtitle_path, metadata = result
+                                   sports_operation=None, source_tool=None):
+    """Shared editor write with an owned publication boundary where available."""
+    if source_tool is not None:
+        subtitle_path, metadata = source_tool.sidecar.path, _source_metadata(source_tool.source)
+    else:
+        result = resolve_subtitle_path(media_type, media_id, language_code, arr_instance_id=arr_instance_id)
+        if isinstance(result[1], int):
+            return result[0], result[1]
+        subtitle_path, metadata = result
 
     data = request.get_json()
     if not data or 'content' not in data:
@@ -1039,6 +1124,9 @@ def _save_subtitle_content_guarded(media_type, media_id, language_code, arr_inst
 
     if len(encoded) > MAX_FILE_SIZE:
         return f'Content too large ({len(encoded)} bytes, max {MAX_FILE_SIZE})', 413
+
+    if source_tool is not None:
+        return _save_source_subtitle(source_tool, encoded)
 
     video_path = (sports_operation[3] if sports_operation is not None else
                   path_mappings.path_replace_instance(
@@ -1077,6 +1165,36 @@ def _save_subtitle_content_guarded(media_type, media_id, language_code, arr_inst
     except Exception:
         logging.exception('BAZARR could not reindex %s %s after writing its subtitle',
                           media_type, media_id)
+    response = make_response('', 204)
+    response.headers['ETag'] = f'"{new_etag}"'
+    return response
+
+
+def _save_source_subtitle(operation, encoded):
+    from media_sources.indexer import index_and_notify_item
+    from media_sources.subtitle_tools import log_source_edit
+
+    source, subtitle = operation.source, operation.sidecar
+    if_match = request.headers.get('If-Match')
+    try:
+        with subtitle_write_locks(source.path, subtitle.path):
+            if if_match is not None and (
+                not _matches_source_etag(if_match, _source_etag(source, subtitle.version))
+                or regular_subtitle_version(subtitle.path) != subtitle.version
+            ):
+                return 'Subtitle file has been modified since last read', 412
+            new_etag = _source_etag(source, operation.write(encoded, 'edit'))
+    except (FileNotFoundError, SubtitleSourceChanged, SubtitleDestinationChanged):
+        return 'The source subtitle changed. Open it again before saving.', 409
+    except PermissionError:
+        return 'Permission denied when writing subtitle file', 409
+    except OSError as error:
+        if error.errno == 28:  # ENOSPC
+            return 'No space left on device', 507
+        raise
+
+    log_source_edit(source, subtitle.path, subtitle.language, 'Subtitle edited.')
+    index_and_notify_item(source)
     response = make_response('', 204)
     response.headers['ETag'] = f'"{new_etag}"'
     return response
@@ -1134,6 +1252,9 @@ def _promote_sync_subtitle_guarded(media_type, media_id, target_language, source
         return 'Source and target languages do not match', 400
     if _language_non_sync_modifiers(target_language) != _language_non_sync_modifiers(source_language):
         return 'Source and target language variants do not match', 400
+
+    if media_type == 'source':
+        return _promote_source_sync(media_id, target_language, source_language, arr_instance_id)
 
     source_result = resolve_subtitle_path(
         media_type,
@@ -1211,6 +1332,38 @@ def _promote_sync_subtitle_guarded(media_type, media_id, target_language, source
         'targetLanguage': target_language,
         'targetPath': target_path,
     }, 200
+
+
+def _promote_source_sync(item_id, target_language, source_language, arr_instance_id):
+    from media_sources.indexer import index_and_notify_item
+    from media_sources.subtitle_tools import SourceSubtitleTool, SourceToolError, indexed_sidecar, log_source_edit, tool_item
+
+    try:
+        source, item = tool_item(item_id, arr_instance_id)
+        candidate = indexed_sidecar(source, item, language=source_language)
+        subtitle = indexed_sidecar(source, item, language=target_language)
+        if candidate.path == subtitle.path:
+            return 'Source and target subtitles are the same file', 400
+        operation = SourceSubtitleTool.capture(source, subtitle, candidate)
+        aligned = candidate.read(max_bytes=MAX_FILE_SIZE + 1)
+        if len(aligned) > MAX_FILE_SIZE:
+            return f'Subtitle file too large (max {MAX_FILE_SIZE} bytes)', 413
+        operation.write(aligned, 'sync')
+    except SourceToolError as error:
+        return str(error), error.status
+    except (FileNotFoundError, SubtitleSourceChanged, SubtitleDestinationChanged):
+        return 'The source subtitle changed while promoting the sync output.', 409
+    except PermissionError:
+        return 'Permission denied when writing subtitle file', 409
+    except OSError as error:
+        if error.errno == 28:
+            return 'No space left on device', 507
+        raise
+    engine = _sync_engine_from_language(source_language) or 'sync engine'
+    log_source_edit(source, subtitle.path, target_language,
+                    f'Synchronized subtitle from {engine} was promoted.', action=5)
+    index_and_notify_item(source)
+    return {'sourceLanguage': source_language, 'targetLanguage': target_language, 'targetPath': subtitle.path}, 200
 
 
 def _promote_sync_subtitle_content(media_type, media_id, language_code, arr_instance_id=None):
@@ -1538,3 +1691,29 @@ class SportsEventSubtitleCreate(Resource):
     @authenticate
     def post(self, eventId):
         return _create_subtitle('sports', eventId, arr_instance_id=_request_arr_instance_id())
+
+
+@api_ns_subtitle_content.route('sources/items/<int:item_id>/subtitles/<language>/content')
+class SourceSubtitleContent(Resource):
+    @authenticate
+    def get(self, item_id, language):
+        return _get_subtitle_content('source', item_id, language, arr_instance_id=_request_arr_instance_id())
+
+    @authenticate
+    def put(self, item_id, language):
+        return _save_subtitle_content('source', item_id, language, arr_instance_id=_request_arr_instance_id())
+
+
+@api_ns_subtitle_content.route('sources/items/<int:item_id>/subtitles/<language>/sync-status')
+class SourceSubtitleSyncStatus(Resource):
+    @authenticate
+    def get(self, item_id, language):
+        response, status = get_subtitle_sync_status('source', item_id, language, _request_arr_instance_id())
+        return jsonify(response) if status == 200 else (response, status)
+
+
+@api_ns_subtitle_content.route('sources/items/<int:item_id>/subtitles/<language>/promote')
+class SourceSubtitlePromote(Resource):
+    @authenticate
+    def post(self, item_id, language):
+        return _promote_sync_subtitle_content('source', item_id, language, arr_instance_id=_request_arr_instance_id())

@@ -57,7 +57,6 @@ export default function SourceFormModal({
   const showLibrary = mode !== "edit-source";
   const newLibrary = mode === "create-source" || mode === "add-library";
   const { data: profiles } = useLanguageProfiles();
-  const save = useWriteMediaSource();
   const [name, setName] = useState(source?.name ?? "");
   const [enabled, setEnabled] = useState(
     library?.enabled ?? source?.enabled ?? true,
@@ -72,6 +71,17 @@ export default function SourceFormModal({
   const [profile, setProfile] = useState<string | null>(
     library?.profile_id != null ? String(library.profile_id) : NO_PROFILE,
   );
+  const profileId = profile === NO_PROFILE || !profile ? null : Number(profile);
+  const save = useWriteMediaSource({
+    source,
+    library,
+    contentKind: showLibrary ? kind : undefined,
+    refreshSports:
+      newLibrary ||
+      (library
+        ? library.enabled !== enabled || library.profile_id !== profileId
+        : source?.enabled !== enabled || source?.name !== name.trim()),
+  });
   const [debouncedPath] = useDebouncedValue(path, 300);
   const pathPresent = newLibrary && path.trim().length > 0;
   const currentPath = pathPresent && path === debouncedPath;
@@ -91,8 +101,6 @@ export default function SourceFormModal({
   const submit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     if (!canSave || save.isPending) return;
-    const profileId =
-      profile === NO_PROFILE || !profile ? null : Number(profile);
     const draft: SourceLibraryDraft = {
       path,
       content_kind: kind,
@@ -170,14 +178,17 @@ export default function SourceFormModal({
                 disabled={!newLibrary}
                 onChange={(event) => {
                   const value = event.currentTarget.value;
-                  if (value === "movie" || value === "series") setKind(value);
+                  if (
+                    value === "movie" ||
+                    value === "series" ||
+                    value === "sports"
+                  )
+                    setKind(value);
                 }}
                 data={[
                   { value: "movie", label: CONTENT_KIND_LABELS.movie },
                   { value: "series", label: CONTENT_KIND_LABELS.series },
-                  ...(kind === "sports"
-                    ? [{ value: "sports", label: CONTENT_KIND_LABELS.sports }]
-                    : []),
+                  { value: "sports", label: CONTENT_KIND_LABELS.sports },
                 ]}
               />
               <TextInput

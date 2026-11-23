@@ -50,8 +50,11 @@ def _insert(target, table, values):
 
 # Sources, libraries and roots
 
-def get_source(source_id, target=None):
-    return _target(target).execute(sa.select(Sources).where(Sources.c.id == source_id)).first()
+def get_source(source_id, target=None, *, lock_key=False):
+    statement = sa.select(Sources).where(Sources.c.id == source_id)
+    if lock_key:
+        statement = statement.with_for_update(read=True, key_share=True)
+    return _target(target).execute(statement).first()
 
 
 def list_sources(target=None):
@@ -180,6 +183,14 @@ def get_group(group_id, target=None, *, for_update=False):
     return _target(target).execute(statement).first()
 
 
+def get_item_group(item, target=None):
+    if item.group_id is None:
+        return None
+    statement = sa.select(Groups).where(Groups.c.id == item.group_id, Groups.c.source_id == item.source_id,
+                                        Groups.c.library_id == item.library_id)
+    return _target(target).execute(statement).first()
+
+
 def library_groups(library_id, target=None):
     return _target(target).execute(
         sa.select(Groups).where(Groups.c.library_id == library_id).order_by(Groups.c.id)).all()
@@ -227,10 +238,12 @@ def create_group(*, source_id, library_id, kind, group_key, title, identity_sour
 
 # Items
 
-def get_item(item_id, target=None, *, for_update=False):
+def get_item(item_id, target=None, *, group_id=None, for_update=False, nowait=False):
     statement = sa.select(Items).where(Items.c.id == item_id)
+    if group_id is not None:
+        statement = statement.where(group_item_scope(group_id))
     if for_update:
-        statement = statement.with_for_update()
+        statement = statement.with_for_update(nowait=nowait)
     return _target(target).execute(statement).first()
 
 
@@ -238,24 +251,36 @@ def get_item_by_path(path, target=None):
     return _target(target).execute(sa.select(Items).where(Items.c.path == path)).first()
 
 
-def list_items(*, source_id=None, library_id=None, kind=None, limit=100, offset=0, target=None):
+def group_item_scope(group_id):
+    return sa.and_(Items.c.group_id == group_id, sa.select(Groups.c.id).where(
+        Groups.c.id == group_id, Groups.c.source_id == Items.c.source_id,
+        Groups.c.library_id == Items.c.library_id,
+    ).exists())
+
+
+def list_items(*, source_id=None, library_id=None, group_id=None, kind=None, limit=100, offset=0, target=None):
     statement = sa.select(Items)
     if source_id is not None:
         statement = statement.where(Items.c.source_id == source_id)
     if library_id is not None:
         statement = statement.where(Items.c.library_id == library_id)
+    if group_id is not None:
+        statement = statement.where(group_item_scope(group_id)).order_by(
+            sa.func.coalesce(Items.c.season, 0), sa.func.coalesce(Items.c.episode, 0), Items.c.part_number)
     if kind is not None:
         statement = statement.where(Items.c.kind == kind)
     statement = statement.order_by(Items.c.sort_title, Items.c.id).limit(limit).offset(offset)
     return _target(target).execute(statement).all()
 
 
-def count_items(*, source_id=None, library_id=None, kind=None, target=None):
+def count_items(*, source_id=None, library_id=None, group_id=None, kind=None, target=None):
     statement = sa.select(sa.func.count()).select_from(Items)
     if source_id is not None:
         statement = statement.where(Items.c.source_id == source_id)
     if library_id is not None:
         statement = statement.where(Items.c.library_id == library_id)
+    if group_id is not None:
+        statement = statement.where(group_item_scope(group_id))
     if kind is not None:
         statement = statement.where(Items.c.kind == kind)
     return _target(target).execute(statement).scalar_one()
@@ -471,6 +496,12 @@ def blacklist_pairs(item_kind, target=None):
         sa.select(Blacklist.c.provider, Blacklist.c.subs_id).where(Blacklist.c.item_kind == item_kind)).all()]
 
 
+def is_release_blacklisted(release, target):
+    item_kind, provider, subs_id = release
+    return target.scalar(sa.select(sa.exists().where(
+        Blacklist.c.item_kind == item_kind, Blacklist.c.provider == provider, Blacklist.c.subs_id == subs_id)))
+
+
 def retained_activity_by_kind(target=None):
     """History and blacklist rows can outlive both the source and its library."""
     by_kind = {'movie': 'movie', 'series': 'episode', 'sports': 'sports_event'}
@@ -480,12 +511,26 @@ def retained_activity_by_kind(target=None):
     return _target(target).execute(sa.select(*checks)).mappings().one()
 
 
+def retained_sports_owners_without_libraries(target=None):
+    """Owners whose retained records would otherwise lack an entry in the Sports filter."""
+    libraries = Libraries.c
+    owners = sa.union(*(
+        sa.select(table.c.source_id).where(
+            table.c.item_kind == 'sports_event',
+            ~sa.exists().where(libraries.source_id == table.c.source_id, libraries.content_kind == 'sports'),
+        )
+        for table in (History, Blacklist)
+    ))
+    return set(_target(target).execute(owners).scalars())
+
+
 # Enabled flags, overlap and holders
 
 def item_state(item_id, target=None):
-    """The id, title, source name and the two enabled flags of an item's library and source, or None."""
+    """The availability and owner details of an item, or None."""
     row = _target(target).execute(
-        sa.select(Items.c.id, Items.c.title, Libraries.c.enabled.label('library_enabled'),
+        sa.select(Items.c.id, Items.c.title, Items.c.server_missing, Items.c.file_dev, Items.c.file_ino,
+                  Libraries.c.enabled.label('library_enabled'),
                   Sources.c.enabled.label('source_enabled'), Sources.c.name.label('source_name'))
         .select_from(Items.join(Libraries, Items.c.library_id == Libraries.c.id)
                      .join(Sources, Items.c.source_id == Sources.c.id))

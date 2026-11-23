@@ -1,0 +1,450 @@
+import { useState } from "react";
+import { Alert, Menu, Stack, Text } from "@mantine/core";
+import { showNotification } from "@mantine/notifications";
+import {
+  faEllipsis,
+  faFileExcel,
+  faLayerGroup,
+} from "@fortawesome/free-solid-svg-icons";
+import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
+import { isAxiosError } from "axios";
+import queryClient from "@/apis/queries";
+import { expireSourceSubtitleDocument } from "@/apis/queries/sourceSubtitleDocument";
+import api from "@/apis/raw";
+import { withInlineErrors } from "@/apis/raw/inlineWrites";
+import { Action, Toolbox } from "@/components";
+import { CombineModal } from "@/components/forms/CombineForm";
+import SubtitleToolsMenu from "@/components/SubtitleToolsMenu";
+import { useModals } from "@/modules/modals";
+import { notification } from "@/modules/notification";
+import { subtitleEditorUrl } from "@/pages/SubtitleEditor/editorScope";
+import { toPython } from "@/utilities";
+import { basename, saveBlobAs } from "@/utilities/files";
+import {
+  buildSubtitleLanguageKey,
+  canSynchronizeSubtitle,
+  combineRequestForSubtitle,
+  isCombinedOutputSubtitle,
+  isSyncOutputSubtitle,
+} from "@/utilities/subtitles";
+import {
+  sourceDetailApi,
+  sourceError,
+  SourceItem,
+  useSourceWrite,
+} from "./api";
+import {
+  sourceHistoryApi,
+  sourceReleaseForSubtitle,
+  useSourceHistory,
+  useSourceReleaseExclusion,
+} from "./History";
+
+export type OpenSourceEditor = (path: string) => void;
+
+async function requireCurrentSubtitle(
+  item: SourceItem,
+  subtitle: Subtitle,
+  readByLanguage?: boolean,
+) {
+  const current = await sourceDetailApi.requireCurrentItem(item, subtitle);
+  if (
+    readByLanguage &&
+    current.subtitles.some(
+      (row) =>
+        row.path &&
+        row.path !== subtitle.path &&
+        buildSubtitleLanguageKey(row) === buildSubtitleLanguageKey(subtitle),
+    )
+  ) {
+    throw new Error("More than one file is listed for this subtitle language.");
+  }
+}
+
+export function sourceSubtitleSelection(
+  item: SourceItem,
+  subtitle: Subtitle,
+): FormType.ModifySubtitle {
+  return {
+    type: "source",
+    id: item.id,
+    path: subtitle.path ?? "",
+    language: subtitle.code2,
+    hi: toPython(subtitle.hi),
+    forced: toPython(subtitle.forced),
+    sourceLanguage: buildSubtitleLanguageKey(subtitle),
+    validateSource: (readByLanguage) =>
+      requireCurrentSubtitle(item, subtitle, readByLanguage),
+  };
+}
+
+export function canSynchronizeSourceSubtitle(subtitle: Subtitle) {
+  return !subtitle.forced && canSynchronizeSubtitle(subtitle);
+}
+
+function combineInputs(item: SourceItem) {
+  return item.subtitles.flatMap((row) =>
+    row.path?.toLowerCase().endsWith(".srt") &&
+    !isSyncOutputSubtitle(row) &&
+    !isCombinedOutputSubtitle(row)
+      ? [{ path: row.path, language: buildSubtitleLanguageKey(row) }]
+      : [],
+  );
+}
+
+function combineScope(
+  item: SourceItem,
+  output?: Subtitle,
+  rebuildRequest?: NonNullable<ReturnType<typeof combineRequestForSubtitle>>,
+) {
+  return {
+    kind: "source" as const,
+    itemId: item.id,
+    validate: async (body: Api.CombineRequest) => {
+      const current = await sourceDetailApi.requireCurrentItem(item, output);
+      const available =
+        rebuildRequest && output
+          ? compatibleRebuildInputs(current, output, rebuildRequest.languages)
+          : combineInputs(current);
+      if (
+        (rebuildRequest &&
+          (body.format !== rebuildRequest.format ||
+            body.languages?.length !== rebuildRequest.languages.length ||
+            body.languages.some(
+              (language, index) => language !== rebuildRequest.languages[index],
+            ))) ||
+        !body.inputs ||
+        body.inputs.length !== body.languages?.length ||
+        body.inputs.some(
+          (input, index) =>
+            input.language.split(":")[0] !== body.languages?.[index] ||
+            !available.some(
+              (row) =>
+                row.path === input.path && row.language === input.language,
+            ),
+        )
+      ) {
+        throw new Error(
+          "A selected subtitle is no longer listed for this item.",
+        );
+      }
+    },
+  };
+}
+
+function compatibleRebuildInputs(
+  item: SourceItem,
+  subtitle: Subtitle,
+  languages: string[],
+) {
+  const modifiers = buildSubtitleLanguageKey(subtitle).split(":").slice(1);
+  const primaryVariants = [
+    ...(subtitle.hi || modifiers.includes("hi") ? ["hi"] : []),
+    ...(subtitle.forced || modifiers.includes("forced") ? ["forced"] : []),
+  ];
+  return combineInputs(item).filter((input) => {
+    const [code, ...variants] = input.language.split(":");
+    if (
+      variants.length > 1 ||
+      (variants.length === 1 && !["hi", "forced"].includes(variants[0]))
+    )
+      return false;
+    if (!languages.includes(code)) return false;
+    return (
+      code !== languages[0] ||
+      primaryVariants.length === 0 ||
+      input.language === [code, ...primaryVariants].join(":")
+    );
+  });
+}
+
+function rebuildInputs(
+  item: SourceItem,
+  subtitle: Subtitle,
+  languages: string[],
+) {
+  const available = compatibleRebuildInputs(item, subtitle, languages);
+  return languages.flatMap((language) => {
+    const candidates = available.filter(
+      (input) => input.language.split(":")[0] === language,
+    );
+    return candidates.length === 1 ? candidates : [];
+  });
+}
+
+function useSourceCombineAction(item: SourceItem) {
+  const modals = useModals();
+  const sourceInputs = combineInputs(item);
+  const availableLanguages = [
+    ...new Set(sourceInputs.map((row) => row.language.split(":")[0])),
+  ];
+  return {
+    canCombine: availableLanguages.length >= 2,
+    openCombine: () =>
+      modals.openContextModal(CombineModal, {
+        scope: combineScope(item),
+        availableLanguages,
+        sourceInputs,
+      }),
+  };
+}
+
+export function SourceCombineButton({
+  item,
+  disabled,
+}: {
+  item: SourceItem;
+  disabled?: boolean;
+}) {
+  const { canCombine, openCombine } = useSourceCombineAction(item);
+  return (
+    <Toolbox.Button
+      icon={faLayerGroup}
+      disabled={disabled || !canCombine}
+      onClick={openCombine}
+    >
+      Combine Subtitles
+    </Toolbox.Button>
+  );
+}
+
+export function SourceSubtitleMenu({
+  item,
+  subtitle,
+  openEditor,
+}: {
+  item: SourceItem;
+  subtitle: Subtitle;
+  openEditor: OpenSourceEditor;
+}) {
+  const modals = useModals();
+  const write = useSourceWrite({ notifyError: true });
+  const deleteAndExclude = useSourceWrite();
+  const excludeRelease = useSourceReleaseExclusion(item);
+  const { canCombine, openCombine } = useSourceCombineAction(item);
+  const [opened, setOpened] = useState(false);
+  const [fileError, setFileError] = useState<string>();
+  const [checkingRebuild, setCheckingRebuild] = useState(false);
+  const history = useSourceHistory(item, opened);
+  const release = sourceReleaseForSubtitle(
+    history.data?.data ?? [],
+    item,
+    subtitle,
+  );
+  const combined = isCombinedOutputSubtitle(subtitle);
+  const language = buildSubtitleLanguageKey(subtitle);
+  const readFile = async (action: "view" | "edit" | "download") => {
+    setFileError(undefined);
+    try {
+      await requireCurrentSubtitle(item, subtitle, true);
+      if (action === "download") {
+        const { data } = await api.subtitles.getContent(
+          "source",
+          item.id,
+          language,
+        );
+        saveBlobAs(
+          new Blob([data.content], { type: "text/plain;charset=utf-8" }),
+          basename(subtitle.path ?? "subtitle.srt"),
+        );
+        return;
+      }
+      await expireSourceSubtitleDocument(queryClient, item.id, language);
+      modals.closeAll();
+      openEditor(
+        subtitleEditorUrl(
+          action === "view" ? "preview" : "edit",
+          "source",
+          item.id,
+          language,
+        ),
+      );
+    } catch (error) {
+      setFileError(sourceError(error));
+    }
+  };
+  const rebuildFile = async () => {
+    const body = combineRequestForSubtitle(subtitle);
+    if (!body) return;
+    setFileError(undefined);
+    setCheckingRebuild(true);
+    try {
+      const current = await sourceDetailApi.requireCurrentItem(item, subtitle);
+      const previousInputs = rebuildInputs(item, subtitle, body.languages);
+      const inputs = rebuildInputs(current, subtitle, body.languages).filter(
+        (input) => {
+          const previous = previousInputs.find(
+            (row) =>
+              row.language.split(":")[0] === input.language.split(":")[0],
+          );
+          return (
+            previous?.path === input.path &&
+            previous.language === input.language
+          );
+        },
+      );
+      const sourceInputs = compatibleRebuildInputs(
+        current,
+        subtitle,
+        body.languages,
+      );
+      modals.openContextModal(CombineModal, {
+        scope: combineScope(current, subtitle, body),
+        availableLanguages: body.languages,
+        sourceInputs,
+        initialRequest: { ...body, inputs },
+        rebuild: true,
+      });
+    } catch (error) {
+      setFileError(sourceError(error));
+    } finally {
+      setCheckingRebuild(false);
+    }
+  };
+
+  return (
+    <Stack gap="xs">
+      <SubtitleToolsMenu
+        selections={[sourceSubtitleSelection(item, subtitle)]}
+        menu={{ onChange: setOpened }}
+        canSync={canSynchronizeSourceSubtitle(subtitle)}
+        isCombinedOutput={combined}
+        onAction={(action) => {
+          if (action === "view" || action === "edit" || action === "download") {
+            void readFile(action);
+          } else if (action === "delete") {
+            write.mutate(async () => {
+              await sourceDetailApi.requireCurrentItem(item, subtitle);
+              return sourceDetailApi.removeSubtitle(item.id, subtitle);
+            });
+          } else if (action === "rebuild") {
+            void rebuildFile();
+          }
+        }}
+        extraActions={
+          <>
+            {!combined && canCombine && (
+              <Menu.Item
+                leftSection={<FontAwesomeIcon icon={faLayerGroup} />}
+                onClick={openCombine}
+              >
+                Combine Subtitles...
+              </Menu.Item>
+            )}
+            {release && (
+              <Menu.Item
+                color="red"
+                leftSection={<FontAwesomeIcon icon={faFileExcel} />}
+                onClick={() =>
+                  modals.openConfirmModal({
+                    title: "Exclude from search?",
+                    children: (
+                      <Text size="sm">
+                        Delete {basename(subtitle.path ?? "")} and exclude this
+                        release from future searches.
+                      </Text>
+                    ),
+                    labels: {
+                      confirm: "Exclude from search",
+                      cancel: "Cancel",
+                    },
+                    confirmProps: { color: "red" },
+                    onConfirm: () => {
+                      setFileError(undefined);
+                      excludeRelease.reset();
+                      deleteAndExclude.mutate(async () => {
+                        try {
+                          const current =
+                            await sourceDetailApi.requireCurrentItem(
+                              item,
+                              subtitle,
+                            );
+                          const { data } = await withInlineErrors(() =>
+                            sourceHistoryApi.history(item.id),
+                          );
+                          const latest = sourceReleaseForSubtitle(
+                            data,
+                            current,
+                            subtitle,
+                          );
+                          if (
+                            latest?.history_id !== release.history_id ||
+                            latest.provider !== release.provider ||
+                            latest.subs_id !== release.subs_id
+                          ) {
+                            throw new Error(
+                              "The subtitle release changed. Reopen its actions to try again.",
+                            );
+                          }
+                          await withInlineErrors(() =>
+                            sourceHistoryApi.exclude(item.id, latest),
+                          );
+                        } catch (error) {
+                          if (
+                            !isAxiosError<{ code?: string }>(error) ||
+                            error.response?.status !== 409 ||
+                            error.response.data?.code !==
+                              "source_release_changed"
+                          ) {
+                            showNotification(
+                              notification.error(
+                                "Subtitle action failed",
+                                sourceError(error),
+                              ),
+                            );
+                          } else {
+                            modals.openConfirmModal({
+                              title: "Exclude release without deleting?",
+                              children: (
+                                <Text size="sm">
+                                  The current subtitle could not be verified for
+                                  this release, so no file was deleted. Exclude
+                                  only the selected release from future
+                                  searches? No subtitle file will be deleted,
+                                  even if it changed, was replaced, or is
+                                  already missing.
+                                </Text>
+                              ),
+                              labels: {
+                                confirm: "Exclude release only",
+                                cancel: "Cancel",
+                              },
+                              onConfirm: () => excludeRelease.mutate(release),
+                            });
+                          }
+                          throw error;
+                        }
+                      });
+                    },
+                  })
+                }
+              >
+                Exclude from search...
+              </Menu.Item>
+            )}
+          </>
+        }
+      >
+        <Action
+          label="Actions"
+          icon={faEllipsis}
+          disabled={
+            write.isPending ||
+            deleteAndExclude.isPending ||
+            excludeRelease.isPending ||
+            checkingRebuild
+          }
+        />
+      </SubtitleToolsMenu>
+      {fileError && <Alert color="red">{fileError}</Alert>}
+      {excludeRelease.isError && (
+        <Alert color="red">{sourceError(excludeRelease.error)}</Alert>
+      )}
+      {excludeRelease.isSuccess && (
+        <Text role="status" size="sm">
+          Release excluded from search. No subtitle file was deleted.
+        </Text>
+      )}
+    </Stack>
+  );
+}

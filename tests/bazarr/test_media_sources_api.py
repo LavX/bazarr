@@ -46,18 +46,20 @@ def test_every_route_needs_the_api_key(api):
     assert api.client.post(ITEMS + "/1/search").status_code == 401
 
 
-def test_a_source_is_created_with_its_library_and_root(api):
+@pytest.mark.parametrize("content_kind", ["movie", "sports"])
+def test_a_source_is_created_with_its_library_and_root(api, content_kind):
     profile = add_profile(api.db, [("en", "False", "False")])
-    response = _create(api, library={"path": str(api.movies), "content_kind": "movie", "profile_id": profile},
+    response = _create(api, name=f"Local {content_kind}",
+                       library={"path": str(api.movies), "content_kind": content_kind, "profile_id": profile},
                        scan_frequency_hours=0)
 
     assert response.status_code == 201
     body = response.json
-    assert (body["kind"], body["name"], body["enabled"], body["scan_frequency_hours"]) == ("folder", "Local movies",
-                                                                                           True, 0)
+    assert (body["kind"], body["name"], body["enabled"], body["scan_frequency_hours"]) == (
+        "folder", f"Local {content_kind}", True, 0)
     (library,) = body["libraries"]
-    assert (library["content_kind"], library["locator"], library["profile_id"]) == ("movie", str(api.movies),
-                                                                                     profile)
+    assert (library["content_kind"], library["locator"], library["profile_id"]) == (
+        content_kind, str(api.movies), profile)
     assert [root["local_path"] for root in library["roots"]] == [str(api.movies)]
     assert library["roots"][0]["server_path"] is None
 
@@ -71,7 +73,6 @@ def test_a_source_is_created_with_its_library_and_root(api):
     ({"library": {"path": "relative", "content_kind": "movie"}}, "must be absolute"),
     ({"library": {"path": "/definitely/not/there", "content_kind": "movie"}}, "does not exist"),
     ({"library": {"path": "{movies}", "content_kind": "music"}}, "content_kind must be one of"),
-    ({"library": {"path": "{movies}", "content_kind": "sports"}}, "Only movie and series libraries"),
     ({"library": {"path": "{movies}", "content_kind": "movie", "profile_id": 99}}, "profile does not exist"),
     ({"scan_frequency_hours": -1}, "scan_frequency_hours"),
     ({"scan_frequency_hours": "6"}, "scan_frequency_hours"),
@@ -130,6 +131,26 @@ def test_a_scan_is_queued_as_a_job_and_the_items_are_listed(api):
     assert second["path"] == str(api.movies / "The.Matrix.1999.1080p.BluRay.x264-GRP.mkv")
 
 
+def test_public_subtitle_entries_keep_codec_and_hide_internal_versions(api):
+    from media_sources import repository, scanner
+
+    created = _create(api).json
+    recording = video(api.movies / "Film.2001.mkv")
+    scanner.run_scan(created["id"])
+    (movie,) = api.client.get(ITEMS, headers=HEADERS).json["data"]
+    original = [
+        ["en", str(recording.with_suffix(".en.srt")), 57, "subrip"],
+        ["hu:forced", str(recording.with_suffix(".srt")), 72, (10, 11, 72, 12, 13)],
+        ["fr", None, None, "ass", "French dialogue"],
+    ]
+    repository.update_item(movie["id"], api.db, subtitles=repr(original))
+    expected = [original[0], original[1][:3], original[2]]
+    (listed,) = api.client.get(ITEMS, headers=HEADERS).json["data"]
+    detail = api.client.get(f"{ITEMS}/{movie['id']}", headers=HEADERS)
+    assert detail.status_code == 200
+    assert listed["subtitles"] == detail.json["subtitles"] == expected
+
+
 def test_the_item_list_pages_and_filters(api):
     from media_sources import scanner
 
@@ -144,6 +165,40 @@ def test_the_item_list_pages_and_filters(api):
                                                                                                  "total": 0}
     assert api.client.get(ITEMS + "?kind=episode", headers=HEADERS).json["total"] == 0
     assert api.client.get(ITEMS + "?kind=song", headers=HEADERS).status_code == 400
+
+
+@pytest.mark.parametrize("stored", ["not valid Python", "None", "{}", "[None, ['en'], ['en', []], [None, None]]"])
+def test_malformed_stored_subtitles_do_not_break_scores_or_upgrade_candidates(api, monkeypatch, stored):
+    from app.config import settings
+    from media_sources import repository
+    from media_sources.history import source_upgrade_candidates
+    from media_source_helpers import add_item, add_source
+
+    monkeypatch.setattr(settings.general, "upgrade_subs", True)
+    profile = add_profile(api.db, [("en", "False", "False")])
+    source_id, library_id, root = add_source(api.db, api.tmp_path, folder="Scored", profile_id=profile)
+    items, history_ids = [], []
+    for title, malformed in (("Malformed", True), ("Valid", False)):
+        media = video(root / f"{title}.mkv")
+        subtitle = media.with_suffix(".en.srt")
+        subtitle.write_text("Subtitle", encoding="utf-8")
+        item_id = add_item(api.db, source_id, library_id, media, title=title, missing_subtitles="[]",
+                           subtitles=stored if malformed else str([["en", str(subtitle), 8]]))
+        history_ids.append(repository.insert_history(
+            api.db, source_id=source_id, item_id=item_id, item_kind="movie", item_title=title,
+            action=1, description="downloaded", score=60, score_out_of=120, video_path=str(media),
+            subtitles_path=str(subtitle), language="en", provider="fake"))
+        items.append(item_id)
+
+    assert [row.id for row in source_upgrade_candidates()] == [history_ids[1]]
+    detail = api.client.get(f"{ITEMS}/{items[0]}", headers=HEADERS)
+    assert detail.status_code == 200
+    assert detail.json["lowest_subtitle_score"] is None and detail.json["upgradable"] is False
+    page = api.client.get(ITEMS + "?scores=1", headers=HEADERS)
+    assert page.status_code == 200
+    by_id = {row["id"]: row for row in page.json["data"]}
+    assert by_id[items[0]]["lowest_subtitle_score"] is None and by_id[items[0]]["upgradable"] is False
+    assert by_id[items[1]]["lowest_subtitle_score"] == 50 and by_id[items[1]]["upgradable"] is True
 
 
 def test_a_search_is_queued_through_the_jobs_queue(api):
@@ -384,8 +439,11 @@ def test_navigation_availability_keeps_browsing_and_searching_separate(api, cont
     from app.config import get_settings
     from media_sources import repository
 
-    assert get_settings()["media_sources"]["visible"] is False
+    assert "visible" not in get_settings()["media_sources"]
     hidden = {"browsable": False, "searchable": False, "retained": False}
+    retired = {**hidden, "retained": True}
+    if content_kind == "sports":
+        retired["removed"] = True
 
     def availability():
         response = api.client.get(SOURCES + "?availability=1", headers=HEADERS)
@@ -415,10 +473,10 @@ def test_navigation_availability_keeps_browsing_and_searching_separate(api, cont
         source_id=source_id, item_kind=item_kind, action=1, description="Downloaded"))
     api.db.execute(sa.insert(repository.Blacklist).values(source_id=source_id, item_kind=item_kind))
     assert api.client.delete(source_url, headers=HEADERS).status_code == 204
-    assert availability() == {**hidden, "retained": True}
+    assert availability() == retired
 
     api.db.execute(sa.delete(repository.History))
-    assert availability() == {**hidden, "retained": True}
+    assert availability() == retired
     api.db.execute(sa.delete(repository.Blacklist))
     assert availability() == hidden
 

@@ -8,6 +8,8 @@ from flask_restx import Namespace, Resource
 from app.database import database
 from app.jobs_queue import jobs_queue
 from app.process_session import PROCESS_SESSION
+from media_sources import sports_activity
+from media_sources.union import SourceKeyFilter
 from sportarr import library
 from sportarr.sync.leagues import require_sportarr
 from sportarr.workflows import require_sports_enabled
@@ -99,7 +101,9 @@ class SportsLeagues(Resource):
             # The copy that used to live here rejected -1, so the library page
             # could not fetch every row and its filters only ever searched the
             # page currently on screen.
-            return library.list_leagues(database, owner, start, length), 200
+            scope = SourceKeyFilter.from_values(request.args.getlist('source_key[]'))
+            return sports_activity.list_leagues(database, request.args, scope, arr_instance_id=owner,
+                                                start=start, length=length), 200
         except SportsNotFound as exc:
             return {'message': str(exc)}, 404
         except ValueError as exc:

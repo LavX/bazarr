@@ -473,8 +473,9 @@ it.each(["change", "clear"])(
     }
     await waitFor(() => {
       const params = new URLSearchParams(router.state.location.search);
-      expect(params.get("instance")).toBe(
-        action === "change" ? String(sportarrSibling.id) : null,
+      expect(params.get("instance")).toBeNull();
+      expect(params.get("source")).toBe(
+        action === "change" ? `arr:${sportarrSibling.id}` : null,
       );
       expect(params.get("event_id")).toBeNull();
       expect(params.get("league")).toBeNull();
