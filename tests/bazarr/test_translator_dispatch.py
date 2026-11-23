@@ -284,6 +284,7 @@ def test_a_terminal_decline_history_fault_leaves_the_job_awaiting_retry(env):
     output = env.dispatcher().run(make_spec())
     output.complete()
     assert (env.last_job().id, env.last_job().state) == (job.id, "completed")
+    assert env.history(job)["status"] == "completed"
 
 
 def test_a_fallback_that_is_not_configured_is_skipped_with_a_notice(env):
