@@ -124,12 +124,15 @@ def _generate(context, languages=(("en", "False", "False"),), **kwargs):
                                    context.media_type, context.profile_id, source=context, **kwargs))
 
 
-def test_download_keeps_another_registered_videos_exact_engine_named_sidecar(world, monkeypatch):
+@pytest.mark.parametrize('same_file_alias', [False, True])
+def test_download_keeps_another_registered_videos_exact_engine_named_sidecar(world, monkeypatch, same_file_alias):
     from media_sources.indexer import SourcePublicationOwnerIndex
     from subtitles.indexer.utils import add_sync_engine_outputs
 
     folder = _custom_folder(world, monkeypatch, world.tmp_path)
     context = _movie(world, "Film.mkv")
+    if same_file_alias:
+        Path(context.path).with_suffix(".en.mkv").symlink_to(context.path)
     owner, library, other_root = add_source(world.db, world.tmp_path, name="Other", folder="Other")
     competing = video(other_root / "Film.en.ffsubsync.mkv")
     add_item(world.db, owner, library, competing)
@@ -211,12 +214,14 @@ def test_source_download_keeps_the_primary_write_when_a_shared_subtitle_folder_c
     assert destination.read_bytes() == generated.read_bytes() == CONTENT
 
 
+@pytest.mark.parametrize('unreadable', ['directory', 'metadata', 'content'])
 def test_scheduled_source_download_skips_publication_when_missing_languages_cannot_be_verified(
-        world, monkeypatch, caplog):
+        world, monkeypatch, caplog, unreadable):
     import os
 
     from app.jobs_queue import JobFailed
-    from media_sources import repository, service
+    from media_sources import indexer, repository, service
+    from subtitles import download
 
     folder = _custom_folder(world, monkeypatch, world.tmp_path)
     context = _movie(world, 'Film.mkv')
@@ -227,26 +232,42 @@ def test_scheduled_source_download_skips_publication_when_missing_languages_cann
     asked = _download(monkeypatch)
     jobs = []
     monkeypatch.setattr(service.jobs_queue, 'update_job_progress', lambda **kwargs: jobs.append(kwargs))
-    scandir = os.scandir
+    untagged = folder / 'Film.srt'
+    best = download.download_best_subtitles
     refused = []
 
-    def no_subtitle_listing(path):
-        if isinstance(path, (str, os.PathLike)) and Path(path) == folder:
-            refused.append(True)
-            raise PermissionError('The subtitle folder is write-only')
-        return scandir(path)
+    def return_subtitles_and_add_sidecar(*args, **kwargs):
+        result = best(*args, **kwargs)
+        if unreadable != 'directory':
+            untagged.write_bytes(CONTENT)
+        return result
 
-    monkeypatch.setattr(os, 'scandir', no_subtitle_listing)
-    with caplog.at_level(logging.INFO):
+    monkeypatch.setattr(download, 'download_best_subtitles', return_subtitles_and_add_sidecar)
+    module, name, denied = {
+        'directory': (os, 'scandir', folder),
+        'metadata': (os, 'lstat', untagged),
+        'content': (indexer, 'read_regular_subtitle', untagged),
+    }[unreadable]
+    operation = getattr(module, name)
+
+    def refuse(path, *args, **kwargs):
+        if isinstance(path, (str, os.PathLike)) and Path(path) == denied:
+            refused.append(True)
+            raise PermissionError('This subtitle candidate is unreadable')
+        return operation(path, *args, **kwargs)
+
+    with monkeypatch.context() as patch, caplog.at_level(logging.INFO):
+        patch.setattr(module, name, refuse)
         with pytest.raises(JobFailed, match='The source missing languages could not be verified') as failed:
             service.search_source_item(context.item_id, job_id=3)
-    monkeypatch.setattr(os, 'scandir', scandir)
 
     assert failed.value.reason == 'save_failed'
     assert asked['video'].source_context.item_id == context.item_id
     assert refused
     assert not destination.exists()
     assert generated.read_bytes() == CONTENT
+    if unreadable != 'directory':
+        assert untagged.read_bytes() == CONTENT
     assert not list(folder.glob('.bazarr-*'))
     current = repository.get_item(context.item_id)
     assert (current.subtitles, current.missing_subtitles) == (initial.subtitles, initial.missing_subtitles)
@@ -743,12 +764,12 @@ def test_sync_sidecar_variants_keep_movie_indexer_precedence_across_passes(world
 def test_a_malformed_sidecar_keeps_the_index_incomplete_and_preserves_a_saved_result(
         world, monkeypatch, after_save):
     from media_sources import indexer, repository, service
+    from subtitles import download
     from subtitles.indexer import utils
 
     context = _movie(world)
     initial = repository.get_item(context.item_id)
     bad = Path(context.path).with_suffix(".hu.srt")
-    bad.write_bytes(CONTENT + b"\xff")
     # Exercise the real read and decode when an encoding detector guesses incorrectly.
     monkeypatch.setattr(utils, "detect", lambda text: {"encoding": "utf-8"})
     jobs = []
@@ -756,6 +777,17 @@ def test_a_malformed_sidecar_keeps_the_index_incomplete_and_preserves_a_saved_re
     saved = Path(context.path).with_suffix(".en.srt")
 
     if after_save:
+        write = download._write_source_download
+
+        def add_malformed_after_write(*args, **kwargs):
+            written = write(*args, **kwargs)
+            if written:
+                bad.write_bytes(CONTENT + b"\xff")
+            return written
+
+        # A malformed file present during publication now prevents the write.
+        # Introduce it after the real save to exercise post-save recovery.
+        monkeypatch.setattr(download, "_write_source_download", add_malformed_after_write)
         _download(monkeypatch)
         service.search_source_item(context.item_id, job_id=3)
         assert saved.read_bytes() == CONTENT
@@ -763,6 +795,7 @@ def test_a_malformed_sidecar_keeps_the_index_incomplete_and_preserves_a_saved_re
         assert (row.item_id, row.subtitles_path) == (context.item_id, str(saved))
         assert jobs[-1]["progress_message"] == "1 subtitle(s) downloaded"
     else:
+        bad.write_bytes(CONTENT + b"\xff")
         assert indexer.index_item(context.item_id) is None
 
     assert bad.read_bytes() == CONTENT + b"\xff"
@@ -1664,7 +1697,8 @@ def test_source_download_pairs_a_mapped_alias_stem_with_its_relative_subtitle_fo
     assert existing.read_bytes() == existing_content
 
 
-def test_source_download_uses_its_logical_filename_in_a_shared_relative_folder(world, monkeypatch):
+@pytest.mark.parametrize('competing_parent', ['separate', 'resolved'])
+def test_source_download_uses_its_logical_filename_in_a_shared_relative_folder(world, monkeypatch, competing_parent):
     from app.config import settings
     from media_sources.context import resolve_item
     from media_sources.indexer import index_item
@@ -1680,10 +1714,18 @@ def test_source_download_uses_its_logical_filename_in_a_shared_relative_folder(w
     item_id = add_item(world.db, world.source_id, world.library_id, alias, title='Film')
     index_item(item_id)
     context = resolve_item(item_id)
-    competing = video(world.tmp_path / 'competing' / 'Other.mkv')
-    (competing.parent / 'Subs').symlink_to(shared, target_is_directory=True)
+    assert context.path == str(alias)
+    if competing_parent == 'resolved':
+        # The resolved movie has a true sibling named for the planned
+        # subtitle, but that sibling's directory has its own relative output.
+        competing = video(actual.parent / 'Film.en.mkv')
+        (competing.parent / 'Subs').mkdir()
+        existing = competing.parent / 'Subs' / 'Film.en.srt'
+    else:
+        competing = video(world.tmp_path / 'competing' / 'Other.mkv')
+        (competing.parent / 'Subs').symlink_to(shared, target_is_directory=True)
+        existing = shared / 'Other.en.srt'
     world.db.execute(_legacy_owner_insert(world, 'radarr', competing))
-    existing = shared / 'Other.en.srt'
     existing_content = CONTENT.replace(b'Downloaded', b'Existing subtitle')
     existing.write_bytes(existing_content)
     _download(monkeypatch)
@@ -3325,10 +3367,12 @@ def test_source_combine_rechecks_input_ownership_at_publication(world, monkeypat
 
 
 @pytest.mark.parametrize('language', ['en', 'hu'])
-@pytest.mark.parametrize('input_location', ['media folder', 'shared folder'])
+@pytest.mark.parametrize(('input_location', 'alias'), [
+    ('media folder', False), ('shared folder', False), ('shared folder', True),
+])
 @pytest.mark.parametrize('arrival', ['before reading', 'after preparation'])
 def test_source_combine_rechecks_local_input_ownership_after_preparation(
-        world, monkeypatch, language, input_location, arrival):
+        world, monkeypatch, language, input_location, alias, arrival):
     from contextlib import contextmanager
 
     from media_sources import indexer, repository
@@ -3352,9 +3396,17 @@ def test_source_combine_rechecks_local_input_ownership_after_preparation(
     read = combine.read_regular_subtitle
     consumed = []
 
+    def add_competing_video():
+        sibling = media.with_suffix(f'.{language}.mkv')
+        if alias:
+            target = video(world.tmp_path / 'Another video' / sibling.name)
+            (media.parent / 'Alias.mkv').symlink_to(target)
+        else:
+            video(sibling)
+
     def arrive_before_reading(**kwargs):
         if arrival == 'before reading':
-            video(media.with_suffix(f'.{language}.mkv'))
+            add_competing_video()
         return compose(**kwargs)
 
     def record_read(path, version):
@@ -3365,7 +3417,7 @@ def test_source_combine_rechecks_local_input_ownership_after_preparation(
     def add_local_owner(source, *, shared=False):
         with publication(source, shared=shared) as result:
             if arrival == 'after preparation':
-                video(media.with_suffix(f'.{language}.mkv'))
+                add_competing_video()
             yield result
 
     monkeypatch.setattr(indexer, 'source_item_publication', add_local_owner)
@@ -3374,9 +3426,13 @@ def test_source_combine_rechecks_local_input_ownership_after_preparation(
     result = combine.try_combine_for_video(context.path, 'movie', languages=['en', 'hu'], format='srt',
                                            source=context)
 
-    assert result.status == 'failed' and 'input' in result.error
+    assert result.status == 'failed'
     if arrival == 'before reading':
+        assert 'input lost its unique owner before reading' in result.error
         assert str(primary if language == 'en' else secondary) not in consumed
+    else:
+        assert ('input lost its unique owner before publication' in result.error
+                or 'Another video now owns the subtitle destination' in result.error)
     for path in (primary, secondary, destination, alternate, variant):
         assert path.read_bytes() == CONTENT
     assert world.db.execute(sa.select(repository.History)).all() == []

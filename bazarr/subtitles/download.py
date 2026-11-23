@@ -343,8 +343,8 @@ def _write_source_download(video_path, destination, content, *, source, language
             except OSError as error:
                 logging.warning('BAZARR could not verify missing languages for source item %s', source.item_id)
                 raise SourceMissingLanguagesUnavailable(
-                    'The source missing languages could not be verified. Try again when its subtitle folders '
-                    'can be read.') from error
+                    'The source missing languages could not be verified. Try again when its subtitle files and '
+                    'folders can be read.') from error
         return None
 
     @contextmanager

@@ -150,10 +150,14 @@ class SourcePublicationOwnerIndex(SourceOutputOwnerIndex):
             owners.setdefault(key, set()).update(paths)
         return owners
 
+    def subtitle_destination(self):
+        if self._publication_settings is not None:
+            return self._publication_settings[0]
+        return super().subtitle_destination()
+
     def folder_is_shared(self, directory):
         # A relative custom path can also resolve into another video's directory.
-        destination = self._publication_settings[0] if self._publication_settings else None
-        return bool(destination[1] if destination is not None else get_subtitle_destination_folder())
+        return bool(self.subtitle_destination()[1])
 
     @staticmethod
     def _needs_registry_guard(source, destination, custom_folder):
@@ -252,10 +256,10 @@ def list_external_subtitles(path, previous=None, ownership_index=None, *, public
             path_key = os.path.normcase(os.path.abspath(subtitle_path))
             if path_key in actual or path_key in excluded:
                 continue
-            version = regular_subtitle_version(subtitle_path)
-            if version is None:
-                continue
             if publication and not sync_output_owner_is_unique(path, subtitle_path, ownership_index=ownership_index):
+                continue
+            version = regular_subtitle_version(subtitle_path, strict=publication)
+            if version is None:
                 continue
             if version[2] <= MAXIMUM_SUBTITLE_SIZE:
                 try:
@@ -265,12 +269,14 @@ def list_external_subtitles(path, previous=None, ownership_index=None, *, public
                     language = guess_external_subtitles(
                         directory, {subtitle: language}, 'movie', (previous_entry,) if previous_entry else None,
                         path_reverse=os.fspath, read_bytes=read_sample)[subtitle]
-                except SubtitleSourceChanged:
+                except SubtitleSourceChanged as error:
+                    if publication:
+                        raise OSError('A candidate subtitle changed while verifying its language') from error
                     continue
-                except (OSError, UnicodeError):
-                    if not publication:
-                        raise
-                    continue
+                except UnicodeError as error:
+                    if publication:
+                        raise OSError('A candidate subtitle could not be decoded') from error
+                    raise
             entry = _external_subtitle_entry(subtitle, language, subtitle_path, version[2])
             if entry is not None:
                 actual[path_key] = entry

@@ -300,11 +300,13 @@ def add_sync_engine_outputs(dest_folder, subtitles, video_filename=None, video_p
             ownership_index = SyncOutputOwnerIndex()
     if video_filename is not None:
         video_stem = _normalized_video_stem(os.path.splitext(video_filename)[0])
-        media_folder = (os.path.dirname(video_path) or '.') if video_path is not None else dest_folder
-        with os.scandir(media_folder) as media_files:
-            media_stems = {_normalized_video_stem(os.path.splitext(entry.name)[0])
-                           for entry in media_files
-                           if entry.is_file() and entry.name.lower().endswith(core.VIDEO_EXTENSIONS)}
+        if video_path is None:
+            # Filename-only callers can see local basenames. A full video path
+            # uses the shared ownership check, which also pairs alias destinations.
+            with os.scandir(dest_folder) as media_files:
+                media_stems = {_normalized_video_stem(os.path.splitext(entry.name)[0])
+                               for entry in media_files
+                               if entry.is_file() and entry.name.lower().endswith(core.VIDEO_EXTENSIONS)}
 
     with os.scandir(dest_folder) as entries:
         names = []
