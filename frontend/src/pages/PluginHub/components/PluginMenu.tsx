@@ -112,8 +112,8 @@ export const PluginMenu: FunctionComponent<PluginMenuProps> = ({
     ? `Previous release: v${rollback.previous_version}.`
     : null;
   const rollbackReason =
-    rollback?.blocked_reason ??
     waiting ??
+    rollback?.blocked_reason ??
     (!rollback
       ? "Previous release information is unavailable. Reload the Plugin Hub."
       : !rollback.previous_version

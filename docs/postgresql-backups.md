@@ -49,7 +49,8 @@ restore, and a server at 18 or newer cannot be backed up at all.
 ## What a restore does
 
 PostgreSQL restores with `pg_restore --clean --if-exists --no-owner` into the configured database. SQLite
-copies the database file into place and removes the stale write-ahead log beside it.
+stages a complete database file in the database directory before replacing the live file and removes the stale
+write-ahead log.
 
 On both engines the configuration is staged first, the database goes in second, and the configuration is only
 swapped into place once the database step worked. A failure aborts before the restart, so an instance never
@@ -57,13 +58,41 @@ comes back with a new configuration sitting beside an old database.
 
 One failure cannot be undone and is reported as such. `pg_restore --clean` drops the existing objects before
 it loads the new ones, with no transaction around it, so a PostgreSQL restore that fails partway leaves the
-database in neither state. The log says so plainly, keeps the extracted dump beside the restore directory as
-`bazarr_postgres.dump.failed`, and names the backup folder the archive came from, so the restore can be
-retried. That database must not be used until it has been restored again or rebuilt.
+database in neither state. The log names the backup folder and the extracted dump at
+`restore/.backup-staged/payload/bazarr_postgres.dump.failed` for System Backups, or
+`restore/bazarr_postgres.dump.failed` for a manual extraction. An interrupted PostgreSQL restore without
+plugin data also uses that failed-dump path. Confirm the old restore process has exited before retrying.
+Keep the database offline until it has been restored again or rebuilt.
 
 A restore refused before `pg_restore` was ever started is a different thing and says so. Missing client
 tools, no database name configured and an unparseable connection URL all stop the restore before the
 database is touched, and the log says nothing was changed and names what to fix.
+
+### Recover an interrupted plugin data restore
+
+An accepted restore from System Backups is staged under `restore/.backup-staged/payload`. A backup extracted
+manually for restore can still use the top level of `restore`. Temporary extraction directories whose names
+start with `.backup-extract-` are ignored on startup. Keep the original ZIP until the restore finishes.
+
+Bazarr+ installs the database and configuration first. On the next start it waits for any previous plugin
+workers to stop and checks the archived release folders against the plugin inventory before installing them.
+If the folder step fails, the staged files are retained and the next start retries the folder step.
+For backups with plugin data, the restored configuration keeps the current database connection settings so
+the next boot can read the restored inventory. Keep the effective environment and libpq settings the same
+until the restore finishes.
+Before restoring an archive with plugin folders, Bazarr+ checks that the PostgreSQL dump contains a single
+plugin inventory in the schema the configured connection reads. If the schema cannot be matched, Bazarr+
+keeps the staged archive and stops before changing the database.
+
+The `.plugin-restore-phase` checkpoint covers PostgreSQL restores and SQLite restores with plugin data. It sits
+beside the API extraction directory or at the top level of `restore` for a manual extraction. If it says
+`database-started`, the last database operation did not record completion. Keep the extracted files and make
+sure the old restore process has exited. To retry the
+database restore, put the original dump and configuration back into the extraction directory, remove any
+`bazarr_postgres.dump.failed` and remove the checkpoint before starting Bazarr+. To continue after manually
+completing or verifying the same database restore, keep the staged configuration at
+`config/config.yaml.restore`, move any failed dump aside and set the checkpoint to `database-complete` before
+starting Bazarr+.
 
 ## Backups do not cross engines
 

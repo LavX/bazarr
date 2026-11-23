@@ -1090,25 +1090,20 @@ def test_a_package_still_being_uploaded_is_never_taken_for_an_abandoned_one(queu
     assert in_progress.read_bytes() == b"PK partial"
 
 
-def test_leftover_spooled_packages_are_discarded_at_startup(package_uploads):
-    from pathlib import Path
+def test_leftover_spooled_packages_are_discarded_at_startup(package_uploads, monkeypatch):
+    from provider_hub.startup import start_after_migrations
 
-    from provider_hub import service
-
+    monkeypatch.setenv("BAZARR_DISABLE_PROVIDER_AUTOINSTALL", "true")
+    monkeypatch.setattr("app.config.write_config", lambda: True)
+    monkeypatch.setattr("provider_hub.registry.settings_cleanup_plan",
+                        lambda _existing, enabled, disabled, *_: (enabled, disabled, []))
     package_uploads.mkdir(parents=True)
     (package_uploads / "package-left.zip").write_bytes(b"PK left behind")
     (package_uploads / "package-other.zip").write_bytes(b"PK another")
 
-    service.discard_local_package_uploads()
-
+    # Pending jobs never survive a restart, so this startup sweep owns these files.
+    assert start_after_migrations()
     assert spooled(package_uploads) == []
-    # Pending jobs never survive a restart, so nothing still needs these files.
-    # A call, not text: a commented-out call would not count.
-    import ast
-
-    init = ast.parse((Path(__file__).resolve().parents[2] / "bazarr" / "init.py").read_text(encoding="utf-8"))
-    assert any(isinstance(node, ast.Call) and getattr(node.func, "id", None) == "discard_local_package_uploads"
-               for node in ast.walk(init))
 
 
 def test_the_startup_sweep_tolerates_a_missing_spool(package_uploads):

@@ -104,6 +104,8 @@ export interface ProviderHubInstallation {
   name?: string;
   active_version?: string | null;
   staged_version?: string | null;
+  /** The action that produced the staged release, when it is a rollback. */
+  staged_action?: "rollback" | null;
   state: string;
   /**
    * True while a change waits on a restart to take effect. The server works it out from the plugin's

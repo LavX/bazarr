@@ -10,6 +10,7 @@ import queue
 import re
 import signal
 import subprocess
+import sys
 import threading
 import weakref
 import time
@@ -25,6 +26,7 @@ from typing import Any
 from . import WORKER_ABI_VERSION
 from . import runtime_status
 from .provider_roots import SourceMediaFile
+from .sandbox import activity
 from secret_store.scrub import scrub_text
 
 logger = logging.getLogger(__name__)
@@ -318,7 +320,10 @@ def _client_gone(client, budget: float) -> bool:
     # A worker started through the launcher has descendants that left its process group, which only the
     # launcher's own cleanup reaches. Its word that the cleanup finished is what lets the hold go.
     state = getattr(client, "launcher_cleanup_state", None)
-    return state is None or state() == "confirmed"
+    if state is not None and state() != "confirmed":
+        return False
+    activity.forget(process)
+    return True
 
 
 # How the wait for a leftover process paces itself. It starts at the cadence a quick exit is
@@ -414,28 +419,45 @@ class ProviderLayout:
     config_dir: Path
 
 
-def provider_layout(command, cwd, env, provider_id) -> ProviderLayout | None:
+def provider_layout(command, cwd, env, provider_id, *, strict_seed: bool = False) -> ProviderLayout | None:
     """The layout of a hub provider worker, or None for any other process this client starts.
 
     Only the real runner, started by an interpreter the hub built, with a bundle named in its
     environment, is a provider worker. Anything else (a fixture, a script a test writes) runs as
     it always did.
     """
+    seeded = False
     try:
         if not command or len(command) < 2 or os.path.abspath(str(command[-1])) != _RUNNER_PATH:
             return None
         bundle = (env or {}).get("BAZARR_PROVIDER_HUB_BUNDLE") or cwd
         if not bundle:
             return None
+        from . import seed
+
+        seeded = seed.is_runtime_path(bundle) or seed.is_runtime_path(command[0])
+
         from app.get_args import args
 
         from .state import provider_hub_dir
         from .venv import validated_interpreter
 
         hub_dir = Path(provider_hub_dir())
-        interpreter = validated_interpreter(hub_dir, command[0])
-        if interpreter is None:
-            return None
+        if seeded:
+            try:
+                manifest = json.loads((env or {}).get("BAZARR_PROVIDER_HUB_MANIFEST", ""))
+                paths = seed.resolve_paths(hub_dir, manifest, bundle, command[0]) if isinstance(manifest, dict) else None
+            except (OSError, ValueError, TypeError):
+                paths = None
+            if paths is None or (cwd is not None and Path(cwd) != paths[0]):
+                if strict_seed:
+                    raise WorkerError("the seeded provider bundle and interpreter could not be verified")
+                return None
+            bundle, interpreter = paths
+        else:
+            interpreter = validated_interpreter(hub_dir, command[0])
+            if interpreter is None:
+                return None
         key = _SAFE_KEY.sub("_", provider_id or "temporary").lstrip(".") or "temporary"
         return ProviderLayout(
             key=key[:64],
@@ -445,7 +467,11 @@ def provider_layout(command, cwd, env, provider_id) -> ProviderLayout | None:
             hub_dir=hub_dir,
             config_dir=Path(args.config_dir),
         )
-    except Exception:
+    except WorkerError:
+        raise
+    except Exception as error:
+        if strict_seed and seeded:
+            raise WorkerError("the seeded provider bundle and interpreter could not be verified") from error
         logger.debug("Provider Hub: could not work out the sandbox layout of a worker", exc_info=True)
         return None
 
@@ -516,8 +542,10 @@ def provider_spec(layout: ProviderLayout, command, cwd, env, *, source_media: So
     )
 
     base = layout.hub_dir / "run" / layout.key
-    data, temp = base / "data", base / "tmp"
+    data, temp = Path((env or {}).get("BAZARR_PLUGIN_DATA_DIR") or base / "data"), base / "tmp"
     for folder in (base, data, temp):
+        if folder.is_symlink() or folder.is_junction():
+            raise WorkerError("A worker folder is a link")
         folder.mkdir(parents=True, exist_ok=True, mode=0o700)
         # The worker can change the mode of its own folders; the next start puts it back.
         os.chmod(folder, 0o700)
@@ -567,7 +595,7 @@ def provider_spec(layout: ProviderLayout, command, cwd, env, *, source_media: So
         "subtitle_provider",
         home=data,
         tmpdir=temp,
-        extra={key: value for key, value in (env or {}).items() if key != "PATH"},
+        extra={key: value for key, value in (env or {}).items() if key not in {"HOME", "PATH"}},
     )
     # The host's own search path stays: the plugins find ffmpeg and ffprobe through it.
     environment["PATH"] = os.environ.get("PATH") or environment["PATH"]
@@ -657,7 +685,11 @@ class ProviderWorkerClient:
         if self.process:
             if not self._has_exited(self.process):
                 return False
-            if getattr(self.process, "returncode", 0) is None:
+            if activity.is_registered(self.process):
+                self._kill_tree(self.process, 5.0)
+                if not _client_gone(self, 0):
+                    raise WorkerError("The plugin worker is still shutting down")
+            elif getattr(self.process, "returncode", 0) is None:
                 # The previous worker is gone but not collected: end what it
                 # left running before its slot is reused.
                 self._kill_tree(self.process, 5.0)
@@ -680,6 +712,12 @@ class ProviderWorkerClient:
         }
         if self.env:
             env.update(self.env)
+        if data_dir := env.get("BAZARR_PLUGIN_DATA_DIR"):
+            folder = Path(data_dir)
+            if folder.is_symlink() or folder.is_junction():
+                raise WorkerError("The plugin data folder is a link")
+            folder.mkdir(mode=0o700, parents=True, exist_ok=True)
+            env["HOME"] = data_dir
 
         self.last_used = time.monotonic()
         if source_media is None:
@@ -695,8 +733,10 @@ class ProviderWorkerClient:
         # Every group this client started stays on the list until it is seen
         # empty: a respawn must not make the previous worker's survivors
         # forgotten while they still run from the environment.
-        with _GROUPS_LOCK:
-            self._groups = [*self._live_groups(), self.process.pid]
+        if not activity.is_windows():
+            with _GROUPS_LOCK:
+                group = getattr(self.process, "activity_group", self.process.pid)
+                self._groups = [*self._live_groups(), group]
         self._stdout_queue = _BoundedChunks()
         client_ref = weakref.ref(self)
         process = self.process
@@ -752,23 +792,24 @@ class ProviderWorkerClient:
             except Exception as error:
                 self._blocked(f"the ruleset could not be prepared: {error}")
                 raise WorkerError(f"the sandbox could not be prepared, so the provider was not started: {error}") from error
-        return subprocess.Popen(
-            self.command,
-            cwd=self.cwd,
-            env=env,
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            start_new_session=True,
-        )
+        from .sandbox.spawn import OWNER_VARIABLE, _start_plain, owner_marker
+
+        if marker := owner_marker():
+            env = {**env, OWNER_VARIABLE: marker}
+        options = dict(cwd=self.cwd, env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                       stderr=subprocess.PIPE, text=True)
+        if sys.platform != "linux" and (
+                getattr(self, "provider_id", None) or _is_provider_runner(self.command, env)):
+            return _start_plain(self.command, **options)
+        return subprocess.Popen(self.command, start_new_session=True, **options)
 
     def _sandbox_profile(self, *, source_media: SourceMediaFile | None = None):
         """A callable that starts the sandboxed worker, or None when this start is unsandboxed."""
+        # Verify image-supplied code before any decision to launch without the sandbox.
+        provider_id = getattr(self, "provider_id", None)
+        layout = provider_layout(self.command, self.cwd, self.env, provider_id, strict_seed=True)
         if source_media is None and getattr(self, "_sandbox_failed_open", False):
             return None
-        provider_id = getattr(self, "provider_id", None)
-        layout = provider_layout(self.command, self.cwd, self.env, provider_id)
         if layout is None:
             if source_media is None and _is_provider_runner(self.command, self.env):
                 from .sandbox import note_provider_unsandboxed, provider_profile_enabled
@@ -959,10 +1000,22 @@ class ProviderWorkerClient:
         except Exception:
             pass
 
-    def _deregister(self) -> None:
+    def _deregister(self) -> bool:
+        # A provider's child processes can still have its data files open.
+        # Keep the client visible to the next backup, removal and idle sweep.
+        process = getattr(self, "process", None)
+        env = getattr(self, "env", None) or {}
+        writes_data = getattr(self, "provider_id", None) and (
+            env.get("BAZARR_PLUGIN_DATA_DIR") or _is_provider_runner(getattr(self, "command", ()), env))
+        if (writes_data or activity.is_registered(process)) and not _client_gone(self, 0):
+            self._retain_survivor()
+            return False
         with _live_clients_lock:
+            if getattr(self, "process", None) is not process:
+                return False
             _live_clients.discard(self)
             _unreaped_survivors.discard(self)
+        return True
 
     def _retain_survivor(self) -> None:
         with _live_clients_lock:
@@ -1074,9 +1127,9 @@ class ProviderWorkerClient:
                 kept.append(launcher)
                 state = "pending" if state != "unconfirmed" else state
                 continue
-            if launcher.returncode is None:
-                launcher.poll()
             try:
+                if launcher.returncode is None:
+                    launcher.poll()
                 said_complete = launcher.returncode is not None and launcher.returncode >= 0 and (
                     launcher.launcher_cleanup() == "complete"
                 )
@@ -1095,9 +1148,12 @@ class ProviderWorkerClient:
         A worker's children can outlive it, and they run from the same
         environment, so the environment is not free until every group is empty,
         including the groups of workers an earlier respawn replaced. Checked for
-        at most ``ceiling`` seconds. Always true where process groups do not
-        exist or no worker was ever started.
+        at most ``ceiling`` seconds. On Windows the worker and the other
+        members of its job must have exited.
         """
+        if activity.is_windows():
+            return self.process is None or (self.process.poll() is not None
+                                            and activity.tree_gone(self.process, ceiling))
         deadline = time.monotonic() + ceiling
         while True:
             if not self._live_groups():
@@ -1121,6 +1177,11 @@ class ProviderWorkerClient:
         that had made itself a group leader in that window would be reachable
         by it.
         """
+        if activity.is_registered(process):
+            process.stop(grace_seconds)
+            if process.poll() is None or not activity.tree_gone(process):
+                raise subprocess.TimeoutExpired(getattr(process, "args", "worker"), grace_seconds)
+            return
         if cls._is_launcher(process):
             # The launcher passes the signal on and ends the whole tree, the detached
             # processes a plugin started included, which a group signal cannot reach.
@@ -1142,6 +1203,9 @@ class ProviderWorkerClient:
         True only when the worker is confirmed gone; the caller must not
         deregister a process this could not end.
         """
+        if activity.is_registered(process):
+            process.stop(0.0)
+            return process.poll() is not None and activity.tree_gone(process)
         if cls._is_launcher(process):
             # Closing the launcher's lifeline makes it kill everything it started at once; a
             # group kill alone would leave the launcher unable to reach a detached descendant.
@@ -1179,7 +1243,8 @@ class ProviderWorkerClient:
         """
         process = self.process
         if process is None or self._has_exited(process):
-            if process is not None and getattr(process, "returncode", 0) is None:
+            if process is not None and (getattr(process, "returncode", 0) is None
+                                        or activity.is_registered(process)):
                 # Exited but not collected: end what it left running first.
                 self._kill_tree(process, grace_seconds)
             # Nothing to reap. Mirrors stop(): a held survivor whose process
@@ -1210,8 +1275,7 @@ class ProviderWorkerClient:
             self._retain_survivor()
             return False
 
-        self._deregister()
-        return True
+        return self._deregister()
 
     def stop(self, grace_seconds: float = 5.0) -> None:
         # Closed first, on every path, then the latch is set so that a gated
@@ -1223,7 +1287,8 @@ class ProviderWorkerClient:
         if latch is not None:
             latch.set()
         if not process or self._has_exited(process):
-            if process is not None and getattr(process, "returncode", 0) is None:
+            if process is not None and (getattr(process, "returncode", 0) is None
+                                        or activity.is_registered(process)):
                 # Exited but not yet reaped: its group id is still reserved, so
                 # what it left running can be ended before it is collected.
                 self._kill_tree(process, grace_seconds)
@@ -1236,13 +1301,16 @@ class ProviderWorkerClient:
             self._wait_exit(process, grace_seconds)
             # A clean shutdown ends the worker, not necessarily what it forked;
             # the worker is unreaped, so its group id is still its own.
-            self._signal_group(process, _SIGKILL)
-            process.wait(timeout=grace_seconds)
+            if activity.is_registered(process):
+                self._kill_tree(process, grace_seconds)
+            else:
+                self._signal_group(process, _SIGKILL)
+                process.wait(timeout=grace_seconds)
         except Exception:
             # A failed or refused shutdown does not excuse what the worker
             # forked. Unless it was already collected, end the whole group (a
             # worker that died meanwhile is still a zombie holding its id).
-            if getattr(process, "returncode", 0) is None:
+            if getattr(process, "returncode", 0) is None or activity.is_registered(process):
                 self._kill_tree(process, grace_seconds)
 
         # Leave the registry only once this process is confirmed dead AND is
@@ -1344,6 +1412,8 @@ class ProviderWorkerClient:
                 self._cut_process = process
             self._kill_worker()
         except Exception:
+            if process is not None:
+                self._retain_survivor()
             logger.warning("Provider Hub: could not kill the worker of %s", self.provider_id, exc_info=True)
             return
         if process is not None and self._has_exited(process):
@@ -1585,6 +1655,15 @@ class ProviderWorkerClient:
         grant ends before the next request gets the lock. A download can consume
         its content and select an archive member on the same worker before that.
         """
+        if (op != "shutdown" and getattr(self, "provider_id", None)
+                and (self.env or {}).get("BAZARR_PLUGIN_DATA_DIR")):
+            from .datadir import dispatch
+
+            with dispatch(self.provider_id):
+                return self._request(op, payload, timeout, admit, source_media, consume_source_reply)
+        return self._request(op, payload, timeout, admit, source_media, consume_source_reply)
+
+    def _request(self, op, payload, timeout, admit, source_media, consume_source_reply) -> WorkerResult:
         if admit is None:
             self._lock.acquire()
         else:

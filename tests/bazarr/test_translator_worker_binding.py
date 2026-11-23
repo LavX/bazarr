@@ -1214,3 +1214,46 @@ def test_a_refusal_for_the_per_plugin_cap_carries_its_wait_and_the_page_says_how
         port.call(PLUGIN, "test", {}, {}, timeout=5)
     assert refused.value.code == "unverified_limit" and refused.value.retry_after == 3000.0
     assert "50 minutes" in probe.PAUSED_TEST.format(minutes=round(refused.value.retry_after / 60))
+
+
+def test_translator_smoke_starts_with_only_the_staged_release_data(hub):
+    from pathlib import Path
+
+    from provider_hub.datadir import release_path
+
+    active = release_path(hub.root, PLUGIN, "a" * 32)
+    staged = release_path(hub.root, PLUGIN, "b" * 32)
+    active.mkdir(parents=True)
+    staged.mkdir()
+    (active / "phase").write_text("live")
+    (staged / "phase").write_text("staged")
+    with (hub.bundle / "sample_mod.py").open("a", encoding="utf-8") as module:
+        module.write(
+            "\nimport os\n"
+            "from pathlib import Path\n"
+            "data = Path(os.environ['BAZARR_PLUGIN_DATA_DIR'])\n"
+            "(data / 'phase').write_text((data / 'phase').read_text() + ' checked')\n"
+        )
+
+    validated = SimpleNamespace(raw=hub.manifest, provider_id=PLUGIN)
+    hub.definitions().smoke(validated, hub.bundle, Path(hub.installation.python_path), staged, timeout=5.0)
+
+    assert (staged / "phase").read_text() == "staged checked"
+    assert (active / "phase").read_text() == "live"
+    hub.installation.active_data_key = active.name
+    runtime = hub.definitions()._spec(PLUGIN, {443})
+    assert runtime.env["BAZARR_PLUGIN_DATA_DIR"] == str(active)
+
+
+def test_data_quiesce_timeout_keeps_busy_translator_worker_serving():
+    from subtitles.tools.translate.runtime.workers import PoolWorkers
+
+    class BusyPool:
+        def status(self):
+            return {"workers": {PLUGIN: {"state": "ready", "in_flight": 1}}}
+
+        def definition(self, key):
+            raise AssertionError("a busy worker must keep serving after the quiesce bound")
+
+    port = PoolWorkers(BusyPool(), lambda plugin_id: None)
+    assert not port.settle_data(PLUGIN, 0)

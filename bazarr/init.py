@@ -8,14 +8,14 @@ import rarfile
 
 from dogpile.cache.region import register_backend as register_cache_backend
 
-from app.config import (settings, configure_captcha_func, log_startup_notices, remove_settings_section,
-                        write_config)
+from app.config import (settings, configure_captcha_func, finish_backup_restore_startup, log_startup_notices,
+                        open_database_after_backup_restore, write_config)
 from app.get_args import args
 from app.logger import configure_logging
 from utilities.binaries import get_binary, BinaryNotFound
 from utilities.package import package_info_path, read_package_info
 from utilities.path_mappings import path_mappings
-from utilities.backup import restore_from_backup
+from utilities.backup import apply_pending_plugin_restore, restore_from_backup
 
 from app.database import init_db
 
@@ -64,10 +64,20 @@ log_cpu_check()
 # What reading the configuration changed in what was stored. It was found before there was a log to say it in.
 log_startup_notices()
 
+# Mark workers started during initialization as well as those started after it.
+try:
+    from provider_hub.sandbox import sweep as sandbox_sweep
+    sandbox_sweep.configure_owner(args.config_dir)
+except Exception:
+    logging.exception("BAZARR cannot mark this run's plugin workers")
+
 # restore backup if required. A restore that leaves the database unfit to run
 # on (pg_restore failing partway, or the restored configuration not going in)
 # stops the start from inside, and so does a dump parked by an earlier failure.
-restore_from_backup()
+if not restore_from_backup():
+    open_database_after_backup_restore()
+    apply_pending_plugin_restore()
+    finish_backup_restore_startup()
 
 
 # change default base_url to ''
@@ -132,31 +142,11 @@ settings['general'].pop('update_restart', None)
 write_config()
 
 
-# Remove deprecated providers from enabled and disabled providers in config.
-#
-# CRITICAL: register Provider Hub plugins into the registry BEFORE the strip
-# filter runs. Otherwise any plugin provider in enabled_providers gets
-# silently stripped on every startup (the registry only knows about built-in
-# providers at this point — plugins are registered lazily on the first
-# get_providers() call, which is too late).
-#
-# We must also flip any staged installations to "active" first. On a
-# plugin-update restart the new version is "staged" + pending_restart=True
-# at this point in startup, so active_installations() would exclude it,
-# register_active_provider_classes() would skip it, and the strip filter
-# would drop it from enabled_providers. main.py runs activate_staged_
-# installations() later, but that's already past this filter.
-from subliminal_patch.extensions import provider_registry  # noqa: E402
 # Register ISO 639-3 languages missing from babelfish's bundled snapshot (e.g. Montenegrin
 # "cnr") before any Language() is constructed below, so providers declaring them resolve.
 from languages.extra import register_extra_languages  # noqa: E402
 register_extra_languages()
-provider_hub_registration_ok = True
-# Auto-install official-catalog versions of enabled built-in providers so the
-# catalog becomes the canonical provider source. Staged here so the
-# activate_staged_installations() + register_active_provider_classes() calls
-# below bring them live and shadow the built-in in this same boot. Best-effort:
-# failures must never prevent startup.
+
 try:
     # The translator kind exists only while the translation runtime switch is on. Registered here, ahead of
     # anything that stages or activates a plugin, and not when the kinds package loads, because reading the
@@ -165,99 +155,6 @@ try:
     register_when_enabled()
 except Exception:  # pragma: no cover - a dark feature must not prevent startup
     logging.exception("Unable to register the translator plugin kind on startup")
-try:
-    from provider_hub.service import autoinstall_enabled_builtins
-    auto_staged = autoinstall_enabled_builtins()
-    if auto_staged:
-        logging.info("Provider Hub auto-installed from official catalog: %s", auto_staged)
-except Exception:  # pragma: no cover - hub failures must not prevent startup
-    logging.exception("Unable to auto-install Provider Hub providers on startup")
-try:
-    from provider_hub.service import activate_staged_installations
-    activated = activate_staged_installations()
-    if activated:
-        logging.info("Activated staged Provider Hub installations on startup: %s", activated)
-except Exception:  # pragma: no cover - hub failures must not prevent startup
-    logging.exception("Unable to activate staged Provider Hub installations on startup")
-try:
-    # Records the environments installations already use and flags the ones
-    # that went missing. It runs no pip: repairing is never a boot step.
-    from provider_hub.service import enforce_activation_needs, reconcile_plugin_environments
-    reconcile_plugin_environments()
-    # A supplier whose environment just turned out to be missing does not run, so what relies on it is held
-    # back too.
-    enforce_activation_needs()
-except Exception:  # pragma: no cover - hub failures must not prevent startup
-    logging.exception("Unable to reconcile Provider Hub environments on startup")
-try:
-    # A package uploaded for an install that never ran: its job did not
-    # survive the restart, so nothing will install or remove it now.
-    from provider_hub.service import discard_local_package_uploads
-    discard_local_package_uploads()
-except Exception:  # pragma: no cover - hub failures must not prevent startup
-    logging.exception("Unable to remove leftover Provider Hub package uploads on startup")
-try:
-    from provider_hub.registry import register_active_provider_classes
-    registered = register_active_provider_classes()
-    if registered:
-        logging.info("Registered Provider Hub plugins into provider registry: %s", registered)
-except Exception:  # pragma: no cover - hub failures must not prevent startup
-    provider_hub_registration_ok = False
-    logging.exception("Unable to register active Provider Hub providers on startup")
-existing_providers = provider_registry.names()
-enabled_providers = settings.general.enabled_providers
-disabled_providers = list(getattr(settings.general, 'disabled_providers', None) or [])
-# The providers whose installation exists but whose registration was refused. They
-# are not "gone": nothing below may drop their ids or their settings. When the set
-# cannot be read, nothing is dropped at all.
-try:
-    from provider_hub.registry import registration_incomplete, settings_cleanup_plan
-    registration_incomplete_ids = registration_incomplete()
-except Exception:  # pragma: no cover - hub failures must not prevent startup
-    provider_hub_registration_ok = False
-    logging.exception("Unable to read which Provider Hub providers failed to register")
-if provider_hub_registration_ok:
-    if registration_incomplete_ids:
-        logging.warning("Provider Hub providers kept in the settings, their registration was refused: %s",
-                        ", ".join(sorted(registration_incomplete_ids)))
-    from provider_hub.migration import RETIRED_BUILT_IN_PROVIDER_IDS
-    settings.general.enabled_providers, settings.general.disabled_providers, stale_provider_sections = \
-        settings_cleanup_plan(existing_providers, enabled_providers, disabled_providers,
-                              RETIRED_BUILT_IN_PROVIDER_IDS, lambda provider_id: hasattr(settings, provider_id),
-                              registration_incomplete_ids)
-
-    # Drop the config section a retired built-in provider left behind.
-    #
-    # A retired id has no provider class, no validators and no secret_store
-    # paths left, so its section is unreachable settings: the Settings card went
-    # with the provider and nothing reads the values. It is still serialized
-    # into config.yaml and into every /api/system/settings response though, and
-    # a credential written there by a build older than the secret store stays in
-    # clear text forever, because the encrypt-at-rest walk only visits
-    # registered paths. Unsetting the section is what closes that, and it is the
-    # same treatment app.config already gives series_scores / movie_scores.
-    #
-    # Skipped for any retired id a trusted catalog plugin has adopted: Provider
-    # Hub reads that plugin's credentials out of exactly this section, and the
-    # registration above is what puts the id back in existing_providers.
-    for stale_provider_section in stale_provider_sections:
-        remove_settings_section(stale_provider_section)
-    if stale_provider_sections:
-        logging.info("Removed leftover config sections of retired providers: %s",
-                     ", ".join(stale_provider_sections))
-
-    write_config()
-else:
-    logging.warning("Skipping provider list cleanup because Provider Hub registration failed")
-
-
-# Initialize provider_priorities if not exists
-if not hasattr(settings.general, 'provider_priorities') or not settings.general.provider_priorities:
-    settings.general.provider_priorities = {}
-    # Set default priorities based on current order in enabled_providers
-    for idx, provider in enumerate(settings.general.enabled_providers):
-        settings.general.provider_priorities[provider] = (idx + 1) * 10
-    write_config()
 
 
 def init_binaries():

@@ -647,7 +647,7 @@ def rollback_store(client, hub_store, tmp_path, monkeypatch):  # noqa: F811
         row = {"provider_id": plugin_id, "name": plugin_id.title(), "kind": previous.get("kind", "subtitle_provider"),
                "state": "active", "pending_restart": False, "trusted": True, "origin": "catalog",
                "source_id": source_id, "source_bound": True, "enabled": True, "config": {"region": "eu"}}
-        for manifest in (previous, current):
+        for key_prefix, manifest in zip("ab", (previous, current)):
             bundle = root / "bundles" / plugin_id / manifest["version"]
             bundle.mkdir(parents=True, exist_ok=True)
             filename = "provider.py" if plugin_id == "providerhub" else "service.py"
@@ -660,6 +660,15 @@ def rollback_store(client, hub_store, tmp_path, monkeypatch):  # noqa: F811
             interpreter.write_text("", encoding="utf-8")
             row.update(active_version=manifest["version"], active_path=str(bundle), python_path=str(interpreter),
                        manifest=manifest, supplied_by=previous_supplied_by if manifest is previous else {})
+            row.pop("active_data_key", None)
+            if "data_dir" in manifest.get("permissions", ()):
+                from provider_hub.datadir import release_path
+
+                key = key_prefix * 32
+                data = release_path(root, plugin_id, key)
+                data.mkdir(parents=True, exist_ok=True)
+                (data / "settings").write_text(f"data for {manifest['version']}", encoding="utf-8")
+                row["active_data_key"] = key
             if manifest is current and draining_previous:
                 from provider_hub.releases import DRAIN_PREVIOUS
                 row[DRAIN_PREVIOUS] = True
@@ -1003,6 +1012,145 @@ def test_rollback_refuses_history_from_a_removed_catalog_after_a_new_release_use
     assert row["active_version"] == "3.0.0" and row["config"] == original["config"]
     assert Path(old_active.bundle_path).is_dir() and Path(old_active.python_path).exists()
     assert bundle.is_dir() and interpreter.exists()
+
+
+@pytest.fixture
+def community_install_job(client, rollback_store, tmp_path, monkeypatch):
+    from provider_hub import jobs, service, state
+    from provider_hub.kinds.subtitle_provider import SUBTITLE_PROVIDER_KIND
+
+    provider_id, source_id = "providerhub", "fixture-catalog"
+    url = "https://github.com/example/plugin-catalog/blob/main/catalog.json"
+    rollback_store(plugin_id=provider_id, source_id=source_id)
+    root = tmp_path / "provider_hub"
+    queued = []
+    monkeypatch.setattr(jobs, "_enqueue", lambda _label, func, args: queued.append((func, args)) or "install-job")
+    monkeypatch.setattr(jobs, "_checkpoint", lambda _job_id: lambda _message: None)
+    monkeypatch.setattr(service, "_fetch_bundle", lambda candidate, _deadline: (
+        root / "bundles" / provider_id / candidate.version))
+    monkeypatch.setattr(service.PluginEnvironment, "install", lambda _self, candidate, **_kwargs: (
+        root / "envs" / provider_id / candidate.version))
+    monkeypatch.setattr(SUBTITLE_PROVIDER_KIND, "smoke_test", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(SUBTITLE_PROVIDER_KIND, "on_activated", lambda *_args: None)
+
+    def replace_catalog():
+        assert service.remove_catalog_source(source_id)
+        service.add_catalog_source(source_id, url)
+
+    def publish(version):
+        manifest = provider_manifest_v1(provider_id, version)
+        key = f"{source_id}:{provider_id}:{version}"
+        state.mutate_state(lambda document: document["catalog_entries"].update({key: {
+            "source": source_id, "provider_id": provider_id, "version": version, "trusted": False, "manifest": manifest,
+        }}))
+
+    def queue(version):
+        publish(version)
+        response = client.post("/api/provider-hub/installations", headers={"X-API-KEY": API_KEY}, json={
+            "source": source_id, "provider_id": provider_id, "version": version,
+        })
+        assert response.status_code == 202, response.json
+        action, args = queued.pop()
+        assert action == "install_provider"
+        assert args["catalog_registration"] == state.load_state()["catalog_sources"][source_id]["registration"]
+        return lambda: jobs.install_provider(**args)
+
+    return provider_id, source_id, replace_catalog, publish, queue
+
+
+@pytest.mark.parametrize("when", ["queued", "downloading"])
+def test_an_authenticated_install_cannot_move_to_a_replacement_catalog_registration(
+        community_install_job, monkeypatch, when):
+    from provider_hub import jobs, releases, service, state, state_store
+
+    provider_id, _, replace_catalog, publish, queue = community_install_job
+    original, = state_store.list_releases(provider_id, states=(releases.RETIRED,))
+    run = queue("1.0.0")
+    fetch = service._fetch_bundle
+
+    def replace():
+        replace_catalog()
+        publish("1.0.0")
+
+    def fetch_after_replacement(*args):
+        assert when == "downloading"
+        replace()
+        return fetch(*args)
+
+    monkeypatch.setattr(service, "_fetch_bundle", fetch_after_replacement)
+    monkeypatch.setattr(service.PluginEnvironment, "install", lambda *_args, **_kwargs: pytest.fail(
+        "a changed registration must not build an environment"))
+    if when == "queued":
+        replace()
+    with pytest.raises(jobs.JobFailed, match="catalog registration changed"):
+        run()
+
+    assert state_store.list_releases(provider_id, states=(releases.RETIRED,)) == [original]
+    row = state.load_state()["installations"][provider_id]
+    assert row["active_version"] == "2.0.0" and not row.get("staged_version")
+
+
+def test_an_authenticated_reinstall_of_a_retained_version_can_later_roll_back(
+        client, community_install_job):
+    from provider_hub import releases, service, state_store
+
+    provider_id, _, replace_catalog, _, queue = community_install_job
+    original, = state_store.list_releases(provider_id, states=(releases.RETIRED,))
+    replace_catalog()
+    queue("1.0.0")()
+    assert service.activate_staged_installations() == [provider_id]
+    renewed, = state_store.list_releases(provider_id, states=(releases.ACTIVE,))
+    assert renewed.id != original.id
+    assert (renewed.version, renewed.bundle_path) == (original.version, original.bundle_path)
+    assert renewed.catalog_registration != original.catalog_registration
+    queue("2.0.0")()
+    assert service.activate_staged_installations() == [provider_id]
+    preview = _get(client, f"/api/plugins/installations/{provider_id}/rollback").json
+    assert preview["previous_version"] == "1.0.0" and preview["blocked_reason"] is None
+
+    response = _rollback(client, plugin_id=provider_id)
+    assert response.status_code == 200 and response.json["status"] == "waiting", response.json
+    assert _get(client, f"/api/plugins/installations/{provider_id}").json["staged_action"] == "rollback"
+    assert _get(client, f"/api/provider-hub/providers/{provider_id}").json["staged_action"] == "rollback"
+    assert service.activate_staged_installations() == [provider_id]
+    restored, = state_store.list_releases(provider_id, states=(releases.ACTIVE,))
+    assert (restored.id, restored.catalog_registration) == (renewed.id, renewed.catalog_registration)
+
+
+def test_authenticated_rollback_smokes_a_private_snapshot_of_the_confirmed_release(
+        client, rollback_store, monkeypatch):
+    from plugin_platform_helpers import provider_manifest_v2
+    from provider_hub import datadir, releases, service, state, state_store
+    from provider_hub.kinds.subtitle_provider import SUBTITLE_PROVIDER_KIND
+
+    plugin_id = "providerhub"
+    previous, current = [provider_manifest_v2(plugin_id, version, permissions=["data_dir"])
+                         for version in ("1.0.0", "2.0.0")]
+    rollback_store(plugin_id=plugin_id, previous=previous, current=current)
+    original, = state_store.list_releases(plugin_id, states=(releases.RETIRED,))
+    retired_path = datadir.release_path(state.provider_hub_dir(), plugin_id, original.data_key)
+    current_path = datadir.release_path(state.provider_hub_dir(), plugin_id, "b" * 32)
+    smoke_paths = []
+
+    def smoke(_manifest, _bundle, _interpreter, *, data_dir):
+        assert data_dir != retired_path and data_dir != current_path
+        assert (data_dir / "settings").read_text() == "data for 1.0.0"
+        (data_dir / "settings").write_text("temporary smoke output")
+        smoke_paths.append(data_dir)
+
+    monkeypatch.setattr(service, "_previous_workers_stopped", lambda **_: True)
+    monkeypatch.setattr(SUBTITLE_PROVIDER_KIND, "smoke_test", smoke)
+    monkeypatch.setattr(SUBTITLE_PROVIDER_KIND, "on_activated", lambda *_args: None)
+
+    response = _rollback(client, plugin_id=plugin_id)
+    assert response.status_code == 200 and response.json["status"] == "waiting", response.json
+    assert smoke_paths == []
+    assert service.activate_staged_installations() == [plugin_id]
+    restored, = state_store.list_releases(plugin_id, states=(releases.ACTIVE,))
+    assert (restored.id, restored.data_key) == (original.id, original.data_key)
+    assert len(smoke_paths) == 1 and not smoke_paths[0].exists()
+    assert (retired_path / "settings").read_text() == "data for 1.0.0"
+    assert (current_path / "settings").read_text() == "data for 2.0.0"
 
 
 def test_a_confirmed_rollback_activates_on_boot_and_preserves_active_and_retained_files(

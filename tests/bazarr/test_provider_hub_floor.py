@@ -17,7 +17,11 @@ from pathlib import Path
 import pytest
 import requests
 
+import provider_hub_state_engines as state_engines
 from provider_hub import signing_roots as _signing_roots
+
+hub_engine = state_engines.hub_engine
+hub_store = state_engines.hub_store
 
 ROOT = Path(__file__).resolve().parents[2]
 BUILDER = ROOT / "scripts" / "release" / "catalog_floor.py"
@@ -782,7 +786,7 @@ def _service_manifest():
     return manifest
 
 
-def _signed_files(keys, *, source_commit=FLOOR_COMMIT, channel="main", providers=None, plugins=None):
+def _signed_files(keys, *, source_commit=FLOOR_COMMIT, channel="main", providers=None, plugins=None, revocations=None):
     """The three signed files the lock pins, signed with the throwaway ``keys``."""
     from datetime import datetime, timedelta, timezone
 
@@ -796,6 +800,7 @@ def _signed_files(keys, *, source_commit=FLOOR_COMMIT, channel="main", providers
         "source_commit": source_commit,
         "providers": [{"manifest": _manifest()}] if providers is None else providers,
         "plugins": [{"manifest": _service_manifest()}] if plugins is None else plugins,
+        **({"revocations": revocations} if revocations is not None else {}),
     }, sort_keys=True).encode()
     return {
         SIGNED_FILES[0]: body,
@@ -1066,3 +1071,1007 @@ def test_a_signed_catalog_with_no_providers_seeds_providers_only(tmp_path, monke
 
     _providers_only(catalog)
     assert "no providers list" in caplog.text
+
+
+@pytest.fixture
+def register_seed_translator():
+    from provider_hub.kinds import TRANSLATOR, kind_for_api, unregister_kind
+    from provider_hub.kinds.translator import TRANSLATOR_KIND_API, register_translator_kind
+
+    already_registered = kind_for_api(TRANSLATOR_KIND_API) is not None
+    register_translator_kind()
+    yield
+    if not already_registered:
+        unregister_kind(TRANSLATOR)
+
+
+def _build_runtime_snapshot(
+    tmp_path, monkeypatch, keys, *, tag="py3-none-any", bad_bytes=False, missing_provider_wheel=False,
+    google_fields=None, unsigned=False, revocations=None,
+):
+    from provider_hub import seed
+    from plugin_platform_helpers import service_manifest
+    from test_provider_hub_bundled_wheels import _make_wheel
+
+    wheel = _make_wheel(tmp_path / "wheels", "seedfixture", "1.0", tag=tag)
+    wheel_name = f"wheels/{wheel.name}"
+    plugin_files = {
+        "translator.py": (
+            b"from bazarr_plugin_sdk.translator.v1 import TranslatorPlugin\n"
+            b"from seedfixture import VALUE\n\n"
+            b"class FixtureTranslator(TranslatorPlugin):\n"
+            b"    def describe(self):\n"
+            b"        return {'name': VALUE}\n\n"
+            b"    async def test(self, config, secrets, ctx=None):\n"
+            b"        return {'ok': True, 'message': VALUE}\n"
+        ),
+        wheel_name: wheel.read_bytes(),
+    }
+    google = service_manifest(
+        seed.GOOGLE_PLUGIN_ID,
+        kind="translator",
+        kind_api="bazarr.translator.v1",
+        entry_module="translator",
+        entry_class="FixtureTranslator",
+        file_payloads=plugin_files,
+        dependencies={"requirements": [{"name": "seedfixture", "version": "1.0",
+                                        "hashes": ["sha256:" + _sha(plugin_files[wheel_name])]}]},
+        source={"type": "github", "repo": OFFICIAL_REPO, "ref": "main", "commit": FLOOR_COMMIT,
+                "path": "plugins/google_translate"},
+        **(google_fields or {}),
+    )
+    provider_manifest = _manifest()
+    if missing_provider_wheel:
+        provider_manifest["dependencies"]["requirements"] = [
+            {"name": "missingfixture", "version": "1.0", "hashes": ["sha256:" + "0" * 64]}
+        ]
+    providers = [{"manifest": provider_manifest}, {"manifest": _manifest(provider_id="exampleother")}]
+    signed = (_signed_files(keys, providers=providers, plugins=[{"manifest": google}, {"manifest": _service_manifest()}],
+                            revocations=revocations) if not unsigned else {})
+    data = {
+        "catalog.json": json.dumps({"schema_version": 1, "providers": providers}).encode(),
+        "providers/examplehub/provider.py": PROVIDER_FILE,
+        "providers/exampleother/provider.py": PROVIDER_FILE,
+        **signed,
+        **{f"plugins/google_translate/{name}": content for name, content in plugin_files.items()},
+    }
+    if bad_bytes:
+        data[f"plugins/google_translate/{wheel_name}"] = _tamper(data[f"plugins/google_translate/{wheel_name}"])
+    lock = {"lock_version": 1, "repo": OFFICIAL_REPO, "branch": "main", "commit": FLOOR_COMMIT}
+    root = tmp_path / "catalog_floor"
+    builder = _builder()
+    builder.write_floor(lock, data, root, build_runtime=lambda path: seed.build(
+        path, repo=OFFICIAL_REPO, commit=FLOOR_COMMIT, catalog=data["catalog.json"],
+        signed_catalog=signed.get(SIGNED_FILES[0]), files=data, offline=True))
+    builder.check_modes(root)
+    monkeypatch.setenv("BAZARR_CATALOG_FLOOR", str(root))
+    return root
+
+
+@pytest.fixture
+def runtime_snapshot(tmp_path, monkeypatch, keys, register_seed_translator):
+    return _build_runtime_snapshot(tmp_path, monkeypatch, keys)
+
+
+def test_runtime_index_uses_exact_catalog_bytes_and_shares_environments(runtime_snapshot, tmp_path):
+    from provider_hub import floor, seed
+
+    seed.check_image_interpreter(runtime_snapshot)
+    snapshot = floor.load_floor(runtime_snapshot)
+    index = json.loads(snapshot.read(seed.INDEX_FILE))
+    expected = {"examplehub", "exampleother", seed.GOOGLE_PLUGIN_ID}
+    assert {entry["manifest"].get("provider_id", entry["manifest"].get("id")) for entry in index["releases"]} == expected
+    assert index["source_commit"] == FLOOR_COMMIT
+    assert len(index["environments"]) == 2
+    first = seed.select_release(tmp_path / "hub", "examplehub")
+    other = seed.select_release(tmp_path / "hub", "exampleother")
+    google = seed.select_release(tmp_path / "hub", seed.GOOGLE_PLUGIN_ID)
+    assert first.interpreter == other.interpreter
+    assert first.interpreter != google.interpreter
+    assert {entry["bundle_sha256"] for entry in index["releases"]} == {first.manifest.bundle_sha256,
+                                                                    google.manifest.bundle_sha256}
+    assert seed.select_release(tmp_path / "hub", SERVICE_ID) is None
+
+
+@pytest.mark.parametrize(("version", "config_wins"), [("0.9.0", False), ("1.0.0", True), ("1.1.0", True)])
+def test_runtime_seed_picks_the_highest_valid_release_and_config_wins_a_tie(runtime_snapshot, tmp_path, version, config_wins):
+    import sys
+
+    from provider_hub import seed
+
+    root = tmp_path / "hub"
+    config_manifest = _validated(version=version)
+    bundle = root / "bundles" / "examplehub" / version / FLOOR_COMMIT
+    bundle.mkdir(parents=True)
+    (bundle / "provider.py").write_bytes(PROVIDER_FILE)
+    interpreter = root / "shared_envs" / "fixture" / "bin" / "python"
+    interpreter.parent.mkdir(parents=True)
+    interpreter.symlink_to(Path(sys.executable).resolve())
+    (interpreter.parent.parent / 'pyvenv.cfg').write_text(f'version = {sys.version.split()[0]}\n')
+    candidate = (config_manifest, str(bundle), str(interpreter))
+
+    chosen = seed.select_release(root, "examplehub", config_candidate=candidate)
+    assert chosen.seeded is not config_wins
+    assert chosen.manifest.version == (version if config_wins else "1.0.0")
+
+    (bundle / "provider.py").write_bytes(b"not the bundle we validated")
+    assert seed.select_release(root, "examplehub", config_candidate=candidate).seeded
+
+
+def test_tampered_signature_with_cached_seed_releases_leaves_providers_only(runtime_snapshot, tmp_path):
+    from provider_hub import seed
+
+    root = tmp_path / "hub"
+    assert seed.select_release(root, seed.GOOGLE_PLUGIN_ID).seeded
+    existing = runtime_snapshot / SIGNED_FILES[1]
+    existing.chmod(0o644)
+    existing.write_bytes(_tamper(existing.read_bytes()))
+    existing.chmod(0o444)
+
+    assert seed.select_release(root, seed.GOOGLE_PLUGIN_ID) is None
+    assert seed.select_release(root, "examplehub").seeded
+    assert "plugins" not in _seeded()[0]
+
+
+def test_wrong_runtime_architecture_ignores_the_seed(runtime_snapshot, tmp_path, monkeypatch, caplog):
+    from provider_hub import seed
+
+    monkeypatch.setattr(seed.platform, "machine", lambda: "different-architecture")
+    with pytest.raises(seed.SeedError, match="another Python interpreter or architecture"):
+        seed.check_image_interpreter(runtime_snapshot)
+    assert seed.select_release(tmp_path / "hub", "examplehub") is None
+    assert "another Python interpreter or architecture" in caplog.text
+
+
+def test_build_rejects_modified_runtime_wheel(tmp_path, monkeypatch, keys):
+    from provider_hub.bundle import BundleValidationError
+
+    with pytest.raises(BundleValidationError, match="SHA256 mismatch for wheels/"):
+        _build_runtime_snapshot(tmp_path, monkeypatch, keys, bad_bytes=True)
+
+
+def test_signed_build_rejects_a_wheel_for_another_architecture(tmp_path, monkeypatch, keys):
+    from provider_hub.seed import SeedError
+
+    with pytest.raises(SeedError, match="could not install wheels for google_translate"):
+        _build_runtime_snapshot(tmp_path, monkeypatch, keys, tag="cp38-cp38-win32")
+
+
+@pytest.mark.parametrize("damage", ["bundle", "wheel", "environment"])
+def test_seeded_worker_resolves_verified_paths_again_each_time(runtime_snapshot, tmp_path, damage):
+    from types import SimpleNamespace
+
+    from provider_hub import seed
+    from provider_hub.sandbox.policy import PolicyError
+    from subtitles.tools.translate.runtime.worker_binding import TranslatorWorkers
+
+    root = tmp_path / "hub"
+    google = seed.select_release(root, seed.GOOGLE_PLUGIN_ID)
+    installation = SimpleNamespace(active_path=str(google.bundle), python_path=str(google.interpreter),
+                                   manifest=google.manifest.raw)
+    definitions = TranslatorWorkers(
+        installation_for=lambda _plugin: installation, hub_dir=lambda: root,
+        config_dir=lambda: str(tmp_path / "config"), reserved_ports=lambda: (),
+    )
+    spec = definitions._spec(seed.GOOGLE_PLUGIN_ID, {443})
+    assert spec.interpreter == str(google.interpreter)
+    assert spec.cwd == str(google.bundle)
+    assert (root / "run" / seed.GOOGLE_PLUGIN_ID / "data").is_dir()
+    if damage == "bundle":
+        target = google.bundle / "translator.py"
+    elif damage == "wheel":
+        target, = (google.bundle / "wheels").glob("*.whl")
+    else:
+        target, = google.interpreter.parent.parent.glob("lib/python*/site-packages/seedfixture/__init__.py")
+    mode = stat.S_IMODE(target.stat().st_mode)
+    target.chmod(mode | 0o200)
+    target.write_bytes(_tamper(target.read_bytes()))
+    target.chmod(mode)
+    with pytest.raises(PolicyError, match="no release that can run"):
+        definitions._spec(seed.GOOGLE_PLUGIN_ID, {443})
+
+
+@pytest.fixture
+def google_startup(monkeypatch, schema_session):
+    import sys
+    from types import SimpleNamespace
+
+    from app.config import settings
+    from subtitles.tools.translate import runtime
+    from subtitles.tools.translate.runtime import startup, store
+
+    class Pointers:
+        engine = fallback = None
+
+        def get(self):
+            return self.engine, self.fallback
+
+        def set(self, engine, fallback):
+            self.engine, self.fallback = engine, fallback
+            return True
+
+    pointers = Pointers()
+    monkeypatch.setattr(settings.translator, "runtime_v2", True)
+    monkeypatch.setattr(settings.translator, "translator_type", "google_translate")
+    monkeypatch.setattr(settings.general, "provider_hub_auto_install", False)
+    monkeypatch.setattr(runtime, "_runtime_tables_exist", lambda: True)
+    monkeypatch.setattr(store, "ConfigPointers", lambda: pointers)
+    monkeypatch.setitem(sys.modules, "app.database", SimpleNamespace(database=schema_session))
+    return startup.start_google_from_seed, store.TranslatorStore(schema_session)
+
+
+def test_google_first_start_launches_the_seeded_translator_worker(
+    runtime_snapshot, tmp_path, hub, google_startup, monkeypatch,
+):
+    from provider_hub import env_registry, seed
+    from provider_hub.runtime.pool import WorkerPool
+    from subtitles.tools.translate.runtime import worker_binding, workers
+
+    config = tmp_path / "config"
+    root = hub.provider_hub_dir()
+    start, store = google_startup
+    source_paths = {p.relative_to(runtime_snapshot): (p.stat().st_mode, p.stat().st_mtime_ns)
+                    for p in runtime_snapshot.rglob("*")}
+
+    def fail_install(*args, **kwargs):
+        pytest.fail("looking up an image seed should not run the installer")
+
+    monkeypatch.setattr(hub.PluginEnvironment, "install", fail_install)
+    monkeypatch.setattr(hub, "refresh_catalog", fail_install)
+    _no_network(monkeypatch, hub)
+    assert start()
+    row, = hub.load_state()["installations"].values()
+    assert row["provider_id"] == seed.GOOGLE_PLUGIN_ID
+    assert row["state"] == "active" and row["origin"] == "catalog"
+    assert Path(row["active_path"]).is_relative_to(runtime_snapshot)
+    instance, = store.list_instances(seed.GOOGLE_PLUGIN_ID)
+    assert instance.enabled and store.pointers() == (instance.id, None)
+    assert hub.reconcile_plugin_environments()["needs_repair"] == []
+    assert env_registry.cleanup_environments(root) == []
+    assert not (root / "bundles").exists()
+    assert not (root / "shared_envs").exists()
+
+    definitions = worker_binding.TranslatorWorkers(
+        hub_dir=lambda: root, config_dir=lambda: str(config), reserved_ports=lambda: (),
+        store_factory=lambda: type("Store", (), {"list_instances": lambda self: []})(),
+    )
+    pool = WorkerPool(autostart=True)
+    try:
+        port = workers.PoolWorkers(pool, definitions.definition_for, one_call_for=definitions.one_call_for,
+                                   ports_for=definitions.ports_for)
+        response = port.call(seed.GOOGLE_PLUGIN_ID, workers.TEST_OP, {"config": {}}, {}, timeout=20)
+        assert response.result == {"ok": True, "message": "seedfixture"}
+    finally:
+        pool.close()
+    assert {p.relative_to(runtime_snapshot): (p.stat().st_mode, p.stat().st_mtime_ns)
+            for p in runtime_snapshot.rglob("*")} == source_paths
+    store.set_engine(None)
+    assert not start()
+    assert store.pointers() == (None, None)
+
+
+def test_seeded_provider_proxy_reverifies_its_runtime_before_respawn(runtime_snapshot, tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from provider_hub import registry, seed
+    from provider_hub.worker import WorkerError
+
+    root = tmp_path / "hub"
+    release = seed.select_release(root, "examplehub")
+    installation = SimpleNamespace(active_path=str(release.bundle), python_path=str(release.interpreter))
+    monkeypatch.setattr(registry, "provider_hub_dir", lambda: root)
+    provider = registry._make_provider_class(release.manifest, installation=installation)()
+    provider._verify_bundle_before_start()
+
+    target = release.bundle / "provider.py"
+    target.chmod(0o644)
+    target.write_bytes(b"tampered")
+    target.chmod(0o444)
+    with pytest.raises(WorkerError, match="catalog runtime seed no longer verifies"):
+        provider._verify_bundle_before_start()
+
+
+def test_signed_build_refuses_a_missing_google_release(tmp_path, keys):
+    from provider_hub import seed
+
+    signed = _signed_files(keys)
+    with pytest.raises(seed.SeedError, match="no usable google_translate release"):
+        seed.build(tmp_path, repo=OFFICIAL_REPO, commit=FLOOR_COMMIT, catalog=b"",
+                   signed_catalog=signed[SIGNED_FILES[0]], files={}, offline=True)
+
+
+def test_signed_build_refuses_an_unavailable_legacy_provider_wheel(tmp_path, monkeypatch, keys):
+    from provider_hub.seed import SeedError
+
+    with pytest.raises(SeedError, match="could not install wheels for examplehub"):
+        _build_runtime_snapshot(tmp_path, monkeypatch, keys, missing_provider_wheel=True)
+    assert not (tmp_path / "catalog_floor" / "floor.json").exists()
+
+
+@pytest.fixture
+def provider_sandbox_probes(monkeypatch, schema_session):
+    """Exercise the normal profile with an empty, migrated media root inventory."""
+    from app import database as app_database
+    from provider_hub import sandbox
+
+    monkeypatch.setattr(app_database, "database", schema_session)
+    host = sandbox.probe_sandbox()
+    real_spawn = sandbox.spawn_worker
+    confined = host.enforces(sandbox.PROVIDER_MIN_ABI)
+    if not confined and not host.absent:
+        pytest.skip(f"Host provider sandbox probe failed: {host.reason}")
+    probes, launches = [], []
+
+    def probe(*_args, **_kwargs):
+        probes.append(True)
+        return host
+
+    def spawn(*args, **kwargs):
+        process = real_spawn(*args, **kwargs)
+        launches.append(process.pid)
+        return process
+
+    monkeypatch.setattr(sandbox, "provider_profile_enabled", lambda: True)
+    monkeypatch.setattr(sandbox, "probe_sandbox", probe)
+    monkeypatch.setattr(sandbox, "spawn_worker", spawn)
+    return probes, launches, confined
+
+
+def test_marketplace_installs_and_tests_a_signed_seeded_provider(
+    runtime_snapshot, hub, monkeypatch, provider_sandbox_probes,
+):
+    _unreachable(monkeypatch)
+    _no_network(monkeypatch, hub)
+    hub.refresh_catalog()
+    monkeypatch.setattr(hub.PluginEnvironment, "install", lambda *_args, **_kw: pytest.fail("unexpected pip"))
+    monkeypatch.setattr("provider_hub.kinds.subtitle_provider.set_bazarr_provider_enabled", lambda *_: True)
+
+    hub.install_catalog_entry("official", "examplehub", "1.0.0")
+    assert hub.activate_staged_installations() == ["examplehub"]
+    root = hub.provider_hub_dir()
+    row = hub.load_state()["installations"]["examplehub"]
+    assert Path(row["active_path"]).is_relative_to(runtime_snapshot)
+    assert not (root / "bundles").exists() and not (root / "shared_envs").exists()
+    result = hub.test_provider_connection("examplehub")
+    assert result["status"] == "ready" and result["details"]["initialized"] is True
+    probes, launches, confined = provider_sandbox_probes
+    assert len(probes) == 3  # install smoke, activation smoke and Test Connection
+    assert len(launches) == (3 if confined else 0)
+    print(f"Provider launches through verified Landlock: {len(launches)}")
+
+    provider_file = Path(row["active_path"]) / "provider.py"
+    provider_file.chmod(0o644)
+    provider_file.write_bytes(b"raise RuntimeError('tampered code must never load')\n")
+    provider_file.chmod(0o444)
+    monkeypatch.setattr(hub, "ProviderWorkerClient", lambda *_args, **_kw: pytest.fail("seed started after damage"))
+    result = hub.test_provider_connection("examplehub")
+    assert result["status"] == "failed" and "could not be verified" in result["message"]
+
+
+def test_opt_in_provider_activates_after_the_real_application_migration(
+    runtime_snapshot, hub, tmp_path, monkeypatch, provider_sandbox_probes,
+):
+    from alembic.migration import MigrationContext
+    from app import database as db
+    from app.config import settings
+    from app.startup import prepare_database_and_plugins
+    from flask import Flask
+    from provider_hub import registry, releases, sandbox, state
+    from sqlalchemy import create_engine, select
+    from sqlalchemy.orm import scoped_session, sessionmaker
+    from subliminal_patch import extensions
+
+    _unreachable(monkeypatch)
+    _no_network(monkeypatch, hub)
+    monkeypatch.delenv("BAZARR_DISABLE_PROVIDER_AUTOINSTALL", raising=False)
+    monkeypatch.delenv("BAZARR_PROVIDER_HUB_STATE", raising=False)
+    state_snapshot = tmp_path / "database-hub" / "state.json"
+    monkeypatch.setattr(state, "state_file", lambda: state_snapshot)
+    monkeypatch.setattr(settings.general, "provider_hub_auto_install", True)
+    monkeypatch.setattr(settings.general, "enabled_providers", ["exampleother"])
+    monkeypatch.setattr(settings.general, "disabled_providers", ["embeddedsubtitles"])
+    monkeypatch.setattr(settings.general, "provider_priorities", {"exampleother": 60})
+    monkeypatch.setattr(settings.translator, "runtime_v2", False)
+    monkeypatch.setattr("app.config.write_config", lambda: True)
+    monkeypatch.setattr(hub.PluginEnvironment, "install", lambda *_args, **_kw: pytest.fail("unexpected pip"))
+    original_registry = extensions.provider_registry
+    provider_registry = extensions.ProviderRegistry()
+    for name in original_registry.names():
+        if name != "exampleother":
+            provider_registry.register(name, original_registry[name])
+    monkeypatch.setattr(extensions, "provider_registry", provider_registry)
+    monkeypatch.setattr(registry, "provider_registry", provider_registry)
+    monkeypatch.setattr(hub, "provider_registry", provider_registry)
+    monkeypatch.setattr(registry, "_REGISTERED_PROVIDER_HUB_IDS", set())
+    monkeypatch.setattr(registry, "_REGISTRATION_INCOMPLETE", set())
+    monkeypatch.setattr(registry, "_WITHDRAWN_PROVIDER_IDS", set())
+
+    url = f"sqlite:///{tmp_path / 'boot.db'}"
+    engine = create_engine(url, isolation_level="AUTOCOMMIT")
+    session = scoped_session(sessionmaker(bind=engine))
+    monkeypatch.setattr(db, "url", url)
+    monkeypatch.setattr(db, "engine", engine)
+    monkeypatch.setattr(db, "database", session)
+    monkeypatch.setenv("BAZARR_DB_MIGRATION_VERSION", "fixture-unmigrated")
+    checked = []
+    real_probe = sandbox.probe_sandbox
+
+    def check_migration(*args, **kwargs):
+        with engine.connect() as connection:
+            checked.append(MigrationContext.configure(connection).get_current_heads())
+        assert checked[-1] and checked[-1] == (os.environ["BAZARR_DB_MIGRATION_VERSION"],)
+        return real_probe(*args, **kwargs)
+
+    monkeypatch.setattr(sandbox, "probe_sandbox", check_migration)
+    try:
+        db.init_db()
+        with engine.connect() as connection:
+            assert not MigrationContext.configure(connection).get_current_heads()
+        assert not state_snapshot.exists()
+        assert prepare_database_and_plugins(Flask(__name__))
+        assert len(checked) == 2  # install smoke and activation smoke
+        _, launches, confined = provider_sandbox_probes
+        assert len(launches) == (2 if confined else 0)
+        print(f"Provider startup launches after migrations through verified Landlock: {len(launches)}")
+        row, = hub.load_state()["installations"].values()
+        assert row["state"] == "active" and Path(row["active_path"]).is_relative_to(runtime_snapshot)
+        with engine.connect() as connection:
+            release = connection.execute(select(releases.releases_table).where(
+                releases.releases_table.c.plugin_id == "exampleother",
+            )).mappings().one()
+        assert release["state"] == "active" and release["bundle_path"] == row["active_path"]
+        assert state_snapshot.is_file()
+        assert "exampleother" in provider_registry.names()
+        assert settings.general.enabled_providers == ["exampleother"]
+        assert settings.general.disabled_providers == ["embeddedsubtitles"]
+        assert settings.general.provider_priorities == {"exampleother": 60}
+    finally:
+        session.remove()
+        engine.dispose()
+
+
+def test_invalid_runtime_seed_marketplace_falls_back_to_the_verified_floor_copy(
+    runtime_snapshot, hub, monkeypatch, provider_sandbox_probes,
+):
+    from provider_hub import seed
+
+    root = hub.provider_hub_dir()
+    seeded = seed.select_release(root, "examplehub")
+    altered = seeded.bundle / "provider.py"
+    altered.chmod(0o644)
+    altered.write_bytes(b"raise RuntimeError('tampered code must never load')\n")
+    altered.chmod(0o444)
+    _unreachable(monkeypatch)
+    _no_network(monkeypatch, hub)
+    hub.refresh_catalog()
+    monkeypatch.setattr(hub.provider_kind, "set_bazarr_provider_enabled", lambda *_: True)
+
+    hub.install_catalog_entry("official", "examplehub", "1.0.0")
+    assert hub.activate_staged_installations() == ["examplehub"]
+    row = hub.load_state()["installations"]["examplehub"]
+    bundle = Path(row["active_path"])
+    assert bundle.is_relative_to(root)
+    assert (bundle / "provider.py").read_bytes() == PROVIDER_FILE
+    assert hub.test_provider_connection("examplehub")["status"] == "ready"
+
+
+def test_google_first_start_ignores_an_invalid_signature(runtime_snapshot, hub, google_startup):
+    start, store = google_startup
+    target = runtime_snapshot / SIGNED_FILES[1]
+    target.chmod(0o644)
+    target.write_bytes(_tamper(target.read_bytes()))
+    target.chmod(0o444)
+
+    assert not start()
+    assert hub.load_state()["installations"] == {}
+    assert store.pointers() == (None, None)
+
+
+@pytest.mark.parametrize("field", ["pyvenv.cfg", "requirements.txt"])
+def test_invalid_config_environment_metadata_falls_back_to_seed(runtime_snapshot, tmp_path, field):
+    import sys
+
+    from provider_hub import seed
+
+    root = tmp_path / "hub"
+    release = seed.select_release(root, "examplehub")
+    bundle = root / "bundles" / "examplehub" / release.manifest.version / FLOOR_COMMIT
+    bundle.mkdir(parents=True)
+    (bundle / "provider.py").write_bytes(PROVIDER_FILE)
+    env = root / "shared_envs" / "fixture"
+    python = env / "bin" / "python"
+    python.parent.mkdir(parents=True)
+    python.symlink_to(Path(sys.executable).resolve())
+    (env / "pyvenv.cfg").write_text(f"version = {sys.version.split()[0]}\n")
+    (env / field).write_bytes(b"\xff")
+
+    chosen = seed.select_release(root, "examplehub", config_candidate=(release.manifest, str(bundle), str(python)))
+    assert chosen == release
+
+
+@pytest.mark.parametrize("fields", [{"platforms": ["windows-x86_64"]}, {"python_tags": ["cp310"]}])
+def test_signed_seed_requires_google_to_support_the_build_target(tmp_path, monkeypatch, keys, fields):
+    from provider_hub.seed import SeedError
+
+    with pytest.raises(SeedError, match="no usable google_translate release"):
+        _build_runtime_snapshot(tmp_path, monkeypatch, keys, google_fields=fields)
+
+
+def test_signed_seed_checks_google_against_the_stamped_image_version(tmp_path, monkeypatch, keys):
+    from provider_hub import seed
+
+    monkeypatch.delenv("BAZARR_VERSION", raising=False)
+    root = _build_runtime_snapshot(tmp_path, monkeypatch, keys, google_fields={"min_host_version": "2.8.0"})
+    seed.check_image_interpreter(root, "2.8.0")
+    with pytest.raises(seed.SeedError, match="no google_translate release compatible"):
+        seed.check_image_interpreter(root, "2.7.1")
+
+
+@pytest.mark.parametrize("mode", ["disabled", "prior-fallback", "source-scoped"])
+def test_invalid_seed_worker_cannot_reach_the_unsandboxed_launcher(runtime_snapshot, hub, tmp_path, monkeypatch, mode):
+    from provider_hub import seed
+    from provider_hub.provider_roots import SourceMediaFile
+    from provider_hub.worker import ProviderWorkerClient, SourceMediaRefused, WorkerError, worker_command
+
+    root = hub.provider_hub_dir()
+    release = seed.select_release(root, "examplehub")
+    env = {
+        "BAZARR_PROVIDER_HUB_BUNDLE": str(release.bundle),
+        "BAZARR_PROVIDER_HUB_MANIFEST": json.dumps(release.manifest.raw),
+    }
+    runner = ROOT / "bazarr" / "provider_hub" / "worker_runner.py"
+    env["BAZARR_PROVIDER_HUB_MANIFEST"] = "{}"
+    monkeypatch.setattr("provider_hub.sandbox.provider_profile_enabled", lambda: mode != "disabled")
+    monkeypatch.setattr("provider_hub.worker.subprocess.Popen",
+                        lambda *_args, **_kwargs: pytest.fail("unverified seed reached the direct launcher"))
+    worker = ProviderWorkerClient(worker_command(release.interpreter, runner), cwd=release.bundle, env=env)
+    worker._sandbox_failed_open = mode != "disabled"
+    refusal = "seeded provider bundle and interpreter could not be verified"
+    if mode == "source-scoped":
+        media = tmp_path / "media"
+        media.mkdir()
+        path = media / "movie.mkv"
+        path.write_bytes(b"fixture movie")
+        info = path.stat()
+        source_file = SourceMediaFile(path, (info.st_dev, info.st_ino), media)
+        with pytest.raises(SourceMediaRefused, match=refusal):
+            worker.request("search", source_media=lambda: source_file)
+    else:
+        with pytest.raises(WorkerError, match=refusal):
+            worker.start()
+    assert worker.process is None
+
+
+def test_unsigned_wheel_failure_leaves_the_provider_in_the_catalog(tmp_path, monkeypatch, keys, caplog):
+    from provider_hub import seed
+
+    _build_runtime_snapshot(tmp_path, monkeypatch, keys, unsigned=True, missing_provider_wheel=True)
+    assert {item["manifest"]["provider_id"] for item in _seeded()[0]["providers"]} == {"examplehub", "exampleother"}
+    assert seed.select_release(tmp_path / "hub", "examplehub") is None
+    assert seed.select_release(tmp_path / "hub", "exampleother").seeded
+    assert "no runnable wheel closure for: examplehub" in caplog.text
+
+
+def test_signed_revocation_refuses_seed_selection_and_marketplace_install(
+    tmp_path, monkeypatch, keys, register_seed_translator, hub,
+):
+    from provider_hub import seed
+
+    _build_runtime_snapshot(tmp_path, monkeypatch, keys, revocations=[{"id": "examplehub", "version": "1.0.0"}])
+    _unreachable(monkeypatch)
+    hub.refresh_catalog()
+    assert seed.select_release(tmp_path / "hub", "examplehub") is None
+    with pytest.raises(hub.ProviderHubInstallError, match="revoked by the official catalog"):
+        hub.install_catalog_entry("official", "examplehub", "1.0.0")
+
+
+def test_a_cached_bundled_google_entry_cannot_install_after_signature_damage(runtime_snapshot, hub, monkeypatch):
+    from provider_hub import seed
+
+    _unreachable(monkeypatch)
+    hub.refresh_catalog()
+    source = runtime_snapshot / SIGNED_FILES[1]
+    source.chmod(0o644)
+    source.write_bytes(_tamper(source.read_bytes()))
+    source.chmod(0o444)
+    assert {entry["provider_id"] for entry in hub.list_catalog()["entries"]} == {"examplehub", "exampleother"}
+    monkeypatch.setattr(hub, "_fetch_bundle", lambda *_a, **_k: pytest.fail("cannot trust the cached seed manifest"))
+    with pytest.raises(hub.ProviderHubInstallError, match="bundled plugin catalog no longer verifies"):
+        hub.stage_install(
+            next(entry["manifest"] for entry in hub.load_state()["catalog_entries"].values()
+                 if entry["provider_id"] == seed.GOOGLE_PLUGIN_ID),
+            source_id="official",
+        )
+
+
+def test_google_first_start_prefers_an_existing_config_release_on_a_tie(
+    runtime_snapshot, hub, google_startup, monkeypatch,
+):
+    from provider_hub import seed
+
+    _unreachable(monkeypatch)
+    _no_network(monkeypatch, hub)
+    root = hub.provider_hub_dir()
+    previous = runtime_snapshot / "without-runtime"
+    runtime = runtime_snapshot / seed.RUNTIME_DIR
+    runtime_snapshot.chmod(0o755)
+    runtime.rename(previous)
+    runtime_snapshot.chmod(0o555)
+    try:
+        # The raw floor remains signed and usable. In the absence of the derived
+        # runtime this first install stages the official bundle in config.
+        hub.refresh_catalog()
+        digest = hub.install_consent("official", seed.GOOGLE_PLUGIN_ID, "1.0.0")["digest"]
+        staged = hub.install_catalog_entry("official", seed.GOOGLE_PLUGIN_ID, "1.0.0", consent_digest=digest)
+        assert Path(staged["staged_path"]).is_relative_to(root)
+        assert hub.activate_staged_installations() == [seed.GOOGLE_PLUGIN_ID]
+    finally:
+        runtime_snapshot.chmod(0o755)
+        previous.rename(runtime)
+        runtime_snapshot.chmod(0o555)
+
+    monkeypatch.setattr(hub.PluginEnvironment, "install", lambda *_a, **_k: pytest.fail("unexpected pip"))
+    start, store = google_startup
+    assert start()
+    row = hub.load_state()["installations"][seed.GOOGLE_PLUGIN_ID]
+    assert row["active_path"] == staged["staged_path"]
+    instance, = store.list_instances(seed.GOOGLE_PLUGIN_ID)
+    assert store.pointers() == (instance.id, None)
+
+
+@pytest.mark.parametrize("reason", ["host_version", "signed_revocation"])
+def test_google_startup_and_worker_reject_a_config_release_before_ranking_it(
+    reason, tmp_path, monkeypatch, keys, register_seed_translator, hub, google_startup,
+):
+    from provider_hub import revocation, seed
+    from subtitles.tools.translate.runtime.worker_binding import TranslatorWorkers
+
+    fields = {"version": "2.0.0"}
+    if reason == "host_version":
+        fields["min_host_version"] = "3.0.0"
+    monkeypatch.setenv("BAZARR_VERSION", "3.0.0")
+    old = _build_runtime_snapshot(tmp_path / "installed-image", monkeypatch, keys, google_fields=fields)
+    # Install into config through the regular signed Marketplace pathway.
+    old.chmod(0o755)
+    (old / seed.RUNTIME_DIR).rename(old / "without-runtime")
+    old.chmod(0o555)
+    _unreachable(monkeypatch)
+    _no_network(monkeypatch, hub)
+    hub.refresh_catalog()
+    digest = hub.install_consent("official", seed.GOOGLE_PLUGIN_ID, "2.0.0")["digest"]
+    hub.install_catalog_entry("official", seed.GOOGLE_PLUGIN_ID, "2.0.0", consent_digest=digest)
+    assert hub.activate_staged_installations() == [seed.GOOGLE_PLUGIN_ID]
+    root = hub.provider_hub_dir()
+    active = hub.load_state()["installations"][seed.GOOGLE_PLUGIN_ID]
+    assert active["active_version"] == "2.0.0" and Path(active["active_path"]).is_relative_to(root)
+    definitions = TranslatorWorkers(hub_dir=lambda: root)
+    assert definitions.resolve(seed.GOOGLE_PLUGIN_ID) is not None
+
+    monkeypatch.setenv("BAZARR_VERSION", "2.8.0")
+    revoked = [{"id": seed.GOOGLE_PLUGIN_ID, "version": "2.0.0"}] if reason == "signed_revocation" else None
+    current = _build_runtime_snapshot(tmp_path / "boot-image", monkeypatch, keys, revocations=revoked)
+    assert revocation.stored_lists(hub.load_state()) == {}
+    assert definitions.resolve(seed.GOOGLE_PLUGIN_ID) is None
+
+    monkeypatch.setattr(hub.PluginEnvironment, "install", lambda *_a, **_k: pytest.fail("unexpected pip"))
+    start, store = google_startup
+    assert start()
+    row = hub.load_state()["installations"][seed.GOOGLE_PLUGIN_ID]
+    assert row["active_version"] == "1.0.0" and Path(row["active_path"]).is_relative_to(current)
+    instance, = store.list_instances(seed.GOOGLE_PLUGIN_ID)
+    assert store.pointers() == (instance.id, None)
+    assert revocation.stored_lists(hub.load_state()) == {}
+    assert definitions.resolve(seed.GOOGLE_PLUGIN_ID).bundle == Path(row["active_path"])
+
+
+def test_seeded_translator_update_waits_for_previous_release_data_writers(
+    tmp_path, monkeypatch, keys, register_seed_translator, hub_store, google_startup,
+):
+    from provider_hub import datadir, releases, seed, service as hub, state
+    from provider_hub.kinds import TRANSLATOR, get_kind
+
+    plugin_id = seed.GOOGLE_PLUGIN_ID
+    monkeypatch.setattr(state, "state_file", hub_store.legacy_state_path)
+    root = hub.provider_hub_dir()
+    _no_network(monkeypatch, hub)
+    _build_runtime_snapshot(tmp_path / "old-image", monkeypatch, keys, google_fields={"permissions": ["data_dir"]})
+    start, store = google_startup
+    assert start()
+    selection = store.pointers()
+    active = hub.load_state()["installations"][plugin_id]
+    old_data = datadir.release_path(root, plugin_id, active["active_data_key"])
+    old_file = old_data / "state.txt"
+    old_file.write_text("before the update")
+
+    new_image = _build_runtime_snapshot(tmp_path / "new-image", monkeypatch, keys,
+                                        google_fields={"version": "1.1.0", "permissions": ["data_dir"]})
+    monkeypatch.setattr(hub, "_previous_workers_stopped", lambda: False)
+    listdir = os.listdir
+    old_stat = old_data.stat()
+    renamed = old_file.with_name("renamed.txt")
+    smoke_calls = []
+    kind = get_kind(TRANSLATOR)
+    smoke_test = kind.smoke_test
+
+    def smoke_final_data(manifest, bundle, interpreter, *, data_dir, timeout=None):
+        smoke_calls.append((manifest.version, data_dir, (data_dir / renamed.name).read_text()))
+        return smoke_test(manifest, bundle, interpreter, data_dir=data_dir, timeout=timeout)
+
+    monkeypatch.setattr(kind, "smoke_test", smoke_final_data)
+
+    def list_while_previous_worker_writes(directory):
+        names = listdir(directory)
+        copying_old_data = (os.path.samestat(os.fstat(directory), old_stat) if isinstance(directory, int)
+                            else Path(directory) == old_data)
+        if copying_old_data:
+            # A writer can rename the file after listing but before the copy stats it.
+            old_file.rename(renamed)
+        return names
+
+    with monkeypatch.context() as race:
+        race.setattr(datadir.os, "listdir", list_while_previous_worker_writes)
+        assert not start()
+        staged_release, = hub_store.list_releases(plugin_id, states=(releases.STAGED,))
+        assert hub.activate_staged_installations() == []
+        assert hub_store.list_releases(plugin_id, states=(releases.STAGED,)) == [staged_release]
+
+    staged = hub.load_state()["installations"][plugin_id]
+    assert staged["active_version"] == "1.0.0" and staged["staged_version"] == "1.1.0"
+    assert staged["active_data_key"] == old_data.name
+    assert staged["data_worker_cleanup_pending"] is True
+    assert not smoke_calls
+    assert "staged_data_fingerprint" not in staged
+    assert staged_release.data_key and staged_release.data_key != old_data.name
+    staged_data = datadir.release_path(root, plugin_id, staged_release.data_key)
+    assert not staged_data.exists()
+
+    old_file.rename(renamed)
+    renamed.write_text("final write")
+    monkeypatch.setattr(hub, "_previous_workers_stopped", lambda: True)
+    # A replacement row must be detectable even when SQLite reuses its numeric ID.
+    monkeypatch.setattr(releases, "now_text", lambda: "2099-01-01T00:00:00Z")
+    apply_plan = releases.apply_plan
+
+    def reject_promotion(connection, plan):
+        apply_plan(connection, plan)
+        if any(row_id == staged_release.id and fields.get("state") == releases.ACTIVE
+               for row_id, fields, _ in plan.updates):
+            raise RuntimeError("fixture interrupted the promotion")
+
+    with monkeypatch.context() as database:
+        database.setattr(releases, "apply_plan", reject_promotion)
+        assert hub.activate_staged_installations() == []
+    assert hub_store.list_releases(plugin_id, states=(releases.STAGED,)) == [staged_release]
+    assert smoke_calls == [("1.1.0", staged_data, "final write")]
+    (staged_data / renamed.name).write_text("left by the interrupted attempt")
+
+    assert hub.activate_staged_installations() == [plugin_id]
+    active_release, = hub_store.list_releases(plugin_id, states=(releases.ACTIVE,))
+    assert (active_release.id, active_release.created_at) == (staged_release.id, staged_release.created_at)
+    assert active_release.data_key == staged_release.data_key == staged["staged_data_key"]
+    active = hub.load_state()["installations"][plugin_id]
+    assert active["active_version"] == "1.1.0" and Path(active["active_path"]).is_relative_to(new_image)
+    current_data = datadir.release_path(root, plugin_id, active["active_data_key"])
+    assert current_data == staged_data
+    assert smoke_calls == [("1.1.0", current_data, "final write")] * 2
+    assert (current_data / renamed.name).read_text() == "final write"
+    assert store.pointers() == selection
+
+
+def test_failed_seed_smoke_keeps_the_data_of_a_concurrently_staged_release(
+    tmp_path, monkeypatch, keys, register_seed_translator, hub,
+):
+    from provider_hub import datadir, seed
+    from provider_hub.kinds import get_kind
+
+    _build_runtime_snapshot(tmp_path, monkeypatch, keys, google_fields={"permissions": ["data_dir"]})
+    plugin_id = seed.GOOGLE_PLUGIN_ID
+    root = hub.provider_hub_dir()
+    release = seed.select_release(root, plugin_id)
+    row = hub._staged_installation(release.manifest, None, release.bundle, release.interpreter, True,
+                                   source_id="official")
+    row["staged_data_key"] = "a" * 32
+    kept = datadir.release_path(root, plugin_id, row["staged_data_key"])
+    failed_folders = []
+
+    def fail(*args, data_dir, **kwargs):
+        failed_folders.append(data_dir)
+        kept.mkdir()
+        (kept / "state.txt").write_text("concurrent install")
+        hub.mutate_state(lambda state: state["installations"].update({plugin_id: row}))
+        raise RuntimeError("seed smoke failed")
+
+    monkeypatch.setattr(get_kind(release.manifest.kind), "smoke_test", fail)
+    with pytest.raises(hub.ProviderHubInstallError, match="seed smoke failed"):
+        hub._stage_validated(release.manifest, True, "catalog", "official", None,
+                             ready_release=release, expected_installation=None)
+    failed, = failed_folders
+    assert not failed.exists()
+    assert hub.load_state()["installations"][plugin_id]["staged_data_key"] == kept.name
+    assert (kept / "state.txt").read_text() == "concurrent install"
+
+
+def test_a_failed_probe_refuses_even_a_verified_seed_instead_of_claiming_landlock_is_absent(
+    runtime_snapshot, hub, monkeypatch,
+):
+    from provider_hub import sandbox, seed
+    from provider_hub.worker import ProviderWorkerClient, WorkerError, worker_command
+
+    release = seed.select_release(hub.provider_hub_dir(), "examplehub")
+    path = ROOT / "bazarr" / "provider_hub" / "worker_runner.py"
+    client = ProviderWorkerClient(worker_command(release.interpreter, path), cwd=release.bundle, env={
+        "BAZARR_PROVIDER_HUB_BUNDLE": str(release.bundle),
+        "BAZARR_PROVIDER_HUB_MANIFEST": json.dumps(release.manifest.raw),
+    })
+    failed = sandbox.SandboxProbe(abi=11, verified=False, absent=False, reason="fixture canary could not verify")
+    monkeypatch.setattr(sandbox, "provider_profile_enabled", lambda: True)
+    monkeypatch.setattr(sandbox, "probe_sandbox", lambda *_a, **_k: failed)
+    with pytest.raises(WorkerError, match="the sandbox could not be confirmed"):
+        client.start()
+    assert client.process is None
+
+
+def test_runtime_checks_keep_host_supported_config_service_pairs_available(tmp_path, monkeypatch):
+    from plugin_platform_helpers import oci_runtime, service_manifest
+    from provider_hub import seed
+    from provider_hub.compatibility import HostFacts
+
+    root = tmp_path / "hub"
+    bundle = root / "bundles" / "configservice" / "1.0.0"
+    bundle.mkdir(parents=True)
+    interpreter = root / "shared_envs" / "fixture" / "bin" / "python"
+    interpreter.parent.mkdir(parents=True)
+    manifest = service_manifest("configservice", **oci_runtime())
+    host = HostFacts("2.8.0", "linux-x86_64", frozenset({("oci", "daemon")}), in_container=True)
+    monkeypatch.setattr(seed, "current_host", lambda: host)
+    assert seed.resolve_paths(root, manifest, bundle, interpreter) == (bundle, interpreter)
+
+
+@pytest.mark.parametrize("denial", ["host_version", "baked_revocation", None])
+def test_reconciliation_applies_release_policy_before_smoke_testing_shared_config_env(
+    denial, hub, tmp_path, monkeypatch, keys,
+):
+    from plugin_platform_helpers import provider_manifest_v2
+    from provider_hub.manifest import validate_manifest
+    from provider_hub.state import save_state
+    from provider_hub.venv import environment_fingerprint
+
+    monkeypatch.setenv("BAZARR_VERSION", "2.8.0")
+    revoked = [{"id": "examplehub", "version": "1.0.0"}] if denial == "baked_revocation" else None
+    _build_runtime_snapshot(tmp_path, monkeypatch, keys, revocations=revoked)
+    raw = provider_manifest_v2("examplehub", file_payloads={"provider.py": PROVIDER_FILE})
+    if denial == "host_version":
+        raw["min_host_version"] = "3.0.0"
+    root = hub.provider_hub_dir()
+    original_python = root / "envs" / "examplehub" / "1.0.0" / "legacy" / "bin" / "python"
+    shared_python = root / "shared_envs" / "fixture" / "bin" / "python"
+    for interpreter in (original_python, shared_python):
+        interpreter.parent.mkdir(parents=True)
+        interpreter.touch()
+    bundle = root / "bundles" / "examplehub" / "1.0.0" / FLOOR_COMMIT
+    bundle.mkdir(parents=True)
+    (bundle / "provider.py").write_bytes(PROVIDER_FILE)
+    state = hub.load_state()
+    state["installations"]["examplehub"] = {
+        "provider_id": "examplehub", "state": "active", "active_version": "1.0.0",
+        "manifest": raw, "active_path": str(bundle), "python_path": str(original_python),
+    }
+    key = environment_fingerprint(validate_manifest(raw))
+    state["plugin_envs"] = {key: {"path": str(shared_python.parent.parent)}}
+    save_state(state)
+    probes = []
+    monkeypatch.setattr(hub, "_smoke_validate_worker", lambda *_args: probes.append(True))
+
+    assert hub.reconcile_plugin_environments()["repointed"] == ([] if denial else ["examplehub"])
+    assert probes == ([] if denial else [True])
+    if denial == "host_version":
+        result = hub.test_provider_connection("examplehub")
+        assert not result["ok"] and "needs Bazarr+ 3.0.0" in result["message"]
+        assert not hub.load_state()["installations"]["examplehub"].get("needs_repair")
+
+
+@pytest.mark.parametrize("enabled", [True, False])
+def test_refused_first_activation_preserves_owner_settings_for_a_retired_provider(
+    enabled, hub, monkeypatch,
+):
+    from app.config import settings
+    from plugin_platform_helpers import provider_manifest_v2
+    from provider_hub import registry
+    from provider_hub.manifest import validate_manifest
+    from provider_hub.startup import start_after_migrations
+    from provider_hub.state import save_state
+
+    provider_id = "argenteamdump"
+    monkeypatch.setenv("BAZARR_DISABLE_PROVIDER_AUTOINSTALL", "true")
+    monkeypatch.setenv("BAZARR_VERSION", "2.8.0")
+    monkeypatch.setattr(settings.general, "enabled_providers", [provider_id] if enabled else [])
+    monkeypatch.setattr(settings.general, "disabled_providers", [] if enabled else [provider_id])
+    monkeypatch.setattr(settings.general, "provider_priorities", {provider_id: 70})
+    saved_section = {"username": "fixture-owner"}
+    monkeypatch.setattr(settings, provider_id, saved_section, raising=False)
+    monkeypatch.setattr(registry, "_REGISTRATION_INCOMPLETE", set())
+    monkeypatch.setattr("app.config.write_config", lambda: True)
+    removed = []
+    monkeypatch.setattr("app.config.remove_settings_section", removed.append)
+    monkeypatch.setattr(hub, "_smoke_validate_worker", lambda *_a: pytest.fail("incompatible provider was started"))
+
+    raw = provider_manifest_v2(provider_id, min_host_version="3.0.0")
+    root = hub.provider_hub_dir()
+    bundle = root / "bundles" / provider_id / "1.0.0" / FLOOR_COMMIT
+    interpreter = root / "shared_envs" / "fixture" / "bin" / "python"
+    installation = hub._staged_installation(
+        validate_manifest(raw), {}, bundle, interpreter, True, source_id="official", catalog_list="plugins",
+    )
+    state = hub.load_state()
+    state["installations"][provider_id] = installation
+    save_state(state)
+
+    assert start_after_migrations()
+    failed = hub.load_state()["installations"][provider_id]
+    assert failed["state"] == "failed" and not failed.get("active_version")
+    assert "needs Bazarr+ 3.0.0" in failed["last_error"]
+    assert settings.general.enabled_providers == ([provider_id] if enabled else [])
+    assert settings.general.disabled_providers == ([] if enabled else [provider_id])
+    assert settings.general.provider_priorities == {provider_id: 70}
+    assert getattr(settings, provider_id) == saved_section and provider_id not in removed
+
+
+@pytest.mark.parametrize("boot", ["same", "next", "same-with-choice"])
+def test_deferred_google_activation_finishes_default_selection_on_that_boot(
+    boot, tmp_path, monkeypatch, keys, register_seed_translator, hub, google_startup,
+):
+    import sys
+    from app.config import settings
+    from app.startup import prepare_database_and_plugins
+    from provider_hub import startup as hub_startup
+    from provider_hub.state import mutate_state
+    from subtitles.tools.translate import runtime
+
+    _no_network(monkeypatch, hub)
+    _build_runtime_snapshot(tmp_path / "old-image", monkeypatch, keys,
+                            google_fields={"permissions": ["data_dir"]})
+    start, store = google_startup
+    assert start()
+    store.set_engine(None)
+    mutate_state(lambda state: state.pop("google_seed_selected", None))
+    new_image = _build_runtime_snapshot(tmp_path / "new-image", monkeypatch, keys,
+                                        google_fields={"version": "1.1.0", "permissions": ["data_dir"]})
+    workers_ready = [False]
+    monkeypatch.setattr(hub, "_previous_workers_stopped", lambda: workers_ready[0])
+    database = sys.modules["app.database"]
+    monkeypatch.setattr(database, "migrate_db", lambda _app: None, raising=False)
+    monkeypatch.setattr(database, "upgrade_languages_profile_values", lambda: None, raising=False)
+    monkeypatch.setattr(database, "fix_languages_profiles_with_duplicate_ids", lambda: None, raising=False)
+    monkeypatch.setattr(runtime, "run_startup_tasks", lambda: True)
+    monkeypatch.setattr("app.config.write_config", lambda: True)
+    monkeypatch.setattr(settings.general, "enabled_providers", [])
+    monkeypatch.setattr(settings.general, "disabled_providers", [])
+    real_start = hub_startup.start_after_migrations
+    other_engine = store.create_instance("example_engine") if boot == "same-with-choice" else None
+
+    def finish_boot():
+        if other_engine is not None:
+            store.set_engine(other_engine.id)
+        workers_ready[0] = True
+        return real_start()
+
+    if boot != "next":
+        monkeypatch.setattr(hub_startup, "start_after_migrations", finish_boot)
+    else:
+        # The first full boot stays deferred, with no migration marker or pointer.
+        assert prepare_database_and_plugins(object())
+        assert hub.load_state()["installations"]["google_translate"]["state"] == "staged"
+        assert store.pointers() == (None, None)
+        assert not hub.load_state().get("google_seed_selected")
+        workers_ready[0] = True
+    assert prepare_database_and_plugins(object())
+    active = hub.load_state()["installations"]["google_translate"]
+    assert active["state"] == "active" and active["active_version"] == "1.1.0"
+    assert Path(active["active_path"]).is_relative_to(new_image)
+    google, = store.list_instances("google_translate")
+    if other_engine is None:
+        assert store.pointers() == (google.id, None)
+        assert hub.load_state()["google_seed_selected"] is True
+    else:
+        assert store.pointers() == (other_engine.id, None)
+        assert "google_seed_selected" not in hub.load_state()

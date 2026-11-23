@@ -43,10 +43,11 @@ import stat
 import threading
 
 from dataclasses import dataclass
+from functools import cached_property
 from pathlib import Path
 from typing import Any
 
-from . import catalog_feed
+from . import catalog_feed, revocation
 from .bundle import BundleValidationError
 from .state import (
     OFFICIAL_CATALOG_REPO,
@@ -157,6 +158,16 @@ class Floor:
         """The verified signed catalog, parsed afresh, or None when the snapshot has none that verified."""
         return json.loads(self.signed_bytes) if self.signed_bytes is not None else None
 
+    @cached_property
+    def release_revocations(self) -> dict[str, revocation.ChannelList]:
+        """The verified list with its channel and signed sequence number."""
+        document = self.signed_catalog()
+        if document is None:
+            return {}
+        return {self.branch: revocation.ChannelList(
+            document["signed_version"], revocation.parse(document.get(revocation.FIELD_NAME)),
+        )}
+
     def read(self, path: str) -> bytes:
         """The bytes of one snapshot file, checked against floor.json first."""
         expected = self.files.get(path)
@@ -201,10 +212,23 @@ _cache: tuple[tuple[Any, ...], Floor] | None = None
 
 
 def _meta_signature(root: Path) -> tuple[Any, ...]:
-    info = (root / META_FILE).lstat()
-    # The signed feed is judged against the roots this process trusts, so a different set is a different result.
+    def identity(path: str) -> tuple[int, ...] | None:
+        try:
+            info = (root / path).lstat()
+        except OSError as error:
+            if path == META_FILE:
+                raise
+            return (error.errno,) if error.errno is not None else None
+        return info.st_ino, info.st_mode, info.st_size, info.st_mtime_ns, info.st_ctime_ns
+
+    # An image should be immutable. If a repacked floor changes after boot,
+    # a cached verification must not keep vouching for its signed plugins.
+    paths = [META_FILE, CATALOG_FILE, catalog_feed.KEY_FILE_PATH]
+    for channel in (catalog_feed.CHANNEL_MAIN, catalog_feed.CHANNEL_BETA):
+        paths.extend((catalog_feed.SIGNED_CATALOG_PATH.format(channel=channel),
+                      catalog_feed.SIGNED_ENVELOPE_PATH.format(channel=channel)))
     roots = tuple(sorted(catalog_feed.trusted_roots().items()))
-    return (str(root), info.st_ino, info.st_size, info.st_mtime_ns, roots)
+    return str(root), roots, tuple(identity(path) for path in paths)
 
 
 def _checked_read(root: Path, files: dict[str, str], path: str) -> bytes | None:
@@ -261,6 +285,11 @@ def _verified_signed_feed(root: Path, branch: str, commit: str, files: dict[str,
     if not isinstance(document.get("providers"), list) or not document["providers"]:
         logger.warning("The bundled signed catalog is not used, so the bundled catalog seeds providers only: "
                        "it has no providers list")
+        return None
+    try:
+        revocation.parse(document.get(revocation.FIELD_NAME))
+    except revocation.RevocationFormatError as error:
+        logger.warning("The bundled signed catalog is not used, so the bundled catalog seeds providers only: %s", error)
         return None
     return body
 
@@ -348,6 +377,23 @@ def seed_candidate(source: dict[str, Any], entries: dict[str, Any]) -> tuple[dic
         return {key: signed[key] for key in keys if key in signed}, floor.commit
     document = floor.catalog()
     return {key: value for key, value in document.items() if key != "plugins"}, floor.commit
+
+
+def baked_revocation_lists() -> dict[str, revocation.ChannelList]:
+    """Read the image's verified policy without touching the fetched feed ledger."""
+    snapshot = _usable_floor()
+    return snapshot.release_revocations if snapshot is not None else {}
+
+
+def signed_context(source: dict[str, Any]) -> dict[str, Any] | None:
+    """Recheck the signed catalog behind a cached bundled source."""
+    marker = source.get("floor_seed")
+    if not isinstance(marker, dict):
+        return None
+    snapshot = _usable_floor()
+    if snapshot is None or marker.get("commit") != snapshot.commit:
+        return None
+    return snapshot.signed_catalog()
 
 
 def trust_source(source: dict[str, Any]) -> None:

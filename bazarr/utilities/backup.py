@@ -8,12 +8,19 @@ import shutil
 import subprocess
 import logging
 import re
+import secrets
+import stat
+import tempfile
 import yaml
 
-from contextlib import closing
+from contextlib import closing, suppress
 from datetime import datetime, timedelta, timezone
 from zipfile import ZipFile, BadZipFile, ZIP_DEFLATED
 from glob import glob
+from pathlib import Path, PureWindowsPath
+from string import ascii_lowercase, ascii_uppercase
+
+from provider_hub import datadir, secret_paths
 
 from app.get_args import args
 from app.config import settings
@@ -21,7 +28,7 @@ from app.postgres_url import postgres_engine_url
 from app.event_handler import event_stream
 from app.jobs_queue import jobs_queue
 from literals import EXIT_RESTORE_ERROR
-from utilities.central import restart_bazarr, stop_bazarr
+from utilities.central import (BACKUP_STAGE_DIR, OLD_RESTORE_STATE, PLUGIN_RESTORE_PHASE, restart_bazarr, stop_bazarr)
 
 _BACKUP_FILENAME_RE = re.compile(r'^bazarr_backup_v[\w.\-]+\.zip$')
 
@@ -36,6 +43,17 @@ POSTGRES_ARCHIVE_NAME = 'bazarr_postgres.dump'
 # everything restore looks for, so the next start neither applies it nor
 # deletes it, and the operator still has the extracted file to retry from.
 POSTGRES_FAILED_ARCHIVE_NAME = f'{POSTGRES_ARCHIVE_NAME}.failed'
+_CONFIG_ARCHIVE_NAMES = ('config.yaml', 'config.ini')
+_DATABASE_ARCHIVE_NAMES = (SQLITE_ARCHIVE_NAME, POSTGRES_ARCHIVE_NAME, POSTGRES_FAILED_ARCHIVE_NAME)
+_PLUGIN_ARCHIVE_NAMES = (datadir.ARCHIVE_DIR, datadir.OMISSIONS_ARCHIVE, secret_paths.HISTORY_ARCHIVE)
+_BACKUP_STAGE = BACKUP_STAGE_DIR
+_RETIRED_RESTORE = '.backup-consumed'
+_RETIRED_FOLDERS = '.applied_plugin_data'
+_PLUGIN_RESTORE_PHASE = PLUGIN_RESTORE_PHASE
+_DATABASE_STARTED = 'database-started'
+_DATABASE_COMPLETE = 'database-complete'
+_DATA_READY = 'data-ready'
+_OLD_RESTORE_STATE = OLD_RESTORE_STATE
 
 # pg_restore keeps going past an error and reports how many it ignored, and it
 # exits non-zero when it did. One error class is benign: a dump written by a
@@ -78,6 +96,10 @@ class PostgresUnreachableError(BackupError):
     answers, so the staged files are kept for the next start.
     """
     pass
+
+
+class DatabaseRestoreUncertainError(BackupError):
+    """The database may have changed without a confirmed restore result."""
 
 
 def _postgres_enabled():
@@ -221,11 +243,26 @@ def _run_postgres_tool(tool_name, command, connection, ran_error=BackupError):
         environment.pop('PGPASSWORD', None)
 
     try:
-        result = subprocess.run(command, env=environment, capture_output=True, text=True, check=False)
+        process = subprocess.Popen(command, env=environment, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                   text=True)
     except OSError as error:
-        # The process never started, so nothing it would have done happened.
         raise BackupError(f'Unable to run {tool_name}: {error}') from error
 
+    restores_database = ran_error is PostgresRestoreStartedError
+    try:
+        stdout, stderr = process.communicate()
+    except (OSError, UnicodeError, subprocess.SubprocessError) as error:
+        # A communication failure gives no evidence about the child or the database.
+        for stream in (process.stdout, process.stderr):
+            if stream is not None:
+                with suppress(OSError):
+                    stream.close()
+        failure = DatabaseRestoreUncertainError if restores_database else BackupError
+        raise failure(f'Unable to read the result of {tool_name}') from error
+
+    result = subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
+    if restores_database and (result.returncode < 0 or (os.name == 'nt' and result.returncode > 255)):
+        raise DatabaseRestoreUncertainError(f'{tool_name} was interrupted (exit status {result.returncode})')
     if result.returncode != 0:
         raise ran_error(f'{tool_name} exited with code {result.returncode}: '
                         f'{result.stderr.strip() or "no output"}')
@@ -288,7 +325,29 @@ def _postgres_server_major(connection):
         return None
 
 
-def _check_postgres_reachable(connection):
+_SEARCH_PATH_NAME = re.compile(r'\s*(?:"((?:[^"]|"")*)"|([^\s,"]+))\s*(?:,|$)')
+_POSTGRES_IDENTIFIER_CASE = str.maketrans(ascii_uppercase, ascii_lowercase)
+
+
+def _postgres_search_path_names(search_path, role):
+    """Read configured names, including those PostgreSQL skipped because they do not exist yet."""
+    names = []
+    offset = 0
+    while offset < len(search_path):
+        match = _SEARCH_PATH_NAME.match(search_path, offset)
+        if match is None:
+            return []
+        quoted, unquoted = match.groups()
+        name = quoted.replace('""', '"') if quoted is not None else unquoted.translate(_POSTGRES_IDENTIFIER_CASE)
+        if name == '$user':
+            name = role
+        if name != 'pg_temp':
+            names.append(name)
+        offset = match.end()
+    return names
+
+
+def _check_postgres_reachable(connection, *, resolve_plugin_schemas=False):
     """Raise PostgresUnreachableError unless the database takes a connection.
 
     Uses the settings pg_restore gets. pg_restore exits non-zero when it cannot
@@ -306,10 +365,61 @@ def _check_postgres_reachable(connection):
     if connection['password']:
         arguments['password'] = str(connection['password'])
     try:
-        driver.connect(_postgres_conninfo(connection), **arguments).close()
+        with closing(driver.connect(_postgres_conninfo(connection), **arguments)) as client:
+            if resolve_plugin_schemas:
+                with closing(client.cursor()) as cursor:
+                    cursor.execute('''
+                        SELECT (SELECT n.nspname
+                            FROM pg_catalog.pg_class AS c
+                            JOIN pg_catalog.pg_namespace AS n ON n.oid = c.relnamespace
+                            WHERE c.oid = pg_catalog.to_regclass('provider_hub_state')),
+                            pg_catalog.current_schema(), pg_catalog.current_setting('search_path'), current_user,
+                            NOT EXISTS (SELECT 1 FROM pg_catalog.pg_class AS c
+                                JOIN pg_catalog.pg_namespace AS n ON n.oid = c.relnamespace
+                                WHERE pg_catalog.left(n.nspname, 3) <> 'pg_'
+                                AND n.nspname <> 'information_schema')
+                    ''')
+                    inventory, current, search_path, role, empty = cursor.fetchone()
+                schemas = [inventory or current]
+                # On an empty database a full dump can create the configured
+                # namespace. Once there is existing data, keep the authority
+                # of the inventory (or default schema) this connection sees.
+                if inventory is None and empty:
+                    schemas.extend(_postgres_search_path_names(search_path, role))
+                return tuple(dict.fromkeys(schema for schema in schemas if schema))
     except Exception as error:
         raise PostgresUnreachableError(
             f'The PostgreSQL database could not be reached: {str(error).strip()}') from error
+
+
+def _verify_postgres_plugin_schema(dump_path):
+    """Require the dump's only plugin inventory to replace the one this connection reads."""
+    pg_restore = shutil.which('pg_restore')
+    if pg_restore is None:
+        raise BackupError(f'pg_restore was not found on PATH. {_PG_TOOLS_HINT}')
+    connection = _postgres_connection_settings()
+    if not _postgres_names_database(connection):
+        raise BackupError('No PostgreSQL database name is configured for the plugin data restore.')
+    schemas = _check_postgres_reachable(connection, resolve_plugin_schemas=True)
+    if not schemas:
+        raise BackupError('The configured PostgreSQL connection does not resolve a plugin inventory schema.')
+
+    def inventory_entries(*selection):
+        # Let pg_restore select names, including schemas with spaces. The list
+        # contains object names and IDs, never data from any archived rows.
+        result = subprocess.run([pg_restore, '--list', '--table=provider_hub_state', *selection, dump_path],
+                                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, errors='replace')
+        if result.returncode != 0:
+            raise BackupError('The PostgreSQL dump catalog could not be read.')
+        return [entry for line in result.stdout.splitlines()
+                if (entry := re.match(r'^\d+;\s+\d+\s+\d+\s+(TABLE DATA|TABLE) ', line))]
+
+    archived = inventory_entries()
+    target = inventory_entries(*(f'--schema={schema}' for schema in schemas))
+    expected = ['TABLE', 'TABLE DATA']
+    if sorted(entry[1] for entry in archived) != expected or sorted(entry[1] for entry in target) != expected:
+        raise BackupError('The PostgreSQL backup must contain a single plugin inventory in the schema '
+                          'the configured connection uses. The database was not changed.')
 
 
 def _dump_postgres_database(dest_path):
@@ -350,7 +460,7 @@ def _restore_postgres_database(dump_path):
     logging.debug('Restoring PostgreSQL database %s from %s', connection['database'], dump_path)
     try:
         _run_postgres_tool('pg_restore', command, connection, ran_error=PostgresRestoreStartedError)
-    except BackupError as error:
+    except PostgresRestoreStartedError as error:
         if not _errors_are_only_unknown_parameters(str(error)):
             raise
         logging.warning('pg_restore reported only unknown server parameters, which a dump written by a '
@@ -387,7 +497,7 @@ def _database_archive_name():
     return POSTGRES_ARCHIVE_NAME if _postgres_enabled() else SQLITE_ARCHIVE_NAME
 
 
-def _wrong_engine_archive_message():
+def _wrong_engine_archive_message(restore):
     """Say what a complete archive from the other engine holds, or None.
 
     A backup taken on the other engine is not a partial backup, it is a
@@ -400,20 +510,51 @@ def _wrong_engine_archive_message():
     else:
         present, holds = POSTGRES_ARCHIVE_NAME, f'a PostgreSQL dump ({POSTGRES_ARCHIVE_NAME})'
         engine, expected = 'SQLite', SQLITE_ARCHIVE_NAME
-    if not os.path.isfile(os.path.join(get_restore_path(), present)):
+    if not (restore / present).is_file():
         return None
     return f'This backup holds {holds}; this instance runs {engine} and needs {expected}.'
 
 
-def _clear_restore_directory():
-    """Drop whatever an extracted archive left in the restore directory.
+def _restore_paths():
+    restore = Path(get_restore_path())
+    stage = restore / _BACKUP_STAGE
+    if stage.is_symlink() or stage.is_junction() or (stage.exists() and not stage.is_dir()):
+        raise BackupError('The staged backup path is not a regular directory.')
+    if not stage.is_dir():
+        return restore, restore
+    payload = stage / 'payload'
+    if payload.is_symlink() or payload.is_junction() or not payload.is_dir():
+        raise BackupError('The staged backup is missing its extraction directory.')
+    return stage, payload
 
-    Anything left there is picked up again on the next boot, which is how one
-    failed restore becomes a restore loop.
-    """
-    for name in ('config.yaml', 'config.ini', SQLITE_ARCHIVE_NAME, POSTGRES_ARCHIVE_NAME,
-                 POSTGRES_FAILED_ARCHIVE_NAME):
-        _delete_file(os.path.join(get_restore_path(), name))
+
+def _remove_retired_restore(path):
+    try:
+        datadir.remove(path)
+    except OSError:
+        logging.warning('Could not remove consumed restore files at %s.', path, exc_info=True)
+
+
+def _clear_restore_directory(stage, payload):
+    """Retire an API restore as a unit. Clean only known files for a manual restore."""
+    if stage != payload:
+        retired = stage.with_name(_RETIRED_RESTORE)
+        datadir.remove(retired)
+        stage.rename(retired)
+        datadir.sync_directory(stage.parent)
+        _remove_retired_restore(retired)
+        return
+
+    for name in (*_CONFIG_ARCHIVE_NAMES, *_DATABASE_ARCHIVE_NAMES, *_PLUGIN_ARCHIVE_NAMES[1:]):
+        (payload / name).unlink(missing_ok=True)
+    folders, retired = payload / datadir.ARCHIVE_DIR, payload / _RETIRED_FOLDERS
+    if folders.exists() or folders.is_symlink():
+        datadir.remove(retired)
+        folders.rename(retired)
+        datadir.sync_directory(payload)
+    (stage / _PLUGIN_RESTORE_PHASE).unlink(missing_ok=True)
+    datadir.sync_directory(stage)
+    _remove_retired_restore(retired)
 
 
 def _backup_prerequisites_met():
@@ -447,11 +588,44 @@ def _validate_backup_filename(filename):
 def _safe_extract(zip_obj, dest_path):
     """Extract a ZIP archive while rejecting entries that escape `dest_path`."""
     dest_real = os.path.realpath(dest_path)
-    for member in zip_obj.namelist():
+    plugin_prefix = datadir.ARCHIVE_DIR + '/'
+    members = zip_obj.namelist()
+    for member in members:
+        if member.startswith(plugin_prefix):
+            parts = member.rstrip('/').split('/')
+            if (len(parts) < 3 or '\\' in member
+                    or any(part in ('', '.', '..') or PureWindowsPath(part).drive for part in parts)):
+                raise BadZipFile('Unsafe plugin data path in backup archive')
         member_real = os.path.realpath(os.path.join(dest_real, member))
         if member_real != dest_real and not member_real.startswith(dest_real + os.sep):
             raise BadZipFile(f'Unsafe path in backup archive: {member}')
-    zip_obj.extractall(path=dest_path)
+
+    executable_data = {}
+    if os.name == 'nt':
+        zip_obj.extractall(path=dest_path)
+    else:
+        # Use the same member order and duplicate-name lookup as extractall.
+        # Track the extracted file so a later alias cannot inherit its mode.
+        for member in members:
+            entry = zip_obj.getinfo(member)
+            path = Path(zip_obj.extract(entry, path=dest_path))
+            if entry.is_dir():
+                continue
+            extracted = path.lstat()
+            identity = (extracted.st_dev, extracted.st_ino)
+            archived_mode = entry.external_attr >> 16
+            if (member.startswith(plugin_prefix) and member.count('/') >= 3 and entry.create_system == 3
+                    and stat.S_ISREG(archived_mode) and archived_mode & stat.S_IXUSR
+                    and stat.S_ISREG(extracted.st_mode)):
+                executable_data[identity] = (path, stat.S_IMODE(extracted.st_mode))
+            else:
+                executable_data.pop(identity, None)
+    if (dest_path / datadir.ARCHIVE_DIR / datadir.RESTORE_APPLIED_MARKER).exists():
+        raise BadZipFile('Backup archive contains a plugin restore completion marker')
+    # ZIP extraction drops permissions. Only plugin data needs its owner
+    # execute bit back; all other archive permission bits remain ignored.
+    for path, mode in executable_data.values():
+        path.chmod(mode | stat.S_IXUSR)
 
 
 def get_backup_path():
@@ -497,6 +671,11 @@ def backup_to_zip(job_id=None, wait_for_completion=False):
                                          wait_for_completion=wait_for_completion)
         return True
 
+    with datadir.release_lock:
+        return _write_backup(job_id)
+
+
+def _write_backup(job_id):
     now = datetime.now()
     database_backup_file = None
     now_string = now.strftime("%Y.%m.%d_%H.%M.%S")
@@ -541,6 +720,7 @@ def backup_to_zip(job_id=None, wait_for_completion=False):
         with ZipFile(backup_file_path, 'w', compression=ZIP_DEFLATED, compresslevel=9) as backupZip:
             backupZip.write(database_backup_file, _database_archive_name())
             backupZip.write(config_file, 'config.yaml')
+            datadir.write_backup(backupZip)
     except Exception:
         # Half an archive is worse than none: it lists as a backup and refuses
         # to restore.
@@ -561,36 +741,53 @@ def _restore_database(restore_database_path, dest_database_path):
         _restore_postgres_database(restore_database_path)
         return
 
+    destination = Path(dest_database_path)
+    fd, temporary = tempfile.mkstemp(prefix=f'.{destination.name}-restore-', dir=destination.parent)
+    os.close(fd)
     try:
-        shutil.copy(restore_database_path, dest_database_path)
+        shutil.copy(restore_database_path, temporary)
+        datadir.sync_file(Path(temporary))
+        os.replace(temporary, destination)
     except (OSError, shutil.Error) as error:
         raise BackupError(f'Unable to restore the database to {dest_database_path}: {error}') from error
+    finally:
+        _delete_file(temporary)
 
     # The restored file is a complete database, so the write-ahead log and
     # shared-memory files sitting next to it describe one that no longer exists.
-    for suffix in ('-shm', '-wal'):
-        _delete_file(f'{dest_database_path}{suffix}')
+    try:
+        for suffix in ('-shm', '-wal'):
+            Path(f'{dest_database_path}{suffix}').unlink(missing_ok=True)
+        datadir.sync_directory(destination.parent)
+    except OSError as error:
+        raise DatabaseRestoreUncertainError('Unable to finish installing the SQLite database') from error
 
 
-def _refuse_start_after_failed_restore(failed_dump_path):
+def _refuse_start_after_failed_restore(failed_dump_path, journal):
     """Stop the start while a dump that pg_restore failed on is still parked.
 
-    That file is the only sign left that the database may be half restored:
-    the configuration beside it is gone, so without this check the next start
-    finds nothing to restore and runs on the damaged database.
+    The parked dump means the database may be half restored. Without this
+    check the next start could run on the damaged database.
     """
+    if journal.is_file():
+        logging.critical('An earlier PostgreSQL restore failed partway. Bazarr will not start on this '
+                         'database. Keep the dump at %s and the checkpoint at %s. Verify that the old '
+                         'process has exited and follow the backup documentation to recover the '
+                         'database before clearing the checkpoint.', failed_dump_path, journal)
+        stop_bazarr(EXIT_RESTORE_ERROR)
+        return
     logging.critical('An earlier restore of the PostgreSQL database failed partway, so the database '
                      'may be partially restored, and Bazarr will not start on it. The dump that was '
                      'being restored is kept at %s. To retry the restore from Bazarr, extract the '
                      'backup archive it came from (in %s) into %s, delete %s, and start Bazarr. To '
                      'restore the database yourself instead, run pg_restore --clean --if-exists '
                      '--no-owner --dbname <database> %s, then delete that file and start Bazarr.',
-                     failed_dump_path, get_backup_path(), get_restore_path(), failed_dump_path,
+                     failed_dump_path, get_backup_path(), os.path.dirname(failed_dump_path), failed_dump_path,
                      failed_dump_path)
     stop_bazarr(EXIT_RESTORE_ERROR)
 
 
-def _prepare_restored_configuration(source_path, staged_path):
+def _prepare_restored_configuration(source_path, staged_path, *, preserve_database=False):
     """Stage a restored config with a generation no existing cookie can carry.
 
     The Flask signing key stays as archived: named API tokens are HMACed with
@@ -625,7 +822,7 @@ def _prepare_restored_configuration(source_path, staged_path):
     def existing_key(mapping, wanted):
         matches = [key for key in mapping if isinstance(key, str) and key.lower() == wanted]
         if len(matches) > 1:
-            raise BackupError('The backup authentication settings are ambiguous')
+            raise BackupError(f'The backup has ambiguous settings for {wanted}')
         return matches[0] if matches else wanted
 
     auth_key = existing_key(restored, 'auth')
@@ -640,6 +837,29 @@ def _prepare_restored_configuration(source_path, staged_path):
     from app.auth.generation import generation_for_restore
     auth[generation_key] = generation_for_restore(archived_generation)
 
+    if preserve_database:
+        # The dump went to the currently configured database. The next boot
+        # must read its plugin inventory through the same connection settings.
+        database = dict(settings.postgresql)
+        from secret_store.registry import is_user_visible_secret
+
+        credentials = [field for field, value in database.items()
+                       if value and is_user_visible_secret(f'postgresql.{field.lower()}')]
+        if credentials:
+            from secret_store.crypto import encrypt_secret
+
+            general = restored.setdefault(existing_key(restored, 'general'), {})
+            if not isinstance(general, dict):
+                raise BackupError('The backup general settings are invalid')
+            key = existing_key(general, 'secrets_encryption_key')
+            master_key = general.get(key) or secrets.token_urlsafe(32)
+            if not isinstance(master_key, str):
+                raise BackupError('The backup encryption key is invalid')
+            general[key] = master_key
+            for field in credentials:
+                database[field] = encrypt_secret(database[field], master_key=master_key)
+        restored[existing_key(restored, 'postgresql')] = database
+
     prepared_path = f'{staged_path}.prepared'
     try:
         with open(prepared_path, 'w', encoding='utf-8') as handle:
@@ -652,22 +872,74 @@ def _prepare_restored_configuration(source_path, staged_path):
         _delete_file(prepared_path)
 
 
+def _write_plugin_restore_phase(path, phase):
+    fd, temporary = tempfile.mkstemp(prefix=path.name + '-', dir=path.parent)
+    try:
+        with os.fdopen(fd, 'w', encoding='ascii') as handle:
+            handle.write(phase + '\n')
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+        datadir.sync_directory(path.parent)
+    finally:
+        _delete_file(temporary)
+
+
+def _read_plugin_restore_phase(path):
+    if path.is_symlink():
+        raise BackupError('The plugin restore checkpoint is a link.')
+    if not path.exists():
+        return None
+    if not path.is_file():
+        raise BackupError('The plugin restore checkpoint is not a regular file.')
+    phase = path.read_text(encoding='ascii').strip()
+    if phase not in (_DATABASE_STARTED, _DATABASE_COMPLETE, _DATA_READY):
+        raise BackupError('The plugin restore checkpoint could not be read.')
+    return phase
+
+
 def restore_from_backup():
-    failed_dump_path = os.path.join(get_restore_path(), POSTGRES_FAILED_ARCHIVE_NAME)
-    if os.path.isfile(failed_dump_path):
-        _refuse_start_after_failed_restore(failed_dump_path)
+    """Run the ordinary restore, or finish a plugin restore that already ran it."""
+    root = Path(get_restore_path())
+    manual_failure = root / POSTGRES_FAILED_ARCHIVE_NAME
+    if manual_failure.is_file():
+        _refuse_start_after_failed_restore(manual_failure, root / _PLUGIN_RESTORE_PHASE)
+        return False
+    try:
+        if any((root / name).exists() for name in _OLD_RESTORE_STATE):
+            raise BackupError('An earlier restore format left recovery files in the restore directory.')
+        stage, payload = _restore_paths()
+        return _restore_from_archive(stage, payload)
+    except (BackupError, OSError, UnicodeError):
+        logging.exception('Backup restore stopped. Keep the staged files in %s for recovery.', root)
+        stop_bazarr(EXIT_RESTORE_ERROR)
         return False
 
-    if os.path.isfile(os.path.join(get_restore_path(), 'config.yaml')):
-        restore_config_path = os.path.join(get_restore_path(), 'config.yaml')
-    else:
-        restore_config_path = os.path.join(get_restore_path(), 'config.ini')
-    dest_config_path = os.path.join(args.config_dir, 'config', 'config.yaml')
 
+def _restore_from_archive(stage, payload):
+    journal = stage / _PLUGIN_RESTORE_PHASE
+    failed_dump_path = payload / POSTGRES_FAILED_ARCHIVE_NAME
+    if os.path.isfile(failed_dump_path):
+        _refuse_start_after_failed_restore(failed_dump_path, journal)
+        return False
+
+    dest_config_path = os.path.join(args.config_dir, 'config', 'config.yaml')
+    staged_config_path = f'{dest_config_path}.restore'
+    phase = _read_plugin_restore_phase(journal)
+    if phase == _DATABASE_STARTED:
+        raise BackupError(f'The database restore outcome could not be confirmed. Keep {payload} and '
+                          f'{journal} for recovery before retrying.')
+    if phase == _DATABASE_COMPLETE:
+        return _finish_plugin_database_restore(payload, journal, staged_config_path, dest_config_path)
+    if phase == _DATA_READY:
+        return False
+
+    restore_config_path = next((str(payload / name) for name in _CONFIG_ARCHIVE_NAMES
+                                if (payload / name).is_file()), str(payload / 'config.ini'))
     # The database artifact is named after the engine this instance runs on: a
     # SQLite install restores the database file, a PostgreSQL install restores
     # the pg_dump archive.
-    restore_database_path = os.path.join(get_restore_path(), _database_archive_name())
+    restore_database_path = str(payload / _database_archive_name())
     dest_database_path = os.path.join(args.config_dir, 'db', SQLITE_ARCHIVE_NAME)
 
     config_present = os.path.isfile(restore_config_path)
@@ -678,39 +950,62 @@ def restore_from_backup():
         return False
 
     if not (config_present and database_present):
-        wrong_engine = _wrong_engine_archive_message()
+        wrong_engine = _wrong_engine_archive_message(payload)
         if wrong_engine:
             logging.error('%s It cannot be restored here.', wrong_engine)
         else:
             logging.error('Cannot restore a partial backup. You must have both config and database.')
-        _clear_restore_directory()
+        _clear_restore_directory(stage, payload)
         return False
+
+    has_plugins = any((payload / name).exists() for name in _PLUGIN_ARCHIVE_NAMES)
+    if has_plugins and (payload / datadir.ARCHIVE_DIR / datadir.RESTORE_APPLIED_MARKER).exists():
+        raise BackupError('The extracted backup contains a plugin restore completion marker.')
 
     # Stage the configuration before touching the database. Copying it is what
     # proves the destination is readable and writable, and the os.replace at
     # the end makes the swap itself atomic, so a database step that fails
     # cannot leave a new configuration beside the old database.
-    staged_config_path = f'{dest_config_path}.restore'
     try:
         shutil.copy(restore_config_path, staged_config_path)
-        _prepare_restored_configuration(restore_config_path, staged_config_path)
+        _prepare_restored_configuration(restore_config_path, staged_config_path, preserve_database=has_plugins)
     except (BackupError, OSError, shutil.Error):
         logging.error('Restoring the backup configuration failed. Bazarr will not restart, and the '
                       'files staged for the restore have been discarded. The backup archive is untouched.')
         _delete_file(staged_config_path)
-        _clear_restore_directory()
+        _clear_restore_directory(stage, payload)
         return False
 
+    postgres = _postgres_enabled()
+    if postgres and (payload / datadir.ARCHIVE_DIR).is_dir():
+        _verify_postgres_plugin_schema(restore_database_path)
+    if has_plugins or postgres:
+        datadir.sync_file(Path(staged_config_path))
+        datadir.sync_directory(Path(staged_config_path).parent)
+        _write_plugin_restore_phase(journal, _DATABASE_STARTED)
     try:
         _restore_database(restore_database_path, dest_database_path)
     except (BackupError, OSError, shutil.Error) as error:
-        _delete_file(staged_config_path)
+        if isinstance(error, DatabaseRestoreUncertainError):
+            if not has_plugins and postgres:
+                # The checkpoint already fences replay even if parking fails.
+                os.replace(restore_database_path, failed_dump_path)
+                datadir.sync_directory(payload)
+            logging.exception('The database restore outcome could not be confirmed. Bazarr is stopping. '
+                              'Keep the extracted backup in %s and the staged configuration for recovery.',
+                              payload)
+            stop_bazarr(EXIT_RESTORE_ERROR)
+            return False
         if isinstance(error, PostgresUnreachableError):
             # Kept rather than cleared: the database is exactly as it was, and
             # this restore can still go through once it answers.
             logging.error('%s. The restore did not start, so the database was not touched and nothing '
                           'was changed. The extracted backup stays in %s and the restore is tried again '
-                          'at the next start.', error, get_restore_path())
+                          'at the next start.', error, payload)
+            if has_plugins or postgres:
+                journal.unlink()
+                datadir.sync_directory(stage)
+            _delete_file(staged_config_path)
             return False
         if isinstance(error, PostgresRestoreStartedError):
             # pg_restore drops the existing objects before it loads the new
@@ -735,7 +1030,6 @@ def restore_from_backup():
                                   'kept there and the backup archive it came from is still in %s, so '
                                   'the restore can be retried.',
                                   failed_dump_path, get_backup_path())
-                _delete_file(restore_config_path)
             else:
                 # The dump could not be moved aside, so the staged set is left
                 # whole. Deleting the configuration beside it would make the
@@ -746,23 +1040,32 @@ def restore_from_backup():
                                   'that, so this database may now be partially restored and must not be '
                                   'used until it has been restored again or rebuilt. Bazarr is '
                                   'stopping. The extracted dump could not be moved aside either, so the '
-                                  'whole extracted backup has been left in %s and the next start will '
-                                  'try this restore again.', get_restore_path())
+                                  'whole extracted backup has been left in %s for manual recovery.', payload)
             stop_bazarr(EXIT_RESTORE_ERROR)
-        elif _postgres_enabled():
+        elif postgres:
             # Nothing reached pg_restore, so the database is exactly as it was.
             logging.exception('The restore was refused before pg_restore was started, so the database '
                               'was not touched and nothing was changed. Fix the problem reported above '
                               'and try the restore again. Bazarr will not restart, the files staged for '
                               'the restore have been discarded so the next start does not retry it '
                               'silently, and the backup archive itself is untouched.')
-            _clear_restore_directory()
+            _delete_file(staged_config_path)
+            _clear_restore_directory(stage, payload)
+        elif has_plugins:
+            logging.exception('The SQLite database restore failed. Keep the extracted backup in %s '
+                              'to recover the database before starting Bazarr.', payload)
+            stop_bazarr(EXIT_RESTORE_ERROR)
         else:
             logging.exception('Restoring the backup failed. Bazarr will not restart, and the files '
                               'staged for the restore have been discarded so the next start does not '
                               'retry it silently. The backup archive itself is untouched.')
-            _clear_restore_directory()
+            _delete_file(staged_config_path)
+            _clear_restore_directory(stage, payload)
         return False
+
+    if has_plugins:
+        _write_plugin_restore_phase(journal, _DATABASE_COMPLETE)
+        return _finish_plugin_database_restore(payload, journal, staged_config_path, dest_config_path)
 
     try:
         os.replace(staged_config_path, dest_config_path)
@@ -775,75 +1078,120 @@ def restore_from_backup():
                           'configuration that was already here. The configuration from the backup is '
                           'kept at %s: copy it over %s, then start Bazarr again.',
                           staged_config_path, dest_config_path)
-        _clear_restore_directory()
+        _clear_restore_directory(stage, payload)
         stop_bazarr(EXIT_RESTORE_ERROR)
         return False
 
-    _clear_restore_directory()
+    _clear_restore_directory(stage, payload)
 
     logging.info('Backup restored successfully. Bazarr will restart.')
-    from app.server import webserver
-    if webserver is not None:
-        webserver.close_all()
-    restart_bazarr()
+    _restart_after_restore()
     return True
 
 
+def _finish_plugin_database_restore(payload, journal, staged_config_path, dest_config_path):
+    from provider_hub.state import provider_hub_dir
+
+    # History must be available when configuration classifies its secrets on
+    # the next boot. The importer is idempotent if startup stopped here.
+    try:
+        secret_paths.restore_backup_history(payload / secret_paths.HISTORY_ARCHIVE, provider_hub_dir())
+    except (OSError, ValueError, AttributeError) as error:
+        raise BackupError('The plugin field history from the backup could not be restored.') from error
+
+    config = Path(dest_config_path)
+    if Path(staged_config_path).is_file():
+        os.replace(staged_config_path, dest_config_path)
+    elif not config.is_file():
+        raise BackupError('The restored configuration is missing.')
+    datadir.sync_directory(config.parent)
+    _write_plugin_restore_phase(journal, _DATA_READY)
+    logging.info('Database and configuration restored. Bazarr will restart before applying plugin data.')
+    _restart_after_restore()
+    return True
+
+
+def apply_pending_plugin_restore():
+    """Consume plugin data on the boot that opened the restored configuration."""
+    try:
+        stage, payload = _restore_paths()
+        root = stage if stage == payload else stage.parent
+        _remove_retired_restore(root / _RETIRED_RESTORE)
+        if _read_plugin_restore_phase(stage / _PLUGIN_RESTORE_PHASE) != _DATA_READY:
+            _remove_retired_restore(root / _RETIRED_FOLDERS)
+            return
+        from provider_hub.sandbox.sweep import previous_workers_stopped
+        from provider_hub.state import database_held, provider_hub_dir
+
+        folders = payload / datadir.ARCHIVE_DIR
+        if folders.exists() or folders.is_symlink():
+            if (not (folders / datadir.RESTORE_APPLIED_MARKER).is_file()
+                    and not previous_workers_stopped(args.config_dir)):
+                raise BackupError('Previous plugin workers are still active or their shutdown could not be verified.')
+            if database_held():
+                raise BackupError('The restored plugin inventory is not available.')
+            datadir.restore_backup(folders, provider_hub_dir())
+        if (payload / datadir.OMISSIONS_ARCHIVE).is_file():
+            logging.warning('Some release data was omitted when this backup was taken. Its folders will be left as they are.')
+        _clear_restore_directory(stage, payload)
+    except Exception:
+        logging.exception('Plugin data restore failed. The staged files remain available for the next start.')
+        stop_bazarr(EXIT_RESTORE_ERROR)
+        return
+    logging.info('Plugin data restored successfully.')
+
+
+@datadir.serialized
 def prepare_restore(filename):
     filename = _validate_backup_filename(filename)
     if filename is None:
         logging.error('Invalid backup filename refused for restore.')
         return False
-    src_zip_file_path = os.path.join(get_backup_path(), filename)
-    dest_zip_file_path = os.path.join(get_restore_path(), filename)
-    success = False
+    restore = Path(get_restore_path())
+    stage = restore / _BACKUP_STAGE
+    if any((restore / name).exists() or (restore / name).is_symlink() for name in (
+            _BACKUP_STAGE, _PLUGIN_RESTORE_PHASE, *_OLD_RESTORE_STATE,
+            *_CONFIG_ARCHIVE_NAMES, *_DATABASE_ARCHIVE_NAMES, *_PLUGIN_ARCHIVE_NAMES)):
+        logging.error('An earlier backup is still staged. Finish its recovery before staging a new restore.')
+        return False
+
+    source = Path(get_backup_path()) / filename
     try:
-        shutil.copy(src_zip_file_path, dest_zip_file_path)
-    except (OSError, FileNotFoundError):
-        logging.exception(f'Unable to copy backup archive to {dest_zip_file_path}')  # noqa: G004
-    else:
-        try:
-            with ZipFile(dest_zip_file_path, 'r') as zipObj:
-                _safe_extract(zipObj, get_restore_path())
-        except (BadZipFile, OSError):
-            logging.exception(f'Unable to extract files from backup archive {dest_zip_file_path}')  # noqa: G004
-        else:
-            success = True
+        with tempfile.TemporaryDirectory(prefix='.backup-extract-', dir=restore) as temporary:
+            work = Path(temporary)
+            payload = work / 'payload'
+            payload.mkdir(mode=0o700)
+            with ZipFile(source) as archive:
+                _safe_extract(archive, payload)
 
-        if success and not os.path.isfile(os.path.join(get_restore_path(), _database_archive_name())):
-            # Refused here rather than after the restart: the restore itself
-            # runs at the next start, and a restart that only finds out then
-            # costs the user a bounce for nothing.
-            wrong_engine = _wrong_engine_archive_message()
-            if wrong_engine:
-                logging.error('Backup archive %s cannot be restored here. %s', filename, wrong_engine)
-            else:
-                logging.error('Backup archive %s does not contain the database for this instance, so it '
-                              'cannot be restored.', filename)
-            success = False
+            if not (payload / _database_archive_name()).is_file():
+                wrong_engine = _wrong_engine_archive_message(payload)
+                if wrong_engine:
+                    logging.error('Backup archive %s cannot be restored here. %s', filename, wrong_engine)
+                else:
+                    logging.error('Backup archive %s does not contain the database for this instance, so it '
+                                  'cannot be restored.', filename)
+                return False
 
-        if success and not any(os.path.isfile(os.path.join(get_restore_path(), name))
-                               for name in ('config.yaml', 'config.ini')):
-            # The same reason: the start that applies it refuses an archive
-            # without a configuration as partial and restores nothing.
-            logging.error('Backup archive %s does not contain the configuration (config.yaml or '
-                          'config.ini), so it cannot be restored.', filename)
-            success = False
+            if not any((payload / name).is_file() for name in _CONFIG_ARCHIVE_NAMES):
+                logging.error('Backup archive %s does not contain the configuration (config.yaml or '
+                              'config.ini), so it cannot be restored.', filename)
+                return False
 
-    if not success:
-        # A failed extraction can still have written part of the archive, and
-        # anything left in the restore directory is applied at the next start.
-        _clear_restore_directory()
+            datadir.sync_tree(work)
+            work.rename(stage)
+    except (BadZipFile, OSError, RuntimeError):
+        logging.exception('Unable to stage backup archive %s.', filename)
+        return False
 
+    # The rename is the publication point. A directory sync error does not
+    # unpublish an already visible restore.
     try:
-        os.remove(dest_zip_file_path)
-    except (OSError, FileNotFoundError):
-        logging.exception(f'Unable to delete backup archive {dest_zip_file_path}')  # noqa: G004
-
-    if success:
-        logging.debug('Restore staged')
-
-    return success
+        datadir.sync_directory(restore)
+    except OSError:
+        logging.warning('Restore staged, but the staging directory could not be flushed.', exc_info=True)
+    logging.debug('Restore staged')
+    return True
 
 
 # Close and os._exit on the request thread is what dropped the PATCH before

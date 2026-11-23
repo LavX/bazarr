@@ -87,14 +87,13 @@ KEEP_FAILED = 1
 # calls are still being served. ``split`` consumes it: the replaced release goes
 # to ``draining`` instead of straight to ``retired``.
 DRAIN_PREVIOUS = "drain_previous"
+# The rollback carries the exact released row approved by the user.
+STAGED_ROLLBACK = "staged_rollback"
+PROMOTE_ROLLBACK = "promote_rollback"
 # Set on an installation row when a staged release is dropped because it failed to activate, with the reason.
 # ``split`` consumes it: that release is kept as failed, or as the previous release again when it came from there.
 # A staged release that leaves its slot for any other reason is forgotten, whatever error the row shows.
 FAIL_STAGED = "fail_staged"
-# Kept in the installation document until the confirmed rollback leaves the staged slot.
-STAGED_ROLLBACK = "staged_rollback"
-# Consumed by split when the confirmed staged row moves into the active slot.
-PROMOTE_ROLLBACK = "promote_rollback"
 
 metadata = sa.MetaData()
 
@@ -149,8 +148,11 @@ _ACTIVE_KEYS = ("active_version", "active_path", "python_path", "manifest", "sup
 _STAGED_KEYS = ("staged_version", "staged_path", "staged_python_path", "staged_manifest", "staged_supplied_by")
 # Recorded in ``fields`` when the row's map of bindings was null and not empty.
 NULL_BINDINGS = "supplied_by:null"
-# An optional tag in the existing fields list. Older releases only recorded the catalog's name.
-SOURCE_REGISTRATION = "source_registration:"
+# The existing per-release field metadata also carries the opaque data folder key.
+_DATA_KEY = "data:"
+# A release written now can belong to a catalog that was registered before IDs were recorded.
+_CATALOG_REGISTRATION = "catalog_registration:"
+_LEGACY_CATALOG_REGISTRATION = "legacy"
 # What each key after the version is, in order, for the ``fields`` column.
 _FIELD_NAMES = ("path", "python_path", "manifest", "supplied_by", "activated_at")
 
@@ -188,7 +190,8 @@ class Release:
     ended_seq: int | None = None
     source_id: str | None = None
     origin: str | None = None
-    source_registration: str | None = None
+    data_key: str | None = None
+    catalog_registration: str | None = None
 
 
 def release_of(row: dict[str, Any]) -> Release:
@@ -199,8 +202,32 @@ def release_of(row: dict[str, Any]) -> Release:
         manifest=_loads(row.get("manifest")), supplied_by=dict(row.get("supplied_by") or {}),
         error=row.get("error"), created_at=row.get("created_at"), activated_at=row.get("activated_at"),
         retired_at=row.get("retired_at"), ended_seq=row.get("ended_seq"), source_id=row.get("source_id"),
-        origin=row.get("origin"), source_registration=_source_registration(row.get("fields")),
+        origin=row.get("origin"), data_key=_data_key(row),
+        catalog_registration=_field_value(row, _CATALOG_REGISTRATION),
     )
+
+
+def _field_value(row: dict[str, Any], prefix: str) -> str | None:
+    return next((marker[len(prefix):] for marker in json.loads(row.get("fields") or "[]")
+                 if isinstance(marker, str) and marker.startswith(prefix)), None)
+
+
+def _data_key(row: dict[str, Any]) -> str | None:
+    return _field_value(row, _DATA_KEY)
+
+
+def catalog_registration(data: dict[str, Any], source_id: str | None) -> str | None:
+    from .state import OFFICIAL_CATALOG_SOURCE_ID
+
+    if source_id == OFFICIAL_CATALOG_SOURCE_ID:
+        return None
+    source = (data.get("catalog_sources") or {}).get(source_id)
+    return (source.get("registration") or _LEGACY_CATALOG_REGISTRATION) if isinstance(source, dict) else None
+
+
+def matches_catalog_registration(data: dict[str, Any], source_id: str | None, recorded: str | None) -> bool:
+    current = catalog_registration(data, source_id)
+    return recorded == current or (recorded is None and current == _LEGACY_CATALOG_REGISTRATION)
 
 
 def _loads(text: Any) -> dict[str, Any] | None:
@@ -215,17 +242,6 @@ def _loads(text: Any) -> dict[str, Any] | None:
 
 def _dumps(manifest: dict[str, Any] | None) -> str | None:
     return None if manifest is None else json.dumps(manifest, sort_keys=True)
-
-
-def _source_registration(fields: str | None) -> str | None:
-    try:
-        values = json.loads(fields) if fields else []
-    except ValueError:
-        return None
-    if not isinstance(values, list):
-        return None
-    return next((value.removeprefix(SOURCE_REGISTRATION) for value in values
-                 if isinstance(value, str) and value.startswith(SOURCE_REGISTRATION)), None)
 
 
 def _optional_text(value: Any) -> bool:
@@ -245,6 +261,7 @@ class _Slot:
     manifest: dict[str, Any] | None
     supplied_by: dict[str, str]
     activated_at: str | None
+    data_key: str | None
     # The names (``_FIELD_NAMES``) of the fields the installation row carried.
     present: list[str]
 
@@ -261,7 +278,8 @@ def _slot(row: dict[str, Any], keys: tuple[str, ...], with_activation: bool) -> 
         return None
     path, python, manifest, supplied = (row.get(key) for key in keys[1:5])
     activated = row.get(keys[5]) if with_activation else None
-    if not (_optional_text(path) and _optional_text(python) and _optional_text(activated)
+    data_key = row.get("active_data_key" if with_activation else "staged_data_key")
+    if not (_optional_text(data_key) and _optional_text(path) and _optional_text(python) and _optional_text(activated)
             and (manifest is None or isinstance(manifest, dict)) and _bindings_ok(supplied)):
         return None
     names = _FIELD_NAMES if with_activation else _FIELD_NAMES[:4]
@@ -269,7 +287,9 @@ def _slot(row: dict[str, Any], keys: tuple[str, ...], with_activation: bool) -> 
     if "supplied_by" in present and supplied is None:
         # A null map and an empty one are different values of the row: the null is remembered.
         present.append(NULL_BINDINGS)
-    return _Slot(version, path, python, manifest, dict(supplied or {}), activated, present)
+    if data_key:
+        present.append(_DATA_KEY + data_key)
+    return _Slot(version, path, python, manifest, dict(supplied or {}), activated, data_key, present)
 
 
 @functools.lru_cache(maxsize=1024)
@@ -299,15 +319,28 @@ def _digest(manifest: dict[str, Any] | None) -> str | None:
     return value if isinstance(value, str) and value else None
 
 
-class StateDocument(dict):
-    """The state as the callers see it: a plain dict that also knows which retired and draining releases exist.
+@dataclass(frozen=True)
+class SlotIdentity:
+    id: int
+    created_at: str
+    source_id: str | None
+    origin: str | None
+    bundle_digest: str | None
+    catalog_registration: str | None = None
 
-    The extra is not part of the document and is never stored or written to state.json. What cleans up files
-    reads it, so the bundle and environment of the release a rollback would go back to are not taken away.
-    """
+
+class StateDocument(dict):
+    """The composed state with release metadata that is never stored in the document or state.json."""
 
     retained_releases: tuple[dict[str, Any], ...] = ()
-    staged_releases: dict[str, dict[str, Any]]
+    adopting_staged_data: tuple[str, str | None] | None = None
+    staging_install: str | None = None
+    promoting_stage: str | None = None
+
+    def __init__(self, data: dict[str, Any]):
+        super().__init__(data)
+        self.release_slots: dict[str, dict[str, SlotIdentity]] = {}
+        self.staged_releases: dict[str, dict[str, Any]] = {}
 
 
 def compose(data: dict[str, Any], rows: list[dict[str, Any]]) -> "StateDocument":
@@ -319,15 +352,15 @@ def compose(data: dict[str, Any], rows: list[dict[str, Any]]) -> "StateDocument"
     releases kept besides the active and staged ones attached.
     """
     document = StateDocument(data)
-    document.staged_releases = {}
     installations = data.get("installations")
     listed = installations if isinstance(installations, dict) else {}
     # The previous and draining releases, and every release of a plugin the document does not list (what a
     # damaged document lost): they are kept until discarded on purpose, and so are their files.
     document.retained_releases = tuple(
-        {key: release.get(key) for key in ("id", "plugin_id", "version", "state", "bundle_path", "python_path",
-                                          "bundle_digest", "env_key", "created_at", "ended_seq", "source_id",
-                                          "origin", "fields")}
+        {**{key: release.get(key) for key in (
+            "id", "plugin_id", "version", "state", "bundle_path", "python_path", "bundle_digest", "env_key",
+            "created_at", "ended_seq", "source_id", "origin", "fields")},
+         "data_key": _data_key(release)}
         for release in rows
         if release["state"] in (RETIRED, DRAINING) or release["plugin_id"] not in listed)
     if not isinstance(installations, dict) or not rows:
@@ -342,11 +375,22 @@ def compose(data: dict[str, Any], rows: list[dict[str, Any]]) -> "StateDocument"
         slots = by_plugin.get(plugin_id)
         if not slots or not isinstance(installation, dict):
             continue
+        document.release_slots[plugin_id] = {
+            state: SlotIdentity(release["id"], release["created_at"], release.get("source_id"),
+                                release.get("origin"), release.get("bundle_digest"),
+                                _field_value(release, _CATALOG_REGISTRATION))
+            for state, release in slots.items()
+        }
         for state, keys in ((ACTIVE, _ACTIVE_KEYS), (STAGED, _STAGED_KEYS)):
             release = slots.get(state)
             if release is None:
                 continue
             installation[keys[0]] = release["version"]
+            data_field = "active_data_key" if state == ACTIVE else "staged_data_key"
+            if data_key := _data_key(release):
+                installation[data_field] = data_key
+            else:
+                installation.pop(data_field, None)
             recorded = release.get("fields")
             names = _FIELD_NAMES if state == ACTIVE else _FIELD_NAMES[:4]
             present = set(json.loads(recorded)) if recorded else set(names)
@@ -380,7 +424,8 @@ class Plan:
 
 
 def _matches(release: dict[str, Any], slot: _Slot) -> bool:
-    return release["version"] == slot.version and release.get("bundle_path") == slot.bundle_path
+    return (release["version"] == slot.version and release.get("bundle_path") == slot.bundle_path
+            and _data_key(release) == slot.data_key)
 
 
 def split(data: dict[str, Any], rows: list[dict[str, Any]], *, now: str | None = None,
@@ -427,35 +472,46 @@ def split(data: dict[str, Any], rows: list[dict[str, Any]], *, now: str | None =
         existing = by_plugin.get(plugin_id, [])
         claimed: set[int] = set()
 
-        def find(slot: _Slot, states: tuple[str, ...], release_id: int | None = None) -> dict[str, Any] | None:
+        def find(slot: _Slot, states: tuple[str, ...], *,
+                 for_install: bool = False, release_id: int | None = None) -> dict[str, Any] | None:
             for state in states:
                 for release in existing:
                     if (release["id"] not in claimed and release["state"] == state and _matches(release, slot)
                             and (release_id is None or release["id"] == release_id)):
+                        if for_install and (
+                                (release.get("source_id"), release.get("origin"))
+                                != (row.get("source_id"), row.get("origin"))
+                                or not matches_catalog_registration(
+                                    data, row.get("source_id"), _field_value(release, _CATALOG_REGISTRATION))):
+                            continue
                         return release
             return None
 
-        def settle(slot: _Slot, release: dict[str, Any] | None, state: str) -> None:
+        def settle(slot: _Slot, release: dict[str, Any] | None, state: str, *, source_id: str | None = None) -> None:
             unchanged_env = release is not None and release.get("python_path") == slot.python_path
-            source_id = row.get("source_id")
-            source = (data.get("catalog_sources") or {}).get(source_id) if isinstance(source_id, str) else None
-            registration = (_source_registration(release.get("fields")) if release is not None
-                            else source.get("registration_id") if isinstance(source, dict) else None)
-            fields = slot.present + ([SOURCE_REGISTRATION + registration] if isinstance(registration, str) else [])
             values = {
                 "state": state, "bundle_path": slot.bundle_path, "python_path": slot.python_path,
                 "manifest": _dumps(slot.manifest), "bundle_digest": _digest(slot.manifest),
                 "env_key": (release.get("env_key") if unchanged_env and release.get("env_key")
                             else _env_key(data, slot.python_path)),
-                "error": None, "fields": json.dumps(fields),
+                "error": None,
             }
+            registration = None
+            if source_id is not None or (release is None and row.get("origin") == "catalog"):
+                registration = catalog_registration(data, source_id if source_id is not None else row.get("source_id"))
+            elif release is not None:
+                registration = _field_value(release, _CATALOG_REGISTRATION)
+            fields = slot.present + ([_CATALOG_REGISTRATION + registration] if registration else [])
+            values["fields"] = json.dumps(fields)
             if state == ACTIVE:
                 values["activated_at"] = slot.activated_at
                 values["retired_at"] = None
+            if source_id is not None:
+                values["source_id"] = source_id
             if release is None:
-                origin = row.get("origin")
+                source, origin = row.get("source_id"), row.get("origin")
                 values.update(plugin_id=plugin_id, version=slot.version, created_at=stamp,
-                              source_id=source_id if isinstance(source_id, str) else None,
+                              source_id=source if isinstance(source, str) else None,
                               origin=origin if isinstance(origin, str) else None)
                 plan.inserts.append((values, dict(slot.supplied_by)))
                 return
@@ -466,28 +522,48 @@ def split(data: dict[str, Any], rows: list[dict[str, Any]], *, now: str | None =
                 plan.updates.append((release["id"], changed, None if bindings is None else dict(bindings)))
 
         if staged is not None:
-            rollback = row.get(STAGED_ROLLBACK)
-            staged_release = find(staged, (STAGED,))
-            if staged_release is not None and staged_release.get("retired_at") and (
-                    staged_release.get("python_path") != staged.python_path
-                    or staged_release.get("manifest") != _dumps(staged.manifest)):
-                # A replacement cannot overwrite the previous release that was staged for a rollback.
-                staged_release = None
-            rollback_id = rollback.get("release_id") if isinstance(rollback, dict) else None
-            if isinstance(rollback_id, int):
-                # A rollback must take the confirmed retained row even when another release has the same path.
+            adoption = getattr(data, "adopting_staged_data", None)
+            rebound_source = None
+            if adoption is not None and adoption[0] == plugin_id:
+                rebound_source = adoption[1]
+                # Adopt only into the existing staged slot. A retired release with the same code is unrelated.
+                staged_release = next((release for release in existing if release["state"] == STAGED), None)
+                source_id = row.get("source_id")
+                if staged_release is not None and (
+                        _data_key(staged_release) is not None or staged_release["version"] != staged.version
+                        or staged_release.get("bundle_path") != staged.bundle_path
+                        or staged_release.get("python_path") != staged.python_path
+                        or _loads(staged_release.get("manifest")) != staged.manifest
+                        or (staged_release.get("source_id") != source_id and rebound_source != source_id)
+                        or staged_release.get("origin") != row.get("origin")):
+                    raise ReleaseTransitionError("the staged release changed before its data key could be recorded")
+            else:
+                rollback = row.get(STAGED_ROLLBACK)
+                rollback_id = rollback.get("release_id") if isinstance(rollback, dict) else None
+                for_install = getattr(data, "staging_install", None) == plugin_id
+                def same_contents(release):
+                    return (release.get("python_path") == staged.python_path
+                            and release.get("manifest") == _dumps(staged.manifest))
+
+                staged_release = find(staged, (STAGED,), for_install=for_install)
+                if (staged_release is not None and staged_release.get("retired_at")
+                        and not same_contents(staged_release)):
+                    # A replacement must leave the protected rollback row intact.
+                    staged_release = None
                 if staged_release is None:
-                    staged_release = find(staged, (RETIRED,), rollback_id)
-            elif rollback is None and staged_release is None:
-                staged_release = find(staged, (RETIRED,))
-            settle(staged, staged_release, STAGED)
+                    retained = find(staged, (RETIRED,), for_install=for_install, release_id=rollback_id)
+                    if retained is not None and (rollback_id is None or same_contents(retained)):
+                        staged_release = retained
+            settle(staged, staged_release, STAGED, source_id=rebound_source)
         if active is not None:
             if promote_rollback is not None:
-                active_release = find(active, (STAGED,), promote_rollback)
+                active_release = find(active, (STAGED,), release_id=promote_rollback)
                 if active_release is None:
                     raise ReleaseTransitionError("the confirmed rollback release is no longer staged")
             else:
-                active_release = find(active, (ACTIVE, STAGED, DRAINING, RETIRED))
+                states = ((STAGED, ACTIVE, DRAINING, RETIRED) if getattr(data, "promoting_stage", None) == plugin_id
+                          else (ACTIVE, STAGED, DRAINING, RETIRED))
+                active_release = find(active, states)
             settle(active, active_release, ACTIVE)
         # What the slots no longer name.
         for release in existing:
@@ -513,9 +589,11 @@ def split(data: dict[str, Any], rows: list[dict[str, Any]], *, now: str | None =
                     plan.deletes.append(release["id"])
         # The slots that did not become releases keep their fields in the document.
         if active is not None:
+            row.pop("active_data_key", None)
             for key in _ACTIVE_KEYS:
                 row.pop(key, None)
         if staged is not None:
+            row.pop("staged_data_key", None)
             for key in _STAGED_KEYS:
                 row.pop(key, None)
         stored_rows[plugin_id] = row

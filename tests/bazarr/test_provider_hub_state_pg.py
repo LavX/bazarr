@@ -405,3 +405,396 @@ def test_a_restart_is_reported_from_the_kind_alone(hub_store, hub_engine, servic
     stored = raw_row(hub_engine)[1]
     document = json.loads(stored) if isinstance(stored, str) else stored
     assert "needs_restart" not in document["installations"]["provider"]
+
+
+_POSTGRES_RESTORE_PROGRAM = r"""
+import json, os, sys
+from pathlib import Path
+from types import SimpleNamespace
+from sqlalchemy import text
+from app import config
+from app.database import engine
+from plugin_platform_helpers import provider_manifest_v2
+from provider_hub import datadir, state
+from provider_hub.sandbox import sweep
+from utilities import backup
+
+sys.modules['app.server'] = SimpleNamespace(webserver=None)
+backup.restart_bazarr = lambda: os._exit(41)
+backup.stop_bazarr = lambda code: os._exit(code & 255)
+backup.event_stream = lambda **fields: None
+backup.jobs_queue.update_job_name = lambda **fields: True
+# These children never launch a plugin worker. Process ownership has separate
+# coverage and must not make the database integration depend on /proc access.
+sweep.previous_workers_stopped = lambda config: True
+root = Path(backup.args.config_dir)
+run_tool = backup._run_postgres_tool
+def count(tool, *args, **kwargs):
+    with (root / 'postgres-tool-runs').open('a') as stream:
+        stream.write(tool + '\n')
+    return run_tool(tool, *args, **kwargs)
+backup._run_postgres_tool = count
+
+action, argument = sys.argv[1:]
+if action == 'seed':
+    config.open_database_after_backup_restore()
+    document = state.load_state_strict()
+    document['installations']['examplehub'] = {
+        'state': 'active', 'kind': 'subtitle_provider', 'active_version': '1.0.0',
+        'active_data_key': 'a' * 32,
+        'manifest': provider_manifest_v2('examplehub', permissions=['data_dir']),
+        'name': argument,
+    }
+    state.save_state(document)
+elif action == 'backup':
+    assert backup.backup_to_zip(job_id=1)
+elif action == 'prepare':
+    assert backup.prepare_restore(argument)
+elif action == 'check':
+    config.open_database_after_backup_restore()
+    with engine.connect() as connection:
+        database, schema = connection.execute(text('SELECT current_database(), current_schema()')).one()
+    print(json.dumps({'database': database, 'schema': schema,
+                      'name': state.load_state_strict()['installations']['examplehub']['name']}))
+else:
+    if action in ('interrupt-before-complete', 'interrupt-after-complete'):
+        write_phase = backup._write_plugin_restore_phase
+        def interrupt(path, phase):
+            if phase == 'database-complete' and action == 'interrupt-before-complete':
+                os._exit(42)
+            write_phase(path, phase)
+            if phase == 'database-complete' and action == 'interrupt-after-complete':
+                os._exit(42)
+        backup._write_plugin_restore_phase = interrupt
+    if action == 'folders-fail':
+        def refuse_folders(*args, **kwargs):
+            raise OSError('injected folder apply failure')
+        datadir.restore_backup = refuse_folders
+    finish = config.finish_backup_restore_startup
+    def finish_and_exit():
+        finish()
+        os._exit(0)
+    config.finish_backup_restore_startup = finish_and_exit
+    import init
+    raise AssertionError('The restore startup should have reached its exit hook')
+"""
+
+
+@pytest.fixture
+def postgres_restore_instance(tmp_path):
+    """A fresh application tree and database on the explicitly supplied test server."""
+    import configparser
+    import os
+    import shutil
+    import subprocess
+    import sys
+    import uuid
+    from pathlib import Path
+    from types import SimpleNamespace
+
+    import yaml
+
+    test_url = os.getenv("BAZARR_PG_TEST_URL")
+    if not test_url or not all(shutil.which(program) for program in ("pg_dump", "pg_restore")):
+        pytest.skip("requires the PostgreSQL test server and pg_dump/pg_restore")
+    url = sa.make_url(test_url)
+    admin = sa.create_engine(url, isolation_level="AUTOCOMMIT", hide_parameters=True)
+    database = "restore_" + uuid.uuid4().hex
+    root = tmp_path / "instance"
+    config = root / "config" / "config.yaml"
+    for directory in ("config", "db", "backup", "restore", "cache", "log"):
+        (root / directory).mkdir(parents=True)
+    for name in ("releases.txt", "announcements.txt"):
+        (config.parent / name).write_text("[]", encoding="utf-8")
+    sample = root / "provider_hub" / "data" / "examplehub" / ("a" * 32) / "sample"
+    sample.parent.mkdir(parents=True)
+    sample.write_text("archived plugin files", encoding="utf-8")
+    repo = Path(__file__).resolve().parents[2]
+    environment = {key: value for key, value in os.environ.items()
+                   if not key.startswith(("POSTGRES_", "PG")) and key != "BAZARR_PROVIDER_HUB_STATE"}
+    environment.update(BAZARR_CONFIG_DIR=str(root), NO_CLI="true", BAZARR_VERSION="test",
+                       PYTHONDONTWRITEBYTECODE="1", PGCONNECT_TIMEOUT="3",
+                       PYTHONPATH=os.pathsep.join(str(repo / name) for name in ("bazarr", "custom_libs", "tests/bazarr")))
+    password = url.query.get("password") or url.password
+    if password:
+        environment["POSTGRES_PASSWORD"] = password
+    created = []
+    try:
+        with admin.connect() as connection:
+            info = connection.connection.driver_connection.info
+            host, port, user = info.host, info.port, info.user
+            connection.exec_driver_sql(f'CREATE DATABASE "{database}"')
+            created.append(database)
+        direct_url = sa.URL.create(url.drivername, username=user, database=database,
+                                   query={"host": host, "port": str(port), "connect_timeout": "3"})
+        schema = "plugin_restore"
+
+        def fresh_database():
+            target = "restore_" + uuid.uuid4().hex
+            with admin.connect() as connection:
+                connection.exec_driver_sql(f'CREATE DATABASE "{target}"')
+            created.append(target)
+            return direct_url.set(database=target)
+
+        def configure(mode, *, target=None, schema_name=schema, search_path=None, create_schema=True):
+            connection_url = target or direct_url
+            environment.pop("PGSERVICEFILE", None)
+            if mode == "service":
+                parser = configparser.ConfigParser(interpolation=None)
+                parser["bazarr_restore"] = {"host": host, "port": str(port), "user": user, "dbname": database}
+                service_file = tmp_path / "pg_service.conf"
+                with service_file.open("w", encoding="utf-8") as stream:
+                    parser.write(stream, space_around_delimiters=False)
+                environment["PGSERVICEFILE"] = str(service_file)
+                connection_url = sa.URL.create(url.drivername, query={"service": "bazarr_restore"})
+                assert connection_url.database is None and "dbname" not in connection_url.query
+            elif mode == "multihost":
+                # This directory never exists. libpq must fall back to the
+                # real local socket or TCP endpoint without a test listener.
+                unavailable = tmp_path / "missing-pg-socket"
+                connection_url = direct_url.difference_update_query(("port",)).update_query_dict({
+                    "host": (f"{unavailable}:{port}", f"{host}:{port}")})
+            elif mode == "search_path":
+                if create_schema:
+                    database_engine = sa.create_engine(connection_url.set(password=password),
+                                                       isolation_level="AUTOCOMMIT", hide_parameters=True)
+                    try:
+                        with database_engine.connect() as connection:
+                            quoted_schema = connection.dialect.identifier_preparer.quote_identifier(schema_name)
+                            connection.exec_driver_sql(f'CREATE SCHEMA {quoted_schema}')
+                    finally:
+                        database_engine.dispose()
+                # libpq splits options at unescaped spaces before PostgreSQL
+                # interprets the quoted search_path identifiers.
+                path = (search_path or schema_name).replace(' ', r'\ ')
+                connection_url = connection_url.update_query_dict({"options": f"-csearch_path={path}"})
+            elif mode != "direct":
+                raise AssertionError(mode)
+            config.write_text(yaml.safe_dump({"general": {"port": 7000}, "postgresql": {
+                "enabled": True, "url": connection_url.render_as_string(),
+            }}), encoding="utf-8")
+
+        def child(action, argument="", *, expected=0):
+            run = subprocess.run([sys.executable, "-c", _POSTGRES_RESTORE_PROGRAM, action, argument],
+                                 env=environment, capture_output=True, text=True, timeout=60)
+            assert run.returncode == expected, run.stdout + run.stderr
+            return run.stdout.strip()
+
+        def archive():
+            child("seed", "archived row")
+            child("backup")
+            [result] = (root / "backup").glob("*.zip")
+            return result
+
+        configure("direct")
+        yield SimpleNamespace(root=root, config=config, sample=sample, database=database, schema=schema,
+                              configure=configure, child=child, archive=archive,
+                              fresh_database=fresh_database,
+                              stage=root / "restore" / ".backup-staged",
+                              tool_runs=root / "postgres-tool-runs", direct_url=direct_url.set(password=password))
+    finally:
+        if created:
+            with admin.connect() as connection:
+                for name in created:
+                    connection.exec_driver_sql(f'DROP DATABASE "{name}" WITH (FORCE)')
+        admin.dispose()
+
+
+@pytest.mark.parametrize("connection_mode", ["service", "multihost", "search_path"])
+def test_postgres_restore_uses_libpq_and_retries_folders_without_replaying_database(
+        postgres_restore_instance, connection_mode):
+    """The published pg_restore path works with the connection forms libpq supports."""
+    from literals import EXIT_RESTORE_ERROR
+    import yaml
+    from zipfile import ZipFile
+
+    instance = postgres_restore_instance
+    instance.configure(connection_mode)
+    archive = instance.archive()
+    instance.child("seed", "changed row")
+    instance.sample.write_text("changed plugin files", encoding="utf-8")
+    # A backup can originate on another installation. The archived settings
+    # must not move the next boot to a different DB, search path or engine.
+    edited_archive = archive.with_name("bazarr_backup_vedited.zip")
+    with ZipFile(archive) as original, ZipFile(edited_archive, "w") as edited:
+        for name in original.namelist():
+            value = original.read(name)
+            if name == "config.yaml":
+                settings = yaml.safe_load(value)
+                settings["general"]["port"] = 7100
+                settings["postgresql"] = {"enabled": False, "url": "postgresql://unused/different"}
+                value = yaml.safe_dump(settings)
+            edited.writestr(name, value)
+    instance.child("prepare", edited_archive.name)
+    payload = instance.stage / "payload"
+    phase = instance.stage / ".plugin-restore-phase"
+    assert (payload / "bazarr_postgres.dump").is_file()
+    assert not phase.exists()
+
+    # The database restore returned and its completion is durable, but this
+    # process never installed the configuration or reached the restart.
+    instance.child("interrupt-after-complete", expected=42)
+    assert phase.read_text(encoding="utf-8").strip() == "database-complete"
+    restored = json.loads(instance.child("check"))
+    assert restored == {"database": instance.database,
+                        "schema": instance.schema if connection_mode == "search_path" else "public",
+                        "name": "archived row"}
+    instance.child("seed", "written after database restore")
+    instance.child("boot", expected=41)
+    assert phase.read_text(encoding="utf-8").strip() == "data-ready"
+    assert instance.sample.read_text(encoding="utf-8") == "changed plugin files"
+
+    instance.child("folders-fail", expected=EXIT_RESTORE_ERROR & 255)
+    assert phase.read_text(encoding="utf-8").strip() == "data-ready"
+    assert (payload / "bazarr_postgres.dump").is_file()
+    assert instance.sample.read_text(encoding="utf-8") == "changed plugin files"
+    instance.child("boot")
+    assert instance.sample.read_text(encoding="utf-8") == "archived plugin files"
+    assert yaml.safe_load(instance.config.read_text(encoding="utf-8"))["general"]["port"] == 7100
+    assert json.loads(instance.child("check"))["name"] == "written after database restore"
+    assert instance.tool_runs.read_text(encoding="utf-8").splitlines() == ["pg_dump", "pg_restore"]
+    assert not instance.stage.exists()
+    if connection_mode == "search_path":
+        engine = sa.create_engine(instance.direct_url, isolation_level="AUTOCOMMIT", hide_parameters=True)
+        try:
+            with engine.connect() as connection:
+                assert connection.execute(sa.text("SELECT to_regclass('public.provider_hub_state')")).scalar_one() is None
+                assert connection.execute(sa.text(
+                    "SELECT to_regclass('plugin_restore.provider_hub_state')")).scalar_one() is not None
+        finally:
+            engine.dispose()
+
+
+def test_postgres_restore_keeps_an_ambiguous_database_step_for_operator_verification(postgres_restore_instance):
+    from literals import EXIT_RESTORE_ERROR
+
+    instance = postgres_restore_instance
+    archive = instance.archive()
+    instance.child("seed", "changed row")
+    instance.sample.write_text("changed plugin files", encoding="utf-8")
+    instance.child("prepare", archive.name)
+    phase = instance.stage / ".plugin-restore-phase"
+    # pg_restore has really completed, but the process exits before its
+    # filesystem completion checkpoint. A fresh process must not guess.
+    instance.child("interrupt-before-complete", expected=42)
+    assert phase.read_text(encoding="utf-8").strip() == "database-started"
+    instance.child("boot", expected=EXIT_RESTORE_ERROR & 255)
+    assert json.loads(instance.child("check"))["name"] == "archived row"
+    assert instance.sample.read_text(encoding="utf-8") == "changed plugin files"
+    assert (instance.stage / "payload" / "bazarr_postgres.dump").is_file()
+    assert (instance.stage / "payload" / "config.yaml").is_file()
+    assert archive.is_file()
+    assert instance.tool_runs.read_text(encoding="utf-8").splitlines() == ["pg_dump", "pg_restore"]
+
+
+@pytest.mark.parametrize('path_kind', ['custom-only', 'public-fallback', 'quoted-fallback', 'populated'])
+def test_postgres_restore_creates_a_configured_schema_on_a_fresh_database(postgres_restore_instance, path_kind):
+    from literals import EXIT_RESTORE_ERROR
+    from zipfile import ZipFile
+
+    instance = postgres_restore_instance
+    schema = 'Plugin, Restore' if path_kind == 'quoted-fallback' else instance.schema
+    path = '"' + schema + '"' if path_kind == 'quoted-fallback' else schema.upper()
+    instance.configure('search_path', schema_name=schema, search_path=path)
+    archive = instance.archive()
+    if path_kind == 'custom-only':
+        payload = instance.root / 'restore'
+        with ZipFile(archive) as backup:
+            backup.extractall(payload)
+    else:
+        # Queue from the running instance. The subsequent boot below is the
+        # first application process to open the new database.
+        instance.child('prepare', archive.name)
+        payload = instance.stage / 'payload'
+    target = instance.fresh_database()
+
+    engine = sa.create_engine(target.set(password=instance.direct_url.password), hide_parameters=True)
+    try:
+        with engine.begin() as connection:
+            assert connection.execute(sa.text('SELECT to_regnamespace(:name)'), {'name': path}).scalar_one() is None
+            assert connection.exec_driver_sql("SELECT count(*) FROM information_schema.tables "
+                                              "WHERE table_schema = 'public'").scalar_one() == 0
+            if path_kind == 'populated':
+                connection.exec_driver_sql('CREATE TABLE public.current_records (id integer PRIMARY KEY)')
+                connection.exec_driver_sql('INSERT INTO public.current_records VALUES (12)')
+        if path_kind != 'custom-only':
+            path += ', public'
+        instance.configure('search_path', target=target, search_path=path, create_schema=False)
+        instance.sample.write_text('files before restore', encoding='utf-8')
+
+        if path_kind == 'populated':
+            instance.child('boot', expected=EXIT_RESTORE_ERROR & 255)
+            assert (payload / 'bazarr_postgres.dump').is_file()
+            assert instance.sample.read_text(encoding='utf-8') == 'files before restore'
+            assert instance.tool_runs.read_text(encoding='utf-8').splitlines() == ['pg_dump']
+            with engine.connect() as connection:
+                assert connection.exec_driver_sql('SELECT id FROM public.current_records').scalar_one() == 12
+        else:
+            instance.child('boot', expected=41)
+            instance.child('boot')
+            assert json.loads(instance.child('check')) == {
+                'database': target.database, 'schema': schema, 'name': 'archived row',
+            }
+            assert instance.sample.read_text(encoding='utf-8') == 'archived plugin files'
+            assert instance.tool_runs.read_text(encoding='utf-8').splitlines() == ['pg_dump', 'pg_restore']
+            assert not (payload / 'bazarr_postgres.dump').exists()
+            assert not instance.stage.exists()
+    finally:
+        engine.dispose()
+
+
+@pytest.mark.parametrize('extra_inventory', [False, True], ids=['different-schema', 'multiple-schemas'])
+def test_postgres_restore_preserves_payload_when_its_inventory_does_not_match_live_schema(
+        postgres_restore_instance, extra_inventory):
+    from literals import EXIT_RESTORE_ERROR
+
+    instance = postgres_restore_instance
+    if extra_inventory:
+        instance.child('seed', 'other inventory in archive')
+    instance.configure('search_path')
+    archive = instance.archive()
+    instance.child('seed', 'current custom schema inventory')
+    instance.sample.write_text('current plugin files', encoding='utf-8')
+    if not extra_inventory:
+        instance.configure('direct')
+        instance.child('seed', 'current target schema inventory with matching data key')
+    instance.child('prepare', archive.name)
+    instance.child('boot', expected=EXIT_RESTORE_ERROR & 255)
+
+    expected = ('current custom schema inventory' if extra_inventory
+                else 'current target schema inventory with matching data key')
+    assert json.loads(instance.child('check'))['name'] == expected
+    assert instance.sample.read_text(encoding='utf-8') == 'current plugin files'
+    assert instance.tool_runs.read_text(encoding='utf-8').splitlines() == ['pg_dump']
+    assert archive.is_file()
+    assert (instance.stage / 'payload' / 'bazarr_postgres.dump').is_file()
+    assert (instance.stage / 'payload' / 'config.yaml').is_file()
+    assert not (instance.stage / '.plugin-restore-phase').exists()
+
+
+def test_postgres_restore_accepts_a_legacy_archive_without_plugin_metadata(postgres_restore_instance):
+    from zipfile import ZipFile
+
+    instance = postgres_restore_instance
+    archive = instance.archive()
+    legacy = archive.with_name("bazarr_backup_vlegacy.zip")
+    with ZipFile(archive) as source, ZipFile(legacy, "w") as target:
+        for name in ("config.yaml", "bazarr_postgres.dump"):
+            target.writestr(name, source.read(name))
+    instance.child("seed", "changed row")
+    instance.sample.write_text("changed plugin files", encoding="utf-8")
+    instance.child("prepare", legacy.name)
+    # The prior inventory is unreadable to the app. Startup must reach the
+    # ordinary restore before trying to migrate or scrub that inventory.
+    engine = sa.create_engine(instance.direct_url, isolation_level="AUTOCOMMIT", hide_parameters=True)
+    try:
+        with engine.connect() as connection:
+            connection.exec_driver_sql("ALTER TABLE provider_hub_state RENAME COLUMN document TO unreadable")
+    finally:
+        engine.dispose()
+    instance.child("boot", expected=41)
+    instance.child("boot")
+    assert json.loads(instance.child("check"))["name"] == "archived row"
+    assert instance.sample.read_text(encoding="utf-8") == "changed plugin files"
+    assert instance.tool_runs.read_text(encoding="utf-8").splitlines() == ["pg_dump", "pg_restore"]
+    assert not instance.stage.exists()

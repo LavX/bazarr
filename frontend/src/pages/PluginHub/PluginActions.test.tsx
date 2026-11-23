@@ -290,7 +290,7 @@ describe("rolling back a plugin from its card", () => {
     },
   );
 
-  it("shows the server's discard instruction instead of suggesting restart for a staged update", async () => {
+  it("offers a restart to finish a staged update before rollback", async () => {
     const refusal = "Discard the staged update before rolling back.";
     present({ ...availability, blocked_reason: refusal });
     installed = installed.map((item) => ({
@@ -302,8 +302,10 @@ describe("rolling back a plugin from its card", () => {
     await menuOf(name);
     const item = await screen.findByRole("menuitem", { name: /Roll back/ });
     expect(item).toHaveAttribute("aria-disabled", "true");
-    expect(item).toHaveTextContent(refusal);
-    expect(item).not.toHaveTextContent("Restart Bazarr+");
+    expect(item).toHaveTextContent(
+      "Restart Bazarr+ to finish the change in progress.",
+    );
+    expect(item).not.toHaveTextContent(refusal);
     expect(calls).toEqual([]);
   });
 

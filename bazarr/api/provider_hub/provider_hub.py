@@ -200,7 +200,8 @@ class ProviderHubInstallations(Resource):
         # which raises with the reason when any of them fails.
         return {"job_id": hub_jobs.queue_install(entry["source"], entry["provider_id"],
                                                  entry["version"], entry["name"],
-                                                 entry_key=entry["entry_key"])}, 202
+                                                 entry_key=entry["entry_key"],
+                                                 catalog_registration=entry.get("catalog_registration"))}, 202
 
 
 def _package_too_large():

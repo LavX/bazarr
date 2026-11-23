@@ -627,7 +627,7 @@ def read_state(bind=None) -> tuple[int, str, list[dict[str, Any]]]:
     return int(found[0]), found[1], found[2]
 
 
-def read_release_rows(bind=None, *, plugin_id: str | None = None) -> list[dict[str, Any]]:
+def read_release_rows(bind=None, *, plugin_id: str | None = None, include_history: bool = False) -> list[dict[str, Any]]:
     """Every stored release with its bindings, the active and staged ones with their manifests.
 
     The ones a write needs to settle slots against: it also needs the draining,
@@ -638,7 +638,8 @@ def read_release_rows(bind=None, *, plugin_id: str | None = None) -> list[dict[s
 
     def fetch():
         with bind.connect() as connection:
-            return releases.read_rows(connection, plugin_id=plugin_id)
+            manifests = releases.RELEASE_STATES if include_history else releases.SLOT_STATES
+            return releases.read_rows(connection, plugin_id=plugin_id, manifests=manifests)
 
     return _sanitized(fetch)
 

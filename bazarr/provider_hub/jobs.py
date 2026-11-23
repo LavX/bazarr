@@ -62,7 +62,8 @@ def _noun(source_id, provider_id, version, entry_key=None):
         return "plugin"
 
 
-def queue_install(source_id, provider_id, version, name=None, entry_key=None, consent=None):
+def queue_install(source_id, provider_id, version, name=None, entry_key=None, consent=None,
+                  catalog_registration=None):
     """Queue the install of the entry ``source_id`` lists for ``provider_id``.
 
     The job carries the reference, not a manifest: it installs what the source
@@ -75,6 +76,8 @@ def queue_install(source_id, provider_id, version, name=None, entry_key=None, co
         kwargs["entry_key"] = entry_key
     if consent is not None:
         kwargs["consent"] = consent
+    if catalog_registration is not None:
+        kwargs["catalog_registration"] = catalog_registration
     return _enqueue(f"Installing {_noun(source_id, provider_id, version, entry_key)} {name or provider_id}",
                     "install_provider", kwargs)
 
@@ -137,12 +140,15 @@ def queue_catalog_refresh():
     return _enqueue("Refreshing provider catalog", "refresh_catalog", {})
 
 
-def install_provider(source_id, provider_id, version, name=None, job_id=None, entry_key=None, consent=None):
+def install_provider(source_id, provider_id, version, name=None, job_id=None, entry_key=None, consent=None,
+                     catalog_registration=None):
     label = name or provider_id
     try:
         return service.install_catalog_entry(source_id, provider_id, version,
                                              checkpoint=_checkpoint(job_id), entry_key=entry_key,
-                                             consent_digest=consent)
+                                             consent_digest=consent,
+                                             **({"expected_registration": catalog_registration}
+                                                if catalog_registration is not None else {}))
     except service.ProviderHubStopped as stopped:
         raise JobCancelled(str(stopped)) from stopped
     except Exception as error:

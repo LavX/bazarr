@@ -68,3 +68,14 @@ describe("the status of a revoked provider on its catalog card", () => {
     expect(screen.getByText("Restart required")).toBeVisible();
   });
 });
+
+it("identifies a staged rollback on the Subtitle Hub card", () => {
+  show({
+    ...running,
+    state: "staged",
+    staged_version: "0.9.0",
+    staged_action: "rollback",
+  });
+  expect(screen.getByText("Rollback staged")).toBeVisible();
+  expect(screen.queryByText("Update staged")).not.toBeInTheDocument();
+});

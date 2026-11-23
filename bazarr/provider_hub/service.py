@@ -10,10 +10,10 @@ import logging
 import re
 import shutil
 import tempfile
+from hashlib import sha256
 import time
 import uuid
 import zipfile
-from hashlib import sha256
 
 import requests
 
@@ -32,10 +32,10 @@ from secret_store.registry import SECRET_DESCRIPTOR_KEY as SECRET_DESCRIPTORS_KE
 from secret_store.scrub import mask_credential_refusal, scrub_job_secrets, scrub_text
 
 from .manifest import ManifestValidationError, manifest_provider_id, validate_manifest
-from .kinds import (ATTACH_LIVE, ATTACH_ON_RESTART, DETACH_LIVE, SUBTITLE_PROVIDER, UnknownKindError, catalog_kind_of, get_kind, kind_for_api,
-                    kind_of, known_kinds)
+from .kinds import (ATTACH_LIVE, ATTACH_ON_RESTART, DETACH_LIVE, SUBTITLE_PROVIDER, TRANSLATOR, UnknownKindError,
+                    catalog_kind_of, get_kind, kind_for_api, kind_of, known_kinds)
 from .kinds import subtitle_provider as provider_kind
-from . import catalog_feed, closure, consent, detach, dev_source, floor, releases, revocation
+from . import catalog_feed, closure, consent, datadir, detach, dev_source, floor, releases, revocation, secret_paths, seed
 from .bundle import verify_bundle_tree
 from .compatibility import (
     CATALOG_LIST_PLUGINS, CATALOG_LIST_PROVIDERS, HostFacts, current_host, entry_compatibility, refusal_text,
@@ -55,6 +55,7 @@ from .state import (
     ORIGIN_BUNDLED,
     catalog_source_for_entry,
     load_state,
+    load_state_strict,
     mutate_state,
     provider_hub_dir,
     running_installations,
@@ -66,7 +67,7 @@ from .venv import (
     _ENV_LOCK, PluginEnvironment, environment_fingerprint, hold_environment, pin_scope, python_executable,
     release_pins, validated_bundle_path, validated_interpreter,
 )
-from .worker import ProviderWorkerClient, release_when_gone, worker_command
+from .worker import ProviderWorkerClient, WorkerBusy, WorkerError, release_when_gone, worker_command
 
 
 class CatalogSourceError(ValueError):
@@ -97,6 +98,10 @@ ENABLED_PROVIDERS_NOT_SAVED = "the enabled providers list could not be saved to 
 
 
 SECRET_PLACEHOLDER = "********"
+PROBE_TIMEOUT = 10.0
+_PROBE_COPIES_LOCK = threading.Lock()
+_PROBE_COPIES: set[str] = set()
+_PLUGIN_BUSY = "The plugin is busy. Try again."
 _JOB_LOG_LIMIT = 200
 # A job that has not reported for this long is taken as dead. An install or a repair has time limits far below it.
 JOB_TIME_LIMIT_SECONDS = 2 * 60 * 60
@@ -125,7 +130,7 @@ def utcnow_iso() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
-def _persist_job(job: dict[str, Any]) -> None:
+def _persist_job(job: dict[str, Any], state: dict[str, Any] | None = None) -> None:
     # One row's message, error and details come from whatever raised, which
     # for a plugin failure is the plugin's own words. The row is read by the
     # API and, after a restart, by the boot that loads it, so it is scrubbed
@@ -154,7 +159,10 @@ def _persist_job(job: dict[str, Any]) -> None:
         if len(jobs) > _JOB_LOG_LIMIT:
             del jobs[: len(jobs) - _JOB_LOG_LIMIT]
 
-    mutate_state(persist)
+    if state is None:
+        mutate_state(persist)
+    else:
+        persist(state)
 
 
 class _JobHandle:
@@ -162,6 +170,7 @@ class _JobHandle:
 
     def __init__(self, data: dict[str, Any]):
         self.data = data
+        self.started_perf = time.perf_counter()
 
     def update(self, **fields: Any) -> None:
         """Merge ``fields`` into the job payload and persist immediately.
@@ -226,9 +235,8 @@ def record_job(
         "updated_at": now,
         "session": _PROCESS_SESSION,
     }
-    handle = _JobHandle(job)
     _persist_job(job)
-    started_perf = time.perf_counter()
+    handle = _JobHandle(job)
     job["state"] = "running"
     job["started_at"] = utcnow_iso()
     job["updated_at"] = job["started_at"]
@@ -240,15 +248,17 @@ def record_job(
         job["error"] = str(error) or error.__class__.__name__
         job["completed_at"] = utcnow_iso()
         job["updated_at"] = job["completed_at"]
-        job["duration_ms"] = int((time.perf_counter() - started_perf) * 1000)
+        job["duration_ms"] = int((time.perf_counter() - handle.started_perf) * 1000)
         _persist_job(job)
         raise
     else:
+        if job["completed_at"] is not None:
+            return
         if job.get("state") != "failed":
             job["state"] = "completed"
         job["completed_at"] = utcnow_iso()
         job["updated_at"] = job["completed_at"]
-        job["duration_ms"] = int((time.perf_counter() - started_perf) * 1000)
+        job["duration_ms"] = int((time.perf_counter() - handle.started_perf) * 1000)
         _persist_job(job)
 
 
@@ -1012,6 +1022,7 @@ def _catalog_source_error_message(error: Exception) -> str:
     return str(error)
 
 
+@datadir.serialized
 def add_catalog_source(
     name: str, url: str, trusted: bool = False, dev_ref: str | None = None
 ) -> dict[str, Any]:
@@ -1041,12 +1052,17 @@ def add_catalog_source(
             "official": is_official,
             "trusted": is_official,
             "dev_ref": dev_ref_value,
-            "registration_id": uuid.uuid4().hex,
             "last_checked_at": None,
             "last_error": None,
+            **({"registration": job.data["id"]} if not is_official else {}),
         }
+
         def store_source(state: dict[str, Any]) -> dict[str, Any]:
-            state.setdefault("catalog_sources", {})[name] = source
+            sources = state.setdefault("catalog_sources", {})
+            existing = sources.get(name)
+            if isinstance(existing, dict) and (existing.get("url"), existing.get("dev_ref")) == (url, dev_ref_value):
+                return dict(existing)
+            sources[name] = source
             return dict(source)
 
         source = mutate_state(store_source)
@@ -1059,6 +1075,7 @@ def add_catalog_source(
         return source
 
 
+@datadir.serialized
 def remove_catalog_source(name: str) -> bool:
     with record_job(
         "remove_source",
@@ -1088,11 +1105,19 @@ def remove_catalog_source(name: str) -> bool:
             # Its installs stay, with no source to update from. A source added
             # later under the same name is a different catalog and must not
             # inherit them.
-            for installation in (state.get("installations") or {}).values():
-                if (isinstance(installation, dict) and installation.get("source_bound")
-                        and installation.get("source_id") == name):
-                    installation["source_id"] = None
+            for plugin_id, installation in (state.get("installations") or {}).items():
+                if not isinstance(installation, dict):
+                    continue
+                active = _release_slots(state, plugin_id).get(releases.ACTIVE)
+                if active is not None and (active.source_id, active.origin) == (name, "catalog"):
                     installation["trust_note"] = _SOURCE_REMOVED_NOTE
+                if installation.get("source_bound") and installation.get("source_id") == name:
+                    installation["source_id"] = None
+                    if not _active_release_owned(state, installation, active):
+                        installation["trust_note"] = _SOURCE_REMOVED_NOTE
+            for kept in (state.get("kept_data") or {}).values():
+                if isinstance(kept, dict) and kept.get("source_id") == name:
+                    kept.update(source_id=None, origin="catalog")
             return True, removed_name
 
         removed, _removed_name = mutate_state(remove_source)
@@ -1196,10 +1221,16 @@ def list_catalog(auto_refresh: bool = False) -> dict[str, Any]:
         refresh_catalog()
         state = load_state()
     sources = state.get("catalog_sources") or {}
+    official = sources.get(OFFICIAL_CATALOG_SOURCE_ID) or {}
+    unsigned_floor = (official.get("catalog_status") == floor.CATALOG_STATUS_BUNDLED
+                      and floor.signed_context(official) is None)
     host = current_host()
     entries = []
     for entry in (state.get("catalog_entries") or {}).values():
         if isinstance(entry, dict):
+            if (unsigned_floor and entry.get("source") == OFFICIAL_CATALOG_SOURCE_ID
+                    and entry.get("catalog_list") == CATALOG_LIST_PLUGINS):
+                continue
             # Named from the source record as it is now. Marked when its source
             # may not install it, or when this Bazarr+ cannot run it.
             source = catalog_source_for_entry(sources, entry)
@@ -1448,41 +1479,49 @@ def _recheck_installed_trust(state: dict[str, Any], ancestry: _OfficialAncestry)
     answer changes an install; a check that fails is repeated next time.
     """
     built_in_ids = None
-    for provider_id, row in (state.get("installations") or {}).items():
-        if not isinstance(row, dict):
-            continue
+
+    def recheck(provider_id, row, manifest):
+        nonlocal built_in_ids
         if row.get("origin") == "local":
             row["source_bound"] = True
-            continue
-        manifest = row.get("staged_manifest")
-        if not isinstance(manifest, dict):
-            manifest = row.get("manifest")
+            return
         origin = manifest.get("source") if isinstance(manifest, dict) else None
         origin = origin if isinstance(origin, dict) else {}
         if not row.get("source_bound"):
             if not row.get("trusted"):
                 _bind_by_evidence(row, manifest, origin, state)
-                continue
+                return
             # Only the official source ever made an install trusted.
             row["source_bound"] = True
             row["source_id"] = OFFICIAL_CATALOG_SOURCE_ID
         if not (row.get("trusted") or row.get("demoted_commit")):
-            continue
+            return
         if built_in_ids is None:
             built_in_ids = _built_in_provider_ids()
         shadows = str(provider_id) in built_in_ids
         if origin.get("repo") != OFFICIAL_CATALOG_REPO:
             if row.get("trusted"):
                 _demote_installation(row, _FOREIGN_REPO_NOTE, shadows, for_commit=False)
-            continue
+            return
         verdict, reason = ancestry.check(origin.get("commit"))
         if verdict is None:
-            continue
+            return
         if verdict and row.get("demoted_commit"):
             row.update(trusted=True, source_id=OFFICIAL_CATALOG_SOURCE_ID,
                        demoted_commit=False, trust_note=None)
         elif not verdict and row.get("trusted"):
             _demote_installation(row, _commit_demotion_note(reason), shadows, for_commit=True)
+
+    for provider_id, row in (state.get("installations") or {}).items():
+        if not isinstance(row, dict):
+            continue
+        staged = row.get("staged_manifest")
+        active = row.get("manifest")
+        recheck(provider_id, row, staged if isinstance(staged, dict) else active)
+        previous = row.get("previous_source")
+        if (isinstance(staged, dict) and isinstance(previous, dict)
+                and (previous.get("trusted") or previous.get("demoted_commit"))):
+            recheck(provider_id, previous, active)
 
 
 def _normalize_catalog_manifest(manifest: dict[str, Any], source: dict[str, Any], commit: str) -> dict[str, Any]:
@@ -1881,8 +1920,8 @@ def refresh_catalog(source_ids: set[str] | None = None, checkpoint=None) -> dict
                     if key not in refreshed_entry_keys:
                         del entries[key]
             if source_ids is None or OFFICIAL_CATALOG_SOURCE_ID in source_ids:
-                _recheck_installed_trust(state, ancestry)
                 _hold_revoked_installations(state)
+                _recheck_installed_trust(state, ancestry)
             if _fallback_setting_on():
                 _store_transport(state)
             ok_sources = sources_count - len(failed_sources)
@@ -2131,6 +2170,11 @@ def _redact_installation(installation: dict[str, Any]) -> dict[str, Any]:
     redacted = dict(installation)
     if redacted.pop(releases.STAGED_ROLLBACK, None) and redacted.get("staged_version"):
         redacted["staged_action"] = "rollback"
+    redacted.pop("active_data_key", None)
+    _clear_staged_data(redacted)
+    redacted.pop("delete_release_data", None)
+    redacted.pop("data_worker_cleanup_pending", None)
+    redacted.pop("previous_source", None)
     provider_id = redacted.get("provider_id")
     if provider_id:
         # enabled_providers in config.yaml is the source of truth; the stored
@@ -2923,6 +2967,7 @@ def _blocked_connection_result(provider_id: str, provider: dict[str, Any], job) 
 
 
 def test_provider_connection(provider_id: str) -> dict[str, Any] | None:
+    deadline = time.monotonic() + PROBE_TIMEOUT
     provider = get_provider(provider_id, redact=False)
     if not provider:
         return None
@@ -2934,7 +2979,7 @@ def test_provider_connection(provider_id: str) -> dict[str, Any] | None:
         target_kind="provider",
         target_id=provider_id,
         target_name=target_name,
-    ) as job:
+    ) as job, contextlib.ExitStack() as probe_files:
         if provider.get("pending_restart") or provider.get("state") != "active":
             job.update(
                 message="Restart Bazarr+ before testing this staged plugin",
@@ -2949,36 +2994,28 @@ def test_provider_connection(provider_id: str) -> dict[str, Any] | None:
         if provider.get("blocked"):
             return _blocked_connection_result(provider_id, provider, job)
 
-        # The row is read again under the lock a cleanup decides under, and the
-        # environment is held in the same step: a repair and a cleanup that ran
-        # since the first read cannot take it away while the test runs.
-        with _ENV_LOCK:
-            provider = get_provider(provider_id, redact=False) or provider
-            blocked_now = bool(provider.get("blocked"))
-            manifest_data = provider.get("manifest")
-            active_path = provider.get("active_path")
-            python_path = provider.get("python_path")
-            release_environment = (
-                hold_environment(env_registry.env_dir_of(python_path)) if python_path else (lambda: None)
-            )
-
-        if blocked_now:
-            # Held back since the first read: nothing of it is started to be tested.
-            release_environment()
-            return _blocked_connection_result(provider_id, provider, job)
-
         client = None
+        python_path = None
+        release_environment = None
         try:
+            # Pin the interpreter under the cleanup lock. Drop this lock before
+            # acquiring the release lock, as staging records in the opposite order.
+            with _snapshot_lock(deadline, _ENV_LOCK):
+                provider = get_provider(provider_id, redact=False) or provider
+                if provider.get("blocked"):
+                    return _blocked_connection_result(provider_id, provider, job)
+                manifest_data = provider.get("manifest")
+                active_path = provider.get("active_path")
+                python_path = provider.get("python_path")
+                if python_path:
+                    release_environment = hold_environment(env_registry.env_dir_of(python_path))
+
             if not isinstance(manifest_data, dict):
                 raise ProviderHubInstallError("active manifest is missing")
             if not active_path:
                 raise ProviderHubInstallError("active bundle path is missing")
             if not python_path:
                 raise ProviderHubInstallError("provider Python path is missing")
-            interpreter = validated_interpreter(provider_hub_dir(), python_path)
-            if interpreter is None:
-                raise ProviderHubInstallError("provider Python path is not one of the hub's environments")
-
             trusted = bool(provider.get("trusted", False))
             manifest = validate_manifest(
                 manifest_data,
@@ -2987,13 +3024,27 @@ def test_provider_connection(provider_id: str) -> dict[str, Any] | None:
                     trusted,
                 ),
             )
-            bundle_path = validated_bundle_path(provider_hub_dir(), active_path)
-            if bundle_path is None:
+            refusal = seed.runtime_refusal(manifest.raw)
+            if refusal:
+                raise ProviderHubInstallError(refusal)
+            root = provider_hub_dir()
+            runtime = seed.resolve_paths(root, manifest.raw, active_path, python_path)
+            if runtime is None:
+                if seed.is_runtime_path(active_path) or seed.is_runtime_path(python_path):
+                    env_registry.mark_needs_repair(provider_id, python_path)
+                    raise ProviderHubInstallError("the active bundle and Python environment could not be verified")
+                if validated_interpreter(root, python_path) is None:
+                    raise ProviderHubInstallError("provider Python path is not one of the hub's environments")
                 env_registry.mark_needs_repair(provider_id, python_path)
                 raise ProviderHubInstallError("active bundle path is not one of the hub's bundles")
-            _remove_bundle_runtime_artifacts(bundle_path)
-            verify_bundle_tree(manifest, bundle_path)
+            bundle_path, interpreter = runtime
+            _verify_bundle_for_run(manifest, bundle_path)
 
+            data = probe_files.enter_context(_probe_release_data(provider_id, provider, deadline=deadline))
+            timeout = _snapshot_time_left(deadline)
+            # A late data snapshot leaves too little time to judge worker health.
+            if data is not None and timeout < PROBE_TIMEOUT / 2:
+                raise datadir.SnapshotBusy(_PLUGIN_BUSY)
             runner = Path(__file__).with_name("worker_runner.py")
             client = ProviderWorkerClient(
                 worker_command(interpreter, runner),
@@ -3001,11 +3052,15 @@ def test_provider_connection(provider_id: str) -> dict[str, Any] | None:
                 env={
                     "BAZARR_PROVIDER_HUB_BUNDLE": str(bundle_path),
                     "BAZARR_PROVIDER_HUB_MANIFEST": json.dumps(manifest.raw),
+                    **({"BAZARR_PLUGIN_DATA_DIR": str(data)} if data is not None else {}),
                 },
             )
             try:
-                result = client.request("health", {}, timeout=10)
-            except Exception:
+                result = client.request("health", {}, timeout=timeout)
+            except Exception as error:
+                if (time.monotonic() >= deadline or isinstance(error, (WorkerBusy, TimeoutError))
+                        or isinstance(error, WorkerError) and error.code == "timeout"):
+                    raise datadir.SnapshotBusy(_PLUGIN_BUSY) from error
                 # The worker could not start or answer here, which is what a
                 # missing, stale or foreign environment looks like.
                 env_registry.mark_needs_repair(provider_id, python_path)
@@ -3029,26 +3084,28 @@ def test_provider_connection(provider_id: str) -> dict[str, Any] | None:
             }
         except Exception as error:
             message = scrub_text(str(error) or error.__class__.__name__)
-            _record_provider_last_error(provider_id, message, python_path)
+            status = "busy" if isinstance(error, datadir.SnapshotBusy) else "failed"
+            if not isinstance(error, datadir.SnapshotRefused):
+                _record_provider_last_error(provider_id, message, python_path)
             job.data["state"] = "failed"
             job.update(
                 error=message,
                 message=message,
-                details={"status": "failed"},
+                details={"status": status},
             )
             return {
                 "provider_id": provider_id,
                 "ok": False,
-                "status": "failed",
+                "status": status,
                 "message": message,
             }
         finally:
-            if client is None:
-                release_environment()
-            else:
-                # Held until the worker and anything it started are gone: a
-                # stop that leaves a survivor keeps the environment in place.
-                release_when_gone(client, release_environment, f"the connection test of {provider_id}")
+            if release_environment is not None:
+                if client is None:
+                    release_environment()
+                else:
+                    # Keep the environment pinned until the worker and its children exit.
+                    release_when_gone(client, release_environment, f"the connection test of {provider_id}")
 
 
 def _built_in_provider_ids() -> set[str]:
@@ -3436,14 +3493,13 @@ def _source_may_carry_new_kinds(state: dict[str, Any], source_id: str | None) ->
 
 def _revocation_lists(state: dict[str, Any]) -> dict[str, revocation.ChannelList]:
     """The lists this host holds, by channel: of the database copy and the file copy, the newer one."""
-    official = (state.get("catalog_sources") or {}).get(OFFICIAL_CATALOG_SOURCE_ID)
-    return revocation.effective(revocation.from_source(official), revocation.read_mirror())
+    return revocation.stored_lists(state)
 
 
 def _revocations(state: dict[str, Any]) -> tuple[revocation.Revocation, ...]:
     """What the official catalog has revoked, as this host last verified it: every channel's list together.
     Nothing verified means none."""
-    return revocation.entries_of(_revocation_lists(state))
+    return revocation.runtime_entries(state)
 
 
 def _revocations_stale(state: dict[str, Any], channels: Iterable[str] = revocation.CHANNELS) -> list[str]:
@@ -3498,6 +3554,11 @@ def _install_refusal(
     if source_id != OFFICIAL_CATALOG_SOURCE_ID and str(provider_id) in _reserved_provider_ids(state):
         return RESERVED_ID_REASON
     if source_id == OFFICIAL_CATALOG_SOURCE_ID:
+        source = (state.get("catalog_sources") or {}).get(source_id) or {}
+        if source.get("catalog_status") == floor.CATALOG_STATUS_BUNDLED:
+            document = floor.signed_context(source)
+            if document is None and kind != SUBTITLE_PROVIDER:
+                return "the bundled plugin catalog no longer verifies"
         return _supply_refusal(state)
     return None
 
@@ -3564,7 +3625,8 @@ def _verify_bundle_for_run(manifest, bundle_path: Path) -> None:
     verify_bundle_tree(manifest, bundle_path)
 
 
-def _smoke_validate_worker(manifest, bundle_path: Path, python_path: Path, timeout: float = 10.0) -> None:
+def _smoke_validate_worker(manifest, bundle_path: Path, python_path: Path, timeout: float = 10.0,
+                           *, data_dir: Path | None = None) -> None:
     _verify_bundle_for_run(manifest, bundle_path)
     runner = Path(__file__).with_name("worker_runner.py")
     # The environment is held for as long as the worker may run, which can be
@@ -3578,6 +3640,7 @@ def _smoke_validate_worker(manifest, bundle_path: Path, python_path: Path, timeo
             env={
                 "BAZARR_PROVIDER_HUB_BUNDLE": str(bundle_path),
                 "BAZARR_PROVIDER_HUB_MANIFEST": json.dumps(manifest.raw),
+                **({"BAZARR_PLUGIN_DATA_DIR": str(data_dir)} if data_dir is not None else {}),
             },
         )
         client.request("health", {}, timeout=timeout)
@@ -3590,7 +3653,9 @@ def _smoke_validate_worker(manifest, bundle_path: Path, python_path: Path, timeo
             if client is None:
                 release()
             else:
-                release_when_gone(client, release, "a health check")
+                stopped = release_when_gone(client, release, "a health check")
+                if data_dir is not None and not stopped:
+                    raise ProviderHubInstallError("the health check could not stop every process using plugin data")
 
 
 def _catalog_list_field(catalog_list: str | None) -> dict[str, str]:
@@ -3634,16 +3699,19 @@ def _abandon_staged_catalog_list(installation: dict[str, Any]) -> None:
         installation.pop("catalog_list", None)
 
 
-def _abandon_staged_release(installation: dict[str, Any], message: str) -> None:
+def _abandon_staged_release(state: dict[str, Any], plugin_id: str,
+                            installation: dict[str, Any], message: str) -> None:
     """Drop a staged release that will not activate and record why. The active release, if any, stays."""
     installation["last_error"] = message
-    if installation.pop(releases.STAGED_ROLLBACK, None) is None:
-        _abandon_staged_catalog_list(installation)
+    installation.pop(releases.STAGED_ROLLBACK, None)
+    _abandon_staged_catalog_list(installation)
+    _restore_active_source(state, plugin_id, installation)
     installation["staged_version"] = None
     installation["staged_path"] = None
     installation["staged_python_path"] = None
     installation["staged_manifest"] = None
     installation.pop("staged_supplied_by", None)
+    _clear_staged_data(installation)
     # The restart a refresh asked for, to stop a revoked release, is still to come.
     installation["pending_restart"] = bool(installation.get("revoked_restart"))
     installation["state"] = "active" if installation.get("active_version") else "failed"
@@ -3651,18 +3719,15 @@ def _abandon_staged_release(installation: dict[str, Any], message: str) -> None:
     installation[releases.FAIL_STAGED] = message
 
 
-def _drop_revoked_staged(installations: dict[str, Any], revocations: tuple[revocation.Revocation, ...]) -> bool:
-    """Drop each staged release the revocation list names, so it never activates. Returns whether any row changed."""
-    changed = False
-    for plugin_id, row in installations.items():
+def _drop_revoked_staged(state: dict[str, Any], revocations: tuple[revocation.Revocation, ...]) -> None:
+    """Drop each staged release the revocation list names, so it never activates."""
+    for plugin_id, row in state["installations"].items():
         if not isinstance(row, dict) or row.get("state") != "staged" or not row.get("staged_version"):
             continue
         found = revocation.lookup(revocations, plugin_id, row.get("staged_version"))
         if found is not None:
-            _abandon_staged_release(row, _revocation_text(
+            _abandon_staged_release(state, plugin_id, row, _revocation_text(
                 revocation.refusal, found, row.get("name") or plugin_id, row["staged_version"], "installed"))
-            changed = True
-    return changed
 
 
 def _hold_revoked_installations(state: dict[str, Any]) -> None:
@@ -3676,8 +3741,114 @@ def _hold_revoked_installations(state: dict[str, Any]) -> None:
     installations = state.setdefault("installations", {})
     revocations = _revocations(state)
     # A revoked staged release goes first, so the text and the restart cue are decided on what is left.
-    _drop_revoked_staged(installations, revocations)
+    _drop_revoked_staged(state, revocations)
     _mark_revoked_installations(installations, revocations)
+
+
+def _clear_staged_data(installation) -> None:
+    for key in ("staged_data_key", "staged_data_fingerprint", "staged_data_from_active",
+                "staged_data_rollback", "data_activation_waiting"):
+        installation.pop(key, None)
+
+
+def _owned_kept_data(state, entry, source_id, kind, origin) -> bool:
+    return (isinstance(entry, dict) and entry.get("source_id") == source_id and entry.get("kind") == kind
+            and releases.matches_catalog_registration(state, source_id, entry.get("catalog_registration"))
+            and (entry.get("origin") == origin == "local" if source_id is None
+                 else (entry.get("origin") or origin) == origin))
+
+
+def _release_slots(state, plugin_id) -> dict[str, releases.SlotIdentity]:
+    return getattr(state, "release_slots", {}).get(plugin_id, {})
+
+
+def _same_release_owner(state, release: releases.SlotIdentity | releases.Release | None, source_id, origin) -> bool:
+    if release is None or (release.source_id, release.origin) != (source_id, origin):
+        return False
+    if origin == "local":
+        return True
+    return (origin == "catalog" and isinstance((state.get("catalog_sources") or {}).get(source_id), dict)
+            and releases.matches_catalog_registration(state, source_id, release.catalog_registration))
+
+
+def _rollback_owner_recorded(release: releases.SlotIdentity | releases.Release | None) -> bool:
+    # An old community release with only a source name may belong to a deleted registration.
+    return (release is not None and (release.origin == "local" or release.source_id == OFFICIAL_CATALOG_SOURCE_ID
+                                    or release.catalog_registration is not None))
+
+
+def _active_release_owned(state, row, release: releases.SlotIdentity | None) -> bool:
+    return (release is not None and _same_release_owner(state, release, release.source_id, release.origin)
+            and (release.origin == "local" or release.catalog_registration is not None
+                 or row.get("trust_note") != _SOURCE_REMOVED_NOTE))
+
+
+_INSTALLATION_SOURCE_FIELDS = ("source_id", "origin", "source_bound", "trusted", "trust_note", "demoted_commit")
+
+
+def _installation_source(row: dict[str, Any]) -> dict[str, Any]:
+    return {key: row[key] for key in _INSTALLATION_SOURCE_FIELDS if key in row}
+
+
+def _restore_active_source(state, plugin_id, row) -> None:
+    """Restore the active release's recorded binding when a stage is discarded."""
+    previous = row.pop("previous_source", None)
+    if not row.get("active_version"):
+        return
+    active = _release_slots(state, plugin_id).get(releases.ACTIVE)
+    if active is None and not isinstance(state, releases.StateDocument):
+        return
+    if not _active_release_owned(state, row, active):
+        removed = (row.get("trust_note") == _SOURCE_REMOVED_NOTE
+                   or (active is not None and active.catalog_registration is not None))
+        note = _SOURCE_REMOVED_NOTE if removed else _UNKNOWN_SOURCE_NOTE
+        row.update(source_id=None, origin="catalog", source_bound=True, trusted=False, trust_note=note)
+        row.pop("demoted_commit", None)
+        return
+    owner = active.source_id, active.origin
+    if isinstance(previous, dict) and (
+            (previous.get("source_id"), previous.get("origin")) == owner or (
+                active.source_id == OFFICIAL_CATALOG_SOURCE_ID and previous.get("source_id") is None
+                and previous.get("trust_note") and previous.get("source_bound"))):
+        row.pop("demoted_commit", None)
+        row.pop("trust_note", None)
+        row.update(_installation_source(previous))
+        row["trusted"] = bool(previous.get("trusted"))
+    else:
+        # Old stages did not save the active release's trust decision.
+        if (row.get("source_id"), row.get("origin")) != owner and not (
+                active.source_id == OFFICIAL_CATALOG_SOURCE_ID and row.get("demoted_commit")):
+            row.update(source_id=active.source_id, origin=active.origin)
+            row.pop("demoted_commit", None)
+            row.pop("trust_note", None)
+        row["trusted"] = False
+    row["source_bound"] = True
+    if active.source_id != OFFICIAL_CATALOG_SOURCE_ID:
+        row["trusted"] = False
+
+
+def _active_data_path(plugin_id: str, row) -> Path | None:
+    key = row.get("active_data_key")
+    root = provider_hub_dir()
+    if key:
+        return datadir.release_path(root, plugin_id, key)
+    return datadir.legacy_path(root, plugin_id, row.get("manifest")) if row.get("active_version") else None
+
+
+def _stage_data_source(state, plugin_id, row, source_id, kind, origin, manifest) -> tuple[Path | None, bool]:
+    active_release = _release_slots(state, plugin_id).get(releases.ACTIVE)
+    if (_active_release_owned(state, row, active_release) and not row.get("delete_release_data")
+            and (active_release.source_id, active_release.origin) == (source_id, origin)):
+        active = _active_data_path(plugin_id, row)
+        if active is not None:
+            return active, True
+    kept = (state.get("kept_data") or {}).get(plugin_id)
+    if _owned_kept_data(state, kept, source_id, kind, origin):
+        path = datadir.plugin_root(provider_hub_dir(), plugin_id) / "kept"
+        if path.exists():
+            return path, False
+        return datadir.legacy_path(provider_hub_dir(), plugin_id, manifest), False
+    return None, False
 
 
 def _staged_installation(
@@ -3697,10 +3868,12 @@ def _staged_installation(
         # list the active version came from is kept so a failed activation can
         # put it back. Staging over a staged update keeps the first one.
         restaged = existing.get("pending_restart") and existing.get("state") == "staged"
-        previous_list = (existing.get("previous_catalog_list")
-                         if restaged and not existing.get(releases.STAGED_ROLLBACK) else existing.get("catalog_list"))
+        previous_list = existing.get("previous_catalog_list") if restaged else existing.get("catalog_list")
         if previous_list:
             previous = {"previous_catalog_list": previous_list}
+        previous_source = existing.get("previous_source") if restaged else _installation_source(existing)
+        if previous_source:
+            previous["previous_source"] = previous_source
     return {
         **_catalog_list_field(catalog_list),
         **previous,
@@ -3710,6 +3883,9 @@ def _staged_installation(
         "active_version": existing.get("active_version"),
         "staged_version": validated.version,
         "active_path": existing.get("active_path"),
+        **({"active_data_key": existing["active_data_key"]} if existing.get("active_data_key") else {}),
+        **({"delete_release_data": True} if existing.get("delete_release_data") else {}),
+        **({"data_worker_cleanup_pending": True} if existing.get("data_worker_cleanup_pending") else {}),
         "python_path": existing.get("python_path"),
         "staged_path": str(bundle_path),
         "staged_python_path": str(staged_python_path),
@@ -3723,6 +3899,7 @@ def _staged_installation(
         "origin": origin,
         "source_id": source_id,
         "source_bound": True,
+        **({"trust_note": _SOURCE_REMOVED_NOTE} if existing.get("trust_note") == _SOURCE_REMOVED_NOTE else {}),
         "manifest": existing.get("manifest") if existing.get("active_version") else validated.raw,
         "enabled": existing.get("enabled", True),
         "config": existing.get("config", {}),
@@ -3760,17 +3937,20 @@ def _failed_installation(
         return installation
     if existing.get("active_version"):
         installation = dict(existing)
-        if installation.get(releases.STAGED_ROLLBACK):
-            _abandon_staged_release(installation, message)
-            return installation
         if installation.get("state") == "staged":
             # A restage that fails drops the staged update the row still holds.
+            installation.pop(releases.STAGED_ROLLBACK, None)
             _abandon_staged_catalog_list(installation)
+            if state is not None:
+                _restore_active_source(state, validated.provider_id, installation)
+            installation["state"] = "active"
         installation["last_error"] = message
         installation["staged_version"] = None
         installation["staged_path"] = None
         installation["staged_python_path"] = None
         installation["staged_manifest"] = None
+        installation.pop("staged_supplied_by", None)
+        _clear_staged_data(installation)
         # The restart a refresh asked for, to stop a revoked release, is still to come after a failed update.
         installation["pending_restart"] = bool(installation.get("revoked_restart"))
         return installation
@@ -3821,6 +4001,30 @@ def _bundled_wheels_argument(validated, bundle_path: Path) -> dict[str, Path]:
     return {"bundle_path": bundle_path} if declared_wheels(validated) else {}
 
 
+_ANY_INSTALLATION = object()
+
+
+def _check_catalog_registration(state, source_id, expected):
+    if (expected is not _UNSET and source_id is not None
+            and (source_id not in (state.get("catalog_sources") or {})
+                 or releases.catalog_registration(state, source_id) != expected)):
+        raise ProviderHubInstallError("the catalog registration changed while the release was being prepared")
+
+
+def _running_release_candidate(installation, kind):
+    if not isinstance(installation, dict) or not installation.get("active_version"):
+        return None
+    raw = installation.get("manifest")
+    paths = installation.get("active_path"), installation.get("python_path")
+    if not isinstance(raw, dict) or not all(isinstance(path, str) and path for path in paths):
+        return None
+    try:
+        manifest = kind.validate_manifest(raw, bool(installation.get("trusted", False)))
+    except ManifestValidationError:
+        return None
+    return manifest, *paths
+
+
 def _stage_validated(
     validated,
     source_trusted: bool,
@@ -3831,8 +4035,18 @@ def _stage_validated(
     install_timeout: float | None = None,
     checkpoint=None,
     catalog_list: str | None = None,
+    ready_release: seed.Release | None = None,
+    expected_installation: Any = _ANY_INSTALLATION,
+    defer_active_data_copy: bool = False,
+    expected_registration: Any = _UNSET,
 ) -> dict[str, Any]:
-    """Shared install core: stage the bundle, build the venv, smoke-test, record.
+    """Shared install core: prepare the release, smoke-test, record.
+
+    A verified runtime pair can be staged directly. A seeded release stays
+    outside the writable environment registry and the list of files to clean up.
+    When boot supplies an expected installation, a concurrent change wins.
+    Boot can defer the active data copy and its smoke test until activation has
+    confirmed that previous workers have stopped.
 
     ``bundle_stager(validated, deadline) -> Path`` decides where the bundle comes
     from (catalog fetch vs already-extracted local files). ``install_timeout``, when
@@ -3848,7 +4062,17 @@ def _stage_validated(
     step = checkpoint or (lambda message: None)
     staged = []
     env_path = None
+    data_path = None
+    data_key = None
+    data_fingerprint = None
+    data_from_active = False
+    data_deferred = False
     state = load_state()
+
+    def check_catalog(state):
+        _check_catalog_registration(state, source_id, expected_registration)
+
+    check_catalog(state)
     # Every route that installs or updates ends here, a local package included, so a revoked release is
     # refused whichever way it was asked for.
     revoked = _revocation_refusal(
@@ -3856,6 +4080,8 @@ def _stage_validated(
     if revoked:
         raise ProviderHubInstallError(revoked)
     existing = (state.get("installations") or {}).get(validated.provider_id)
+    if expected_installation is not _ANY_INSTALLATION and existing != expected_installation:
+        raise ProviderHubInstallError(f"{validated.provider_id} changed while the seed was being chosen")
     if isinstance(existing, dict) and kind_of(existing) != validated.kind:
         # An installation's kind never changes: the id already belongs to a
         # plugin of another kind, and replacing it would hand that plugin's
@@ -3885,65 +4111,117 @@ def _stage_validated(
     ) as job, pin_scope():
         try:
             deadline = None if install_timeout is None else time.monotonic() + max(0.0, install_timeout)
-            step("Downloading the provider")
-            bundle_path = bundle_stager(validated, deadline)
-            staged.append(bundle_path)
-            step("Installing the provider's dependencies")
-            install_remaining = None if deadline is None else max(0.0, deadline - time.monotonic())
-            env_path = PluginEnvironment(provider_hub_dir()).install(
-                validated, timeout=install_remaining, **_bundled_wheels_argument(validated, bundle_path))
-            staged.append(env_path)
-            staged_python_path = python_executable(env_path)
-            step("Checking that the provider starts")
-            smoke_timeout = None
-            if deadline is not None:
-                # The check shares the install's budget instead of adding its own.
+
+            def time_left() -> float:
+                if deadline is None:
+                    return float("inf")
                 left = deadline - time.monotonic()
                 if left <= 0:
-                    raise ProviderHubInstallError(
-                        f"install for {validated.provider_id} exceeded its time budget"
-                    )
-                smoke_timeout = min(10.0, left)
-            get_kind(validated.kind).smoke_test(
-                validated, bundle_path, staged_python_path, timeout=smoke_timeout)
+                    raise ProviderHubInstallError(f"install for {validated.provider_id} exceeded its time budget")
+                return left
+
+            if ready_release is not None:
+                step("Checking the prepared release")
+                paths = seed.resolve_paths(provider_hub_dir(), validated.raw, ready_release.bundle, ready_release.interpreter)
+                if paths is None:
+                    raise ProviderHubInstallError("the prepared release could not be verified")
+                bundle_path, staged_python_path = paths
+                if not ready_release.seeded:
+                    env_path = staged_python_path.parent.parent
+            else:
+                step("Downloading the provider")
+                bundle_path = bundle_stager(validated, deadline)
+                staged.append(bundle_path)
+
+            if expected_registration is not _UNSET:
+                check_catalog(load_state())
+            if datadir.declared(validated.raw):
+                step("Preparing the plugin's data")
+                if defer_active_data_copy:
+                    _, data_from_active = _stage_data_source(
+                        state, validated.provider_id, existing or {}, source_id, validated.kind, origin, validated.raw)
+                    data_deferred = data_from_active
+                # The key identifies the stage even if startup must defer its copy until activation.
+                data_key = uuid.uuid4().hex
+                if not data_deferred:
+                    data_path = datadir.release_path(provider_hub_dir(), validated.provider_id, data_key)
+                    snapshot_deadline = time.monotonic() + min(datadir.QUIESCE_TIMEOUT, time_left())
+                    data_fingerprint, data_from_active = _copy_staged_release_data(
+                        validated, state, source_id, origin, data_path, snapshot_deadline, check_catalog)
+
+            if ready_release is None:
+                step("Installing the provider's dependencies")
+                install_remaining = None if deadline is None else time_left()
+                env_path = PluginEnvironment(provider_hub_dir()).install(
+                    validated, timeout=install_remaining, **_bundled_wheels_argument(validated, bundle_path))
+                staged.append(env_path)
+                staged_python_path = python_executable(env_path)
+            if not data_deferred:
+                step("Checking that the provider starts")
+                smoke_timeout = None if deadline is None else min(10.0, time_left())
+                get_kind(validated.kind).smoke_test(
+                    validated, bundle_path, staged_python_path, timeout=smoke_timeout,
+                    **({"data_dir": data_path} if data_path is not None else {}))
             step("Recording the installation")
         except ProviderHubStopped:
+            if data_path is not None:
+                datadir.remove(data_path)
             _discard_stopped_install(staged, existing)
             raise
         except Exception as error:
+            if data_path is not None:
+                datadir.remove(data_path)
             install_error = error
             if env_path is not None:
                 # An environment this install built and nothing records or uses
                 # would otherwise stay on disk for good.
                 release_pins()
                 env_registry.discard_if_unused(provider_hub_dir(), env_path)
+            if isinstance(error, datadir.SnapshotRefused):
+                raise ProviderHubInstallError(str(error)) from error
 
-            def record_failed_install(state: dict[str, Any]) -> dict[str, Any]:
+            def record_failed_install(state: dict[str, Any]) -> tuple[Any, dict[str, Any]]:
+                check_catalog(state)
                 installations = state.setdefault("installations", {})
-                current = installations.get(validated.provider_id, existing)
+                current = installations.get(validated.provider_id)
+                if expected_installation is not _ANY_INSTALLATION and current != expected_installation:
+                    return None, dict(current or {})
                 installation = _failed_installation(
                     validated, current, install_error, source_trusted, origin, source_id, catalog_list, state
                 )
                 installations[validated.provider_id] = installation
-                return dict(installation)
+                return current, dict(installation)
 
-            mutate_state(record_failed_install)
+            with datadir.release_lock:
+                _require_release_available(validated.provider_id)
+                previous, failed = mutate_state(record_failed_install)
+                _discard_superseded_data(validated.provider_id, previous, failed.get("staged_data_key"))
             raise ProviderHubInstallError(str(install_error)) from install_error
 
         before_staging: dict[str, Any] = {}
 
         def record_staged_install(state: dict[str, Any]) -> dict[str, Any]:
+            check_catalog(state)
             installations = state.setdefault("installations", {})
             # What the row was before this write, to put back if the install is refused after it.
             before_staging.clear()
             before_staging["row"] = copy.deepcopy(installations.get(validated.provider_id))
-            current = installations.get(validated.provider_id, existing)
+            current = installations.get(validated.provider_id)
+            if expected_installation is not _ANY_INSTALLATION and current != expected_installation:
+                raise ProviderHubInstallError(f"{validated.provider_id} changed while the seed was being checked")
             if is_fresh and isinstance(current, dict) and current.get("state") == "removed":
                 # The row of a plugin removed in this run still carries its saved settings and keys. They go to the
                 # same plugin from the same source and to nobody else, so a package from another source, or an
                 # upload over a catalog install, starts with none, before anything is copied from the row.
-                if current.get("source_id") != source_id or (current.get("origin") or origin) != origin:
-                    current = {**current, "config": {}}
+                active = _release_slots(state, validated.provider_id).get(releases.ACTIVE)
+                same_owner = (_active_release_owned(state, current, active)
+                              and (active.source_id, active.origin) == (source_id, origin))
+                if active is None and not isinstance(state, releases.StateDocument):
+                    same_owner = (current.get("source_id") == source_id
+                                  and (current.get("origin") or origin) == origin
+                                  and current.get("trust_note") != _SOURCE_REMOVED_NOTE)
+                if not same_owner:
+                    current = {**current, "config": {}, "delete_release_data": True}
             _refuse_a_release_that_breaks_dependents(state, validated.provider_id, validated.version, validated.raw)
             installation = _staged_installation(
                 validated,
@@ -3955,14 +4233,22 @@ def _stage_validated(
                 source_id,
                 catalog_list,
             )
+            if data_key:
+                installation["staged_data_key"] = data_key
+                installation["staged_data_from_active"] = data_from_active
+                if not data_deferred:
+                    installation["staged_data_fingerprint"] = data_fingerprint
             plugin = parse_plugin_manifest(validated.raw) if validated.raw.get("schema_version") == 2 else None
             if plugin is not None:
                 # Which installed plugin supplies each capability it needs, kept with the release.
                 installation["staged_supplied_by"] = closure.supplier_map(state, plugin, validated.provider_id)
             installations[validated.provider_id] = installation
+            if isinstance(state, releases.StateDocument):
+                state.staging_install = validated.provider_id
             # The environment passed the worker check, so it is now the one
             # recorded for this dependency set (a no-op when it already is).
-            env_registry.register_environment(state, environment_fingerprint(validated), env_path)
+            if env_path is not None:
+                env_registry.register_environment(state, environment_fingerprint(validated), env_path)
             # The plugin's secret paths join the persisted set now, so a
             # credential configured through the settings card is encrypted
             # at rest from the first save and stays covered after removal.
@@ -3970,25 +4256,34 @@ def _stage_validated(
             return dict(installation)
 
         try:
-            with env_registry.recording_environment(env_path):
-                installation = mutate_state(record_staged_install)
+            with datadir.release_lock:
+                _require_release_available(validated.provider_id)
+                if env_path is None:
+                    installation = mutate_state(record_staged_install)
+                else:
+                    with env_registry.recording_environment(env_path):
+                        installation = mutate_state(record_staged_install)
+                if is_fresh:
+                    try:
+                        claim_kept_data(validated.provider_id, source_id, validated.kind, origin)
+                    except ProviderHubInstallError:
+                        _undo_staging(validated.provider_id, before_staging.get("row"))
+                        raise
         except env_registry.EnvironmentGone as error:
+            if data_path is not None:
+                datadir.remove(data_path)
             raise ProviderHubInstallError(str(error)) from error
         except ProviderHubInstallError:
-            # Refused in the write: another plugin's need would no longer be met. Nothing was recorded.
+            if data_path is not None:
+                datadir.remove(data_path)
             _discard_stopped_install(staged, existing)
             raise
         if is_fresh:
-            try:
-                claim_kept_data(validated.provider_id, source_id, validated.kind, origin)
-            except ProviderHubInstallError:
-                # Refused, so nothing of this install may be left to activate at the next restart.
-                _undo_staging(validated.provider_id, before_staging.get("row"))
-                _discard_stopped_install(staged, existing)
-                raise
             # The saved settings may have come back with the kept data, so the row is read again before the
             # required fields are judged.
             installation = dict((load_state().get("installations") or {}).get(validated.provider_id) or installation)
+        with datadir.release_lock:
+            _discard_superseded_data(validated.provider_id, before_staging.get("row"), data_key)
         missing_required = missing_required_fields(installation) if is_fresh else []
         if is_fresh and not get_kind(validated.kind).on_installed(
                 validated.provider_id, missing_required=missing_required):
@@ -4015,6 +4310,19 @@ def _stage_validated(
                 )
         job.update(message=message)
         return _redact_installation(installation)
+
+
+def _discard_superseded_data(plugin_id: str, previous, keep_key: str | None) -> None:
+    if not isinstance(previous, dict):
+        return
+    old_key = previous.get("staged_data_key")
+    if (old_key and old_key not in (keep_key, previous.get("active_data_key"))
+            and not previous.get("staged_data_rollback")):
+        try:
+            datadir.remove(datadir.release_path(provider_hub_dir(), plugin_id, old_key))
+        except (OSError, datadir.DataFolderError):
+            logging.getLogger(__name__).warning("Could not clear superseded staged data for %s",
+                                                plugin_id, exc_info=True)
 
 
 def _undo_staging(provider_id: str, previous: Any) -> None:
@@ -4063,7 +4371,7 @@ def _discard_stopped_install(paths, existing) -> None:
 
 def stage_install(
     manifest: dict[str, Any], install_timeout: float | None = None, checkpoint=None,
-    source_id: str | None = None, catalog_list: str | None = None,
+    source_id: str | None = None, catalog_list: str | None = None, *, expected_registration: Any = _UNSET,
 ) -> dict[str, Any]:
     """Install ``manifest``, bound to the catalog entry Bazarr+ holds for it.
 
@@ -4074,6 +4382,7 @@ def stage_install(
     matching the manifest against the stored entries.
     """
     state = load_state()
+    _check_catalog_registration(state, source_id, expected_registration)
     if isinstance(manifest, dict):
         source_id, source_trusted = _catalog_binding(manifest, state, source_id)
         if catalog_list not in (CATALOG_LIST_PROVIDERS, CATALOG_LIST_PLUGINS):
@@ -4093,6 +4402,20 @@ def stage_install(
     origin = "catalog"
     manifest_source = validated.raw.get("source") if isinstance(validated.raw, dict) else None
     catalog_url = manifest_source.get("catalog_url") if isinstance(manifest_source, dict) else None
+    ready_release = None
+    source = (state.get("catalog_sources") or {}).get(source_id)
+    official = source_trusted and source_id == OFFICIAL_CATALOG_SOURCE_ID and isinstance(source, dict)
+    if (official and catalog_list == CATALOG_LIST_PLUGINS and source.get("catalog_status") == floor.CATALOG_STATUS_BUNDLED
+            and floor.signed_context(source) is None):
+        raise ProviderHubInstallError("the bundled plugin catalog no longer verifies")
+    if official and not source.get("dev_ref"):
+        existing = (state.get("installations") or {}).get(validated.provider_id)
+        config_candidate = None
+        if isinstance(existing, dict) and existing.get("source_id") == source_id and kind_of(existing) == kind.name:
+            config_candidate = _running_release_candidate(existing, kind)
+        ready_release = seed.select_release(
+            provider_hub_dir(), validated.provider_id, config_candidate=config_candidate, requested=validated.raw,
+        )
     mirror_channel = _bundle_mirror_channel(state, source_id)
     token = _BUNDLE_MIRROR_CHANNEL.set(mirror_channel)
     try:
@@ -4108,11 +4431,69 @@ def stage_install(
             install_timeout=install_timeout,
             checkpoint=checkpoint,
             catalog_list=catalog_list,
+            ready_release=ready_release,
+            expected_registration=releases.catalog_registration(state, source_id),
         )
     finally:
         _BUNDLE_MIRROR_CHANNEL.reset(token)
         if mirror_channel is not None:
             _persist_transport()
+
+
+def activate_google_seed() -> bool:
+    """Start Google's verified image release at boot, or keep a valid config release.
+
+    The translator startup code decides whether the engine is wanted. This
+    function stages only the designated Google release and uses normal
+    activation. Baked trust is read-only and no fetched catalog is needed.
+    """
+    plugin_id = seed.GOOGLE_PLUGIN_ID
+    kind = get_kind(TRANSLATOR)
+    state = load_state_strict()
+    official = (state.get("catalog_sources") or {}).get(OFFICIAL_CATALOG_SOURCE_ID) or {}
+    if official.get("dev_ref") or official.get("enabled") is False:
+        return False
+    existing = (state.get("installations") or {}).get(plugin_id)
+    if isinstance(existing, dict) and (
+        existing.get("state") in ("staged", "removed") or not kind.is_enabled(existing)
+        or kind_of(existing) != TRANSLATOR or existing.get("source_id") != OFFICIAL_CATALOG_SOURCE_ID
+        or not existing.get("trusted") or (existing.get("origin") or "catalog") != "catalog"
+    ):
+        return False
+
+    config = _running_release_candidate(existing, kind)
+
+    def usable(release: seed.Release) -> bool:
+        manifest = release.manifest
+        if _revocation_refusal(state, plugin_id, manifest.version, manifest.name):
+            return False
+        if not release.seeded:
+            return True
+        entry = {"source": OFFICIAL_CATALOG_SOURCE_ID, "manifest": manifest.raw}
+        needs = _closure_of(state, entry) if closure.has_needs(manifest.raw) else closure.Closure()
+        if not needs.resolved or any(member.plugin_id != plugin_id for member in needs.members):
+            return False
+        if config is None:
+            return True
+        delta = consent.update_delta(state, config[0].raw, entry, needs)
+        return not delta["needs_consent"]
+
+    chosen = seed.select_release(provider_hub_dir(), plugin_id, config_candidate=config, usable=usable)
+    if chosen is None:
+        return False
+    if not chosen.seeded or (config is not None and (str(chosen.bundle), str(chosen.interpreter)) == config[1:]):
+        return True
+    _stage_validated(
+        chosen.manifest, True, "catalog", OFFICIAL_CATALOG_SOURCE_ID, None,
+        catalog_list=CATALOG_LIST_PLUGINS, ready_release=chosen, expected_installation=existing,
+        defer_active_data_copy=True,
+    )
+    with datadir.release_lock:
+        staged = (load_state().get("installations") or {}).get(plugin_id)
+        if not isinstance(staged, dict) or staged.get("state") != "staged":
+            return False
+        ready, _ = _boot_data_workers_ready(plugin_id, staged)
+        return ready and activate_release(plugin_id, at_boot=True).activated
 
 
 def _find_catalog_entry(
@@ -4197,10 +4578,11 @@ def resolve_catalog_install(
     and version in both. The ``entry_key`` returned pins the one entry, so the
     install that follows reads the entry that was checked here.
     """
-    key, entry = _requested_entry(
-        load_state(), source_id, provider_id, version, manifest, catalog_list=catalog_list)
+    state = load_state()
+    key, entry = _requested_entry(state, source_id, provider_id, version, manifest, catalog_list=catalog_list)
     return {
         "source": entry["source"],
+        "catalog_registration": releases.catalog_registration(state, entry["source"]),
         "provider_id": entry["provider_id"],
         "version": entry["version"],
         "name": entry.get("name") or entry["provider_id"],
@@ -4258,7 +4640,7 @@ class _StagedMembers(list):
         return found
 
 
-def _stage_closure_members(resolved, source_id: str, checkpoint=None) -> list[str]:
+def _stage_closure_members(resolved, source_id: str, checkpoint=None, *, expected_registration: Any = _UNSET) -> list[str]:
     """Stage the plugins a closure adds, dependencies first, before the plugin that needs them.
 
     Returns the ids of the rows this call wrote, which is what to discard if the plugin they were staged
@@ -4296,6 +4678,7 @@ def _stage_closure_members(resolved, source_id: str, checkpoint=None) -> list[st
             stage_install(
                 member.entry["manifest"], checkpoint=checkpoint, source_id=source_id,
                 catalog_list=member.entry.get("catalog_list", CATALOG_LIST_PROVIDERS),
+                **({"expected_registration": expected_registration} if expected_registration is not _UNSET else {}),
             )
     except Exception as error:
         _discard_staged_members(written(), resolved.members[-1].plugin_id if resolved.members else None)
@@ -4323,7 +4706,7 @@ def _discard_staged_members(plugin_ids: list[str], root_id: str | None = None) -
         try:
             # A rollback: whatever an earlier removal kept of this plugin stays exactly as it was, whether or not this
             # install got as far as taking it over.
-            removed = remove_installation(plugin_id, ignoring_dependents=frozenset(own), rollback=True)
+            removed = remove_installation(plugin_id, ignoring_dependents=frozenset(own), keep_data=False, rollback=True)
             if removed and plugin_id in was_enabled:
                 # The person had it on before this install, and removing it switched it off.
                 get_kind(was_enabled[plugin_id]).set_enabled({"provider_id": plugin_id}, True)
@@ -4415,7 +4798,7 @@ def check_install_consent(
 
 def install_catalog_entry(
     source_id: str, provider_id: str, version: str, checkpoint=None, entry_key: str | None = None,
-    consent_digest: str | None = None,
+    consent_digest: str | None = None, *, expected_registration: Any = _UNSET,
 ) -> dict[str, Any]:
     """Install the entry ``source_id`` lists for ``provider_id`` at ``version``.
 
@@ -4424,6 +4807,9 @@ def install_catalog_entry(
     replacement that adds access requires ``consent_digest`` to match the current summary, however it was queued.
     """
     state = load_state()
+    _check_catalog_registration(state, source_id, expected_registration)
+    registration = releases.catalog_registration(state, source_id)
+    registration_kwargs = {"expected_registration": registration} if registration is not None else {}
     _key, entry = _requested_entry(state, source_id, provider_id, version, entry_key=entry_key)
     resolved = None
     if closure.has_needs(entry.get("manifest")) or catalog_kind_of(entry) != SUBTITLE_PROVIDER:
@@ -4438,12 +4824,14 @@ def install_catalog_entry(
         if _closure_needs_consent(candidate) or _provider_replacement_delta(state, entry, candidate):
             raise ProviderHubConsentError(CONSENT_MISSING_REASON)
     # The plugins it extends or needs are installed first, from the same source, by the same rules.
-    members = _stage_closure_members(resolved, source_id, checkpoint) if resolved is not None else []
+    members = (_stage_closure_members(resolved, source_id, checkpoint, **registration_kwargs)
+               if resolved is not None else [])
     try:
         # An entry stored before the plugins list existed carries no list and came from providers.
         return stage_install(
             entry["manifest"], checkpoint=checkpoint, source_id=source_id,
             catalog_list=entry.get("catalog_list", CATALOG_LIST_PROVIDERS),
+            **registration_kwargs,
         )
     except ProviderHubSettingsError:
         # The plugin is staged and only could not be enabled: it keeps what it needs.
@@ -4868,8 +5256,7 @@ def _enforce_kept_data_ownership() -> None:
                 or not row.get("pending_restart") or row.get("active_version")):
             continue
         origin = row.get("origin") or "catalog"
-        if (entry.get("source_id") == row.get("source_id") and entry.get("kind") == kind_of(row)
-                and (entry.get("origin") or origin) == origin):
+        if _owned_kept_data(state, entry, row.get("source_id"), kind_of(row), origin):
             continue
         try:
             claim_kept_data(provider_id, row.get("source_id"), kind_of(row), origin)
@@ -4915,7 +5302,7 @@ class Activation:
         return self.outcome == ACTIVATED
 
 
-def _verified_staged_release(provider_id: str, installation: dict[str, Any], revocations):
+def _verified_staged_release(provider_id: str, installation: dict[str, Any], revocations, *, data_path=None):
     """The manifest of the staged release once it has been checked, or the reason it cannot activate (raised).
 
     The checks, in order: the release is not revoked, its kind accepts its manifest, the bundle and interpreter
@@ -4938,29 +5325,199 @@ def _verified_staged_release(provider_id: str, installation: dict[str, Any], rev
     staged_python_path = installation.get("staged_python_path")
     if not staged_path or not staged_python_path:
         raise ProviderHubInstallError("staged bundle or python path is missing")
-    staged_interpreter = validated_interpreter(provider_hub_dir(), staged_python_path)
-    if staged_interpreter is None:
-        raise ProviderHubInstallError("staged python path is not one of the hub's environments")
-    staged_bundle_path = validated_bundle_path(provider_hub_dir(), staged_path)
-    if staged_bundle_path is None:
+    refusal = seed.runtime_refusal(manifest.raw, revocations)
+    if refusal:
+        raise ProviderHubInstallError(refusal)
+    root = provider_hub_dir()
+    runtime = seed.resolve_paths(root, manifest.raw, staged_path, staged_python_path)
+    if runtime is None:
+        if seed.is_runtime_path(staged_path) or seed.is_runtime_path(staged_python_path):
+            raise ProviderHubInstallError("the staged bundle and Python environment could not be verified")
+        if validated_interpreter(root, staged_python_path) is None:
+            raise ProviderHubInstallError("staged python path is not one of the hub's environments")
         raise ProviderHubInstallError("staged bundle path is not one of the hub's bundles")
-    _remove_bundle_runtime_artifacts(staged_bundle_path)
-    verify_bundle_tree(manifest, staged_bundle_path)
-    kind.smoke_test(manifest, staged_bundle_path, staged_interpreter)
+    staged_bundle_path, staged_interpreter = runtime
+    _verify_bundle_for_run(manifest, staged_bundle_path)
+    kind.smoke_test(manifest, staged_bundle_path, staged_interpreter,
+                    **({"data_dir": data_path} if data_path is not None else {}))
     return manifest
 
 
-def _abandon_if_still_staged(provider_id: str, version: Any, message: str, *, expected=None) -> None:
-    """Drop the staged release a failed activation looked at, unless another one has replaced it meanwhile."""
-    def drop(state: dict[str, Any]) -> None:
+def _archive_active_manifest(provider_id: str, manifest: dict) -> None:
+    try:
+        secret_paths.archive_manifest(provider_hub_dir(), provider_id, manifest)
+    except OSError:
+        logging.getLogger(__name__).warning("Could not retain the active manifest of %s", provider_id, exc_info=True)
+
+
+def _same_staged_release(row: Any, expected: dict[str, Any]) -> bool:
+    return (isinstance(row, dict) and row.get("state") == "staged" and row.get("pending_restart")
+            and all(row.get(key) == expected.get(key) for key in (
+                "staged_version", "staged_path", "staged_python_path", "staged_manifest", "staged_data_key",
+                "staged_supplied_by", "staged_data_rollback", releases.STAGED_ROLLBACK, "kind", "source_id",
+                "origin", "catalog_list", "trusted")))
+
+
+def _staged_catalog_changed(state, row, stage) -> bool:
+    source_id = row.get("source_id")
+    return (stage is not None and (stage.source_id is not None or source_id is not None)
+            and not _same_release_owner(state, stage, source_id, row.get("origin")))
+
+
+def _fail_staged_activation(provider_id, installation, stage, job, message, error) -> bool:
+    """Record the failure and drop the stage in the same state write."""
+    now = utcnow_iso()
+    failed = dict(job.data, state="failed", error=error, message=f"Activation failed: {error}",
+                  completed_at=now, updated_at=now, duration_ms=int((time.perf_counter() - job.started_perf) * 1000))
+
+    def drop(state: dict[str, Any]) -> bool:
         row = (state.get("installations") or {}).get(provider_id)
-        if (isinstance(row, dict) and row.get("staged_version") == version and row.get("state") == "staged"
-                and (expected is None or all(row.get(key) == value for key, value in expected.items()))):
-            _abandon_staged_release(row, message)
+        slots = _release_slots(state, provider_id)
+        if not _same_staged_release(row, installation) or slots.get(releases.STAGED) != stage:
+            return False
+        _abandon_staged_release(state, provider_id, row, message)
+        _persist_job(failed, state)
+        return True
 
-    mutate_state(drop)
+    if not mutate_state(drop):
+        return False
+    job.data.update(failed)
+    return True
 
 
+def _keyless_stage_owner(
+    state: dict[str, Any], row: dict[str, Any], stage: releases.SlotIdentity | None,
+) -> tuple[str | None, str | None]:
+    """Return a catalog rebind or a refusal if a keyless stage has ambiguous ownership."""
+    source_id = row.get("source_id")
+    origin = row.get("origin")
+    source = (state.get("catalog_sources") or {}).get(source_id)
+    unknown = None, "the staged release's catalog binding cannot be verified"
+    if origin == "catalog" and (not row.get("source_bound") or not isinstance(source, dict)):
+        return unknown
+    if stage is None or _same_release_owner(state, stage, source_id, origin):
+        return None, None
+    if origin != stage.origin or origin != "catalog":
+        return None, "the staged release has conflicting origins"
+    if stage.source_id == source_id or not _same_release_owner(state, stage, stage.source_id, stage.origin):
+        return unknown
+
+    manifest = row["staged_manifest"]
+    if stage.bundle_digest != manifest.get("bundle_sha256"):
+        return unknown
+    found = _find_catalog_entry(state, source_id, manifest_provider_id(manifest), row["staged_version"],
+                                catalog_list=_installed_catalog_list(row))
+    if found is None:
+        return unknown
+    _, entry = found
+    trusted = bool(source.get("trusted") and entry.get("trusted"))
+    if trusted != bool(row.get("trusted")):
+        return unknown
+    try:
+        kind = get_kind(kind_of(row))
+        published = kind.validate_manifest(entry["manifest"], trusted)
+        staged = kind.validate_manifest(manifest, trusted)
+    except ValueError:
+        return unknown
+    return (source_id, None) if _trust_manifest(published.raw) == _trust_manifest(staged.raw) else unknown
+
+
+def _verify_restaged_bundle(installation: dict[str, Any]) -> None:
+    kind = get_kind(kind_of(installation))
+    manifest = kind.validate_manifest(installation["staged_manifest"], bool(installation.get("trusted")))
+    path = validated_bundle_path(provider_hub_dir(), installation.get("staged_path"))
+    if path is None or path != _bundle_path_for(manifest).resolve():
+        raise ProviderHubInstallError("the staged bundle path does not match its manifest")
+    _verify_bundle_for_run(manifest, path)
+
+
+def _reserve_staged_data_key(
+    provider_id: str, installation: dict[str, Any], snapshot: dict[str, Any],
+) -> tuple[dict[str, Any] | None, str | None]:
+    """Give a stage from before per-release data a stable key before activation can copy or run it."""
+    key = uuid.uuid4().hex
+    slots = _release_slots(snapshot, provider_id)
+    stage = slots.get(releases.STAGED)
+    owner = _keyless_stage_owner(snapshot, installation, stage)
+    rebound_source, refusal = owner
+    if rebound_source is not None:
+        # The old writer reused a staged row by version/path but kept its previous catalog ID.
+        # Check the bytes at that historical path against the new catalog's exact entry.
+        try:
+            _verify_restaged_bundle(installation)
+        except (ValueError, OSError, ProviderHubInstallError) as error:
+            refusal = refusal_text(error)
+
+    def reserve(state):
+        row = (state.get("installations") or {}).get(provider_id)
+        if (not _same_staged_release(row, installation)
+                or _release_slots(state, provider_id) != slots
+                or any(row.get(field) != installation.get(field) for field in (
+                    "installed_at", "source_bound",
+                    "active_version", "active_path", "active_data_key", "manifest"))
+                or _keyless_stage_owner(state, row, stage) != owner):
+            return None, None
+        if refusal is not None:
+            return None, refusal
+        row["staged_data_key"] = key
+        if isinstance(state, releases.StateDocument):
+            state.adopting_staged_data = provider_id, rebound_source
+        return dict(row), None
+
+    return mutate_state(reserve)
+
+
+def _wait_for_data_activation(provider_id: str, installation, *, previous_run: bool = False) -> str:
+    message = "The plugin is still busy; the update will be tried again later."
+
+    def note_retry(state):
+        row = (state.get("installations") or {}).get(provider_id)
+        if (isinstance(row, dict) and row.get("staged_version") == installation.get("staged_version")
+                and row.get("staged_data_key") == installation.get("staged_data_key")):
+            row["data_activation_waiting"] = True
+            if previous_run:
+                row["data_worker_cleanup_pending"] = True
+            row["last_error"] = message
+
+    mutate_state(note_retry)
+    return message
+
+
+def _prepare_activation_data(plugin_id, row, active_data, same_owner, files) -> tuple[str | None, Path | None]:
+    manifest = row.get("staged_manifest")
+    if not datadir.declared(manifest):
+        return None, None
+    root = provider_hub_dir()
+    recorded_key = row.get("staged_data_key")
+    if row.get("staged_data_rollback"):
+        if not same_owner:
+            raise datadir.DataFolderError("The previous release data owner could not be verified")
+        previous = (datadir.release_path(root, plugin_id, recorded_key) if recorded_key
+                    else datadir.legacy_path(root, plugin_id, manifest))
+        if previous is None:
+            raise datadir.DataFolderError("The previous release data folder was never recorded")
+        # A failed smoke test must leave the previous release usable on a later attempt.
+        parent = datadir.plugin_root(root, plugin_id)
+        parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        testing = Path(files.enter_context(tempfile.TemporaryDirectory(dir=parent))) / "rollback"
+        if datadir.copy_folder(previous, testing) is None:
+            raise datadir.DataFolderError("The previous release data folder is missing")
+        return recorded_key, testing
+
+    path = datadir.release_path(root, plugin_id, recorded_key)
+    if path.is_symlink() or path.is_junction():
+        raise datadir.DataFolderError("The staged release data folder is unsafe")
+    carry_active = same_owner and not row.get("delete_release_data")
+    if (not path.exists() or "staged_data_fingerprint" not in row
+            or (row.get("staged_data_from_active") and not carry_active)):
+        # A deferred seed or an older stage has no fingerprint. Recopy on retry even if it made the folder.
+        datadir.copy_folder(active_data if carry_active and row.get("staged_data_from_active", True) else None, path)
+    elif row.get("staged_data_from_active") and datadir.fingerprint(active_data) != row["staged_data_fingerprint"]:
+        datadir.copy_folder(active_data, path)
+    return recorded_key, path
+
+
+@datadir.serialized
 def activate_release(provider_id: str, *, at_boot: bool = False, _expected_staged=None) -> Activation:
     """The one way a staged release becomes the active one, at boot and while Bazarr+ runs.
 
@@ -4972,8 +5529,7 @@ def activate_release(provider_id: str, *, at_boot: bool = False, _expected_stage
 
     The boot passes ``at_boot=True``: nothing is running, so every kind activates. Otherwise the kind's attach
     policy decides: a kind that attaches on restart answers ``ACTIVATION_WAITING`` and the release stays staged
-    for the next boot; a kind that attaches live activates now and the replaced release drains. A rollback pins
-    ``_expected_staged`` so an intervening install cannot make it activate or abandon a different release.
+    for the next boot; a kind that attaches live activates now and the replaced release drains.
     """
     state = load_state()
     installation = (state.get("installations") or {}).get(provider_id)
@@ -4985,33 +5541,43 @@ def activate_release(provider_id: str, *, at_boot: bool = False, _expected_stage
     previous_version = installation.get("active_version")
     previous_manifest = installation.get("manifest") if previous_version else None
     target_version = installation.get("staged_version")
+    if _probe_copy_in_progress(provider_id):
+        return Activation(provider_id, ACTIVATION_WAITING, target_version, previous_version, _PLUGIN_BUSY)
     target_name = installation.get("name") or provider_id
-    rollback = installation.get(releases.STAGED_ROLLBACK) is not None
-    expected = ({key: installation.get(key) for key in _ROLLBACK_STAGED_FIELDS}
-                if rollback else {releases.STAGED_ROLLBACK: None, **(_expected_staged or {})})
-
-    def check_rollback(document: dict[str, Any], row: dict[str, Any]) -> str | None:
-        refusal = _staged_rollback_refusal(document, provider_id, row)
-        if refusal and at_boot:
-            refusal += "; the staged rollback was discarded"
-            _abandon_staged_release(row, refusal)
-        return refusal
-
-    def still_staged(row: Any) -> bool:
-        return (isinstance(row, dict) and row.get("state") == "staged"
-                and all(row.get(key) == value for key, value in expected.items()))
-
-    def discard_stale(document: dict[str, Any]) -> str | None:
-        row = (document.get("installations") or {}).get(provider_id)
-        return check_rollback(document, row) if still_staged(row) else None
-
     try:
         live = get_kind(kind_of(installation)).attach_policy == ATTACH_LIVE
     except UnknownKindError:
         live = False
+    rollback = installation.get(releases.STAGED_ROLLBACK) is not None
     refusal = _staged_rollback_refusal(state, provider_id, installation)
-    if not at_boot and not live and not refusal:
+    if not at_boot and not live and refusal is None:
         return Activation(provider_id, ACTIVATION_WAITING, target_version, previous_version)
+    if (not at_boot and installation.get("data_worker_cleanup_pending")
+            and _has_removable_data(provider_id, installation) and not _previous_workers_stopped()):
+        message = _wait_for_data_activation(provider_id, installation)
+        return Activation(provider_id, ACTIVATION_WAITING, target_version, previous_version, message)
+    slots = _release_slots(state, provider_id)
+    staged_release = slots.get(releases.STAGED)
+    active_release = slots.get(releases.ACTIVE)
+    staged_owner = (staged_release.source_id, staged_release.origin) if staged_release is not None else (None, None)
+    if (refusal is None and datadir.declared(installation.get("staged_manifest"))
+            and not installation.get("staged_data_key") and not installation.get("staged_data_rollback")):
+        reserved, refusal = _reserve_staged_data_key(provider_id, installation, state)
+        if reserved is None and refusal is None:
+            return Activation(provider_id, ACTIVATION_SKIPPED, target_version, previous_version)
+        if reserved is not None:
+            installation = reserved
+            state = load_state()
+            if not _same_staged_release((state.get("installations") or {}).get(provider_id), installation):
+                return Activation(provider_id, ACTIVATION_SKIPPED, target_version, previous_version)
+            slots = _release_slots(state, provider_id)
+            staged_release = slots.get(releases.STAGED)
+            active_release = slots.get(releases.ACTIVE)
+            staged_owner = (reserved.get("source_id"), reserved.get("origin"))
+    elif refusal is None and (_staged_catalog_changed(state, installation, staged_release)
+                              or (installation.get("staged_data_rollback")
+                                  and not _rollback_owner_recorded(staged_release))):
+        refusal = "the staged release's catalog binding cannot be verified"
 
     with record_job(
         "activate",
@@ -5020,53 +5586,74 @@ def activate_release(provider_id: str, *, at_boot: bool = False, _expected_stage
         target_name=target_name,
         from_version=previous_version,
         to_version=target_version,
-    ) as job:
-        def failed_rollback(refusal: str) -> Activation:
+    ) as job, contextlib.ExitStack() as activation_files:
+        def refused_rollback(message):
             job.data["state"] = "failed"
-            job.update(error=refusal, message=refusal)
+            job.update(error=message, message=message)
             outcome = ACTIVATION_FAILED if at_boot else ACTIVATION_SKIPPED
-            return Activation(provider_id, outcome, target_version, previous_version, refusal)
+            return Activation(provider_id, outcome, target_version, previous_version, message)
 
-        if refusal:
-            if at_boot:
-                refusal = mutate_state(discard_stale)
-            if refusal:
-                return failed_rollback(refusal)
+        if refusal is not None:
+            if rollback:
+                if not at_boot:
+                    return refused_rollback(refusal)
+                refusal += "; the staged rollback was discarded"
+            if _fail_staged_activation(provider_id, installation, staged_release, job, refusal, refusal):
+                return Activation(provider_id, ACTIVATION_FAILED, target_version, previous_version, refusal)
             return Activation(provider_id, ACTIVATION_SKIPPED, target_version, previous_version)
-        try:
-            manifest = _verified_staged_release(provider_id, installation, _revocations(state))
-        except Exception as error:
-            message = refusal_text(error)
-            _abandon_if_still_staged(provider_id, target_version, message, expected=expected)
-            job.data["state"] = "failed"
-            job.update(
-                error=str(error) or error.__class__.__name__,
-                message=f"Activation failed: {error}",
-            )
-            return Activation(provider_id, ACTIVATION_FAILED, target_version, previous_version, message)
 
-        def activation_attention() -> str | None:
+        def activation_attention(manifest):
             try:
                 return get_kind(kind_of(installation)).on_activated(provider_id, previous_manifest, manifest.raw)
             except Exception:
                 logging.getLogger(__name__).exception("The kind's activation step failed for %s", provider_id)
                 return "Its saved settings could not be brought up to date with this version."
 
-        attention = None if rollback else activation_attention()
+        try:
+            active_data = _active_data_path(provider_id, installation)
+            if active_data is not None and not at_boot:
+                kind = get_kind(kind_of(installation))
+                ready = activation_files.enter_context(
+                    datadir.quiesced(provider_id, kind.settle_data, datadir.QUIESCE_TIMEOUT))
+                if not ready:
+                    message = _wait_for_data_activation(provider_id, installation)
+                    job.update(message=message)
+                    return Activation(provider_id, ACTIVATION_WAITING, target_version, previous_version, message)
+            same_owner = (_active_release_owned(state, installation, active_release)
+                          and (active_release.source_id, active_release.origin) == staged_owner)
+            data_key, data_path = _prepare_activation_data(
+                provider_id, installation, active_data, same_owner, activation_files)
+            manifest = _verified_staged_release(provider_id, installation, _revocations(state),
+                                                **({"data_path": data_path} if data_path is not None else {}))
+            attention = None if rollback else activation_attention(manifest)
+        except Exception as error:
+            message = refusal_text(error)
+            if _fail_staged_activation(
+                    provider_id, installation, staged_release, job, message, str(error) or error.__class__.__name__):
+                return Activation(provider_id, ACTIVATION_FAILED, target_version, previous_version, message)
+            if rollback:
+                job.data["state"] = "failed"
+                job.update(error=message, message=message)
+                return Activation(provider_id, ACTIVATION_FAILED, target_version, previous_version, message)
+            return Activation(provider_id, ACTIVATION_SKIPPED, target_version, previous_version)
 
         def promote(state: dict[str, Any]) -> tuple[bool, str | None]:
             row = (state.get("installations") or {}).get(provider_id)
-            if (not still_staged(row)
-                    or row.get("staged_version") != target_version
-                    or row.get("staged_path") != installation.get("staged_path")
-                    or (row.get("staged_manifest") or {}).get("bundle_sha256")
-                    != (installation.get("staged_manifest") or {}).get("bundle_sha256")
+            if (rollback and isinstance(row, dict) and row.get("state") == "staged"
+                    and all(row.get(key) == installation.get(key) for key in _ROLLBACK_STAGED_FIELDS)
+                    and _release_slots(state, provider_id).get(releases.STAGED) == staged_release
+                    and (reason := _staged_rollback_refusal(state, provider_id, row))):
+                if at_boot:
+                    reason += "; the staged rollback was discarded"
+                    _abandon_staged_release(state, provider_id, row, reason)
+                return False, reason
+            if (not _same_staged_release(row, installation)
+                    or _release_slots(state, provider_id) != slots
+                    or _staged_catalog_changed(state, row, staged_release)
                     or revocation.lookup(_revocations(state), provider_id, target_version) is not None):
                 # Replaced, removed, revoked or finished by someone else while it was being checked: theirs
                 # stands, and a revoked release is dropped by the next refresh.
                 return False, None
-            if rollback and (refusal := check_rollback(state, row)):
-                return False, refusal
             row["active_version"] = row.get("staged_version")
             if row.get("staged_path"):
                 row["active_path"] = row.get("staged_path")
@@ -5078,17 +5665,30 @@ def activate_release(provider_id: str, *, at_boot: bool = False, _expected_stage
             row["staged_manifest"] = None
             if rollback:
                 row[releases.PROMOTE_ROLLBACK] = row.pop(releases.STAGED_ROLLBACK)["release_id"]
+            if data_key:
+                row["active_data_key"] = data_key
+            else:
+                row.pop("active_data_key", None)
+            _clear_staged_data(row)
+            row.pop("delete_release_data", None)
+            row.pop("data_worker_cleanup_pending", None)
             row.pop("previous_catalog_list", None)
+            row.pop("previous_source", None)
             row["manifest"] = manifest.raw
             row["supplied_by"] = row.pop("staged_supplied_by", None) or {}
             row["state"] = "active"
+            if row.get("trust_note") == _SOURCE_REMOVED_NOTE and row.get("source_id") is not None:
+                row.pop("trust_note")
             row["pending_restart"] = False
             row["last_error"] = None
             row.pop("needs_repair", None)
             row["activated_at"] = utcnow_iso()
+            if isinstance(state, releases.StateDocument) and staged_release is not None and not same_owner:
+                # The old active slot may have identical files, even when it belongs to a different registration.
+                state.promoting_stage = provider_id
             if attention:
                 row["last_error"] = attention
-            if previous_version and not at_boot:
+            if previous_version and not at_boot and active_data is None:
                 # Calls the replaced release took are still running: it drains instead of retiring at once.
                 row[releases.DRAIN_PREVIOUS] = True
             # Activation swaps the installation's manifest for the staged one; the staged schema's secret
@@ -5098,23 +5698,35 @@ def activate_release(provider_id: str, *, at_boot: bool = False, _expected_stage
 
         promoted, refusal = mutate_state(promote)
         if refusal:
-            return failed_rollback(refusal)
+            return refused_rollback(refusal)
         if not promoted:
             job.update(message=f"Activation of '{target_name}' v{target_version} skipped: it changed meanwhile")
             return Activation(provider_id, ACTIVATION_SKIPPED, target_version, previous_version)
+        if installation.get("delete_release_data"):
+            try:
+                if active_data is not None:
+                    datadir.remove(active_data)
+                if kind_of(installation) in {SUBTITLE_PROVIDER, TRANSLATOR}:
+                    datadir.remove(datadir.legacy_data_path(provider_hub_dir(), provider_id))
+            except (OSError, datadir.DataFolderError):
+                logging.getLogger(__name__).warning("Could not delete the removed data of %s", provider_id,
+                                                    exc_info=True)
+        if isinstance(previous_manifest, dict):
+            _archive_active_manifest(provider_id, previous_manifest)
+        _archive_active_manifest(provider_id, manifest.raw)
         if rollback:
-            # A kind can change saved data here. Do it only once the rollback's final identity check has committed.
-            if attention := activation_attention():
+            # Run the kind's state transition only after the rollback identity was committed.
+            if attention := activation_attention(manifest):
                 _record_provider_last_error(provider_id, attention, installation.get("staged_python_path"))
             job.update(message=f"Activated rollback {previous_version} -> {target_version}")
         elif previous_version:
             job.update(message=f"Activated update {previous_version} -> {target_version}")
         else:
             job.update(message=f"Activated plugin '{target_name}' v{target_version}")
-    draining = bool(previous_version and not at_boot)
-    drained = (_drain_replaced_release(provider_id, kind_of(installation), previous_manifest, previous_version)
-               if draining else None)
-    return Activation(provider_id, ACTIVATED, target_version, previous_version, draining=draining, drained=drained)
+        draining = bool(previous_version and not at_boot and active_data is None)
+        drained = (_drain_replaced_release(provider_id, kind_of(installation), previous_manifest, previous_version)
+                   if draining else None)
+        return Activation(provider_id, ACTIVATED, target_version, previous_version, draining=draining, drained=drained)
 
 
 def _drain_replaced_release(provider_id: str, kind_name: str, previous_manifest: Any, previous_version: Any):
@@ -5141,6 +5753,7 @@ def _drain_replaced_release(provider_id: str, kind_name: str, previous_manifest:
     return detach.when_drained(drains, retire, name=provider_id)
 
 
+@datadir.serialized
 def retire_release(plugin_id: str, version: str | None = None) -> int:
     """A draining release has finished its calls: it becomes the previous release. Returns how many moved.
 
@@ -5187,9 +5800,9 @@ def _previous_release(provider_id: str):
     return max(previous, key=lambda release: (release.ended_seq or 0, release.id)) if previous else None
 
 
-_ROLLBACK_ACTIVE_FIELDS = ("active_version", "active_path", "python_path", "manifest", "kind")
+_ROLLBACK_ACTIVE_FIELDS = ("active_version", "active_path", "python_path", "manifest", "kind", "active_data_key")
 _ROLLBACK_STAGED_FIELDS = (releases.STAGED_ROLLBACK, "staged_version", "staged_path",
-                           "staged_python_path", "staged_manifest")
+                           "staged_python_path", "staged_manifest", "staged_data_key", "staged_data_rollback")
 _ROLLBACK_CHANGED = "The previous release changed; review the rollback again"
 
 
@@ -5201,18 +5814,31 @@ def _rollback_release_identity(release: releases.Release) -> str:
     return _rollback_hash((release.plugin_id, release.id, release.created_at, release.ended_seq,
                            release.version, release.bundle_path, release.bundle_digest,
                            release.python_path, release.env_key, release.source_id, release.origin,
-                           release.source_registration))
+                           release.catalog_registration, release.data_key))
+
+
+def _rollback_active_identity(state, provider_id, row) -> str:
+    slot = _release_slots(state, provider_id).get(releases.ACTIVE)
+    return _rollback_hash((
+        [row.get(key) for key in _ROLLBACK_ACTIVE_FIELDS],
+        (slot.id, slot.created_at, slot.source_id, slot.origin, slot.catalog_registration) if slot else None,
+    ))
 
 
 def _rollback_source_binding(state: dict[str, Any], row: dict[str, Any]) -> str:
     source_id = row.get("source_id")
     source = (state.get("catalog_sources") or {}).get(source_id) if isinstance(source_id, str) else None
-    registration = ([source.get(key) for key in ("registration_id", "type", "url", "dev_ref", "binding_revision",
-                                                "enabled", "trusted")]
+    registration = ([source.get(key) for key in ("type", "url", "dev_ref", "binding_revision", "enabled", "trusted")]
                     if isinstance(source, dict) else None)
     return _rollback_hash((source_id, row.get("origin"), row.get("source_bound"), row.get("trusted"),
-                           _installed_catalog_list(row), registration))
+                           _installed_catalog_list(row), releases.catalog_registration(state, source_id), registration))
 
+
+def _rollback_owned(state, provider_id, row, target) -> bool:
+    active = _release_slots(state, provider_id).get(releases.ACTIVE)
+    return (_active_release_owned(state, row, active) and _rollback_owner_recorded(target)
+            and _same_release_owner(state, target, active.source_id, active.origin)
+            and (target.source_id, target.origin) == (row.get("source_id"), row.get("origin")))
 
 def _rollback_confirmation(state: dict[str, Any], row: dict[str, Any], target: releases.Release) -> str:
     return _rollback_hash((_rollback_release_identity(target), target.manifest, _rollback_source_binding(state, row)))
@@ -5227,8 +5853,10 @@ def _staged_rollback_refusal(state: dict[str, Any], provider_id: str, row: dict[
     staged = getattr(state, "staged_releases", {}).get(provider_id)
     if (staged is None or staged.get("id") != binding.get("release_id")
             or _rollback_confirmation(state, row, releases.release_of(staged)) != binding.get("confirmation_identity")
-            or _rollback_hash([row.get(key) for key in _ROLLBACK_ACTIVE_FIELDS]) != binding.get("active_identity")):
+            or _rollback_active_identity(state, provider_id, row) != binding.get("active_identity")):
         return "The previous release changed"
+    if not _rollback_owned(state, provider_id, row, releases.release_of(staged)):
+        return "The catalog source binding changed"
     return None
 
 
@@ -5258,15 +5886,14 @@ def _checked_rollback_target(state, provider_id, target, *, verify_files=True):
         if row.get(releases.STAGED_ROLLBACK):
             status = "waiting for restart" if needs_restart(row) else "in progress"
             raise ProviderHubInstallError(f"{provider_id} has a rollback {status}")
-        raise ProviderHubInstallError(f"{provider_id} has an update waiting; discard it before going back")
+        raise ProviderHubInstallError(f"{provider_id} has an update waiting; restart Bazarr+ to finish it")
     if target is None:
         raise ProviderHubInstallError(f"{provider_id} has no previous release to go back to")
     name = row.get("name") or provider_id
-    source_id = row.get("source_id")
-    source = (state.get("catalog_sources") or {}).get(source_id) if isinstance(source_id, str) else None
-    registration = source.get("registration_id") if isinstance(source, dict) else None
-    if ((target.source_id, target.origin) != (source_id, row.get("origin"))
-            or target.source_registration != registration):
+    if not _rollback_owner_recorded(target):
+        raise ProviderHubInstallError(
+            f"The catalog registration for {name} v{target.version} could not be verified, so it is not restored")
+    if not _rollback_owned(state, provider_id, row, target):
         raise ProviderHubInstallError(
             f"{name} v{target.version} was installed from another source than {name} is now, so it is not restored")
     found = revocation.lookup(_revocations(state), provider_id, target.version)
@@ -5282,11 +5909,10 @@ def _checked_rollback_target(state, provider_id, target, *, verify_files=True):
         if target.bundle_digest and manifest.bundle_sha256 != target.bundle_digest:
             raise ProviderHubInstallError("bundle digest changed")
         if verify_files:
-            bundle = validated_bundle_path(provider_hub_dir(), target.bundle_path)
-            interpreter = validated_interpreter(provider_hub_dir(), target.python_path)
-            if bundle is None or interpreter is None or not Path(bundle).is_dir() or not Path(interpreter).exists():
+            runtime = seed.resolve_paths(provider_hub_dir(), manifest.raw, target.bundle_path, target.python_path)
+            if runtime is None or not runtime[0].is_dir() or not runtime[1].exists():
                 raise ProviderHubInstallError("not on disk")
-            verify_bundle_tree(manifest, bundle)
+            verify_bundle_tree(manifest, runtime[0])
     except Exception as error:
         raise ProviderHubInstallError(
             f"{name} v{target.version} is no longer on disk, or no longer matches what it was, "
@@ -5324,6 +5950,7 @@ def rollback_preview(provider_id: str, *, state=None, verify_files=True, include
     return result
 
 
+@datadir.serialized
 def rollback_release(provider_id: str, consent_digest: str | None = None, *, expected_version: str | None = None,
                      confirmation_identity: str | None = None) -> Activation:
     """Go back to the release this plugin ran before its active one.
@@ -5337,6 +5964,7 @@ def rollback_release(provider_id: str, consent_digest: str | None = None, *, exp
     changes nothing: the previous release stays recorded. A confirmation pins the server-selected release
     and its source binding independently of permission consent.
     """
+    _require_release_available(provider_id)
     state = load_state()
     target = _previous_release(provider_id)
     row = (state.get("installations") or {}).get(provider_id)
@@ -5363,21 +5991,23 @@ def rollback_release(provider_id: str, consent_digest: str | None = None, *, exp
     if delta and delta["needs_consent"] and consent_digest != delta["digest"]:
         raise ProviderHubConsentError(consent.delta_text(delta))
 
-    identity = {key: row.get(key) for key in _ROLLBACK_ACTIVE_FIELDS}
     binding = {
         "release_id": target.id,
         "confirmation_identity": _rollback_confirmation(state, row, target),
         "source_binding": _rollback_source_binding(state, row),
-        "active_identity": _rollback_hash(list(identity.values())),
+        "active_identity": _rollback_active_identity(state, provider_id, row),
     }
     staged_identity = {releases.STAGED_ROLLBACK: binding, "staged_version": target.version,
                        "staged_path": target.bundle_path, "staged_python_path": target.python_path,
-                       "staged_manifest": target.manifest}
+                       "staged_manifest": target.manifest, "staged_data_key": target.data_key,
+                       "staged_data_rollback": datadir.declared(target.manifest)}
 
     def stage(state: dict[str, Any]) -> bool:
         current = (state.get("installations") or {}).get(provider_id)
-        if (not isinstance(current, dict) or any(current.get(key) != value for key, value in identity.items())
+        if (not isinstance(current, dict)
+                or _rollback_active_identity(state, provider_id, current) != binding["active_identity"]
                 or _rollback_source_binding(state, current) != binding["source_binding"]
+                or not _rollback_owned(state, provider_id, current, target)
                 or not matches_retained(state)
                 or current.get("staged_version") or current.get("state") == "removed"):
             return False
@@ -5388,6 +6018,9 @@ def rollback_release(provider_id: str, consent_digest: str | None = None, *, exp
         refusal = _rollback_needs_refusal(state, plugin, provider_id, name, target)
         if refusal:
             raise ProviderHubInstallError(refusal)
+        current["previous_source"] = _installation_source(current)
+        if current.get("catalog_list"):
+            current["previous_catalog_list"] = current["catalog_list"]
         current.update(staged_identity, state="staged", pending_restart=True, last_error=None)
         if plugin is not None:
             current["staged_supplied_by"] = closure.supplier_map(state, plugin, provider_id)
@@ -5398,7 +6031,33 @@ def rollback_release(provider_id: str, consent_digest: str | None = None, *, exp
     return activate_release(provider_id, _expected_staged=staged_identity)
 
 
-def _finish_removal(provider_id: str) -> bool:
+def _boot_data_workers_ready(
+        provider_id: str, installation: dict[str, Any], previous_stopped: bool | None = None,
+) -> tuple[bool, bool | None]:
+    removal = installation.get("state") == "removed"
+    has_previous_data = (
+        installation.get("data_worker_cleanup_pending") or installation.get("data_activation_waiting")
+        or installation.get("staged_data_rollback")
+        or (not removal and _active_data_path(provider_id, installation) is not None)
+    )
+    if not has_previous_data or not _has_removable_data(provider_id, installation):
+        return True, previous_stopped
+
+    from .worker import _client_gone
+
+    if previous_stopped is None:
+        previous_stopped = _previous_workers_stopped()
+    if previous_stopped and all(_client_gone(client, 0) for client in detach.snapshot_workers(provider_id)):
+        return True, previous_stopped
+
+    logging.getLogger(__name__).warning(
+        "Keeping %s data in place until its previous workers are confirmed stopped", provider_id)
+    if not removal:
+        _wait_for_data_activation(provider_id, installation, previous_run=True)
+    return False, previous_stopped
+
+
+def _finish_removal(provider_id: str, previous_stopped: bool | None) -> bool:
     """The restart that follows a staged removal takes the plugin's row, and with it its releases, away."""
     state = load_state()
     installation = (state.get("installations") or {}).get(provider_id)
@@ -5413,7 +6072,7 @@ def _finish_removal(provider_id: str) -> bool:
         target_name=target_name,
         from_version=installation.get("active_version"),
     ) as job:
-        removed = _drop_removed_row(provider_id)
+        removed = _drop_removed_row(provider_id, previous_stopped=previous_stopped)
         if removed:
             job.update(message=f"Removed plugin '{target_name}' on restart")
     return removed
@@ -5443,6 +6102,7 @@ def activate_staged_installations() -> list[str]:
                                             exc_info=True)
     state = load_state()
     activated = []
+    previous_stopped = None
     try:
         for provider_id, installation in list((state.get("installations") or {}).items()):
             if not isinstance(installation, dict):
@@ -5452,9 +6112,12 @@ def activate_staged_installations() -> list[str]:
                 continue
             # One plugin that cannot be handled never keeps the others from starting.
             try:
+                ready, previous_stopped = _boot_data_workers_ready(provider_id, installation, previous_stopped)
+                if not ready:
+                    continue
                 if removal:
-                    _finish_removal(provider_id)
-                    state["installations"].pop(provider_id, None)
+                    if _finish_removal(provider_id, previous_stopped):
+                        state["installations"].pop(provider_id, None)
                 elif activate_release(provider_id, at_boot=True).activated:
                     activated.append(provider_id)
             except Exception:
@@ -5468,6 +6131,12 @@ def activate_staged_installations() -> list[str]:
                 _apply_unmet_needs(state.setdefault("installations", {}), _revocations(state))
 
             mutate_state(hold)
+    try:
+        from .state import load_state_strict
+
+        datadir.cleanup(provider_hub_dir(), load_state_strict())
+    except (OSError, ValueError):
+        logging.getLogger(__name__).warning("Could not clean unused plugin data folders", exc_info=True)
     return activated
 
 
@@ -5494,6 +6163,171 @@ def _retire_stale_draining() -> None:
         state_store.retire_draining()
 
 
+def _snapshot_time_left(deadline: float) -> float:
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise datadir.SnapshotBusy("The plugin check timed out. Try again.")
+    return remaining
+
+
+@contextlib.contextmanager
+def _snapshot_lock(deadline: float, lock=datadir.release_lock):
+    if not lock.acquire(timeout=_snapshot_time_left(deadline)):
+        raise datadir.SnapshotBusy(_PLUGIN_BUSY)
+    try:
+        _snapshot_time_left(deadline)
+        yield
+    finally:
+        lock.release()
+
+
+def _same_data_release(current, expected, slot: str) -> bool:
+    return all(current.get(f"{slot}_{field}") == expected.get(f"{slot}_{field}")
+               for field in ("version", "path", "data_key"))
+
+
+def _probe_copy_in_progress(plugin_id: str) -> bool:
+    with _PROBE_COPIES_LOCK:
+        return plugin_id in _PROBE_COPIES
+
+
+def _require_release_available(plugin_id: str) -> None:
+    # Release mutations check while holding release_lock, as does reservation.
+    if _probe_copy_in_progress(plugin_id):
+        raise ProviderHubInstallError(_PLUGIN_BUSY)
+
+
+@contextlib.contextmanager
+def _reserve_probe_copy(plugin_id: str):
+    with _PROBE_COPIES_LOCK:
+        if plugin_id in _PROBE_COPIES:
+            raise datadir.SnapshotBusy(_PLUGIN_BUSY)
+        _PROBE_COPIES.add(plugin_id)
+    try:
+        yield
+    finally:
+        with _PROBE_COPIES_LOCK:
+            _PROBE_COPIES.remove(plugin_id)
+
+
+@contextlib.contextmanager
+def _release_data_source(plugin_id: str, kind: str, deadline: float, select_source, *, probe: bool = False):
+    """Keep the selected source stable while it is copied."""
+    with contextlib.ExitStack() as held:
+        def hold_source():
+            if probe:
+                held.enter_context(_reserve_probe_copy(plugin_id))
+            else:
+                held.enter_context(datadir.release_lock)
+
+        with _snapshot_lock(deadline):
+            if _probe_copy_in_progress(plugin_id):
+                raise datadir.SnapshotBusy(_PLUGIN_BUSY)
+            source, active = select_source()
+            if not active:
+                hold_source()
+
+        if active:
+            # Neither checking the previous host nor draining this host's writers
+            # needs the release lock.
+            previous_stopped = _previous_workers_stopped(deadline=deadline)
+            remaining = _snapshot_time_left(deadline)
+            if not previous_stopped:
+                raise datadir.SnapshotRefused("Could not confirm the previous plugin workers stopped.")
+            settled = held.enter_context(datadir.quiesced(
+                plugin_id, get_kind(kind).settle_data, remaining, bounded=True))
+            if not settled:
+                raise datadir.SnapshotBusy("The active plugin data is busy. Try again.")
+            with _snapshot_lock(deadline):
+                if select_source() != (source, active):
+                    raise datadir.SnapshotRefused("The plugin release changed. Try again.")
+                if _probe_copy_in_progress(plugin_id):
+                    raise datadir.SnapshotBusy(_PLUGIN_BUSY)
+                hold_source()
+        _snapshot_time_left(deadline)
+        yield source, active
+
+
+def _copy_staged_release_data(validated, expected_state, source_id, origin, target: Path,
+                              deadline: float, check_catalog):
+    plugin_id = validated.provider_id
+    expected = (expected_state.get("installations") or {}).get(plugin_id) or {}
+    expected_slot = _release_slots(expected_state, plugin_id).get(releases.ACTIVE)
+    expected_source = _stage_data_source(
+        expected_state, plugin_id, expected, source_id, validated.kind, origin, validated.raw)
+
+    def select_source():
+        state = load_state()
+        current = (state.get("installations") or {}).get(plugin_id) or {}
+        try:
+            check_catalog(state)
+        except ProviderHubInstallError as error:
+            raise datadir.SnapshotRefused(str(error)) from error
+        source = _stage_data_source(state, plugin_id, current, source_id, validated.kind, origin, validated.raw)
+        if (not _same_data_release(current, expected, "active")
+                or _release_slots(state, plugin_id).get(releases.ACTIVE) != expected_slot
+                or source != expected_source):
+            raise datadir.SnapshotRefused("The plugin release changed. Try again.")
+        return source
+
+    with _release_data_source(plugin_id, validated.kind, deadline, select_source) as (source, active):
+        return datadir.copy_folder(source, target), active
+
+def _same_probe_release(current, expected, slot: str) -> bool:
+    python_key = "staged_python_path" if slot == "staged" else "python_path"
+    return (isinstance(current, dict) and current.get("state") != "removed" and not current.get("revoked")
+            and _same_data_release(current, expected, slot) and current.get(python_key) == expected.get(python_key)
+            and current.get("blocked") == expected.get("blocked"))
+
+
+@contextlib.contextmanager
+def _probe_release_data(plugin_id: str, row, *, staged: bool = False, deadline: float):
+    """Give an environment or connection probe an isolated copy of the relevant data."""
+    manifest = row.get("staged_manifest" if staged else "manifest")
+    if not datadir.declared(manifest):
+        yield None
+        return
+    slot = releases.STAGED if staged else releases.ACTIVE
+    root = provider_hub_dir()
+    expected_slot = _UNSET
+
+    def select_source():
+        nonlocal expected_slot
+        state = load_state()
+        current = (state.get("installations") or {}).get(plugin_id)
+        current_slot = _release_slots(state, plugin_id).get(slot)
+        if expected_slot is _UNSET:
+            expected_slot = current_slot
+        if current_slot != expected_slot or not _same_probe_release(current, row, slot):
+            raise datadir.SnapshotRefused("The plugin release changed. Try again.")
+        key = current.get(f"{slot}_data_key")
+        source = (datadir.release_path(root, plugin_id, key) if key
+                  else datadir.legacy_path(root, plugin_id, manifest))
+        # Older slots can share the same legacy folder.
+        return source, source is not None and (not staged or source == _active_data_path(plugin_id, current))
+
+    with contextlib.ExitStack() as files:
+        try:
+            with _release_data_source(plugin_id, kind_of(row), deadline, select_source, probe=True) as (
+                    source, active):
+                with contextlib.ExitStack() as copy_files:
+                    # A later release removal can delete the plugin's data root.
+                    temporary = copy_files.enter_context(tempfile.TemporaryDirectory(prefix=".probe-", dir=root))
+                    target = Path(temporary) / "data"
+                    datadir.copy_folder(source, target, probe_deadline=deadline)
+                    if select_source() != (source, active):
+                        raise datadir.SnapshotRefused("The plugin release changed. Try again.")
+                    _snapshot_time_left(deadline)
+                    files.enter_context(copy_files.pop_all())
+        except datadir.SnapshotRefused:
+            raise
+        except (OSError, datadir.DataFolderError):
+            # A filesystem error can contain names from the plugin's private data.
+            raise datadir.SnapshotRefused("Could not copy the plugin data for the check.") from None
+        # The probe uses its own folder. Live dispatch can resume before it starts.
+        yield target
+
+
 def reconcile_plugin_environments() -> dict[str, list[str]]:
     """Boot step: adopt the environments installations already use.
 
@@ -5506,11 +6340,18 @@ def reconcile_plugin_environments() -> dict[str, list[str]]:
         # Each kind validates its own manifests; the subtitle provider kind delegates to the provider validator.
         return get_kind(kind_of(row)).validate_manifest(raw, bool(row.get("trusted", False)))
 
-    def probe(validated, bundle_path: Path, python_path: Path) -> None:
-        get_kind(kind_of(validated)).smoke_test(validated, bundle_path, python_path)
+    def probe_data(validated, bundle_path: Path, python_path: Path, row, staged: bool) -> None:
+        refusal = seed.runtime_refusal(validated.raw)
+        if refusal:
+            raise ProviderHubInstallError(refusal)
+        deadline = time.monotonic() + PROBE_TIMEOUT
+        with _probe_release_data(validated.provider_id, row, staged=staged, deadline=deadline) as folder:
+            get_kind(kind_of(validated)).smoke_test(
+                validated, bundle_path, python_path,
+                **({"data_dir": folder, "timeout": _snapshot_time_left(deadline)} if folder is not None else {}))
 
     return env_registry.reconcile_environments(
-        validate=validate, probe=probe, verify_bundle=_verify_bundle_for_run
+        validate=validate, probe_data=probe_data, verify_bundle=_verify_bundle_for_run
     )
 
 
@@ -5521,16 +6362,19 @@ def repair_installation_environment(provider_id: str, checkpoint=None) -> dict[s
     so a cleanup cannot remove it between the repoint and the moment the old
     workers that still run from it have been drained.
     """
-    row = (load_state().get("installations") or {}).get(provider_id)
-    old_python = row.get("python_path") if isinstance(row, dict) else None
-    release = hold_environment(env_registry.env_dir_of(old_python)) if old_python else (lambda: None)
+    deadline = time.monotonic() + PROBE_TIMEOUT
+    with _snapshot_lock(deadline, _ENV_LOCK):
+        row = (load_state().get("installations") or {}).get(provider_id)
+        old_python = row.get("python_path") if isinstance(row, dict) else None
+        release = hold_environment(env_registry.env_dir_of(old_python)) if old_python else None
     try:
-        return _repair_environment(provider_id, checkpoint)
+        return _repair_environment(provider_id, row, deadline, checkpoint)
     finally:
-        release()
+        if release is not None:
+            release()
 
 
-def _repair_environment(provider_id: str, checkpoint=None) -> dict[str, Any]:
+def _repair_environment(provider_id: str, row, deadline: float, checkpoint=None) -> dict[str, Any]:
     """Rebuild an active installation's environment into a new directory.
 
     The old directory is left alone, because other plugins may share it. The new
@@ -5539,7 +6383,6 @@ def _repair_environment(provider_id: str, checkpoint=None) -> dict[str, Any]:
     any other needs the network. It is an explicit action and never runs at boot.
     """
     step = checkpoint or (lambda message: None)
-    row = (load_state().get("installations") or {}).get(provider_id)
     if not isinstance(row, dict) or not row.get("active_version"):
         raise ProviderHubInstallError(f"{provider_id} has no active version to repair")
     if row.get("revoked"):
@@ -5560,7 +6403,7 @@ def _repair_environment(provider_id: str, checkpoint=None) -> dict[str, Any]:
         target_id=provider_id,
         target_name=name,
         from_version=row.get("active_version"),
-    ) as job, pin_scope():
+    ) as job, pin_scope(), contextlib.ExitStack() as probe_files:
         env_path = None
         try:
             kind = get_kind(kind_of(row))
@@ -5572,11 +6415,17 @@ def _repair_environment(provider_id: str, checkpoint=None) -> dict[str, Any]:
                 env_registry.mark_needs_repair(provider_id)
                 raise
             step("Rebuilding the plugin's dependencies")
+            data = probe_files.enter_context(_probe_release_data(provider_id, row, deadline=deadline))
             env_path = PluginEnvironment(provider_hub_dir()).install(
                 validated, rebuild=True, **_bundled_wheels_argument(validated, bundle_path))
             python_path = python_executable(env_path)
             step("Checking that the plugin starts")
-            kind.smoke_test(validated, bundle_path, python_path)
+            with _snapshot_lock(time.monotonic() + PROBE_TIMEOUT):
+                current = (load_state().get("installations") or {}).get(provider_id)
+                if not _same_probe_release(current, row, "active"):
+                    raise datadir.SnapshotRefused("The plugin release changed. Try again.")
+            kind.smoke_test(validated, bundle_path, python_path,
+                            **({"data_dir": data} if data is not None else {}))
             # A stop pressed during the check ends the repair here, before the
             # installation is pointed at the new environment.
             step("Recording the repair")
@@ -5590,7 +6439,7 @@ def _repair_environment(provider_id: str, checkpoint=None) -> dict[str, Any]:
             current = (state.get("installations") or {}).get(provider_id)
             if not isinstance(current, dict):
                 return None
-            if current.get("python_path") != row.get("python_path"):
+            if not _same_probe_release(current, row, "active"):
                 # Another repair or an activation moved the installation while
                 # this one was building; theirs stands.
                 return {}
@@ -5602,11 +6451,17 @@ def _repair_environment(provider_id: str, checkpoint=None) -> dict[str, Any]:
             return dict(current)
 
         try:
-            with env_registry.recording_environment(env_path):
-                repaired = mutate_state(record_repair)
+            with datadir.release_lock:
+                _require_release_available(provider_id)
+                with env_registry.recording_environment(env_path):
+                    repaired = mutate_state(record_repair)
         except env_registry.EnvironmentGone as error:
             release_pins()
             raise ProviderHubInstallError(str(error)) from error
+        except ProviderHubInstallError:
+            release_pins()
+            env_registry.discard_if_unused(provider_hub_dir(), env_path)
+            raise
         if repaired is None:
             raise ProviderHubInstallError(f"{provider_id} was removed while it was being repaired")
         if repaired == {}:
@@ -5667,8 +6522,9 @@ def dependent_refusal(provider_id: str, action: str, *, enabled_only: bool = Fal
     return closure.dependents_text(provider_id, names, action) if names else None
 
 
+@datadir.serialized
 def remove_installation(provider_id: str, *, ignoring_dependents: frozenset[str] = frozenset(),
-                        keep_data: bool = False, rollback: bool = False) -> bool:
+                        keep_data: bool = True, rollback: bool = False) -> bool:
     """Stage the removal of an installation, or remove it at once when it was never active.
 
     A kind that stops a release while Bazarr+ runs finishes the removal without a restart: the row is marked
@@ -5679,12 +6535,13 @@ def remove_installation(provider_id: str, *, ignoring_dependents: frozenset[str]
     A plugin another one depends on is refused. ``ignoring_dependents`` names plugins that do not count as
     dependents, which is how a failed install discards the plugins it staged for itself while any other
     plugin that has come to depend on them still protects them. ``keep_data`` is the person's choice to keep the
-    plugin's saved settings and data folder, which the kind honours; the default deletes them.
+    plugin's saved settings and data folder, which the kind honours; the default keeps them.
 
     ``rollback`` is for discarding what a failed or stopped install staged. It deletes only what that install made:
     data an earlier removal kept (it has a record), and the settings of a subtitle provider, which may be older than
     the install, are left exactly as they were, and no record is written or changed.
     """
+    _require_release_available(provider_id)
     state = load_state()
     installations = state.setdefault("installations", {})
     if provider_id not in installations:
@@ -5732,6 +6589,8 @@ def remove_installation(provider_id: str, *, ignoring_dependents: frozenset[str]
             if names:
                 raise ProviderHubInstallError(closure.dependents_text(provider_id, names, "removed"))
             kept = (state.get("kept_data") or {}).get(provider_id)
+            if not rollback:
+                _record_kept_data(state, provider_id, item, kind_hooks, keep_data)
             if rollback and isinstance(kept, dict) and not kept.get("config") and item.get("config"):
                 # An install that took the kept settings over put them on this row and cleared the record's copy.
                 # The row is going, so they go back to the record, as they were.
@@ -5739,17 +6598,25 @@ def remove_installation(provider_id: str, *, ignoring_dependents: frozenset[str]
             if not item.get("active_version"):
                 del installations[provider_id]
                 return "removed_pending"
+            if item.get("staged_version"):
+                _abandon_staged_catalog_list(item)
+                _restore_active_source(state, provider_id, item)
             item["state"] = "removed"
             # A kind that stops a release while Bazarr+ runs needs no restart to finish this: the release is
             # detached right after, and the row goes once its calls are done. The row stays marked removed until
             # then, so a process that ends first finishes the removal at its next start.
             item["pending_restart"] = not live_removal
+            if live_removal:
+                item["data_worker_cleanup_pending"] = True
             item["staged_version"] = None
             item["staged_path"] = None
             item["staged_python_path"] = None
             item["staged_manifest"] = None
             item.pop(releases.STAGED_ROLLBACK, None)
+            item.pop("staged_supplied_by", None)
+            _clear_staged_data(item)
             item["last_error"] = None
+            item["delete_release_data"] = not keep_data
             if not keep_data:
                 # Its settings go with the choice to delete, now and not at the restart, so installing it again
                 # before then does not find them.
@@ -5769,13 +6636,12 @@ def remove_installation(provider_id: str, *, ignoring_dependents: frozenset[str]
             return False
         from . import runtime_status
         runtime_status.clear(provider_id)
-        if not rollback:
-            _record_kept_data(provider_id, item, kind_hooks, keep_data)
         try:
             kind_hooks.after_removed(provider_id, keep_data=keep_data)
         except Exception:
             logging.getLogger(__name__).exception("Cleanup after the removal of %s failed", provider_id)
         if result == "removed_pending":
+            _settle_release_data(provider_id, item, keep_data)
             job.update(message=f"Removed pending install of '{target_name}'")
             return True
         if live_removal and _detach_removed(provider_id, kind_of(item)):
@@ -5796,31 +6662,110 @@ def _detach_removed(provider_id: str, kind_name: str) -> bool:
         logging.getLogger(__name__).exception(
             "Provider Hub: could not stop %s live; its removal finishes at the next restart", provider_id)
 
-        def ask(state: dict[str, Any]) -> None:
-            row = (state.get("installations") or {}).get(provider_id)
-            if isinstance(row, dict) and row.get("state") == "removed":
-                row["pending_restart"] = True
-
-        mutate_state(ask)
+        _defer_removal(provider_id)
         return False
 
     def finish() -> None:
-        # The workers it had when it was detached go, whatever release they were started for.
-        detach.stop_stragglers(workers, cut=True)
-        if _drop_removed_row(provider_id):
+        from .worker import _client_gone
+
+        # Only finish the same removal. A reinstall can take over the slot
+        # before the preceding release finishes draining.
+        with datadir.release_lock:
+            row = (load_state().get("installations") or {}).get(provider_id)
+            if not isinstance(row, dict) or row.get("state") != "removed":
+                return
+            clients = list({id(client): client for client in (*workers, *detach.snapshot_workers(provider_id))}.values())
+            detach.stop_stragglers(clients, cut=True)
             try:
-                get_kind(kind_name).removal_finished(provider_id)
-            except Exception:
-                logging.getLogger(__name__).warning("Provider Hub: the step after removing %s failed", provider_id,
-                                                    exc_info=True)
+                if _has_removable_data(provider_id, row) and not all(_client_gone(client, 0) for client in clients):
+                    _defer_removal(provider_id)
+                    return
+                removed = _drop_removed_row(provider_id)
+            except (OSError, datadir.DataFolderError):
+                logging.getLogger(__name__).warning("Could not finish the removal of %s", provider_id, exc_info=True)
+                _defer_removal(provider_id)
+                return
+            if removed:
+                try:
+                    get_kind(kind_name).removal_finished(provider_id)
+                except Exception:
+                    logging.getLogger(__name__).warning("Provider Hub: the step after removing %s failed", provider_id,
+                                                        exc_info=True)
 
     detach.when_drained(drains, finish, name=provider_id)
     return True
 
 
-def _drop_removed_row(provider_id: str) -> bool:
+def _defer_removal(provider_id: str) -> None:
+    def mark(state: dict[str, Any]) -> None:
+        row = (state.get("installations") or {}).get(provider_id)
+        if isinstance(row, dict) and row.get("state") == "removed":
+            row["pending_restart"] = True
+            row["data_worker_cleanup_pending"] = True
+            row["last_error"] = "Restart Bazarr+ to finish removing the plugin's data."
+
+    mutate_state(mark)
+
+def _has_removable_data(provider_id: str, installation) -> bool:
+    root = provider_hub_dir()
+    return bool(installation.get("active_data_key") or datadir.plugin_root(root, provider_id).exists()
+                or (kind_of(installation) in {SUBTITLE_PROVIDER, TRANSLATOR}
+                    and datadir.legacy_data_path(root, provider_id).exists()))
+
+
+def _previous_workers_stopped(*, deadline: float | None = None) -> bool:
+    """Use the same prior-process evidence for activation, uninstall and snapshots."""
+    from .sandbox.sweep import previous_workers_stopped
+
+    return previous_workers_stopped(provider_hub_dir().parent, deadline=deadline)
+
+
+def _settle_release_data(provider_id: str, installation, keep_data: bool) -> None:
+    root = provider_hub_dir()
+    folder = datadir.plugin_root(root, provider_id)
+    legacy = (datadir.legacy_data_path(root, provider_id)
+              if kind_of(installation) in {SUBTITLE_PROVIDER, TRANSLATOR} else None)
+    if not keep_data:
+        datadir.remove(folder)
+        if legacy is not None:
+            datadir.remove(legacy)
+        return
+    # Legacy workers find their HOME at the same path on reinstall, including
+    # packages that predate the data_dir permission.
+    active = _active_data_path(provider_id, installation) if installation.get("active_data_key") else None
+    kept = folder / "kept"
+    if installation.get("active_version") and active is not None:
+        if active.is_dir() and not active.is_symlink() and not active.is_junction():
+            folder.mkdir(parents=True, exist_ok=True, mode=0o700)
+            datadir.remove(kept)
+            active.rename(kept)
+        # On retry a missing active path can mean the rename already ran.
+        # The older HOME may still need cleaning, but must not displace kept.
+        if kept.is_dir() and not kept.is_symlink() and not kept.is_junction() and legacy is not None:
+            datadir.remove(legacy)
+    elif installation.get("active_version") and legacy is not None and legacy.is_dir():
+        datadir.remove(kept)
+    if folder.is_dir():
+        for child in folder.iterdir():
+            if child != kept and not child.name.startswith(".copy-"):
+                datadir.remove(child)
+
+
+@datadir.serialized
+def _drop_removed_row(provider_id: str, *, previous_stopped: bool | None = None) -> bool:
     """Delete the row of a removed plugin, and with it its releases. A row that is not marked removed any more (it
     was installed again meanwhile) stays."""
+    _require_release_available(provider_id)
+    row = (load_state().get("installations") or {}).get(provider_id)
+    if isinstance(row, dict) and row.get("state") == "removed":
+        if row.get("data_worker_cleanup_pending") and _has_removable_data(provider_id, row):
+            if previous_stopped is None:
+                previous_stopped = _previous_workers_stopped()
+            if not previous_stopped:
+                _defer_removal(provider_id)
+                return False
+        _settle_release_data(provider_id, row, not row.get("delete_release_data", False))
+
     def drop(state: dict[str, Any]) -> bool:
         row = (state.get("installations") or {}).get(provider_id)
         if isinstance(row, dict) and row.get("state") == "removed":
@@ -5831,7 +6776,7 @@ def _drop_removed_row(provider_id: str) -> bool:
     return bool(mutate_state(drop))
 
 
-def _record_kept_data(provider_id: str, item: Any, kind_hooks: Any, keep_data: bool) -> None:
+def _record_kept_data(state, provider_id: str, row, kind_hooks, keep_data: bool) -> None:
     """Remember whose data was kept, so only the same plugin from the same source finds it again.
 
     The kept data belongs to a plugin id, a source and a kind. A later install of the same id from another source,
@@ -5839,24 +6784,32 @@ def _record_kept_data(provider_id: str, item: Any, kind_hooks: Any, keep_data: b
     it over. The plugin's saved settings travel in the record, because the installation row that holds them goes at
     the next restart. A removal that deletes the data takes the record with it.
     """
-    if not keep_data and not (load_state().get("kept_data") or {}).get(provider_id):
-        return
-    row = item if isinstance(item, dict) else {}
-    config = row.get("config")
-    entry = {"source_id": row.get("source_id"), "origin": row.get("origin"), "kind": kind_of(row) if row else None,
-             "config": copy.deepcopy(config) if keep_data and isinstance(config, dict) and config else None}
-
-    def record(state: dict[str, Any]) -> None:
-        kept = state.setdefault("kept_data", {})
-        if keep_data and getattr(kind_hooks, "keeps_data", False):
-            kept[provider_id] = entry
+    if keep_data and (kind_hooks.keeps_data or datadir.declared(row.get("manifest"))):
+        active = _release_slots(state, provider_id).get(releases.ACTIVE)
+        config = row.get("config")
+        registration = None
+        if active is not None:
+            source_id = active.source_id if _active_release_owned(state, row, active) else None
+            origin = active.origin
+            registration = active.catalog_registration if source_id is not None else None
+        elif (not isinstance(state, releases.StateDocument) and row.get("active_version")
+                and not row.get("active_data_key") and not datadir.declared(row.get("manifest"))):
+            # File-backed tooling can still keep settings when there is no release data folder.
+            source_id, origin = row.get("source_id"), row.get("origin")
+            registration = releases.catalog_registration(state, source_id)
         else:
-            kept.pop(provider_id, None)
-
-    try:
-        mutate_state(record)
-    except Exception:
-        logging.getLogger(__name__).warning("Could not record the kept data of %s", provider_id, exc_info=True)
+            kept = (state.get("kept_data") or {}).get(provider_id)
+            if (config and _owned_kept_data(state, kept, row.get("source_id"), kind_of(row), row.get("origin"))
+                    and not kept.get("config")):
+                kept["config"] = copy.deepcopy(config)
+            return
+        state.setdefault("kept_data", {})[provider_id] = {
+            "source_id": source_id, "origin": origin, "kind": kind_of(row),
+            **({"catalog_registration": registration} if registration else {}),
+            "config": copy.deepcopy(config) if isinstance(config, dict) and config else None,
+        }
+    else:
+        (state.get("kept_data") or {}).pop(provider_id, None)
 
 
 def claim_kept_data(provider_id: str, source_id: str | None, kind: str, origin: str | None = None) -> bool:
@@ -5868,13 +6821,13 @@ def claim_kept_data(provider_id: str, source_id: str | None, kind: str, origin: 
     The record stays until a removal rewrites it, and only the copy of the settings is dropped once they are put
     back. An install that fails after this therefore leaves the data owned by the source it was kept for.
     """
-    entry = (load_state().get("kept_data") or {}).get(provider_id)
+    state = load_state()
+    entry = (state.get("kept_data") or {}).get(provider_id)
     if not isinstance(entry, dict):
         return False
     # An upload takes back what an upload kept, and nothing a catalog source kept. A row that says nothing of its
     # origin is judged by its source alone.
-    if (entry.get("source_id") == source_id and entry.get("kind") == kind
-            and (entry.get("origin") or origin) == origin):
+    if _owned_kept_data(state, entry, source_id, kind, origin):
         config = entry.get("config")
 
         def hand_over(state: dict[str, Any]) -> None:
@@ -5889,7 +6842,13 @@ def claim_kept_data(provider_id: str, source_id: str | None, kind: str, origin: 
         get_kind(kind).kept_data_reclaimed(provider_id)
         return True
     try:
-        get_kind(str(entry.get("kind"))).discard_kept_data(provider_id)
+        old_kind = entry.get("kind")
+        get_kind(str(old_kind)).discard_kept_data(provider_id)
+        root = provider_hub_dir()
+        datadir.remove(datadir.plugin_root(root, provider_id) / "kept")
+        row = (state.get("installations") or {}).get(provider_id) or {}
+        if old_kind in {SUBTITLE_PROVIDER, TRANSLATOR} and not row.get("active_version"):
+            datadir.remove(datadir.legacy_data_path(root, provider_id))
     except Exception as error:
         # The data stays, with its record, and the install is refused: going on would hand it to a package it
         # was not kept for.
@@ -5910,6 +6869,11 @@ def check_updates(*, kind: str | None = None) -> dict[str, Any]:
     job_id: str | None = None
     with record_job("check_updates", target_kind="system") as job:
         job_id = job.data["id"]
+        state = load_state()
+        for plugin_id, row in (state.get("installations") or {}).items():
+            if (isinstance(row, dict) and row.get("data_activation_waiting")
+                    and (kind is None or kind_of(row) == kind)):
+                activate_release(plugin_id)
         state = load_state()
         available = 0
         provider_summaries: list[str] = []

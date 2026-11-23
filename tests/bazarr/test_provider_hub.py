@@ -3746,7 +3746,10 @@ def test_get_providers_auth_includes_active_provider_hub_config(tmp_path, monkey
     assert get_providers_auth()["examplehub"]["region"] == "eu"
 
 
-def test_provider_hub_connection_test_runs_worker_health(tmp_path, monkeypatch):
+@pytest.mark.parametrize("release_data", [False, True])
+def test_provider_hub_connection_test_runs_worker_health(tmp_path, monkeypatch, release_data):
+    from plugin_platform_helpers import provider_manifest_v2
+    from provider_hub import datadir
     from provider_hub.state import load_state, save_state
 
     requests = []
@@ -3759,6 +3762,11 @@ def test_provider_hub_connection_test_runs_worker_health(tmp_path, monkeypatch):
 
         def request(self, op, payload=None, timeout=30):
             requests.append((op, payload, timeout, self.cwd, self.env))
+            if release_data:
+                copied = Path(self.env["BAZARR_PLUGIN_DATA_DIR"])
+                assert copied != data
+                assert (copied / "settings").read_text() == "installed"
+                (copied / "settings").write_text("connection check")
             return type("Result", (), {"payload": {"initialized": True}, "events": []})()
 
         def stop(self):
@@ -3789,6 +3797,13 @@ def test_provider_hub_connection_test_runs_worker_health(tmp_path, monkeypatch):
             "last_error": "old failure",
         }
     }
+    if release_data:
+        row = state["installations"]["examplehub"]
+        row["manifest"] = provider_manifest_v2(permissions=["data_dir"])
+        row["active_data_key"] = "a" * 32
+        data = datadir.release_path(tmp_path / "provider_hub", "examplehub", row["active_data_key"])
+        data.mkdir(parents=True)
+        (data / "settings").write_text("installed")
     save_state(state)
 
     from provider_hub.service import test_provider_connection
@@ -3801,7 +3816,11 @@ def test_provider_hub_connection_test_runs_worker_health(tmp_path, monkeypatch):
     assert requests[0][0] == "health"
     assert requests[0][2] == 10
     assert str(requests[0][3]) == str(bundle_path)
-    assert json.loads(requests[0][4]["BAZARR_PROVIDER_HUB_MANIFEST"])["provider_id"] == "examplehub"
+    manifest = json.loads(requests[0][4]["BAZARR_PROVIDER_HUB_MANIFEST"])
+    assert manifest.get("provider_id", manifest.get("id")) == "examplehub"
+    if release_data:
+        assert (data / "settings").read_text() == "installed"
+        assert not Path(requests[0][4]["BAZARR_PLUGIN_DATA_DIR"]).exists()
     assert load_state()["installations"]["examplehub"]["last_error"] is None
 
 

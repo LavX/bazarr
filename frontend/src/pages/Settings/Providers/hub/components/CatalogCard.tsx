@@ -368,6 +368,7 @@ export const CatalogCard: FunctionComponent<CatalogCardProps> = ({
               state={installed.state}
               pendingRestart={isAwaitingRestart(installed)}
               activeVersion={installed.active_version}
+              stagedAction={installed.staged_action}
               needsRepair={installed.needs_repair}
               revoked={installed.revoked}
               revokedReason={

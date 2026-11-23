@@ -64,11 +64,12 @@ import logging
 import os
 import select
 import signal
+import sys
 import threading
 import time
 from dataclasses import dataclass, field
 
-from . import spawn
+from . import activity, spawn
 
 logger = logging.getLogger(__name__)
 
@@ -91,6 +92,26 @@ SCAN_BUDGET_SECONDS = 10.0
 TERM_WAIT_SECONDS = spawn.LAUNCHER_CLEANUP_SECONDS + 5.0
 POLL_SECONDS = 0.1
 KILL_WAIT_SECONDS = 3.0
+
+# A former host's private launcher status socket is unavailable to this host.
+# Neither a launcher exit nor ending the members of one /proc scan recovers its
+# trusted tree-cleanup reply. Remember that missing proof across later scans.
+_previous_worker_uncertainty: set[str] = set()
+_previous_worker_lock = threading.Lock()
+
+
+def _remember_unproven_tree(instance: str) -> None:
+    with _previous_worker_lock:
+        if instance in _previous_worker_uncertainty:
+            return
+        _previous_worker_uncertainty.add(instance)
+    logger.warning("Provider Hub: a previous worker tree has no trusted cleanup confirmation. "
+                   "Plugin data snapshots remain refused.")
+
+
+def _has_unproven_tree(instance: str) -> bool:
+    with _previous_worker_lock:
+        return instance in _previous_worker_uncertainty
 
 
 @dataclass(frozen=True)
@@ -121,6 +142,8 @@ class SweepResult:
     truncated: bool = False
     sessions: list[SweptSession] = field(default_factory=list)
     unreadable: int = 0
+    verify_writers: bool = False
+    launchers: dict[int, str] = field(default_factory=dict)
 
     @property
     def ended(self) -> int:
@@ -143,6 +166,7 @@ def configure_owner(config_dir: "str | os.PathLike") -> "str | None":
     Call once at boot, before any worker starts. Without ``/proc`` (or an unreadable start
     time for this process) nothing can be proved later, so nothing is marked.
     """
+    activity.configure(config_dir)
     start = spawn._start_mark(os.getpid()) if _has_proc() and _proc_is_ours() else None
     if start is None:
         spawn.set_owner_marker(None)
@@ -394,18 +418,27 @@ def _scan(instance: str, deadline: float, result: SweepResult) -> "tuple[dict[in
         if time.monotonic() > deadline:
             result.truncated = True
             break
-        if not _ours(pid, my_euid) or not _same_pid_namespace(pid):
+        if not _ours(pid, my_euid):
             continue
+        if not _same_pid_namespace(pid):
+            _track_writer_launcher(entry, instance, result)
+            continue
+        unreadable = False
         try:
             value = _bound_marker(entry)
         except PermissionError:
+            unreadable, value = True, None
+        if value is None and _track_writer_launcher(entry, instance, result):
+            continue
+        if unreadable:
             result.unreadable += 1
             continue
-        if value is None:
+        if value is None or value == spawn.owner_marker():
             continue
         parsed = _parse_marker(value)
         if parsed is None or parsed[0] != instance:
             continue
+        _remember_unproven_tree(instance)
         sessions.setdefault(entry.session, _Session(entry.session)).marked[pid] = value
     if time.monotonic() > deadline:
         result.truncated = True
@@ -423,6 +456,26 @@ def _is_launcher_argv(args: "list[str]") -> bool:
     """Whether an argv is the launcher's: ``python -I -S -B .../sandbox/launcher.py <fds>``."""
     wanted = os.fspath(spawn.LAUNCHER_PATH)
     return any(arg == wanted or arg.replace(os.sep, "/").endswith("/sandbox/launcher.py") for arg in args[:6])
+
+
+def _launcher_owner(args: list[str]) -> str | None:
+    prefix = "--owner="
+    return args[-1][len(prefix):] if args[-1].startswith(prefix) else None
+
+
+def _track_writer_launcher(entry: _Proc, instance: str, result: SweepResult) -> bool:
+    # A non-dumpable launcher can hide its namespace and environment, and
+    # can still be exiting after its last child is gone. Its command line
+    # can hold the data fence. Signalling still requires a marked child.
+    argv = _read_cmdline(entry.pid)
+    if not argv or not _is_launcher_argv(argv) or not _same_process(_read_proc(entry.pid), entry):
+        return False
+    owner = _launcher_owner(argv)
+    parsed = _parse_marker(owner) if owner is not None else None
+    if owner is None or (owner != spawn.owner_marker() and (parsed is None or parsed[0] == instance)):
+        result.launchers[entry.pid] = entry.start
+        _remember_unproven_tree(instance)
+    return True
 
 
 def _launcher_identity(leader: _Proc, euid: int) -> bool:
@@ -563,9 +616,10 @@ def _wait_exited(held: "list[_Held]", timeout: float) -> "list[_Held]":
     deadline = time.monotonic() + timeout
     while True:
         left = [item for item in held if not _exited(item.fd)]
-        if not left or time.monotonic() >= deadline:
+        remaining = deadline - time.monotonic()
+        if not left or remaining <= 0:
             return left
-        time.sleep(POLL_SECONDS)
+        time.sleep(min(POLL_SECONDS, remaining))
 
 
 def _end(item: _Session, result: SweepResult, term_wait: float) -> None:
@@ -613,13 +667,15 @@ def sweep_leftovers(
     *,
     instance: "str | None" = None,
     term_wait: float = TERM_WAIT_SECONDS,
+    verify_writers: bool = False,
+    deadline: float | None = None,
 ) -> SweepResult:
     """End the processes a previous run of this install left behind. Never raises.
 
     ``config_dir`` (or ``instance``, an ``instance_key``) names the install; without one
     nothing can be proved and nothing is signalled.
     """
-    result = SweepResult()
+    result = SweepResult(verify_writers=verify_writers)
     try:
         if instance is None and config_dir is not None:
             instance = instance_key(config_dir)
@@ -642,8 +698,10 @@ def sweep_leftovers(
             result.reason = "no pidfd_open and pidfd_send_signal: a process cannot be pinned before it is signalled"
             logger.debug("Provider Hub: leftover process sweep skipped: %s", result.reason)
             return result
-        deadline = time.monotonic() + SCAN_BUDGET_SECONDS
-        found, _ = _scan(instance, deadline, result)
+        scan_deadline = time.monotonic() + SCAN_BUDGET_SECONDS
+        if deadline is not None:
+            scan_deadline = min(scan_deadline, deadline)
+        found, _ = _scan(instance, scan_deadline, result)
         if result.truncated:
             result.reason = "the /proc scan was partial, so nothing was signalled"
             logger.warning("Provider Hub: %s", result.reason)
@@ -658,12 +716,42 @@ def sweep_leftovers(
                 routine = refusal.startswith(("it is this process's", "it holds this process's", "it holds a child", "its owner is still"))
                 logger.log(logging.DEBUG if routine else logging.INFO, "Provider Hub: leftover plugin session %d left alone: %s", number, refusal)
                 continue
+            # A short check may refuse a surviving session. Give the normal
+            # sweep its full grace to clean descendants before escalating.
+            if deadline is not None and deadline - time.monotonic() < term_wait + KILL_WAIT_SECONDS:
+                result.truncated = True
+                result.reason = "not enough time to confirm leftover worker shutdown"
+                break
             _end(item, result, term_wait)
         if result.ended:
             logger.warning("Provider Hub: ended %d plugin session(s) left by a previous run", result.ended)
     except Exception:
+        result.supported = False
+        result.reason = "the leftover process sweep could not finish"
         logger.exception("Provider Hub: the leftover process sweep failed")
     return result
+
+
+def previous_workers_stopped(config_dir, *, deadline: float | None = None) -> bool:
+    """Refuse former trees whose trusted supervisor cleanup reply is unavailable.
+
+    Current workers have their own LauncherProcess and private status socket;
+    their normal stop path can consume ``launcher_cleanup()``. A previous
+    host's reply cannot be recovered from a PID, including an exited launcher.
+    Once a former tree is observed, later empty scans cannot supply that proof.
+    """
+    if sys.platform != "linux":
+        return activity.previous_workers_stopped(config_dir, deadline=deadline)
+    instance = instance_key(config_dir)
+    if _has_unproven_tree(instance):
+        return False
+    result = sweep_leftovers(config_dir, verify_writers=True, deadline=deadline)
+    if result.launchers or result.sessions:
+        _remember_unproven_tree(instance)
+    if (not result.supported or result.truncated or result.unreadable
+            or _has_unproven_tree(instance)):
+        return False
+    return deadline is None or time.monotonic() < deadline
 
 
 _sweep_thread: "threading.Thread | None" = None
