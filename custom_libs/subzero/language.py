@@ -18,6 +18,7 @@ repl_map = {
     "chi": "zh",
     "cze": "cs",
     "dut": "nl",
+    "es-419": "es-MX",
     "fre": "fr",
     "geo": "ka",
     "ger": "de",
@@ -162,4 +163,4 @@ class Language(Language_):
         return Language(*Language_.fromalpha3b(s).__getstate__())
 
 
-ENDSWITH_LANGUAGECODE_RE = re.compile(r"\.([^-.]{2,3})(?:-[A-Za-z]{2,})?$")
+ENDSWITH_LANGUAGECODE_RE = re.compile(r"\.([^-.]{2,3})(?:-(?:[A-Za-z]{2,}|[0-9]{3}))?$")

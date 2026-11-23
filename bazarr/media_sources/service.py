@@ -21,7 +21,7 @@ from .analysis import index_matches_file, local_content_stamp, local_stat, sourc
 from .context import SourceItemGone, resolve_item, resolve_same_item
 from .db import source_transaction
 from .history import history_log_source
-from .indexer import index_item
+from .indexer import index_and_notify_item, index_item
 from .kinds import UnknownSourceKind, get_kind
 from .schedule import refresh_tasks
 
@@ -421,11 +421,10 @@ def search_source_item(item_id, job_id=None, *, translation_gate=True, expected_
                 raise JobFailed('The item no longer exists', reason='not_found') from error
         return jobs_queue.add_job_from_function(f"Searching subtitles for {_label(item_id)}", is_progress=True)
     with source_search_probes(item_id):
-        return _search_source_item(item_id, job_id, translation_gate, expected_source)
+        return _search_source_item(item_id, job_id, translation_gate=translation_gate, expected_source=expected_source)
 
 
-
-def _search_source_item(item_id, job_id, translation_gate, expected_source):
+def _search_source_item(item_id, job_id, *, translation_gate, expected_source):
     if expected_source is not None:
         context = resolve_same_item(expected_source)
         if context is None or context.item_id != item_id:
@@ -455,17 +454,14 @@ def _search_source_item(item_id, job_id, translation_gate, expected_source):
     if item.missing_subtitles is None or not index_matches_file(item, stat):
         # The scanner still owns admission and re-identification. Refresh the tracks
         # and wanted languages of the file at this path for the immediate search.
-        if index_item(item_id) is None:
+        if index_item(item_id, keep_index_on_probe_failure=True, expected_path=context.path,
+                      expected_source=context) is None:
             raise JobFailed('The source subtitle index could not be refreshed. Try again.', reason='conflict')
         item = repository.get_item(item_id)
-        if item is None:
+        if item is None or not context.same_item(item):
             raise JobFailed('The item no longer exists', reason='not_found')
-        try:
-            refreshed = resolve_item(item_id)
-        except SourceItemGone as error:
-            raise JobFailed('The item no longer exists', reason='not_found') from error
-        if (not context.same_item(refreshed) or not context.same_item(item)
-                or refreshed.path != context.path or item.path != context.path):
+        refreshed = resolve_same_item(context)
+        if refreshed is None or item.path != context.path:
             raise JobFailed('The source file moved while the search was starting. Try again.', reason='conflict')
         context = refreshed
     from .translation import missing_language_candidates
@@ -596,7 +592,11 @@ def _download_source_subtitles(context, item, languages, job_id, *, translation_
                                          **({} if translation_gate else {'auto_translate': False})):
             if not result:
                 continue
-            history_log_source(1, context, result)
+            if getattr(result, 'source_indexed', False) is not True:
+                # Retry an incomplete listing, including results from outside shared processing.
+                index_and_notify_item(context)
+            with source_transaction() as connection:
+                history_log_source(1, context, result, target=connection)
             downloaded.append(result.language_code)
             try:
                 send_notifications_source(context, result.message)

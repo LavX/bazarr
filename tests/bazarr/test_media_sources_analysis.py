@@ -457,6 +457,65 @@ def test_no_source_means_no_source_recalculation(source_db, refresh_queue, monke
     recalc.assert_not_called()
 
 
+@pytest.mark.parametrize("extension", ["mkv", "sTrM"])
+def test_search_of_a_legacy_external_only_index(source_db, tmp_path, probe, monkeypatch, extension):
+    from app.config import settings
+    from media_sources import identity, indexer, repository, service
+    from subtitles import download
+    from subzero.language import Language
+
+    monkeypatch.setattr(settings.general, "enable_strm_support", True)
+    monkeypatch.setattr(indexer, "get_language_set", lambda: {Language("hun")})
+    monkeypatch.setattr(service.jobs_queue, "update_job_progress", lambda **_: None)
+    monkeypatch.setattr(service, "get_providers", lambda: ["fixture"])
+    requested = Mock(return_value=iter(()))
+    monkeypatch.setattr(download, "generate_subtitles", requested)
+    profile = add_profile(source_db, [("fr", "True", "False")])
+    source_id, library_id, root = add_source(source_db, tmp_path, profile_id=profile)
+    path = stamped_video(root / f"Film.2001.{extension}")
+    if extension == "sTrM":
+        path.write_text("https://example.invalid/fixture.mkv\n")
+    sidecar = path.with_suffix(".hu.srt")
+    sidecar.write_text("1\n00:00:01,000 --> 00:00:02,000\nFixture\n")
+    dev, ino, size, mtime = identity.stat_file(path)
+    item_id = add_item(source_db, source_id, library_id, path, file_dev=dev, file_ino=ino, file_size=size,
+                       file_mtime_ns=mtime)
+    external = [["hu", str(sidecar), sidecar.stat().st_size]]
+    # Development wrote the external listing and missing languages without a probe cache.
+    repository.write_item_index(item_id, str(external), "['fr:forced']", source_db)
+    assert repository.get_item(item_id).ffprobe_cache is None
+
+    enumerate_sidecars = Mock(wraps=indexer.list_external_subtitles)
+    monkeypatch.setattr(indexer, "list_external_subtitles", enumerate_sidecars)
+    probe.return_value = None
+    service.search_source_item(item_id, job_id=1)
+    requested.assert_called_once()
+    assert requested.call_args.args[1:3] == ([("fr", "False", "True")], "None")
+    enumerate_sidecars.assert_not_called()
+    assert ast.literal_eval(repository.get_item(item_id).subtitles) == external
+
+    probe.return_value = metadata()
+    service.search_source_item(item_id, job_id=2)
+    after = repository.get_item(item_id)
+    if extension == "sTrM":
+        probe.assert_not_called()
+        enumerate_sidecars.assert_not_called()
+        assert ast.literal_eval(after.subtitles) == external and requested.call_count == 2
+
+        path.write_text("https://example.invalid/replacement.mkv\n")
+        service.search_source_item(item_id, job_id=3)
+        service.search_source_item(item_id, job_id=4)
+        probe.assert_not_called()
+        enumerate_sidecars.assert_called_once()
+        assert ast.literal_eval(repository.get_item(item_id).subtitles) == external
+    else:
+        assert probe.call_count == 2
+        requested.assert_called_once()
+        enumerate_sidecars.assert_called_once()
+        assert after.video_codec == "H.264" and after.missing_subtitles == "[]"
+        assert ast.literal_eval(after.subtitles) == [["fr:forced", None, None, "srt", "French Forced"], *external]
+
+
 @pytest.mark.parametrize("scenario", ["reuse", "restore", "recover"])
 def test_search_refreshes_replacement_tracks_before_a_scan(
     source_db, tmp_path, probe, offline_movies, monkeypatch, scenario,

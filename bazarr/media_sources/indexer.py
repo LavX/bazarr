@@ -8,9 +8,11 @@ supplies embedded tracks and audio languages for the profile rules.
 import ast
 import logging
 import os
+import sqlite3
 from functools import partial
 
 import sqlalchemy as sa
+from sqlalchemy.orm import Session
 
 from subliminal_patch import core
 
@@ -34,7 +36,9 @@ from utilities.helper import get_subtitle_destination_folder, get_target_folder
 from utilities.video_analyzer import audio_languages_from_metadata, embedded_subtitles_from_metadata
 
 from . import repository
-from .analysis import cached_metadata, failed_probe_values, local_stat, probe_item, read_metadata, streams
+from .analysis import (cached_metadata, failed_probe_values, index_matches_file, local_stat, probe_item,
+                       read_metadata, streams)
+from .context import resolve_same_item
 from .db import handle, source_transaction
 
 
@@ -44,6 +48,12 @@ class SourceOutputOwnerIndex(SyncOutputOwnerIndex):
     The base index reads the arr and Sportarr tables, which a source never does. Here the owners are the source
     items, each claiming its own folder and, with a custom subtitle folder, that folder too.
     """
+
+    def __init__(self, target=None):
+        super().__init__()
+        self._target = target
+        # Post-save indexing needs the original failure to discard an incomplete listing.
+        self.propagate_errors = target is not None
 
     def conflicting_stems(self, video, subtitle_path):
         """Include media whose stem consumes only part of the subtitle suffix."""
@@ -67,13 +77,12 @@ class SourceOutputOwnerIndex(SyncOutputOwnerIndex):
                 stems.add(stem[:-len(alias) - 1])
         return stems
 
-    @staticmethod
-    def _load_owners():
+    def _load_owners(self):
         custom_folder = get_subtitle_destination_folder()
         subfolder = settings.general.subfolder
         absolute_folder = os.path.normcase(os.path.realpath(custom_folder)) if subfolder == 'absolute' else None
         owners = {}
-        for row in handle().execute(sa.select(repository.Items.c.path)).all():
+        for row in handle(self._target).execute(sa.select(repository.Items.c.path)).all():
             mapped = os.path.normcase(os.path.realpath(row.path))
             folders = {os.path.dirname(mapped)}
             if absolute_folder:
@@ -90,9 +99,8 @@ class SourceOutputOwnerIndex(SyncOutputOwnerIndex):
 class SourcePublicationOwnerIndex(SourceOutputOwnerIndex):
     """Source writes in shared subtitle folders must account for all media stored there."""
 
-    @staticmethod
-    def _load_owners():
-        owners = SourceOutputOwnerIndex._load_owners()
+    def _load_owners(self):
+        owners = super()._load_owners()
         for key, paths in SyncOutputOwnerIndex._load_owners().items():
             owners.setdefault(key, set()).update(paths)
         return owners
@@ -105,8 +113,9 @@ class SourcePublicationOwnerIndex(SourceOutputOwnerIndex):
 def list_external_subtitles(path, previous=None, ownership_index=None, *, publication=False, written_paths=()):
     """``[[language, subtitle path, size], ...]`` for the subtitle files beside ``path``.
 
-    The caller holds the subtitle write locks. Publication checks its index for fresh sidecar ownership.
-    Previously indexed paths supply language guesses for files discovered in this scan."""
+    The caller holds the subtitle write locks. Publication checks fresh ownership before counting a sidecar.
+    Previously indexed paths supply language guesses for files discovered in this scan.
+    """
     if ownership_index is None:
         ownership_index = SourceOutputOwnerIndex()
     media_directory, filename = os.path.split(path)
@@ -122,30 +131,35 @@ def list_external_subtitles(path, previous=None, ownership_index=None, *, public
                 os.path.join(directory, filename), languages=languages, only_one=bool(languages))
             found = add_sync_engine_outputs(directory, found, video_path=path, ownership_index=ownership_index)
             found = add_combined_outputs(directory, found, video_filename=filename)
-        except FileNotFoundError:
+        except (FileNotFoundError, NotADirectoryError):
             continue
         for subtitle, language in found.items():
             subtitle_path = os.path.join(directory, subtitle)
-            if subtitle in actual or os.path.abspath(subtitle_path) in excluded:
+            path_key = os.path.abspath(subtitle_path)
+            if path_key in actual or path_key in excluded:
                 continue
             version = regular_subtitle_version(subtitle_path)
             if version is None:
                 continue
             if publication and not sync_output_owner_is_unique(path, subtitle_path, ownership_index=ownership_index):
                 continue
-            if language is None and version[2] <= MAXIMUM_SUBTITLE_SIZE:
+            if version[2] <= MAXIMUM_SUBTITLE_SIZE:
                 try:
                     read_sample = partial(read_regular_subtitle, expected_version=version,
                                           max_bytes=MAXIMUM_SUBTITLE_SIZE)
                     previous_entry = indexed.get(subtitle_path)
                     language = guess_external_subtitles(
-                        directory, {subtitle: None}, 'movie', (previous_entry,) if previous_entry else None,
+                        directory, {subtitle: language}, 'movie', (previous_entry,) if previous_entry else None,
                         path_reverse=os.fspath, read_bytes=read_sample)[subtitle]
-                except (OSError, UnicodeError, SubtitleSourceChanged):
+                except SubtitleSourceChanged:
+                    continue
+                except (OSError, UnicodeError):
+                    if not publication:
+                        raise
                     continue
             entry = _external_subtitle_entry(subtitle, language, subtitle_path, version[2])
             if entry is not None:
-                actual[subtitle] = entry
+                actual[path_key] = entry
     return list(actual.values())
 
 
@@ -257,7 +271,7 @@ def _missing(item, listing, audio_language, target):
 
 
 def _embedded_listing(data):
-    if not data or not settings.general.use_embedded_subs:
+    if not settings.general.use_embedded_subs:
         return []
     ignored = {
         'pgs': settings.general.ignore_pgs_subs,
@@ -274,7 +288,8 @@ def _embedded_listing(data):
 
 
 def _file_version(item):
-    return item.path, item.file_dev, item.file_ino, item.file_size, item.file_mtime_ns
+    return (item.created_at, item.source_id, item.library_id, item.path,
+            item.file_dev, item.file_ino, item.file_size, item.file_mtime_ns)
 
 
 def _file_signature(stat):
@@ -283,11 +298,19 @@ def _file_signature(stat):
     return stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns
 
 
-def index_item(item_id, target=None, ownership_index=None):
-    """Analyze the source file and rebuild its subtitle listing. None means the index could not be written."""
+def index_item(item_id, target=None, ownership_index=None, *, keep_index_on_probe_failure=False, expected_path=None,
+               expected_source=None):
+    """Analyze a source file and return its subtitle listing, or None if the index is unavailable."""
     item = repository.get_item(item_id, target)
     if item is None:
         logging.info('BAZARR source item %s no longer exists; its subtitles were not indexed', item_id)
+        return None
+    if expected_source is not None and (not expected_source.same_item(item)
+                                       or item.source_id != expected_source.source_id
+                                       or item.library_id != expected_source.library_id):
+        return None
+    if expected_path is not None and item.path != expected_path:
+        logging.debug('BAZARR source item %s moved before its subtitles were indexed', item_id)
         return None
     stat = local_stat(item.path)
     if stat is None:
@@ -307,8 +330,23 @@ def index_item(item_id, target=None, ownership_index=None):
             return None
         try:
             previous = ast.literal_eval(latest.subtitles) if latest.subtitles else []
+        except (SyntaxError, ValueError):
+            logging.exception('BAZARR invalid stored subtitle listing for this file %s', item.path)
+            return None
+        if not isinstance(previous, (list, tuple)) or any(
+                not isinstance(entry, (list, tuple))
+                or (len(entry) == 3 and (entry[0] is not None and not isinstance(entry[0], str)
+                                         or entry[1] is not None and not isinstance(entry[1], str)))
+                for entry in previous):
+            logging.warning('BAZARR invalid stored subtitle listing for this file %s', item.path)
+            return None
+        if (keep_index_on_probe_failure and blob is None
+                and latest.subtitles is not None and latest.missing_subtitles is not None
+                and index_matches_file(latest, stat, allow_external_only=True)):
+            return previous
+        try:
             external = list_external_subtitles(item.path, previous, ownership_index)
-        except Exception:
+        except (OSError, UnicodeDecodeError):
             logging.exception('BAZARR unable to index external subtitles for this file %s', item.path)
             return None
         if _file_signature(local_stat(item.path)) != _file_signature(stat):
@@ -341,6 +379,69 @@ def index_item(item_id, target=None, ownership_index=None):
     return None
 
 
+def _recoverable_index_database_error(error):
+    """Recognize operational failures without hiding SQL defects reported as OperationalError by SQLite."""
+    if isinstance(error, (sa.exc.ProgrammingError, sa.exc.IntegrityError)):
+        return False
+    original = error.orig
+    sqlite_code = getattr(original, 'sqlite_errorcode', None)
+    if sqlite_code is not None:
+        return sqlite_code & 0xff in {
+            sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED, sqlite3.SQLITE_IOERR,
+            sqlite3.SQLITE_FULL, sqlite3.SQLITE_CANTOPEN, sqlite3.SQLITE_PROTOCOL,
+        }
+    sqlstate = getattr(original, 'sqlstate', None) or getattr(original, 'pgcode', None)
+    if sqlstate is not None:
+        if sqlstate == '57014':
+            return False  # Query cancellation must propagate, even when its connection was invalidated.
+        return sqlstate[:2] in {'08', '40', '53'} or sqlstate in {
+            '25P02', '55P03', '57P01', '57P02', '57P03',
+        }
+    # Without a driver code, recognize only SQLite's exact lock messages.
+    if isinstance(original, sqlite3.Error):
+        return isinstance(original, sqlite3.OperationalError) and str(original) in {
+            'database is locked', 'database table is locked', 'database schema is locked',
+        }
+    return error.connection_invalidated
+
+
+def index_saved_subtitle(item_id, *, expected_path, expected_source=None):
+    """Index after a save without letting recoverable failures discard the saved result or its history."""
+    try:
+        # Keep repository and ownership reads in the same isolated session. The index write has
+        # its own transaction, which rolls back before a failure reaches this boundary.
+        with Session(bind=handle().get_bind()) as session:
+            listing = index_item(item_id, target=session, ownership_index=SourceOutputOwnerIndex(session),
+                                 expected_path=expected_path, expected_source=expected_source)
+    except (sa.exc.DBAPIError, OSError) as error:
+        if isinstance(error, sa.exc.DBAPIError):
+            if not _recoverable_index_database_error(error):
+                raise
+            # Shared helpers may have invalidated the application's scoped session. Roll back this thread's
+            # logical transaction as well, so a retry can acquire a new connection in AUTOCOMMIT mode.
+            handle().rollback()
+        logging.exception('BAZARR source item %s subtitle index failed after saving; the subtitle was retained',
+                          item_id)
+        return False
+    if listing is None:
+        logging.warning('BAZARR source item %s subtitle index is incomplete after saving; the subtitle was retained',
+                        item_id)
+    return listing is not None
+
+
+def index_and_notify_item(source):
+    """Refresh a source item's subtitles and the views that show it after a save."""
+    from app.event_handler import event_stream
+
+    indexed = index_saved_subtitle(source.item_id, expected_path=source.path, expected_source=source)
+    current = resolve_same_item(source) if indexed else None
+    if current is not None:
+        event_stream(type='source-item', payload=current.item_id)
+        if current.group_id is not None:
+            event_stream(type='source-group', payload=current.group_id)
+    return indexed
+
+
 def recalculate_missing_subtitles(*, library_id=None, group_id=None, cancel=None):
     """Re-evaluate profile and settings rules against stored tracks, without a folder walk or probe."""
     items = repository.Items
@@ -370,16 +471,3 @@ def recalculate_missing_subtitles(*, library_id=None, group_id=None, cancel=None
             missing = str(_missing(item, listing, item.audio_language, connection))
             if (subtitles, missing) != (item.subtitles, item.missing_subtitles):
                 repository.write_item_index(item_id, subtitles, missing, connection, indexed=False)
-
-
-def index_and_notify_item(source):
-    """Refresh a source item's subtitles and the views that show it."""
-    from app.event_handler import event_stream
-
-    item = repository.get_item(source.item_id)
-    if item is None or not source.same_item(item) or item.path != source.path or item.source_id != source.source_id:
-        return
-    if index_item(source.item_id) is not None:
-        event_stream(type='source-item', payload=source.item_id)
-        if source.group_id is not None:
-            event_stream(type='source-group', payload=source.group_id)
