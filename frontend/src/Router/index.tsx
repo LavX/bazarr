@@ -90,7 +90,11 @@ export function useRoutes(): CustomRouteObject[] {
     sportsActivity,
     sonarr,
     radarr,
-    sportarr,
+    sonarrBadges,
+    radarrBadges,
+    sportarrBadges,
+    wantedEpisodesBadge,
+    wantedMoviesBadge,
   } = useMediaNavigation();
   // The Translation page exists only while the v2 translation runtime is on.
   const translationRuntime = useTranslationRuntime();
@@ -115,7 +119,7 @@ export function useRoutes(): CustomRouteObject[] {
             icon: faPlay,
             name: "My series",
             path: "series",
-            badge: sonarr ? data?.sonarr_signalr : undefined,
+            badge: sonarrBadges ? data?.sonarr_signalr : undefined,
             hidden: !series,
             children: [
               {
@@ -140,7 +144,7 @@ export function useRoutes(): CustomRouteObject[] {
             icon: faFilm,
             name: "My movies",
             path: "movies",
-            badge: radarr ? data?.radarr_signalr : undefined,
+            badge: radarrBadges ? data?.radarr_signalr : undefined,
             hidden: !movies,
             children: [
               {
@@ -169,7 +173,7 @@ export function useRoutes(): CustomRouteObject[] {
             // badges on Series and Movies. The endpoint has reported it all
             // along and the nav never showed it, so there was no way to see at
             // a glance whether Bazarr was still connected to Sportarr.
-            badge: sportarr ? data?.sportarr_sse : undefined,
+            badge: sportarrBadges ? data?.sportarr_sse : undefined,
             hidden: !sports,
             children: [
               { index: true, element: <Sports /> },
@@ -226,13 +230,13 @@ export function useRoutes(): CustomRouteObject[] {
                 path: "sports",
                 name: "Sports",
                 hidden: !sportsActivity,
-                badge: sportarr ? data?.sports : undefined,
+                badge: sportarrBadges ? data?.sports : undefined,
                 element: <WantedSportsView></WantedSportsView>,
               },
               {
                 name: "Episodes",
                 path: "series",
-                badge: sonarr || folderSeries ? data?.episodes : undefined,
+                badge: wantedEpisodesBadge ? data?.episodes : undefined,
                 hidden: !seriesActivity,
                 element: folderSeries ? (
                   <WantedSeriesView />
@@ -245,7 +249,7 @@ export function useRoutes(): CustomRouteObject[] {
               {
                 name: "Movies",
                 path: "movies",
-                badge: radarr || folderMovies ? data?.movies : undefined,
+                badge: wantedMoviesBadge ? data?.movies : undefined,
                 hidden: !movieActivity,
                 element: folderMovies ? (
                   <WantedMoviesView />
@@ -551,7 +555,11 @@ export function useRoutes(): CustomRouteObject[] {
       sportsActivity,
       sonarr,
       radarr,
-      sportarr,
+      sonarrBadges,
+      radarrBadges,
+      sportarrBadges,
+      wantedEpisodesBadge,
+      wantedMoviesBadge,
       translationRuntime,
     ],
   );

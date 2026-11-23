@@ -55,6 +55,35 @@ export function useArrInstances(enabled = true) {
   });
 }
 
+// An absent list or kind leaves the connection's availability unknown.
+export function getArrInstanceAvailability(
+  kind: ArrKind,
+  instances: ArrInstance[] | undefined,
+) {
+  const records = instances?.filter((instance) => instance.kind === kind);
+  return records?.length
+    ? records.some((instance) => instance.enabled)
+    : undefined;
+}
+
+export function isArrMediaRouteEnabled(
+  kind: ArrKind,
+  settings: Settings | undefined,
+  instances: ArrInstance[] | undefined,
+) {
+  if (!settings?.general?.[`use_${kind}`]) return false;
+  if (!settings.media_sources?.visible) return true;
+  if (!instances) return false;
+
+  const available = getArrInstanceAvailability(kind, instances);
+  if (available !== undefined) return available;
+  if (kind === "sportarr") return false;
+
+  // A legacy Sonarr or Radarr connection can predate instance records.
+  const legacy = settings[kind];
+  return Boolean(legacy?.ip?.trim() && legacy.apikey?.trim());
+}
+
 /**
  * Whether one arr kind is actually in use. Both conditions matter: the master
  * toggle is the operator's intent, and an enabled instance is what there is to
@@ -172,6 +201,10 @@ export function useUpdateArrInstance({
             instance.id === id ? { ...instance, enabled } : instance,
           ),
         );
+        void client.invalidateQueries({
+          queryKey: [QueryKeys.System, QueryKeys.Badges, true],
+          exact: true,
+        });
       }
       void client.invalidateQueries({ queryKey: arrKey });
     },

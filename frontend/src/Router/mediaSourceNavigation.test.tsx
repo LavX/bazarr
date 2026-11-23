@@ -11,12 +11,16 @@ import { useBadges } from "@/apis/hooks/system";
 import queryClient from "@/apis/queries";
 import { QueryKeys } from "@/apis/queries/keys";
 import type { SourceAvailability } from "@/apis/raw/mediaSources";
+import { latestWhatsNewVersion } from "@/data/whatsNew";
 import { makeInstance } from "@/pages/Settings/Connections/__tests__/fixtures";
 import InstanceCard from "@/pages/Settings/Connections/InstanceCard";
-import { useRoutes } from "@/Router";
+import { AllProviders } from "@/providers";
+import { Router, useRoutes } from "@/Router";
 import type { CustomRouteObject } from "@/Router/type";
-import { customRender, screen, waitFor } from "@/tests";
+import { customRender, rawRender, screen, waitFor } from "@/tests";
 import server from "@/tests/mocks/node";
+import { setAuthenticated } from "@/utilities/event";
+import { WHATS_NEW_SEEN_KEY } from "@/utilities/whatsNew";
 
 function Navigation() {
   // eslint-disable-next-line testing-library/no-node-access -- route metadata, not a DOM node.
@@ -29,12 +33,13 @@ function Navigation() {
           .filter((route) => route.name && !route.hidden)
           .map((route) => (
             <div key={route.path}>
-              <span>{route.name}</span>
+              <span data-badge={route.badge}>{route.name}</span>
               {((route.children ?? []) as CustomRouteObject[])
                 .filter((child) => child.name && !child.hidden)
                 .map((child) => (
                   <span
                     key={child.path}
+                    data-badge={child.badge}
                   >{`${route.name} / ${child.name}`}</span>
                 ))}
             </div>
@@ -51,6 +56,305 @@ const ABSENT = { browsable: false, searchable: false, retained: false };
 const ENABLED = { ...ABSENT, browsable: true, searchable: true };
 const DISABLED = { ...ABSENT, browsable: true };
 const RETAINED = { ...ABSENT, retained: true };
+
+it.each([
+  { visible: true, status: 200, sibling: false, enabledFolder: false },
+  { visible: true, status: 200, sibling: false, enabledFolder: true },
+  { visible: true, status: 503, sibling: false, enabledFolder: false },
+  { visible: false, status: 200, sibling: false, enabledFolder: false },
+  { visible: false, status: 503, sibling: false, enabledFolder: false },
+  { visible: false, status: 200, sibling: true, enabledFolder: false },
+])(
+  "updates Radarr badges on disable (folders visible: $visible, PATCH $status, enabled sibling: $sibling, enabled folder: $enabledFolder)",
+  async ({ visible, status, sibling, enabledFolder }) => {
+    const user = userEvent.setup();
+    const movie = makeInstance({ kind: "radarr", name: "Radarr" });
+    const series = makeInstance({ id: 1 });
+    const sports = makeInstance({ id: 2, kind: "sportarr" });
+    const instances = [movie, series, sports];
+    if (sibling) {
+      instances.push(makeInstance({ id: 43, kind: "radarr", name: "Sibling" }));
+    }
+    const patch = Promise.withResolvers<void>();
+    const refresh = Promise.withResolvers<void>();
+    const patchStarted = vi.fn();
+    const list = vi.fn();
+    const sources = vi.fn();
+    const excluded = vi.fn();
+    let confirmed = false;
+
+    server.use(
+      http.get("/api/system/settings", () =>
+        HttpResponse.json({
+          general: {
+            theme: "light",
+            setup_complete: true,
+            use_radarr: true,
+            use_sonarr: true,
+            use_sportarr: true,
+          },
+          media_sources: { visible },
+          auth: { type: "form" },
+        }),
+      ),
+      http.get("/api/system/arr-instances", async () => {
+        list();
+        if (!confirmed) return HttpResponse.json(instances);
+        await refresh.promise;
+        return new HttpResponse(null, { status: 503 });
+      }),
+      http.patch("/api/system/arr-instances/42", async ({ request }) => {
+        patchStarted(await request.json());
+        await patch.promise;
+        if (status === 503) return new HttpResponse(null, { status });
+        confirmed = true;
+        return HttpResponse.json({ ...movie, enabled: false }, { status });
+      }),
+      http.get("/api/system/media-sources", () => {
+        sources();
+        return HttpResponse.json({
+          data: [],
+          availability: {
+            movie: { ...(enabledFolder ? ENABLED : DISABLED), retained: true },
+            series: ABSENT,
+            sports: ABSENT,
+          },
+        });
+      }),
+      http.get("/api/badges", ({ request }) =>
+        HttpResponse.json({
+          movies:
+            confirmed && new URL(request.url).searchParams.has("sources")
+              ? 3
+              : 9,
+          episodes: 4,
+          sports: 2,
+          radarr_signalr: "DOWN",
+          sonarr_signalr: "LIVE",
+          sportarr_sse: "LIVE",
+        }),
+      ),
+      http.get("/api/system/status", () => HttpResponse.json({ data: {} })),
+      http.get("/api/system/jobs", () => HttpResponse.json({ data: [] })),
+      http.get("/api/system/searches", () => HttpResponse.json([])),
+      http.get("/api/discover/metadata/status", () =>
+        HttpResponse.json({ data: { configured: false } }),
+      ),
+      http.all("/api/movies/blacklist", ({ request }) => {
+        excluded(request.method);
+        return HttpResponse.json({ data: [] });
+      }),
+    );
+
+    // Mantine's flyout hides its content when the trigger has no layout bounds.
+    const bounds = vi
+      .spyOn(HTMLElement.prototype, "getBoundingClientRect")
+      .mockReturnValue(new DOMRect(100, 100, 100, 40));
+    window.history.replaceState(null, "", "/settings/connections#radarr");
+    setAuthenticated(true);
+    localStorage.setItem(WHATS_NEW_SEEN_KEY, latestWhatsNewVersion);
+    const { unmount } = rawRender(
+      <AllProviders>
+        <Router />
+      </AllProviders>,
+    );
+
+    const moviesLink = () => screen.getByRole("link", { name: "Movies" });
+    const wanted = () => screen.getByRole("button", { name: "Wanted" });
+    const toggle = () =>
+      screen.getAllByRole("switch", { name: "Disable instance" })[0];
+    const initialCounts = "Sports: 2, Episodes: 4, Movies: 9";
+
+    try {
+      await screen.findAllByRole("switch", { name: "Disable instance" });
+      await waitFor(() =>
+        expect(moviesLink()).toHaveAttribute(
+          "aria-description",
+          "Connection down",
+        ),
+      );
+      expect(wanted()).toHaveAttribute("aria-description", initialCounts);
+      expect(list).toHaveBeenCalledOnce();
+      if (!visible) expect(sources).not.toHaveBeenCalled();
+
+      await user.click(toggle());
+      await waitFor(() =>
+        expect(patchStarted).toHaveBeenCalledWith({ enabled: false }),
+      );
+      expect(toggle()).toBeChecked();
+      expect(moviesLink()).toHaveAttribute(
+        "aria-description",
+        "Connection down",
+      );
+      expect(wanted()).toHaveAttribute("aria-description", initialCounts);
+      expect(list).toHaveBeenCalledOnce();
+
+      patch.resolve();
+      if (status === 503) {
+        await waitFor(() => expect(toggle()).toBeEnabled());
+        expect(toggle()).toBeChecked();
+        expect(moviesLink()).toHaveAttribute(
+          "aria-description",
+          "Connection down",
+        );
+        expect(wanted()).toHaveAttribute("aria-description", initialCounts);
+        expect(list).toHaveBeenCalledOnce();
+        return;
+      }
+
+      await waitFor(() => expect(list).toHaveBeenCalledTimes(2));
+      expect(
+        await screen.findByRole("switch", { name: "Enable instance" }),
+      ).not.toBeChecked();
+
+      const expectBadges = () => {
+        expect(moviesLink()).toHaveAttribute("href", "/movies");
+        if (sibling) {
+          expect(moviesLink()).toHaveAttribute(
+            "aria-description",
+            "Connection down",
+          );
+        } else {
+          expect(moviesLink()).not.toHaveAttribute("aria-description");
+        }
+        expect(wanted()).toHaveAttribute(
+          "aria-description",
+          sibling
+            ? initialCounts
+            : enabledFolder
+              ? "Sports: 2, Episodes: 4, Movies: 3"
+              : "Sports: 2, Episodes: 4",
+        );
+        expect(screen.getByRole("link", { name: "Series" })).toHaveAttribute(
+          "aria-description",
+          "Connection live",
+        );
+        expect(screen.getByRole("link", { name: "Sports" })).toHaveAttribute(
+          "aria-description",
+          "Connection live",
+        );
+      };
+      await waitFor(expectBadges);
+      await user.click(screen.getByRole("button", { name: "Excluded" }));
+      await user.click(await screen.findByRole("menuitem", { name: "Movies" }));
+      if (visible) {
+        expect(
+          await screen.findByRole("link", { name: "Connections" }),
+        ).toHaveAttribute("href", "/settings/connections#folders");
+      } else {
+        await waitFor(() => expect(excluded).toHaveBeenCalledWith("GET"));
+      }
+
+      const expectExcluded = () => {
+        expect(window.location.pathname).toBe("/blacklist/movies");
+        expect(
+          screen.getByRole("button", { name: "Excluded" }),
+        ).toHaveAttribute("aria-current", "page");
+        if (visible) {
+          expect(
+            screen.queryByRole("button", { name: "Remove All" }),
+          ).not.toBeInTheDocument();
+          expect(excluded).not.toHaveBeenCalled();
+        }
+        expect(list).toHaveBeenCalledTimes(2);
+      };
+      expectExcluded();
+
+      refresh.resolve();
+      await waitFor(() =>
+        expect(
+          queryClient.getQueryState([QueryKeys.ArrInstances])?.status,
+        ).toBe("error"),
+      );
+      expectBadges();
+      expectExcluded();
+      if (!visible) expect(sources).not.toHaveBeenCalled();
+    } finally {
+      patch.resolve();
+      refresh.resolve();
+      unmount();
+      bounds.mockRestore();
+      window.history.replaceState(null, "", "/");
+      localStorage.removeItem(WHATS_NEW_SEEN_KEY);
+      setAuthenticated(false);
+    }
+  },
+);
+
+it.each([true, false])(
+  "handles a cold instance list and a missing kind (folders visible: %s)",
+  async (visible) => {
+    const list = Promise.withResolvers<void>();
+    const listKey = [QueryKeys.ArrInstances];
+    let recovered = false;
+    server.use(
+      http.get("/api/system/settings", () =>
+        HttpResponse.json({
+          general: { use_radarr: true },
+          media_sources: { visible },
+          ...(visible && { radarr: { ip: "127.0.0.1", apikey: "fixture" } }),
+        }),
+      ),
+      http.get("/api/system/arr-instances", async () => {
+        if (recovered) return HttpResponse.json([makeInstance()]);
+        await list.promise;
+        return new HttpResponse(null, { status: 503 });
+      }),
+      http.get("/api/system/media-sources", () =>
+        HttpResponse.json({
+          data: [],
+          availability: { movie: ABSENT, series: ABSENT, sports: ABSENT },
+        }),
+      ),
+      http.get("/api/badges", () =>
+        HttpResponse.json({ movies: 9, radarr_signalr: "DOWN" }),
+      ),
+    );
+    customRender(<Navigation />);
+
+    const expectBadges = async () => {
+      await waitFor(() =>
+        expect(screen.getByText("My movies")).toHaveAttribute(
+          "data-badge",
+          "DOWN",
+        ),
+      );
+      expect(screen.getByText("Missing / Movies")).toHaveAttribute(
+        "data-badge",
+        "9",
+      );
+    };
+    const expectCold = async () => {
+      if (visible) {
+        expect(screen.queryByText("My movies")).not.toBeInTheDocument();
+        expect(screen.queryByText("Missing / Movies")).not.toBeInTheDocument();
+      } else {
+        await expectBadges();
+      }
+    };
+    try {
+      await waitFor(() =>
+        expect(queryClient.getQueryState(listKey)?.fetchStatus).toBe(
+          "fetching",
+        ),
+      );
+      await expectCold();
+      list.resolve();
+      await waitFor(() =>
+        expect(queryClient.getQueryState(listKey)?.status).toBe("error"),
+      );
+      await expectCold();
+
+      recovered = true;
+      await act(async () => {
+        await queryClient.invalidateQueries({ queryKey: listKey, exact: true });
+      });
+      await expectBadges();
+    } finally {
+      list.resolve();
+    }
+  },
+);
 
 it.each([
   ["series", "sonarr", "My series", "Episodes"],

@@ -1,5 +1,11 @@
+import type { ArrKind } from "@/apis/raw/arrInstances";
+import {
+  getArrInstanceAvailability,
+  isArrMediaRouteEnabled,
+  useArrInstances,
+} from "./arrInstances";
 import { useSourceAvailability } from "./mediaSources";
-import { useSystemSettings, useSystemStatus } from ".";
+import { useSystemSettings, useSystemStatus } from "./system";
 
 export function useEnabledStatus() {
   const { data } = useSystemSettings();
@@ -12,11 +18,29 @@ export function useEnabledStatus() {
 }
 
 export function useMediaNavigation() {
-  const { sonarr, radarr, sportarr } = useEnabledStatus();
+  const { data: settings } = useSystemSettings();
+  const general = settings?.general;
+  const visible = settings?.media_sources?.visible === true;
+  const { data: instances } = useArrInstances(
+    visible &&
+      Boolean(
+        general?.use_sonarr || general?.use_radarr || general?.use_sportarr,
+      ),
+  );
+  const sonarr = isArrMediaRouteEnabled("sonarr", settings, instances);
+  const radarr = isArrMediaRouteEnabled("radarr", settings, instances);
+  const sportarr = isArrMediaRouteEnabled("sportarr", settings, instances);
   const { availability } = useSourceAvailability();
   const series = sonarr || availability?.series.browsable === true;
   const movies = radarr || availability?.movie.browsable === true;
   const sports = sportarr || availability?.sports.browsable === true;
+  // Hidden folders keep master-based navigation. The badge can still use
+  // cached instance records from Connections or an Arr page.
+  const showBadges = (kind: ArrKind, routeEnabled: boolean) =>
+    routeEnabled &&
+    (visible || getArrInstanceAvailability(kind, instances) !== false);
+  const sonarrBadges = showBadges("sonarr", sonarr);
+  const radarrBadges = showBadges("radarr", radarr);
   return {
     series,
     movies,
@@ -28,7 +52,12 @@ export function useMediaNavigation() {
     sportsActivity: sports || availability?.sports.retained === true,
     sonarr,
     radarr,
-    sportarr,
+    sonarrBadges,
+    radarrBadges,
+    sportarrBadges: showBadges("sportarr", sportarr),
+    wantedEpisodesBadge:
+      sonarrBadges || availability?.series.searchable === true,
+    wantedMoviesBadge: radarrBadges || availability?.movie.searchable === true,
   };
 }
 
