@@ -98,11 +98,6 @@ def backup_env(monkeypatch, tmp_path):
     (config_dir / 'config' / 'config.yaml').write_text('general:\n  port: 6767\n', encoding='utf-8')
     _write_marker_database(config_dir / 'db' / 'bazarr.db', 'live')
 
-    monkeypatch.setattr('provider_hub.sandbox.sweep.previous_workers_stopped', lambda config: True)
-    monkeypatch.setattr(backup_module.restore_target, 'reserve',
-                        lambda configuration, directory, token: (
-                            backup_module.restore_target.sqlite_file(Path(directory) / 'db' / 'bazarr.db'), None)
-                        if not backup_module._postgres_enabled(configuration) else (None, None))
     monkeypatch.setattr(backup_module, 'args', SimpleNamespace(config_dir=str(config_dir)))
     monkeypatch.setattr(settings.backup, 'folder', str(config_dir / 'backup'))
     monkeypatch.setattr(backup_module, 'event_stream', lambda *a, **kw: None)
@@ -260,13 +255,7 @@ def test_sqlite_backup_archive_still_contains_the_database(backup_env, monkeypat
 
 
 def _stage_restore(backup_env, database_name):
-    configuration = {'general': {'port': 7000}}
-    if database_name == 'bazarr_postgres.dump':
-        configuration['postgresql'] = {
-            key: getattr(backup_env.settings.postgresql, key)
-            for key in ('enabled', 'host', 'port', 'database', 'username', 'password', 'url')
-        }
-    (backup_env.restore_dir / 'config.yaml').write_text(yaml.safe_dump(configuration), encoding='utf-8')
+    (backup_env.restore_dir / 'config.yaml').write_text('general:\n  port: 7000\n', encoding='utf-8')
     if database_name == 'bazarr.db':
         _write_marker_database(backup_env.restore_dir / database_name, 'restored')
     elif database_name:
@@ -379,56 +368,7 @@ def test_sqlite_restore_replaces_config_and_database(backup_env, monkeypatch):
     assert backup_env.restarts == [True]
     assert backup_env.stops == []
     assert _read_marker_database(backup_env.config_dir / 'db' / 'bazarr.db') == 'restored'
-    backup_env.module.apply_pending_plugin_restore()
     assert os.listdir(backup_env.restore_dir) == []
-
-
-def test_sqlite_restore_rejects_a_replacement_file_before_startup_touches_it(backup_env, monkeypatch):
-    import subprocess
-
-    monkeypatch.setattr(backup_env.settings.postgresql, 'enabled', False)
-    archive = backup_env.backup_dir / 'bazarr_backup_vtest_2026.11.23_00.00.00.zip'
-    saved = backup_env.config_dir / 'saved.db'
-    _write_marker_database(saved, 'archived')
-    with zipfile.ZipFile(archive, 'w') as output:
-        output.write(saved, 'bazarr.db')
-        output.writestr('config.yaml', 'general:\n  port: 7000\n')
-    assert backup_env.module.prepare_restore(archive.name)
-    database = backup_env.config_dir / 'db' / 'bazarr.db'
-    replacement = database.with_name('replacement.db')
-    _write_marker_database(replacement, 'other database')
-    replacement.replace(database)
-    before = database.read_bytes()
-
-    repo = Path(__file__).resolve().parents[2]
-    environment = {**os.environ, 'BAZARR_CONFIG_DIR': str(backup_env.config_dir),
-                   'POSTGRES_ENABLED': 'false', 'PATH': backup_env.original_path,
-                   'PYTHONPATH': os.pathsep.join(str(repo / name) for name in ('bazarr', 'custom_libs'))}
-    boot = subprocess.run([sys.executable, '-c', 'import app.config'], env=environment,
-                          capture_output=True, text=True, timeout=30)
-    assert boot.returncode != 0
-    assert 'recorded SQLite database file could not be verified' in boot.stderr
-    assert database.read_bytes() == before
-    assert (backup_env.restore_dir / 'bazarr.db').is_file()
-
-
-def test_known_postgres_launch_failure_keeps_the_restore_staged(backup_env, monkeypatch, caplog):
-    import subprocess
-
-    _enable_postgresql(backup_env, monkeypatch)
-    backup = backup_env.module
-    _write_fake_tool(str(backup_env.tools_dir), 'pg_restore')
-    _stage_restore(backup_env, 'bazarr_postgres.dump')
-
-    def executable_missing(*args, **kwargs):
-        raise FileNotFoundError('fixture executable vanished')
-
-    monkeypatch.setattr(subprocess, 'run', executable_missing)
-    assert not backup.restore_from_backup()
-    assert not backup_env.stops
-    assert 'The restore did not start' in caplog.text
-    assert (backup_env.restore_dir / 'bazarr_postgres.dump').is_file()
-    assert not (backup_env.restore_dir / backup._RESTORE_HANDOFF).exists()
 
 
 def test_restore_advances_past_live_and_archived_generations_without_rotating_the_signing_key(
@@ -515,6 +455,47 @@ def test_prepare_restore_does_not_restart_on_a_corrupted_archive(backup_env, mon
 
     assert backup_env.restarts == []
     assert os.listdir(backup_env.restore_dir) == []
+
+
+def test_boot_ignores_unpublished_api_extraction(backup_env, monkeypatch):
+    monkeypatch.setattr(backup_env.settings.postgresql, 'enabled', False)
+    module = backup_env.module
+    scratch = backup_env.restore_dir / '.backup-extract-interrupted' / 'payload'
+    scratch.mkdir(parents=True)
+    (scratch / 'config.yaml').write_text('general:\n  port: 7000\n')
+    _write_marker_database(scratch / 'bazarr.db', 'unpublished')
+    archive = backup_env.backup_dir / 'bazarr_backup_v1_20260101.zip'
+    with zipfile.ZipFile(archive, 'w') as zip_file:
+        zip_file.write(scratch / 'config.yaml', 'config.yaml')
+        zip_file.write(scratch / 'bazarr.db', 'bazarr.db')
+
+    assert not module.restore_from_backup()
+    assert _read_marker_database(backup_env.config_dir / 'db' / 'bazarr.db') == 'live'
+    assert scratch.is_dir()
+
+    assert module.prepare_restore(archive.name)
+    assert (backup_env.restore_dir / module._BACKUP_STAGE / 'payload' / 'bazarr.db').is_file()
+    assert not (backup_env.restore_dir / 'bazarr.db').exists()
+    assert not module.prepare_restore(archive.name)
+    assert module.restore_from_backup()
+    assert _read_marker_database(backup_env.config_dir / 'db' / 'bazarr.db') == 'unpublished'
+    assert not (backup_env.restore_dir / module._BACKUP_STAGE).exists()
+    assert scratch.is_dir()
+
+
+def test_zip_payload_cannot_supply_the_plugin_restore_checkpoint(backup_env, monkeypatch):
+    monkeypatch.setattr(backup_env.settings.postgresql, 'enabled', False)
+    module = backup_env.module
+    archive = _write_backup_archive(backup_env, 'bazarr.db')
+    with zipfile.ZipFile(archive, 'a') as zip_file:
+        zip_file.writestr(module._PLUGIN_RESTORE_PHASE, module._DATA_READY)
+
+    assert module.prepare_restore(archive.name)
+    stage = backup_env.restore_dir / module._BACKUP_STAGE
+    assert not (stage / module._PLUGIN_RESTORE_PHASE).exists()
+    assert (stage / 'payload' / module._PLUGIN_RESTORE_PHASE).is_file()
+    assert not module.apply_pending_plugin_restore()
+    assert stage.is_dir()
 
 
 def test_prepare_restore_does_not_restart_on_an_archive_without_the_database(backup_env, monkeypatch):
@@ -636,51 +617,10 @@ def test_a_dump_that_cannot_be_moved_aside_keeps_the_whole_staged_backup(backup_
     assert backup_env.restarts == []
     assert MID_RESTORE_WORDING in caplog.text
     assert 'could not be moved aside' in caplog.text
-    assert 'The restore will need manual recovery' in caplog.text
-    assert set(os.listdir(backup_env.restore_dir)) == {
-        backup_env.module._RESTORE_HANDOFF, 'bazarr_postgres.dump', 'config.yaml',
-    }
-
-
-def test_interruption_after_pg_restore_returns_does_not_replay_the_command(backup_env, monkeypatch, caplog):
-    import json
-
-    _enable_postgresql(backup_env, monkeypatch)
-    backup = backup_env.module
-    log = _write_fake_tool(str(backup_env.tools_dir), 'pg_restore')
-    _stage_restore(backup_env, 'bazarr_postgres.dump')
-    journal = backup_env.restore_dir / backup._RESTORE_HANDOFF
-    original_write = backup._write_restore_journal
-    with monkeypatch.context() as interrupted:
-        def write(path, record):
-            if record['phase'] == backup._DATABASE_COMPLETE:
-                raise SystemExit(41)
-            original_write(path, record)
-
-        interrupted.setattr(backup, '_write_restore_journal', write)
-        with pytest.raises(SystemExit):
-            backup.restore_from_backup()
-
-    record = json.loads(journal.read_text(encoding='ascii'))
-    assert record['phase'] == backup._DATABASE_STARTED
-    assert 'sekrit' not in journal.read_text(encoding='ascii')
-    assert 'bazarr_user' not in journal.read_text(encoding='ascii')
-    assert (backup_env.restore_dir / 'bazarr_postgres.dump').is_file()
-    assert (backup_env.config_dir / 'config' / 'config.yaml.restore').is_file()
-    assert not backup.restore_from_backup()
-    assert backup_env.stops == [backup.EXIT_RESTORE_ERROR]
-    assert 'will not be replayed automatically' in caplog.text
-    with open(log, encoding='utf-8') as handle:
-        assert handle.read().count('ARGV') == 1
-
-    # The operator has verified that the restore completed on the original database.
-    record['phase'] = backup._DATABASE_COMPLETE
-    original_write(journal, record)
-    assert backup.restore_from_backup()
-    backup.apply_pending_plugin_restore()
-    assert not journal.exists()
-    with open(log, encoding='utf-8') as handle:
-        assert handle.read().count('ARGV') == 1
+    assert 'the next start will try this restore again' in caplog.text
+    # The whole staged set survives, so the next start can finish the job and
+    # nothing deletes the dump the message points at.
+    assert sorted(os.listdir(backup_env.restore_dir)) == ['bazarr_postgres.dump', 'config.yaml']
 
 
 def test_a_failing_pg_restore_says_the_database_may_be_half_restored(backup_env, monkeypatch, caplog):
@@ -814,72 +754,13 @@ def test_a_configuration_that_cannot_be_put_in_place_stops_the_start(backup_env,
 
     assert backup_env.stops == [EXIT_RESTORE_ERROR]
     assert backup_env.restarts == []
-    # The staged configuration is retained for the next startup.
+    # The configuration from the backup is kept for the operator to put in place.
     staged = backup_env.config_dir / 'config' / 'config.yaml.restore'
     with open(staged, encoding='utf-8') as handle:
         saved = yaml.safe_load(handle)
     assert saved['general']['port'] == 7000
     assert saved['auth']['session_generation'] > 0
-    assert f'kept at {staged}' in caplog.text
-    assert (backup_env.restore_dir / backup_env.module._RESTORE_HANDOFF).is_file()
-
-
-@pytest.mark.parametrize('environment_keeps_target', [False, True])
-def test_postgresql_restore_checks_the_effective_connection_after_the_config_swap(
-        backup_env, monkeypatch, environment_keeps_target):
-    _enable_postgresql(backup_env, monkeypatch)
-    log_path = _write_fake_tool(str(backup_env.tools_dir), 'pg_restore')
-    _stage_restore(backup_env, 'bazarr_postgres.dump')
-    archive_config = backup_env.restore_dir / 'config.yaml'
-    config = yaml.safe_load(archive_config.read_text(encoding='utf-8'))
-    config['postgresql']['database'] = 'replacement'
-    archive_config.write_text(yaml.safe_dump(config), encoding='utf-8')
-    dest_config = backup_env.config_dir / 'config' / 'config.yaml'
-    if not environment_keeps_target:
-        original = dest_config.read_bytes()
-        assert not backup_env.module.restore_from_backup()
-        assert not os.path.exists(log_path)
-        assert dest_config.read_bytes() == original
-        assert not backup_env.restarts
-        return
-
-    monkeypatch.setenv('POSTGRES_DATABASE', 'bazarr')
-    real_replace = os.replace
-
-    with monkeypatch.context() as interruption:
-        def interrupt_after_config_swap(source, destination):
-            real_replace(source, destination)
-            if os.fspath(destination) == os.fspath(dest_config):
-                raise SystemExit(41)
-
-        interruption.setattr(os, 'replace', interrupt_after_config_swap)
-        with pytest.raises(SystemExit):
-            backup_env.module.restore_from_backup()
-    with open(log_path, encoding='utf-8') as handle:
-        before = handle.read()
-    assert before.count('ARGV') == 1 and '--dbname bazarr' in before
-    reloaded = yaml.safe_load(dest_config.read_text(encoding='utf-8'))
-    monkeypatch.setattr(backup_env.settings.postgresql, 'database', reloaded['postgresql']['database'])
-    assert backup_env.module.restore_from_backup()
-    assert backup_env.restarts == [True]
-    with open(log_path, encoding='utf-8') as handle:
-        assert handle.read() == before
-
-
-def test_postgresql_restore_compares_passwords_using_the_archived_encryption_key(backup_env, monkeypatch):
-    from secret_store.crypto import encrypt_secret
-
-    _enable_postgresql(backup_env, monkeypatch)
-    _write_fake_tool(str(backup_env.tools_dir), 'pg_restore')
-    _stage_restore(backup_env, 'bazarr_postgres.dump')
-    archived = backup_env.restore_dir / 'config.yaml'
-    config = yaml.safe_load(archived.read_text(encoding='utf-8'))
-    archive_key = 'fixture encryption key'
-    config['general']['secrets_encryption_key'] = archive_key
-    config['postgresql']['password'] = encrypt_secret(config['postgresql']['password'], master_key=archive_key)
-    archived.write_text(yaml.safe_dump(config), encoding='utf-8')
-    assert backup_env.module.restore_from_backup()
-    assert backup_env.restarts == [True]
+    assert f'kept at {staged}: copy it over {dest_config}' in caplog.text
 
 
 def test_a_start_with_nothing_to_restore_goes_on(backup_env, monkeypatch):
@@ -1317,13 +1198,6 @@ class _Refused(Exception):
 
 def _driver(opened, refuse=False):
     class _Connection:
-        def cursor(self):
-            from unittest.mock import MagicMock
-
-            cursor = MagicMock()
-            cursor.__enter__.return_value.fetchone.return_value = ('bazarr', 1, '127.0.0.1', 5432, '5432', 'public')
-            return cursor
-
         def close(self):
             pass
 
@@ -1531,6 +1405,43 @@ def test_a_backup_follows_the_same_precedence_for_a_url(backup_env, monkeypatch)
             connection['database']) == ('url_user', 'url_password', 'env.host', 6543, 'url_database')
 
 
+@pytest.mark.parametrize('exit_code', [0, 1])
+def test_plugin_backup_uses_the_published_pg_restore_and_checkpoints_its_result(backup_env, monkeypatch, exit_code):
+    from provider_hub import secret_paths
+
+    module = backup_env.module
+    _enable_postgresql_by_url(backup_env, monkeypatch, 'postgresql:///?service=bazarr_restore')
+    tool_log = Path(_write_fake_tool(str(backup_env.tools_dir), 'pg_restore', exit_code=exit_code))
+    archive = _write_backup_archive(backup_env, module.POSTGRES_ARCHIVE_NAME)
+    with zipfile.ZipFile(archive, 'a') as zip_file:
+        zip_file.writestr(secret_paths.HISTORY_ARCHIVE, '{}')
+
+    assert module.prepare_restore(archive.name)
+    assert not tool_log.exists()
+    assert module.restore_from_backup() is (exit_code == 0)
+    calls = tool_log.read_text().splitlines()
+    assert '--clean --if-exists --no-owner' in calls[0]
+    assert "service='bazarr_restore'" in calls[0]
+    stage = backup_env.restore_dir / module._BACKUP_STAGE
+    assert (stage / 'payload' / secret_paths.HISTORY_ARCHIVE).is_file()
+
+    checkpoint = stage / module._PLUGIN_RESTORE_PHASE
+    if exit_code:
+        assert backup_env.stops == [module.EXIT_RESTORE_ERROR]
+        assert (stage / 'payload' / module.POSTGRES_FAILED_ARCHIVE_NAME).is_file()
+        assert (stage / 'payload' / 'config.yaml').is_file()
+        assert checkpoint.read_text().strip() == module._DATABASE_STARTED
+        assert not module.restore_from_backup()
+        module.apply_pending_plugin_restore()
+        assert tool_log.read_text().splitlines() == calls
+        assert archive.is_file()
+    else:
+        assert checkpoint.read_text().strip() == module._DATA_READY
+        module.apply_pending_plugin_restore()
+        assert not backup_env.stops
+        assert not stage.exists()
+
+
 def test_backup_and_restore_exclude_release_sign_in_paths(backup_env, monkeypatch, tmp_path):
     import json
 
@@ -1633,19 +1544,13 @@ def test_restore_distinguishes_an_omitted_data_folder_from_an_empty_one(
 
 def _ready_folder_restore(backup_env):
     backup = backup_env.module
-    backup._write_restore_journal(backup_env.restore_dir / backup._RESTORE_HANDOFF, {
-        'phase': backup._DATA_READY, 'has_data': True,
-        'destination': backup._restore_destination(),
-        'server': backup.restore_target.sqlite_file(backup_env.config_dir / 'db' / 'bazarr.db'),
-    })
+    backup._write_plugin_restore_phase(backup_env.restore_dir / backup._PLUGIN_RESTORE_PHASE, backup._DATA_READY)
 
 
 @pytest.mark.parametrize("unrecognized", [True, False])
 def test_a_failed_plugin_restore_keeps_the_pending_input_and_all_original_folders(
         backup_env, monkeypatch, tmp_path, unrecognized):
     import json
-
-    from pathlib import Path
 
     from plugin_platform_helpers import service_manifest
     from provider_hub import datadir
@@ -1654,7 +1559,7 @@ def test_a_failed_plugin_restore_keeps_the_pending_input_and_all_original_folder
     root.mkdir()
     state_path = root / "state.json"
     inventory = {}
-    pending = backup_env.restore_dir / "pending_plugin_data"
+    pending = backup_env.restore_dir / datadir.ARCHIVE_DIR
     original_rename = Path.rename
     for plugin_id, key in (("alpha", "a" * 32), ("beta", "b" * 32)):
         inventory[plugin_id] = {"active_version": "1.0.0", "active_data_key": key,
@@ -1683,7 +1588,8 @@ def test_a_failed_plugin_restore_keeps_the_pending_input_and_all_original_folder
     assert (datadir.release_path(root, "beta", "b" * 32) / "sample").read_text() == "beta original"
 
 
-@pytest.mark.parametrize("interruption", ["before_config_swap", "after_config_swap", "after_handoff"])
+@pytest.mark.parametrize("interruption", ["before_database_checkpoint", "before_config_swap",
+                                         "after_config_swap", "after_handoff"])
 def test_plugin_restore_retries_the_handoff_without_restoring_sqlite_twice(
         backup_env, monkeypatch, tmp_path, service_kind, interruption):
     import sqlalchemy as sa
@@ -1724,14 +1630,20 @@ def test_plugin_restore_retries_the_handoff_without_restoring_sqlite_twice(
         restores = []
         restore_database = backup_env.module._restore_database
 
-        def restore_once(source, destination, before_restore, record):
+        def restore_once(source, destination):
             restores.append(True)
-            return restore_database(source, destination, before_restore, record)
+            return restore_database(source, destination)
 
         monkeypatch.setattr(backup_env.module, "_restore_database", restore_once)
         with monkeypatch.context() as interrupted:
             real_replace = os.replace
+            real_write_phase = backup_env.module._write_plugin_restore_phase
             staged_config = backup_env.config_dir / "config" / "config.yaml.restore"
+
+            def interrupt_before_complete(path, phase):
+                if phase == backup_env.module._DATABASE_COMPLETE:
+                    raise SystemExit(41)
+                real_write_phase(path, phase)
 
             def replace_config(source, destination):
                 if os.fspath(source) != str(staged_config):
@@ -1744,8 +1656,10 @@ def test_plugin_restore_retries_the_handoff_without_restoring_sqlite_twice(
             def exit_after_handoff():
                 raise SystemExit(41)
 
-            if interruption == "after_handoff":
-                interrupted.setattr(backup_env.module, "_clear_restore_directory", exit_after_handoff)
+            if interruption == "before_database_checkpoint":
+                interrupted.setattr(backup_env.module, "_write_plugin_restore_phase", interrupt_before_complete)
+            elif interruption == "after_handoff":
+                interrupted.setattr(backup_env.module, "restart_bazarr", exit_after_handoff)
             else:
                 interrupted.setattr(os, "replace", replace_config)
             if interruption == "before_config_swap":
@@ -1754,28 +1668,74 @@ def test_plugin_restore_retries_the_handoff_without_restoring_sqlite_twice(
             else:
                 with pytest.raises(SystemExit):
                     backup_env.module.restore_from_backup()
-        if interruption == "after_handoff":
-            assert (backup_env.restore_dir / "pending_plugin_data").is_dir()
-        else:
-            assert (backup_env.restore_dir / datadir.ARCHIVE_DIR).is_dir()
+        stage = backup_env.restore_dir / backup_env.module._BACKUP_STAGE
+        assert (stage / "payload" / datadir.ARCHIVE_DIR).is_dir()
         assert (folder / "sample").read_text() == "written after backup"
 
-        assert backup_env.module.restore_from_backup()
+        if interruption == "before_database_checkpoint":
+            checkpoint = stage / backup_env.module._PLUGIN_RESTORE_PHASE
+            assert checkpoint.read_text().strip() == backup_env.module._DATABASE_STARTED
+            assert not backup_env.module.restore_from_backup()
+            assert backup_env.stops == [backup_env.module.EXIT_RESTORE_ERROR]
+            backup_env.module.apply_pending_plugin_restore()
+            assert (folder / "sample").read_text() == "written after backup"
+            assert restores == [True]
+            # An operator can verify the database restore and resume from it.
+            assert state.load_state()["installations"]["exampleservice"]["active_data_key"] == key
+            backup_env.module._write_plugin_restore_phase(checkpoint, backup_env.module._DATABASE_COMPLETE)
+
+        assert backup_env.module.restore_from_backup() is (interruption != "after_handoff")
         assert restores == [True]
         assert state.load_state()["installations"]["exampleservice"]["active_data_key"] == key
+        if interruption == "after_handoff":
+            with monkeypatch.context() as busy:
+                busy.setattr("provider_hub.sandbox.sweep.previous_workers_stopped", lambda config: False)
+                backup_env.module.apply_pending_plugin_restore()
+            assert backup_env.stops == [backup_env.module.EXIT_RESTORE_ERROR]
+            assert stage.is_dir()
+            assert not backup_env.module.restore_from_backup()
+            assert restores == [True]
         backup_env.module.apply_pending_plugin_restore()
         assert (folder / "sample").read_text() == "backup content"
-        assert not (backup_env.restore_dir / "pending_plugin_data").exists()
+        assert not stage.exists()
     finally:
         state_store.reset()
         engine.dispose()
 
 
+def test_failed_manifest_history_import_keeps_the_completed_database_checkpoint(backup_env, monkeypatch):
+    from provider_hub import secret_paths
+
+    module = backup_env.module
+    monkeypatch.setattr(backup_env.settings.postgresql, 'enabled', False)
+    _stage_restore(backup_env, 'bazarr.db')
+    history = backup_env.restore_dir / secret_paths.HISTORY_ARCHIVE
+    history.write_text('{}')
+
+    with monkeypatch.context() as failure:
+        def fail_import(*args):
+            raise OSError('history directory temporarily unavailable')
+
+        failure.setattr(secret_paths, 'restore_backup_history', fail_import)
+        assert not module.restore_from_backup()
+    assert backup_env.stops == [module.EXIT_RESTORE_ERROR]
+    assert history.is_file()
+    assert (backup_env.restore_dir / module._PLUGIN_RESTORE_PHASE).read_text().strip() == module._DATABASE_COMPLETE
+    assert _read_marker_database(backup_env.config_dir / 'db' / 'bazarr.db') == 'restored'
+    assert yaml.safe_load((backup_env.config_dir / 'config' / 'config.yaml').read_text())['general']['port'] == 6767
+
+    def unexpected_database_restore(*args):
+        pytest.fail('the completed database restore was repeated')
+
+    monkeypatch.setattr(module, '_restore_database', unexpected_database_restore)
+    assert module.restore_from_backup()
+    module.apply_pending_plugin_restore()
+    assert not history.exists()
+
+
 def test_a_failed_rollback_rename_leaves_the_original_for_the_next_start(backup_env, monkeypatch, tmp_path):
     import gc
     import json
-
-    from pathlib import Path
 
     from plugin_platform_helpers import service_manifest
     from provider_hub import datadir
@@ -1786,7 +1746,7 @@ def test_a_failed_rollback_rename_leaves_the_original_for_the_next_start(backup_
     target.mkdir(parents=True)
     saved = target / "sample"
     saved.write_text("original")
-    source = backup_env.restore_dir / "pending_plugin_data" / plugin_id / key
+    source = backup_env.restore_dir / datadir.ARCHIVE_DIR / plugin_id / key
     source.mkdir(parents=True)
     (source / "sample").write_text("backup")
     state_path = root / "state.json"
@@ -1820,8 +1780,6 @@ def test_a_failed_rollback_rename_leaves_the_original_for_the_next_start(backup_
 def test_interrupting_plugin_restore_after_commit_keeps_the_new_folder(
         backup_env, monkeypatch, tmp_path, after_pending_rename):
     import json
-    from pathlib import Path
-
     from plugin_platform_helpers import service_manifest
     from provider_hub import datadir
 
@@ -1830,7 +1788,7 @@ def test_interrupting_plugin_restore_after_commit_keeps_the_new_folder(
     target = datadir.release_path(root, "alpha", key)
     target.mkdir(parents=True)
     (target / "sample").write_text("original")
-    pending = backup_env.restore_dir / "pending_plugin_data"
+    pending = backup_env.restore_dir / datadir.ARCHIVE_DIR
     source = pending / "alpha" / key
     source.mkdir(parents=True)
     (source / "sample").write_text("restored")
@@ -1848,11 +1806,16 @@ def test_interrupting_plugin_restore_after_commit_keeps_the_new_folder(
             if path.name == datadir.RESTORE_APPLIED_MARKER:
                 raise SystemExit(41)
 
-        def exit_before_journal_cleanup(path):
-            raise SystemExit(41)
+        original_rename = Path.rename
+
+        def exit_after_pending_rename(path, destination):
+            result = original_rename(path, destination)
+            if path == pending:
+                raise SystemExit(41)
+            return result
 
         if after_pending_rename:
-            interruption.setattr(backup_env.module, "_finish_restore_journal", exit_before_journal_cleanup)
+            interruption.setattr(Path, "rename", exit_after_pending_rename)
         else:
             interruption.setattr(Path, "touch", interrupt_after_touch)
         with pytest.raises(SystemExit):
@@ -1878,7 +1841,7 @@ def test_pending_plugin_restore_waits_for_the_previous_worker(backup_env, monkey
     target = datadir.release_path(root, "alpha", key)
     target.mkdir(parents=True)
     (target / "sample").write_text("in use")
-    source = backup_env.restore_dir / "pending_plugin_data" / "alpha" / key
+    source = backup_env.restore_dir / datadir.ARCHIVE_DIR / "alpha" / key
     source.mkdir(parents=True)
     (source / "sample").write_text("restored")
     state_path = root / "state.json"

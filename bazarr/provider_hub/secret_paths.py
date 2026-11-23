@@ -62,7 +62,7 @@ def remember_manifest(state, plugin_id: str, manifest: dict | None) -> None:
         history.append(record)
 
 
-def archive_manifest(root: Path, plugin_id: str, manifest: dict) -> None:
+def archive_manifest(root: Path, plugin_id: str, manifest: dict) -> Path | None:
     folder = _archive_folder(root, plugin_id)
     version, digest = manifest.get("version"), manifest.get("bundle_sha256")
     if (folder is None or not isinstance(version, str) or not _VERSION.fullmatch(version)
@@ -74,7 +74,7 @@ def archive_manifest(root: Path, plugin_id: str, manifest: dict) -> None:
     path = folder / f"{version}-{digest[:16]}-{manifest_digest}.json"
     folder.mkdir(mode=0o700, parents=True, exist_ok=True)
     if path.exists():
-        return
+        return path
     fd, temp = tempfile.mkstemp(prefix=".manifest-", dir=folder)
     try:
         with os.fdopen(fd, "wb") as handle:
@@ -83,6 +83,7 @@ def archive_manifest(root: Path, plugin_id: str, manifest: dict) -> None:
     finally:
         with contextlib.suppress(FileNotFoundError):
             os.unlink(temp)
+    return path
 
 
 def archived_manifests(root: Path, plugin_id: str, *, strict: bool = False) -> list[dict]:
@@ -147,10 +148,21 @@ def restore_backup_history(extracted: Path, root: Path) -> None:
     history = json.loads(extracted.read_text(encoding="utf-8")).get(HISTORY_FIELD, {})
     if not isinstance(history, dict):
         raise ValueError("The plugin manifest history is not an object")
+    from .datadir import sync_directory, sync_file
+
+    written = set()
     for plugin_id, records in history.items():
         if not isinstance(records, list):
             raise ValueError("A plugin manifest history is not a list")
         for record in records:
             if not isinstance(record, dict):
                 raise ValueError("A plugin manifest history record is not an object")
-            archive_manifest(root, plugin_id, record)
+            path = archive_manifest(root, plugin_id, record)
+            if path is not None:
+                if path.is_symlink() or not path.is_file():
+                    raise OSError("The restored plugin manifest is not a regular file")
+                sync_file(path)
+                written.add(path.parent)
+    if written:
+        for directory in (*written, root / "manifests", root, root.parent):
+            sync_directory(directory)

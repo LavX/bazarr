@@ -1,7 +1,8 @@
 # PostgreSQL backups and restores
 
-Bazarr+ uses the PostgreSQL client tools `pg_dump`, `pg_restore`, and `psql` for complete backups and
-verified restores. The official Docker image installs them
+Bazarr+ backs up and restores a PostgreSQL database with the PostgreSQL client tools, `pg_dump` and
+`pg_restore`. They are not optional: without them a backup would hold the configuration file alone, which
+looks like a backup in the list and refuses to restore. The official Docker image installs them
 (`postgresql-client`). On a bare-metal install, put them on the same PATH the Bazarr+ process sees. On Debian
 and Ubuntu that is the `postgresql-client` package, on Alpine `postgresql-client`.
 
@@ -32,52 +33,56 @@ read.
 major version or older, and refuses outright to dump from a server newer than itself, so a client older than
 the server cannot make a backup at all.
 
-Newer clients can emit a `transaction_timeout` setting that servers before PostgreSQL 17 do not support.
-Bazarr applies that setting only when the server supports it. A SQL error in the restored dump stops the
-transaction and leaves the staged files available for recovery.
+That rule is about making the dump. Restoring is where the other direction shows up, and it works but is
+worth knowing about. A dump written by a newer client sets server parameters
+an older server has never heard of (`transaction_timeout`, added in PostgreSQL 17, is the one people meet).
+`pg_restore` reports those as errors, ignores them, and exits non-zero even though every row was restored.
+Bazarr+ recognises that one error class, logs it as a warning naming the client and server major versions, and
+treats the restore as successful. Any other error, or any mixture, is still a failure and the restore is
+refused.
 
-The Docker image ships the `postgresql-client` provided by its Debian base. Run `pg_dump --version`
-inside the container to see the installed version.
+The Docker image ships whatever `postgresql-client` its Debian base provides, currently major version 17. Run
+`pg_dump --version` inside the container to see the one you have. With a 17 client, a server at 17 backs up
+and restores without a warning, a server at 16 or older backs up and shows the warning above on every
+restore, and a server at 18 or newer cannot be backed up at all.
 
 ## What a restore does
 
-For PostgreSQL, Bazarr records a receipt in the selected database when it stages a restore. It uses
-`pg_restore --clean --if-exists --no-owner` to generate the SQL and `psql` to apply it. The same transaction
-checks the receipt before applying the dump and marks it complete before committing. The PostgreSQL client
-package includes both tools. Regular Bazarr backups omit the receipt table.
-
-SQLite installs a prepared database file and removes the write-ahead log and shared memory files from the old
-database. Bazarr tracks the file it replaces and the file it installs.
+PostgreSQL restores with `pg_restore --clean --if-exists --no-owner` into the configured database. SQLite
+copies the database file into place and removes the stale write-ahead log beside it.
 
 On both engines the configuration is staged first, the database goes in second, and the configuration is only
 swapped into place once the database step worked. A failure aborts before the restart, so an instance never
 comes back with a new configuration sitting beside an old database.
 
-An older restore that failed partway may leave `bazarr_postgres.dump.failed` in the restore directory.
-That restore dropped existing objects before loading the new ones without a transaction. Restore the
-database from the retained dump or rebuild it before starting Bazarr again.
+One failure cannot be undone and is reported as such. `pg_restore --clean` drops the existing objects before
+it loads the new ones, with no transaction around it, so a PostgreSQL restore that fails partway leaves the
+database in neither state. The log says so plainly, keeps the extracted dump beside the restore directory as
+`bazarr_postgres.dump.failed`, and names the backup folder the archive came from, so the restore can be
+retried. That database must not be used until it has been restored again or rebuilt.
 
 A restore refused before `pg_restore` was ever started is a different thing and says so. Missing client
 tools, no database name configured and an unparseable connection URL all stop the restore before the
 database is touched, and the log says nothing was changed and names what to fix.
 
-### Recover an interrupted restore
+### Recover an interrupted plugin data restore
 
-Keep the effective database destination the same until Bazarr finishes restarting and applying the
-backup's plugin files. If startup cannot verify the recorded database, restore the original connection
-settings, including environment overrides, and start Bazarr again. The staged files remain available.
+An accepted restore from System Backups is staged under `restore/.backup-staged/payload`. A backup extracted
+manually for restore can still use the top level of `restore`. Temporary extraction directories whose names
+start with `.backup-extract-` are ignored on startup. Keep the original ZIP until the restore finishes.
 
-If Bazarr stops during restore, it keeps `.restore-journal.json`, the dump, the staged configuration, and any
-staged plugin data. A committed PostgreSQL receipt lets Bazarr resume on the original database. When the
-transaction has rolled back, wait for the original `psql` process to exit, then set only the journal's `phase`
-to `staged` to retry on the original database.
+Bazarr+ installs the database and configuration first. On the next start it waits for any previous plugin
+workers to stop and checks the archived release folders against the plugin inventory before installing them.
+If the folder step fails, the staged files are retained and the next start retries the folder step.
 
-For a restore without a receipt, first make sure the original restore process has exited. Complete or verify
-the database restore before setting the journal's `phase` to `database-complete`. On SQLite, stop Bazarr and
-move any `bazarr.db-wal` and `bazarr.db-shm` from the old database aside before verifying the replacement file.
-If `bazarr.db.restore` remains beside it, rename that prepared file to `bazarr.db` so its recorded file identity
-is preserved. Start Bazarr with the original settings. It checks the destination before installing the
-configuration and applying plugin files.
+For a plugin-bearing backup, `.plugin-restore-phase` sits beside the API extraction directory or at the top
+level of `restore` for a manual extraction. If it says `database-started`, the last database operation did
+not record completion. Keep the extracted files and make sure the old restore process has exited. To retry the
+database restore, put the original dump and configuration back into the extraction directory, remove any
+`bazarr_postgres.dump.failed` and remove the checkpoint before starting Bazarr+. To continue after manually
+completing or verifying the same database restore, keep the staged configuration at
+`config/config.yaml.restore`, move any failed dump aside and set the checkpoint to `database-complete` before
+starting Bazarr+.
 
 ## Backups do not cross engines
 

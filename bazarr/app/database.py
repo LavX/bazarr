@@ -122,10 +122,6 @@ if postgresql:
         # must not print its values into the log.
         hide_parameters=True,
     )
-    from .config import _startup_restore
-    from utilities import restore_target
-
-    restore_target.guard_engine(engine, _startup_restore)
 else:
     # insert is different between database types
     from sqlalchemy.dialects.sqlite import insert

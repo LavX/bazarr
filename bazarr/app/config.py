@@ -21,8 +21,7 @@ import platform
 from urllib.parse import quote_plus
 from provider_hub.endpoints import FLARESOLVERR_SETTING_PATH, normalize_endpoint_url
 from utilities.binaries import BinaryNotFound, get_binary
-from literals import (EXIT_RESTORE_ERROR, EXIT_VALIDATION_ERROR, LOG_BACKUP_COUNT_DEFAULT, LOG_BACKUP_COUNT_MAX,
-                      LOG_BACKUP_COUNT_MIN,
+from literals import (EXIT_VALIDATION_ERROR, LOG_BACKUP_COUNT_DEFAULT, LOG_BACKUP_COUNT_MAX, LOG_BACKUP_COUNT_MIN,
                       LOG_MAX_FILE_SIZE_MB_DEFAULT, LOG_MAX_FILE_SIZE_MB_MAX, LOG_MAX_FILE_SIZE_MB_MIN)
 from utilities.central import stop_bazarr
 from subliminal.cache import region
@@ -955,15 +954,6 @@ def convert_ini_to_yaml(config_file):
 
 config_yaml_file = os.path.join(args.config_dir, 'config', 'config.yaml')
 config_ini_file = os.path.join(args.config_dir, 'config', 'config.ini')
-from utilities import restore_target  # noqa: E402
-
-_startup_restore = None
-try:
-    _startup_restore = restore_target.startup_record(args.config_dir)
-except restore_target.RestoreTargetError as error:
-    logging.critical('%s', error)
-    stop_bazarr(EXIT_RESTORE_ERROR)
-
 if os.path.exists(config_ini_file) and not os.path.exists(config_yaml_file):
     convert_ini_to_yaml(config_ini_file)
 elif not os.path.exists(config_yaml_file):
@@ -1098,15 +1088,8 @@ try:
     _force_first_save_migration = has_plaintext_secrets_on_disk(settings)
 
     decrypt_settings_in_place(settings)
-    if _startup_restore is not None:
-        try:
-            restore_target.check(settings, args.config_dir, _startup_restore)
-        except restore_target.RestoreTargetError as error:
-            logging.critical('%s Restore the original database settings to continue.', error)
-            stop_bazarr(EXIT_RESTORE_ERROR)
 finally:
-    if _startup_restore is None:
-        release_database()
+    release_database()
 
 # A stored API key that will not decrypt is the one failure Bazarr can and
 # must repair itself: the key is Bazarr's own, the SPA sends it on every
@@ -1399,35 +1382,19 @@ if not write_config():
 # key that ever opens it. The migration raises when plaintext credentials
 # remain but cannot be encrypted, so a boot does not complete while they are
 # still readable in the clear.
-def _initialize_database_secrets():
-    from secret_store.registry import migrate_installation_config_secrets
-    from secret_store.scrub import refresh_secret_values, scrub_persisted_secrets
+from secret_store.registry import migrate_installation_config_secrets  # noqa: E402
 
-    migrate_installation_config_secrets()
-    refresh_secret_values(settings)
-    scrub_persisted_secrets()
+migrate_installation_config_secrets()
 
+# Register the live credential values before anything can log, store or serve
+# them, and rewrite what an earlier version already left in state.json. The
+# scrub runs after the migration above for the same reason the migration runs
+# after the boot write: the credential containers are ciphertext by now, so a
+# scrub cannot mistake a stored credential for a leaked one.
+from secret_store.scrub import refresh_secret_values, scrub_persisted_secrets  # noqa: E402
 
-def open_database_for_restore():
-    if _startup_restore is not None:
-        release_database()
-
-
-def finish_database_restore_startup():
-    global _startup_restore
-    if _startup_restore is not None:
-        postgres = _startup_restore['destination'] != 'sqlite'
-        _startup_restore = None
-        release_database()
-        _initialize_database_secrets()
-        if postgres:
-            from app.database import engine
-
-            restore_target.release_engine(engine)
-
-
-if _startup_restore is None:
-    _initialize_database_secrets()
+refresh_secret_values(settings)
+scrub_persisted_secrets()
 
 
 # What the settings read shows in place of a stored login password, and what a
