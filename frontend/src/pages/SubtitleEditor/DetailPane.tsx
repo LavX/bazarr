@@ -94,9 +94,13 @@ const DetailPane = forwardRef<DetailPaneHandle, DetailPaneProps>(
     },
     ref,
   ) {
-    const [textDraft, setTextDraft] = useState("");
-    const [startDraft, setStartDraft] = useState("");
-    const [endDraft, setEndDraft] = useState("");
+    const [textDraft, setTextDraft] = useState(() => cue?.text ?? "");
+    const [startDraft, setStartDraft] = useState(() =>
+      cue ? formatTimestamp(cue.startMs) : "",
+    );
+    const [endDraft, setEndDraft] = useState(() =>
+      cue ? formatTimestamp(cue.endMs) : "",
+    );
     const textareaRef = useRef<HTMLTextAreaElement>(null);
     // The editor's own gate answer, not the configured engine's: the two can
     // differ in both directions, and this button posts to the editor endpoint.

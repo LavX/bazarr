@@ -156,7 +156,6 @@ export default function EditorPage() {
     isLoading,
     error,
     isPlaceholderData,
-    isFetching,
     refetch: refetchSubtitle,
   } = useSubtitleContent(
     mediaType,
@@ -167,7 +166,32 @@ export default function EditorPage() {
     codec,
   );
 
-  const data = queryResult?.data;
+  const subtitleKey = JSON.stringify([
+    mediaType,
+    mediaId,
+    scopedArrInstanceId,
+    language,
+    source,
+    codec,
+  ]);
+  const fetchedData = queryResult?.data;
+  const fetchedParseResult = useMemo(
+    () => (fetchedData ? parseSubtitleContent(fetchedData) : null),
+    [fetchedData],
+  );
+  // Source serialization must use the metadata of the cues we adopted.
+  // Refetches can update the query cache without replacing the editor draft.
+  const [sourceDocument, setSourceDocument] = useState<{
+    key: string;
+    revision: number;
+    data: NonNullable<typeof fetchedData>;
+    parsed: ParseResult;
+  } | null>(null);
+  const loadedSource =
+    sourceDocument?.key === subtitleKey ? sourceDocument : null;
+  const sourceRevision = loadedSource?.revision;
+  const data = loadedSource?.data ?? fetchedData;
+  const parseResult = loadedSource?.parsed ?? fetchedParseResult;
   const [createdSuccessfully, setCreatedSuccessfully] = useState(false);
   // An embedded track answers exists: false with its text, so it opens in
   // create mode already filled in, and Save creates the file. Placeholder
@@ -176,12 +200,6 @@ export default function EditorPage() {
   const isNewSubtitle =
     !isPlaceholderData && data?.exists === false && !createdSuccessfully;
   const fromEmbedded = data?.source === "embedded";
-
-  // Parse the fetched content
-  const parseResult = useMemo(
-    () => (data ? parseSubtitleContent(data) : null),
-    [data],
-  );
 
   // Combined outputs (en:combined-hu) stack languages at shared timestamps. For
   // ASS that means one positioned cue per language, so we suppress the QC
@@ -206,20 +224,31 @@ export default function EditorPage() {
   const [loaded, setLoaded] = useState(false);
   const etagRef = useRef<string>("");
   const [saveConflictKey, setSaveConflictKey] = useState<string | null>(null);
+  const [isReloading, setIsReloading] = useState(false);
+  const reloadPendingRef = useRef(false);
+  const reloadVersionRef = useRef(0);
+
+  const loadFetchedDocument = useCallback(
+    (result: NonNullable<typeof queryResult>, parsed: ParseResult) => {
+      if (mediaType === "source") {
+        etagRef.current = result.etag?.replace(/^"|"$/g, "") ?? "";
+        setSourceDocument({
+          key: subtitleKey,
+          revision: reloadVersionRef.current,
+          data: result.data,
+          parsed,
+        });
+      }
+      dispatch({ type: "LOAD", cues: parsed.cues });
+    },
+    [mediaType, subtitleKey],
+  );
 
   // Reset when switching to a different subtitle. The track inside the video
   // and the file that shares its language key are two subtitles, and so are
   // two text tracks of one key with different codecs: moving from one to the
   // other must load the other, or the next Save would write the first one's
   // text under the second one's name.
-  const subtitleKey = JSON.stringify([
-    mediaType,
-    mediaId,
-    scopedArrInstanceId,
-    language,
-    source,
-    codec,
-  ]);
   const hasSaveConflict = saveConflictKey === subtitleKey;
   // A preview belongs to this visit to the subtitle and the cues it submitted.
   const syncDocument = useMemo(
@@ -248,16 +277,17 @@ export default function EditorPage() {
   // subtitle the editor just left, shown until the new one answers; it is
   // never loaded as the new one.
   useEffect(() => {
-    if (parseResult && !loadedRef.current && !isPlaceholderData) {
-      // For source files the tag belongs to the cues loaded into the editor.
-      if (mediaType === "source") {
-        etagRef.current = queryResult?.etag?.replace(/^"|"$/g, "") ?? "";
-      }
-      dispatch({ type: "LOAD", cues: parseResult.cues });
+    if (
+      queryResult &&
+      fetchedParseResult &&
+      !loadedRef.current &&
+      !isPlaceholderData
+    ) {
+      loadFetchedDocument(queryResult, fetchedParseResult);
       loadedRef.current = true;
       setLoaded(true);
     }
-  }, [parseResult, isPlaceholderData, mediaType, queryResult?.etag]);
+  }, [queryResult, fetchedParseResult, isPlaceholderData, loadFetchedDocument]);
 
   // Auto-save to localStorage on every change (debounced 2s)
   const autoSaveKey = buildEditorAutosaveKey(
@@ -274,6 +304,11 @@ export default function EditorPage() {
     // untouched file never writes a phantom draft to localStorage.
     if (!autoSaveKey || docState.cues.length === 0 || !docState.dirty) return;
     const timer = setTimeout(() => {
+      if (
+        sourceRevision !== undefined &&
+        sourceRevision !== reloadVersionRef.current
+      )
+        return;
       try {
         const serialized = getSerializer(format).serialize({
           metadata: parseResult?.metadata ?? { format },
@@ -299,6 +334,7 @@ export default function EditorPage() {
     docState.dirty,
     format,
     parseResult?.metadata,
+    sourceRevision,
   ]);
 
   // Auto-save recovery: check on load if there's a newer draft in localStorage
@@ -842,36 +878,39 @@ export default function EditorPage() {
   ]);
 
   const handleReloadConflictedSubtitle = async () => {
-    const documentBeforeReload = currentSyncDocumentRef.current;
-    const refreshed = await refetchSubtitle();
-    if (currentSyncDocumentRef.current?.subtitleKey !== subtitleKey) return;
-    if (currentSyncDocumentRef.current !== documentBeforeReload) {
-      showNotification({
-        message:
-          "The subtitle was edited during reload. Your edits are still unsaved.",
-        color: "yellow",
-      });
-      return;
-    }
+    if (!hasSaveConflict || reloadPendingRef.current) return;
+    reloadPendingRef.current = true;
+    setIsReloading(true);
+    try {
+      const { data: latest } = await refetchSubtitle({ throwOnError: true });
+      if (currentSyncDocumentRef.current?.subtitleKey !== subtitleKey) return;
+      const parsed = latest && parseSubtitleContent(latest.data);
+      if (!latest || !parsed || !latest.etag || latest.data.exists === false) {
+        throw new Error("Incomplete subtitle document");
+      }
 
-    const latest = refreshed.isSuccess ? refreshed.data : undefined;
-    const parsed = latest ? parseSubtitleContent(latest.data) : null;
-    if (!latest || !parsed) {
-      showNotification({
-        title: "Could not reload the subtitle",
-        message: "Your edits are still unsaved. Try reloading again.",
-        color: "red",
-      });
-      return;
+      reloadVersionRef.current += 1;
+      loadFetchedDocument(latest, parsed);
+      setSelectedIndex(0);
+      setMultiSelect(new Set());
+      setLineTranslationJobs([]);
+      setTranslatingLineIdx(null);
+      setTranslating(false);
+      setSaveConflictKey(null);
+      setRecoveryAvailable(null);
+      if (autoSaveKey) removeStoredValue(autoSaveKey);
+    } catch {
+      if (currentSyncDocumentRef.current?.subtitleKey === subtitleKey) {
+        showNotification({
+          title: "Could not reload the subtitle",
+          message: "Your edits are still unsaved. Try reloading again.",
+          color: "red",
+        });
+      }
+    } finally {
+      reloadPendingRef.current = false;
+      setIsReloading(false);
     }
-
-    etagRef.current = latest.etag?.replace(/^"|"$/g, "") ?? "";
-    dispatch({ type: "LOAD", cues: parsed.cues });
-    setSelectedIndex(0);
-    setMultiSelect(new Set());
-    setSaveConflictKey(null);
-    setRecoveryAvailable(null);
-    if (autoSaveKey) removeStoredValue(autoSaveKey);
   };
 
   // Subtitle language switcher
@@ -1083,8 +1122,14 @@ export default function EditorPage() {
     (e: React.ChangeEvent<HTMLInputElement>) => {
       const file = e.target.files?.[0];
       if (!file) return;
+      const reloadVersion = reloadVersionRef.current;
       const reader = new FileReader();
       reader.onload = () => {
+        if (
+          reloadPendingRef.current ||
+          reloadVersion !== reloadVersionRef.current
+        )
+          return;
         const text = reader.result as string;
         const detectedFormat = detectFormat(file.name);
         try {
@@ -1268,7 +1313,7 @@ export default function EditorPage() {
 
   // Search/Replace handlers
   const handleSearchNavigate = useCallback((cueIndex: number) => {
-    setSelectedIndex(cueIndex);
+    if (!reloadPendingRef.current) setSelectedIndex(cueIndex);
   }, []);
 
   const subtitleSearch = useMemo(
@@ -1357,6 +1402,7 @@ export default function EditorPage() {
 
   const handleWaveformTimingChange = useCallback(
     (index: number, startMs: number, endMs: number) => {
+      if (reloadPendingRef.current) return;
       dispatch({
         type: "APPLY_OP",
         op: createEditTiming(index, startMs, endMs),
@@ -1368,6 +1414,7 @@ export default function EditorPage() {
   // User explicitly selects a cue (click in table, waveform, etc.)
   const handleUserSelect = useCallback(
     (index: number) => {
+      if (reloadPendingRef.current) return;
       setSelectedIndex(index);
       if (index >= 0 && index < docState.cues.length) {
         setUserSeekMs(docState.cues[index].startMs);
@@ -1380,6 +1427,7 @@ export default function EditorPage() {
   // Waveform seek: find cue at that time and seek video there
   const handleWaveformSeek = useCallback(
     (ms: number) => {
+      if (reloadPendingRef.current) return;
       const idx = docState.cues.findIndex(
         (c) => ms >= c.startMs && ms <= c.endMs,
       );
@@ -1615,6 +1663,7 @@ export default function EditorPage() {
     // parked there leaves the initiating cue's button free for a second
     // click to queue a second job.
     setTranslatingLineIdx(selectedIndex);
+    const reloadVersion = reloadVersionRef.current;
     try {
       const queued = await queueEditorTranslation({
         lines: [{ position: 0, line: sourceText }],
@@ -1623,7 +1672,8 @@ export default function EditorPage() {
         title: data?.mediaTitle || "",
         mediaType: mediaType || "",
       });
-      if (queued.jobId) {
+      if (reloadVersion !== reloadVersionRef.current) return;
+      if (!reloadPendingRef.current && queued.jobId) {
         if (insertion) {
           dispatch({
             type: "APPLY_OP",
@@ -1644,6 +1694,7 @@ export default function EditorPage() {
         setTranslatingLineIdx(null);
       }
     } catch (error) {
+      if (reloadVersion !== reloadVersionRef.current) return;
       // A stale status can leave the line translate clickable while the
       // gate is closed: a 409 shows the server's reason, and every other
       // failure keeps the shared client's own toast.
@@ -1664,9 +1715,18 @@ export default function EditorPage() {
 
   // Each single-line translation is a queued job like the panel's. Its end
   // arrives through the jobs cache, and only then is the result read.
-  const applyTranslatedLine = useCallback((targetIdx: number, line: string) => {
-    dispatch({ type: "APPLY_OP", op: createEditText(targetIdx, line) });
-  }, []);
+  const applyTranslatedLine = useCallback(
+    (targetIdx: number, line: string) => {
+      if (
+        reloadPendingRef.current ||
+        (sourceRevision !== undefined &&
+          sourceRevision !== reloadVersionRef.current)
+      )
+        return;
+      dispatch({ type: "APPLY_OP", op: createEditText(targetIdx, line) });
+    },
+    [sourceRevision],
+  );
   const finishLineTranslation = useCallback((jobId: number) => {
     setLineTranslationJobs((jobs) => jobs.filter((job) => job.jobId !== jobId));
   }, []);
@@ -1719,6 +1779,17 @@ export default function EditorPage() {
   // Keyboard shortcuts (Subtitle Edit conventions)
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent<HTMLDivElement>) => {
+      const reloadVersion = reloadVersionRef.current;
+      const afterBlur = (action: "addCue" | "merge" | "split") => {
+        setTimeout(() => {
+          if (
+            !reloadPendingRef.current &&
+            reloadVersion === reloadVersionRef.current
+          ) {
+            handleToolbarAction(action);
+          }
+        }, 0);
+      };
       const target = e.target as HTMLElement;
       const isTextInput =
         target.tagName === "TEXTAREA" ||
@@ -1871,7 +1942,7 @@ export default function EditorPage() {
         e.preventDefault();
         commitPendingEdit();
         // Use setTimeout to let the blur commit propagate before adding
-        setTimeout(() => handleToolbarAction("addCue"), 0);
+        afterBlur("addCue");
         return;
       }
 
@@ -1879,7 +1950,7 @@ export default function EditorPage() {
       if (e.key === "m" && ctrl && e.shiftKey) {
         e.preventDefault();
         commitPendingEdit();
-        setTimeout(() => handleToolbarAction("merge"), 0);
+        afterBlur("merge");
         return;
       }
 
@@ -1887,7 +1958,7 @@ export default function EditorPage() {
       if (e.key === "s" && ctrl && e.shiftKey) {
         e.preventDefault();
         commitPendingEdit();
-        setTimeout(() => handleToolbarAction("split"), 0);
+        afterBlur("split");
         return;
       }
 
@@ -2044,13 +2115,26 @@ export default function EditorPage() {
       : null;
   const activeSubtitleText = getActiveCueText(docState.cues, playbackTimeMs);
 
-  return (
+  // Native inert keeps mounted controls out of pointer and keyboard navigation.
+  // Capture also covers React events from controls rendered in portals.
+  const blockEditorEvent = (event: React.SyntheticEvent) => {
+    if (!reloadPendingRef.current) return;
+    event.preventDefault();
+    event.stopPropagation();
+  };
+
+  const editor = (
     <div
+      inert={isReloading}
       onKeyDown={handleKeyDown}
+      onKeyDownCapture={blockEditorEvent}
+      onClickCapture={blockEditorEvent}
+      onChangeCapture={blockEditorEvent}
+      onBlurCapture={blockEditorEvent}
       tabIndex={-1}
       style={{
-        height: "calc(100dvh - var(--app-shell-header-offset, 76px) - 1px)",
-        maxHeight: "calc(100dvh - var(--app-shell-header-offset, 76px) - 1px)",
+        flex: 1,
+        minHeight: 0,
         overflow: "hidden",
         display: "flex",
         flexDirection: "column",
@@ -2080,7 +2164,13 @@ export default function EditorPage() {
               <Text>{data.mediaTitle}</Text>
             ))}
           {data?.episodeTitle && <Text>{data.episodeTitle}</Text>}
-          <Menu shadow="md" width={260} position="bottom-start" withinPortal>
+          <Menu
+            shadow="md"
+            width={260}
+            position="bottom-start"
+            withinPortal
+            disabled={isReloading}
+          >
             <Menu.Target>
               <Anchor
                 component="button"
@@ -2206,31 +2296,6 @@ export default function EditorPage() {
         translating={translating}
         referenceActive={referenceCueList.length > 0}
       />
-
-      {hasSaveConflict && (
-        <Alert
-          color="yellow"
-          title="Subtitle changed on disk"
-          m="xs"
-          style={{ flexShrink: 0 }}
-        >
-          <Group gap="sm" justify="space-between">
-            <Text size="sm">
-              Your edits are still here. Reloading replaces them with the latest
-              file.
-            </Text>
-            <Button
-              size="xs"
-              variant="light"
-              color="yellow"
-              loading={isFetching}
-              onClick={handleReloadConflictedSubtitle}
-            >
-              Discard edits and reload
-            </Button>
-          </Group>
-        </Alert>
-      )}
 
       {/* Auto-save recovery banner */}
       {recoveryAvailable?.key === autoSaveKey && (
@@ -2375,7 +2440,7 @@ export default function EditorPage() {
             onClose={() => setQcOpen(false)}
           />
           <TimingToolsPanel
-            key={subtitleKey}
+            key={`${subtitleKey}:${sourceRevision ?? 0}`}
             open={timingOpen}
             cues={docState.cues}
             selectedIndices={multiSelect}
@@ -2391,6 +2456,12 @@ export default function EditorPage() {
               return { content: serialized, format, encoding };
             }}
             onApplySyncedContent={(syncedContent: string) => {
+              if (
+                reloadPendingRef.current ||
+                (sourceRevision !== undefined &&
+                  sourceRevision !== reloadVersionRef.current)
+              )
+                return false;
               const currentDocument = currentSyncDocumentRef.current;
               if (currentDocument !== syncDocument) {
                 showNotification({
@@ -2432,6 +2503,7 @@ export default function EditorPage() {
             onClose={() => setTimingOpen(false)}
           />
           <TranslatePanel
+            key={sourceRevision}
             open={translateOpen}
             cues={docState.cues}
             referenceCues={referenceCueList}
@@ -2613,6 +2685,7 @@ export default function EditorPage() {
             currentSubtitleText={activeSubtitleText}
             onTimeUpdate={(ms) => {
               setPlaybackTimeMs(ms);
+              if (reloadPendingRef.current) return;
               const idx = findActiveCueIndex(docState.cues, ms);
               if (idx >= 0 && idx !== selectedIndex) {
                 setSelectedIndex(idx);
@@ -2666,6 +2739,7 @@ export default function EditorPage() {
             </div>
           )}
           <DetailPane
+            key={sourceRevision}
             ref={detailPaneRef}
             cue={selectedCue}
             cueIndex={selectedIndex}
@@ -2716,7 +2790,7 @@ export default function EditorPage() {
       />
 
       <ShortcutSheet
-        open={shortcutsOpen}
+        open={shortcutsOpen && !isReloading}
         onClose={() => setShortcutsOpen(false)}
       />
 
@@ -2866,6 +2940,44 @@ export default function EditorPage() {
           </Group>
         </Stack>
       </Modal>
+    </div>
+  );
+
+  return (
+    <div
+      style={{
+        height: "calc(100dvh - var(--app-shell-header-offset, 76px) - 1px)",
+        maxHeight: "calc(100dvh - var(--app-shell-header-offset, 76px) - 1px)",
+        display: "flex",
+        flexDirection: "column",
+      }}
+    >
+      {hasSaveConflict && (
+        <Alert
+          color="yellow"
+          title="Subtitle changed on disk"
+          m="xs"
+          style={{ flexShrink: 0 }}
+        >
+          <Group gap="sm" justify="space-between">
+            <Text size="sm">
+              Your edits are still here. Reloading replaces them with the latest
+              file.
+            </Text>
+            <Button
+              size="xs"
+              variant="light"
+              color="yellow"
+              loading={isReloading}
+              disabled={isReloading}
+              onClick={handleReloadConflictedSubtitle}
+            >
+              Discard edits and reload
+            </Button>
+          </Group>
+        </Alert>
+      )}
+      {editor}
     </div>
   );
 }

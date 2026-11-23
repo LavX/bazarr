@@ -20,6 +20,38 @@ function subtitleContent(text: string) {
   return `1\n00:00:01,000 --> 00:00:02,000\n${text}`;
 }
 
+function assContent(text: string, refreshed = false) {
+  return `[Script Info]
+ScriptType: v4.00+
+Title: ${refreshed ? "Fresh title" : "Original title"}
+
+[V4+ Styles]
+Format: Name, Fontname, Fontsize
+Style: Default,${refreshed ? "Verdana,32" : "Arial,20"}
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+Dialogue: 0,${refreshed ? "0:00:05.00,0:00:08.00" : "0:00:01.00,0:00:02.00"},Default,,0,0,0,,${text}`;
+}
+
+function subtitleResponse(content: string, format = "srt", encoding = "utf-8") {
+  return HttpResponse.json(
+    {
+      content,
+      format,
+      encoding,
+      language: "en",
+      mediaTitle: "Local film",
+      mediaId: 42,
+    },
+    { headers: { ETag: `"${refreshedEtag}"` } },
+  );
+}
+
+function documentControlsAreInert(element: HTMLElement) {
+  // jsdom does not implement inert's native input blocking or expose a role.
+  return element.closest("[inert]") !== null;
+}
+
 const originalEtag = `${"a".repeat(64)}:gzip`;
 const refreshedEtag = `${"b".repeat(64)}:gzip`;
 
@@ -29,7 +61,10 @@ afterEach(() => {
   setAuthenticated(false);
 });
 
-async function openEditor(mediaType: "source" | "movie") {
+async function openEditor(
+  mediaType: "source" | "movie",
+  format: "srt" | "ass" = "srt",
+) {
   const user = userEvent.setup();
   const base = mediaType === "source" ? "sources/items" : "movies";
   const contentPath = `/api/${base}/42/subtitles/en/content`;
@@ -54,10 +89,10 @@ async function openEditor(mediaType: "source" | "movie") {
       reads();
       return HttpResponse.json(
         {
-          content: subtitleContent(
+          content: (format === "ass" ? assContent : subtitleContent)(
             writes.length === 0 ? "Original subtitle" : "Changed on disk",
           ),
-          format: "srt",
+          format,
           encoding: "utf-8",
           language: "en",
           mediaTitle: "Local film",
@@ -101,7 +136,8 @@ async function openEditor(mediaType: "source" | "movie") {
 }
 
 it("keeps source edits after a rejected conditional save until explicitly reloaded", async () => {
-  const { user, editor, reads, writes } = await openEditor("source");
+  const { user, editor, reads, writes, contentPath } =
+    await openEditor("source");
   const status = within(screen.getByRole("status", { name: "Editor status" }));
   const save = screen.getByRole("button", { name: "Save" });
   fireEvent.change(editor, { target: { value: "Local edit" } });
@@ -119,10 +155,34 @@ it("keeps source edits after a rejected conditional save until explicitly reload
   expect(status.getByText("Unsaved")).toBeInTheDocument();
   expect(reads).toHaveBeenCalledTimes(1);
 
-  await user.click(
-    screen.getByRole("button", { name: "Discard edits and reload" }),
+  let finishReload!: (response: Response) => void;
+  const reloadResponse = new Promise<Response>((resolve) => {
+    finishReload = resolve;
+  });
+  server.use(
+    http.get(contentPath, async () => {
+      reads();
+      return await reloadResponse;
+    }),
   );
+  const reload = screen.getByRole("button", {
+    name: "Discard edits and reload",
+  });
+  await user.click(reload);
+  expect(reload).toBeDisabled();
+  expect(screen.getByDisplayValue("Local edit")).toBeInTheDocument();
+  expect(documentControlsAreInert(editor)).toBe(true);
+  fireEvent.keyDown(editor, {
+    key: "ArrowRight",
+    ctrlKey: true,
+    shiftKey: true,
+  });
+  expect(screen.getByTitle("Start time")).toHaveValue("00:00:01.000");
+  fireEvent.keyDown(editor, { key: "s", ctrlKey: true });
+  expect(writes).toHaveLength(1);
+  finishReload(subtitleResponse(subtitleContent("Changed on disk")));
   const reloadedEditor = await screen.findByDisplayValue("Changed on disk");
+  expect(documentControlsAreInert(reloadedEditor)).toBe(false);
   expect(reads).toHaveBeenCalledTimes(2);
   expect(writes).toHaveLength(1);
   expect(
@@ -164,6 +224,76 @@ it("keeps the conflict and unsaved edits when reloading fails", async () => {
     ),
   ).toBeInTheDocument();
   expect(writes).toHaveLength(1);
+});
+
+it("adopts reloaded ASS text, timing, styles and encoding together before saving", async () => {
+  const { user, editor, writes, contentPath } = await openEditor(
+    "source",
+    "ass",
+  );
+  fireEvent.change(editor, { target: { value: "Local ASS draft" } });
+  await user.click(screen.getByRole("button", { name: "Save" }));
+  await screen.findByText("Subtitle changed on disk");
+
+  server.use(
+    http.get(contentPath, () =>
+      subtitleResponse(assContent("Fresh ASS text", true), "ass", "utf-16"),
+    ),
+  );
+  await user.click(
+    screen.getByRole("button", { name: "Discard edits and reload" }),
+  );
+  const reloadedEditor = await screen.findByDisplayValue("Fresh ASS text");
+  expect(screen.getByTitle("Start time")).toHaveValue("00:00:05.000");
+  expect(screen.getByTitle("End time")).toHaveValue("00:00:08.000");
+  const status = within(screen.getByRole("status", { name: "Editor status" }));
+  expect(status.getByText("ASS")).toBeInTheDocument();
+  expect(status.getByText("utf-16")).toBeInTheDocument();
+  expect(status.queryByText("Unsaved")).not.toBeInTheDocument();
+
+  fireEvent.change(reloadedEditor, { target: { value: "Fresh ASS edit" } });
+  await user.click(screen.getByRole("button", { name: "Save" }));
+  await screen.findByText("Saved");
+  expect(writes[1]).toEqual({
+    etag: refreshedEtag,
+    body: { content: assContent("Fresh ASS edit", true), encoding: "utf-16" },
+  });
+});
+
+it("retains ASS draft timing and metadata after an unsuccessful reload", async () => {
+  const { user, editor, writes, contentPath } = await openEditor(
+    "source",
+    "ass",
+  );
+  fireEvent.change(editor, { target: { value: "Local ASS draft" } });
+  const start = screen.getByTitle("Start time");
+  fireEvent.change(start, { target: { value: "00:00:00.500" } });
+  fireEvent.blur(start);
+  await user.click(screen.getByRole("button", { name: "Save" }));
+  await screen.findByText("Subtitle changed on disk");
+
+  server.use(
+    http.get(contentPath, () =>
+      HttpResponse.json(
+        { content: null, format: "srt", encoding: "utf-16" },
+        { headers: { ETag: `"${refreshedEtag}"` } },
+      ),
+    ),
+  );
+  await user.click(
+    screen.getByRole("button", { name: "Discard edits and reload" }),
+  );
+  await screen.findByText("Could not reload the subtitle");
+  expect(screen.getByDisplayValue("Local ASS draft")).toBeInTheDocument();
+  expect(screen.getByTitle("Start time")).toHaveValue("00:00:00.500");
+  expect(screen.getByTitle("End time")).toHaveValue("00:00:02.000");
+  expect(documentControlsAreInert(editor)).toBe(false);
+  const status = within(screen.getByRole("status", { name: "Editor status" }));
+  expect(status.getByText("ASS")).toBeInTheDocument();
+  expect(status.getByText("utf-8")).toBeInTheDocument();
+  expect(status.getByText("Unsaved")).toBeInTheDocument();
+  expect(writes).toHaveLength(1);
+  expect(screen.getByRole("button", { name: "Save" })).toBeDisabled();
 });
 
 it("keeps the legacy movie editor's overwrite retry on 412", async () => {
