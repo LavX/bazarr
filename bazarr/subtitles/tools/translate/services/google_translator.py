@@ -8,8 +8,9 @@ from media_servers.events import publication_callback
 
 from retry.api import retry
 from app.config import settings  # noqa: F401
-from ..core.translator_utils import (load_translation_input, add_translator_info, create_process_result,
-                                     record_source_translation, require_source_translation, translation_write_kwargs)
+from ..core.translator_utils import (
+    load_translation_input, validate_source_translation_input, add_translator_info, create_process_result,
+    record_source_translation, require_source_translation, translation_write_kwargs)
 from sonarr.history import history_log
 from radarr.history import history_log_movie
 from deep_translator import GoogleTranslator
@@ -179,6 +180,13 @@ class GoogleTranslatorService:
         try:
             if self.sports_operation:
                 jobs_queue.update_job_progress(job_id=job_id)
+            if getattr(self, 'source', None) is not None:
+                from app.database import database
+
+                try:
+                    validate_source_translation_input(self)
+                finally:
+                    database.remove()
             return GoogleTranslator(
                 source='auto',
                 target=self.language_code_convert_dict.get(self.lang_obj.alpha2, self.lang_obj.alpha2)

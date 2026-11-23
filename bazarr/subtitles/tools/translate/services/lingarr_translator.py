@@ -22,8 +22,9 @@ from subtitles.processing import ProcessSubtitlesResult  # noqa: F401
 from utilities.path_mappings import path_mappings  # noqa: F401
 
 from ..runtime.legacy_engines import request_target
-from ..core.translator_utils import (load_translation_input, add_translator_info, create_process_result, get_title,
-                                     record_source_translation, require_source_translation, translation_write_kwargs)
+from ..core.translator_utils import (
+    load_translation_input, validate_source_translation_input, add_translator_info, create_process_result,
+    get_title, record_source_translation, require_source_translation, translation_write_kwargs)
 
 logger = logging.getLogger(__name__)
 
@@ -281,6 +282,7 @@ class LingarrTranslatorService:
             if token:
                 headers["X-Api-Key"] = token
 
+            validate_source_translation_input(self)
             response = requests.post(
                 f"{url}/api/translate/content",
                 json=payload,

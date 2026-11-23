@@ -8,6 +8,7 @@ import threading
 import time
 import typing
 import logging
+from io import StringIO
 
 import srt
 import pysubs2
@@ -29,8 +30,9 @@ from utilities.path_mappings import path_mappings  # noqa: F401
 from subtitles.processing import ProcessSubtitlesResult  # noqa: F401
 from app.jobs_queue import JobCancelled, jobs_queue
 from languages.get_languages import alpha3_from_alpha2, language_from_alpha2, language_from_alpha3  # noqa: F401
-from ..core.translator_utils import (load_translation_input, add_translator_info, get_description, create_process_result,
-                                     record_source_translation, require_source_translation, translation_write_kwargs)
+from ..core.translator_utils import (
+    load_translation_input, validate_source_translation_input, add_translator_info, get_description,
+    create_process_result, record_source_translation, require_source_translation, translation_write_kwargs)
 
 logger = logging.getLogger(__name__)
 DEFAULT_GEMINI_BATCH_SIZE = 300
@@ -157,7 +159,10 @@ class GeminiTranslatorService:
                         self.progress_file = temporary + '.progress'
                     if not self.sports_operation:
                         self._check_saved_progress()
-                    self._translate_with_gemini()
+                    if self.source is not None:
+                        self._translate_with_gemini(source_text=subs.to_string('srt'))
+                    else:
+                        self._translate_with_gemini()
                     if self.sports_operation and (not os.path.isfile(temporary) or not os.path.getsize(temporary)):
                         raise RuntimeError("Gemini returned no translated text")
                     if self.source is not None:
@@ -445,6 +450,7 @@ class GeminiTranslatorService:
         try:
             check_cancelled(self.cancel)
             jobs_queue.update_job_progress(job_id=self.job_id)
+            validate_source_translation_input(self)
             response = requests.request("POST", url, headers=headers, data=payload,
                                         timeout=GEMINI_REQUEST_TIMEOUT)
             check_cancelled(self.cancel)
@@ -579,7 +585,7 @@ class GeminiTranslatorService:
             self.partial_error = ' '.join(str(detail).split())[:500]
             logger.warning('Translation partially completed: %s', self.partial_error)
 
-    def _translate_with_gemini(self):
+    def _translate_with_gemini(self, source_text=None):
         if not self.api_keys:
             jobs_queue.update_job_progress(
                 job_id=self.job_id,
@@ -603,7 +609,8 @@ class GeminiTranslatorService:
             return
 
         try:
-            with open(self.input_file, "r", encoding="utf-8") as original_file:
+            with (StringIO(source_text) if source_text is not None
+                  else open(self.input_file, "r", encoding="utf-8")) as original_file:
                 original_text = original_file.read()
                 original_subtitle = list(srt.parse(original_text))
 

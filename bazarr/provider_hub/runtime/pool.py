@@ -2271,7 +2271,8 @@ class WorkerPool:
     # ---------------------------------------------------------------- requests
 
     def submit(self, key: str, op: str, params=None, *, timeout=None, max_result_bytes=None,
-               secrets=None, on_progress=None, context=None) -> PoolRequest:
+               secrets=None, on_progress=None, context=None,
+               before_send: Callable[[], None] | None = None) -> PoolRequest:
         """Send a request to the worker for ``key``, starting it if needed.
 
         ``secrets`` travel in the request frame only; they are never stored in
@@ -2283,6 +2284,9 @@ class WorkerPool:
         see for this request (a job record, say). It is attached before the
         worker can issue a call, so the very first call already carries it as
         ``PoolHostCall.context``. It is dropped when the request finishes.
+
+        ``before_send`` may refuse a request after worker admission. It runs
+        without the pool lock, immediately before the request is submitted.
         """
         self._check_request(timeout, secrets)
         last_error: BaseException | None = None
@@ -2299,6 +2303,8 @@ class WorkerPool:
                     refused = WorkerKilled(problem[1], code=problem[0])
                     refused.before_send = True
                     raise refused
+                if before_send is not None:
+                    before_send()
                 handle = slot.session.submit(
                     op, params, timeout=timeout, max_result_bytes=max_result_bytes,
                     secrets=secrets, on_progress=on_progress)

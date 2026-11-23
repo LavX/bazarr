@@ -20,8 +20,10 @@ from radarr.history import history_log_movie
 from sonarr.history import history_log
 from app.jobs_queue import jobs_queue, JobCancelled, JobFailed
 
-from ..core.translator_utils import (load_translation_input, EmptySourceTranslation, add_translator_info, create_process_result, get_title,
-                                     record_source_translation, require_source_translation, translation_write_kwargs)
+from ..core.translator_utils import (
+    load_translation_input, validate_source_translation_input, EmptySourceTranslation, add_translator_info,
+    create_process_result, get_title, record_source_translation, require_source_translation,
+    translation_write_kwargs)
 from .auth import get_translator_auth_headers
 from .sidecar_errors import describe_sidecar_refusal, redact_service_text, MAX_REFUSAL_LENGTH
 
@@ -487,6 +489,7 @@ class OpenRouterTranslatorService:
 
             # Submit job
             logger.debug(f'BAZARR submitting {len(lines_payload)} lines to AI Subtitle Translator')  # noqa: G004
+            validate_source_translation_input(self)
             submit_response = requests.post(
                 f"{base_url}/api/v1/jobs/translate/content",
                 json=payload,
