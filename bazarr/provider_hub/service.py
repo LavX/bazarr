@@ -2200,6 +2200,7 @@ def _redact_installation(installation: dict[str, Any]) -> dict[str, Any]:
     redacted = dict(installation)
     if redacted.pop(releases.STAGED_ROLLBACK, None) and redacted.get("staged_version"):
         redacted["staged_action"] = "rollback"
+    redacted.pop(_PENDING_ROLLBACK_HOOK, None)
     redacted.pop("active_data_key", None)
     _clear_staged_data(redacted)
     redacted.pop("delete_release_data", None)
@@ -3957,6 +3958,7 @@ def _staged_installation(
         "active_path": existing.get("active_path"),
         **({"active_data_key": existing["active_data_key"]} if existing.get("active_data_key") else {}),
         **({"google_seed_rollback": existing["google_seed_rollback"]} if existing.get("google_seed_rollback") else {}),
+        **({_PENDING_ROLLBACK_HOOK: existing[_PENDING_ROLLBACK_HOOK]} if _PENDING_ROLLBACK_HOOK in existing else {}),
         **({"delete_release_data": True} if existing.get("delete_release_data") else {}),
         **({"data_worker_cleanup_pending": True} if existing.get("data_worker_cleanup_pending") else {}),
         "python_path": existing.get("python_path"),
@@ -4544,8 +4546,7 @@ def activate_google_seed() -> bool:
         return False
 
     config = _running_release_candidate(existing, kind)
-    if config is not None and existing.get("google_seed_rollback") == _rollback_hash(
-            tuple(existing.get(key) for key in _ROLLBACK_ACTIVE_FIELDS)):
+    if config is not None and _google_rollback_held(existing, _release_slots(state, plugin_id).get(releases.ACTIVE)):
         # Reverify the exact restored release, whether it lives in config or in the image.
         restored = seed.select_release(
             provider_hub_dir(), plugin_id, config_candidate=config, requested=config[0].raw,
@@ -5698,7 +5699,7 @@ def activate_release(provider_id: str, *, at_boot: bool = False, _expected_stage
                 return get_kind(kind_of(installation)).on_activated(provider_id, previous_manifest, manifest.raw)
             except Exception:
                 logging.getLogger(__name__).exception("The kind's activation step failed for %s", provider_id)
-                return "Its saved settings could not be brought up to date with this version."
+                return _ACTIVATION_HOOK_ERROR
 
         try:
             active_data = _active_data_path(provider_id, installation)
@@ -5783,10 +5784,14 @@ def activate_release(provider_id: str, *, at_boot: bool = False, _expected_stage
             row["last_error"] = None
             row.pop("needs_repair", None)
             row["activated_at"] = utcnow_iso()
+            if rollback:
+                identity = _rollback_artifact_identity(row, staged_release)
+                row[_PENDING_ROLLBACK_HOOK] = {"identity": identity, "previous_manifest": previous_manifest}
+            else:
+                row.pop(_PENDING_ROLLBACK_HOOK, None)
             if provider_id == seed.GOOGLE_PLUGIN_ID:
                 if rollback:
-                    row["google_seed_rollback"] = _rollback_hash(
-                        tuple(row.get(key) for key in _ROLLBACK_ACTIVE_FIELDS))
+                    row["google_seed_rollback"] = identity
                 else:
                     row.pop("google_seed_rollback", None)
             if (isinstance(state, releases.StateDocument) and staged_release is not None
@@ -5823,8 +5828,7 @@ def activate_release(provider_id: str, *, at_boot: bool = False, _expected_stage
         _archive_active_manifest(provider_id, manifest.raw)
         if rollback:
             # Run the kind's state transition only after the rollback identity was committed.
-            if attention := activation_attention(manifest):
-                _record_provider_last_error(provider_id, attention, installation.get("staged_python_path"))
+            _finish_rollback_activation(load_state_strict(), provider_id)
             job.update(message=f"Activated rollback {previous_version} -> {target_version}")
         elif previous_version:
             job.update(message=f"Activated update {previous_version} -> {target_version}")
@@ -5911,17 +5915,87 @@ _ROLLBACK_ACTIVE_FIELDS = ("active_version", "active_path", "python_path", "mani
 _ROLLBACK_STAGED_FIELDS = (releases.STAGED_ROLLBACK, "staged_version", "staged_path",
                            "staged_python_path", "staged_manifest", "staged_data_key", "staged_data_rollback")
 _ROLLBACK_CHANGED = "The previous release changed; review the rollback again"
+_PENDING_ROLLBACK_HOOK = "pending_rollback_hook"
+_ACTIVATION_HOOK_ERROR = "Its saved settings could not be brought up to date with this version."
 
 
 def _rollback_hash(value: Any) -> str:
     return sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 
-def _rollback_release_identity(release: releases.Release) -> str:
-    return _rollback_hash((release.plugin_id, release.id, release.created_at, release.ended_seq,
-                           release.version, release.bundle_path, release.bundle_digest,
-                           release.python_path, release.env_key, release.source_id, release.origin,
+def _rollback_release_identity(release: releases.Release, *, legacy_env=_UNSET) -> str:
+    # Registration can fill in env_key when the retained row becomes staged.
+    identity = (release.plugin_id, release.id, release.created_at, release.ended_seq,
+                release.version, release.bundle_path, release.bundle_digest, release.python_path)
+    if legacy_env is not _UNSET:
+        identity += (legacy_env,)
+    return _rollback_hash((*identity, release.source_id, release.origin,
                            release.catalog_registration, release.data_key))
+
+
+def _rollback_artifact_identity(row, slot: releases.SlotIdentity | None) -> str | None:
+    if slot is None:
+        return None
+    # Repair can repoint the interpreter without replacing the release or its data.
+    return _rollback_hash((slot.id, slot.created_at, slot.source_id, slot.origin, slot.catalog_registration,
+                           slot.bundle_digest, row.get("activated_at"),
+                           [row.get(key) for key in _ROLLBACK_ACTIVE_FIELDS if key != "python_path"]))
+
+
+def _google_rollback_held(row, slot: releases.SlotIdentity | None) -> bool:
+    marker = row.get("google_seed_rollback")
+    return bool(slot is not None and marker and (
+        marker == _rollback_artifact_identity(row, slot)
+        or marker == _rollback_hash(tuple(row.get(key) for key in _ROLLBACK_ACTIVE_FIELDS))))
+
+
+def _finish_rollback_activation(state, provider_id: str) -> None:
+    def pending_row(document):
+        row = (document.get("installations") or {}).get(provider_id)
+        if not isinstance(row, dict) or row.get("state") == "removed":
+            return None
+        marker = row.get(_PENDING_ROLLBACK_HOOK)
+        if not isinstance(marker, dict):
+            return None
+        identity = _rollback_artifact_identity(row, _release_slots(document, provider_id).get(releases.ACTIVE))
+        return row if identity and marker.get("identity") == identity else None
+
+    row = pending_row(state)
+    if row is None:
+        return
+    marker = row[_PENDING_ROLLBACK_HOOK]
+    try:
+        attention = get_kind(kind_of(row)).on_activated(provider_id, marker.get("previous_manifest"), row["manifest"])
+    except Exception:
+        logging.getLogger(__name__).exception("The kind's rollback activation step failed for %s", provider_id)
+        attention = _ACTIVATION_HOOK_ERROR
+        completed = False
+    else:
+        completed = True
+
+    def acknowledge(document):
+        current = pending_row(document)
+        if current is None or current[_PENDING_ROLLBACK_HOOK] != marker:
+            return
+        if completed:
+            current.pop(_PENDING_ROLLBACK_HOOK)
+        if attention:
+            current["last_error"] = refusal_text(attention)
+        elif current.get("last_error") == _ACTIVATION_HOOK_ERROR:
+            current["last_error"] = None
+
+    mutate_state(acknowledge)
+
+
+@datadir.serialized
+def resume_rollback_activations() -> None:
+    """Finish settings reconciliation for rollbacks committed by an earlier run."""
+    state = load_state_strict()
+    for provider_id in state.get("installations", {}):
+        try:
+            _finish_rollback_activation(state, provider_id)
+        except Exception:
+            logging.getLogger(__name__).exception("Could not resume rollback activation for %s", provider_id)
 
 
 def _rollback_active_identity(state, provider_id, row) -> str:
@@ -5947,8 +6021,11 @@ def _rollback_owned(state, provider_id, row, target) -> bool:
             and _same_release_owner(state, target, active.source_id, active.origin)
             and (target.source_id, target.origin) == (row.get("source_id"), row.get("origin")))
 
-def _rollback_confirmation(state: dict[str, Any], row: dict[str, Any], target: releases.Release) -> str:
-    return _rollback_hash((_rollback_release_identity(target), target.manifest, _rollback_source_binding(state, row)))
+
+def _rollback_confirmation(state: dict[str, Any], row: dict[str, Any], target: releases.Release, *,
+                           legacy_env=_UNSET) -> str:
+    return _rollback_hash((_rollback_release_identity(target, legacy_env=legacy_env),
+                           target.manifest, _rollback_source_binding(state, row)))
 
 
 def _staged_rollback_refusal(state: dict[str, Any], provider_id: str, row: dict[str, Any]) -> str | None:
@@ -5959,10 +6036,16 @@ def _staged_rollback_refusal(state: dict[str, Any], provider_id: str, row: dict[
         return "The catalog source binding changed"
     staged = getattr(state, "staged_releases", {}).get(provider_id)
     if (staged is None or staged.get("id") != binding.get("release_id")
-            or _rollback_confirmation(state, row, releases.release_of(staged)) != binding.get("confirmation_identity")
             or _rollback_active_identity(state, provider_id, row) != binding.get("active_identity")):
         return "The previous release changed"
-    if not _rollback_owned(state, provider_id, row, releases.release_of(staged)):
+    target = releases.release_of(staged)
+    # A rollback queued by an older build can have been confirmed before env_key was filled in.
+    confirmed = binding.get("confirmation_identity")
+    if (confirmed != _rollback_confirmation(state, row, target)
+            and confirmed != _rollback_confirmation(state, row, target, legacy_env=target.env_key)
+            and confirmed != _rollback_confirmation(state, row, target, legacy_env=None)):
+        return "The previous release changed"
+    if not _rollback_owned(state, provider_id, row, target):
         return "The catalog source binding changed"
     return None
 
@@ -6556,6 +6639,10 @@ def _repair_environment(provider_id: str, row, deadline: float, checkpoint=None)
                 # Another repair or an activation moved the installation while
                 # this one was building; theirs stands.
                 return {}
+            if provider_id == seed.GOOGLE_PLUGIN_ID:
+                slot = _release_slots(state, provider_id).get(releases.ACTIVE)
+                if _google_rollback_held(current, slot):
+                    current["google_seed_rollback"] = _rollback_artifact_identity(current, slot)
             current["python_path"] = str(python_path)
             if current.pop("needs_repair", None):
                 # A plugin held back at boot keeps saying why.

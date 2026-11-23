@@ -1887,6 +1887,7 @@ def test_google_rollback_survives_two_ordinary_application_startups(
     from provider_hub import datadir, releases, seed, service as hub, state
     from provider_hub.kinds import TRANSLATOR, get_kind
     from subtitles.tools.translate import runtime
+    from subtitles.tools.translate.runtime.plugin_update import NEEDS_ATTENTION
 
     plugin_id = seed.GOOGLE_PLUGIN_ID
     monkeypatch.setattr(state, "state_file", hub_store.legacy_state_path)
@@ -1905,9 +1906,14 @@ def test_google_rollback_survives_two_ordinary_application_startups(
     )
 
     def prepared(version, *, seeded):
+        fields = [{"key": "mode", "type": "text"}, {
+            "key": "region", "type": "text", "required": version == "1.0.0",
+            "show_if": {"key": "mode", "equals": "special"},
+        }]
         manifest = get_kind(TRANSLATOR).validate_manifest(service_manifest(
             plugin_id, version, kind=TRANSLATOR, kind_api="bazarr.translator.v1",
             entry_module="translator", entry_class="FixtureTranslator", permissions=["data_dir"],
+            settings_version=1, settings={"fields": fields},
             file_payloads={"translator.py": payload}), True)
         bundle = root / "bundles" / plugin_id / version / manifest.source_commit
         bundle.mkdir(parents=True)
@@ -1941,6 +1947,8 @@ def test_google_rollback_survives_two_ordinary_application_startups(
     updated, = hub_store.list_releases(plugin_id, states=(releases.ACTIVE,))
     updated_data = datadir.release_path(hub.provider_hub_dir(), plugin_id, updated.data_key)
     (updated_data / "settings").write_text("updated settings")
+    incompatible = store.create_instance(plugin_id, settings={"mode": "special"}, plugin_version="1.1.0")
+    incompatible_id = incompatible.id
     preview = hub.rollback_preview(plugin_id)
     assert preview["blocked_reason"] is None
     result = hub.rollback_release(plugin_id, consent_digest=preview["consent"]["digest"],
@@ -1956,8 +1964,43 @@ def test_google_rollback_survives_two_ordinary_application_startups(
     monkeypatch.setattr(settings.general, "enabled_providers", [])
     monkeypatch.setattr(settings.general, "disabled_providers", [])
 
+    kind = get_kind(TRANSLATOR)
+    on_activated = kind.on_activated
+
+    def interrupted_hook(*args):
+        active, = hub_store.list_releases(plugin_id, states=(releases.ACTIVE,))
+        assert active.id == original.id
+        if failed_update_first:
+            on_activated(*args)
+        raise SystemExit("interrupted rollback activation")
+
+    with monkeypatch.context() as activation:
+        activation.setattr(kind, "on_activated", interrupted_hook)
+        with pytest.raises(SystemExit, match="interrupted rollback activation"):
+            prepare_database_and_plugins(object())
+    promoted = hub.load_state()["installations"][plugin_id]
+    assert not promoted.get("staged_version") and promoted["pending_rollback_hook"]
+    store._session.expire_all()
+    assert store.get_instance(incompatible_id).enabled == int(not failed_update_first)
+
+    assert prepare_database_and_plugins(object())
+    reconciled = hub.load_state()["installations"][plugin_id]
+    assert reconciled["last_error"] == NEEDS_ATTENTION and "pending_rollback_hook" not in reconciled
+    store._session.expire_all()
+    held = store.get_instance(incompatible_id)
+    assert (held.enabled, held.awaiting_secrets, held.revision) == (0, 1, 2)
+
+    repaired_env = root / "shared_envs" / "repaired"
+    repaired_python = repaired_env / "bin" / "python"
+    repaired_python.parent.mkdir(parents=True)
+    repaired_python.symlink_to(Path(sys.executable).resolve())
+    (repaired_env / "pyvenv.cfg").write_text(f"version = {sys.version.split()[0]}\n")
+    monkeypatch.setattr(hub.PluginEnvironment, "install", lambda *_args, **_kwargs: repaired_env)
+    hub.repair_installation_environment(plugin_id)
+    repaired, = hub_store.list_releases(plugin_id, states=(releases.ACTIVE,))
+    assert (repaired.id, repaired.python_path) == (original.id, str(repaired_python))
+
     if failed_update_first:
-        assert prepare_database_and_plugins(object())
         update = inventory[0]
         hub._stage_validated(update.manifest, True, "catalog", "official", None,
                              catalog_list="plugins", ready_release=update)
@@ -1979,6 +2022,9 @@ def test_google_rollback_survives_two_ordinary_application_startups(
             original.id, original.created_at, original.data_key)
         row = hub.load_state()["installations"][plugin_id]
         assert row["active_version"] == "1.0.0" and not row.get("staged_version")
+        assert "pending_rollback_hook" not in row
+        store._session.expire_all()
+        assert store.get_instance(incompatible_id).revision == 2
         assert (original_data / "settings").read_text() == "restored settings"
         assert (updated_data / "settings").read_text() == "updated settings"
         assert store.pointers() == selection

@@ -776,10 +776,11 @@ class TranslatorStore:
         with self._pointer_cycle(), self.transaction():
             for kind, owner_id in owners:
                 row = self._require_owner((kind, owner_id))
-                row.enabled = 0
-                row.awaiting_secrets = 1
-                row.revision = int(row.revision) + 1
-                row.updated_at = datetime.now()
+                if row.enabled or not row.awaiting_secrets:
+                    row.enabled = 0
+                    row.awaiting_secrets = 1
+                    row.revision = int(row.revision) + 1
+                    row.updated_at = datetime.now()
                 if kind == INSTANCE:
                     engine_ids.add(owner_id)
             self._session.flush()

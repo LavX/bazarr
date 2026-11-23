@@ -23,6 +23,13 @@ def prepare_database_and_plugins(app) -> bool:
         logger.exception("Unable to start the translation runtime after the migrations")
     upgrade_languages_profile_values()
     fix_languages_profiles_with_duplicate_ids()
+    try:
+        # An interrupted rollback can have settings that still describe the replaced release.
+        from provider_hub.service import resume_rollback_activations
+
+        resume_rollback_activations()
+    except Exception:  # pragma: no cover - hub failures must not prevent startup
+        logger.exception("Unable to resume Provider Hub rollback activation")
     pending_google_release = None
     try:
         if getattr(settings.translator, "runtime_v2", False) is True:

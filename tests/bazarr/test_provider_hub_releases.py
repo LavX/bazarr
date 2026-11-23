@@ -1073,6 +1073,28 @@ def test_rollback_promotes_the_exact_row_when_version_and_bundle_path_match(stag
     assert (retired.id, retired.state, retired.python_path) == (current.id, releases.RETIRED, current.python_path)
 
 
+def test_rollback_confirmation_survives_environment_registration_during_staging(staged):
+    from provider_hub import env_registry, releases, service, state_store
+    from provider_hub.state import mutate_state
+
+    assert service.activate_staged_installations() == ["alpha"]
+    [previous] = state_store.list_releases("alpha", bind=staged, states=(releases.RETIRED,))
+    assert previous.env_key is None
+    preview = service.rollback_preview("alpha")
+    mutate_state(lambda state: env_registry.register_environment(
+        state, "shared-environment", Path(previous.python_path).parent.parent))
+
+    result = service.rollback_release("alpha", expected_version="1.0.0",
+                                      confirmation_identity=preview["confirmation_identity"])
+
+    assert result.outcome == service.ACTIVATION_WAITING
+    [pending] = state_store.list_releases("alpha", bind=staged, states=(releases.STAGED,))
+    assert (pending.id, pending.env_key) == (previous.id, "shared-environment")
+    assert service.activate_staged_installations() == ["alpha"]
+    [active] = state_store.list_releases("alpha", bind=staged, states=(releases.ACTIVE,))
+    assert (active.id, active.python_path) == (previous.id, previous.python_path)
+
+
 def test_boot_rejects_a_replaced_staged_rollback_and_keeps_the_previous_release(staged, monkeypatch):
     from provider_hub import releases, service, state_store
     from provider_hub.state import load_state, mutate_state
