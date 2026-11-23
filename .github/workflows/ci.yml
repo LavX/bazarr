@@ -730,6 +730,7 @@ jobs:
           pip install -r postgres-requirements.txt
           for f in \
             tests/bazarr/test_discover_digital_releases.py \
+            tests/bazarr/test_discover_media_sources.py \
             tests/bazarr/test_discover_recent_episodes.py \
             tests/bazarr/test_media_sources_identification.py \
             tests/bazarr/test_editor_api.py \
