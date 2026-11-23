@@ -675,12 +675,15 @@ def _scan_leftover_plugin_keys(settings_obj, state, provider_hub_dir):
     installations = state.get("installations") if isinstance(state, dict) else None
     if not isinstance(installations, dict):
         installations = {}
+    from provider_hub.secret_paths import archived_manifests, protected_history
+
     discovered = set()
     for section, values in sections.items():
         if not section or section in reserved:
             continue
         installation = installations.get(section)
         declared = _declared_fields(installation)
+        held = historical = None
         for key, value in values.items():
             if not isinstance(key, str) or key.startswith("__"):
                 continue
@@ -692,7 +695,11 @@ def _scan_leftover_plugin_keys(settings_obj, state, provider_hub_dir):
                 # Not a value a credential can hide behind: an empty string,
                 # a list, a dict, or nothing at all.
                 continue
-            held = _held_manifests(state, provider_hub_dir, section, installation)
+            if held is None:
+                historical = list(protected_history(state, section))
+                if provider_hub_dir is not None:
+                    historical.extend(archived_manifests(provider_hub_dir, section))
+                held = [*_held_manifests(state, provider_hub_dir, section, installation), *historical]
             if any(key.lower() in {f.lower() for f in _manifest_secret_fields(manifest)}
                    for manifest in held):
                 # A held manifest declaring the field secret is authoritative
@@ -706,7 +713,7 @@ def _scan_leftover_plugin_keys(settings_obj, state, provider_hub_dir):
                 continue
             active_path = (str(installation.get("active_path") or "").strip()
                            if isinstance(installation, dict) else "")
-            ran_bundles = [
+            ran_bundles = historical + [
                 manifest for path, manifest in _bundle_manifests(provider_hub_dir, section)
                 if active_path
                 and path.parent == Path(active_path)

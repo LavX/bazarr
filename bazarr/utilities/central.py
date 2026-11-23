@@ -7,7 +7,20 @@ import logging
 import os
 from pathlib import Path
 
-from literals import ENV_BAZARR_ROOT_DIR, DIR_LOG, ENV_STOPFILE, ENV_RESTARTFILE, EXIT_NORMAL, FILE_LOG
+from literals import ENV_BAZARR_ROOT_DIR, DIR_LOG, DIR_RESTORE, ENV_STOPFILE, ENV_RESTARTFILE, EXIT_NORMAL, FILE_LOG
+
+BACKUP_STAGE_DIR = '.backup-staged'
+PLUGIN_RESTORE_PHASE = '.plugin-restore-phase'
+OLD_RESTORE_STATE = ('.restore-journal.json', '.database_restore_complete', 'pending_plugin_data')
+
+
+def backup_restore_pending(config_dir):
+    """Check the startup-visible restore paths without importing live settings or opening a database."""
+    root = Path(config_dir) / DIR_RESTORE
+    return any((root / name).exists() or (root / name).is_symlink() for name in (
+        BACKUP_STAGE_DIR, PLUGIN_RESTORE_PHASE, *OLD_RESTORE_STATE,
+        'config.yaml', 'config.ini', 'bazarr.db', 'bazarr_postgres.dump', 'bazarr_postgres.dump.failed',
+    ))
 
 
 def get_bazarr_dir(sub_dir):

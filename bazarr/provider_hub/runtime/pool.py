@@ -245,6 +245,7 @@ from ..sandbox import (
     SandboxApplyError,
     SandboxRefused,
     WorkerProcess,
+    activity,
     shm_guardable,
     shm_state,
     spawn_worker,
@@ -3492,6 +3493,11 @@ class WorkerPool:
         but that cleanup, so none of those cases may release a worker's place in
         the pool.
         """
+        if activity.is_registered(process):
+            if not activity.tree_gone(process):
+                return False
+            activity.forget(process)
+            return True
         if isinstance(process, WorkerProcess) and (
                 process._anchor is not None or process._anchor_lost or process._leader_lost
                 or process.group_cleaned is False):
@@ -3637,7 +3643,8 @@ class WorkerPool:
         slot.unverified_noted = True
         session = slot.session
         process = session.process if session is not None else None
-        if process is None or isinstance(process, LauncherProcess):
+        if (process is None or isinstance(process, LauncherProcess)
+                or (activity.is_registered(process) and getattr(process, "activity_job", None) is not None)):
             self._settle_unverified(slot)
             return
         if slot.ephemeral and slot.kill_reason is None and getattr(session, "exit_code", None) == 0:

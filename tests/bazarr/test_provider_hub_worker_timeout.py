@@ -322,6 +322,120 @@ def test_a_turn_that_comes_at_the_deadline_is_busy_not_an_error(gated, monkeypat
     assert not gated.client._lock.locked()
 
 
+def test_probe_startup_and_dispatch_spend_the_reply_budget(gated, monkeypatch):
+    now = [100.0]
+    monkeypatch.setattr(worker_mod, "time", SimpleNamespace(monotonic=lambda: now[0]))
+    gated.client.request_deadline = 106.0
+    messages = []
+    reply_timeouts = []
+    original_write = gated.process.write
+    original_flush = gated.process.flush
+    original_read = gated.client._read_reply
+
+    def start():
+        now[0] += 3.0
+        return False
+
+    def write(text):
+        messages.append(json.loads(text))
+        original_write(text)
+
+    def flush():
+        now[0] += 1.0
+        original_flush()
+
+    def read(request_id, timeout):
+        reply_timeouts.append(timeout)
+        return original_read(request_id, timeout)
+
+    monkeypatch.setattr(gated.client, "start", start)
+    monkeypatch.setattr(gated.process, "write", write)
+    monkeypatch.setattr(gated.process, "flush", flush)
+    monkeypatch.setattr(gated.client, "_read_reply", read)
+
+    assert gated.client.request("health", {}, timeout=6.0).ok
+    assert messages[0]["deadline_ms"] == 3000
+    assert reply_timeouts == [2.0]
+
+
+@pytest.mark.parametrize("late_phase", ["start", "dispatch", "reply", "validation"])
+def test_probe_cannot_succeed_after_its_transport_deadline(gated, monkeypatch, late_phase):
+    now = [100.0]
+    monkeypatch.setattr(worker_mod, "time", SimpleNamespace(monotonic=lambda: now[0]))
+    gated.client.request_deadline = 106.0
+    original_start = gated.client.start
+    original_flush = gated.process.flush
+    original_read = gated.client._read_reply
+    original_loads = json.loads
+
+    def start():
+        result = original_start()
+        if late_phase == "start":
+            now[0] = 107.0
+        return result
+
+    def flush():
+        original_flush()
+        if late_phase == "dispatch":
+            now[0] = 107.0
+
+    def read(request_id, timeout):
+        result = original_read(request_id, timeout)
+        if late_phase == "reply":
+            now[0] = 107.0
+        return result
+
+    def loads(value, *args, **kwargs):
+        result = original_loads(value, *args, **kwargs)
+        if late_phase == "validation" and isinstance(result, dict) and "ok" in result:
+            now[0] = 107.0
+        return result
+
+    monkeypatch.setattr(gated.client, "start", start)
+    monkeypatch.setattr(gated.process, "flush", flush)
+    monkeypatch.setattr(gated.client, "_read_reply", read)
+    monkeypatch.setattr(worker_mod.json, "loads", loads)
+
+    with pytest.raises(worker_mod.WorkerError) as error:
+        gated.client.request("health", {}, timeout=6.0)
+    assert error.value.code == "timeout"
+    assert gated.process.written == ([] if late_phase == "start" else ["health"])
+    assert not gated.client._lock.locked()
+
+
+def test_probe_shutdown_still_runs_after_the_transport_deadline(gated, monkeypatch):
+    monkeypatch.setattr(worker_mod, "time", SimpleNamespace(monotonic=lambda: 107.0))
+    gated.client.request_deadline = 106.0
+
+    gated.client.stop(grace_seconds=0.1)
+
+    assert gated.process.written == ["shutdown"]
+
+
+@pytest.mark.parametrize("operation, expected_kills", [("health", []), ("search", [True])])
+def test_only_probe_read_timeout_leaves_shutdown_to_its_owner(gated, monkeypatch, operation, expected_kills):
+    now = [100.0]
+    monkeypatch.setattr(worker_mod, "time", SimpleNamespace(monotonic=lambda: now[0]))
+    gated.client.request_deadline = 106.0
+    gated.process.held.add(operation)
+    kills = []
+
+    class TimedOutQueue:
+        def get(self, timeout):
+            now[0] += timeout
+            raise queue.Empty
+
+    gated.client._stdout_queue = TimedOutQueue()
+    monkeypatch.setattr(gated.client, "_kill_worker", lambda: kills.append(True))
+
+    with pytest.raises(worker_mod.WorkerError) as error:
+        gated.client.request(operation, {}, timeout=6.0)
+
+    assert error.value.code == "timeout"
+    assert kills == expected_kills
+    assert gated.process.written == [operation]
+
+
 def test_a_client_stopped_after_its_worker_exited_admits_nothing(gated):
     gated.process.exited = True
     gated.client.stop(grace_seconds=0.1)

@@ -30,6 +30,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+from .datadir import SnapshotRefused
 from .state import (
     corrupt_copies, process_lock, provider_hub_dir, load_state, load_state_strict, mutate_state, mutate_state_checked,
     read_state_document,
@@ -173,7 +174,8 @@ def _recorded_dir(envs: dict[str, Any], fingerprint: str, root: Path) -> Path | 
 def reconcile_environments(
     *,
     validate: Callable[[dict[str, Any], bool], Any],
-    probe: Callable[[Any, Path, Path], None],
+    probe: Callable[[Any, Path, Path], None] | None = None,
+    probe_data: Callable[[Any, Path, Path, dict[str, Any], bool], None] | None = None,
     root: str | Path | None = None,
     verify_bundle: Callable[[Any, Path], None] | None = None,
 ) -> dict[str, list[str]]:
@@ -182,6 +184,7 @@ def reconcile_environments(
     ``validate(row, staged)`` returns the row's validated manifest (the staged one
     when ``staged``). ``probe(manifest, bundle_path, python_path)`` is the worker
     import check and raises when the interpreter cannot run the plugin.
+    ``probe_data`` also gets the row and slot for a release-data-aware check.
 
     * An environment on disk that matches the installation's dependency set is
       recorded where it is. It is not moved, copied or rebuilt.
@@ -199,6 +202,8 @@ def reconcile_environments(
     The probes run without the state lock; the result is applied in one write
     that skips any row that changed in the meantime.
     """
+    if probe is None and probe_data is None:
+        raise TypeError("An environment probe is required")
     summary: dict[str, list[str]] = {"adopted": [], "repointed": [], "needs_repair": [], "kept": []}
     root = Path(root) if root is not None else provider_hub_dir()
     try:
@@ -212,8 +217,8 @@ def reconcile_environments(
     adoptions: dict[str, str] = {}
     adopted_by: dict[str, list[str]] = {}
     flags: list[str] = []
-    unflags: list[str] = []
-    repoints: list[tuple[str, str, str, str]] = []
+    unflags: dict[str, dict[str, Any]] = {}
+    repoints: list[tuple[str, str, dict[str, Any], str]] = []
 
     for provider_id, row in (state.get("installations") or {}).items():
         if not isinstance(row, dict):
@@ -274,7 +279,7 @@ def reconcile_environments(
                         flags.append(provider_id)
                         summary["needs_repair"].append(provider_id)
                         continue
-                unflags.append(provider_id)
+                unflags[provider_id] = row
             recorded = _recorded_dir(envs, fingerprint, root)
             if recorded is None:
                 if _adoptable(env_dir, manifest):
@@ -304,7 +309,15 @@ def reconcile_environments(
                     summary["needs_repair"].append(provider_id)
                     continue
             try:
-                probe(manifest, bundle, shared_python)
+                if probe_data is not None:
+                    probe_data(manifest, bundle, shared_python, row, staged)
+                elif probe is not None:
+                    probe(manifest, bundle, shared_python)
+            except SnapshotRefused as refusal:
+                unflags.pop(provider_id, None)
+                logger.info("Provider Hub: deferred %s's shared environment check: %s", provider_id, refusal)
+                summary["kept"].append(provider_id)
+                continue
             except Exception as error:
                 logger.warning(
                     "Provider Hub: %s stays on its own environment, the shared one failed the check: %s",
@@ -312,8 +325,11 @@ def reconcile_environments(
                 )
                 summary["kept"].append(provider_id)
                 continue
-            repoints.append((provider_id, python_key, str(python_path), str(shared_python)))
+            repoints.append((provider_id, python_key, row, str(shared_python)))
             summary["repointed"].append(provider_id)
+
+    if not (adoptions or flags or unflags or repoints):
+        return summary
 
     def apply(state: dict[str, Any]) -> None:
         installations = state.get("installations") or {}
@@ -333,22 +349,26 @@ def reconcile_environments(
                 row["needs_repair"] = True
                 if not row.get("last_error"):
                     row["last_error"] = NEEDS_REPAIR_MESSAGE
-        for provider_id in unflags:
+        for provider_id, expected in unflags.items():
             if provider_id in flags:
                 continue  # a check in this pass found it broken: the flag stays
             row = installations.get(provider_id)
-            if isinstance(row, dict):
+            if (isinstance(row, dict) and row.get("state") != "removed"
+                    and all(row.get(key) == expected.get(key)
+                            for key in ("python_path", "active_version", "active_path", "active_data_key"))):
                 row.pop("needs_repair", None)
                 # Only the repair message goes with the flag; any other error is not this check's to clear.
                 if row.get("last_error") == NEEDS_REPAIR_MESSAGE:
                     row["last_error"] = _held_back_error(row)
-        for provider_id, python_key, old, new in repoints:
+        for provider_id, python_key, expected, new in repoints:
             row = installations.get(provider_id)
-            if isinstance(row, dict) and row.get(python_key) == old:
-                if lock_held[0] and Path(new).exists():
-                    row[python_key] = new
-                else:
-                    dropped_repoints.append(provider_id)
+            if (lock_held[0] and Path(new).exists() and isinstance(row, dict) and row.get("state") != "removed"
+                    and not row.get("revoked") and not row.get("blocked")
+                    and all(row.get(key) == expected.get(key)
+                            for key in (python_key, "active_version", "active_path", "active_data_key"))):
+                row[python_key] = new
+            else:
+                dropped_repoints.append(provider_id)
 
     # A row or record that points at an environment is committed under the lock
     # a cleanup deletes under, with the target checked again inside it, so a
