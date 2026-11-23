@@ -73,11 +73,15 @@ class NativeConfiguration:
         with self.lock:
             return tuple(self.snapshots.values())
 
-    def read(self, instance_id):
+    def read(self, instance_id, *, guard=None):
         with self.lock:
             snapshot = self.snapshots.get(instance_id)
         if snapshot is None:
             raise MediaServerError('not_found')
+        # The lock may have been held by a settings write. Recheck lookup
+        # shutdown before a held row can ask plex.tv.
+        if guard is not None:
+            guard()
         released = self._release_held(snapshot)
         if released is not snapshot:
             # The ask ran without the lock every dispatcher caller shares, so

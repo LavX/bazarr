@@ -269,21 +269,24 @@ def _current(native, instance_id, destination):
     ``read`` asks plex.tv about a held account row and, once plex.tv lists
     its address, publishes it released, one revision on, at that address. So
     the row read is the one looked up, whatever its revision, and a row that
-    is gone, switched off, broken or still held raises before anything is
-    sent. The guard is the refreshes' own, from the revision read: a change
+    is gone, switched off, broken or still held raises before the media
+    server is contacted. The guard validates the revision read: a change
     landing after the read stops the lookup at its next request.
     """
     destination.ensure_open()
-    revision, snapshot, _changing = native.read(instance_id)
+    revision, snapshot, _changing = native.read(instance_id, guard=destination.ensure_open)
     if not snapshot.enabled:
         raise MediaServerError('connection_disabled')
     if snapshot.configuration_error:
         raise MediaServerError(snapshot.configuration_error)
     if not snapshot.sendable:
         raise MediaServerError('server_not_listed')
+
     def guard():
         destination.ensure_open()
         native.ensure_current(instance_id, revision)
+        # Shutdown can close the lane while validation waits for settings.
+        destination.ensure_open()
 
     return snapshot, guard
 

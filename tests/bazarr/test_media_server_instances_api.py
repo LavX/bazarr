@@ -49,31 +49,75 @@ def test_authenticated_crud_uuid_safe_key_and_status(instance_api, kind):
     assert instance_api.get(path + '/status', headers=HEADERS).status_code == 404
 
 
-@pytest.mark.parametrize('lifecycle', ['delete-idle', 'delete-active', 'restore'])
+def _isolated_server(monkeypatch, listener, calls):
+    import sys
+    import warnings
+    from importlib.util import module_from_spec, spec_from_file_location
+    from pathlib import Path
+    from types import SimpleNamespace
+
+    import app
+    import compat
+    from app import app as flask_app, host_allowlist
+    from sportarr import sse_client
+    from utilities import tracemalloc_dumper
+    from waitress import server as waitress_server
+
+    # Exercise the real Server methods without caching an app.server module
+    # or starting a listener, Socket.IO runtime, or boot-time handlers.
+    spec = spec_from_file_location('app._server_under_test', Path(app.__file__).with_name('server.py'))
+    server = module_from_spec(spec)
+    with monkeypatch.context() as setup, warnings.catch_warnings():
+        setup.setattr(waitress_server, 'create_server', lambda *args, **kwargs: listener)
+        setup.setattr(flask_app, 'create_app', lambda: Flask(__name__))
+        setup.setattr(compat, 'register', lambda *args, **kwargs: None)
+        setup.setattr(host_allowlist, 'announce_code', lambda: None)
+        setup.setattr(tracemalloc_dumper, 'install', lambda: None)
+        spec.loader.exec_module(server)
+    monkeypatch.delitem(sys.modules, 'subtitles.tools.ocr.decode', raising=False)
+    monkeypatch.delitem(sys.modules, 'subtitles.tools.translate.runtime.worker_binding', raising=False)
+    monkeypatch.setattr(server, 'signal', SimpleNamespace(SIGINT=2, SIGTERM=15, signal=lambda *_args: None))
+    monkeypatch.setattr(server, 'close_database', lambda: calls.append('database'))
+    monkeypatch.setattr(sse_client, 'stop_sportarr_clients', lambda: calls.append('streams'))
+    return server
+
+
+@pytest.mark.parametrize('lifecycle', [
+    'delete-idle', 'delete-active', 'restore', 'loop-return', 'loop-error', 'loop-oserror', 'loop-ebadf',
+    'loop-interrupt', 'loop-system-exit',
+])
 def test_play_on_workers_follow_destination_lifecycle(instance_api, monkeypatch, tmp_path, lifecycle):
+    import errno
     import json
-    from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
-    from threading import Event, current_thread
+    import sys
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Event, Lock, current_thread
+    from types import SimpleNamespace
     from urllib.parse import urlsplit
 
     import requests
     from sqlalchemy import create_engine
-    from sqlalchemy.orm import sessionmaker
+    from sqlalchemy.orm import scoped_session, sessionmaker
 
+    from api.system import media_server_instances
     from app import database
     from media_servers import links
 
     engine = create_engine(f'sqlite:///{tmp_path / "library.db"}')
     database.Base.metadata.create_all(engine)
     sessions = sessionmaker(engine)
+    api_sessions = scoped_session(sessions)
+    instance_api.application.teardown_request(lambda _error: api_sessions.remove())
+    monkeypatch.setattr(media_server_instances, 'database', api_sessions)
     monkeypatch.setattr(database, 'session_factory', sessions)
     monkeypatch.setattr(links, '_lanes', {})
-    monkeypatch.setattr(links, '_lanes_closed', False, raising=False)
+    monkeypatch.setattr(links, '_lanes_closed', False)
     with sessions.begin() as session:
         session.add_all(database.TableMovies(id=i, path='/movies/Film.mkv', title='Film', tmdbId=str(i))
                         for i in range(1, 7))
 
     workers = set()
+    workers_lock = Lock()
     both_running, release, queued = Event(), Event(), Event()
     wire = []
 
@@ -83,10 +127,11 @@ def test_play_on_workers_follow_destination_lifecycle(instance_api, monkeypatch,
         content_id = url.path.rsplit('/', 1)[-1]
         wire.append((url.hostname, content_id))
         if url.hostname == 'a.example' and content_id in ('movie-tmdb-2', 'movie-tmdb-3'):
-            workers.add(current_thread())
-            if len(workers) == 2:
-                both_running.set()
-            assert release.wait(5)
+            with workers_lock:
+                workers.add(current_thread())
+                if len(workers) == 2:
+                    both_running.set()
+            release.wait()
         response = requests.Response()
         response.status_code = 200
         response._content = json.dumps({'content_id': content_id}).encode()
@@ -108,39 +153,59 @@ def test_play_on_workers_follow_destination_lifecycle(instance_api, monkeypatch,
         assert response.status_code == 200
         return response.json['state']
 
-    if lifecycle == 'restore':
-        from types import SimpleNamespace
-
-        from waitress import server as waitress_server
+    deleting = lifecycle.startswith('delete-')
+    calls = []
+    if not deleting:
         from utilities import backup
 
-        # The real restore callback closes the server before exiting the process.
-        calls = []
-        listener = SimpleNamespace(close=lambda: calls.append('close'))
-        monkeypatch.setattr(waitress_server, 'create_server', lambda *args, **kwargs: listener)
-        from app import server
-        monkeypatch.setattr(server.webserver, 'server', listener)
-        monkeypatch.setattr(backup, 'restart_bazarr', lambda: calls.append('restart'))
+        def run():
+            calls.append('run')
+            error = {
+                'loop-error': RuntimeError(),
+                'loop-oserror': OSError(errno.EIO, 'I/O error'),
+                'loop-ebadf': OSError(errno.EBADF, 'bad file descriptor'),
+                'loop-interrupt': KeyboardInterrupt(),
+                'loop-system-exit': SystemExit(),
+            }.get(lifecycle)
+            if error is not None:
+                raise error
 
-    def pool_for(entry):
-        return getattr(entry, 'lane', entry).pool
+        listener = SimpleNamespace(run=run, close=lambda: calls.append('close'), print_listen=lambda _message: None)
+        server = _isolated_server(monkeypatch, listener, calls)
+        monkeypatch.setattr(server, 'stop_bazarr', lambda _status: calls.append('stop'))
 
+    def teardown():
+        if deleting:
+            return instance_api.delete(f'{ROOT}/{removed}', headers=HEADERS).status_code
+        if lifecycle == 'restore':
+            # Expose the isolated instance only to the real restore callback.
+            with monkeypatch.context() as restore:
+                restore.setitem(sys.modules, 'app.server', server)
+                restore.setattr(backup, 'restart_bazarr', lambda: calls.append('restart'))
+                backup._restart_after_restore()
+        else:
+            server.webserver.start()
+
+    pools = set()
     try:
         assert resolve(removed, 1) == resolve(live, 1) == 'resolved'
         live_lane = links._lanes[live]
-        with ThreadPoolExecutor(max_workers=3) as requests_pool:
-            active = [requests_pool.submit(resolve, removed, i) for i in (2, 3)]
+        pools.update((links._lanes[removed].lane.pool, live_lane.lane.pool))
+        with ThreadPoolExecutor(max_workers=4) as requests_pool:
             try:
+                active = [requests_pool.submit(resolve, removed, i) for i in (2, 3)]
                 assert both_running.wait(3), wire
                 if lifecycle == 'delete-idle':
                     release.set()
                     assert [future.result(2) for future in active] == ['resolved', 'resolved']
                 else:
-                    pool = pool_for(links._lanes[removed])
+                    pool = links._lanes[removed].lane.pool
                     submit = pool.submit
+                    queued_work = []
 
                     def observed_submit(*args, **kwargs):
                         future = submit(*args, **kwargs)
+                        queued_work.append(future)
                         queued.set()
                         return future
 
@@ -148,38 +213,41 @@ def test_play_on_workers_follow_destination_lifecycle(instance_api, monkeypatch,
                     pending = requests_pool.submit(resolve, removed, 4)
                     assert queued.wait(3)
 
+                # A joining teardown fails here while the two HTTP requests
+                # still wait. Only this test's finally block can release them.
+                result = requests_pool.submit(teardown).result(3)
+                if lifecycle != 'delete-idle':
+                    assert all(not future.done() for future in active)
+                    assert queued_work[0].cancelled()
+                    assert pending.result(1) == 'unreachable'
                 if lifecycle == 'restore':
-                    backup._restart_after_restore()
-                    assert calls == ['close', 'restart']
+                    assert calls == ['close', 'streams', 'database', 'restart']
+                elif not deleting:
+                    stopped = ['stop'] if lifecycle in ('loop-interrupt', 'loop-system-exit') else []
+                    assert calls == ['run', 'close', 'streams', 'database', *stopped]
                 else:
-                    assert instance_api.delete(f'{ROOT}/{removed}', headers=HEADERS).status_code == 204
+                    assert result == 204
                     assert resolve(removed, 5) == 'not_found'
                     assert resolve(live, 5) == 'resolved'
                     assert links._lanes[live] is live_lane
-
-                if lifecycle != 'delete-idle':
-                    try:
-                        canceled = pending.result(1)
-                    except FutureTimeout:
-                        canceled = None
             finally:
                 release.set()
             if lifecycle != 'delete-idle':
-                assert (canceled, *(future.result(2) for future in active)) == ('unreachable',) * 3
+                assert [future.result(2) for future in active] == ['unreachable', 'unreachable']
             assert removed not in links._lanes
             assert sorted(item for host, item in wire if host == 'a.example') == [
                 'movie-tmdb-1', 'movie-tmdb-2', 'movie-tmdb-3']
             for worker in workers:
                 worker.join(1)
             assert not any(worker.is_alive() for worker in workers)
-            if lifecycle == 'restore':
+            if not deleting:
                 assert not links._lanes
                 assert resolve(live, 6) == 'unreachable'
     finally:
-        for instance_id in (removed, live):
-            lane = links._lanes.pop(instance_id, None)
-            if lane is not None:
-                pool_for(lane).shutdown(wait=True, cancel_futures=True)
+        for destination in links._lanes.values():
+            pools.update(destination.pools)
+        for pool in pools:
+            pool.shutdown(wait=True, cancel_futures=True)
         engine.dispose()
 
 

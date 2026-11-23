@@ -11,6 +11,7 @@ from utilities.central import restart_bazarr, stop_bazarr
 from utilities.tracemalloc_dumper import install as install_tracemalloc_dumper
 
 from waitress.server import create_server
+from threading import RLock
 from time import sleep
 
 from api import api_bp
@@ -44,6 +45,8 @@ class Server:
         self.address = os.environ.get(BACKEND_HOST_ENV, '').strip() or str(settings.general.ip)
         self.port = int(args.port) if args.port else int(settings.general.port)
         self.interrupted = False
+        self._close_lock = RLock()
+        self._closing = False
 
         install_tracemalloc_dumper()
 
@@ -124,16 +127,19 @@ class Server:
             self.server.run()
         except (KeyboardInterrupt, SystemExit):
             self.shutdown()
-        except OSError as error:
-            if error.errno == 9:
-                # deal with "OSError: [Errno 9] Bad file descriptor" by closing webserver again.
-                self.server.close()
-            else:
-                pass
         except Exception:
             pass
+        finally:
+            self.close_all()
 
     def close_all(self):
+        # An explicit shutdown can close the listener while start() is
+        # running. Its loop exit must not start a second teardown.
+        with self._close_lock:
+            if self._closing:
+                return
+            self._closing = True
+
         # The webserver first, so a slow stream teardown cannot hold the UI
         # open and unresponsive, then the streams, then the database. Stopping
         # the streams first meant a restart appeared to hang: the server was
@@ -148,17 +154,18 @@ class Server:
                 ocr_decode.stop_live_renders()
             except Exception:
                 pass
-        if self.server:
-            print("Closing webserver...")
-            self.server.close()
-        # Stop admitting link lookups before the database closes. Only loaded
-        # lookup workers need shutdown, including on a restore's restart.
-        media_server_links = sys.modules.get("media_servers.links")
-        if media_server_links:
-            try:
-                media_server_links.shutdown()
-            except Exception:
-                pass
+        try:
+            if self.server:
+                print("Closing webserver...")
+                self.server.close()
+        finally:
+            # Stop admitting lookups even if closing the listener fails.
+            media_server_links = sys.modules.get("media_servers.links")
+            if media_server_links:
+                try:
+                    media_server_links.shutdown()
+                except Exception:
+                    pass
         # Translator workers run in processes of their own. Nothing to end, and nothing to import, when the
         # translation runtime was never bound to them.
         translator_binding = sys.modules.get("subtitles.tools.translate.runtime.worker_binding")
