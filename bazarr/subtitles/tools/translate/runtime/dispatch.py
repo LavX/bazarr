@@ -479,14 +479,16 @@ class Dispatcher:
             except EngineDeclined as declined:
                 state.declines.append(declined.reason)
                 taken_over = chain[position + 1].instance.id if position + 1 < len(chain) else None
-                if taken_over is None and not jobs.fail(state.job_id, fail.DECLINED, "; ".join(state.declines),
-                                                       owner=state.owner):
-                    return DispatchOutcome("skipped", job_id=state.job_id)
-                history.note_declined(state.ledger_id, instance_id=chain[0].instance.id,
-                                      reason="; ".join(state.declines), taken_over_by=taken_over)
+                reason = "; ".join(state.declines)
+                with ledger_transaction(self.session):
+                    if taken_over is None and not jobs.fail(
+                            state.job_id, fail.DECLINED, reason, owner=state.owner):
+                        return DispatchOutcome("skipped", job_id=state.job_id)
+                    history.note_declined(state.ledger_id, instance_id=chain[0].instance.id,
+                                          reason=reason, taken_over_by=taken_over)
+                    if taken_over is None:
+                        history.finish_job(state.ledger_id, "declined", error_class=fail.DECLINED, error_detail=reason)
                 if taken_over is None:
-                    history.finish_job(state.ledger_id, "declined", error_class=fail.DECLINED,
-                                       error_detail="; ".join(state.declines))
                     raise Declined(state.declines) from None
                 continue
             except AttemptFailure as failure:

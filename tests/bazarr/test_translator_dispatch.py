@@ -265,6 +265,33 @@ def test_a_decline_without_a_fallback_ends_declined(env):
     assert env.history(env.last_job())["taken_over_by_instance_id"] is None
 
 
+def test_a_terminal_decline_history_fault_leaves_the_job_awaiting_retry(env, monkeypatch):
+    from subtitles.tools.translate.runtime.history import HistoryStore
+
+    env.engine(SECOND_PLUGIN)
+    env.scripts[SECOND_PLUGIN] = {"*": [decline()]}
+    note_declined = HistoryStore.note_declined
+
+    def fail_after_note(history, *args, **kwargs):
+        note_declined(history, *args, **kwargs)
+        raise RuntimeError("could not finish decline history")
+
+    with monkeypatch.context() as failed_history:
+        failed_history.setattr(HistoryStore, "note_declined", fail_after_note)
+        with pytest.raises(RuntimeError, match="could not finish decline history"):
+            env.dispatcher().run(make_spec())
+
+    job = env.last_job()
+    assert (job.state, job.error_class) == ("awaiting_retry", "internal")
+    history = env.history(job)
+    assert history["status"] == "awaiting_retry" and history["declined_reason"] is None
+
+    env.scripts[SECOND_PLUGIN] = {}
+    output = env.dispatcher().run(make_spec())
+    output.complete()
+    assert (env.last_job().id, env.last_job().state) == (job.id, "completed")
+
+
 def test_a_fallback_that_is_not_configured_is_skipped_with_a_notice(env):
     env.engine(SECOND_PLUGIN)
     fallback = env.engine(PLUGIN, select=False)
