@@ -65,6 +65,20 @@ A restore refused before `pg_restore` was ever started is a different thing and 
 tools, no database name configured and an unparseable connection URL all stop the restore before the
 database is touched, and the log says nothing was changed and names what to fix.
 
+### Recover an interrupted restore
+
+Keep the effective database destination the same until Bazarr finishes restarting and applying the
+backup's plugin files. If startup cannot verify the recorded database, restore the original connection
+settings, including environment overrides, and start Bazarr again. The staged files remain available.
+
+If Bazarr stops while the database restore is in progress, it keeps `.restore-journal.json`, the dump,
+the staged configuration, and any staged plugin data. It cannot tell whether the restore command completed,
+so startup waits for recovery. Before editing the journal, make sure the original restore process has exited.
+Verify that the database restore completed on the original database, or restore that database manually from
+the retained dump. Then set only the journal's `phase` to `database-complete` and start Bazarr with the
+original database settings. Bazarr checks the destination again before installing the configuration and
+applying plugin files.
+
 ## Backups do not cross engines
 
 An archive made on SQLite cannot be restored into a PostgreSQL instance, or the other way round: the dump

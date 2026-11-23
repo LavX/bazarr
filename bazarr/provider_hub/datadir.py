@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import contextlib
+import errno
 import hashlib
 import json
 import logging
@@ -421,6 +422,41 @@ def _checked_directory(path: Path) -> bool:
     return path.is_dir()
 
 
+def sync_file(path: Path) -> None:
+    # Windows flushes a file through a handle opened with write access.
+    with path.open("rb+" if os.name == "nt" else "rb") as stream:
+        os.fsync(stream.fileno())
+
+
+def sync_directory(path: Path) -> None:
+    if not hasattr(os, "O_DIRECTORY"):
+        return  # Windows does not support directory fsync through os.open.
+    fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(fd)
+    except OSError as error:
+        if error.errno not in (errno.EINVAL, errno.ENOTSUP):
+            raise
+    finally:
+        os.close(fd)
+
+
+def sync_tree(root: Path) -> None:
+    def cannot_walk(error):
+        raise error
+
+    for directory, _, files in os.walk(root, topdown=False, onerror=cannot_walk):
+        path = Path(directory)
+        for name in files:
+            sync_file(path / name)
+        sync_directory(path)
+
+
+def _sync_swap(target, stage):
+    sync_directory(stage)
+    sync_directory(target.parent)
+
+
 def _recover_restore_folder(target: Path, stage: Path) -> None:
     """Restore the original before clearing the journal for an unfinished swap."""
     if not _checked_directory(stage):
@@ -431,10 +467,14 @@ def _recover_restore_folder(target: Path, stage: Path) -> None:
             if _checked_directory(replacement):
                 raise DataFolderError("Both an original and an unexpected destination are present")
             target.rename(replacement)
+            _sync_swap(target, stage)
         old.rename(target)
+        _sync_swap(target, stage)
     elif (stage / "absent").is_file() and not _checked_directory(replacement) and _checked_directory(target):
         target.rename(replacement)
+        _sync_swap(target, stage)
     remove(stage)
+    sync_directory(target.parent)
 
 
 def restore_backup(source: Path, root: Path) -> None:
@@ -473,10 +513,17 @@ def restore_backup(source: Path, root: Path) -> None:
                     raise DataFolderError("A data folder in the backup is missing")
                 if not _checked_directory(target):
                     (stage / "absent").touch()
+                sync_tree(stage)
+                for directory in (target.parent, *target.parent.parents):
+                    sync_directory(directory)
+                    if directory == root.parent:
+                        break
             for _, target, stage in folders:
                 if _checked_directory(target):
                     target.rename(stage / "old")
+                    _sync_swap(target, stage)
                 (stage / "new").rename(target)
+                _sync_swap(target, stage)
         except BaseException:
             for _, target, stage in reversed(folders):
                 try:
@@ -487,6 +534,8 @@ def restore_backup(source: Path, root: Path) -> None:
         # Once written, the marker decides the retry. An interruption in or
         # after this step must not undo swaps that may already be committed.
         committed.touch(exist_ok=False)
+    sync_file(committed)
+    sync_directory(source)
     for _, _, stage in folders:
         if _checked_directory(stage):
             remove(stage)

@@ -374,6 +374,7 @@ def test_sqlite_restore_replaces_config_and_database(backup_env, monkeypatch):
     assert backup_env.restarts == [True]
     assert backup_env.stops == []
     assert _read_marker_database(backup_env.config_dir / 'db' / 'bazarr.db') == 'restored'
+    backup_env.module.apply_pending_plugin_restore()
     assert os.listdir(backup_env.restore_dir) == []
 
 
@@ -582,10 +583,51 @@ def test_a_dump_that_cannot_be_moved_aside_keeps_the_whole_staged_backup(backup_
     assert backup_env.restarts == []
     assert MID_RESTORE_WORDING in caplog.text
     assert 'could not be moved aside' in caplog.text
-    assert 'the next start will try this restore again' in caplog.text
-    # The whole staged set survives, so the next start can finish the job and
-    # nothing deletes the dump the message points at.
-    assert sorted(os.listdir(backup_env.restore_dir)) == ['bazarr_postgres.dump', 'config.yaml']
+    assert 'The restore will need manual recovery' in caplog.text
+    assert set(os.listdir(backup_env.restore_dir)) == {
+        backup_env.module._RESTORE_HANDOFF, 'bazarr_postgres.dump', 'config.yaml',
+    }
+
+
+def test_interruption_after_pg_restore_returns_does_not_replay_the_command(backup_env, monkeypatch, caplog):
+    import json
+
+    _enable_postgresql(backup_env, monkeypatch)
+    backup = backup_env.module
+    log = _write_fake_tool(str(backup_env.tools_dir), 'pg_restore')
+    _stage_restore(backup_env, 'bazarr_postgres.dump')
+    journal = backup_env.restore_dir / backup._RESTORE_HANDOFF
+    original_write = backup._write_restore_journal
+    with monkeypatch.context() as interrupted:
+        def write(path, record):
+            if record['phase'] == backup._DATABASE_COMPLETE:
+                raise SystemExit(41)
+            original_write(path, record)
+
+        interrupted.setattr(backup, '_write_restore_journal', write)
+        with pytest.raises(SystemExit):
+            backup.restore_from_backup()
+
+    record = json.loads(journal.read_text(encoding='ascii'))
+    assert record['phase'] == backup._DATABASE_STARTED
+    assert 'sekrit' not in journal.read_text(encoding='ascii')
+    assert 'bazarr_user' not in journal.read_text(encoding='ascii')
+    assert (backup_env.restore_dir / 'bazarr_postgres.dump').is_file()
+    assert (backup_env.config_dir / 'config' / 'config.yaml.restore').is_file()
+    assert not backup.restore_from_backup()
+    assert backup_env.stops == [backup.EXIT_RESTORE_ERROR]
+    assert 'will not be replayed automatically' in caplog.text
+    with open(log, encoding='utf-8') as handle:
+        assert handle.read().count('ARGV') == 1
+
+    # The operator has verified that the restore completed on the original database.
+    record['phase'] = backup._DATABASE_COMPLETE
+    original_write(journal, record)
+    assert backup.restore_from_backup()
+    backup.apply_pending_plugin_restore()
+    assert not journal.exists()
+    with open(log, encoding='utf-8') as handle:
+        assert handle.read().count('ARGV') == 1
 
 
 def test_a_failing_pg_restore_says_the_database_may_be_half_restored(backup_env, monkeypatch, caplog):
@@ -1222,6 +1264,13 @@ class _Refused(Exception):
 
 def _driver(opened, refuse=False):
     class _Connection:
+        def cursor(self):
+            from unittest.mock import MagicMock
+
+            cursor = MagicMock()
+            cursor.__enter__.return_value.fetchone.return_value = ('bazarr', 1, '127.0.0.1', 5432, '5432', 'public')
+            return cursor
+
         def close(self):
             pass
 
@@ -1529,6 +1578,14 @@ def test_restore_distinguishes_an_omitted_data_folder_from_an_empty_one(
     assert after.exists() is busy
 
 
+def _ready_folder_restore(backup_env):
+    backup = backup_env.module
+    backup._write_restore_journal(backup_env.restore_dir / backup._RESTORE_HANDOFF, {
+        'phase': backup._DATA_READY, 'has_data': True,
+        'destination': backup._restore_destination(), 'server': None,
+    })
+
+
 @pytest.mark.parametrize("unrecognized", [True, False])
 def test_a_failed_plugin_restore_keeps_the_pending_input_and_all_original_folders(
         backup_env, monkeypatch, tmp_path, unrecognized):
@@ -1556,6 +1613,7 @@ def test_a_failed_plugin_restore_keeps_the_pending_input_and_all_original_folder
         (source / "sample").write_text(f"{plugin_id} backup")
     state_path.write_text(json.dumps({"installations": inventory}))
     monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(state_path))
+    _ready_folder_restore(backup_env)
 
     def rename(path, target):
         if path.name == "new" and target.name == "b" * 32:
@@ -1612,9 +1670,9 @@ def test_plugin_restore_retries_the_handoff_without_restoring_sqlite_twice(
         restores = []
         restore_database = backup_env.module._restore_database
 
-        def restore_once(source, destination):
+        def restore_once(source, destination, before_restore):
             restores.append(True)
-            return restore_database(source, destination)
+            return restore_database(source, destination, before_restore)
 
         monkeypatch.setattr(backup_env.module, "_restore_database", restore_once)
         with monkeypatch.context() as interrupted:
@@ -1682,6 +1740,7 @@ def test_a_failed_rollback_rename_leaves_the_original_for_the_next_start(backup_
         "active_version": "1.0.0", "active_data_key": key,
         "manifest": service_manifest(plugin_id, permissions=["data_dir"])}}}))
     monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(state_path))
+    _ready_folder_restore(backup_env)
 
     path_rename = Path.rename
     with monkeypatch.context() as failure:
@@ -1703,7 +1762,9 @@ def test_a_failed_rollback_rename_leaves_the_original_for_the_next_start(backup_
     assert not source.exists()
 
 
-def test_interrupting_plugin_restore_after_commit_keeps_the_new_folder(backup_env, monkeypatch, tmp_path):
+@pytest.mark.parametrize('after_pending_rename', [False, True])
+def test_interrupting_plugin_restore_after_commit_keeps_the_new_folder(
+        backup_env, monkeypatch, tmp_path, after_pending_rename):
     import json
     from pathlib import Path
 
@@ -1724,6 +1785,7 @@ def test_interrupting_plugin_restore_after_commit_keeps_the_new_folder(backup_en
         "active_version": "1.0.0", "active_data_key": key,
         "manifest": service_manifest("alpha", permissions=["data_dir"])}}}))
     monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(state_path))
+    _ready_folder_restore(backup_env)
     real_touch = Path.touch
 
     with monkeypatch.context() as interruption:
@@ -1732,7 +1794,13 @@ def test_interrupting_plugin_restore_after_commit_keeps_the_new_folder(backup_en
             if path.name == datadir.RESTORE_APPLIED_MARKER:
                 raise SystemExit(41)
 
-        interruption.setattr(Path, "touch", interrupt_after_touch)
+        def exit_before_journal_cleanup(path):
+            raise SystemExit(41)
+
+        if after_pending_rename:
+            interruption.setattr(backup_env.module, "_finish_restore_journal", exit_before_journal_cleanup)
+        else:
+            interruption.setattr(Path, "touch", interrupt_after_touch)
         with pytest.raises(SystemExit):
             backup_env.module.apply_pending_plugin_restore()
     assert (target / "sample").read_text() == "restored"
@@ -1764,6 +1832,7 @@ def test_pending_plugin_restore_waits_for_the_previous_worker(backup_env, monkey
         "active_version": "1.0.0", "active_data_key": key,
         "manifest": service_manifest("alpha", permissions=["data_dir"])}}}))
     monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(state_path))
+    _ready_folder_restore(backup_env)
 
     monkeypatch.setattr("provider_hub.sandbox.sweep.previous_workers_stopped", lambda config: False)
     backup_env.module.apply_pending_plugin_restore()

@@ -635,6 +635,47 @@ def test_posix_interruption_after_the_child_starts_never_reaches_plugin_code(mon
         activity.forget(process)
 
 
+def test_posix_interruption_after_acknowledgement_drains_the_group(monkeypatch, tmp_path):
+    import os
+    import subprocess
+
+    from provider_hub.sandbox import activity, spawn
+
+    if not hasattr(os, "killpg"):
+        pytest.skip("requires POSIX process groups")
+    monkeypatch.setattr(activity, "_root", activity._directory(tmp_path))
+    sample = tmp_path / "worker.started"
+    command = [sys.executable, "-c", "from pathlib import Path; import sys, time; "
+               "Path(sys.argv[1]).touch(); time.sleep(30)", str(sample)]
+    processes = []
+
+    class RecordingWorker(spawn.WorkerProcess):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            processes.append(self)
+
+    original_write = os.write
+
+    def interrupt_after_acknowledgement(fd, data):
+        result = original_write(fd, data)
+        if data == b"1":
+            deadline = time.monotonic() + 5
+            while not sample.is_file() and time.monotonic() < deadline:
+                time.sleep(0.02)
+            assert sample.is_file()
+            raise SystemExit(41)
+        return result
+
+    monkeypatch.setattr(spawn, "WorkerProcess", RecordingWorker)
+    monkeypatch.setattr(os, "write", interrupt_after_acknowledgement)
+    with pytest.raises(SystemExit):
+        spawn._start_plain(command, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    [process] = processes
+    assert process.wait(timeout=5) != 0
+    monkeypatch.setattr(activity, "_owner", "second-run")
+    assert activity.previous_workers_stopped(tmp_path)
+
+
 @pytest.mark.parametrize("platform", ["win32", "darwin"])
 def test_provider_probe_uses_the_registered_worker_path_without_a_provider_id(monkeypatch, tmp_path, platform):
     from types import SimpleNamespace
