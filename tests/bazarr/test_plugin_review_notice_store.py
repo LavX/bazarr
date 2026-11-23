@@ -6,7 +6,9 @@ from unittest.mock import Mock
 import pytest
 
 import provider_hub_state_engines as engines
+from plugin_platform_helpers import provider_manifest_v2, service_manifest, verified_official_source
 from provider_hub_state_engines import raw_row
+from test_provider_hub import _provider_zip
 
 hub_engine = engines.hub_engine
 hub_store = engines.hub_store
@@ -73,14 +75,24 @@ def _stage_row(plugin_id, **row):
                      **row}}))
 
 
-@pytest.mark.parametrize("plugin_kind", ["subtitle_provider", "translator", "service"])
-@pytest.mark.parametrize("claim", ["same_owner", "other_source", "upload", "other_kind"])
+@pytest.mark.parametrize(("plugin_kind", "incoming_kind", "source", "reclaims"), [
+    pytest.param("subtitle_provider", "subtitle_provider", "official", True, id="provider-same-owner"),
+    pytest.param("translator", "translator", "official", True, id="translator-same-owner"),
+    pytest.param("service", "service", "official", True, id="service-same-owner"),
+    pytest.param("subtitle_provider", "subtitle_provider", "community", False, id="provider-other-source"),
+    pytest.param("subtitle_provider", "subtitle_provider", None, False, id="provider-upload"),
+    pytest.param("translator", "subtitle_provider", None, False, id="translator-provider-upload"),
+    pytest.param("service", "subtitle_provider", None, False, id="service-provider-upload"),
+    pytest.param("subtitle_provider", "service", "official", False, id="provider-to-service"),
+    pytest.param("translator", "service", "official", False, id="translator-to-service"),
+    pytest.param("service", "translator", "official", False, id="service-to-translator"),
+])
 def test_kept_data_goes_back_only_to_the_same_plugin_from_the_same_source_and_kind(
-        hub_store, hub_engine, monkeypatch, tmp_path, plugin_kind, claim):
+        hub_store, hub_engine, monkeypatch, tmp_path, plugin_kind, incoming_kind, source, reclaims):
     from compat import service as compat_service
-    from provider_hub import datadir, detach, kinds, leases, registry, service
+    from provider_hub import consent, datadir, detach, kinds, leases, registry, service
     from provider_hub.kinds import subtitle_provider, translator
-    from provider_hub.kinds.service import ServiceKind
+    from provider_hub.kinds.service import SERVICE_KIND_API, ServiceKind
     from provider_hub.state import load_state, mutate_state
     from subtitles.tools.translate.runtime import worker_binding
 
@@ -94,12 +106,14 @@ def test_kept_data_goes_back_only_to_the_same_plugin_from_the_same_source_and_ki
     monkeypatch.setattr(compat_service, "reset_compat_pool", lambda: None)
     monkeypatch.setattr(leases, "detach_service", lambda plugin_id: [])
     monkeypatch.setattr(translator, "_store", lambda: SimpleNamespace(
-        release_plugin=lambda plugin_id: SimpleNamespace(notices=[]), delete_plugin_data=lambda plugin_id: None))
+        release_plugin=lambda plugin_id: SimpleNamespace(notices=[]), delete_plugin_data=lambda plugin_id: None,
+        ensure_instance=lambda plugin_id: None))
     for name in ("plugin_changed", "plugin_kept", "plugin_installed", "discard_folders"):
         monkeypatch.setattr(worker_binding, name, lambda plugin_id: None)
     monkeypatch.setattr(worker_binding, "plugin_detached", lambda plugin_id, grace: [])
     monkeypatch.setattr(worker_binding, "sweep_removed_plugins", lambda: None)
     monkeypatch.setattr(detach, "snapshot_workers", lambda plugin_id: [])
+    monkeypatch.setattr(service, "_previous_workers_stopped", lambda: True)
     hooks = {
         "subtitle_provider": subtitle_provider.SubtitleProviderKind(),
         "translator": translator.TranslatorKind(), "service": ServiceKind(),
@@ -136,26 +150,75 @@ def test_kept_data_goes_back_only_to_the_same_plugin_from_the_same_source_and_ki
     assert not active.exists()
     assert marker.read_text() == "saved state"
 
-    source = "community" if claim == "other_source" else None if claim == "upload" else "official"
-    incoming_kind = ("translator" if plugin_kind == "service" else "service") if claim == "other_kind" else plugin_kind
-    origin = "local" if claim == "upload" else "catalog"
-    _stage_row("engine", kind=incoming_kind, source_id=source, origin=origin)
+    env_path = tmp_path / "envs" / "fixture"
+    interpreter = service.python_executable(env_path)
+    interpreter.parent.mkdir(parents=True)
+    interpreter.touch()
+    monkeypatch.setattr(service.PluginEnvironment, "install", lambda *args, **kwargs: env_path)
+    monkeypatch.setattr(service, "_smoke_validate_worker", lambda *args, **kwargs: None)
+    monkeypatch.setattr(worker_binding.TranslatorWorkers, "smoke", lambda *args, **kwargs: None)
+    monkeypatch.setattr(consent, "sandbox_status", lambda: {})
 
-    assert service.claim_kept_data("engine", source, incoming_kind, origin) is (claim == "same_owner")
+    version = "2.0.0"
+    if incoming_kind == "subtitle_provider":
+        files = {"provider.py": b"class ExampleProvider: pass\n"}
+        incoming = provider_manifest_v2("engine", version, permissions=["data_dir"], file_payloads=files)
+    else:
+        files = {"service.py": b"class Service: pass\n"}
+        contract = (
+            {"kind_api": translator.TRANSLATOR_KIND_API, "settings_version": 1, "settings": {"fields": []}}
+            if incoming_kind == "translator" else {"kind_api": SERVICE_KIND_API, "provides": ["engine.v1"]}
+        )
+        incoming = service_manifest("engine", version, kind=incoming_kind, permissions=["data_dir"],
+                                    file_payloads=files, **contract)
 
-    state = load_state()
-    if claim == "same_owner":
+    if source is None:
+        result = service.stage_install_local(_provider_zip(incoming, files))
+    else:
+        # Seed the cached catalog entry as a refresh leaves it and serve its bundle files offline.
+        trusted = source == "official"
+        catalog_source = verified_official_source() if trusted else {
+            "id": source, "name": "Community", "type": "github", "enabled": True, "trusted": False,
+        }
+        source_name = catalog_source["name"]
+        entry = {"source": source, "source_name": source_name, "provider_id": "engine", "name": incoming["name"],
+                 "version": version, "trusted": trusted, "manifest": incoming, "catalog_list": "plugins"}
+
+        def seed_catalog(state):
+            state["catalog_sources"][source] = catalog_source
+            state["catalog_entries"][f"{source_name}:plugins:engine:{version}"] = entry
+
+        mutate_state(seed_catalog)
+        monkeypatch.setattr(service, "_fetch_github_bundle_file",
+                            lambda validated, path, **kwargs: files[path])
+        digest = service.install_consent(source, "engine", version, catalog_list="plugins")["digest"]
+        result = service.install_catalog_entry(source, "engine", version, consent_digest=digest)
+
+    staged = load_state()["installations"]["engine"]
+    assert result["state"] == staged["state"] == "staged"
+    assert staged["staged_version"] == version
+    assert staged["kind"] == incoming_kind
+    assert staged["origin"] == ("local" if source is None else "catalog")
+    assert staged["source_id"] == source
+    staged_dir = datadir.release_path(tmp_path, "engine", staged["staged_data_key"])
+    assert staged_dir != active
+    staged_marker = staged_dir / marker.name
+    stored = json.loads(raw_row(hub_engine)[1])
+    saved_config = stored["installations"]["engine"]["config"]
+    if reclaims:
         kind.discard_kept_data.assert_not_called()
         kind.kept_data_reclaimed.assert_called_once_with("engine")
-        assert state["kept_data"]["engine"] == {**owner, "config": None}
-        assert state["installations"]["engine"]["config"] == {"region": "eu"}
+        assert stored["kept_data"]["engine"] == {**owner, "config": None}
+        assert saved_config == owner["config"]
         assert marker.read_text() == "saved state"
+        assert staged_marker.read_text() == "saved state"
     else:
         kind.discard_kept_data.assert_called_once_with("engine")
         kind.kept_data_reclaimed.assert_not_called()
-        assert "engine" not in state["kept_data"]
-        assert not state["installations"]["engine"].get("config")
+        assert "engine" not in stored["kept_data"]
+        assert saved_config == {}
         assert not retained.exists()
+        assert staged_dir.is_dir() and not staged_marker.exists()
     for name, hook in hooks.items():
         if name != plugin_kind:
             for method in observed_hooks:
