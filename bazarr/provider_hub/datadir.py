@@ -48,6 +48,10 @@ class SnapshotBusy(SnapshotRefused):
     """Contention or a time or work limit deferred a snapshot."""
 
 
+class ProbeWorkerUnconfirmed(RuntimeError):
+    """The probe still owns its temporary files because its worker stop is unconfirmed."""
+
+
 class _ProbeCopyBudget:
     def __init__(self, deadline: float):
         self.deadline = deadline
@@ -407,10 +411,12 @@ def _probe_root(root: Path) -> Path:
     return directory
 
 
-def probe_workspace(root: Path) -> tempfile.TemporaryDirectory:
+def probe_workspace(root: Path) -> Path:
     directory = _probe_root(root)
     directory.mkdir(mode=0o700, exist_ok=True)
-    return tempfile.TemporaryDirectory(prefix=_PROBE_PREFIX, dir=directory)
+    # A probe may outlive the request that created it. Its cleanup owner must
+    # explicitly confirm worker exit before removing this directory.
+    return Path(tempfile.mkdtemp(prefix=_PROBE_PREFIX, dir=directory))
 
 
 def cleanup_probe_workspaces(root: Path, workers_stopped) -> None:

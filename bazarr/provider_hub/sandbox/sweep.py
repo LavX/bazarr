@@ -158,69 +158,76 @@ def _write_uncertainty_marker(directory, boot) -> None:
             os.unlink(_UNCERTAINTY_FILE + ".unknown", dir_fd=directory)
 
 
-def _persist_uncertainty(instance, config_dir) -> None:
-    if config_dir is None or instance in _previous_worker_persisted:
-        return
+def _persist_uncertainty(instance, config_dir) -> bool:
+    if config_dir is None:
+        return False
+    with _previous_worker_lock:
+        if instance in _previous_worker_persisted:
+            return True
     try:
         with _uncertainty_directory(config_dir, create=True) as directory:
             boot = _boot_identity()
             _write_uncertainty_marker(directory, boot)
-        if boot is not None:
-            _previous_worker_persisted.add(instance)
     except OSError:
         logger.exception("Provider Hub: could not persist previous worker shutdown uncertainty")
+        return False
+    if boot is not None:
+        with _previous_worker_lock:
+            _previous_worker_persisted.add(instance)
+    return True
 
 
-def _remember_unproven_tree(instance: str, config_dir=None) -> None:
+def _remember_unproven_tree(instance: str, config_dir=None) -> bool:
     with _previous_worker_lock:
         first = instance not in _previous_worker_uncertainty
         _previous_worker_uncertainty.add(instance)
-        _persist_uncertainty(instance, config_dir)
     if first:
         logger.warning("Provider Hub: a previous worker tree has no trusted cleanup confirmation. "
                        "Plugin data snapshots remain refused.")
+    return _persist_uncertainty(instance, config_dir)
 
 
-def _has_unproven_tree(instance: str, config_dir=None) -> bool:
+def _has_unproven_tree(instance: str, config_dir=None, *, read_only=False) -> bool:
     with _previous_worker_lock:
-        if instance in _previous_worker_uncertainty:
+        remembered = instance in _previous_worker_uncertainty
+    if remembered:
+        if not read_only:
             _persist_uncertainty(instance, config_dir)
-            return True
-        if config_dir is None:
-            return False
-        try:
-            with _uncertainty_directory(config_dir) as directory:
-                boot = _boot_identity()
-                stale = []
-                with os.scandir(directory) as entries:
-                    for index, entry in enumerate(entries):
-                        if index >= 256:
-                            raise OSError("Worker shutdown state listing exceeded its limit")
-                        if not entry.name.startswith(_UNCERTAINTY_FILE):
-                            continue
-                        previous_boot = entry.name.removeprefix(_UNCERTAINTY_FILE + ".")
-                        if previous_boot == "unknown" and boot is not None:
-                            # Keep refusing on this boot. Recording its identity
-                            # lets the next verified reboot clear the refusal.
-                            _write_uncertainty_marker(directory, boot)
-                            _previous_worker_uncertainty.add(instance)
-                            _previous_worker_persisted.add(instance)
-                            return True
-                        if not _BOOT_ID.fullmatch(previous_boot) or boot is None:
-                            return True
-                        if previous_boot == boot:
-                            _previous_worker_uncertainty.add(instance)
-                            _previous_worker_persisted.add(instance)
-                            return True
-                        stale.append(entry.name)
+        return True
+    if config_dir is None:
+        return False
+    try:
+        with _uncertainty_directory(config_dir) as directory:
+            boot = _boot_identity()
+            stale = []
+            with os.scandir(directory) as entries:
+                for index, entry in enumerate(entries):
+                    if index >= 256:
+                        raise OSError("Worker shutdown state listing exceeded its limit")
+                    if not entry.name.startswith(_UNCERTAINTY_FILE):
+                        continue
+                    previous_boot = entry.name.removeprefix(_UNCERTAINTY_FILE + ".")
+                    if previous_boot == "unknown" and boot is not None:
+                        if not read_only:
+                            _remember_unproven_tree(instance, config_dir)
+                        return True
+                    if not _BOOT_ID.fullmatch(previous_boot) or boot is None:
+                        return True
+                    if previous_boot == boot:
+                        # Finding a directory entry proves uncertainty, not that
+                        # a concurrent marker write has finished persisting it.
+                        _remember_unproven_tree(instance)
+                        return True
+                    stale.append(entry.name)
+            if not read_only:
                 for name in stale:
-                    os.unlink(name, dir_fd=directory)
-                _previous_worker_persisted.discard(instance)
-                return False
-        except FileNotFoundError:
+                    with contextlib.suppress(FileNotFoundError):
+                        os.unlink(name, dir_fd=directory)
             return False
-        except (OSError, UnicodeError):
-            return True
+    except FileNotFoundError:
+        return False
+    except (OSError, UnicodeError):
+        return True
 
 
 @dataclass(frozen=True)
@@ -530,14 +537,14 @@ def _scan(instance: str, deadline: float, result: SweepResult, config_dir=None) 
         if not _ours(pid, my_euid):
             continue
         if not _same_pid_namespace(pid):
-            _track_writer_launcher(entry, instance, result, config_dir)
+            _track_writer_launcher(entry, instance, result)
             continue
         unreadable = False
         try:
             value = _bound_marker(entry)
         except PermissionError:
             unreadable, value = True, None
-        if value is None and _track_writer_launcher(entry, instance, result, config_dir):
+        if value is None and _track_writer_launcher(entry, instance, result):
             continue
         if unreadable:
             result.unreadable += 1
@@ -547,7 +554,7 @@ def _scan(instance: str, deadline: float, result: SweepResult, config_dir=None) 
         parsed = _parse_marker(value)
         if parsed is None or parsed[0] != instance:
             continue
-        _remember_unproven_tree(instance, config_dir)
+        _remember_unproven_tree(instance)
         sessions.setdefault(entry.session, _Session(entry.session)).marked[pid] = value
     if time.monotonic() > deadline:
         result.truncated = True
@@ -572,7 +579,7 @@ def _launcher_owner(args: list[str]) -> str | None:
     return args[-1][len(prefix):] if args[-1].startswith(prefix) else None
 
 
-def _track_writer_launcher(entry: _Proc, instance: str, result: SweepResult, config_dir=None) -> bool:
+def _track_writer_launcher(entry: _Proc, instance: str, result: SweepResult) -> bool:
     # A non-dumpable launcher can hide its namespace and environment, and
     # can still be exiting after its last child is gone. Its command line
     # can hold the data fence. Signalling still requires a marked child.
@@ -583,7 +590,7 @@ def _track_writer_launcher(entry: _Proc, instance: str, result: SweepResult, con
     parsed = _parse_marker(owner) if owner is not None else None
     if owner is None or (owner != spawn.owner_marker() and (parsed is None or parsed[0] == instance)):
         result.launchers[entry.pid] = entry.start
-        _remember_unproven_tree(instance, config_dir)
+        _remember_unproven_tree(instance)
     return True
 
 
@@ -792,8 +799,7 @@ def sweep_leftovers(
             result.supported = False
             result.reason = "no instance named"
             return result
-        _has_unproven_tree(instance, config_dir)
-        if not _has_proc():
+        if sys.platform != "linux" or not _has_proc():
             result.supported = False
             result.reason = "no /proc: leftover processes cannot be told from strangers"
             logger.debug("Provider Hub: leftover process sweep skipped: %s", result.reason)
@@ -808,14 +814,30 @@ def sweep_leftovers(
             result.reason = "no pidfd_open and pidfd_send_signal: a process cannot be pinned before it is signalled"
             logger.debug("Provider Hub: leftover process sweep skipped: %s", result.reason)
             return result
+        read_only = deadline is not None
+        if not read_only:
+            _has_unproven_tree(instance, config_dir)
         scan_deadline = time.monotonic() + SCAN_BUDGET_SECONDS
         if deadline is not None:
             scan_deadline = min(scan_deadline, deadline)
         found, _ = _scan(instance, scan_deadline, result, config_dir)
         if result.truncated:
+            if not read_only:
+                _has_unproven_tree(instance, config_dir)
             result.reason = "the /proc scan was partial, so nothing was signalled"
             logger.warning("Provider Hub: %s", result.reason)
             return result
+        if found or result.launchers:
+            if read_only:
+                result.reason = "previous workers are still observed"
+            elif config_dir is not None and not _remember_unproven_tree(instance, config_dir):
+                # Leave the observed workers available to the next scan unless
+                # their uncertainty has been recorded across a host restart.
+                result.reason = "previous worker uncertainty could not be saved"
+            if result.reason:
+                for number, item in sorted(found.items()):
+                    result.sessions.append(SweptSession(number, tuple(sorted(item.members)), "refused", result.reason))
+                return result
         me, my_session, my_group, my_euid = os.getpid(), os.getsid(0), os.getpgrp(), os.geteuid()
         for number in sorted(found):
             item = found[number]
@@ -854,15 +876,19 @@ def previous_workers_stopped(config_dir, *, deadline: float | None = None) -> bo
     if sys.platform != "linux":
         return activity.previous_workers_stopped(config_dir, deadline=deadline)
     instance = instance_key(config_dir)
-    if _has_unproven_tree(instance, config_dir):
+    if deadline is not None and time.monotonic() >= deadline:
+        return False
+    read_only = deadline is not None
+    if _has_unproven_tree(instance, config_dir, read_only=read_only):
         return False
     result = sweep_leftovers(config_dir, verify_writers=True, deadline=deadline)
     if result.launchers or result.sessions:
-        _remember_unproven_tree(instance, config_dir)
-    if (not result.supported or result.truncated or result.unreadable
-            or _has_unproven_tree(instance)):
+        _remember_unproven_tree(instance, None if read_only else config_dir)
         return False
-    return deadline is None or time.monotonic() < deadline
+    if not result.supported or result.truncated or result.unreadable:
+        return False
+    with _previous_worker_lock:
+        return instance not in _previous_worker_uncertainty and (deadline is None or time.monotonic() < deadline)
 
 
 _sweep_thread: "threading.Thread | None" = None

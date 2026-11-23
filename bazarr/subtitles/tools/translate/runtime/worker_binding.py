@@ -319,8 +319,9 @@ class TranslatorWorkers:
 
     def smoke(self, validated, bundle: Path, interpreter: Path, data: Path, timeout: float | None) -> None:
         """Run the normal translator handshake in the staged release's private data tree."""
-        from tempfile import TemporaryDirectory
+        from tempfile import mkdtemp
 
+        from provider_hub import datadir
         from provider_hub.runtime.pool import WorkerPool, launcher_spawn
         from provider_hub.runtime.session import SessionLimits, WorkerSession
 
@@ -328,19 +329,25 @@ class TranslatorWorkers:
         entry = f"{manifest['entry_module']}:{manifest['entry_class']}"
         resolved = Resolved(validated.provider_id, interpreter, bundle, entry, manifest)
         ports = self._fixed_ports(manifest) - set(self._reserved_ports())
-        with TemporaryDirectory(prefix=".smoke-", dir=data.parent) as temporary:
-            spawn = launcher_spawn(lambda: self._worker_spec(resolved, data, Path(temporary), ports),
+        temporary = Path(mkdtemp(prefix=".smoke-", dir=data.parent))
+        session = None
+        try:
+            spawn = launcher_spawn(lambda: self._worker_spec(resolved, data, temporary, ports),
                                    probe=self._probe, require_sandbox=self._require_sandbox)
             limits = SessionLimits() if timeout is None else SessionLimits(handshake_timeout=timeout)
             session = WorkerSession(spawn=spawn, kind=KIND, limits=limits, name=validated.provider_id)
+            session.start()
+        finally:
             try:
-                session.start()
+                if session is not None:
+                    session.close()
             finally:
-                session.close()
-            process = session.process
-            if (process.returncode is None or not session.teardown_confirmed
-                    or not WorkerPool._cleanup_confirmed(process)):
-                raise RuntimeError("The translator check could not stop every process using plugin data")
+                process = session.process if session is not None else None
+                if process is not None and (process.returncode is None or not session.teardown_confirmed
+                                            or not WorkerPool._cleanup_confirmed(process)):
+                    raise datadir.ProbeWorkerUnconfirmed(
+                        "The translator check could not stop every process using plugin data")
+                datadir.remove(temporary)
 
 
 # ------------------------------------------------------------------------------------------------ real sources

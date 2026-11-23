@@ -2361,23 +2361,66 @@ def test_connection_probe_deadline_does_not_wait_for_worker_startup(isolated_pro
     assert service.test_provider_connection(plugin_id)["status"] == "ready"
 
 
+def test_connection_probe_keeps_files_after_unconfirmed_cleanup(isolated_probe_release, monkeypatch):
+    import gc
+    from threading import Event
+    from types import SimpleNamespace
+
+    from provider_hub import datadir, worker
+    from provider_hub.worker import ProviderWorkerClient
+
+    service, plugin_id, active, _, _ = isolated_probe_release
+    watcher_finished = Event()
+    probe_folders = []
+    wait_until_gone = worker._wait_until_gone
+
+    def watch(*args):
+        try:
+            wait_until_gone(*args)
+        finally:
+            watcher_finished.set()
+
+    class ProbeClient(ProviderWorkerClient):
+        def _request(self, *args):
+            probe_folders.append(Path(self.env["BAZARR_PLUGIN_DATA_DIR"]))
+            return SimpleNamespace(payload={})
+
+        def stop(self):
+            pass
+
+        def launcher_cleanup_state(self):
+            return "unconfirmed"
+
+    monkeypatch.setattr(service, "ProviderWorkerClient", ProbeClient)
+    monkeypatch.setattr(service, "hold_environment", lambda path: lambda: None)
+    monkeypatch.setattr(worker, "_client_gone", lambda client, budget: False)
+    monkeypatch.setattr(worker, "_wait_until_gone", watch)
+    assert service.test_provider_connection(plugin_id)["ok"]
+    assert watcher_finished.wait(2)
+
+    gc.collect()
+    assert (probe_folders[0] / "settings").read_text() == "before request"
+    assert (active / "settings").read_text() == "before request"
+    datadir.cleanup_probe_workspaces(service.provider_hub_dir(), lambda: True)
+    assert not probe_folders[0].exists()
+
+
 def test_boot_cleans_only_owned_probe_workspaces(tmp_path):
     from provider_hub import datadir
 
     root = tmp_path / "provider_hub"
     root.mkdir()
-    with datadir.probe_workspace(root) as temporary:
-        abandoned = Path(temporary)
-        (abandoned / "data").mkdir()
-        other = abandoned.with_name("keep")
-        other.mkdir()
-        root_peer = root / ".probe-unrelated"
-        root_peer.mkdir()
-        datadir.cleanup_probe_workspaces(root, lambda: False)
-        assert abandoned.is_dir()
-        datadir.cleanup_probe_workspaces(root, lambda: True)
-        assert not abandoned.exists()
-        assert other.is_dir() and root_peer.is_dir()
+    abandoned = datadir.probe_workspace(root)
+    (abandoned / "data").mkdir()
+    other = abandoned.with_name("keep")
+    other.mkdir()
+    root_peer = root / ".probe-unrelated"
+    root_peer.mkdir()
+    datadir.cleanup_probe_workspaces(root, lambda: False)
+    assert abandoned.is_dir()
+    datadir.cleanup_probe_workspaces(root, lambda: True)
+    assert not abandoned.exists()
+    assert other.is_dir() and root_peer.is_dir()
 
 
 def test_connection_probe_without_data_can_use_the_remaining_health_time(
@@ -2504,6 +2547,48 @@ def test_startup_reconcile_keeps_its_environment_when_previous_worker_exit_is_un
     assert load_state()["installations"][plugin_id] == original
     assert load_state()["plugin_envs"] == {fingerprint: {"path": str(shared)}}
     assert (active / "settings").read_text() == "before request"
+
+
+def test_startup_probe_keeps_its_data_copy_after_unconfirmed_smoke(isolated_probe_release, monkeypatch):
+    import sys
+    from types import SimpleNamespace
+
+    from provider_hub import datadir
+    from provider_hub.state import load_state, mutate_state
+    from provider_hub.venv import environment_fingerprint
+    from provider_hub.worker import ProviderWorkerClient
+
+    service, plugin_id, active, _, _ = isolated_probe_release
+    original = load_state()["installations"][plugin_id]
+    own_environment = Path(original["python_path"]).parent.parent
+    (own_environment / "pyvenv.cfg").write_text(
+        f"version = {sys.version_info.major}.{sys.version_info.minor}.0\n")
+    validated = service.validate_manifest(original["manifest"], built_in_provider_ids=set())
+    shared = service.provider_hub_dir() / "shared_envs" / "already-recorded"
+    (shared / "bin").mkdir(parents=True)
+    (shared / "bin" / "python").write_text("")
+    fingerprint = environment_fingerprint(validated)
+    mutate_state(lambda state: state["plugin_envs"].update({fingerprint: {"path": str(shared)}}))
+    folders = []
+
+    class SmokeClient(ProviderWorkerClient):
+        def _request(self, *args):
+            folders.append(Path(self.env["BAZARR_PLUGIN_DATA_DIR"]))
+            return SimpleNamespace(payload={})
+
+        def stop(self):
+            pass
+
+    monkeypatch.setattr(service, "ProviderWorkerClient", SmokeClient)
+    monkeypatch.setattr(service, "release_when_gone", lambda *args, **kwargs: False)
+    result = service.reconcile_plugin_environments()
+
+    assert result["kept"] == [plugin_id] and result["repointed"] == []
+    assert load_state()["installations"][plugin_id] == original
+    assert (folders[0] / "settings").read_text() == "before request"
+    assert (active / "settings").read_text() == "before request"
+    datadir.cleanup_probe_workspaces(service.provider_hub_dir(), lambda: True)
+    assert not folders[0].exists()
 
 
 def test_probe_timeout_keeps_dispatch_closed_until_the_actual_worker_stop_finishes(

@@ -1096,6 +1096,88 @@ def test_boot_sweep_remembers_a_previous_marked_tree_after_ending_scanned_member
     assert not sweep.previous_workers_stopped(config)
 
 
+def test_sweep_does_not_end_previous_workers_if_uncertainty_cannot_be_saved(tmp_path, monkeypatch):
+    config = tmp_path / "config"
+    marker = f"{sweep.instance_key(config)}:123:10"
+    entry = sweep._Proc(pid=321, state="S", ppid=1, pgrp=321, session=321, start="20")
+    monkeypatch.setattr(sweep, "_boot_identity", lambda: "11111111-1111-1111-1111-111111111111")
+    monkeypatch.setattr(sweep, "_has_proc", lambda: True)
+    monkeypatch.setattr(sweep, "_proc_is_ours", lambda: True)
+    monkeypatch.setattr(sweep, "_pidfd_available", lambda: True)
+    monkeypatch.setattr(sweep, "_list_pids", lambda: ([entry.pid], False))
+    monkeypatch.setattr(sweep, "_read_proc", lambda pid: entry)
+    monkeypatch.setattr(sweep, "_ours", lambda *args: True)
+    monkeypatch.setattr(sweep, "_same_pid_namespace", lambda pid: True)
+    monkeypatch.setattr(sweep, "_bound_marker", lambda proc: marker)
+    monkeypatch.setattr(sweep, "_refusal", lambda *args: None)
+    writes = []
+
+    def fail_write(*args):
+        writes.append(args)
+        raise OSError("disk unavailable")
+
+    monkeypatch.setattr(sweep, "_write_uncertainty_marker", fail_write)
+    monkeypatch.setattr(sweep, "_end", lambda *args: pytest.fail("prior worker ended without durable proof"))
+    assert sweep.sweep_leftovers(config).reason == "previous worker uncertainty could not be saved"
+    assert not sweep.previous_workers_stopped(config, deadline=time.monotonic() + 2)
+
+    # A process restart loses the in-memory fact. The surviving worker is
+    # still visible and the deadline-bound check performs no marker writes.
+    sweep._previous_worker_uncertainty.clear()
+    sweep._previous_worker_persisted.clear()
+    assert not sweep.previous_workers_stopped(config, deadline=time.monotonic() + 2)
+    assert len(writes) == 1
+
+
+def test_a_marker_fsync_does_not_block_another_configs_worker_proof(tmp_path, monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Event
+
+    writing, release = Event(), Event()
+    config = tmp_path / "first"
+    other = tmp_path / "second"
+    monkeypatch.setattr(sweep, "_boot_identity", lambda: "11111111-1111-1111-1111-111111111111")
+    monkeypatch.setattr(sweep, "_has_proc", lambda: True)
+    monkeypatch.setattr(sweep, "_proc_is_ours", lambda: True)
+    monkeypatch.setattr(sweep, "_pidfd_available", lambda: True)
+    monkeypatch.setattr(sweep, "_list_pids", lambda: ([], False))
+
+    def wait_to_write(*args):
+        writing.set()
+        assert release.wait(5)
+
+    monkeypatch.setattr(sweep, "_write_uncertainty_marker", wait_to_write)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        save = pool.submit(sweep._remember_unproven_tree, sweep.instance_key(config), config)
+        try:
+            assert writing.wait(2)
+            deadline = time.monotonic() + 2
+            check = pool.submit(sweep.previous_workers_stopped, other, deadline=deadline)
+            assert check.result(timeout=2)
+            check = pool.submit(sweep.previous_workers_stopped, config, deadline=deadline)
+            assert not check.result(timeout=2)
+        finally:
+            release.set()
+        assert save.result(timeout=2)
+
+
+def test_windows_startup_uses_native_activity_without_opening_linux_markers(tmp_path, monkeypatch):
+    config = tmp_path / "config"
+    calls = []
+
+    def native_proof(path, *, deadline=None):
+        calls.append((path, deadline))
+        return True
+
+    monkeypatch.setattr(sweep.sys, "platform", "win32")
+    monkeypatch.setattr(sweep, "_has_proc", lambda: pytest.fail("Linux process scan during Windows startup"))
+    monkeypatch.setattr(sweep, "_uncertainty_directory", lambda *args, **kwargs: pytest.fail("Linux marker read"))
+    monkeypatch.setattr(sweep.activity, "previous_workers_stopped", native_proof)
+    assert not sweep.sweep_leftovers(config).supported
+    assert sweep.previous_workers_stopped(config, deadline=10)
+    assert calls == [(config, 10)]
+
+
 @pytest.mark.parametrize("observed", ["launcher", "session"])
 def test_previous_tree_uncertainty_survives_a_host_process_restart(tmp_path, monkeypatch, observed):
     config = tmp_path / "config"

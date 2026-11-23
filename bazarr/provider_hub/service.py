@@ -3035,7 +3035,7 @@ def test_provider_connection(provider_id: str) -> dict[str, Any] | None:
             _remove_bundle_runtime_artifacts(bundle_path)
             verify_bundle_tree(manifest, bundle_path)
 
-            data = probe_files.enter_context(_probe_release_data(provider_id, provider, deadline=deadline))
+            data = _probe_release_data(provider_id, provider, probe_files, deadline=deadline)
             timeout = _snapshot_time_left(deadline)
             # A late data snapshot leaves too little time to judge worker health.
             if data is not None and timeout < PROBE_TIMEOUT / 2:
@@ -3637,7 +3637,7 @@ def _smoke_validate_worker(manifest, bundle_path: Path, python_path: Path, timeo
             else:
                 stopped = release_when_gone(client, release, "a health check")
                 if data_dir is not None and not stopped:
-                    raise ProviderHubInstallError("the health check could not stop every process using plugin data")
+                    raise datadir.ProbeWorkerUnconfirmed("The health check could not stop every process using plugin data")
 
 
 def _catalog_list_field(catalog_list: str | None) -> dict[str, str]:
@@ -5686,13 +5686,13 @@ def _same_probe_release(current, expected, slot: str) -> bool:
             and current.get("blocked") == expected.get("blocked"))
 
 
-@contextlib.contextmanager
-def _probe_release_data(plugin_id: str, row, *, staged: bool = False, deadline: float):
-    """Give an environment or connection probe an isolated copy of the relevant data."""
+def _probe_release_data(
+    plugin_id: str, row, files: contextlib.ExitStack, *, staged: bool = False, deadline: float
+) -> Path | None:
+    """Copy the release data and register its explicit cleanup with the probe owner."""
     manifest = row.get("staged_manifest" if staged else "manifest")
     if not datadir.declared(manifest):
-        yield None
-        return
+        return None
     slot = "staged" if staged else "active"
     root = provider_hub_dir()
 
@@ -5706,26 +5706,36 @@ def _probe_release_data(plugin_id: str, row, *, staged: bool = False, deadline: 
         # Older slots can share the same legacy folder.
         return source, source is not None and (not staged or source == _active_data_path(plugin_id, current))
 
-    with contextlib.ExitStack() as files:
-        try:
-            with _release_data_source(plugin_id, kind_of(row), deadline, select_source, probe=True) as (
-                    source, active):
-                with contextlib.ExitStack() as copy_files:
-                    # A later release removal can delete the plugin's data root.
-                    temporary = copy_files.enter_context(datadir.probe_workspace(root))
-                    target = Path(temporary) / "data"
-                    datadir.copy_folder(source, target, probe_deadline=deadline)
-                    if select_source() != (source, active):
-                        raise datadir.SnapshotRefused("The plugin release changed. Try again.")
-                    _snapshot_time_left(deadline)
-                    files.enter_context(copy_files.pop_all())
-        except datadir.SnapshotRefused:
-            raise
-        except (OSError, datadir.DataFolderError):
-            # A filesystem error can contain names from the plugin's private data.
-            raise datadir.SnapshotRefused("Could not copy the plugin data for the check.") from None
-        # The probe uses its own folder. Live dispatch can resume before it starts.
-        yield target
+    try:
+        with _release_data_source(plugin_id, kind_of(row), deadline, select_source, probe=True) as (
+                source, active):
+            with contextlib.ExitStack() as copy_files:
+                # A later release removal can delete the plugin's data root.
+                temporary = datadir.probe_workspace(root)
+                copy_files.callback(datadir.remove, temporary)
+                target = temporary / "data"
+                datadir.copy_folder(source, target, probe_deadline=deadline)
+                if select_source() != (source, active):
+                    raise datadir.SnapshotRefused("The plugin release changed. Try again.")
+                _snapshot_time_left(deadline)
+                files.enter_context(copy_files.pop_all())
+    except datadir.SnapshotRefused:
+        raise
+    except (OSError, datadir.DataFolderError):
+        # A filesystem error can contain names from the plugin's private data.
+        raise datadir.SnapshotRefused("Could not copy the plugin data for the check.") from None
+    # The probe uses its own folder. Live dispatch can resume before it starts.
+    return target
+
+
+@contextlib.contextmanager
+def _keep_unconfirmed_probe_files(files: contextlib.ExitStack):
+    try:
+        yield
+    except datadir.ProbeWorkerUnconfirmed:
+        # Keep the copy for boot cleanup after worker shutdown can be proved.
+        files.pop_all()
+        raise
 
 
 def reconcile_plugin_environments() -> dict[str, list[str]]:
@@ -5742,7 +5752,8 @@ def reconcile_plugin_environments() -> dict[str, list[str]]:
 
     def probe_data(validated, bundle_path: Path, python_path: Path, row, staged: bool) -> None:
         deadline = time.monotonic() + PROBE_TIMEOUT
-        with _probe_release_data(validated.provider_id, row, staged=staged, deadline=deadline) as folder:
+        with contextlib.ExitStack() as probe_files, _keep_unconfirmed_probe_files(probe_files):
+            folder = _probe_release_data(validated.provider_id, row, probe_files, staged=staged, deadline=deadline)
             get_kind(kind_of(validated)).smoke_test(
                 validated, bundle_path, python_path,
                 **({"data_dir": folder, "timeout": _snapshot_time_left(deadline)} if folder is not None else {}))
@@ -5812,7 +5823,7 @@ def _repair_environment(provider_id: str, row, deadline: float, checkpoint=None)
                 env_registry.mark_needs_repair(provider_id)
                 raise
             step("Rebuilding the plugin's dependencies")
-            data = probe_files.enter_context(_probe_release_data(provider_id, row, deadline=deadline))
+            data = _probe_release_data(provider_id, row, probe_files, deadline=deadline)
             env_path = PluginEnvironment(provider_hub_dir()).install(
                 validated, rebuild=True, **_bundled_wheels_argument(validated, bundle_path))
             python_path = python_executable(env_path)
@@ -5821,8 +5832,9 @@ def _repair_environment(provider_id: str, row, deadline: float, checkpoint=None)
                 current = (load_state().get("installations") or {}).get(provider_id)
                 if not _same_probe_release(current, row, "active"):
                     raise datadir.SnapshotRefused("The plugin release changed. Try again.")
-            kind.smoke_test(validated, bundle_path, python_path,
-                            **({"data_dir": data} if data is not None else {}))
+            with _keep_unconfirmed_probe_files(probe_files):
+                kind.smoke_test(validated, bundle_path, python_path,
+                                **({"data_dir": data} if data is not None else {}))
             # A stop pressed during the check ends the repair here, before the
             # installation is pointed at the new environment.
             step("Recording the repair")
