@@ -238,6 +238,53 @@ it("narrows the history to the league the toolbox opened the page for", async ()
   expect(leagueFilter).toBe("7");
 });
 
+it.each([false, true])(
+  "only searches upgrades when the bookmarked owner is enabled (%s)",
+  async (enabled) => {
+    owners();
+    const user = userEvent.setup();
+    const upgrades: unknown[] = [];
+    server.use(
+      http.get("/api/system/arr-instances", () =>
+        HttpResponse.json([{ ...sportarr, enabled }, sportarrSibling]),
+      ),
+      http.get("/api/sports/history", () =>
+        HttpResponse.json({ data: [], total: 0 }),
+      ),
+      http.get("/api/system/jobs", () => HttpResponse.json({ data: [] })),
+      http.post("/api/sports/upgrade", async ({ request }) => {
+        upgrades.push(await request.json());
+        return HttpResponse.json({
+          queued: false,
+          job_id: null,
+          message: "No upgrades needed",
+        });
+      }),
+    );
+    const router = createMemoryRouter(
+      [{ path: "/history/sports", element: <SportsHistoryView /> }],
+      { initialEntries: ["/history/sports?instance=42"] },
+    );
+    rawRender(
+      <AllProviders>
+        <RouterProvider router={router} />
+      </AllProviders>,
+    );
+    const upgrade = await screen.findByRole("button", {
+      name: "Search upgrades",
+    });
+    if (enabled) {
+      expect(upgrade).toBeEnabled();
+      await user.click(upgrade);
+      await waitFor(() => expect(upgrades).toEqual([{ arr_instance_id: 42 }]));
+    } else {
+      expect(upgrade).toBeDisabled();
+      await user.click(upgrade);
+      expect(upgrades).toEqual([]);
+    }
+  },
+);
+
 it("renders the Match popover for a record with recorded criteria", async () => {
   owners();
   const user = userEvent.setup();

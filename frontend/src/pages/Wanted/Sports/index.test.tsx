@@ -1,7 +1,7 @@
 /* eslint-disable camelcase */
 import userEvent from "@testing-library/user-event";
 import { http, HttpResponse } from "msw";
-import { expect, it } from "vitest";
+import { expect, it, vi } from "vitest";
 import { toSportsWantedRow } from "@/apis/hooks/sports";
 import type { SportsEvent } from "@/apis/raw/sports";
 import {
@@ -209,6 +209,49 @@ it("does not request the wanted list when every owner is disabled", async () => 
   ).toBeInTheDocument();
   expect(calls).toBe(0);
 });
+
+it.each([
+  { owners: "no owner records", instances: [] },
+  { owners: "a disabled owner", instances: [{ ...sportarr, enabled: false }] },
+])(
+  "does not read the folder-only audio catalogue with the master on and $owners",
+  async ({ instances }) => {
+    const requested = vi.fn();
+    const absent = { browsable: false, searchable: false, retained: false };
+    server.use(
+      http.get("/api/system/settings", () =>
+        HttpResponse.json({
+          general: { use_sportarr: true },
+          media_sources: { visible: true },
+        }),
+      ),
+      http.get("/api/system/arr-instances", () => HttpResponse.json(instances)),
+      http.get("/api/system/media-sources", () =>
+        HttpResponse.json({
+          data: [],
+          availability: {
+            series: absent,
+            movie: absent,
+            sports: { ...absent, browsable: true },
+          },
+        }),
+      ),
+      http.get("/api/sports/wanted", () => {
+        requested("wanted");
+        return HttpResponse.json({ data: [], total: 0 });
+      }),
+      http.get("/api/system/languages/audio", () => {
+        requested("audio");
+        return HttpResponse.json([]);
+      }),
+    );
+    customRender(<WantedSportsView />);
+    expect(
+      await screen.findByRole("link", { name: "Connections" }),
+    ).toBeInTheDocument();
+    expect(requested).not.toHaveBeenCalled();
+  },
+);
 
 it("offers a selection checkbox so the shared Mass Translate button can be used", async () => {
   // The page declared no selection column, but the shared WantedView still

@@ -466,6 +466,9 @@ validators = [
     Validator('backup.day', must_exist=True, default=6, is_type_of=int, gte=0, lte=6),
     Validator('backup.hour', must_exist=True, default=3, is_type_of=int, gte=0, lte=23),
 
+    # The folder source screens are opt-in while source pages are being added.
+    Validator('media_sources.visible', must_exist=True, default=False, is_type_of=bool),
+
     # translating section
     Validator('translator.min_source_score', must_exist=True, default=90, is_type_of=int, gte=0, lte=100),
     Validator('translator.min_source_wait_minutes', must_exist=True, default=0, is_type_of=int, gte=0, lte=10080,

@@ -14,6 +14,7 @@ import {
 } from "@mantine/core";
 import { showNotification } from "@mantine/notifications";
 import {
+  faFolderOpen,
   faPaperPlane,
   faPlus,
   faRotateRight,
@@ -28,6 +29,7 @@ import {
   useArrInstances,
   useDeleteArrInstance,
 } from "@/apis/hooks";
+import { useMediaSourcesVisible } from "@/apis/hooks/mediaSources";
 import type {
   ArrInstance,
   ArrInstanceDeleteConflict,
@@ -44,7 +46,12 @@ import SportarrSection from "@/pages/Settings/Sportarr/SportarrSection";
 import InstanceCard from "./InstanceCard";
 import InstanceFormModal from "./InstanceFormModal";
 import { ARR_META } from "./meta";
-import { isConnectionTab, parseTabFromHash } from "./tabs";
+import SourceSection from "./SourceSection";
+import {
+  DEFAULT_CONNECTION_TAB,
+  isConnectionTab,
+  parseTabFromHash,
+} from "./tabs";
 import styles from "./Connections.module.scss";
 
 interface KindSectionProps {
@@ -183,10 +190,13 @@ function librarySummary(library: ArrInstanceLibrary) {
 const SettingsConnectionsView: FunctionComponent = () => {
   const instances = useArrInstances();
   const deleteInstance = useDeleteArrInstance();
+  const foldersVisible = useMediaSourcesVisible();
 
   const location = useLocation();
   const navigate = useNavigate();
-  const activeTab = parseTabFromHash(location.hash);
+  const hashTab = parseTabFromHash(location.hash);
+  const activeTab =
+    hashTab === "folders" && !foldersVisible ? DEFAULT_CONNECTION_TAB : hashTab;
   const handleTabChange = (value: string | null) => {
     if (value && isConnectionTab(value)) {
       navigate({ hash: value }, { replace: true });
@@ -321,6 +331,14 @@ const SettingsConnectionsView: FunctionComponent = () => {
           >
             Sportarr
           </Tabs.Tab>
+          {foldersVisible && (
+            <Tabs.Tab
+              value="folders"
+              leftSection={<FontAwesomeIcon icon={faFolderOpen} />}
+            >
+              Local folders
+            </Tabs.Tab>
+          )}
           <Tabs.Tab
             value="plex"
             leftSection={<FontAwesomeIcon icon={faServer} />}
@@ -385,6 +403,12 @@ const SettingsConnectionsView: FunctionComponent = () => {
             />
           </SportarrSection>
         </Tabs.Panel>
+
+        {foldersVisible && (
+          <Tabs.Panel value="folders">
+            <SourceSection />
+          </Tabs.Panel>
+        )}
 
         <Tabs.Panel value="plex">
           <MediaServerSection kind="plex" />

@@ -6,7 +6,10 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import queryClient from "@/apis/queries";
 import { QueryKeys } from "@/apis/queries/keys";
 import type { SportsEvent } from "@/apis/raw/sports";
-import { sportarr } from "@/pages/Settings/Connections/__tests__/fixtures";
+import {
+  sportarr,
+  sportarrSibling,
+} from "@/pages/Settings/Connections/__tests__/fixtures";
 import { AllProviders } from "@/providers";
 import { act, rawRender, screen, waitFor, within } from "@/tests";
 import server from "@/tests/mocks/node";
@@ -50,6 +53,59 @@ describe("sports event detail", () => {
       ),
     );
   });
+  it.each([false, true])(
+    "blocks direct access to an inactive owner with the master toggle %s",
+    async (masterEnabled) => {
+      const requests = vi.fn();
+      const absent = { browsable: false, searchable: false, retained: false };
+      server.use(
+        http.get("/api/system/settings", () =>
+          HttpResponse.json({
+            general: { use_sportarr: masterEnabled },
+            media_sources: { visible: true },
+          }),
+        ),
+        http.get("/api/system/arr-instances", () =>
+          HttpResponse.json([
+            { ...sportarr, enabled: !masterEnabled },
+            sportarrSibling,
+          ]),
+        ),
+        http.get("/api/system/media-sources", () =>
+          HttpResponse.json({
+            data: [],
+            availability: {
+              series: absent,
+              movie: absent,
+              sports: { ...absent, browsable: true },
+            },
+          }),
+        ),
+        http.all("/api/sports/leagues/51", ({ request }) => {
+          requests(request.method);
+          return HttpResponse.json({
+            id: 51,
+            arr_instance_id: 42,
+            title: "Inactive League",
+          });
+        }),
+        http.get("/api/sports/leagues/51/events", () => {
+          requests("events");
+          return HttpResponse.json({ data: [], total: 0 });
+        }),
+      );
+      renderDetail();
+      expect(
+        await screen.findByText(/this sportarr instance is unavailable/i),
+      ).toBeInTheDocument();
+      expect(screen.getByRole("link", { name: "Sports" })).toHaveAttribute(
+        "href",
+        "/sports",
+      );
+      expect(screen.queryByText("Inactive League")).not.toBeInTheDocument();
+      expect(requests).not.toHaveBeenCalled();
+    },
+  );
   it("refreshes cleared subtitle state when a file becomes unavailable", async () => {
     let unavailable = false;
     server.use(
