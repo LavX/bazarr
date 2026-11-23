@@ -43,6 +43,7 @@ def _migration():
     ("unrelated-source", True),
     ("historic-url", True),
     ("republished-schema-2", True),
+    ("republished-newer-source", False),
     ("republished-conflicting-peer", False),
     ("direct-url-conflicting-peer", False),
     ("direct-url-conflicting-peer-unchecked-source", False),
@@ -75,6 +76,8 @@ def test_legacy_release_binding_agrees_on_retained_artifact_evidence(evidence, b
     if evidence.startswith("republished"):
         manifest.update(schema_version=2, id=plugin_id)
         manifest["source"]["catalog_url"] = "https://publisher.invalid/catalog.json"
+        if evidence == "republished-newer-source":
+            source_records[source_id]["resolved_commit"] = "d" * 40
     cached = {**manifest, "source": {"commit": commit, "catalog_url": manifest["source"].get("catalog_url", url),
                                      "trusted": False}}
     if evidence.startswith("republished"):
@@ -222,6 +225,7 @@ def _fields_of(engine, release_id):
 @pytest.mark.parametrize("startup", ["alembic", "first-write", "release-rows"])
 @pytest.mark.parametrize("evidence", [
     "v270", "cached-entry", "republished", "different-active", "replaced", "replaced-cache",
+    "replaced-cache-direct",
 ])
 def test_community_release_slots_require_matching_legacy_catalog_evidence(
         hub_store, hub_engine, monkeypatch, startup, evidence):
@@ -236,7 +240,7 @@ def test_community_release_slots_require_matching_legacy_catalog_evidence(
     source = {"id": source_id, "name": source_id, "url": url, "last_checked_at": "2026-11-01T00:00:00Z",
               "resolved_commit": "b" * 40, "enabled": True}
     entries = {}
-    if evidence == "replaced-cache":
+    if evidence.startswith("replaced-cache"):
         source["last_checked_at"] = None
         source.pop("resolved_commit")
     monkeypatch.setattr(state, "state_file", hub_store.legacy_state_path)
@@ -251,10 +255,13 @@ def test_community_release_slots_require_matching_legacy_catalog_evidence(
                                 "manifest": {**manifest, "source": {**manifest["source"],
                                              "catalog_url": other if evidence == "republished" else url}}}
         else:
-            matches = evidence == "v270" or (evidence == "different-active" and index == 1)
+            matches = (evidence in {"v270", "replaced-cache-direct"}
+                       or (evidence == "different-active" and index == 1))
             manifest["source"]["catalog_url"] = url if matches else other
-        if evidence == "replaced-cache":
-            entries[version] = {"source": source_id, "provider_id": plugin_id, "version": version, "manifest": manifest}
+        if evidence.startswith("replaced-cache"):
+            entries[version] = {"source": source_id, "provider_id": plugin_id, "version": version,
+                                "resolved_commit": manifest["source"]["commit"],
+                                "manifest": {**manifest, "bundle_sha256": "d" * 64}}
         bundle = state.provider_hub_dir() / "bundles" / plugin_id / version / manifest["source"]["commit"]
         bundle.mkdir(parents=True)
         (bundle / "provider.py").write_bytes(b"class ExampleProvider: pass\n")
@@ -284,7 +291,7 @@ def test_community_release_slots_require_matching_legacy_catalog_evidence(
     monkeypatch.setattr(SUBTITLE_PROVIDER_KIND, "smoke_test", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(SUBTITLE_PROVIDER_KIND, "on_activated", lambda *_args: None)
     hub_store.ensure_ready()
-    if evidence == "replaced-cache":
+    if evidence.startswith("replaced-cache"):
         assert state.load_state()["catalog_entries"] == {}
     if startup == "first-write":
         state.mutate_state(lambda document: None)

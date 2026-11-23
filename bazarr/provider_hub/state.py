@@ -841,9 +841,7 @@ def _normalized_state(data: dict[str, Any]) -> dict[str, Any]:
             if not isinstance(entry, dict):
                 continue
             source = catalog_source_for_entry(sources, entry)
-            if (source and not source.get("official") and not source.get("registration")
-                    and "last_checked_at" in source and source["last_checked_at"] is None
-                    and not source.get("resolved_commit")):
+            if releases.is_unchecked_legacy_catalog(source):
                 # Older hosts kept the old entries when Add Source replaced a URL.
                 # A freshly written source record had no commit or successful check.
                 del entries[key]

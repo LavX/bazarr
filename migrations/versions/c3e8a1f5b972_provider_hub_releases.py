@@ -189,6 +189,9 @@ def _legacy_catalog_fields(document, plugin_id, row, version, manifest):
     manifest_source = manifest.get("source") if isinstance(manifest, dict) else None
     if not isinstance(url, str) or not url or not isinstance(manifest_source, dict):
         return []
+    if (not source.get("official") and "last_checked_at" in source and source["last_checked_at"] is None
+            and not source.get("resolved_commit")):
+        return []
     matches = _legacy_manifest_provenance_matches(document, source_id, source, plugin_id, version, manifest)
     return ["catalog_registration:legacy"] if matches else []
 
