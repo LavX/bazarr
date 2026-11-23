@@ -331,6 +331,14 @@ function draftShow(draft: DiscoverDraft): ShowIdentity {
 }
 /* eslint-enable camelcase */
 
+export function copyLookupTmdbId(draft: DiscoverDraft) {
+  // Constrain an existing IMDb episode lookup with the linked catalog show,
+  // even when title details could not attach a source copy.
+  return draft.mediaType === "episode" && draft.imdbId.trim()
+    ? (draft.showId ?? draft.copyTmdbId)
+    : draft.copyTmdbId;
+}
+
 /**
  * The target a chosen copy belongs to.
  *
@@ -348,7 +356,7 @@ export function copyTargetKey(draft: DiscoverDraft): string {
   return JSON.stringify([
     draft.mediaType,
     draft.imdbId.trim().toLowerCase(),
-    draft.copyTmdbId ?? null,
+    copyLookupTmdbId(draft) ?? null,
     draft.mediaType === "episode" ? draft.season : null,
     draft.mediaType === "episode" ? draft.episode : null,
   ]);

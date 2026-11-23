@@ -17,6 +17,7 @@ import {
   chooseSegment,
   findSelectInput,
   openReleaseSearch,
+  openSearchOptions,
   openSelect,
   pickOption,
   selectInput,
@@ -700,6 +701,70 @@ it("uses both episode numbering schemes to ask for copies of a verified catalog 
   expect(actual.get("source_season")).toBe("2");
   expect(actual.get("source_episode")).toBe("1");
   expect(actual.get("episode_tmdb_id")).toBe("401");
+});
+
+it("keeps the linked show's TMDB identity when the title has no attached source copy", async () => {
+  const conflictingCopy = {
+    ...copyA,
+    copy_id: "c1.episode.99.s2",
+    local_id: 99,
+    arr_instance_id: null,
+    source_id: 2,
+    source_name: "Conflicting local show",
+  };
+  server.use(
+    http.get("/api/discover/metadata/shows/100", () =>
+      HttpResponse.json({
+        data: { ...envelope, item: { ...show, copies: [] } },
+      }),
+    ),
+    http.get("/api/discover/copies", ({ request }) => {
+      const params = new URL(request.url).searchParams;
+      copyRequests.push(params.toString());
+      return HttpResponse.json({
+        items:
+          params.get("imdb_id") === show.imdb_id &&
+          params.get("tmdb_id") !== "100"
+            ? [copyA, conflictingCopy]
+            : [copyA],
+        truncated: false,
+        owning_titles: 1,
+      });
+    }),
+  );
+  const { user } = browse();
+  await ready();
+  const listbox = await openSelect(user, "Library copy");
+  expect(
+    within(listbox).getByRole("option", {
+      name: describeCopy(copyA),
+      hidden: true,
+    }),
+  ).toBeInTheDocument();
+  expect(
+    within(listbox).queryByRole("option", {
+      name: /Conflicting local show/,
+      hidden: true,
+    }),
+  ).not.toBeInTheDocument();
+  const actual = new URLSearchParams(copyRequests.at(-1));
+  expect(actual.get("imdb_id")).toBe("tt1234567");
+  expect(actual.get("tmdb_id")).toBe("100");
+  expect(actual.get("episode_tmdb_id")).toBe("401");
+
+  await user.keyboard("{Escape}");
+  await openSearchOptions(user);
+  const imdb = screen.getByLabelText("IMDb ID");
+  await user.clear(imdb);
+  await user.type(imdb, "tt0080274");
+  await user.type(screen.getByRole("textbox", { name: "Season" }), "2");
+  await user.type(screen.getByRole("textbox", { name: "Episode" }), "1");
+  await waitFor(() => {
+    const manual = new URLSearchParams(copyRequests.at(-1));
+    expect(manual.get("imdb_id")).toBe("tt0080274");
+    expect(manual.has("tmdb_id")).toBe(false);
+    expect(manual.has("episode_tmdb_id")).toBe(false);
+  });
 });
 
 it("matches a copy for an IMDb identifier typed straight into the form", async () => {

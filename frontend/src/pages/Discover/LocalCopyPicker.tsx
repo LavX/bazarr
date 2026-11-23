@@ -3,6 +3,7 @@ import { Link, useLocation } from "react-router";
 import { Alert, Anchor, Button, Group, Text } from "@mantine/core";
 import { useDiscoverCopies } from "@/apis/hooks/discover";
 import { useDiscover } from "@/contexts/Discover";
+import { copyLookupTmdbId } from "@/contexts/discoverState";
 import type { DiscoverCopy, DiscoverCopyOption } from "@/types/discover";
 import DiscoverSelect from "./DiscoverSelect";
 import styles from "./Discover.module.scss";
@@ -87,7 +88,7 @@ export default function LocalCopyPicker() {
   const location = useLocation();
   const imdbInput = draft.imdbId.trim().toLowerCase();
   const imdbId = /^tt\d{7,10}$/.test(imdbInput) ? imdbInput : undefined;
-  const tmdbId = draft.copyTmdbId;
+  const tmdbId = copyLookupTmdbId(draft);
   const episode = draft.mediaType === "episode";
   const sourceEpisode =
     !draft.manualEntry &&
