@@ -118,50 +118,72 @@ def test_tmdb_movie_has_a_source_copy_through_details_offer_and_selection(
     assert conflict.json["reason"] == "copy_unavailable"
 
 
-def test_selected_source_copy_passes_its_file_grant_to_provider_hub(
-    authenticated_client, copy_database, providers, monkeypatch, tmp_path,
+@pytest.mark.parametrize("identity_matches", [True, False], ids=["unchanged", "mismatch"])
+def test_selected_source_copy_requires_matching_identity_at_worker_admission(
+    authenticated_client, source_db, providers, monkeypatch, tmp_path, identity_matches,
 ):
+    from pathlib import Path
     from types import SimpleNamespace
 
-    from app.database import TableMediaSourceLibraryRoots, TableSourceItems
+    from app import database as db
     from plugin_platform_helpers import provider_manifest_v2
     from provider_hub import capabilities, registry
     from provider_hub.manifest import validate_manifest
+    from provider_hub.worker import ProviderWorkerClient, WorkerResult
     from subliminal_patch.extensions import provider_registry
 
-    _, session = copy_database
-    owner = add_source(session, "movie")
+    monkeypatch.setattr(db, "engine", source_db.get_bind())
+    owner = add_source(source_db, "movie")
     path = tmp_path / "Night.Film.mkv"
     path.write_bytes(b"movie file")
-    session.add(TableMediaSourceLibraryRoots(library_id=owner[1], local_path=str(tmp_path)))
-    add_title(session, owner, TableSourceItems, kind="movie", title="Night Film", path=str(path), tmdb_id="42")
-    session.commit()
+    source_db.add(db.TableMediaSourceLibraryRoots(library_id=owner[1], local_path=str(tmp_path)))
+    add_title(source_db, owner, db.TableSourceItems, kind="movie", title="Night Film", path=str(path), tmdb_id="42")
+    source_db.commit()
+
+    if not identity_matches:
+        original_lstat = Path.lstat
+        real_path = path.resolve()
+
+        def late_stat(candidate):
+            info = original_lstat(candidate)
+            if candidate == real_path:
+                # Only the late file check sees the fixture's alternate identity.
+                return SimpleNamespace(st_mode=info.st_mode, st_nlink=info.st_nlink,
+                                       st_dev=info.st_dev, st_ino=info.st_ino + 1)
+            return info
+
+        monkeypatch.setattr(Path, "lstat", late_stat)
 
     source_grants = []
+    worker = ProviderWorkerClient(command=[])
 
-    def request(operation, payload, timeout, *, admit=None, source_media=None):
+    def request_locked(operation, payload, timeout, *, source_media):
         assert operation == "search"
-        assert admit is None or admit()
         source_grants.append(source_media)
-        return SimpleNamespace(payload={"candidates": []})
+        return WorkerResult(ok=True, payload={"candidates": []}, events=[])
 
+    monkeypatch.setattr(worker, "_request_locked", request_locked)
     name = providers.add("discover_source")
     cls = provider_registry[name]
     raw = provider_manifest_v2(name, permissions=["media_read"])
     monkeypatch.setattr(cls, "manifest", validate_manifest(raw), raising=False)
     monkeypatch.setattr(cls, "list_subtitles", registry.HubProxyProvider.list_subtitles)
-    monkeypatch.setattr(cls, "worker_client", SimpleNamespace(request=request), raising=False)
+    monkeypatch.setattr(cls, "worker_client", worker, raising=False)
     monkeypatch.setattr(capabilities, "live_row", lambda provider: {"enabled": True, "manifest": raw})
 
     target = {"media_type": "movie", "tmdb_id": 42}
     [copy] = copies_fixtures.copies(authenticated_client, **target).json["items"]
     response = copies_fixtures.post(authenticated_client, {**target, "copy_id": copy["copy_id"], "language": "eng"})
     assert response.status_code == 200
-    [source_media] = source_grants
-    assert source_media is not None
-    grant = source_media()
-    assert grant.path == path.resolve()
-    assert grant.identity == (path.stat().st_dev, path.stat().st_ino)
+    [outcome] = response.json["coverage"]["providers"]
+    if identity_matches:
+        assert outcome["status"] == "empty"
+        [grant] = source_grants
+        assert grant.path == path.resolve()
+        assert grant.identity == (path.stat().st_dev, path.stat().st_ino)
+    else:
+        assert (outcome["status"], outcome["reason"]) == ("skipped", "provider_excluded")
+        assert source_grants == []
 
 
 def test_show_copy_uses_the_groups_identity_and_exact_episode(

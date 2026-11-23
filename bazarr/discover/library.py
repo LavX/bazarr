@@ -1,5 +1,6 @@
 """Bounded scalar library projections. Reads never adopt a media file."""
 from copy import deepcopy
+from dataclasses import replace
 import hashlib
 import json
 import os
@@ -720,7 +721,7 @@ def _physical_revision(facts, path, status, file_hash):
                 status.st_size, status.st_mtime_ns, file_hash]
     if facts.get("source_id") is not None:
         material.extend((facts["source_id"], facts["source_season"], facts["source_episode"], facts["identity_source"],
-                         facts["source_group_key"], status.st_dev, status.st_ino))
+                         facts["source_group_key"], *facts["file_identity"]))
     digest = hashlib.sha256(json.dumps(material, sort_keys=True, separators=(",", ":")).encode())
     return digest.hexdigest()[:32]
 
@@ -810,6 +811,8 @@ def resolve_copy(copy_id, target):
         raise CopyUnavailable(_RECOVERY, "copy_unavailable")
     file_hash = _copy_hash(path, status.st_size)
     facts["observed_size"] = status.st_size
+    if is_source:
+        facts["file_identity"] = (status.st_dev, status.st_ino)
     facts["file_revision"] = _physical_revision(facts, path, status, file_hash)
     # Private to the server. copy_context() is what may be serialized.
     facts["path"] = path
@@ -836,7 +839,7 @@ def source_context_for_copy(facts):
     if (item.item_id, item.kind, item.source_id, item.library_id, item.path) != (
             facts["local_id"], facts["media_type"], facts["source_id"], facts["file_id"], facts["path"]):
         raise CopyUnavailable(_RECOVERY)
-    return item
+    return replace(item, pinned_file_identity=facts["file_identity"])
 
 
 COPY_CONTEXT_FIELDS = ("copy_id", "media_type", "local_id", "arr_instance_id", "instance_name",
