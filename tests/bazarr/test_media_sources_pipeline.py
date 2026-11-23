@@ -2602,9 +2602,9 @@ def test_automatic_source_translation_checks_queued_video_version(world, monkeyp
 
 @pytest.mark.parametrize(
     "old_state", ["queued", "legacy-unsigned", "legacy-pinned", "legacy-current", "awaiting-retry", "legacy-recovered",
-                  "retry-during-replacement", "legacy-removed", "planning-retry", "engine-failure-hold",
-                  "wanted-planning-retry", "wanted-engine-failure-hold", "wanted-awaiting-retry",
-                  "wanted-legacy-stale-retry"])
+                  "retry-during-replacement", "legacy-removed", "planning-retry", "backend-setup-retry",
+                  "engine-failure-hold", "wanted-planning-retry", "wanted-backend-setup-retry",
+                  "wanted-engine-failure-hold", "wanted-awaiting-retry", "wanted-legacy-stale-retry"])
 def test_runtime_queues_a_new_source_translation_for_a_replacement_recording(
         world, monkeypatch, isolated_jobs, old_state):
     from dataclasses import replace
@@ -2666,31 +2666,41 @@ def test_runtime_queues_a_new_source_translation_for_a_replacement_recording(
             assert world.db.execute(sa.select(TableTranslatorJob.id)).scalars().all() == [older_id]
         if old_state == "engine-failure-hold":
             from requests import HTTPError
+            from subtitles.tools.translate.failure_record import clear_failed_translation, translation_recently_failed
             from subtitles.tools.translate.runtime.dispatch import Dispatcher
 
             def fail_engine(*args, **kwargs):
                 raise HTTPError("401 Unauthorized")
 
-            monkeypatch.setattr(Dispatcher, "_run_plugin", fail_engine)
-            assert isolated_jobs._reserve_next_job() is older and not isolated_jobs._run_job(older)
-            assert older.retryable is not True
-            assert TranslationJobs(world.db).get(older_id).state == "awaiting_retry"
-            assert queue_missing_translations(source, wanted=scheduled) == set()
-            assert not isolated_jobs.jobs_pending_queue
-            assert not result.exists()
+            hold_key = None, "source", source.item_id, "en", "hu", False, False
+            hold_owner = {"source_created_at": source.created_at}
+            try:
+                monkeypatch.setattr(Dispatcher, "_compose", fail_engine)
+                assert isolated_jobs._reserve_next_job() is older and not isolated_jobs._run_job(older)
+                assert older.retryable is not True
+                assert TranslationJobs(world.db).get(older_id).state == "awaiting_retry"
+                assert translation_recently_failed(*hold_key, **hold_owner)
+                assert queue_missing_translations(source, wanted=scheduled) == set()
+                assert not isolated_jobs.jobs_pending_queue
+                assert not result.exists()
+                assert len(env.requests()) == 1
+            finally:
+                clear_failed_translation(*hold_key, **hold_owner)
             return
-        if old_state in ("legacy-current", "planning-retry"):
-            if old_state == "planning-retry":
+        if old_state in ("legacy-current", "planning-retry", "backend-setup-retry"):
+            if old_state != "legacy-current":
                 from subtitles.tools.translate.runtime.dispatch import Dispatcher
 
                 def fail_planning(*args, **kwargs):
-                    raise RuntimeError("could not read the selected engine")
+                    raise RuntimeError("could not read the selected engine or backends")
 
                 with monkeypatch.context() as broken_runtime:
-                    broken_runtime.setattr(Dispatcher, "_plan", fail_planning)
+                    stage = "_plan" if old_state == "planning-retry" else "_candidates"
+                    broken_runtime.setattr(Dispatcher, stage, fail_planning)
                     assert isolated_jobs._reserve_next_job() is older and not isolated_jobs._run_job(older)
                 assert older.retryable is True
                 assert older.error["reason"] == "internal"
+                assert not env.requests()
                 assert TranslationJobs(world.db).get(older_id).state == "awaiting_retry"
                 assert queue_missing_translations(source, wanted=scheduled) == {"hu"}
                 (retry,) = isolated_jobs.jobs_pending_queue
