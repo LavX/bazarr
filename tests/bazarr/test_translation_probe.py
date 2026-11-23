@@ -56,7 +56,7 @@ class FakePort:
     def abandon(self, plugin_id):
         return None
 
-    def call(self, plugin_id, op, params, secrets, *, timeout):
+    def call(self, plugin_id, op, params, secrets, *, timeout, context=None):
         self.calls.append((plugin_id, op, params, dict(secrets or {}), timeout))
         return SimpleNamespace(result=self.answer, data=b"")
 
@@ -192,7 +192,7 @@ def test_a_worker_busy_with_a_translation_is_not_charged_and_the_person_is_told(
     from app.database import TableTranslationUsage
 
     class Busy(FakePort):
-        def call(self, plugin_id, op, params, secrets, *, timeout):
+        def call(self, plugin_id, op, params, secrets, *, timeout, context=None):
             raise workers.NotSent("the worker is busy", busy=True)
 
     service = app_service.service
@@ -212,7 +212,7 @@ def test_a_worker_that_would_not_start_took_nothing_and_the_answer_says_try_agai
     from subtitles.tools.translate.runtime import probe
 
     class Unstarted(FakePort):
-        def call(self, plugin_id, op, params, secrets, *, timeout):
+        def call(self, plugin_id, op, params, secrets, *, timeout, context=None):
             raise workers.NotSent("the worker would not start", busy=False)
 
     workers.bind(Unstarted({}))
@@ -252,7 +252,8 @@ def test_the_pool_port_sends_a_short_request_to_a_worker_of_its_own():
     assert port.call("engine", "test", {"config": {}}, {"api_key": "x"}, timeout=5) == "answer"
     ((key, op, params, kwargs),) = pool.runs
     assert key.startswith("engine" + workers.ONE_CALL_SUFFIX + ":") and len(key.split(":")[-1]) == 12
-    assert (op, params, kwargs) == ("test", {"config": {}}, {"secrets": {"api_key": "x"}, "timeout": 5})
+    assert (op, params, kwargs) == ("test", {"config": {}}, {"secrets": {"api_key": "x"}, "timeout": 5,
+                                                          "context": None})
     # Every call is a worker of its own: a second call does not share the first one's key.
     port.call("engine", "test", {}, {}, timeout=5)
     assert pool.runs[0][0] != pool.runs[1][0]
@@ -265,6 +266,52 @@ def test_a_plugin_with_no_worker_to_start_is_not_sent():
     port = workers.PoolWorkers(_Pool(), lambda plugin_id: None)
     with pytest.raises(workers.NotSent):
         port.call("engine", "test", {}, {}, timeout=5)
+
+
+@pytest.mark.parametrize("scenario", ["free", "priced", "over_budget", "cancelled", "unsettled"])
+def test_the_short_worker_reports_usage_inside_the_saved_test_reservation(app_service, scenario):
+    from app.database import TableTranslationBudget, TableTranslationUsage
+    from provider_hub.runtime.errors import HostCallError, RequestCancelled
+    from subtitles.tools.translate.runtime.host_calls import reserve, usage
+
+    class Metered(_Pool):
+        def run_once(self, definition, op, params, *, context, **kwargs):
+            assert op == "test" and params["config"]["connection"]["settings"]["max_tokens"] == 16
+            holds = []
+            if scenario == "over_budget":
+                with pytest.raises(HostCallError) as refused:
+                    reserve(SimpleNamespace(context=context, params={"amount": 0.01}))
+                raise RequestCancelled(str(refused.value))
+            if scenario != "free":
+                holds = [reserve(SimpleNamespace(context=context, params={"amount": 0.000032}))["hold"]]
+            if scenario == "cancelled":
+                raise RequestCancelled("cancelled after reserving the request")
+            if scenario != "unsettled":
+                usage(SimpleNamespace(context=context, params={"tokens": 24, "cost": 0 if scenario == "free"
+                                                                    else 0.000008, "reservations": holds}))
+            return SimpleNamespace(result={"ok": scenario != "unsettled"}, data=b"")
+
+    service = app_service.service
+    if scenario != "free":
+        service.update_connection(app_service.connection_id, {
+            "expected_revision": service._store.get_connection(app_service.connection_id, fresh=True).revision,
+            "values": {"price_output_per_million": 2.0}})
+    workers.bind(workers.PoolWorkers(Metered(), _definition))
+    result = service.test_connection(app_service.connection_id)
+    rows = service._store.session.query(TableTranslationUsage).all()
+    budgets = service._store.session.query(TableTranslationBudget).all()
+    if scenario == "free":
+        assert result["ok"] and rows == [] and budgets == []
+    else:
+        (row,) = rows
+        assert row.worst_case_micros == 32
+        assert [budget.state for budget in budgets] == ["released"]
+        if scenario == "priced":
+            assert result["ok"] and (row.input_tokens, row.output_tokens, row.actual_micros) == (24, 0, 8)
+        elif scenario == "over_budget":
+            assert result["outcome"] == "refused" and row.actual_micros == 0
+        else:
+            assert result["outcome"] == "failed" and row.actual_micros == 32
 
 
 def _refusals():
@@ -409,7 +456,7 @@ def test_a_priced_test_whose_worker_started_over_its_memory_limit_is_settled_at_
 
 def test_a_test_refused_for_the_per_plugin_cap_says_how_long_to_wait_and_is_not_a_verdict(app_service):
     class Paused(FakePort):
-        def call(self, plugin_id, op, params, secrets, *, timeout):
+        def call(self, plugin_id, op, params, secrets, *, timeout, context=None):
             raise workers.NotSent("paused", retry_after=3000.0, code="unverified_limit")
 
     workers.bind(Paused({}))

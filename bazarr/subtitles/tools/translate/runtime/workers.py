@@ -84,7 +84,7 @@ class WorkerPort(Protocol):
         when the worker and what it started are gone."""
 
     def call(self, plugin_id: str, op: str, params: dict, secrets: Mapping[str, str] | None, *,
-             timeout: float) -> Any:
+             timeout: float, context: Any = None) -> Any:
         """One short request (``test`` or ``options``), run in a worker of its own.
 
         Answered, or raised within ``timeout`` (and the time the worker is given to stop), or ``NotSent`` when it was
@@ -107,7 +107,7 @@ class UnboundWorkers:
     def detach(self, plugin_id, *, grace=None):
         return []
 
-    def call(self, plugin_id, op, params, secrets, *, timeout):
+    def call(self, plugin_id, op, params, secrets, *, timeout, context=None):
         raise NotSent("no translator worker is bound for this plugin")
 
     def runtime(self, plugin_id):
@@ -266,13 +266,13 @@ class PoolWorkers:
                              "max_result_bytes": frames.DEFAULT_MAX_RESULT_BYTES, "deadline_ms": int(timeout * 1000),
                              "secrets": dict(secrets or {})}, sender="host")
 
-    def call(self, plugin_id, op, params, secrets, *, timeout):
+    def call(self, plugin_id, op, params, secrets, *, timeout, context=None):
         from provider_hub.datadir import dispatch
 
         with dispatch(plugin_id):
-            return self._call(plugin_id, op, params, secrets, timeout=timeout)
+            return self._call(plugin_id, op, params, secrets, timeout=timeout, context=context)
 
-    def _call(self, plugin_id, op, params, secrets, *, timeout):
+    def _call(self, plugin_id, op, params, secrets, *, timeout, context):
         from provider_hub.runtime.errors import SessionBusy
         from provider_hub.runtime.frames import FrameError
         from provider_hub.runtime.pool import PoolCodes, PoolError, WorkerKilled
@@ -296,7 +296,7 @@ class PoolWorkers:
                 raise NotSent(f"the request could not be sent ({type(error).__name__})") from None
             try:
                 return self._pool.run_once(definition, op, params, secrets=dict(secrets or {}) or None,
-                                           timeout=timeout)
+                                           timeout=timeout, context=context)
             except WorkerKilled as error:
                 if error.before_send:
                     # Over its memory limit as it started, before it was given anything.

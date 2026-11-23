@@ -21,7 +21,10 @@ from __future__ import annotations
 import logging
 from typing import Any, Mapping
 
+from provider_hub.runtime.errors import RequestCancelled, RequestFailed
+
 from . import wire, workers
+from .host_calls import ProbeUsage
 from .settings_service import OPEN_TEST, ProbeRequest
 
 logger = logging.getLogger(__name__)
@@ -50,22 +53,38 @@ def worker_probe(request: ProbeRequest) -> Mapping[str, Any]:
     port = workers.bound_port()
     if not workers.is_bound(port):
         return {"ok": False, "sent": False, "message": OPEN_TEST}
+    from .usage import worst_case_micros
+
+    meter = ProbeUsage(worst_case_micros(request.input_token_limit, request.output_token_limit,
+                                       request.price_input_per_million, request.price_output_per_million))
+    config_values = dict(request.values)
+    if request.backend_type == "openai_compatible":
+        configured_limit = config_values.get("max_tokens")
+        config_values["max_tokens"] = (min(request.output_token_limit, configured_limit)
+                                       if type(configured_limit) is int and configured_limit > 0
+                                       else request.output_token_limit)
     config = {
         "settings": dict(request.engine_values),
         "connection": {"id": str(request.connection_id), "type": request.backend_type, "enabled": True,
-                       "settings": {**dict(request.values), "model": request.model,
+                       "settings": {**config_values, "model": request.model,
                                     "price_input_per_million": request.price_input_per_million,
                                     "price_output_per_million": request.price_output_per_million}},
         "limits": {"input_tokens": request.input_token_limit, "output_tokens": request.output_token_limit},
     }
     try:
         outcome = port.call(request.plugin_id, workers.TEST_OP, {"config": config}, dict(request.secrets),
-                            timeout=request.timeout_seconds)
+                            timeout=request.timeout_seconds, context=meter)
     except workers.NotSent as refused:
         if refused.code == "unverified_limit" and refused.retry_after:
             minutes = max(1, round(refused.retry_after / 60))
             return {"ok": False, "sent": False, "message": PAUSED_TEST.format(minutes=minutes)}
         return {"ok": False, "sent": False, "message": BUSY_TEST if refused.busy else UNSTARTED_TEST}
+    except (RequestCancelled, RequestFailed):
+        if not meter.refused_before_send:
+            raise
+    if meter.refused_before_send:
+        return {"ok": False, "sent": False, "cost_refused": True,
+                "message": "The connection test's cost budget does not cover this request."}
     value = wire.unwrap(outcome.result, outcome.data)
     if not isinstance(value, Mapping):
         return {"ok": False, "message": ""}
@@ -74,6 +93,8 @@ def worker_probe(request: ProbeRequest) -> Mapping[str, Any]:
     for key in _TOKEN_KEYS:
         if key in value:
             answer[key] = value[key]
+    if meter.reported and meter.hold is None:
+        answer.update(tokens=meter.tokens, actual_micros=meter.actual_micros)
     return answer
 
 

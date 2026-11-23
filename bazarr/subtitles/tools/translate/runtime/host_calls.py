@@ -22,8 +22,9 @@ import functools
 import json
 import logging
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
+from threading import Lock
 from typing import Any, Callable, Mapping
 from uuid import uuid4
 
@@ -66,6 +67,40 @@ class AttemptContext:
             self.cancel(reason)
         else:
             self.cancel_pending = reason
+
+
+@dataclass
+class ProbeUsage:
+    """Collect usage inside the settings service's existing one-call reservation."""
+
+    maximum_micros: int
+    tokens: int = 0
+    actual_micros: int = 0
+    reported: bool = False
+    hold: str | None = None
+    refused_before_send: bool = False
+    _reserved_once: bool = False
+    _lock: Any = field(default_factory=Lock, repr=False)
+
+    def reserve(self, worst: int) -> dict:
+        with self._lock:
+            if self.hold is not None or worst > self.maximum_micros - self.actual_micros:
+                self.refused_before_send = not self._reserved_once and not self.reported
+                raise _refuse("cancelled", "the cost budget does not cover this connection test")
+            self.hold = uuid4().hex
+            self._reserved_once = True
+            return {"hold": self.hold}
+
+    def settle(self, tokens: int, cost: int, holds: list[str]) -> dict:
+        with self._lock:
+            if holds:
+                if holds != [self.hold]:
+                    raise _refuse("invalid_request", "that reservation does not belong to this connection test")
+                self.hold = None
+            self.tokens += tokens
+            self.actual_micros += cost
+            self.reported = True
+            return {}
 
 
 def _refuse(code: str, message: str):
@@ -126,7 +161,6 @@ def reserve(call) -> dict:
     """Record a paid call's worst-case charge before it is sent. Refused when it does not fit the budget."""
     from .usage import UsageError, UsageLedger, to_micros
 
-    context = _context(call)
     params = call.params if isinstance(call.params, Mapping) else {}
     amount = _number(params, "amount")
     model = params.get("model")
@@ -135,6 +169,9 @@ def reserve(call) -> dict:
         worst = to_micros(amount)
     except UsageError as error:
         raise _refuse("invalid_request", str(error)) from None
+    if isinstance(getattr(call, "context", None), ProbeUsage):
+        return call.context.reserve(worst)
+    context = _context(call)
     hold = uuid4().hex
     reservation = UsageLedger(context.session, clock=context.clock).reserve_call(
         context.ledger_id, hold, worst_case_micros=worst, limits=context.limits(),
@@ -152,7 +189,6 @@ def usage(call) -> dict:
     """Settle reservations against what a call used. A call made without a reservation is recorded too."""
     from .usage import UsageError, UsageLedger, to_micros
 
-    context = _context(call)
     params = call.params if isinstance(call.params, Mapping) else {}
     tokens = _number(params, "tokens", whole=True)
     cost = _number(params, "cost")
@@ -165,6 +201,9 @@ def usage(call) -> dict:
         actual = to_micros(cost)
     except UsageError as error:
         raise _refuse("invalid_request", str(error)) from None
+    if isinstance(getattr(call, "context", None), ProbeUsage):
+        return call.context.settle(tokens, actual, holds)
+    context = _context(call)
     ledger = UsageLedger(context.session, clock=context.clock)
     limits = context.limits()
     # A hold listed twice is one hold: settling it again at nothing would wipe out the reading.
