@@ -285,7 +285,9 @@ export function useRoutes(): CustomRouteObject[] {
                 path: "series",
                 name: "Episodes",
                 hidden: !seriesActivity,
-                element: (
+                element: seriesActivity ? (
+                  <BlacklistSeriesView />
+                ) : (
                   <ArrMediaRoute kind="sonarr">
                     <BlacklistSeriesView />
                   </ArrMediaRoute>
@@ -295,7 +297,9 @@ export function useRoutes(): CustomRouteObject[] {
                 path: "movies",
                 name: "Movies",
                 hidden: !movieActivity,
-                element: (
+                element: movieActivity ? (
+                  <BlacklistMoviesView />
+                ) : (
                   <ArrMediaRoute kind="radarr">
                     <BlacklistMoviesView />
                   </ArrMediaRoute>

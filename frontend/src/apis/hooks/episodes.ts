@@ -64,10 +64,16 @@ export function useEpisodeWantedPagination(
   );
 }
 
-export function useEpisodeBlacklist() {
+export function useEpisodeBlacklist(scope: Blacklist.Scope = {}) {
   return useQuery({
-    queryKey: [QueryKeys.Series, QueryKeys.Episodes, QueryKeys.Blacklist],
-    queryFn: () => api.episodes.blacklist(),
+    queryKey: [
+      QueryKeys.Series,
+      QueryKeys.Episodes,
+      QueryKeys.Blacklist,
+      scope,
+    ],
+    queryFn: ({ signal }) => api.episodes.blacklist(scope, signal),
+    placeholderData: undefined,
   });
 }
 
@@ -122,14 +128,13 @@ export function useEpisodeDeleteBlacklist() {
   return useMutation({
     mutationKey: [QueryKeys.Series, QueryKeys.Episodes, QueryKeys.Blacklist],
 
-    mutationFn: (param: { all?: boolean; form?: FormType.DeleteBlacklist }) =>
-      api.episodes.deleteBlacklist(param.all, param.form),
+    mutationFn: (removal: Blacklist.Removal) =>
+      api.episodes.deleteBlacklist(removal),
 
-    onSuccess: () => {
-      void client.invalidateQueries({
+    onSuccess: () =>
+      client.invalidateQueries({
         queryKey: [QueryKeys.Series, QueryKeys.Episodes, QueryKeys.Blacklist],
-      });
-    },
+      }),
   });
 }
 

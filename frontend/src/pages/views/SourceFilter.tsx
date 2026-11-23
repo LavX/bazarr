@@ -5,6 +5,7 @@ interface Props {
   value: MediaSourceKey | null;
   onChange: (value: string | null) => void;
   includeSources?: boolean;
+  showSingleSource?: boolean;
 }
 
 export default function SourceFilter({
@@ -12,8 +13,12 @@ export default function SourceFilter({
   value,
   onChange,
   includeSources = true,
+  showSingleSource = false,
 }: Props) {
-  if (labels.size <= 1 && !value) return null;
+  const hasSource =
+    showSingleSource &&
+    [...labels.keys()].some((key) => key.startsWith("source:"));
+  if (labels.size <= 1 && !value && !hasSource) return null;
   return (
     <Select
       aria-label={includeSources ? "Source" : "Instance"}

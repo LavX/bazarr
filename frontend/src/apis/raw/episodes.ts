@@ -1,4 +1,5 @@
 import BaseApi from "./base";
+import { blacklistParams, blacklistRemovalRequest } from "./blacklist";
 
 class EpisodeApi extends BaseApi {
   constructor() {
@@ -156,9 +157,12 @@ class EpisodeApi extends BaseApi {
     });
   }
 
-  async blacklist() {
-    const response =
-      await this.get<DataWrapper<Blacklist.Episode[]>>("/blacklist");
+  async blacklist(scope: Blacklist.Scope = {}, signal?: AbortSignal) {
+    const response = await this.get<DataWrapper<Blacklist.Episode[]>>(
+      "/blacklist",
+      blacklistParams(scope),
+      signal,
+    );
     return response.data;
   }
 
@@ -175,8 +179,9 @@ class EpisodeApi extends BaseApi {
     return response.data;
   }
 
-  async deleteBlacklist(all?: boolean, form?: FormType.DeleteBlacklist) {
-    await this.delete("/blacklist", form, { all });
+  async deleteBlacklist(removal: Blacklist.Removal) {
+    const { form, params } = blacklistRemovalRequest(removal);
+    await this.delete("/blacklist", form, params);
   }
 }
 

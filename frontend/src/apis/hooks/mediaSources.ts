@@ -92,6 +92,7 @@ function isSourceKey(value: string | null): value is MediaSourceKey {
 export function useSourceFilter(
   kind: SourceContentKind,
   arr: "sonarr" | "radarr",
+  { includeDisabledSources = false } = {},
 ) {
   const [params, setParams] = useSearchParams();
   const arrLabels = useArrInstanceLabels(arr);
@@ -124,16 +125,23 @@ export function useSourceFilter(
     }
     for (const source of sources) {
       if (
-        source.enabled &&
-        source.libraries.some(
-          (library) => library.enabled && library.content_kind === kind,
-        )
+        includeDisabledSources ||
+        (source.enabled &&
+          source.libraries.some(
+            (library) => library.enabled && library.content_kind === kind,
+          ))
       ) {
         names.set(`source:${source.id}`, source.name);
       }
     }
     return names;
-  }, [enabledArr, arrLabels.enabledOptions, sources, kind]);
+  }, [
+    enabledArr,
+    arrLabels.enabledOptions,
+    sources,
+    kind,
+    includeDisabledSources,
+  ]);
 
   const legacy = params.get("instance");
   const sourceParam = params.get("source");

@@ -226,23 +226,29 @@ declare namespace Item {
 }
 
 type MediaSourceKey = `arr:${number}` | `source:${number}` | "source:removed";
+type MediaSourceKind = "folder" | "jellyfin" | "emby";
+
+type ArrRowOwner = {
+  origin?: "arr";
+  source_key?: MediaSourceKey | null;
+  arr_instance_id?: number;
+};
+
+type MediaSourceOwner = {
+  origin: "source";
+  source_key: MediaSourceKey;
+  source_name: string | null;
+  source_kind?: MediaSourceKind | null;
+};
 
 declare namespace Wanted {
-  type ArrRow = {
-    origin?: "arr";
-    source_key?: MediaSourceKey | null;
-    arr_instance_id?: number;
-  };
-  type SourceRow = {
-    origin: "source";
-    source_key: MediaSourceKey;
+  type SourceRow = MediaSourceOwner & {
     arr_instance_id: null;
     source_id: number;
-    source_name: string | null;
-    source_kind: "folder" | "jellyfin" | "emby";
+    source_kind: MediaSourceKind;
     identity_state: "identified" | "parsed" | "ambiguous" | "unmatched";
   };
-  type RowOwner = ArrRow | SourceRow;
+  type RowOwner = ArrRowOwner | SourceRow;
   type Range = Parameter.Range & { sourceKeys?: MediaSourceKey[] };
   type Base = MonitoredType &
     TagType &
@@ -265,7 +271,7 @@ declare namespace Wanted {
   type Movie = Base & MovieIdType & TitleType & AudioLanguageType;
 
   type EpisodeRow =
-    | (Episode & ArrRow)
+    | (Episode & ArrRowOwner)
     | (Omit<
         Episode,
         "sonarrEpisodeId" | "sonarrSeriesId" | "arr_instance_id" | "seriesType"
@@ -276,7 +282,7 @@ declare namespace Wanted {
           seriesType: null;
         });
   type MovieRow =
-    | (Movie & ArrRow)
+    | (Movie & ArrRowOwner)
     | (Omit<Movie, "radarrId" | "arr_instance_id"> &
         SourceRow & { radarrId: null });
 
@@ -294,13 +300,37 @@ declare namespace Blacklist {
     subs_id: string;
   };
 
-  type Movie = Base & MovieIdType & TitleType;
+  type SourceRow = MediaSourceOwner & {
+    id: number;
+    source_id: number | null;
+    source_item_id: number | null;
+    video_path: string | null;
+  };
+
+  type Movie = Base &
+    (
+      | (MovieIdType & TitleType & ArrRowOwner)
+      | (SourceRow & { title: string | null })
+    );
 
   type Episode = Base &
-    EpisodeTitleType &
-    SeriesIdType & {
-      episode_number: string;
-    };
+    (
+      | (EpisodeTitleType &
+          SeriesIdType &
+          ArrRowOwner & { episode_number: string })
+      | (SourceRow & {
+          seriesTitle: string | null;
+          episodeTitle: string | null;
+          episode_number: string | null;
+        })
+    );
+
+  type Scope = { includeSources?: boolean; sourceKeys?: MediaSourceKey[] };
+
+  type Removal =
+    | ({ all: true } & Scope)
+    | { all: false; form: FormType.DeleteBlacklist }
+    | { sourceBlacklistId: number };
 }
 
 declare namespace History {
