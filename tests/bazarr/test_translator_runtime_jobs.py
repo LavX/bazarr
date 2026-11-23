@@ -45,6 +45,62 @@ class FakeQueue:
         return self.statuses.get(queue_job_id)
 
 
+def test_queue_status_observes_a_job_during_scheduler_handoff(monkeypatch):
+    from collections import deque
+    from threading import Event, Thread, current_thread
+
+    from app import jobs_queue as app_queue
+
+    monkeypatch.setattr(app_queue.JobsQueue, "_flush_progress_loop", lambda self: None)
+    queue = app_queue.JobsQueue()
+    job = app_queue.Job(41, "Translate", "subtitles.tools.translate.main", "translate_subtitles_file")
+    queue.jobs_pending_queue.append(job)
+    monkeypatch.setattr(app_queue, "jobs_queue", queue)
+    monkeypatch.setattr(queue, "_has_capacity_for", lambda _job: True)
+    removed_from_pending, lookup_started, finish_handoff = Event(), Event(), Event()
+    result = []
+
+    class PausedRunningQueue(deque):
+        def append(self, entry):
+            removed_from_pending.set()
+            assert finish_handoff.wait(5)
+            super().append(entry)
+
+    queue.jobs_running_queue = PausedRunningQueue()
+    queue_lock = queue._queue_lock
+
+    class ObservedLock:
+        def __enter__(self):
+            if current_thread() is lookup:
+                lookup_started.set()
+            return queue_lock.__enter__()
+
+        def __exit__(self, *args):
+            return queue_lock.__exit__(*args)
+
+    def read_status():
+        try:
+            result.append(jobs_module.JobsQueuePort().status(job.job_id))
+        finally:
+            lookup_started.set()
+
+    lookup = Thread(target=read_status, daemon=True)
+    handoff = Thread(target=queue._reserve_next_job, daemon=True)
+    queue._queue_lock = ObservedLock()
+    handoff.start()
+    try:
+        assert removed_from_pending.wait(5)
+        lookup.start()
+        assert lookup_started.wait(5)
+    finally:
+        finish_handoff.set()
+        handoff.join(5)
+        if lookup.ident is not None:
+            lookup.join(5)
+    assert result == ["pending"]
+    assert list(queue.jobs_running_queue) == [job]
+
+
 def _production_sqlite_engine(path, busy_timeout=60000):
     """Built the way bazarr/app/database.py builds the SQLite engine: no pool, AUTOCOMMIT, WAL, busy_timeout.
 
