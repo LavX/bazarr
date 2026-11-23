@@ -10,7 +10,7 @@ from subtitles.tools.subsync_engines import (SubtitleSourceChanged, read_regular
                                              is_sync_engine_output, is_sync_stream_reference, sync_output_owner_is_unique)
 from utilities.security_guards import SUBTITLE_FILE_EXTENSIONS
 
-from . import repository
+from . import identity, repository
 from .analysis import _content_stamp, local_stat
 from .context import SourceItemContext, SourceItemGone, resolve_item
 from .indexer import SourcePublicationOwnerIndex, source_subtitle_directories
@@ -43,6 +43,15 @@ def _video_in_roots(source, target=None):
             and _path_under_any_root(path, roots))
 
 
+def _native_managed(source, item, target=None):
+    # An Arr sync can claim this path before the queued shadow refresh runs.
+    if item.arr_shadow:
+        return True
+    owners = identity.ArrOwners.load(target)
+    return (owners.path_stage(source.path) is not None
+            or owners.stat_stage(source.path, identity.stat_file(source.path)) is not None)
+
+
 def tool_item(item_id, arr_instance_id=None):
     if arr_instance_id is not None:
         raise SourceToolError('Source items do not have an Arr instance', 400)
@@ -55,6 +64,10 @@ def tool_item(item_id, arr_instance_id=None):
     item = repository.get_item(item_id)
     if item is None or not source.same_item(item) or item.path != source.path:
         raise SourceToolError('Source item not found', 404)
+    if item.server_missing:
+        raise SourceToolError('The source recording is unavailable', 404)
+    if _native_managed(source, item):
+        raise SourceToolError('The source recording is managed by an Arr owner', 409)
     return source, item
 
 
@@ -195,6 +208,10 @@ class SourceSubtitleTool:
         if (item is None or not self.sidecar.now_listed(current, item)
                 or (self.reference is not None and not self.reference.now_listed(current, item))):
             raise SubtitleSourceChanged('The source subtitle or reference changed')
+        if item.server_missing:
+            raise SubtitleSourceChanged('The source recording is no longer available')
+        if _native_managed(current, item, target):
+            raise SubtitleSourceChanged('The source recording is now managed by an Arr owner')
 
     def validate(self):
         self.check_current(live_source(self.source))
@@ -217,7 +234,7 @@ class SourceSubtitleTool:
                 raise SubtitleSourceChanged('The source subtitle or output has ambiguous ownership')
 
         with owners.publication(self.source, prepare, destination=output_path,
-                                cleanup_outputs=cleanup_outputs) as (current, connection, _):
+                                cleanup_outputs=cleanup_outputs, native_owners=True) as (current, connection, _):
             self.check_current(current, connection)
             if os.path.lexists(output_path) and regular_subtitle_version(output_path) is None:
                 raise SubtitleSourceChanged('The output is no longer a regular subtitle file')

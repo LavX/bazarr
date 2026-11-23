@@ -190,7 +190,8 @@ class SourcePublicationOwnerIndex(SourceOutputOwnerIndex):
         return directory != media_directory
 
     @contextmanager
-    def publication(self, source, prepare=None, *, destination=None, cleanup_outputs=False, release=None):
+    def publication(self, source, prepare=None, *, destination=None, cleanup_outputs=False, release=None,
+                    native_owners=False):
         """Keep slow ownership and subtitle discovery outside the writer transaction."""
         for _ in range(2):
             self._loaded = False
@@ -217,6 +218,8 @@ class SourcePublicationOwnerIndex(SourceOutputOwnerIndex):
                 publishing = False
                 try:
                     options = {'release': release} if release is not None else {}
+                    if native_owners:
+                        options['native_owners'] = True
                     settings_guard = self._settings_guard() if pin_settings else nullcontext()
                     with (settings_guard,
                           source_item_publication(source, shared=shared, **options) as (current, connection),

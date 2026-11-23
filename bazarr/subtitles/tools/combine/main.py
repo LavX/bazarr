@@ -187,8 +187,8 @@ def try_combine_for_video(video_path, media_type, sonarr_series_id=None,
 
                 @contextmanager
                 def publication():
-                    with owners.publication(source, prepare, destination=out_path, cleanup_outputs=True) as (
-                            current, connection, alternates):
+                    with owners.publication(source, prepare, destination=out_path, cleanup_outputs=True,
+                                            native_owners=bool(selected)) as (current, connection, alternates):
                         if current is None or current.path != video_path:
                             raise ValueError('The source item moved or was removed during composition')
                         if subtitle_source_version(video_path) != video_version:

@@ -3,10 +3,14 @@ import { createMemoryRouter, RouterProvider } from "react-router";
 import userEvent from "@testing-library/user-event";
 import { http, HttpResponse } from "msw";
 import { vi } from "vitest";
+import { useSportsHistoryPagination } from "@/apis/hooks/sports";
 import { useSubtitleContent } from "@/apis/hooks/subtitles";
 import queryClient from "@/apis/queries";
 import { QueryKeys } from "@/apis/queries/keys";
 import { createDefaultReducer } from "@/modules/socketio/reducer";
+import BlacklistSportsView from "@/pages/Blacklist/Sports";
+import SportsHistoryView from "@/pages/History/Sports";
+import { sportarr } from "@/pages/Settings/Connections/__tests__/fixtures";
 import SubtitleViewer from "@/pages/SubtitleEditor";
 import { AllProviders } from "@/providers";
 import { act, customRender, rawRender, screen, waitFor, within } from "@/tests";
@@ -454,6 +458,155 @@ it("excludes a confirmed release without deleting or expiring the current subtit
   expect(screen.getByText("Current source subtitle cues")).toBeVisible();
   expect(contentRead).toHaveBeenCalledTimes(1);
 });
+
+it.each(["event action", "socket event"])(
+  "refreshes combined Sports history and exclusions through the %s",
+  async (trigger) => {
+    const user = userEvent.setup();
+    const event = { ...item, kind: "sports_event" as const };
+    const eventRelease = { ...row, item_kind: event.kind, upgradable: false };
+    const record = {
+      id: row.history_id,
+      title: "Folder Sports Final",
+      origin: "source",
+      source_key: row.source_key,
+      source_id: event.source_id,
+      source_item_id: event.id,
+      arr_instance_id: null,
+      language: "en",
+      provider: row.provider,
+      subs_id: row.subs_id,
+      action: row.action,
+    };
+    const nativeRead = vi.fn();
+    let excluded = false;
+    server.use(
+      http.get("/api/system/settings", () =>
+        HttpResponse.json({
+          general: { use_sportarr: true },
+          media_sources: { visible: true },
+        }),
+      ),
+      http.get("/api/system/arr-instances", () =>
+        HttpResponse.json([{ ...sportarr, enabled: true }]),
+      ),
+      http.get("/api/system/jobs", () => HttpResponse.json({ data: [] })),
+      http.get("/api/system/status", () => HttpResponse.json({ data: {} })),
+      http.get("/api/system/media-sources", () =>
+        HttpResponse.json({
+          availability: { sports: { browsable: true } },
+          data: [
+            {
+              id: event.source_id,
+              name: "Folder Sports",
+              enabled: true,
+              libraries: [
+                { id: event.library_id, content_kind: "sports", enabled: true },
+              ],
+            },
+          ],
+        }),
+      ),
+      http.get("/api/sources/items/7", () => HttpResponse.json(event)),
+      http.get("/api/sources/items/7/history", () =>
+        HttpResponse.json({
+          data: [{ ...eventRelease, blacklisted: excluded }],
+          total: 1,
+        }),
+      ),
+      http.post("/api/sources/items/7/blacklist", () => {
+        excluded = true;
+        return new HttpResponse(null, { status: 204 });
+      }),
+      http.get("/api/sports/history", ({ request }) => {
+        if (new URL(request.url).searchParams.has("arr_instance_id")) {
+          nativeRead();
+          return HttpResponse.json({
+            data: [{ ...record, origin: "arr", arr_instance_id: sportarr.id }],
+            total: 1,
+          });
+        }
+        return HttpResponse.json({
+          data: [{ ...record, blacklisted: excluded }],
+          total: 1,
+        });
+      }),
+      http.get("/api/sports/blacklist", () =>
+        HttpResponse.json({
+          data: excluded ? [record] : [],
+          total: excluded ? 1 : 0,
+        }),
+      ),
+    );
+
+    function NativeHistory() {
+      const native = useSportsHistoryPagination({
+        includeSources: true,
+        owner: sportarr.id,
+        sourceKeys: [`arr:${sportarr.id}`],
+      });
+      return <output>Native history: {native.data?.total}</output>;
+    }
+
+    customRender(
+      <>
+        <section aria-label="Event history">
+          <SourceHistoryView item={event} />
+        </section>
+        <section aria-label="Combined history">
+          <SportsHistoryView />
+        </section>
+        <section aria-label="Combined exclusions">
+          <BlacklistSportsView />
+        </section>
+        <NativeHistory />
+      </>,
+    );
+    const eventHistory = within(
+      screen.getByRole("region", { name: "Event history" }),
+    );
+    const combinedHistory = within(
+      screen.getByRole("region", { name: "Combined history" }),
+    );
+    const combinedExclusions = within(
+      screen.getByRole("region", { name: "Combined exclusions" }),
+    );
+    expect(
+      await combinedHistory.findByRole("button", { name: "Exclude" }),
+    ).toBeEnabled();
+    await screen.findByText("Native history: 1");
+    const nativeReads = nativeRead.mock.calls.length;
+
+    if (trigger === "event action") {
+      await waitFor(() =>
+        expect(
+          eventHistory.getByRole("button", { name: "Exclude" }),
+        ).toBeEnabled(),
+      );
+      await user.click(eventHistory.getByRole("button", { name: "Exclude" }));
+      const confirmation = await screen.findByRole("dialog", {
+        name: "Exclude release from search?",
+      });
+      await user.click(
+        within(confirmation).getByRole("button", { name: "Exclude release" }),
+      );
+    } else {
+      excluded = true;
+      act(() =>
+        createDefaultReducer()
+          .find(({ key }) => key === "sports-blacklist")
+          ?.any?.(),
+      );
+    }
+    expect(await combinedExclusions.findByText(record.title)).toBeVisible();
+    await waitFor(() =>
+      expect(
+        combinedHistory.getByRole("button", { name: "Exclude" }),
+      ).toBeDisabled(),
+    );
+    expect(nativeRead).toHaveBeenCalledTimes(nativeReads);
+  },
+);
 
 it("refuses a moved item before posting an upgrade", async () => {
   const user = userEvent.setup();

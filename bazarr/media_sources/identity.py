@@ -534,6 +534,34 @@ class ArrOwners:
         return None
 
 
+    def stat_stage(self, path, stat):
+        """Judge aliases from equal-size rows and unsized rows with this file name."""
+        from app.database import database
+
+        if stat is None:
+            return None
+        session = database if self.target is None else self.target
+        name = os.path.basename(path)
+        rows = []
+        for instance in self.instances.values():
+            mapper = self.mapper(instance.id)
+            if mapper is None:
+                continue
+            table = TABLE_OF_KIND[instance.kind]
+            model, file_id = self._columns(table)
+            map_path = _mapped_sports_sql_path if mapper.sports else _mapped_sql_path
+            mapped_path = map_path(model.path, mapper.rules)
+            same_name = sa.or_(mapped_path == name, mapped_path.endswith('/' + name, autoescape=True),
+                               mapped_path.endswith('\\' + name, autoescape=True))
+            candidates = sa.or_(model.file_size == stat.size, sa.and_(model.file_size.is_(None), same_name))
+            for row in session.execute(sa.select(model.id, model.path, model.file_size, file_id)
+                                       .where(model.arr_instance_id == instance.id, candidates)).all():
+                arr_row = self._arr_row(instance, table, row[0], row[1], row[2], row[3])
+                if arr_row is not None:
+                    rows.append(arr_row)
+        return ArrIndex(rows).match_stat(path, stat)
+
+
 def _mapped_sql_path(path, rules, *, reverse=False):
     """Use the same first matching Arr mapping for exact stored-path checks."""
     matches = []

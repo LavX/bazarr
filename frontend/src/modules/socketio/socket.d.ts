@@ -13,6 +13,7 @@ declare namespace SocketIO {
 
   type NullEventType =
     | "sports"
+    | "sports-blacklist"
     | "connect"
     | "connect_error"
     | "disconnect"

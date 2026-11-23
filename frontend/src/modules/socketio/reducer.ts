@@ -2,6 +2,7 @@ import { isArray, isEmpty, isNumber } from "lodash";
 import queryClient from "@/apis/queries";
 import { scheduleEpisodesHistoryRefresh } from "@/apis/queries/episodeHistory";
 import { QueryKeys } from "@/apis/queries/keys";
+import { invalidateSourceSportsReleaseActivity } from "@/apis/queries/sourceDetails";
 import { invalidateSourceSubtitleDocuments } from "@/apis/queries/sourceSubtitleDocument";
 import {
   scheduleSubtitleScoresRefresh,
@@ -117,6 +118,12 @@ export function createDefaultReducer(): SocketIO.Reducer[] {
           queryKey: [QueryKeys.System, QueryKeys.Languages, "audio", false],
         });
         invalidateHiddenTracks("sports");
+      },
+    },
+    {
+      key: "sports-blacklist",
+      any: () => {
+        void invalidateSourceSportsReleaseActivity(queryClient);
       },
     },
     {

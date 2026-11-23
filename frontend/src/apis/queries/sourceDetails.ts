@@ -1,4 +1,5 @@
 import type { QueryClient, QueryKey } from "@tanstack/react-query";
+import type { SportsFilters } from "@/apis/raw/sports";
 import { QueryKeys } from "./keys";
 
 export const sourceDetailKeys = {
@@ -15,6 +16,30 @@ export const sourceDetailKeys = {
 export interface SourceDetailScope {
   sourceId: number;
   libraryId?: number;
+}
+
+export async function invalidateSourceSportsReleaseActivity(
+  client: QueryClient,
+) {
+  const queries = {
+    queryKey: [QueryKeys.Sports],
+    predicate: ({ queryKey }: { queryKey: QueryKey }) => {
+      const [, activity, value] = queryKey;
+      if (activity !== QueryKeys.History && activity !== QueryKeys.Blacklist)
+        return false;
+      const filters = value as SportsFilters | undefined;
+      return (
+        filters?.includeSources === true &&
+        filters.owner === undefined &&
+        filters.eventId === undefined &&
+        filters.leagueId === undefined &&
+        (!filters.sourceKeys?.length ||
+          filters.sourceKeys.some((key) => key.startsWith("source:")))
+      );
+    },
+  };
+  await client.cancelQueries(queries);
+  await client.invalidateQueries(queries);
 }
 
 function matchesOwner(data: unknown, scope: SourceDetailScope) {

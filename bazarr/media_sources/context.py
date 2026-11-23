@@ -145,20 +145,23 @@ def _same_context(source, current):
 
 
 @contextmanager
-def source_item_publication(source, *, shared=False, release=None):
+def source_item_publication(source, *, shared=False, release=None, native_owners=False):
     """Keep the captured item stable through an atomic subtitle publication."""
     with source_transaction() as connection:
         if release is not None:
             lock_source_release(connection, release)
         postgres = connection.dialect.name == 'postgresql'
-        shared_postgres = shared and postgres
-        item = repository.get_item(source.item_id, connection, for_update=True, nowait=shared_postgres)
-        if item is not None and shared_postgres:
+        registry_postgres = (shared or native_owners) and postgres
+        item = repository.get_item(source.item_id, connection, for_update=True, nowait=registry_postgres)
+        if item is not None and registry_postgres:
             # The row lock alone cannot prevent a source, Arr or Sportarr
-            # writer from admitting another owner in the shared folder.
+            # writer from admitting another owner in the shared folder or
+            # claiming the source recording during a file-tool publication.
             # Take the item lock first and leave any busy writer free to finish.
-            connection.execute(text('LOCK TABLE table_source_items, table_episodes, table_movies, '
-                                    'table_sports_events, arr_instances IN SHARE MODE NOWAIT'))
+            tables = 'table_episodes, table_movies, table_sports_events, arr_instances'
+            if shared:
+                tables = 'table_source_items, ' + tables
+            connection.execute(text(f'LOCK TABLE {tables} IN SHARE MODE NOWAIT'))
         if item is not None and postgres:
             # Keep the enabled owner and library stable through the final eligibility check and file writes.
             for table, row_id in ((repository.Sources, item.source_id), (repository.Libraries, item.library_id)):

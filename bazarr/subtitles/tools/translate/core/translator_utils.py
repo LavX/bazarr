@@ -221,8 +221,8 @@ def translation_write_kwargs(translator, job_id):
         @contextmanager
         def publication():
             try:
-                with owners.publication(source, prepare, destination=translator.dest_srt_file, cleanup_outputs=True) as (
-                        current, connection, prepared):
+                with owners.publication(source, prepare, destination=translator.dest_srt_file, cleanup_outputs=True,
+                                        native_owners=source_tool is not None) as (current, connection, prepared):
                     if current is None or current.profile_id != prepared.profile_id:
                         raise SourceTranslationChanged('The source item moved, was disabled, or its profile changed')
                     if not (current.wanted_file_stamp is not None and arr_claim_blocks_wanted(

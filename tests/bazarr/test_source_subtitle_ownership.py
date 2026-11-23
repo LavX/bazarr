@@ -199,3 +199,207 @@ def test_source_video_links_use_the_stored_video_directory_for_relative_sidecars
     assert opened.status_code == 200 and opened.json['content'] == tools.SRT
     tools._run(toolbox, tools._request(toolbox, context, path, 'remove_tags'))
     assert '<i>' not in path.read_text()
+
+
+def _sportarr_claim(toolbox, context, monkeypatch, *, enabled=True, path=None, size=None, mappings=()):
+    import json
+    import sqlalchemy as sa
+    from app.config import settings
+    from app.database import TableArrInstances, TableSportsEvents, TableSportsLeagues
+
+    monkeypatch.setattr(settings.general, 'use_sportarr', True)
+    toolbox.db.execute(sa.insert(TableArrInstances).values(
+        id=71, kind='sportarr', name='Native sports', stable_key='native-sports',
+        port=7171, enabled=int(enabled), is_default=0, path_mappings=json.dumps(mappings)))
+    toolbox.db.execute(sa.insert(TableSportsLeagues).values(
+        id=71, arr_instance_id=71, sportarrLeagueId=71, title='Formula 1'))
+    toolbox.db.execute(sa.insert(TableSportsEvents).values(
+        id=71, arr_instance_id=71, league_id=71, sportarrEventId=71,
+        file_id=71, path=str(path or context.path), file_size=size, title='Monaco Grand Prix'))
+
+
+def test_source_file_tool_admission_checks_a_fresh_enabled_native_owner(toolbox, monkeypatch):
+    import sqlalchemy as sa
+    from app.database import TableArrInstances
+    from media_sources import repository
+
+    context = tools.pipeline._sports(toolbox.world)
+    path, _ = tools._sidecars(toolbox, context)
+    url = f'/api/sources/items/{context.item_id}/subtitles/en/content'
+    _sportarr_claim(toolbox, context, monkeypatch, enabled=False)
+    opened = toolbox.client.get(url, headers=tools.HEADERS)
+    assert opened.status_code == 200
+    toolbox.db.execute(sa.update(TableArrInstances).where(TableArrInstances.id == 71).values(enabled=1))
+    assert repository.get_item(context.item_id).arr_shadow == 0
+
+    refused = tools._request(toolbox, context, path, 'remove_tags')
+    assert refused.status_code == 409
+    saved = toolbox.client.put(url, headers={**tools.HEADERS, 'If-Match': opened.headers['ETag']},
+                               json={'content': tools.SRT.replace('Original', 'Edited')})
+    assert saved.status_code == 409
+    assert not toolbox.jobs.jobs_pending_queue
+    assert path.read_text() == tools.SRT
+
+
+def test_queued_source_file_tool_rechecks_a_native_owner_before_running(toolbox, monkeypatch):
+    import sqlalchemy as sa
+    from media_sources import repository
+
+    context = tools.pipeline._sports(toolbox.world)
+    path, _ = tools._sidecars(toolbox, context)
+    queued = tools._request(toolbox, context, path, 'remove_tags')
+    assert queued.status_code == 202
+    _sportarr_claim(toolbox, context, monkeypatch)
+    job = toolbox.jobs._reserve_next_job()
+    assert job.job_id == queued.json['job_id']
+    assert toolbox.jobs._run_job(job) is False
+    assert toolbox.jobs.get_job_status(job.job_id) == 'failed'
+    assert path.read_text() == tools.SRT
+    assert not toolbox.db.execute(sa.select(repository.History)).all()
+    assert not toolbox.world.published
+
+
+def test_running_source_sync_rechecks_a_native_owner_before_publication(toolbox, monkeypatch):
+    import sqlalchemy as sa
+    from media_sources import repository
+    from subtitles.tools import subsyncer
+
+    context = tools.pipeline._sports(toolbox.world)
+    path, reference = tools._sidecars(toolbox, context)
+    aligned = []
+
+    def align(self, engine, output_path, video_path, no_fix_framerate):
+        aligned.append(video_path)
+        _sportarr_claim(toolbox, context, monkeypatch)
+        output_path.write_text(tools.SYNCED)
+        return {'offset_seconds': 0.25}
+
+    monkeypatch.setattr(subsyncer.SubSyncer, '_run_external_engine', align)
+    queued = tools._request(toolbox, context, path, 'sync', reference=str(reference),
+                            output_mode='overwrite', enabled_engines='alass')
+    assert queued.status_code == 202
+    job = toolbox.jobs._reserve_next_job()
+    assert job.job_id == queued.json['job_id']
+    # A changed source is a skipped Sync outcome. The queue still completes it.
+    assert toolbox.jobs._run_job(job)
+    assert toolbox.jobs.get_job_status(job.job_id) == 'completed'
+    assert aligned == [context.path]
+    assert path.read_text() == reference.read_text() == tools.SRT
+    assert not toolbox.db.execute(sa.select(repository.History)).all()
+    assert not toolbox.world.published
+
+
+def test_captured_source_editor_write_rechecks_a_native_owner(toolbox, monkeypatch):
+    from media_sources.subtitle_tools import SourceSubtitleTool, indexed_sidecar, tool_item
+    from subtitles.tools.subsync_engines import SubtitleSourceChanged
+
+    context = tools.pipeline._sports(toolbox.world)
+    path, _ = tools._sidecars(toolbox, context)
+    source, item = tool_item(context.item_id)
+    captured = SourceSubtitleTool.capture(source, indexed_sidecar(source, item, path=str(path)))
+    _sportarr_claim(toolbox, context, monkeypatch)
+
+    with pytest.raises(SubtitleSourceChanged, match='Arr owner'):
+        captured.write(tools.SRT.replace('Original', 'Edited').encode(), 'edit')
+    assert path.read_text() == tools.SRT
+    assert not toolbox.world.published
+
+
+def test_shadowed_recording_keeps_manual_search_and_upload_available(toolbox, monkeypatch):
+    from io import BytesIO
+    from unittest.mock import Mock
+    from media_sources import repository
+    from subtitles import manual, upload
+
+    context = tools.pipeline._sports(toolbox.world)
+    _sportarr_claim(toolbox, context, monkeypatch)
+    repository.update_item(context.item_id, toolbox.db, arr_shadow=1)
+    monkeypatch.setattr(manual, 'jobs_queue', toolbox.jobs)
+    monkeypatch.setattr(upload, 'jobs_queue', toolbox.jobs)
+    monkeypatch.setattr(toolbox.jobs, 'force_start_pending_job', Mock())
+    monkeypatch.setattr(upload, 'sync_subtitles', Mock())
+
+    search = toolbox.client.post(f'/api/sources/items/{context.item_id}/manual/search', headers=tools.HEADERS)
+    assert search.status_code == 202
+    search_job = toolbox.jobs._reserve_next_job()
+    assert search_job.job_id == search.json['job_id']
+    assert search_job.kwargs['source'].item_id == context.item_id
+
+    uploaded = toolbox.client.post(f'/api/sources/items/{context.item_id}/subtitles', headers=tools.HEADERS, data={
+        'file': (BytesIO(tools.SRT.encode()), 'fixture.srt'), 'language': 'en', 'forced': 'False', 'hi': 'False',
+    })
+    tools._run(toolbox, uploaded)
+    assert Path(context.path).with_suffix('.en.srt').read_text() == tools.SRT
+    assert [event.operation for event in toolbox.world.published] == ['upload']
+
+
+def test_source_file_publication_pins_native_ownership_on_postgresql(toolbox, monkeypatch):
+    import sqlalchemy as sa
+    from media_sources.subtitle_tools import SourceSubtitleTool, indexed_sidecar, tool_item
+
+    engine = toolbox.db.get_bind()
+    if engine.dialect.name != 'postgresql':
+        pytest.skip('PostgreSQL registry lock; SQLite serializes source write transactions')
+    context = tools.pipeline._sports(toolbox.world)
+    path, _ = tools._sidecars(toolbox, context)
+    _sportarr_claim(toolbox, context, monkeypatch, enabled=False)
+    source, item = tool_item(context.item_id)
+    captured = SourceSubtitleTool.capture(source, indexed_sidecar(source, item, path=str(path)))
+
+    with captured.publication(str(path)):
+        with pytest.raises(sa.exc.OperationalError) as blocked:
+            with engine.connect().execution_options(isolation_level='READ COMMITTED') as native, native.begin():
+                native.exec_driver_sql("SET LOCAL lock_timeout = '100ms'")
+                native.exec_driver_sql('UPDATE arr_instances SET enabled = 1 WHERE id = 71')
+        assert getattr(blocked.value.orig, 'pgcode', None) == '55P03'
+
+
+def test_source_file_tools_recheck_server_missing_even_when_the_video_remains(toolbox):
+    from media_sources import repository
+    from media_sources.subtitle_tools import SourceSubtitleTool, indexed_sidecar, tool_item
+    from subtitles.tools.subsync_engines import SubtitleSourceChanged
+
+    context = tools.pipeline._sports(toolbox.world)
+    path, _ = tools._sidecars(toolbox, context)
+    source, item = tool_item(context.item_id)
+    captured = SourceSubtitleTool.capture(source, indexed_sidecar(source, item, path=str(path)))
+    repository.update_item(context.item_id, toolbox.db, server_missing=1)
+
+    assert Path(context.path).is_file()
+    assert tools._request(toolbox, context, path, 'remove_tags').status_code == 404
+    with pytest.raises(SubtitleSourceChanged, match='no longer available'):
+        captured.validate()
+    with pytest.raises(SubtitleSourceChanged, match='no longer available'):
+        captured.write(tools.SRT.replace('Original', 'Edited').encode(), 'edit')
+    assert path.read_text() == tools.SRT
+    assert not toolbox.world.published
+
+
+@pytest.mark.parametrize('mapped', [False, True], ids=['sized', 'unsized-mapped'])
+def test_source_file_tools_recheck_a_fresh_native_hardlink_owner(toolbox, monkeypatch, mapped):
+    import os
+    from media_sources import repository
+    from media_sources.subtitle_tools import SourceSubtitleTool, indexed_sidecar, tool_item
+    from subtitles.tools.subsync_engines import SubtitleSourceChanged
+
+    context = tools.pipeline._sports(toolbox.world)
+    path, _ = tools._sidecars(toolbox, context)
+    source, item = tool_item(context.item_id)
+    captured = SourceSubtitleTool.capture(source, indexed_sidecar(source, item, path=str(path)))
+    native_name = Path(context.path).name if mapped else 'Native recording.mkv'
+    native_path = toolbox.world.tmp_path / native_name
+    os.link(context.path, native_path)
+    if mapped:
+        remote = '/remote/Original name.mkv'
+        _sportarr_claim(toolbox, context, monkeypatch, path=remote, mappings=[(remote, str(native_path))])
+    else:
+        _sportarr_claim(toolbox, context, monkeypatch, path=native_path, size=native_path.stat().st_size)
+    assert repository.get_item(context.item_id).arr_shadow == 0
+
+    assert tools._request(toolbox, context, path, 'remove_tags').status_code == 409
+    with pytest.raises(SubtitleSourceChanged, match='Arr owner'):
+        captured.validate()
+    with pytest.raises(SubtitleSourceChanged, match='Arr owner'):
+        captured.write(tools.SRT.replace('Original', 'Edited').encode(), 'edit')
+    assert path.read_text() == tools.SRT
+    assert not toolbox.world.published

@@ -299,6 +299,9 @@ it("opens subtitle tools for the selected Sports recording and uses its source f
   const event = within(
     await screen.findByRole("dialog", { name: toolEvent.title }),
   );
+  expect(event.queryByRole("button", { name: "Upgrade" })).toBeNull();
+  expect(event.getByRole("button", { name: "Manual Search" })).toBeEnabled();
+  expect(event.getByRole("button", { name: "Upload" })).toBeEnabled();
   await user.click(
     await event.findByRole("button", { name: "Subtitle Tools" }),
   );
@@ -309,6 +312,8 @@ it("opens subtitle tools for the selected Sports recording and uses its source f
     await tools.findByRole("checkbox", { name: /race\.en\.hi\.srt/ }),
   ).toBeEnabled();
   expect(tools.queryByRole("checkbox", { name: /pgs/ })).toBeNull();
+  expect(tools.queryByRole("button", { name: "Upgrade" })).toBeNull();
+  expect(tools.getByRole("button", { name: "History" })).toBeVisible();
 
   await user.click(tools.getByRole("button", { name: "Actions" }));
   expect(
@@ -557,6 +562,7 @@ it.each(["league", "event list", "event dialog"] as const)(
 );
 
 it("reads the source movie despite a colliding Arr cache and normalizes its stored subtitle rows", async () => {
+  const user = userEvent.setup();
   queryClient.setQueryData([QueryKeys.Movies, 7], { title: "Wrong Arr movie" });
   queryClient.setQueryData(sourceDetailKeys.item(7, "episode"), {
     ...movie,
@@ -582,6 +588,12 @@ it("reads the source movie despite a colliding Arr cache and normalizes its stor
     id: 7,
     title: "Folder movie",
   });
+  expect(screen.getByRole("button", { name: "Upgrade" })).toBeVisible();
+  await user.click(screen.getByRole("button", { name: "Subtitle Tools" }));
+  const tools = within(
+    await screen.findByRole("dialog", { name: "Subtitle Tools" }),
+  );
+  expect(await tools.findByRole("button", { name: "Upgrade" })).toBeVisible();
 });
 
 it("labels untagged source audio tracks while preserving named tracks", async () => {

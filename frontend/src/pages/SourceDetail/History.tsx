@@ -10,6 +10,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ColumnDef } from "@tanstack/react-table";
 import queryClient from "@/apis/queries";
 import { QueryKeys } from "@/apis/queries/keys";
+import { invalidateSourceSportsReleaseActivity } from "@/apis/queries/sourceDetails";
 import {
   expireSourceSubtitleDocument,
   invalidateSourceSubtitleDocuments,
@@ -229,12 +230,14 @@ export function useSourceReleaseExclusion(item: SourceItem) {
           queryKey: sourceHistoryKey(item),
           exact: true,
         }),
-        client.invalidateQueries({
-          queryKey:
-            item.kind === "episode"
-              ? [QueryKeys.Series, QueryKeys.Episodes, QueryKeys.Blacklist]
-              : [QueryKeys.Movies, QueryKeys.Blacklist],
-        }),
+        item.kind === "sports_event"
+          ? invalidateSourceSportsReleaseActivity(client)
+          : client.invalidateQueries({
+              queryKey:
+                item.kind === "episode"
+                  ? [QueryKeys.Series, QueryKeys.Episodes, QueryKeys.Blacklist]
+                  : [QueryKeys.Movies, QueryKeys.Blacklist],
+            }),
       ]);
     },
   });
@@ -379,6 +382,7 @@ export function SourceUpgradeButton({
   disabled?: boolean;
 }) {
   const upgrade = useSourceUpgrade(item, disabled);
+  if (item.kind === "sports_event") return null;
   return (
     <Stack gap="xs">
       <Toolbox.Button
