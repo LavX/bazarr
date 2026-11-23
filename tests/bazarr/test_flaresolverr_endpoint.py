@@ -205,11 +205,13 @@ class TestFill:
 
 class TestPluginIdNamespace:
     def test_endpoints_is_a_reserved_section_no_plugin_can_claim(self):
-        from provider_hub.manifest import ManifestValidationError, _validate_provider_id, reserved_settings_sections
+        from plugin_platform_helpers import provider_manifest_v1
+        from provider_hub.manifest import ManifestValidationError, reserved_settings_sections, validate_manifest
 
         assert endpoints.ENDPOINTS_SECTION in reserved_settings_sections()
-        with pytest.raises(ManifestValidationError):
-            _validate_provider_id(endpoints.ENDPOINTS_SECTION, set())
+        validate_manifest(provider_manifest_v1("examplehub"), built_in_provider_ids=set())
+        with pytest.raises(ManifestValidationError, match="reserved by a Bazarr settings section"):
+            validate_manifest(provider_manifest_v1(endpoints.ENDPOINTS_SECTION), built_in_provider_ids=set())
 
     def test_no_installed_catalog_or_registered_plugin_id_is_endpoints(self):
         from provider_hub import state as hub_state

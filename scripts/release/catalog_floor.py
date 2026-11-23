@@ -4,11 +4,13 @@
 
 The image ships a snapshot of the official catalog (its catalog.json and every
 provider bundle file it names), on disk and read-only, for the runtime reader in
-bazarr/provider_hub/floor.py to use. This script only
-makes the snapshot reproducible and checked. It uses the standard library and
-git. Only a lock that pins the signed feed also needs the application's
-verifier (signing.py and signing_roots.py) and the cryptography package it
-imports, which the Docker stage provides.
+bazarr/provider_hub/floor.py to use. The byte snapshot needs only the standard
+library and git. A signed lock also needs the application's verifier
+(signing.py and signing_roots.py) and its cryptography package.
+
+The Docker stage passes --runtime-seed to add the verified bundles, pip-less
+shared environments and their index to the same artifact. The runtime builder
+uses the target interpreter and hash-pinned wheels during the image build.
 
 The pin is one lock file, docker/catalog-pin.lock.json: the catalog repository,
 the branch, one commit and the sha256 of every file taken from that commit.
@@ -17,7 +19,7 @@ a release bumps one pin and records one commit.
 
   lock   Write the lock for a commit (the branch tip by default). Run it in
          release prep and commit the result.
-  build  Check the lock against the live repository and write the snapshot.
+  build  Check the lock against the repository and write the snapshot.
   check  Check a written snapshot's modes (and its owner, when asked).
 
 What `build` verifies before it writes a byte:
@@ -113,6 +115,8 @@ DEFAULT_REPO = 'LavX/bazarr-provider-catalog'
 DEFAULT_BRANCH = 'main'
 CATALOG_FILE = 'catalog.json'
 FLOOR_META_FILE = 'floor.json'
+SEED_INDEX_FILE = 'seed.json'
+SEED_RUNTIME_DIR = 'runtime'
 # Where the catalog publishes its signed feed. The host's reader keeps the same
 # names in bazarr/provider_hub/catalog_feed.py, and a test holds the two equal.
 SIGNED_CHANNELS = ('main', 'beta')
@@ -130,7 +134,7 @@ _LOCK_KEYS = frozenset({'lock_version', 'repo', 'branch', 'commit', 'files'})
 _LOCK_OPTIONAL_KEYS = frozenset({'opaque_files'})
 # Written by the build itself, or the catalog document: nothing else may take
 # these names at the snapshot root.
-_RESERVED_PATHS = frozenset({CATALOG_FILE, FLOOR_META_FILE})
+_RESERVED_PATHS = frozenset({CATALOG_FILE, FLOOR_META_FILE, SEED_INDEX_FILE, SEED_RUNTIME_DIR})
 
 
 def _is_reserved(path):
@@ -643,26 +647,29 @@ def _open_destination(dest):
         raise
 
 
-def write_floor(lock, data, dest):
+def _check_runtime_destination(dest):
+    """The venv installer needs a real absolute path for its installed scripts."""
+    # An unrelated user must not be able to move the output path between the
+    # descriptor-based setup and the venv install. System sticky directories,
+    # such as /tmp, can contain a private output subtree.
+    trusted_uids = {os.geteuid(), os.stat(dest.anchor).st_uid}
+    for path in (dest, *dest.parents):
+        info = path.lstat()
+        if (not stat.S_ISDIR(info.st_mode) or info.st_uid not in trusted_uids
+                or (info.st_mode & 0o022 and not info.st_mode & stat.S_ISVTX)):
+            raise FloorError(f'runtime seed destination traverses a directory other users can redirect: {path}')
+
+
+def write_floor(lock, data, dest, *, build_runtime=None):
     """Write the snapshot under ``dest``.
 
     The destination and every directory and file inside it are created
     relative to open directory descriptors, without following links and
     without replacing anything, so a component swapped for a link at any time
-    cannot send a write outside the destination."""
+    cannot send a write outside the destination. The optional environment
+    installer needs a physical path, so its destination must be under
+    directories other users cannot redirect."""
     dest = Path(os.path.abspath(dest))
-
-    meta = {
-        'lock_version': lock['lock_version'],
-        'repo': lock['repo'],
-        'branch': lock['branch'],
-        'commit': lock['commit'],
-        # Every file in the snapshot besides this one, with its sha256, so a
-        # reader can check what it opens without the lock file.
-        'files': {path: _sha256(content) for path, content in sorted(data.items())},
-    }
-    entries = dict(data)
-    entries[FLOOR_META_FILE] = (json.dumps(meta, indent=2, sort_keys=True) + '\n').encode('utf-8')
 
     file_flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
     opened = {}
@@ -673,6 +680,21 @@ def write_floor(lock, data, dest):
                 raise FloorError(f'{dest} is not empty')
         except OSError as error:
             raise FloorError(f'{dest} could not be opened for writing: {error}') from error
+
+        entries = dict(data)
+        if build_runtime is not None:
+            _check_runtime_destination(dest)
+            os.mkdir(SEED_RUNTIME_DIR, 0o755, dir_fd=opened[()])
+            entries[SEED_INDEX_FILE] = build_runtime(dest / SEED_RUNTIME_DIR)
+        meta = {
+            'lock_version': lock['lock_version'],
+            'repo': lock['repo'],
+            'branch': lock['branch'],
+            'commit': lock['commit'],
+            # Listed files are checked by the reader without the lock.
+            'files': {path: _sha256(content) for path, content in sorted(entries.items())},
+        }
+        entries[FLOOR_META_FILE] = (json.dumps(meta, indent=2, sort_keys=True) + '\n').encode('utf-8')
 
         def directory(parts):
             if parts not in opened:
@@ -698,7 +720,8 @@ def write_floor(lock, data, dest):
 
 def check_modes(dest, expect_root_owner=False):
     """Fail on anything under ``dest`` that is not a read-only regular file or
-    directory (and, when asked, not owned by root)."""
+    directory (and, when asked, not owned by root). Seeded environments may
+    also carry read-only executables."""
     dest = Path(dest)
     if not dest.is_dir():
         raise FloorError(f'{dest} is not a directory')
@@ -712,7 +735,8 @@ def check_modes(dest, expect_root_owner=False):
             if mode != DIR_MODE:
                 problems.append(f'{path}: directory mode {mode:04o}, expected {DIR_MODE:04o}')
         elif stat.S_ISREG(info.st_mode):
-            if mode != FILE_MODE:
+            in_environment = path.is_relative_to(dest / SEED_RUNTIME_DIR / 'shared_envs')
+            if mode != FILE_MODE and not (in_environment and mode == DIR_MODE):
                 problems.append(f'{path}: file mode {mode:04o}, expected {FILE_MODE:04o}')
         else:
             problems.append(f'{path}: not a regular file or directory')
@@ -766,7 +790,23 @@ def _cmd_build(args):
         tip = branch_tip(repo, lock['branch'])
         # The snapshot names the commit its files come from: the locked commit,
         # or the signed body's source_commit when the signed feed is baked.
-        write_floor({**lock, 'commit': snapshot.commit}, snapshot.files, args.dest)
+        build_runtime = None
+        if args.runtime_seed:
+            directory = Path(args.signing_dir) if args.signing_dir else _default_signing_dir()
+            sys.path.insert(0, str(directory.resolve().parent))
+            from provider_hub import seed
+
+            def build_runtime(root):
+                try:
+                    return seed.build(
+                        root, repo=lock['repo'], commit=snapshot.commit, catalog=snapshot.files[CATALOG_FILE],
+                        signed_catalog=snapshot.signed.body if snapshot.signed else None,
+                        files=snapshot.files, offline=args.seed_offline,
+                    )
+                except (KeyError, ValueError) as error:
+                    raise FloorError(f'runtime seed build failed: {error}') from error
+
+        write_floor({**lock, 'commit': snapshot.commit}, snapshot.files, args.dest, build_runtime=build_runtime)
     check_modes(args.dest, expect_root_owner=args.expect_root_owner)
     state = 'at the branch tip' if tip == lock['commit'] else f'behind the branch tip {tip[:12]}'
     print(f'floor written: {lock["repo"]}@{snapshot.commit[:12]} ({len(snapshot.files)} files), '
@@ -813,6 +853,8 @@ def build_parser():
     build.add_argument('--expect-root-owner', action='store_true')
     build.add_argument('--signing-dir', help='where signing.py and signing_roots.py are '
                                              '(default: bazarr/provider_hub in this repository)')
+    build.add_argument('--runtime-seed', action='store_true', help='build the target-specific runtime seed')
+    build.add_argument('--seed-offline', action='store_true', help='use only the bundled wheels for the runtime seed')
     build.set_defaults(func=_cmd_build)
 
     check = commands.add_parser('check', help='assert the snapshot modes')

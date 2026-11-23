@@ -65,8 +65,15 @@ class _Kind:
 def _removal(service, kind_hooks, plugin_id, keep, **row):
     from provider_hub.state import mutate_state
 
-    installation = {"provider_id": plugin_id, "kind": "translator", "source_id": "official", **row}
-    mutate_state(lambda state: service._record_kept_data(state, plugin_id, installation, kind_hooks, keep))
+    installation = {"provider_id": plugin_id, "kind": "translator", "source_id": "official", "origin": "catalog",
+                    "source_bound": True, "state": "active", "active_version": "1.0.0", **row}
+    mutate_state(lambda state: state["installations"].update({plugin_id: installation}))
+
+    def remove(state):
+        service._record_kept_data(state, plugin_id, state["installations"][plugin_id], kind_hooks, keep)
+        state["installations"].pop(plugin_id)
+
+    mutate_state(remove)
 
 
 def _stage_row(plugin_id, **row):
@@ -267,7 +274,7 @@ def test_a_plugins_saved_settings_come_back_with_its_kept_data_once(hub_store, h
     _removal(service, kind, "engine", True, config={"base_url": "https://x.test", "api_key": "enc:abc"})
     _stage_row("engine")
 
-    assert service.claim_kept_data("engine", "official", "translator") is True
+    assert service.claim_kept_data("engine", "official", "translator", "catalog") is True
 
     state = load_state()
     assert state["installations"]["engine"]["config"] == {"base_url": "https://x.test", "api_key": "enc:abc"}
@@ -286,7 +293,7 @@ def test_a_claim_that_cannot_clear_what_was_kept_refuses_the_install_and_keeps_t
     _removal(service, kind, "engine", True)
 
     with pytest.raises(service.ProviderHubInstallError, match="could not be cleared"):
-        service.claim_kept_data("engine", "community", "translator")
+        service.claim_kept_data("engine", "community", "translator", "catalog")
 
     assert "engine" in load_state()["kept_data"]
 

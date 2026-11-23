@@ -228,7 +228,7 @@ def hub_calls(monkeypatch, tmp_path):
                          'name': 'Some Provider', 'entry_key': 'key', 'kind': 'subtitle_provider'})
     monkeypatch.setattr(service, 'install_needs_consent', lambda *args, **kwargs: False)
     monkeypatch.setattr(hub_jobs, 'queue_install',
-                        lambda source, provider_id, version, name, entry_key=None:
+                        lambda source, provider_id, version, name, entry_key=None, catalog_registration=None:
                         calls.append((HUB_INSTALL, provider_id)) or 'job-install')
     monkeypatch.setattr(service, 'local_package_uploads_dir', lambda: tmp_path)
     monkeypatch.setattr(hub_jobs, 'queue_install_local',

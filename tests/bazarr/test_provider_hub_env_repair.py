@@ -184,11 +184,13 @@ def test_a_failed_worker_check_at_use_time_flags_the_installation(hub, tmp_path,
     assert "cloudscraper" in row["last_error"]
 
 
-def test_a_stopped_install_leaves_an_environment_another_install_is_using(hub):
+def test_a_stopped_install_leaves_files_another_install_is_using(hub):
     from provider_hub.service import _discard_stopped_install
 
     shared = _env(hub / "shared_envs" / "fp")
     mine = _env(hub / "shared_envs" / "mine")
+    bundle = hub / "bundles" / "examplehub" / "1.0.0"
+    bundle.mkdir(parents=True)
     holding = threading.Event()
     release = threading.Event()
 
@@ -196,6 +198,7 @@ def test_a_stopped_install_leaves_an_environment_another_install_is_using(hub):
         with pin_scope():
             from provider_hub import venv
             venv._pin(shared)
+            venv._pin(bundle)
             holding.set()
             release.wait(5)
 
@@ -207,15 +210,18 @@ def test_a_stopped_install_leaves_an_environment_another_install_is_using(hub):
             from provider_hub import venv
             venv._pin(shared)
             venv._pin(mine)
-            _discard_stopped_install([shared, mine], {})
+            venv._pin(bundle)
+            _discard_stopped_install([shared, mine, bundle])
         assert shared.exists()
+        assert bundle.exists()
         assert not mine.exists()
     finally:
         release.set()
         worker.join()
     with pin_scope():
-        _discard_stopped_install([shared], {})
+        _discard_stopped_install([shared, bundle])
     assert not shared.exists()
+    assert not bundle.exists()
 
 
 def test_a_stopped_install_keeps_a_recorded_environment(hub):
@@ -227,7 +233,7 @@ def test_a_stopped_install_keeps_a_recorded_environment(hub):
     save_state(state)
 
     with pin_scope():
-        _discard_stopped_install([recorded], {})
+        _discard_stopped_install([recorded])
 
     assert recorded.exists()
 

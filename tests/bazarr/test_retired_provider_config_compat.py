@@ -191,6 +191,10 @@ provider_registry.register(ADOPTED, _AdoptedProvider)
 # ids with no provider class out of enabled_providers, drops the config sections
 # of the retired ids that are left, and persists the result.
 import init  # noqa: E402,F401
+from app.startup import prepare_database_and_plugins  # noqa: E402
+from flask import Flask  # noqa: E402
+
+prepare_database_and_plugins(Flask(__name__))
 
 from app.config import get_settings, settings, sync_checker, validators  # noqa: E402
 from secret_store.registry import USER_VISIBLE_SECRET_LISTS, USER_VISIBLE_SECRETS  # noqa: E402

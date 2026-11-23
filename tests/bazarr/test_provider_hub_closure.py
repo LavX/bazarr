@@ -1191,32 +1191,47 @@ def test_the_repair_sites_leave_the_reason_only_on_a_row_that_is_on(tmp_path, mo
 
 def test_the_boot_order_is_activation_then_reconciliation_then_the_second_dependency_check(
         tmp_path, monkeypatch, service_kind):
-    from pathlib import Path
-
     from provider_hub import service
+    from provider_hub.startup import start_after_migrations
     from provider_hub.state import load_state
 
     parent = _manifest("parent", provides=[PARENT_CAPABILITY])
     user = _manifest("user", requires=[PARENT_CAPABILITY])
     _world(tmp_path, monkeypatch, [], {
         **_installed(parent), **_installed(user, supplied_by={PARENT_CAPABILITY: "parent"})})
+    monkeypatch.setenv("BAZARR_DISABLE_PROVIDER_AUTOINSTALL", "true")
+    monkeypatch.setattr("app.config.write_config", lambda: True)
+    monkeypatch.setattr("provider_hub.registry.registration_incomplete", lambda: frozenset())
+    monkeypatch.setattr("provider_hub.registry.settings_cleanup_plan",
+                        lambda _existing, enabled, disabled, *_: (enabled, disabled, []))
+    activate = service.activate_staged_installations
+    reconcile = service.reconcile_plugin_environments
+    recheck = service.enforce_activation_needs
+    steps = []
 
-    # Activation runs first and sees a running supplier: nothing has said otherwise yet.
-    service.activate_staged_installations()
-    assert "blocked" not in load_state()["installations"]["user"]
-    # The reconciliation then finds that the supplier has no environment (it has no interpreter on disk), and
-    # flags it on its own.
-    service.reconcile_plugin_environments()
-    assert load_state()["installations"]["parent"]["needs_repair"] is True
-    assert "blocked" not in load_state()["installations"]["user"]
-    # Only the check run after it holds the dependent back.
-    assert service.enforce_activation_needs() is True
+    def check_activation():
+        steps.append("activated")
+        result = activate()
+        assert "blocked" not in load_state()["installations"]["user"]
+        return result
+
+    def check_reconciliation():
+        steps.append("reconciled")
+        result = reconcile()
+        assert load_state()["installations"]["parent"]["needs_repair"] is True
+        assert "blocked" not in load_state()["installations"]["user"]
+        return result
+
+    def check_dependencies():
+        steps.append("checked")
+        return recheck()
+
+    monkeypatch.setattr(service, "activate_staged_installations", check_activation)
+    monkeypatch.setattr(service, "reconcile_plugin_environments", check_reconciliation)
+    monkeypatch.setattr(service, "enforce_activation_needs", check_dependencies)
+    assert start_after_migrations()
+    assert steps == ["activated", "reconciled", "checked"]
     assert load_state()["installations"]["user"]["blocked"] is True
-
-    source = (Path(service.__file__).parents[1] / "init.py").read_text(encoding="utf-8")
-    assert (source.index("activated = activate_staged_installations()")
-            < source.index("reconcile_plugin_environments()")
-            < source.index("enforce_activation_needs()"))
 
 
 @pytest.mark.parametrize("broken", [{"needs_repair": True}, {"blocked": True, "blocked_reason": "held"}])

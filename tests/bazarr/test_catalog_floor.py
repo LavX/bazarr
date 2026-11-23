@@ -1156,7 +1156,8 @@ def test_the_dockerfile_builds_the_floor_from_the_lock_and_asserts_the_modes():
     assert 'COPY docker/catalog-pin.lock.json' in text
     assert 'COPY scripts/release/catalog_floor.py' in text
     assert 'catalog_floor.py build' in text and '--expect-root-owner' in text
-    assert 'COPY --from=catalog-floor /catalog_floor ./catalog_floor' in text
+    assert 'COPY --from=catalog-floor /app/bazarr/catalog_floor ./catalog_floor' in text
+    assert '--runtime-seed' in text and 'check_image_interpreter' in text
     for assertion in ('-type f ! -perm 0444', '-type d ! -perm 0555', '! -user root'):
         assert assertion in text, f'the production stage no longer asserts {assertion}'
 
@@ -1168,3 +1169,16 @@ def test_the_floor_is_copied_into_the_application_tree_not_the_config_volume():
     ownership_check = text.index('find /app \\( ! -user root')
     assert workdir < copy < ownership_check, (
         'the floor must land under /app/bazarr before the whole-tree ownership assertion')
+
+
+def test_the_runtime_builder_refuses_a_destination_another_user_could_redirect(tmp_path):
+    shared = tmp_path / 'shared'
+    shared.mkdir()
+    shared.chmod(0o777)
+    lock = {'lock_version': 1, 'repo': floor.DEFAULT_REPO, 'branch': 'main', 'commit': 'a' * 40}
+    try:
+        with pytest.raises(floor.FloorError, match='other users can redirect'):
+            floor.write_floor(lock, {'catalog.json': b'{}'}, shared / 'floor',
+                              build_runtime=lambda *_: pytest.fail('runtime build must not start'))
+    finally:
+        shared.chmod(0o755)

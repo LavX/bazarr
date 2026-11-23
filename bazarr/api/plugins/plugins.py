@@ -152,7 +152,8 @@ class PluginsInstallations(Resource):
             return str(error), 400
         return {"job_id": hub_jobs.queue_install(
             entry["source"], entry["provider_id"], entry["version"], entry["name"],
-            entry_key=entry["entry_key"], consent=digest or None)}, 202
+            entry_key=entry["entry_key"], consent=digest or None,
+            catalog_registration=entry.get("catalog_registration"))}, 202
 
 
 @api_ns_plugins.route('plugins/installations/local')

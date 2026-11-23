@@ -109,7 +109,7 @@ def _interpreter_matches(env_dir: Path) -> bool:
     """Whether the venv was made by the running interpreter's minor version."""
     try:
         text = (env_dir / "pyvenv.cfg").read_text(encoding="utf-8")
-    except OSError:
+    except (OSError, UnicodeError):
         return False
     for line in text.splitlines():
         key, _, value = line.partition("=")
@@ -150,7 +150,7 @@ def _requirements_match(env_dir: Path, manifest) -> bool:
         lines = (env_dir / "requirements.txt").read_text(encoding="utf-8").splitlines()
     except FileNotFoundError:
         return not wanted
-    except OSError:
+    except (OSError, UnicodeError):
         return False
     return {line.strip() for line in lines if line.strip()} == wanted
 
@@ -219,6 +219,7 @@ def reconcile_environments(
     flags: list[str] = []
     unflags: dict[str, dict[str, Any]] = {}
     repoints: list[tuple[str, str, dict[str, Any], str]] = []
+    seed_checks: dict[str, tuple[str, str, bool]] = {}
 
     for provider_id, row in (state.get("installations") or {}).items():
         if not isinstance(row, dict):
@@ -235,10 +236,23 @@ def reconcile_environments(
                     flags.append(provider_id)
                     summary["needs_repair"].append(provider_id)
                 continue
-            if not staged and validated_bundle_path(root, row.get("active_path")) is None:
-                # A bundle the hub did not put there is neither run nor cleaned.
-                flags.append(provider_id)
-                summary["needs_repair"].append(provider_id)
+            bundle_key = "staged_path" if staged else "active_path"
+            bundle_path = row.get(bundle_key)
+            if validated_bundle_path(root, bundle_path) is None:
+                if staged:
+                    # Activation checks the staged runtime before making it active.
+                    continue
+                if not isinstance(bundle_path, str):
+                    flags.append(provider_id)
+                    summary["needs_repair"].append(provider_id)
+                    continue
+                from .seed import resolve_paths
+
+                raw = row.get("manifest")
+                valid = isinstance(raw, dict) and resolve_paths(root, raw, bundle_path, python_path) is not None
+                seed_checks[provider_id] = (bundle_path, python_path, valid)
+                if not valid:
+                    summary["needs_repair"].append(provider_id)
                 continue
             # Any active row flagged as needing repair is looked at again, whatever its error says (or whether
             # it has one) and whether it is switched on: the flag goes once its environment is back.
@@ -328,7 +342,7 @@ def reconcile_environments(
             repoints.append((provider_id, python_key, row, str(shared_python)))
             summary["repointed"].append(provider_id)
 
-    if not (adoptions or flags or unflags or repoints):
+    if not (adoptions or flags or unflags or repoints or seed_checks):
         return summary
 
     def apply(state: dict[str, Any]) -> None:
@@ -343,6 +357,18 @@ def reconcile_environments(
                 stored[fingerprint] = {"path": path}
             else:
                 dropped_adoptions.append(fingerprint)
+        for provider_id, (bundle_path, python_path, valid) in seed_checks.items():
+            row = installations.get(provider_id)
+            if not isinstance(row, dict) or (row.get("active_path"), row.get("python_path")) != (bundle_path, python_path):
+                continue
+            if valid:
+                row.pop("needs_repair", None)
+                if row.get("last_error") == NEEDS_REPAIR_MESSAGE:
+                    row["last_error"] = _held_back_error(row)
+            else:
+                row["needs_repair"] = True
+                if not row.get("last_error"):
+                    row["last_error"] = NEEDS_REPAIR_MESSAGE
         for provider_id in flags:
             row = installations.get(provider_id)
             if isinstance(row, dict):

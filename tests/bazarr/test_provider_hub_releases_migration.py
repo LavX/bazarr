@@ -33,6 +33,83 @@ def _migration():
     return module
 
 
+@pytest.mark.parametrize("evidence, bound", [
+    ("matching", True),
+    ("different-digest", False),
+    ("different-digest-first", False),
+    ("malformed-digest", False),
+    ("malformed-peer-digest", False),
+    ("duplicate", False),
+    ("unrelated-source", True),
+    ("historic-url", True),
+    ("republished-schema-2", True),
+    ("republished-newer-source", False),
+    ("republished-conflicting-peer", False),
+    ("direct-url-conflicting-peer", False),
+    ("direct-url-conflicting-peer-unchecked-source", False),
+    ("direct-url-conflicting-peer-newer-source", False),
+    ("malformed-sources", False),
+])
+def test_legacy_release_binding_agrees_on_retained_artifact_evidence(evidence, bound):
+    from provider_hub import releases
+
+    plugin_id, version, source_id = "sample", "1.0.0", "community"
+    url, commit = "https://example.invalid/catalog.json", "a" * 40
+    digest = "b" * 64
+    manifest = {"schema_version": 1, "provider_id": plugin_id, "version": version,
+                "source": {"commit": commit}, "bundle_sha256": digest}
+    source_records = {source_id: {"url": url, "resolved_commit": commit}}
+    if evidence == "historic-url":
+        manifest["source"]["catalog_url"] = url
+        source_records[source_id].pop("resolved_commit")
+    elif evidence.startswith("direct-url-conflicting-peer"):
+        manifest["source"]["catalog_url"] = url
+        if evidence.endswith("unchecked-source"):
+            source_records[source_id].pop("resolved_commit")
+        elif evidence.endswith("newer-source"):
+            source_records[source_id]["resolved_commit"] = "d" * 40
+    elif evidence == "malformed-digest":
+        manifest["bundle_sha256"] = [digest]
+    elif evidence == "malformed-sources":
+        source_records = [source_id]
+
+    if evidence.startswith("republished"):
+        manifest.update(schema_version=2, id=plugin_id)
+        manifest["source"]["catalog_url"] = "https://publisher.invalid/catalog.json"
+        if evidence == "republished-newer-source":
+            source_records[source_id]["resolved_commit"] = "d" * 40
+    cached = {**manifest, "source": {"commit": commit, "catalog_url": manifest["source"].get("catalog_url", url),
+                                     "trusted": False}}
+    if evidence.startswith("republished"):
+        cached.pop("provider_id")
+    entry = {"source": source_id, "provider_id": plugin_id, "version": version,
+             "resolved_commit": commit, "manifest": cached}
+    entries = {} if evidence == "historic-url" else {"first": entry}
+    if evidence.startswith("different-digest") or evidence in {"unrelated-source", "malformed-peer-digest"}:
+        peer_digest = None if evidence == "malformed-peer-digest" else "c" * 64
+        peer = {**entry, "manifest": {**cached, "bundle_sha256": peer_digest}}
+        if evidence == "unrelated-source":
+            peer["source"] = "other"
+        entries = {"second": peer, **entries} if evidence.endswith("-first") else {**entries, "second": peer}
+    elif "conflicting-peer" in evidence:
+        peer_url = url if evidence.startswith("republished") else "https://other.invalid/catalog.json"
+        entries["second"] = {**entry, "manifest": {**cached, "bundle_sha256": "c" * 64,
+                                                    "source": {**cached["source"], "catalog_url": peer_url}}}
+    elif evidence == "duplicate":
+        entries["second"] = copy.deepcopy(entry)
+
+    row = {"origin": "catalog", "source_id": source_id, "active_version": version, "manifest": manifest}
+    document = {"catalog_sources": source_records, "catalog_entries": entries, "installations": {plugin_id: row}}
+    expected_fields = ["catalog_registration:legacy"] if bound else []
+    assert _migration()._legacy_catalog_fields(document, plugin_id, row, version, manifest) == expected_fields
+
+    stored, plan = releases.split(releases.compose(copy.deepcopy(document), []), [])
+    (release, _), = plan.inserts
+    assert json.loads(release["fields"]) == ["manifest", *expected_fields]
+    expected_source = source_id if bound else None
+    assert release["source_id"] == stored["installations"][plugin_id]["source_id"] == expected_source
+
+
 def _run(connection, step):
     context = MigrationContext.configure(connection, opts={"render_as_batch": True})
     with Operations.context(context):
@@ -143,6 +220,119 @@ def _fields_of(engine, release_id):
     with engine.connect() as connection:
         return connection.execute(sa.text("SELECT fields FROM provider_hub_releases WHERE id = :id"),
                                   {"id": release_id}).scalar()
+
+
+@pytest.mark.parametrize("startup", ["alembic", "first-write", "release-rows"])
+@pytest.mark.parametrize("evidence", [
+    "v270", "cached-entry", "republished", "different-active", "replaced", "replaced-cache",
+    "replaced-cache-direct", "replaced-cache-direct-agrees",
+])
+def test_community_release_slots_require_matching_legacy_catalog_evidence(
+        hub_store, hub_engine, monkeypatch, startup, evidence):
+    from plugin_platform_helpers import provider_manifest_v1, write_state
+    from provider_hub import releases, service, state
+    from provider_hub.kinds.subtitle_provider import SUBTITLE_PROVIDER_KIND
+
+    plugin_id, source_id = "fixtureprovider", "community"
+    url = "https://github.com/example/community/blob/main/catalog.json"
+    other = "https://github.com/example/previous/blob/main/catalog.json"
+    manifests = [provider_manifest_v1(plugin_id, version) for version in ("1.0.0", "1.1.0")]
+    source = {"id": source_id, "name": source_id, "url": url, "last_checked_at": "2026-11-01T00:00:00Z",
+              "resolved_commit": "b" * 40, "enabled": True}
+    entries = {}
+    if evidence.startswith("replaced-cache"):
+        source["last_checked_at"] = None
+        source.pop("resolved_commit")
+    monkeypatch.setattr(state, "state_file", hub_store.legacy_state_path)
+    bundles, interpreters = [], []
+    for index, manifest in enumerate(manifests):
+        version = manifest["version"]
+        if evidence in {"cached-entry", "republished"}:
+            if evidence == "republished":
+                manifest["source"]["catalog_url"] = other
+            entries[version] = {"source": source_id, "provider_id": plugin_id, "version": version,
+                                "resolved_commit": source["resolved_commit"],
+                                "manifest": {**manifest, "source": {**manifest["source"],
+                                             "catalog_url": other if evidence == "republished" else url}}}
+        else:
+            matches = (evidence == "v270" or evidence.startswith("replaced-cache-direct")
+                       or (evidence == "different-active" and index == 1))
+            manifest["source"]["catalog_url"] = url if matches else other
+        if evidence.startswith("replaced-cache"):
+            digest = manifest["bundle_sha256"] if evidence.endswith("-agrees") else "d" * 64
+            entries[version] = {"source": source_id, "provider_id": plugin_id, "version": version,
+                                "resolved_commit": manifest["source"]["commit"],
+                                "manifest": {**manifest, "bundle_sha256": digest}}
+        bundle = state.provider_hub_dir() / "bundles" / plugin_id / version / manifest["source"]["commit"]
+        bundle.mkdir(parents=True)
+        (bundle / "provider.py").write_bytes(b"class ExampleProvider: pass\n")
+        interpreter = state.provider_hub_dir() / "envs" / plugin_id / version / "fixture" / "bin" / "python"
+        interpreter.parent.mkdir(parents=True)
+        interpreter.touch()
+        bundles.append(str(bundle))
+        interpreters.append(str(interpreter))
+
+    if evidence == "replaced":
+        refreshed = provider_manifest_v1(plugin_id, "2.0.0")
+        refreshed["source"].update(catalog_url=url, commit="c" * 40)
+        source["resolved_commit"] = refreshed["source"]["commit"]
+        entries[refreshed["version"]] = {"source": source_id, "provider_id": plugin_id,
+                                         "version": refreshed["version"], "manifest": refreshed,
+                                         "resolved_commit": source["resolved_commit"]}
+
+    write_state(hub_store.legacy_state_path(), catalog_sources={source_id: source}, catalog_entries=entries,
+                installations={plugin_id: {
+                    "provider_id": plugin_id, "name": "Fixture", "state": "staged", "pending_restart": True,
+                    "origin": "catalog", "source_id": source_id, "trusted": False,
+                    **({"source_bound": True} if evidence != "v270" else {}),
+                    "active_version": "1.0.0", "active_path": bundles[0], "python_path": interpreters[0],
+                    "manifest": manifests[0], "staged_version": "1.1.0", "staged_path": bundles[1],
+                    "staged_python_path": interpreters[1], "staged_manifest": manifests[1],
+                }})
+    monkeypatch.setattr(SUBTITLE_PROVIDER_KIND, "smoke_test", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(SUBTITLE_PROVIDER_KIND, "on_activated", lambda *_args: None)
+    hub_store.ensure_ready()
+    if evidence.startswith("replaced-cache"):
+        assert state.load_state()["catalog_entries"] == {}
+    if startup == "first-write":
+        state.mutate_state(lambda document: None)
+    if startup == "release-rows":
+        # Development had already split these releases into rows but had never stored registration fields.
+        _, text = hub_store.read_document()
+        document, old_plan = releases.split(json.loads(text), [])
+        for values, _ in old_plan.inserts:
+            values["fields"] = json.dumps([field for field in json.loads(values["fields"])
+                                           if not field.startswith("catalog_registration:")])
+        with hub_engine.begin() as connection:
+            connection.execute(sa.text("UPDATE provider_hub_state SET document = :document WHERE id = 1"),
+                               {"document": json.dumps(document)})
+            releases.apply_plan(connection, old_plan)
+        hub_store._ready.clear()
+        hub_store.ensure_ready()
+        revision, _ = hub_store.read_document()
+        hub_store._ready.clear()
+        hub_store.ensure_ready()
+        assert hub_store.read_document()[0] == revision
+    else:
+        with hub_store.write_transaction(hub_engine) as connection:
+            assert _migration().move_state_into_releases(connection) == (2 if startup == "alembic" else 0)
+    active, = hub_store.list_releases(plugin_id, states=(releases.ACTIVE,))
+    staged, = hub_store.list_releases(plugin_id, states=(releases.STAGED,))
+    known_active = evidence in ("v270", "cached-entry", "republished")
+    unresolved = "legacy-unverified" if startup == "release-rows" else None
+    active_source = source_id if known_active or startup == "release-rows" else None
+    assert (active.source_id, active.catalog_registration) == (active_source, "legacy" if known_active else unresolved)
+    assert staged.source_id == source_id
+    assert staged.catalog_registration == (unresolved if evidence.startswith("replaced") else "legacy")
+    if evidence == "replaced":
+        assert state.load_state()["catalog_entries"][refreshed["version"]]["source"] == source_id
+        assert service.offered_update_version(plugin_id) is None
+    expected = [] if evidence.startswith("replaced") else [plugin_id]
+    assert service.activate_staged_installations() == expected
+    current, = hub_store.list_releases(plugin_id, states=(releases.ACTIVE,))
+    assert current.id == (staged.id if expected else active.id)
+    assert Path(active.bundle_path, "provider.py").is_file()
+    assert state.load_state()["installations"][plugin_id]["source_id"] == (source_id if expected else None)
 
 
 def test_a_second_upgrade_changes_nothing(hub_store, hub_engine):
