@@ -16,6 +16,7 @@ Revision ID: c3e8a1f5b972
 Revises: a7c2e9f4b183
 """
 import json
+import re
 from datetime import datetime, timezone
 
 from alembic import op
@@ -133,12 +134,15 @@ def _legacy_cached_manifest_matches(document, source_id, source, plugin_id, vers
     """Frozen copy of the store's cached manifest check for this upgrade."""
     entries = document.get("catalog_entries")
     commit = source.get("resolved_commit")
+    digest = manifest.get("bundle_sha256")
     id_key = "id" if manifest.get("schema_version") == 2 else "provider_id"
     if (not isinstance(entries, dict) or not isinstance(commit, str) or not commit
+            or not isinstance(digest, str) or not re.fullmatch(r"[0-9a-fA-F]{64}", digest)
             or manifest.get(id_key) != plugin_id or manifest.get("version") != version
             or manifest["source"].get("commit") != commit):
         return False
 
+    digest = digest.lower()
     installed = {**manifest, "source": {key: value for key, value in manifest["source"].items() if key != "trusted"}}
     matched = False
     for entry in entries.values():
@@ -150,6 +154,10 @@ def _legacy_cached_manifest_matches(document, source_id, source, plugin_id, vers
         cached_source = cached.get("source") if isinstance(cached, dict) else None
         if not isinstance(cached_source, dict) or cached_source.get("catalog_url") != source["url"]:
             continue
+        # Every record for this source and release must agree on the artifact.
+        cached_digest = cached.get("bundle_sha256")
+        if not isinstance(cached_digest, str) or cached_digest.lower() != digest:
+            return False
         comparable = {**cached, "source": {key: value for key, value in cached_source.items()
                                            if key not in ("catalog_url", "trusted")}}
         if comparable == installed:

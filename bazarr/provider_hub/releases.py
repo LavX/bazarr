@@ -47,6 +47,7 @@ from __future__ import annotations
 
 import functools
 import json
+import re
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from typing import Any
@@ -235,15 +236,18 @@ def matches_catalog_registration(data: dict[str, Any], source_id: str | None, re
 
 
 def _legacy_cached_manifest_matches(data, source_id, source, plugin_id, version, manifest) -> bool:
-    """Corroborate an omitted URL with one entry from the registered catalog's saved refresh."""
+    """Corroborate an omitted URL with one matching entry and consistent artifact evidence."""
     entries = data.get("catalog_entries")
     commit = source.get("resolved_commit")
+    digest = manifest.get("bundle_sha256")
     id_key = "id" if manifest.get("schema_version") == 2 else "provider_id"
     if (not isinstance(entries, dict) or not isinstance(commit, str) or not commit
+            or not isinstance(digest, str) or not re.fullmatch(r"[0-9a-fA-F]{64}", digest)
             or manifest.get(id_key) != plugin_id or manifest.get("version") != version
             or manifest["source"].get("commit") != commit):
         return False
 
+    digest = digest.lower()
     installed = {**manifest, "source": {key: value for key, value in manifest["source"].items() if key != "trusted"}}
     matched = False
     for entry in entries.values():
@@ -255,6 +259,10 @@ def _legacy_cached_manifest_matches(data, source_id, source, plugin_id, version,
         cached_source = cached.get("source") if isinstance(cached, dict) else None
         if not isinstance(cached_source, dict) or cached_source.get("catalog_url") != source["url"]:
             continue
+        # Every record for this source and release must agree on the artifact.
+        cached_digest = cached.get("bundle_sha256")
+        if not isinstance(cached_digest, str) or cached_digest.lower() != digest:
+            return False
         comparable = {**cached, "source": {key: value for key, value in cached_source.items()
                                            if key not in ("catalog_url", "trusted")}}
         if comparable == installed:
@@ -273,7 +281,8 @@ def _legacy_catalog_registrations(data: dict[str, Any], plugin_id: str, row: dic
     if (row.get("origin") != "catalog" or not isinstance(source_id, str)
             or source_id == OFFICIAL_CATALOG_SOURCE_ID or (active is None and staged is None)):
         return None
-    source = (data.get("catalog_sources") or {}).get(source_id)
+    sources = data.get("catalog_sources")
+    source = sources.get(source_id) if isinstance(sources, dict) else None
     url = source.get("url") if (isinstance(source, dict) and not source.get("registration")
                                and row.get("source_bound", True) is True) else None
     registrations = {}
