@@ -402,7 +402,7 @@ def _restore_upgrade_file(backup, path):
 
 
 @contextmanager
-def _preserve_source_subtitle(path, expected_version, *, retire):
+def _preserve_source_subtitle(path, expected_version, *, retire, keep_backup):
     """Back up the old bytes until the transaction commits."""
     from subtitles.new_subtitle import _backup_for_replacement, _discard
 
@@ -434,7 +434,10 @@ def _preserve_source_subtitle(path, expected_version, *, retire):
             _restore_upgrade_file(backup, path)
         raise
     else:
-        _discard(backup)
+        if keep_backup():
+            logging.warning('BAZARR retained the previous source subtitle at %s for History recovery', backup)
+        else:
+            _discard(backup)
 
 
 @contextmanager
@@ -472,6 +475,7 @@ def _write_source_download(video_path, destination, content, *, source, language
     ownership_index = SourcePublicationOwnerIndex()
     old_path = upgrade.subtitles_path if upgrade is not None else None
     upgrade_history_id = None
+    upgrade_commit_uncertain = False
     same_destination = old_path is not None and os.path.normcase(os.path.realpath(old_path)) == (
         os.path.normcase(os.path.realpath(destination)))
     remove_previous = old_path is not None and not same_destination
@@ -508,6 +512,7 @@ def _write_source_download(video_path, destination, content, *, source, language
 
     @contextmanager
     def check_history_commit():
+        nonlocal upgrade_commit_uncertain
         try:
             yield
         except DBAPIError as error:
@@ -525,6 +530,9 @@ def _write_source_download(video_path, destination, content, *, source, language
                 if committed:
                     logging.info('BAZARR confirmed a source upgrade after losing the database acknowledgement')
                     return
+                # An unconfirmed commit cannot authorize restoring a file that History may already supersede.
+                upgrade_commit_uncertain = True
+                return
             raise SourceUpgradeHistoryFailed(
                 'Unable to commit the upgraded subtitle in History', reason='save_failed') from error
 
@@ -551,7 +559,9 @@ def _write_source_download(video_path, destination, content, *, source, language
                 output_paths = tuple(path for path, _ in outputs)
                 ownership_index.require_current_ownership(video_path, (*paths, *output_paths), proof)
                 files.enter_context(subtitle_mutation(video_path, old_path, *output_paths, invalidate_outputs=False))
-                files.enter_context(_preserve_source_subtitle(old_path, upgrade.subtitle_version, retire=remove_previous))
+                files.enter_context(_preserve_source_subtitle(
+                    old_path, upgrade.subtitle_version, retire=remove_previous,
+                    keep_backup=lambda: upgrade_commit_uncertain))
                 for output, version in outputs:
                     files.enter_context(_quarantine_upgrade_output(output, version))
             elif wanted_stamp is not None:
@@ -589,6 +599,10 @@ def _write_source_download(video_path, destination, content, *, source, language
         _report_subtitle_publication(on_publish, destination)
         if remove_previous:
             _report_subtitle_publication(on_publish, old_path)
+        if upgrade_commit_uncertain:
+            raise SourceUpgradeHistoryFailed(
+                'The subtitle was replaced, but its History commit could not be confirmed. '
+                'The previous subtitle was retained for recovery.', reason='history_unverified', retryable=False)
     return True
 
 
