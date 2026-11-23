@@ -1,11 +1,36 @@
+/* eslint-disable camelcase */
+
 import BaseApi from "./base";
 import client from "./client";
 
 export type SourceContentKind = "movie" | "series" | "sports";
 
+export interface ServerRootMapping {
+  server_path: string;
+  local_path: string;
+}
+
+export interface ServerLibraryChoice {
+  id: string;
+  name: string;
+  content_kind: SourceContentKind | null;
+  roots: (Omit<ServerRootMapping, "local_path"> & {
+    local_path: string | null;
+  })[];
+}
+
+export interface ServerLibraryDraft {
+  server_library_id: string;
+  content_kind: SourceContentKind;
+  profile_id: number | null;
+  roots: ServerRootMapping[];
+}
+
 export interface SourceLibrary {
   id: number;
   locator: string;
+  name?: string | null;
+  roots?: ServerRootMapping[];
   content_kind: SourceContentKind;
   profile_id: number | null;
   enabled: boolean;
@@ -15,11 +40,18 @@ export interface SourceLibrary {
 
 export interface MediaSource {
   id: number;
-  kind: "folder" | "jellyfin" | "emby";
+  kind: "folder" | ServerSourceKind;
+  media_server_instance_id?: string | null;
   name: string;
   enabled: boolean;
   scan_frequency_hours: number;
   libraries: SourceLibrary[];
+}
+
+export type ServerSourceKind = "jellyfin" | "emby";
+
+export function isServerSourceKind(kind: string): kind is ServerSourceKind {
+  return kind === "jellyfin" || kind === "emby";
 }
 
 export type SourceAvailability = Record<
@@ -75,6 +107,56 @@ class MediaSourcesApi extends BaseApi {
 
   create(payload: SourceSettings & { library: SourceLibraryDraft }) {
     return this.postRaw<MediaSource>("", payload);
+  }
+
+  serverLibraries(instanceId: string, signal?: AbortSignal) {
+    return this.get<{ data: ServerLibraryChoice[] }>(
+      "/server-libraries",
+      { media_server_instance_id: instanceId },
+      signal,
+    );
+  }
+
+  createServerSource(
+    kind: ServerSourceKind,
+    instanceId: string,
+    name: string,
+    library: ServerLibraryDraft,
+  ) {
+    return this.postRaw<MediaSource>("", {
+      kind,
+      media_server_instance_id: instanceId,
+      name,
+      library,
+    });
+  }
+
+  addServerLibrary(id: number, payload: ServerLibraryDraft) {
+    return this.postRaw<SourceLibrary>(`/${id}/libraries`, payload);
+  }
+
+  async previewServerRoots(
+    id: number,
+    libraryId: number,
+    roots: ServerRootMapping[],
+  ) {
+    const { data } = await this.postRaw<{ removed_items: number }>(
+      `/${id}/libraries/${libraryId}/roots/preview`,
+      { roots },
+    );
+    return data.removed_items;
+  }
+
+  updateServerRoots(
+    id: number,
+    libraryId: number,
+    roots: ServerRootMapping[],
+    confirmedRemoved: number,
+  ) {
+    return this.patchRaw<SourceLibrary>(`/${id}/libraries/${libraryId}`, {
+      roots,
+      confirmed_removed: confirmedRemoved,
+    });
   }
 
   update(id: number, payload: SourceSettings) {

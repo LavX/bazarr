@@ -5,12 +5,19 @@ import { isAxiosError } from "axios";
 import { QueryKeys } from "@/apis/queries/keys";
 import api from "@/apis/raw";
 import { withInlineErrors } from "@/apis/raw/inlineWrites";
-import type { SourceContentKind } from "@/apis/raw/mediaSources";
+import type {
+  ServerRootMapping,
+  SourceContentKind,
+} from "@/apis/raw/mediaSources";
 import { useArrInstanceLabels } from "./arrInstances";
 import { refreshWhenJobFinishes } from "./jobWatch";
 import { useSystemSettings } from "./system";
 
 export const mediaSourcesKey = [QueryKeys.System, "media-sources"] as const;
+
+export function serverSourceLibraryChoicesKey(instanceId: string) {
+  return [...mediaSourcesKey, "server-libraries", instanceId] as const;
+}
 
 export function useMediaSourcesVisible() {
   const { data } = useSystemSettings();
@@ -24,6 +31,39 @@ export function useMediaSources() {
     queryFn: ({ signal }) =>
       withInlineErrors(() => api.mediaSources.list(signal)),
     enabled: visible,
+  });
+}
+
+export function useServerSourceLibraryChoices(
+  instanceId: string,
+  enabled: boolean,
+) {
+  return useQuery({
+    queryKey: serverSourceLibraryChoicesKey(instanceId),
+    queryFn: ({ signal }) =>
+      withInlineErrors(() =>
+        api.mediaSources.serverLibraries(instanceId, signal),
+      ),
+    enabled,
+    placeholderData: undefined,
+    staleTime: 0,
+  });
+}
+
+export function usePreviewServerSourceRoots() {
+  return useMutation({
+    mutationFn: ({
+      sourceId,
+      libraryId,
+      roots,
+    }: {
+      sourceId: number;
+      libraryId: number;
+      roots: ServerRootMapping[];
+    }) =>
+      withInlineErrors(() =>
+        api.mediaSources.previewServerRoots(sourceId, libraryId, roots),
+      ),
   });
 }
 

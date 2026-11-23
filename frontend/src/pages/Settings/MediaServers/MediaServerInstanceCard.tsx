@@ -15,8 +15,10 @@ import {
 } from "@/apis/hooks/mediaServers";
 import { usePlexLogoutMutation } from "@/apis/hooks/plex";
 import type { MediaServerInstance } from "@/apis/raw/mediaServers";
+import { isServerSourceKind } from "@/apis/raw/mediaSources";
 import { useModals } from "@/modules/modals";
 import MediaServerRefreshStatus from "./MediaServerRefreshStatus";
+import SourceLibraries from "./SourceLibraries";
 import styles from "@/pages/Settings/Connections/Connections.module.scss";
 
 interface Props {
@@ -174,6 +176,9 @@ export default function MediaServerInstanceCard({
             Connection test failed. Check the saved connection and server
             access.
           </Alert>
+        )}
+        {isServerSourceKind(instance.kind) && (
+          <SourceLibraries instance={instance} kind={instance.kind} />
         )}
         <MediaServerRefreshStatus
           instance={instance}
