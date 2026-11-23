@@ -48,6 +48,13 @@ from .context import resolve_same_item, source_item_publication
 from .db import handle, source_transaction
 
 
+def source_subtitle_directories(path):
+    """Directories scanned for sidecars, relative to the source item's stored video path."""
+    media_directory = os.path.dirname(path)
+    target = get_target_folder(path, create=False) or media_directory
+    return tuple(dict.fromkeys((media_directory, target)))
+
+
 class SourceOutputOwnerIndex(SyncOutputOwnerIndex):
     """Who owns a generated subtitle in a shared subtitle folder, answered from the source tables only.
 
@@ -221,9 +228,8 @@ def list_external_subtitles(path, previous=None, ownership_index=None, *, public
     """
     if ownership_index is None:
         ownership_index = SourceOutputOwnerIndex()
-    media_directory, filename = os.path.split(path)
-    target = get_target_folder(path, create=False) or media_directory
-    directories = dict.fromkeys((media_directory, target))
+    filename = os.path.basename(path)
+    directories = source_subtitle_directories(path)
     excluded = {os.path.normcase(os.path.abspath(subtitle_path)) for subtitle_path in written_paths}
     indexed, rejected_paths = {}, set()
     for entry in previous or []:

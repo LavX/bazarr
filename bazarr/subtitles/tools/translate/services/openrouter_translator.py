@@ -20,7 +20,7 @@ from radarr.history import history_log_movie
 from sonarr.history import history_log
 from app.jobs_queue import jobs_queue, JobCancelled, JobFailed
 
-from ..core.translator_utils import (EmptySourceTranslation, add_translator_info, create_process_result, get_title,
+from ..core.translator_utils import (load_translation_input, EmptySourceTranslation, add_translator_info, create_process_result, get_title,
                                      record_source_translation, require_source_translation, translation_write_kwargs)
 from .auth import get_translator_auth_headers
 from .sidecar_errors import describe_sidecar_refusal, redact_service_text, MAX_REFUSAL_LENGTH
@@ -335,7 +335,7 @@ class OpenRouterTranslatorService:
                                        before_publish=lambda: jobs_queue.update_job_progress(job_id=job_id),
                                        allow_empty=self.sports_operation is None and self.source is None,
                                        **translation_write_kwargs(self, job_id)) as temporary:
-                subs = pysubs2.load(self.source_srt_file, encoding='utf-8')
+                subs = load_translation_input(self, pysubs2.load)
                 lines_list: List[str] = [x.plaintext for x in subs]
                 lines_list_len = len(lines_list)
 

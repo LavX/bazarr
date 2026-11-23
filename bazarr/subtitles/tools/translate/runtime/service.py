@@ -30,7 +30,7 @@ from subtitles.tools.subsync_engines import (SubtitleDestinationChanged, Subtitl
                                              capture_subtitle_versions, staged_subtitle_write,
                                              validate_subtitle_versions)
 
-from ..core.translator_utils import (add_translator_info, create_process_result, get_title,
+from ..core.translator_utils import (load_translation_input, add_translator_info, create_process_result, get_title,
                                      record_source_translation, require_source_translation, translation_write_kwargs)
 from .failure import MESSAGES
 from .dispatch import DispatchFailed, Dispatcher, JobSpec, LegacyDeclined, LegacyResult
@@ -157,6 +157,11 @@ class RuntimeTranslatorService:
             expected_destination_versions=self.expected_destination_versions,
             **({"sports_operation": self.sports_operation, "cancel": self.cancel} if self.sports_operation else {}),
             **({"source": self.source} if self.source is not None else {}))
+        if self.source is not None:
+            # The legacy service reopens the input and publishes it itself. Keep
+            # the source selection and this job's input and destination versions.
+            service.source_tool = getattr(self, "source_tool", None)
+            service.expected_runtime_versions = self._versions
         try:
             published = service.translate(job_id=self._job_id)
         except Exception as error:
@@ -178,7 +183,7 @@ class RuntimeTranslatorService:
         self._source_real = os.path.realpath(self.source_srt_file)
         self._versions = capture_subtitle_versions(self.video_path, (self._source_real, self.dest_srt_file),
                                                    self.cancel)
-        subs = pysubs2.load(self.source_srt_file, encoding="utf-8")
+        subs = load_translation_input(self, pysubs2.load)
         lines = [x.plaintext for x in subs]
         if not lines:
             if self.sports_operation:

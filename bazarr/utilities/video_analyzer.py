@@ -210,11 +210,20 @@ def embedded_audio_reader(file, file_size, episode_file_id=None, movie_file_id=N
 
 
 def subtitles_sync_references(subtitles_path, sonarr_episode_id=None, radarr_movie_id=None, arr_instance_id=None,
-                             sports_event_id=None):
+                             sports_event_id=None, source_item=None):
     references_dict = {'audio_tracks': [], 'embedded_subtitles_tracks': [], 'external_subtitles_tracks': []}
     data = None
 
-    if sports_event_id:
+    if source_item is not None:
+        from media_sources.analysis import local_stat, probe_item
+
+        _, media_data = source_item
+        stat = local_stat(media_data.path)
+        if stat is not None:
+            data, _ = probe_item(media_data, stat)
+        # The file may have no probes yet. Its indexed sidecars are still references.
+        data = data or {'ffprobe': {'audio': []}}
+    elif sports_event_id:
         # Without this branch the manual sync dialog opened on a sports event
         # with an empty reference list, so the audio track and embedded
         # subtitle track pickers had nothing to offer. parse_video_metadata has
@@ -329,6 +338,24 @@ def subtitles_sync_references(subtitles_path, sonarr_episode_id=None, radarr_mov
                 )
 
                 track_id += 1
+
+        if source_item is not None:
+            from media_sources.subtitle_tools import SourceToolError, indexed_sidecar, indexed_subtitles
+
+            source, item = source_item
+            for code, path in indexed_subtitles(item):
+                if path == subtitles_path:
+                    continue
+                try:
+                    indexed_sidecar(source, item, path=path)
+                except SourceToolError:
+                    continue
+                language = languages_from_colon_seperated_string(code)
+                references_dict['external_subtitles_tracks'].append({
+                    'name': os.path.basename(path), 'path': path, 'language': language['language'],
+                    'forced': language['forced'], 'hearing_impaired': language['hi'],
+                })
+            return references_dict
 
         # The stored subtitle paths are arr-side, the reference handed back to
         # the sync engine has to be local, so both directions are needed. Named

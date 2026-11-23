@@ -22,6 +22,7 @@ from subtitles.tools.subsync_engines import (
     SyncEngineResult,
     SyncRunResult,
     is_sync_engine_output,
+    is_sync_stream_reference,
     UNCONSTRAINED_MAX_OFFSET_SECONDS,
     SubsyncEngineRunner,
     MissingSyncEngineError,
@@ -311,7 +312,7 @@ class SubSyncer:
             settings.subsync.auto_use_original_language,
             force_sync,
         )
-        if reference and isinstance(reference, str) and len(reference) == 3 and reference[:2] in ['a:', 's:']:
+        if is_sync_stream_reference(reference):
             unparsed_args.append('--reference-stream')
             unparsed_args.append(reference)
         elif settings.subsync.force_audio and not force_sync:
@@ -546,7 +547,8 @@ class SubSyncer:
                 return path_mappings.path_replace_reverse_instance(path, arr_instance_id, history_media_type)
 
         result = ProcessSubtitlesResult(message=message,
-                                        reversed_path=(sports_context.original_path if sports_context is not None
+                                        reversed_path=(source.path if source is not None
+                                                       else sports_context.original_path if sports_context is not None
                                                        else prr(self.reference)),
                                         downloaded_language_code2=srt_lang,
                                         downloaded_provider=None,
@@ -594,7 +596,7 @@ class SubSyncer:
              max_offset_seconds, no_fix_framerate, gss, reference=None, sonarr_series_id=None, sonarr_episode_id=None,
              radarr_id=None, progress_callback=None, job_id=None, force_sync=False, output_mode=None,
              enabled_engines=None, write_history=True, arr_instance_id=None, source_version=None,
-             on_publish=None, validate=None, publication_guard=None, source=None):
+             on_publish=None, validate=None, publication_guard=None, source=None, path_publication_guard=None):
         self.reference = video_path
         self.srtin = srt_path
         self.progress_callback = progress_callback
@@ -610,7 +612,7 @@ class SubSyncer:
         self.args = None
         self.job_id = job_id
 
-        if reference and reference != video_path and os.path.isfile(reference):
+        if reference and reference != video_path and not is_sync_stream_reference(reference) and os.path.isfile(reference):
             # subtitles path provided
             self.reference = reference
 
@@ -684,7 +686,7 @@ class SubSyncer:
                                                   **owner_index)
 
         def publish():
-            if validate is not None and publication_guard is None:
+            if validate is not None and publication_guard is None and path_publication_guard is None:
                 validate()
             self._report_progress('Saving synchronized subtitle', None, None)
 
@@ -700,6 +702,7 @@ class SubSyncer:
                 publication_lock=publication_lock,
                 on_publish=on_publish,
                 **({'publication_guard': publication_guard} if publication_guard is not None else {}),
+                **({'path_publication_guard': path_publication_guard} if path_publication_guard is not None else {}),
                 after_publish=(lambda: quarantine_sync_outputs_after_mutation(video_path, srt_path,
                                                                               **owner_index))
                 if output_mode == OUTPUT_MODE_OVERWRITE and source_version is None else None,

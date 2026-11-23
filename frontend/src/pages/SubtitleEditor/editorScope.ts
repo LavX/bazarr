@@ -142,6 +142,9 @@ export function editorBreadcrumb(
   arrInstanceId?: number,
 ): EditorBreadcrumb {
   const scope = arrInstanceId === undefined ? "" : `?instance=${arrInstanceId}`;
+  if (mediaType === "source") {
+    return { listPath: "/discover", listLabel: "Discover" };
+  }
   if (mediaType === "sports") {
     return {
       listPath: "/sports",

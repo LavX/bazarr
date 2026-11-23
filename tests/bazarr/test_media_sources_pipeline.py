@@ -1962,13 +1962,11 @@ def test_the_webhook_hears_the_publication_type_of_a_source_item(world, monkeypa
 
 def _custom_folder(world, monkeypatch, tmp_path):
     from app.config import settings
-    from media_sources import indexer
 
     subtitles = tmp_path / "subtitles"
     subtitles.mkdir()
     monkeypatch.setattr(settings.general, "subfolder", "absolute")
     monkeypatch.setattr(settings.general, "subfolder_custom", str(subtitles))
-    monkeypatch.setattr(indexer, "get_target_folder", lambda path, create=False: str(subtitles))
     return subtitles
 
 

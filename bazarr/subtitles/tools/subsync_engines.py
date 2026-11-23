@@ -2,6 +2,7 @@
 
 import logging
 import os
+import re
 import stat
 import shutil
 import tempfile
@@ -1013,6 +1014,10 @@ def is_sync_engine_output(path):
     return sync_engine_from_output_path(path) is not None
 
 
+def is_sync_stream_reference(reference):
+    return isinstance(reference, str) and re.fullmatch(r'[as]:[0-9]+', reference) is not None
+
+
 def is_sync_engine_language_key(language):
     if not isinstance(language, str):
         return False
@@ -1040,7 +1045,7 @@ class SubsyncEngineRunner:
 
     def run(self, srt_path, output_mode, enabled_engines, execute_engine, force_sync=False,
             source_version=None, before_publish=None, publication_lock=None, after_publish=None,
-            on_publish=None, publication_guard=None):
+            on_publish=None, publication_guard=None, path_publication_guard=None):
         output_mode = normalize_output_mode(output_mode)
         result = self.result = SyncRunResult(source_path=srt_path, output_mode=output_mode)
 
@@ -1107,7 +1112,12 @@ class SubsyncEngineRunner:
                 generated_path = str(output_path)
                 final_output_path = output_path
                 with publication_lock or nullcontext() as state:
-                    with publication_guard() if publication_guard is not None else nullcontext():
+                    if path_publication_guard is not None:
+                        destination = srt_path if output_mode == OUTPUT_MODE_OVERWRITE else final_engine_output_path
+                        guard = path_publication_guard(str(destination))
+                    else:
+                        guard = publication_guard() if publication_guard is not None else nullcontext()
+                    with guard:
                         if before_publish:
                             before_publish()
                         if source_version is not None and not source_is_unchanged(srt_path, source_version):

@@ -22,7 +22,7 @@ from subtitles.processing import ProcessSubtitlesResult  # noqa: F401
 from utilities.path_mappings import path_mappings  # noqa: F401
 
 from ..runtime.legacy_engines import request_target
-from ..core.translator_utils import (add_translator_info, create_process_result, get_title,
+from ..core.translator_utils import (load_translation_input, add_translator_info, create_process_result, get_title,
                                      record_source_translation, require_source_translation, translation_write_kwargs)
 
 logger = logging.getLogger(__name__)
@@ -80,7 +80,7 @@ class LingarrTranslatorService:
                                        **translation_write_kwargs(self, job_id)) as temporary:
                 jobs_queue.update_job_progress(job_id=job_id, progress_max=1, progress_message=self.source_srt_file)
 
-                subs = pysubs2.load(self.source_srt_file, encoding='utf-8')
+                subs = load_translation_input(self, pysubs2.load)
                 lines_list = [x.plaintext for x in subs]
                 lines_list_len = len(lines_list)
 

@@ -115,7 +115,7 @@ def _pick_key(video_path, source_srt_file, to_lang, forced, hi, embedded_source,
     return (_job_source_key(video_path, source_srt_file, embedded_source, source), to_lang, bool(forced), bool(hi))
 
 
-def pin_translation(video_path, source_srt_file, to_lang, forced, hi, embedded_source, pin):
+def pin_translation(video_path, source_srt_file, to_lang, forced, hi, embedded_source, pin, *, source=None):
     """Record a manual pick (``pick.pin_value``: one back end, or one engine with none) for the translation about to be requested.
 
     A manual translate, a mass translate item or a pick on the Translation page calls this just before
@@ -132,7 +132,7 @@ def pin_translation(video_path, source_srt_file, to_lang, forced, hi, embedded_s
         return
     from .runtime import enqueue
 
-    enqueue.decide(_job_source_key(video_path, source_srt_file, embedded_source), to_lang, forced, hi,
+    enqueue.decide(_job_source_key(video_path, source_srt_file, embedded_source, source), to_lang, forced, hi,
                    pinned_connection_id=pin)
     # The queue job the request adds next carries the pick.
     _pick.expect()
@@ -237,7 +237,7 @@ def _source_provider_target(to_lang, forced, hi):
 def translate_subtitles_file(video_path, source_srt_file, from_lang, to_lang, forced, hi,
                              media_type, sonarr_series_id, sonarr_episode_id, radarr_id, metadata,
                              job_id=None, arr_instance_id=None, sports_operation=None, embedded_source=None,
-                             expected_destination_versions=(), source=None):
+                             expected_destination_versions=(), source=None, source_tool=None):
     """Translate a subtitle file, as a queued job.
 
     ``embedded_source`` names an embedded track to translate instead of a file:
@@ -262,6 +262,9 @@ def translate_subtitles_file(video_path, source_srt_file, from_lang, to_lang, fo
             or any(value is not None for value in (arr_instance_id, sports_operation, embedded_source,
                                                    sonarr_series_id, sonarr_episode_id, radarr_id, metadata))):
         raise ValueError('A source translation requires source media metadata')
+    if source_tool is not None and (source != source_tool.source or source_srt_file != source_tool.sidecar.path
+                                    or video_path != source_tool.source.path):
+        raise ValueError('Translation requires the captured source item and subtitle')
 
     if not job_id:
         with _SOURCE_ENQUEUE_LOCK if source is not None else nullcontext():
@@ -343,6 +346,11 @@ def translate_subtitles_file(video_path, source_srt_file, from_lang, to_lang, fo
                                                        arr_instance_id, media_id=media_id)
         logging.debug(f'Translation request: video={video_path}, source={source_srt_file}, from={from_lang}, to={to_lang}')  # noqa: G004
 
+        if source_tool is not None:
+            try:
+                source_tool.validate()
+            except SubtitleSourceChanged as error:
+                raise SourceTranslationChanged(str(error)) from error
         if source is not None:
             destination = translated_destination_path(video_path, to_lang, forced, hi)
             source = validate_source_translation(source, video_path, source_srt_file, destination, from_lang,
@@ -414,6 +422,9 @@ def translate_subtitles_file(video_path, source_srt_file, from_lang, to_lang, fo
         else:
             translator = TranslatorFactory.create_translator(translator_type, **translator_arguments)
 
+        if source_tool is not None:
+            translator.source_tool = source_tool
+
         logging.debug(f'Created translator instance: {translator.__class__.__name__}')  # noqa: G004
         result = translator.translate(job_id=job_id)
         if getattr(translator, 'skipped', False) is True:
@@ -432,7 +443,7 @@ def translate_subtitles_file(video_path, source_srt_file, from_lang, to_lang, fo
         if sports_operation is None:
             from api.subtitles.subtitles import postprocess_subtitles
             if source is not None:
-                postprocess_subtitles(dest_srt_file, video_path, source.publication_type, None, source.item_id,
+                postprocess_subtitles(dest_srt_file, video_path, "source", None, source.item_id,
                                       source=source)
             else:
                 postprocess_subtitles(dest_srt_file, video_path, media_type, metadata,

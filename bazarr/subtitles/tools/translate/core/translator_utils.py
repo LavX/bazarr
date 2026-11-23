@@ -3,6 +3,7 @@
 import logging
 import os
 import srt
+import pysubs2
 import datetime
 from contextlib import contextmanager
 
@@ -92,6 +93,35 @@ def translated_destination_path(video_path, to_lang, forced, hi):
     )
 
 
+def load_translation_input(translator, loader):
+    """Read from the captured input when a source tool or the runtime has bound it."""
+    if getattr(translator, 'source', None) is not None:
+        from media_sources.indexer import source_subtitle_directories
+
+        directory = os.path.normcase(os.path.realpath(os.path.dirname(translator.source_srt_file)))
+        current_directories = {os.path.normcase(os.path.realpath(path))
+                               for path in source_subtitle_directories(translator.video_path)}
+        if directory not in current_directories:
+            raise SourceTranslationChanged('The configured source subtitle folder changed')
+    source_tool = getattr(translator, 'source_tool', None)
+    if source_tool is None:
+        path = translator.source_srt_file
+        runtime_versions = getattr(translator, 'expected_runtime_versions', ())
+        if runtime_versions:
+            captured_input = runtime_versions[0].path
+            if os.path.realpath(path) != captured_input:
+                raise SourceTranslationChanged('The source subtitle now resolves to a different file')
+            path = captured_input
+        return loader(path, encoding='utf-8')
+
+    from subtitles.tools.subsync_engines import SubtitleSourceChanged
+
+    try:
+        return pysubs2.SSAFile.from_string(source_tool.sidecar.read().decode('utf-8'))
+    except (OSError, SubtitleSourceChanged) as error:
+        raise SourceTranslationChanged('The source subtitle changed before translation') from error
+
+
 def translation_write_kwargs(translator, job_id):
     """The staged_subtitle_write arguments this translation's own context adds.
 
@@ -107,14 +137,20 @@ def translation_write_kwargs(translator, job_id):
 
         return dict(sports_write_kwargs(translator, job_id))
     captured = getattr(translator, 'expected_destination_versions', ())
-    kwargs = {'expected_versions': captured} if captured else {}
+    # Runtime legacy dispatch retains its input and destination snapshots. These
+    # must not turn a manual source request into an automatic profile request.
+    expected = tuple(captured or ()) + tuple(getattr(translator, 'expected_runtime_versions', ()))
+    kwargs = {'expected_versions': expected} if expected else {}
     source = getattr(translator, 'source', None)
     if source is not None:
         from media_sources.indexer import SourcePublicationOwnerIndex, SourcePublicationOwnersChanged
         from media_sources.translation import automatic_translation_is_current
         from media_sources.wanted import arr_claim_blocks_wanted
 
+        from subtitles.tools.subsync_engines import SubtitleSourceChanged
+
         owners = SourcePublicationOwnerIndex()
+        source_tool = getattr(translator, 'source_tool', None)
 
         def prepare():
             return validate_source_translation(source, translator.video_path, translator.source_srt_file,
@@ -130,6 +166,8 @@ def translation_write_kwargs(translator, job_id):
                         raise SourceTranslationChanged('The source item moved, was disabled, or its profile changed')
                     if not (current.wanted_file_stamp is not None and arr_claim_blocks_wanted(
                             current, target=connection)):
+                        if source_tool is not None:
+                            source_tool.check_current(current, connection)
                         if captured and not automatic_translation_is_current(
                                 current, translator.source_srt_file, translator.from_lang, translator.orig_to_lang,
                                 translator.forced, translator.hi, connection=connection):
@@ -138,7 +176,7 @@ def translation_write_kwargs(translator, job_id):
                         return
                 arr_claim_blocks_wanted(source)
                 raise SourceTranslationChanged('An Arr item now owns the source path')
-            except SourcePublicationOwnersChanged as error:
+            except (SourcePublicationOwnersChanged, SubtitleSourceChanged) as error:
                 raise SourceTranslationChanged(str(error)) from error
         kwargs.update(publication_guard=publication, invalidate_outputs=False)
     return kwargs

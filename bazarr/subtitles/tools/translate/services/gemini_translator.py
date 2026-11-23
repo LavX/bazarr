@@ -29,7 +29,7 @@ from utilities.path_mappings import path_mappings  # noqa: F401
 from subtitles.processing import ProcessSubtitlesResult  # noqa: F401
 from app.jobs_queue import JobCancelled, jobs_queue
 from languages.get_languages import alpha3_from_alpha2, language_from_alpha2, language_from_alpha3  # noqa: F401
-from ..core.translator_utils import (add_translator_info, get_description, create_process_result,
+from ..core.translator_utils import (load_translation_input, add_translator_info, get_description, create_process_result,
                                      record_source_translation, require_source_translation, translation_write_kwargs)
 
 logger = logging.getLogger(__name__)
@@ -120,7 +120,7 @@ class GeminiTranslatorService:
 
     def translate(self, job_id):
         self.job_id = job_id
-        subs = pysubs2.load(self.source_srt_file, encoding='utf-8')
+        subs = load_translation_input(self, pysubs2.load)
         subs.remove_miscellaneous_events()
 
         try:

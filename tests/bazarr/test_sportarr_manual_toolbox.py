@@ -17,13 +17,13 @@ from test_sportarr_kind_migration import migration_engine  # noqa: F401
 from test_sportarr_indexer import indexed_library, sports  # noqa: F401
 
 
-def test_the_endpoint_declares_the_third_media_type():
+def test_the_endpoint_declares_sports_and_source_media_types():
     import inspect
 
     from api.subtitles import subtitles
 
     source = inspect.getsource(subtitles)
-    assert '["episode", "movie", "sports"]' in source
+    assert '["episode", "movie", "sports", "source"]' in source
 
 
 def test_a_sports_event_resolves_its_own_row_not_a_movie():
