@@ -474,38 +474,61 @@ describe("hiddenTrackCodecs", () => {
   });
 });
 
+// These are the fields sent by the hide endpoint.
+/* eslint-disable camelcase */
 describe("hiddenTrackOutcome", () => {
   const english = { code2: "en", name: "English", hi: false, forced: false };
+  const hi = { ...english, hi: true };
+  const forced = { ...english, forced: true };
+  const result = {
+    wanted: false,
+    covered_by: [],
+    hidden: english,
+    newly_wanted: [],
+    still_wanted: [],
+    remaining_subtitles: [],
+    covering_subtitles: [],
+  };
 
-  it("says nothing when the language is now wanted", () => {
-    expect(
-      // eslint-disable-next-line camelcase
-      hiddenTrackOutcome({ wanted: true, hidden: english, covered_by: [] }),
-    ).toBeNull();
-  });
-
-  it("names what still covers the language", () => {
+  it("names each variant added to Wanted", () => {
     expect(
       hiddenTrackOutcome({
-        wanted: false,
-        hidden: english,
-        // eslint-disable-next-line camelcase
-        covered_by: [
-          { ...english, hi: true, embedded: true },
-          { ...english, embedded: false },
-        ],
+        ...result,
+        hidden: { ...hi, forced: true },
+        newly_wanted: [english, forced],
+      }),
+    ).toBe("Bazarr+ added English, English (forced) to Wanted.");
+  });
+
+  it("keeps already wanted HI separate from newly wanted English", () => {
+    expect(
+      hiddenTrackOutcome({
+        ...result,
+        wanted: true,
+        newly_wanted: [english],
+        still_wanted: [hi],
+      }),
+    ).toBe("Bazarr+ added English to Wanted. English (HI) is still in Wanted.");
+  });
+
+  it("reports remaining subtitles without claiming that they satisfy the hidden variant", () => {
+    const plainFile = { ...english, embedded: false };
+    expect(
+      hiddenTrackOutcome({
+        ...result,
+        hidden: hi,
+        covered_by: [plainFile],
+        remaining_subtitles: [plainFile],
       }),
     ).toBe(
-      "English is still covered by English (HI) (embedded track), English (subtitle file), so Bazarr+ will not search for it.",
+      "Hiding English (HI) added no subtitles to Wanted. Bazarr+ still lists English (subtitle file).",
     );
   });
 
-  it("says when the profile does not ask for the language", () => {
-    expect(
-      // eslint-disable-next-line camelcase
-      hiddenTrackOutcome({ wanted: false, hidden: english, covered_by: [] }),
-    ).toBe(
-      "English is not wanted for this title under its languages profile, so Bazarr+ will not search for it.",
+  it("states the Wanted result when no subtitle is listed", () => {
+    expect(hiddenTrackOutcome(result)).toBe(
+      "Hiding English added no subtitles to Wanted.",
     );
   });
 });
+/* eslint-enable camelcase */

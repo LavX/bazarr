@@ -52,13 +52,17 @@ function wantedAgain(form: Record<string, string>) {
   return HttpResponse.json({
     data: {
       wanted: true,
+      covered_by: [],
+      newly_wanted: [{ code2: "en", name: "English", hi: true, forced: false }],
+      still_wanted: [],
       hidden: {
         code2: form.language,
         name: form.language,
         hi: form.hi === "True",
         forced: form.forced === "True",
       },
-      covered_by: [],
+      remaining_subtitles: [],
+      covering_subtitles: [],
     },
   });
 }
@@ -77,6 +81,7 @@ function mockCommon(
       HttpResponse.json({ data: null }),
     ),
     http.get("/api/system/languages", () => HttpResponse.json([])),
+    http.get("/api/system/status", () => HttpResponse.json({ data: {} })),
     http.get("/api/subtitles/embedded-hidden", ({ request }) => {
       requests.push({ method: "GET", url: request.url });
       return HttpResponse.json({ data: hidden });
@@ -133,30 +138,35 @@ describe("Movies Detail Table, Hide track", () => {
     );
   });
 
-  it("says so when another subtitle still covers the language", async () => {
+  it("says when hiding plain English leaves English HI in Wanted", async () => {
+    const movie = {
+      ...movieWith([{ ...embeddedEnglish, hi: false }]),
+      missing_subtitles: [embeddedEnglish],
+    };
     mockCommon([], () =>
       HttpResponse.json({
         data: {
-          wanted: false,
-          hidden: { code2: "en", name: "English", hi: true, forced: false },
-          covered_by: [
-            {
-              code2: "en",
-              name: "English",
-              hi: false,
-              forced: false,
-              embedded: false,
-            },
+          wanted: true,
+          covered_by: [],
+          hidden: { code2: "en", name: "English", hi: false, forced: false },
+          newly_wanted: [],
+          still_wanted: [
+            { code2: "en", name: "English", hi: true, forced: false },
           ],
+          remaining_subtitles: [],
+          covering_subtitles: [],
         },
       }),
     );
     const user = userEvent.setup();
-    customRender(<Table movie={movieWith([embeddedEnglish])} history={[]} />);
+    customRender(<Table movie={movie} history={[]} />);
     await screen.findByText("Video File Subtitle Track");
     await waitFor(() => expect(queryClient.isFetching()).toBe(0));
 
-    await user.click(await screen.findByLabelText("Subtitle Actions"));
+    const embeddedRow = screen.getByRole("row", {
+      name: /Video File Subtitle Track/,
+    });
+    await user.click(within(embeddedRow).getByLabelText("Subtitle Actions"));
     await user.click(
       await screen.findByRole("menuitem", { name: "Hide track..." }),
     );
@@ -168,11 +178,75 @@ describe("Movies Detail Table, Hide track", () => {
       ).getByRole("button", { name: "Hide track" }),
     );
 
+    expect(await screen.findByText("Track hidden")).toBeInTheDocument();
     expect(
-      await screen.findByText(
-        "English (HI) is still covered by English (subtitle file), so Bazarr+ will not search for it.",
-      ),
+      await screen.findByText("English (HI) is still in Wanted."),
     ).toBeInTheDocument();
+  });
+
+  it.each([
+    {
+      description: "confirms coverage from a counted English HI subtitle file",
+      remaining: { hi: true, forced: false },
+      covered: true,
+      message: "English is still covered by English (HI) (subtitle file).",
+    },
+    {
+      description: "lists a surviving forced subtitle as inventory",
+      remaining: { hi: false, forced: true },
+      covered: false,
+      message:
+        "Hiding English added no subtitles to Wanted. Bazarr+ still lists English (forced) (subtitle file).",
+    },
+    {
+      description: "lists a surviving HI and forced subtitle as inventory",
+      remaining: { hi: true, forced: true },
+      covered: false,
+      message:
+        "Hiding English added no subtitles to Wanted. Bazarr+ still lists English (HI, forced) (subtitle file).",
+    },
+  ])("$description", async ({ remaining, covered, message }) => {
+    const plain = { ...embeddedEnglish, hi: false };
+    const subtitle = { code2: "en", name: "English", ...remaining };
+    const inventory = [{ ...subtitle, embedded: false }];
+    mockCommon([], () =>
+      HttpResponse.json({
+        data: {
+          wanted: false,
+          covered_by: covered ? inventory : [],
+          hidden: { code2: "en", name: "English", hi: false, forced: false },
+          newly_wanted: [],
+          still_wanted: [],
+          remaining_subtitles: inventory,
+          covering_subtitles: covered ? inventory : [],
+        },
+      }),
+    );
+    const user = userEvent.setup();
+    customRender(
+      <Table
+        movie={movieWith([plain, { ...subtitle, path: "/movies/test.en.srt" }])}
+        history={[]}
+      />,
+    );
+    await screen.findByText("Video File Subtitle Track");
+    await waitFor(() => expect(queryClient.isFetching()).toBe(0));
+
+    const embeddedRow = screen.getByRole("row", {
+      name: /Video File Subtitle Track/,
+    });
+    await user.click(within(embeddedRow).getByLabelText("Subtitle Actions"));
+    await user.click(
+      await screen.findByRole("menuitem", { name: "Hide track..." }),
+    );
+    const dialog = within(
+      await screen.findByRole("dialog", { name: "Hide this embedded track?" }),
+    );
+    expect(dialog.getByText("English (embedded track)")).toBeInTheDocument();
+    await user.click(dialog.getByRole("button", { name: "Hide track" }));
+
+    expect(await screen.findByText("Track hidden")).toBeInTheDocument();
+    expect(await screen.findByText(message)).toBeInTheDocument();
   });
 
   it("shows why the backend refused the hide", async () => {

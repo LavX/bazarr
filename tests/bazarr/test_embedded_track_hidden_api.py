@@ -7,6 +7,7 @@ case runs on SQLite and on PostgreSQL, both on an AUTOCOMMIT engine, because
 the undo after a failed re-index is hand-written for that engine.
 """
 import ast
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -38,7 +39,8 @@ def hidden_api(hidden_db, monkeypatch, tmp_path):  # noqa: F811
     # "indexed" stands in for what the real indexer writes back. By default it
     # applies the recorded hides to the listings; a test that reads the POST's
     # answer, or needs the indexer to misbehave, sets its own.
-    calls = {"reindex": [], "events": [], "indexed": lambda: _apply_hides(session)}
+    calls = {"reindex": [], "events": [], "indexed": lambda: _apply_hides(session),
+             "movie_indexer": mv.store_subtitles_movie, "episode_indexer": se.store_subtitles}
     monkeypatch.setattr(api_mod, "event_stream", lambda **kw: calls["events"].append(kw))
 
     def reindexed(*call):
@@ -116,6 +118,11 @@ def _hidden(session):
                            .order_by(TableEmbeddedTrackHidden.id)).all()
 
 
+def _english_variant(code):
+    modifiers = code.split(":")[1:]
+    return {"code2": "en", "name": "English", "hi": "hi" in modifiers, "forced": "forced" in modifiers}
+
+
 def test_requires_authentication(hidden_api):
     client, _session, _calls = hidden_api
     assert client.get(ROOT + "?media_type=movie&media_id[]=1").status_code == 401
@@ -132,8 +139,12 @@ def test_hiding_a_movie_track_records_it_and_reindexes(hidden_api, tmp_path):
     assert hidden.status_code == 200
     assert hidden.json["data"] == {
         "wanted": True,
-        "hidden": {"code2": "en", "name": "English", "hi": False, "forced": False},
         "covered_by": [],
+        "newly_wanted": [_english_variant("en")],
+        "still_wanted": [],
+        "hidden": {"code2": "en", "name": "English", "hi": False, "forced": False},
+        "remaining_subtitles": [],
+        "covering_subtitles": [],
     }
     assert _hidden(session) == [("movie", 1, 2, "en", "subrip")]
     assert calls["reindex"] == [("movie", "/movies/m.mkv", str(tmp_path) + "/movies/m.mkv",
@@ -174,27 +185,167 @@ def test_one_hide_covers_and_records_every_track_with_that_key(hidden_api):
     assert _hidden(session) == [("movie", 1, 2, "en", "pgs, subrip")]
 
 
-def test_hide_says_when_another_subtitle_still_covers_the_language(hidden_api):
+def test_hide_lists_remaining_subtitles_of_the_same_language(hidden_api):
     """The wanted computation counts an HI track as good as a normal one, and a
     subtitle file counts too, so hiding the plain English track can leave
-    English satisfied. The answer says so, and names what still covers it."""
+    English satisfied. The answer lists the remaining subtitles."""
     client, session, calls = hidden_api
     session.execute(sa.update(TableMovies).where(TableMovies.id == 1).values(
         subtitles=str([["en", None, None], ["en:hi", None, None], ["fr", None, None]])))
-    calls["indexed"] = _indexes_as(session, TableMovies, 1, [["en:hi", None, None], ["fr", None, None],
-                                                             ["en", "/movies/m.en.srt", 10]], [])
+    calls["indexed"] = _indexes_as(session, TableMovies, 1, [
+        ["en:hi", None, None], ["fr", None, None], ["en", "/movies/m.en.srt", 10],
+        ["en:combined-fr", "/movies/m.en.combined-fr.srt", 10],
+    ], [])
     hidden = client.post(ROOT, data={"media_type": "movie", "media_id": 1, "language": "en"}, headers=HEADERS)
     assert hidden.status_code == 200
+    covering = [{**_english_variant("en:hi"), "embedded": True}, {**_english_variant("en"), "embedded": False}]
     assert hidden.json["data"] == {
         "wanted": False,
+        "covered_by": covering,
+        "newly_wanted": [],
+        "still_wanted": [],
         "hidden": {"code2": "en", "name": "English", "hi": False, "forced": False},
-        "covered_by": [
-            {"code2": "en", "name": "English", "hi": True, "forced": False, "embedded": True},
-            {"code2": "en", "name": "English", "hi": False, "forced": False, "embedded": False},
-        ],
+        "remaining_subtitles": covering,
+        "covering_subtitles": covering,
     }
     # Still recorded: the track is hidden, whatever else covers the language.
     assert _hidden(session) == [("movie", 1, 2, "en", None)]
+
+
+@pytest.fixture(params=["movie", "episode"])
+def indexed_video_api(request, hidden_api, monkeypatch):
+    """Use the real indexer and profile lookup, replacing file discovery only."""
+    import app.database as db
+    from subtitles.indexer import movies, series
+
+    client, session, calls = hidden_api
+    media_type = request.param
+    movie = media_type == "movie"
+    indexer = movies if movie else series
+    store = calls[f"{media_type}_indexer"]
+    monkeypatch.setattr(db, "database", session)
+    monkeypatch.setattr(indexer, "database", session)
+    monkeypatch.setattr(indexer, store.__name__, store)
+    monkeypatch.setattr(indexer, "alpha2_from_alpha3", {"eng": "en"}.get)
+    monkeypatch.setattr(indexer, "embedded_subs_reader", lambda *a, **kw: calls["tracks"])
+    monkeypatch.setattr(indexer, "get_language_set", lambda: set())
+    monkeypatch.setattr(indexer, "search_external_subtitles", lambda *a, **kw: {})
+    monkeypatch.setattr(indexer, "add_sync_engine_outputs", lambda folder, subs, **kw: subs)
+    monkeypatch.setattr(indexer, "add_combined_outputs", lambda folder, subs, **kw: subs)
+    monkeypatch.setattr(indexer, "guess_external_subtitles", lambda *a, **kw: {})
+    monkeypatch.setattr(indexer, "event_stream", lambda *a, **kw: None)
+    monkeypatch.setattr(indexer, "_log_embedded_history_movie" if movie else "_log_embedded_history",
+                        lambda *a, **kw: None)
+    monkeypatch.setattr(indexer, "prune_mismatches_for_media", lambda *a, **kw: None)
+    monkeypatch.setattr(indexer, "is_search_given_up", lambda *a, **kw: False)
+    for setting, value in (("use_embedded_subs", True), ("ignore_pgs_subs", False),
+                           ("ignore_vobsub_subs", False), ("ignore_ass_subs", False)):
+        monkeypatch.setitem(indexer.settings.general, setting, value)
+    db.update_profile_id_list.invalidate()
+    try:
+        yield client, session, calls, media_type, store
+    finally:
+        db.update_profile_id_list.invalidate()
+
+
+def _index_english_tracks(indexed_video_api, tmp_path, tracks, profile_variants):
+    from app.database import TableLanguagesProfiles
+
+    _client, session, calls, media_type, store = indexed_video_api
+    if media_type == "movie":
+        table, profile_table, path, owner = TableMovies, TableMovies, "/movies/m.mkv", 2
+    else:
+        table, profile_table, path, owner = TableEpisodes, TableShows, "/tv/e01-e02.mkv", 1
+    calls["tracks"] = [["eng", forced, hi, "subrip"] for hi, forced in tracks]
+    profile = [{"id": item_id, "language": "en", "hi": str(hi), "forced": str(forced),
+                "audio_exclude": "False", "audio_only_include": "False"}
+               for item_id, (hi, forced) in enumerate(profile_variants, 1)]
+    session.add(TableLanguagesProfiles(profileId=1, name="English", items=json.dumps(profile)))
+    session.flush()
+    session.execute(sa.update(profile_table).where(profile_table.id == 1).values(profileId=1))
+    session.commit()
+    store(path, str(tmp_path) + path, arr_instance_id=owner)
+    return table
+
+
+@pytest.mark.parametrize("track_hi,surviving,profile_flags,legacy_cover,confirmed_cover", [
+    pytest.param(False, "en:hi", (False, False), True, True, id="hi-covers-plain"),
+    pytest.param(True, "en", (False, False), True, False, id="plain-does-not-cover-hi"),
+    pytest.param(False, "en:forced", (False, True), False, False, id="forced-does-not-cover-plain"),
+    pytest.param(False, "en:hi:forced", (False, False), False, False, id="hi-forced-does-not-cover-plain"),
+])
+def test_hide_distinguishes_confirmed_coverage_from_track_inventory(
+        indexed_video_api, tmp_path, track_hi, surviving, profile_flags, legacy_cover, confirmed_cover):
+    client, session, _calls, media_type, _store = indexed_video_api
+    survivor = _english_variant(surviving)
+    table = _index_english_tracks(indexed_video_api, tmp_path,
+                                  [(track_hi, False), (survivor["hi"], survivor["forced"])], [profile_flags])
+    assert ast.literal_eval(session.execute(sa.select(table.missing_subtitles).where(table.id == 1)).scalar_one()) == []
+
+    hidden = client.post(ROOT, data={"media_type": media_type, "media_id": 1, "language": "en",
+                                     "hi": str(track_hi)}, headers=HEADERS)
+
+    assert hidden.status_code == 200
+    row = session.execute(sa.select(table.subtitles, table.missing_subtitles).where(table.id == 1)).one()
+    assert [entry[0] for entry in ast.literal_eval(row.subtitles)] == [surviving]
+    assert ast.literal_eval(row.missing_subtitles) == []
+    data = hidden.json["data"]
+    inventory = [{**survivor, "embedded": True}]
+    assert data["wanted"] is False
+    assert data["covered_by"] == (inventory if legacy_cover else [])
+    assert data["newly_wanted"] == data["still_wanted"] == []
+    assert data["remaining_subtitles"] == inventory
+    assert data["covering_subtitles"] == (inventory if confirmed_cover else [])
+
+
+@pytest.mark.parametrize("track_hi,track_forced,profile_variants,before,after,newly_wanted,still_wanted,wanted", [
+    pytest.param(False, False, [(True, False)], ["en:hi"], ["en:hi"], [], ["en:hi"], True,
+                 id="plain-hide-keeps-already-missing-hi"),
+    pytest.param(False, False, [(False, False)], [], ["en"], ["en"], [], True,
+                 id="plain-hide-newly-wants-plain"),
+    pytest.param(True, False, [(True, False)], [], ["en:hi"], ["en:hi"], [], True,
+                 id="hi-hide-newly-wants-hi"),
+    pytest.param(True, False, [(False, False)], [], ["en"], ["en"], [], True,
+                 id="hi-hide-newly-wants-equivalent-plain"),
+    pytest.param(False, True, [(False, True)], [], ["en:forced"], ["en:forced"], [], True,
+                 id="forced-hide-newly-wants-forced"),
+    pytest.param(False, False, [(False, True)], ["en:forced"], ["en:forced"], [], ["en:forced"], False,
+                 id="plain-hide-keeps-already-missing-forced"),
+    pytest.param(False, True, [(False, False)], ["en"], ["en"], [], ["en"], False,
+                 id="forced-hide-keeps-already-missing-plain"),
+    pytest.param(False, False, [(False, False), (True, False)], ["en:hi"], ["en", "en:hi"], ["en"], ["en:hi"], True,
+                 id="plain-hide-newly-wants-plain-with-hi-already-missing"),
+    pytest.param(True, True, [(False, False)], [], ["en"], ["en"], [], False,
+                 id="hi-forced-hide-newly-wants-plain"),
+    pytest.param(True, True, [(True, False)], [], ["en:hi"], ["en:hi"], [], False,
+                 id="hi-forced-hide-newly-wants-hi"),
+    pytest.param(True, True, [(False, True)], ["en:forced"], ["en:forced"], [], ["en:forced"], True,
+                 id="hi-forced-hide-keeps-already-missing-forced"),
+])
+def test_hide_reports_new_and_existing_wanted_profile_variants(
+        indexed_video_api, tmp_path, track_hi, track_forced, profile_variants, before, after,
+        newly_wanted, still_wanted, wanted):
+    """Compute both states from the stored profile instead of supplying missing values."""
+    client, session, _calls, media_type, _store = indexed_video_api
+    table = _index_english_tracks(indexed_video_api, tmp_path, [(track_hi, track_forced)], profile_variants)
+    assert ast.literal_eval(session.execute(sa.select(table.missing_subtitles)
+                                           .where(table.id == 1)).scalar_one()) == before
+
+    hidden = client.post(ROOT, data={"media_type": media_type, "media_id": 1, "language": "en",
+                                     "hi": str(track_hi), "forced": str(track_forced)}, headers=HEADERS)
+    assert hidden.status_code == 200
+    row = session.execute(sa.select(table.subtitles, table.missing_subtitles).where(table.id == 1)).one()
+    assert ast.literal_eval(row.subtitles) == []
+    assert ast.literal_eval(row.missing_subtitles) == after
+    assert hidden.json["data"] == {
+        "wanted": wanted,
+        "covered_by": [],
+        "newly_wanted": [_english_variant(code) for code in newly_wanted],
+        "still_wanted": [_english_variant(code) for code in still_wanted],
+        "hidden": {"code2": "en", "name": "English", "hi": track_hi, "forced": track_forced},
+        "remaining_subtitles": [],
+        "covering_subtitles": [],
+    }
 
 
 @pytest.mark.parametrize("form,status", [

@@ -13,6 +13,7 @@ import os
 
 from flask_restx import Namespace, Resource, reqparse
 
+from app.config import settings
 from app.database import TableEpisodes, TableMovies, database, select
 from app.event_handler import event_stream
 from languages.get_languages import language_from_alpha2
@@ -93,6 +94,18 @@ def _variant(key):
     return base, 'hi' in variants, 'forced' in variants
 
 
+def _track_language(key):
+    base, hi, forced = _variant(key)
+    return {'code2': base, 'name': _language_name(base), 'hi': hi, 'forced': forced}
+
+
+def _coverage_variant(media_type, key):
+    # Movie and episode Wanted read only the first modifier. Sports reads both flags.
+    if media_type != 'sports':
+        key = ':'.join(key.split(':', 2)[:2])
+    return _variant(key)
+
+
 def _table(media_type):
     if media_type == 'sports':
         from app.database import TableSportsEvents
@@ -112,35 +125,51 @@ def _still_listed(media_type, media_id, key):
     return bool(_embedded_entries(stored, key))
 
 
-def _outcome(media_type, media_id, key):
-    """What the hide changed, read back from the row the re-index wrote.
-
-    ``wanted`` is True when the language is now missing. It stays False when
-    another subtitle of that language still satisfies it (``covered_by``): the
-    wanted computation counts an HI track as good as a normal one, and a
-    subtitle file counts too. It also stays False when the profile does not
-    ask for the language at all. The page tells the user either way, since the
-    confirmation promised the language would be wanted again.
-    """
+def _outcome(media_type, media_id, key, previous_missing):
+    """Report the changes in Wanted and the remaining state for this language."""
     table = _table(media_type)
     row = database.execute(select(table.subtitles, table.missing_subtitles)
                            .where(table.id == media_id)).first()
-    base, hi, forced = _variant(key)
-    missing = [item for item in _listing(row.missing_subtitles if row else None) if isinstance(item, str)]
-    wanted = any(_variant(item)[0] == base and _variant(item)[2] == forced for item in missing)
+    hidden = _track_language(key)
+    base = hidden['code2']
+    forced = hidden['forced']
+    before = {item for item in _listing(previous_missing) if isinstance(item, str)}
+    after = dict.fromkeys(item for item in _listing(row.missing_subtitles if row else None)
+                          if isinstance(item, str))
+    after_variants = {_variant(item) for item in after}
+    # Legacy callers ask whether a matching variant is missing after the hide.
+    wanted = any(code == base and is_forced == forced for code, _hi, is_forced in after_variants)
+    # The stored missing keys capture the indexer's own HI, forced, and cutoff
+    # rules. Hiding a cutoff track can add other languages to Wanted as well.
+    newly_wanted = [_track_language(item) for item in after if item not in before]
+    still_wanted = [_track_language(item) for item in after
+                    if item in before and item.partition(':')[0] == base]
+    target = _coverage_variant(media_type, key)
     covered_by = []
+    covering_subtitles = []
+    remaining_subtitles = []
     for entry in _listing(row.subtitles if row else None):
         if not (isinstance(entry, (list, tuple)) and entry and isinstance(entry[0], str)):
             continue
-        entry_base, entry_hi, entry_forced = _variant(entry[0])
-        if (entry_base != base or entry_forced != forced
-                or any(part.startswith('combined-') for part in entry[0].split(':')[1:])):
+        entry_base, *modifiers = entry[0].split(':')
+        if entry_base != base or any(part.startswith('combined-') for part in modifiers):
             continue
-        covered_by.append({'code2': entry_base, 'name': _language_name(entry_base), 'hi': entry_hi,
-                           'forced': entry_forced, 'embedded': not (len(entry) > 1 and entry[1])})
-    return {'wanted': wanted,
-            'hidden': {'code2': base, 'name': _language_name(base), 'hi': hi, 'forced': forced},
-            'covered_by': covered_by}
+        subtitle = {**_track_language(entry[0]), 'embedded': not (len(entry) > 1 and entry[1])}
+        remaining_subtitles.append(subtitle)
+        if subtitle['forced'] == forced:
+            covered_by.append(subtitle)
+        # Wanted can read a mixed HI+forced track as HI. Coverage still
+        # requires the actual forced status to match the hidden track.
+        if subtitle['forced'] != forced:
+            continue
+        if target in after_variants or (subtitle['embedded'] and not settings.general.use_embedded_subs):
+            continue
+        actual = _coverage_variant(media_type, entry[0])
+        if actual == target or (target == (base, False, False) and actual == (base, True, False)):
+            covering_subtitles.append(subtitle)
+    return {'wanted': wanted, 'covered_by': covered_by, 'hidden': hidden, 'newly_wanted': newly_wanted,
+            'still_wanted': still_wanted, 'remaining_subtitles': remaining_subtitles,
+            'covering_subtitles': covering_subtitles}
 
 
 def _reindex(media_type, media_id, original_path, mapped_path, owner, ids):
@@ -244,7 +273,7 @@ class EmbeddedHiddenTracks(Resource):
 
     @authenticate
     @api_ns_embedded_hidden.doc(parser=_Body.parser)
-    @api_ns_embedded_hidden.response(200, 'Hidden; says whether the language is now wanted')
+    @api_ns_embedded_hidden.response(200, 'Hidden, with newly wanted variants and remaining state for its language')
     @api_ns_embedded_hidden.response(400, 'Bad request')
     @api_ns_embedded_hidden.response(404, 'No such media row, or no embedded track with that language')
     @api_ns_embedded_hidden.response(409, 'The video file cannot be read right now')
@@ -262,6 +291,9 @@ class EmbeddedHiddenTracks(Resource):
             # than record a hide the page would not show.
             if not os.path.exists(mapped):
                 return 'The video file cannot be read right now, so the track was not hidden.', 409
+            table = _table(media_type)
+            previous_missing = database.execute(select(table.missing_subtitles)
+                                                .where(table.id == media_id)).scalar()
             # Every codec the hide covers, for the disclosure. A stored entry
             # carries its codec as a fourth element once the indexer records
             # one; older three-element entries have none.
@@ -302,7 +334,7 @@ class EmbeddedHiddenTracks(Resource):
                 raise failure
         except _Refused as refused:
             return refused.message, refused.status
-        return {'data': _outcome(media_type, media_id, key)}, 200
+        return {'data': _outcome(media_type, media_id, key, previous_missing)}, 200
 
     @authenticate
     @api_ns_embedded_hidden.doc(parser=_Body.parser)
