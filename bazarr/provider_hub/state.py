@@ -938,10 +938,14 @@ def blocked_installations(
 
     They are installed and keep their settings, so a caller that decides what is gone from what is running
     reads this to tell the two apart."""
+    from .release_settings import provider_restore_pending
+
     data = load_state(path)
     installations = []
     for provider_id, item in (data.get("installations") or {}).items():
-        if not isinstance(item, dict) or not item.get("blocked") or not item.get("active_version"):
+        if not isinstance(item, dict) or not item.get("active_version"):
+            continue
+        if not item.get("blocked") and not provider_restore_pending(item):
             continue
         if kind is not None and kind_of(item) != kind:
             continue

@@ -121,16 +121,36 @@ def _provider_credentials_present(plugin_id, names, section, hub_config) -> bool
                or _credential_present(hub_config.get(key)) for key in names)
 
 
+def _provider_destinations(manifest, section, hub, fields) -> dict:
+    from app.config import _plugin_destination_fields, _plugin_destination_reach
+
+    _, _, defaults = _plugin_destination_fields(manifest)
+    try:
+        return {key: sorted(str(value) for value in _plugin_destination_reach(
+            section.get(key), key in hub, hub.get(key), defaults.get(key, ()))) for key in fields}
+    except TypeError:
+        raise ValueError("The previous provider address could not be verified") from None
+
+
+def _destination_fields(before_manifest, after_manifest):
+    from app.config import _plugin_destination_fields
+
+    before_uris, _, _ = _plugin_destination_fields(before_manifest)
+    after_uris, _, _ = _plugin_destination_fields(after_manifest)
+    known = _declared(before_manifest) | _declared(after_manifest)
+    return before_uris | after_uris | {key for key in known if key in ("url", "host", "endpoint")
+                                      or key.endswith(("_url", "_host"))}
+
+
 def provider_restore_plan(state, plugin_id, row, target_manifest, snapshot, *, section=None):
     """Project the two stores without copying or decrypting a retained credential."""
-    from app.config import _plugin_destination_reach, _plugin_destination_fields
-
     current = row.get("manifest") or {}
     restoring = {**row, "staged_manifest": target_manifest}
     private = _private_fields(state, plugin_id, restoring)
-    owned = (_declared(current) | _declared(target_manifest)) - private
     section = provider_section(plugin_id) if section is None else section
-    prior = snapshot.get("section", {})
+    prior = snapshot.get("section")
+    # A missing section makes no claim about what the previous YAML contained.
+    owned = (_declared(current) | _declared(target_manifest)) - private if isinstance(prior, dict) else set()
     desired = {key: prior[key] for key in owned if key in prior}
     before = {key: section[key] for key in owned if key in section}
     projected_section = {key: value for key, value in section.items() if key not in owned} | desired
@@ -138,44 +158,42 @@ def provider_restore_plan(state, plugin_id, row, target_manifest, snapshot, *, s
     proposed = dict(restoring)
     restore_config(state, plugin_id, proposed, snapshot)
     next_hub = proposed.get("config") or {}
-
-    current_uris, current_secrets, current_defaults = _plugin_destination_fields(current)
-    target_uris, target_secrets, target_defaults = _plugin_destination_fields(target_manifest)
-    destinations = current_uris | target_uris
-    destinations |= {key for key in owned if key in ("url", "host", "endpoint") or key.endswith(("_url", "_host"))}
-    changed = {}
-    for key in sorted(destinations):
-        try:
-            before_reach = _plugin_destination_reach(section.get(key), key in current_hub, current_hub.get(key),
-                                                     current_defaults.get(key, ()))
-            after_reach = _plugin_destination_reach(projected_section.get(key), key in next_hub, next_hub.get(key),
-                                                    target_defaults.get(key, ()))
-        except TypeError:
-            raise ValueError("The previous provider address could not be verified") from None
-        if before_reach != after_reach:
-            changed[key] = sorted(str(value) for value in after_reach)
-    secret_fields = private | current_secrets | target_secrets
-    if changed and _provider_credentials_present(plugin_id, secret_fields, section, current_hub):
+    fields = _destination_fields(current, target_manifest)
+    prior_addresses = _provider_destinations(current, section, current_hub, fields)
+    addresses = _provider_destinations(target_manifest, projected_section, next_hub, fields)
+    changed = {key: values for key, values in addresses.items() if values != prior_addresses[key]}
+    if changed and _provider_credentials_present(plugin_id, private, section, current_hub):
         raise ValueError("Remove the saved provider credential before rolling back to a different address")
     return {"fields": sorted(owned), "before": before, "after": desired,
-            "changed": changed, "secret_fields": sorted(secret_fields)}
+            "changed": changed, "addresses": addresses, "secret_fields": sorted(private)}
 
 
-def restore_provider_section(plugin_id: str, plan: dict, hub_config: dict) -> None:
+def restore_provider_section(plugin_id: str, plan: dict, hub_config: dict, manifest: dict,
+                             *, just_promoted=False) -> None:
     from app.config import settings, write_config
     from discover.metadata import CONFIG_LOCK
 
     with CONFIG_LOCK:
         current = provider_section(plugin_id)
-        if plan["changed"] and _provider_credentials_present(plugin_id, plan["secret_fields"], current, hub_config):
-            raise ValueError("Remove the saved provider credential before restoring its previous address")
         owned = set(plan["fields"])
         existing = {key: current[key] for key in owned if key in current}
         if existing == plan["after"]:
             return
         if existing != plan["before"]:
             raise ValueError("The provider settings section changed before it could be restored")
-        settings[plugin_id] = {key: value for key, value in current.items() if key not in owned} | plan["after"]
+        projected = {key: value for key, value in current.items() if key not in owned} | plan["after"]
+        fields = _destination_fields(manifest, manifest)
+        before = _provider_destinations(manifest, current, hub_config, fields)
+        after = _provider_destinations(manifest, projected, hub_config, fields)
+        moved = {key: values for key, values in after.items() if values != before[key]}
+        # Startup calls the first attempt during the same activation, whose paired address check already ran.
+        # A retry may see a later credential, so it must use the current effective address again.
+        if moved and not just_promoted and _provider_credentials_present(
+                plugin_id, plan["secret_fields"], current, hub_config):
+            raise ValueError("Remove the saved provider credential before restoring its previous address")
+        if any(plan["addresses"].get(key) != values for key, values in moved.items()):
+            raise ValueError("The provider address changed after the rollback was approved")
+        settings[plugin_id] = projected
         try:
             if write_config() is not True:
                 raise ValueError("The previous provider settings could not be saved")

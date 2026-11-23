@@ -1719,9 +1719,11 @@ def test_rollback_restores_the_exact_release_settings_and_keeps_unowned_values(
         "region": "us", "official_mode": "new", "unrelated": "keep me"}
 
 
-def test_provider_rollback_restores_its_settings_section_after_credential_check(client, rollback_store, monkeypatch):
+@pytest.mark.parametrize("has_copy", [False, True])
+def test_provider_rollback_restores_its_settings_section_after_credential_check(
+        client, rollback_store, monkeypatch, has_copy):
     from app import config
-    from provider_hub import release_settings, service, state
+    from provider_hub import registry, release_settings, service, state
     from provider_hub.kinds.subtitle_provider import SUBTITLE_PROVIDER_KIND
 
     plugin_id = "providerhub"
@@ -1741,8 +1743,9 @@ def test_provider_rollback_restores_its_settings_section_after_credential_check(
         "api_key": {"type": "string"}, "region": {"type": "string"},
         "base_url": {"type": "string", "format": "uri", "default": address}}})
         for version, address in (("1.0.0", "https://original.example.test"), ("2.0.0", "https://current.example.test"))]
-    rollback_store(plugin_id, previous=manifests[0], current=manifests[1], stage_current=True)
-    assert service.activate_staged_installations() == [plugin_id]
+    rollback_store(plugin_id, previous=manifests[0], current=manifests[1], stage_current=has_copy)
+    if has_copy:
+        assert service.activate_staged_installations() == [plugin_id]
     config.save_settings([("settings-providerhub-region", "edited"), ("settings-providerhub-api_key", "fixture value")])
     before = state.load_state()
     preview = _get(client, path).json
@@ -1751,25 +1754,90 @@ def test_provider_rollback_restores_its_settings_section_after_credential_check(
     assert state.load_state() == before
     config.save_settings([("settings-providerhub-api_key", "")])
     preview = _get(client, path).json
-    assert preview["blocked_reason"] is None and preview["restores_settings"]
+    assert preview["blocked_reason"] is None and preview["restores_settings"] is has_copy
     assert preview["consent"]["added"]["destinations"] == ["https://original.example.test"]
     assert _rollback(client, plugin_id).status_code == 400
     reply = _rollback(client, plugin_id, consent=preview["consent"]["digest"])
     assert reply.json == {"status": "waiting", "version": "1.0.0"}, reply.json
     rejected_write = True
     assert service.activate_staged_installations() == [plugin_id]
-    row = state.load_state()["installations"][plugin_id]
-    assert release_settings.provider_restore_pending(row)
-    assert all(item.provider_id != plugin_id for item in state.active_installations())
-    assert service.test_provider_connection(plugin_id)["status"] == "blocked"
-    assert config.settings[plugin_id].get("region") == "edited"
-    rejected_write = False
-    service.resume_rollback_activations()
+    if has_copy:
+        from app import get_providers
+        from types import SimpleNamespace
+
+        row = state.load_state()["installations"][plugin_id]
+        assert release_settings.provider_restore_pending(row)
+        assert all(item.provider_id != plugin_id for item in state.active_installations())
+        assert service.test_provider_connection(plugin_id)["status"] == "blocked"
+        assert config.settings[plugin_id].get("region") == "edited"
+        monkeypatch.setattr(registry, "_REGISTRATION_INCOMPLETE", set())
+        registry.register_active_provider_classes()
+        known = registry.registration_incomplete()
+        assert plugin_id in known
+        # A remaining built-in with this id is still unavailable while its replacement is held.
+        monkeypatch.setattr(get_providers, "_PROVIDER_HUB_REGISTRATION_DONE", True)
+        monkeypatch.setattr(get_providers, "provider_registry", SimpleNamespace(names=lambda: {plugin_id, "native"}))
+        monkeypatch.setattr(config.settings.general, "enabled_providers", [plugin_id, "native"])
+        assert get_providers.get_providers(include_throttled=True) == ["native"]
+        assert not get_providers.provider_is_usable(plugin_id)
+        assert registry.settings_cleanup_plan(set(), [plugin_id], [plugin_id], set(), lambda name: True,
+                                              known) == ([plugin_id], [plugin_id], [])
+        rejected_write = False
+        service.resume_rollback_activations()
+        assert plugin_id not in service.runtime_blocked_provider_ids()
     assert not release_settings.provider_restore_pending(state.load_state()["installations"][plugin_id])
     assert next(item for item in state.active_installations() if item.provider_id == plugin_id).active_version == "1.0.0"
-    assert config.settings[plugin_id].get("region") == "before" and saves[-1] == "before"
+    assert config.settings[plugin_id].get("region") == ("before" if has_copy else "edited")
     assert config.settings[plugin_id].get("unrelated") == "keep"
     assert not config.settings[plugin_id].get("api_key")
+
+
+@pytest.mark.parametrize("edit_while_queued", [False, True])
+def test_provider_rollback_rechecks_the_effective_address_before_or_after_activation(
+        client, rollback_store, monkeypatch, edit_while_queued):
+    from app import config
+    from provider_hub import release_settings, service, state
+    from provider_hub.kinds.subtitle_provider import SUBTITLE_PROVIDER_KIND
+
+    plugin_id = "providerhub"
+    initial_url = "https://original.example.test"
+    later_url = "https://current.example.test"
+    monkeypatch.setattr(SUBTITLE_PROVIDER_KIND, "smoke_test", lambda *args, **kwargs: None)
+    monkeypatch.setattr(config.settings.general, "secrets_encryption_key", "fixture-setting-encryption", raising=False)
+    monkeypatch.setitem(config.settings, plugin_id, {"base_url": initial_url})
+    settings_broken = False
+    monkeypatch.setattr(config, "write_config", lambda: not settings_broken)
+    schema = {"type": "object", "properties": {"api_key": {"type": "string"},
+                                                 "base_url": {"type": "string", "format": "uri"}}}
+    versions = [provider_manifest_v1(plugin_id, version, config_schema=schema) for version in ("1.0.0", "2.0.0")]
+    rollback_store(plugin_id, previous=versions[0], current=versions[1], stage_current=True)
+    assert service.activate_staged_installations() == [plugin_id]
+    # Preserve the effective address while changing which configuration store supplies it.
+    service.update_provider(plugin_id, config={"base_url": initial_url})
+    config.save_settings([("settings-providerhub-base_url", "")])
+    preview = _get(client, f"/api/plugins/installations/{plugin_id}/rollback").json
+    assert preview["restores_settings"] and preview["consent"] is None
+    assert _rollback(client, plugin_id).json == {"status": "waiting", "version": "1.0.0"}
+    if edit_while_queued:
+        config.save_settings([("settings-providerhub-base_url", later_url)])
+        assert service.activate_staged_installations() == []
+        row = state.load_state()["installations"][plugin_id]
+        assert row["active_version"] == "2.0.0" and not row["pending_restart"]
+        assert config.settings[plugin_id].get("base_url") == later_url
+        assert service._previous_release(plugin_id).version == "1.0.0"
+    else:
+        settings_broken = True
+        assert service.activate_staged_installations() == [plugin_id]
+        row = state.load_state()["installations"][plugin_id]
+        assert release_settings.provider_restore_pending(row)
+        settings_broken = False
+        # A normal Hub settings save keeps the credential with the address entered in that save.
+        service.update_provider(plugin_id, config={"base_url": later_url, "api_key": "fixture value"})
+        service.resume_rollback_activations()
+        row = state.load_state()["installations"][plugin_id]
+        assert release_settings.provider_restore_pending(row)
+        assert row["config"]["base_url"] == later_url and not config.settings[plugin_id].get("base_url")
+        assert service.test_provider_connection(plugin_id)["status"] == "blocked"
 
 
 def test_a_live_rollback_conflict_discards_its_stage(client, rollback_store, monkeypatch):
