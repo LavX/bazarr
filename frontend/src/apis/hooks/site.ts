@@ -1,5 +1,6 @@
+import { isArrMediaRouteEnabled, useArrInstances } from "./arrInstances";
 import { useSourceAvailability } from "./mediaSources";
-import { useSystemSettings, useSystemStatus } from ".";
+import { useSystemSettings, useSystemStatus } from "./system";
 
 export function useEnabledStatus() {
   const { data } = useSystemSettings();
@@ -12,7 +13,17 @@ export function useEnabledStatus() {
 }
 
 export function useMediaNavigation() {
-  const { sonarr, radarr, sportarr } = useEnabledStatus();
+  const { data: settings } = useSystemSettings();
+  const general = settings?.general;
+  const { data: instances } = useArrInstances(
+    settings?.media_sources?.visible === true &&
+      Boolean(
+        general?.use_sonarr || general?.use_radarr || general?.use_sportarr,
+      ),
+  );
+  const sonarr = isArrMediaRouteEnabled("sonarr", settings, instances);
+  const radarr = isArrMediaRouteEnabled("radarr", settings, instances);
+  const sportarr = isArrMediaRouteEnabled("sportarr", settings, instances);
   const { availability } = useSourceAvailability();
   const series = sonarr || availability?.series.browsable === true;
   const movies = radarr || availability?.movie.browsable === true;

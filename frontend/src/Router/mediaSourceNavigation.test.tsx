@@ -10,12 +10,16 @@ import { useSportsAvailability } from "@/apis/hooks/sports";
 import queryClient from "@/apis/queries";
 import { QueryKeys } from "@/apis/queries/keys";
 import type { SourceAvailability } from "@/apis/raw/mediaSources";
+import { latestWhatsNewVersion } from "@/data/whatsNew";
 import { makeInstance } from "@/pages/Settings/Connections/__tests__/fixtures";
 import InstanceCard from "@/pages/Settings/Connections/InstanceCard";
-import { useRoutes } from "@/Router";
+import { AllProviders } from "@/providers";
+import { Router, useRoutes } from "@/Router";
 import type { CustomRouteObject } from "@/Router/type";
-import { customRender, screen, waitFor } from "@/tests";
+import { customRender, rawRender, screen, waitFor } from "@/tests";
 import server from "@/tests/mocks/node";
+import { setAuthenticated } from "@/utilities/event";
+import { WHATS_NEW_SEEN_KEY } from "@/utilities/whatsNew";
 
 function Navigation() {
   // eslint-disable-next-line testing-library/no-node-access -- route metadata, not a DOM node.
@@ -50,6 +54,190 @@ const ABSENT = { browsable: false, searchable: false, retained: false };
 const ENABLED = { ...ABSENT, browsable: true, searchable: true };
 const DISABLED = { ...ABSENT, browsable: true };
 const RETAINED = { ...ABSENT, retained: true };
+
+it.each([200, 503])(
+  "updates Radarr navigation only after a confirmed disable (PATCH %s)",
+  async (status) => {
+    const user = userEvent.setup();
+    const movie = makeInstance({ kind: "radarr", name: "Radarr" });
+    const series = makeInstance({ id: 1 });
+    const sports = makeInstance({ id: 2, kind: "sportarr" });
+    const patch = Promise.withResolvers<void>();
+    const refresh = Promise.withResolvers<void>();
+    const patchStarted = vi.fn();
+    const list = vi.fn();
+    const excluded = vi.fn();
+    let confirmed = false;
+
+    server.use(
+      http.get("/api/system/settings", () =>
+        HttpResponse.json({
+          general: {
+            theme: "light",
+            setup_complete: true,
+            use_radarr: true,
+            use_sonarr: true,
+            use_sportarr: true,
+          },
+          media_sources: { visible: true },
+          auth: { type: "form" },
+        }),
+      ),
+      http.get("/api/system/arr-instances", async () => {
+        list();
+        if (!confirmed) return HttpResponse.json([movie, series, sports]);
+        await refresh.promise;
+        return new HttpResponse(null, { status: 503 });
+      }),
+      http.patch("/api/system/arr-instances/42", async ({ request }) => {
+        patchStarted(await request.json());
+        await patch.promise;
+        if (status === 503) return new HttpResponse(null, { status });
+        confirmed = true;
+        return HttpResponse.json({ ...movie, enabled: false }, { status });
+      }),
+      http.get("/api/system/media-sources", () =>
+        HttpResponse.json({
+          data: [],
+          availability: {
+            movie: { ...DISABLED, retained: true },
+            series: ABSENT,
+            sports: ABSENT,
+          },
+        }),
+      ),
+      http.get("/api/badges", () =>
+        HttpResponse.json({
+          movies: 9,
+          episodes: 4,
+          sports: 2,
+          radarr_signalr: "DOWN",
+          sonarr_signalr: "LIVE",
+          sportarr_sse: "LIVE",
+        }),
+      ),
+      http.get("/api/system/status", () => HttpResponse.json({ data: {} })),
+      http.get("/api/system/jobs", () => HttpResponse.json({ data: [] })),
+      http.get("/api/system/searches", () => HttpResponse.json([])),
+      http.get("/api/discover/metadata/status", () =>
+        HttpResponse.json({ configured: false }),
+      ),
+      http.all("/api/movies/blacklist", ({ request }) => {
+        excluded(request.method);
+        return HttpResponse.json({ data: [] });
+      }),
+    );
+
+    // Mantine's flyout hides its content when the trigger has no layout bounds.
+    const bounds = vi
+      .spyOn(HTMLElement.prototype, "getBoundingClientRect")
+      .mockReturnValue(new DOMRect(100, 100, 100, 40));
+    window.history.replaceState(null, "", "/settings/connections#radarr");
+    setAuthenticated(true);
+    localStorage.setItem(WHATS_NEW_SEEN_KEY, latestWhatsNewVersion);
+    const { unmount } = rawRender(
+      <AllProviders>
+        <Router />
+      </AllProviders>,
+    );
+
+    const moviesLink = () => screen.getByRole("link", { name: "Movies" });
+    const wanted = () => screen.getByRole("button", { name: "Wanted" });
+    const toggle = () =>
+      screen.getByRole("switch", { name: "Disable instance" });
+    const initialCounts = "Sports: 2, Episodes: 4, Movies: 9";
+
+    try {
+      await screen.findByRole("switch", { name: "Disable instance" });
+      await waitFor(() =>
+        expect(moviesLink()).toHaveAttribute(
+          "aria-description",
+          "Connection down",
+        ),
+      );
+      expect(wanted()).toHaveAttribute("aria-description", initialCounts);
+      expect(list).toHaveBeenCalledOnce();
+
+      await user.click(toggle());
+      await waitFor(() =>
+        expect(patchStarted).toHaveBeenCalledWith({ enabled: false }),
+      );
+      expect(toggle()).toBeChecked();
+      expect(moviesLink()).toHaveAttribute(
+        "aria-description",
+        "Connection down",
+      );
+      expect(wanted()).toHaveAttribute("aria-description", initialCounts);
+      expect(list).toHaveBeenCalledOnce();
+
+      patch.resolve();
+      if (status === 503) {
+        await waitFor(() => expect(toggle()).toBeEnabled());
+        expect(toggle()).toBeChecked();
+        expect(moviesLink()).toHaveAttribute(
+          "aria-description",
+          "Connection down",
+        );
+        expect(wanted()).toHaveAttribute("aria-description", initialCounts);
+        expect(list).toHaveBeenCalledOnce();
+        return;
+      }
+
+      await waitFor(() => expect(list).toHaveBeenCalledTimes(2));
+      expect(
+        await screen.findByRole("switch", { name: "Enable instance" }),
+      ).not.toBeChecked();
+      await user.click(screen.getByRole("button", { name: "Excluded" }));
+      await user.click(await screen.findByRole("menuitem", { name: "Movies" }));
+      expect(
+        await screen.findByRole("link", { name: "Connections" }),
+      ).toHaveAttribute("href", "/settings/connections#folders");
+      expect(window.location.pathname).toBe("/blacklist/movies");
+
+      const expectFallback = () => {
+        expect(moviesLink()).toHaveAttribute("href", "/movies");
+        expect(moviesLink()).not.toHaveAttribute("aria-description");
+        expect(wanted()).toHaveAttribute(
+          "aria-description",
+          "Sports: 2, Episodes: 4",
+        );
+        expect(screen.getByRole("link", { name: "Series" })).toHaveAttribute(
+          "aria-description",
+          "Connection live",
+        );
+        expect(screen.getByRole("link", { name: "Sports" })).toHaveAttribute(
+          "aria-description",
+          "Connection live",
+        );
+        expect(
+          screen.getByRole("button", { name: "Excluded" }),
+        ).toHaveAttribute("aria-current", "page");
+        expect(
+          screen.queryByRole("button", { name: "Remove All" }),
+        ).not.toBeInTheDocument();
+        expect(excluded).not.toHaveBeenCalled();
+        expect(list).toHaveBeenCalledTimes(2);
+      };
+      expectFallback();
+
+      refresh.resolve();
+      await waitFor(() =>
+        expect(
+          queryClient.getQueryState([QueryKeys.ArrInstances])?.status,
+        ).toBe("error"),
+      );
+      expectFallback();
+    } finally {
+      patch.resolve();
+      refresh.resolve();
+      unmount();
+      bounds.mockRestore();
+      window.history.replaceState(null, "", "/");
+      localStorage.removeItem(WHATS_NEW_SEEN_KEY);
+      setAuthenticated(false);
+    }
+  },
+);
 
 it.each([
   ["series", "sonarr", "My series", "Episodes"],
