@@ -509,8 +509,11 @@ def sync_subtitles(video_path,
             if source is not None:
                 sync_kwargs['source'] = source
             if source_tool is not None:
+                def source_tool_guard(destination):
+                    return source_tool.publication(destination, cleanup_outputs=destination == srt_path)
+
                 sync_kwargs.update(write_history=False, validate=source_tool.validate,
-                                   path_publication_guard=source_tool.publication)
+                                   path_publication_guard=source_tool_guard)
             if context is not None:
                 from sportarr.subtitles import candidate_signature
                 sports_signature = candidate_signature(context)

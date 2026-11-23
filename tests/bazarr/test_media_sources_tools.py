@@ -106,6 +106,7 @@ def test_source_tools_write_files_history_and_index_for_each_media_kind(toolbox,
     from media_sources import repository
     from media_sources.subtitle_tools import SOURCE_SUBTITLE_EDITED_ACTION
     from subtitles.tools import subsyncer
+    from subtitles.tools.subsync_engines import engine_output_path
 
     seen = []
     monkeypatch.setattr(events, 'notify_subtitle_mutation', seen.append)
@@ -132,10 +133,13 @@ def test_source_tools_write_files_history_and_index_for_each_media_kind(toolbox,
     assert references.status_code == 200
     assert [r['path'] for r in references.json['data']['external_subtitles_tracks']] == [str(ref)]
 
+    generated = engine_output_path(path, 'ffsubsync')
+    generated.write_text(SRT)
     response = _request(toolbox, context, path, 'sync', reference=str(ref), output_mode='overwrite',
                         enabled_engines='alass')
     _run(toolbox, response)
     assert path.read_text() == SYNCED
+    assert not generated.exists()
 
     response = _request(toolbox, context, path, 'remove_tags')
     _run(toolbox, response)
@@ -176,6 +180,29 @@ def test_source_tools_write_files_history_and_index_for_each_media_kind(toolbox,
     assert {entry[0] for entry in ast.literal_eval(repository.get_item(context.item_id).subtitles)} == {'en', 'de', 'hu'}
     status = toolbox.client.get(f'/api/sources/items/{context.item_id}/subtitles/en/sync-status', headers=HEADERS)
     assert status.status_code == 200 and status.json['synced'] is True
+
+
+def test_source_combine_route_builds_only_the_selected_items_subtitle(toolbox):
+    from media_sources import repository
+    from subtitles.tools.combine.naming import compose_combined_filename
+
+    context = pipeline._movie(toolbox.world)
+    _sidecars(toolbox, context)
+    before = table_counts(toolbox.db, ARR_AND_SPORTS_TABLES)
+    endpoint = f'/api/sources/items/{context.item_id}/subtitles/combine'
+
+    invalid = toolbox.client.post(endpoint, headers=HEADERS, json={'languages': ['en', 'en'], 'format': 'srt'})
+    assert invalid.status_code == 400
+    assert toolbox.client.post('/api/sources/items/99999/subtitles/combine', headers=HEADERS).status_code == 404
+    missing = toolbox.client.post(endpoint, headers=HEADERS, json={'languages': ['en', 'hu'], 'format': 'srt'})
+    assert missing.status_code == 200 and missing.json['status'] == 'skipped'
+    response = toolbox.client.post(endpoint, headers=HEADERS, json={'languages': ['en', 'de'], 'format': 'srt'})
+    assert response.status_code == 200 and response.json['status'] == 'built'
+    path = Path(compose_combined_filename(video_path=context.path, primary='en', secondaries=['de'], format='srt'))
+    assert response.json['path'] == str(path)
+    assert path.is_file()
+    assert any(item[1] == str(path) for item in ast.literal_eval(repository.get_item(context.item_id).subtitles))
+    assert table_counts(toolbox.db, ARR_AND_SPORTS_TABLES) == before
 
 
 def test_source_sync_status_uses_edit_history_within_mtime_tolerance(toolbox):

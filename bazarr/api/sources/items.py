@@ -181,6 +181,29 @@ class SourceItemHistory(Resource):
         return marshal(response, self.response_model)
 
 
+@api_ns_sources_items.route("sources/items/<int:item_id>/upgrade")
+class SourceItemUpgrade(Resource):
+    request_parser = reqparse.RequestParser()
+    request_parser.add_argument('history_id', type=inputs.positive, required=False,
+                                help='Upgrade the subtitle from this source history entry')
+
+    @authenticate
+    @api_ns_sources_items.doc(parser=request_parser)
+    @api_ns_sources_items.response(202, 'The upgrade was queued as a job')
+    @api_ns_sources_items.response(404, 'No such item')
+    @api_ns_sources_items.response(409, 'No eligible subtitle')
+    def post(self, item_id):
+        """Search for better subtitles for one source item."""
+        args = self.request_parser.parse_args()
+        try:
+            job_id = service.queue_source_upgrade(item_id, args['history_id'])
+        except SourceError as error:
+            return {"error": error.code, "message": str(error)}, error.status
+        if not job_id:
+            return {"error": "not_upgradable", "message": "Subtitle upgrades are unavailable."}, 409
+        return queued_job_response(job_id), 202
+
+
 @api_ns_sources_items.route("sources/items/<int:item_id>/search")
 class SourceItemSearch(Resource):
     @authenticate
@@ -323,6 +346,40 @@ class SourceItemSubtitles(Resource):
     def delete(self, item_id):
         """Delete one indexed external subtitle from a source item"""
         return _delete_item_subtitle(item_id, self.delete_request_parser.parse_args())
+
+
+@api_ns_sources_items.route("sources/items/<int:item_id>/subtitles/combine")
+class SourceItemSubtitlesCombine(Resource):
+    @authenticate
+    @api_ns_sources_items.response(200, 'Result of the combine attempt')
+    @api_ns_sources_items.response(400, 'Invalid combine languages or format')
+    @api_ns_sources_items.response(404, 'No such item')
+    def post(self, item_id):
+        """Build or rebuild a combined subtitle for one source item."""
+        from subtitles.tools.combine.main import try_combine_for_video
+
+        source, refusal = _manual_target(item_id)
+        if refusal:
+            return refusal
+        payload = request.get_json(silent=True)
+        if payload is None and not request.data:
+            payload = {}
+        if not isinstance(payload, dict):
+            return {'message': 'Expected a combine request object.'}, 400
+        languages, format_ = payload.get('languages'), payload.get('format')
+        if languages is not None or format_ is not None:
+            if (not isinstance(languages, list) or not 2 <= len(languages) <= 3
+                    or any(not isinstance(code, str) or len(code) != 2 or not alpha3_from_alpha2(code)
+                           for code in languages)
+                    or len(set(languages)) != len(languages) or format_ not in ('srt', 'ass')):
+                return {'message': 'Choose two or three distinct subtitle languages and an SRT or ASS format.'}, 400
+        result = try_combine_for_video(video_path=source.path, media_type=source.publication_type,
+                                       languages=languages, format=format_, source=source)
+        body = {'status': result.status, 'path': result.path, 'alignment': result.alignment,
+                'reason': result.reason, 'error': result.error}
+        if result.status == 'failed':
+            body['message'] = result.error
+        return body, 500 if result.status == 'failed' else 200
 
 
 @api_ns_sources_items.route("sources/items/<int:item_id>/blacklist")

@@ -24,6 +24,7 @@ client = legacy.client
 everything_uses_the_test_database = legacy.everything_uses_the_test_database
 real_scheduler = schedules.real_scheduler
 world = pipeline.world
+isolated_jobs = pipeline.isolated_jobs
 
 
 @pytest.fixture(autouse=True)
@@ -138,6 +139,81 @@ def test_candidates_and_item_routes_share_current_source_history(client, arr_lib
         row_id: None for row_id in (expected, history_ids['Manual'], history_ids['Translated'], history_ids['Replaced'])
     }
     assert get_upgradable_source_subtitles([expected, history_ids['Unwanted']]) == {expected: None}
+
+
+@pytest.mark.parametrize('target', ['movie', 'episode', 'moved item'])
+def test_item_upgrade_route_uses_only_the_scoped_source_candidate(
+        world, everything_uses_the_test_database, isolated_jobs, monkeypatch, target):
+    from flask import Flask
+
+    from api import api_bp
+    from api.system import jobs as jobs_api
+    from app.config import settings
+    from media_sources import repository
+    from media_sources.indexer import index_item
+    from subtitles import upgrade
+
+    monkeypatch.setitem(settings.auth, 'apikey', HEADERS['X-API-KEY'])
+    monkeypatch.setattr(jobs_api, 'jobs_queue', isolated_jobs)
+    monkeypatch.setattr(upgrade, 'jobs_queue', isolated_jobs)
+    monkeypatch.setattr(upgrade, 'get_providers', lambda: ['fake'])
+    pipeline._download(monkeypatch)
+    app = Flask(__name__)
+    app.register_blueprint(api_bp)
+    source_client = app.test_client()
+
+    selected = pipeline._episode(world) if target == 'episode' else pipeline._movie(world)
+    other = pipeline._movie(world, name='Different.2005.1080p.BluRay.x264-GRP.mkv')
+    originals = {}
+    history_ids = {}
+    for context in (selected, other):
+        media = Path(context.path)
+        original = media.with_suffix('.en.srt')
+        original.write_bytes(b'Old subtitle')
+        index_item(context.item_id)
+        originals[context.item_id] = original
+        history_ids[context.item_id] = _history(
+            world.db, context.source_id, context.item_id, media, original, item_kind=context.kind)
+
+    endpoint = f'/api/sources/items/{selected.item_id}/upgrade'
+    other_history_id = history_ids[other.item_id]
+    ours = history_ids[selected.item_id]
+    assert source_client.post('/api/sources/items/99999/upgrade', headers=HEADERS).status_code == 404
+    assert source_client.post(endpoint, json={'history_id': 0}, headers=HEADERS).status_code == 400
+    stale = source_client.post(endpoint, json={'history_id': other_history_id}, headers=HEADERS)
+    assert stale.status_code == 409 and stale.get_json()['error'] == 'not_upgradable'
+    assert not isolated_jobs.jobs_pending_queue
+
+    params = {'history_id': ours} if target == 'episode' else {}
+    queued = source_client.post(endpoint, headers=HEADERS, json=params)
+    assert queued.status_code == 202
+    queued_job = queued.get_json()
+    again = source_client.post(endpoint, headers=HEADERS, json=params)
+    assert again.get_json() == queued_job
+    job = isolated_jobs._reserve_next_job()
+    assert job.job_id == queued_job['job_id']
+    assert job.kwargs['item_id'] == selected.item_id
+    assert job.kwargs['history_id'] == params.get('history_id')
+    assert not isolated_jobs.jobs_pending_queue
+
+    if target == 'moved item':
+        moved = Path(selected.path).with_name('Moved.mkv')
+        Path(selected.path).rename(moved)
+        repository.update_item(selected.item_id, world.db, path=str(moved))
+    assert isolated_jobs._run_job(job), job.error
+    result = source_client.get('/api/system/jobs/result', headers=HEADERS,
+                               query_string={'id': job.job_id})
+    assert result.status_code == 200
+    assert result.get_json()['session'] == queued_job['session']
+    assert result.get_json()['result'] == {'upgraded': int(target != 'moved item')}
+    assert originals[other.item_id].read_bytes() == b'Old subtitle'
+    assert originals[selected.item_id].read_bytes() == (b'Old subtitle' if target == 'moved item' else pipeline.CONTENT)
+    rows = record_rows(world.db)
+    if target == 'moved item':
+        assert len(rows) == 2 and not world.published
+    else:
+        assert len(rows) == 3 and rows[-1][1:] == (3, ours)
+        assert [event.subtitle_path for event in world.published] == [str(originals[selected.item_id])]
 
 
 @pytest.mark.parametrize('initial_variant', ['en', 'en:hi'])

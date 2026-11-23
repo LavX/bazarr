@@ -421,6 +421,27 @@ def queue_search(item_id):
         raise
 
 
+def source_upgrade_item_stamp(item_id):
+    item = repository.get_item(item_id)
+    return (item.source_id, item.library_id, item.created_at.isoformat(), item.path) if item is not None else None
+
+
+def queue_source_upgrade(item_id, history_id=None):
+    from subtitles.upgrade import upgrade_source_subtitles
+
+    from .history import source_upgrade_candidates
+
+    expected_item = source_upgrade_item_stamp(item_id)
+    if expected_item is None:
+        raise SourceError('No such item', 404, 'not_found')
+    reason = item_disabled_reason(item_id)
+    if reason:
+        raise SourceError(reason, 409, 'disabled')
+    if not source_upgrade_candidates(item_ids=[item_id], history_ids=[history_id] if history_id is not None else None):
+        raise SourceError('There is no eligible subtitle to upgrade for this item.', 409, 'not_upgradable')
+    return upgrade_source_subtitles(item_id=item_id, history_id=history_id, expected_item=expected_item)
+
+
 def queue_group_search(group_id):
     from .scanner import disabled_reason
 
@@ -715,5 +736,4 @@ def upgrade_source_subtitle(candidate, job_id):
         is_hi = 'False'
     context = replace(context, wanted_file_stamp=stamp)
     with source_search_probes(context.item_id):
-        _download_source_subtitles(context, context, [(language, is_hi, is_forced)], job_id,
-                                   upgrade=upgrade)
+        return _download_source_subtitles(context, context, [(language, is_hi, is_forced)], job_id, upgrade=upgrade)
