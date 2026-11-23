@@ -9,7 +9,6 @@ import ast
 import logging
 import os
 import sqlite3
-from collections import defaultdict
 from contextlib import contextmanager
 from dataclasses import dataclass
 from functools import cache, partial
@@ -114,9 +113,6 @@ class _RegisteredSubtitleClaims:
     video: str
     output_folders: dict[str, str]
     candidates: tuple[set[tuple[str, str]], ...]
-    relevant_paths: set[str]
-    other_paths: dict[str, set[str]]
-    parent_versions: dict[str, tuple | None]
 
 
 class SourcePublicationOwnerIndex(SourceOutputOwnerIndex):
@@ -177,66 +173,38 @@ class SourcePublicationOwnerIndex(SourceOutputOwnerIndex):
                 pass
             return os.path.normcase(resolved)
 
-    @staticmethod
-    def _owner_parent_version(path):
-        try:
-            info = os.stat(path)
-        except (FileNotFoundError, NotADirectoryError):
-            return None
-        return info.st_dev, info.st_ino, info.st_mtime_ns, info.st_ctime_ns
-
     def prepare_registered_ownership(self, video_path, subtitle_paths):
-        """Prepare the claim checks before locking the shared registry."""
+        """Capture the output locations that the guarded claim check must verify."""
         if self._prepared_owners is None:
             return None
 
-        source_paths, registry_rows = self._prepared_owners
-        _, mappings = self._publication_settings
         resolve = cache(self._registered_owner_path)
         try:
             video = resolve(os.fspath(video_path))
             output_folders = {parent: resolve(parent) for parent in {os.path.dirname(path) for path in subtitle_paths}}
             candidates = tuple({(output_folders[os.path.dirname(path)], stem)
                                 for stem in self.conflicting_stems(video, path)} for path in subtitle_paths)
-            stems = {stem for candidate in candidates for _, stem in candidate}
-            relevant_paths, parent_versions = set(), {}
-            other_paths = defaultdict(set)
-            for path in chain(source_paths, self._mapped_registry_paths(registry_rows, mappings)):
-                parent = os.path.dirname(path) or os.curdir
-                if parent not in parent_versions:
-                    parent_versions[parent] = self._owner_parent_version(parent)
-                canonical = resolve(path)
-                physical_entry = os.path.normcase(os.path.join(resolve(parent), os.path.basename(path)))
-                if (canonical != physical_entry or _normalized_media_stem(path) in stems
-                        or _normalized_media_stem(canonical) in stems):
-                    relevant_paths.add(path)
-                else:
-                    other_paths[parent].add(path)
-            return _RegisteredSubtitleClaims(video, output_folders, candidates, relevant_paths,
-                                             dict(other_paths), parent_versions)
+            return _RegisteredSubtitleClaims(video, output_folders, candidates)
         except (OSError, ValueError) as error:
             raise SourcePublicationOwnersChanged('Registered subtitle ownership could not be prepared') from error
 
     def registered_ownership_is_current(self, proof):
-        """Recheck relevant claims after the registry is locked, before touching files."""
+        """Resolve registered claims afresh under the writer guard before touching files."""
         if proof is None:
             return True
 
-        destination, _ = self._publication_settings
+        source_paths, registry_rows = self._prepared_owners
+        destination, mappings = self._publication_settings
         resolve = cache(self._registered_owner_path)
         try:
             if any(resolve(folder) != version for folder, version in proof.output_folders.items()):
                 return False
-            relevant = proof.relevant_paths.copy()
-            # A previously unrelated regular file can become an alias for a
-            # candidate stem. Its replacement changes the containing directory.
-            for parent, paths in proof.other_paths.items():
-                if self._owner_parent_version(parent) != proof.parent_versions[parent]:
-                    relevant.update(paths)
             keys = set().union(*proof.candidates)
             stems = {stem for _, stem in keys}
             owned = set()
-            for path in relevant:
+            paths = chain(source_paths, self._mapped_registry_paths(registry_rows, mappings))
+            for path in paths:
+                # A regular path can become an alias to any stem within one timestamp tick.
                 canonical = resolve(path)
                 for key in self._owner_claim_keys(path, canonical, destination, stems=stems, resolve=resolve):
                     if key in keys:
@@ -266,7 +234,7 @@ class SourcePublicationOwnerIndex(SourceOutputOwnerIndex):
 
     @contextmanager
     def publication(self, source, prepare=None, *, destination=None, cleanup_outputs=False):
-        """Keep slow ownership and subtitle discovery outside the writer transaction."""
+        """Prepare subtitle changes before locking the registry for publication."""
         for _ in range(2):
             self._loaded = False
             self._owners = {}

@@ -614,8 +614,13 @@ def test_source_upgrade_rechecks_ownership_and_versions_at_publication(world, mo
     assert not list(folder.glob('.bazarr-sync-obsolete-*'))
 
 
-@pytest.mark.parametrize('registry', ['source', 'mapped Arr'])
-@pytest.mark.parametrize('change', ['regular video becomes alias', 'relative subtitle folder retarget'])
+@pytest.mark.parametrize(('registry', 'change'), [
+    ('source', 'regular video becomes alias'),
+    ('mapped Arr', 'regular video becomes alias'),
+    ('mapped Arr', 'regular video becomes alias within timestamp tick'),
+    ('source', 'relative subtitle folder retarget'),
+    ('mapped Arr', 'relative subtitle folder retarget through mapped symlink parent'),
+])
 @pytest.mark.parametrize('outcome', ['competing', 'unrelated', 'rollback'])
 def test_source_upgrade_rechecks_registered_filesystem_claims_after_writer_admission(
         world, monkeypatch, registry, change, outcome):
@@ -627,7 +632,9 @@ def test_source_upgrade_rechecks_registered_filesystem_claims_after_writer_admis
 
     context = pipeline._movie(world, 'Film.mkv')
     media = Path(context.path)
-    relative = change == 'relative subtitle folder retarget'
+    relative = change.startswith('relative subtitle folder retarget')
+    mapped_parent = relative and registry == 'mapped Arr'
+    coarse_timestamps = change.endswith('within timestamp tick')
     competing = outcome == 'competing'
     if relative:
         folder = media.parent / 'Subs'
@@ -643,8 +650,21 @@ def test_source_upgrade_rechecks_registered_filesystem_claims_after_writer_admis
 
     other_source, other_library, other_root = add_source(
         world.db, world.tmp_path, name='Other', folder='Other')
+    mapped_root = other_root
     if relative:
-        registered = video(other_root / 'Film.en.mkv')
+        registered = other_root / 'Film.en.mkv'
+        if mapped_parent:
+            canonical = video(other_root / 'Canonical.mkv')
+            registered.symlink_to(canonical.name)
+            aliases = world.tmp_path / 'Aliases'
+            aliases.mkdir()
+            nested = world.tmp_path / 'Nested'
+            nested.mkdir()
+            (aliases / 'jump').symlink_to(nested, target_is_directory=True)
+            mapped_root = aliases / 'jump' / '..' / other_root.name
+            assert (mapped_root / registered.name).samefile(canonical)
+        else:
+            video(registered)
         old_folder = world.tmp_path / 'Previous subtitles'
         old_folder.mkdir()
         alias = other_root / 'Subs'
@@ -655,49 +675,49 @@ def test_source_upgrade_rechecks_registered_filesystem_claims_after_writer_admis
         registered = video(other_root / 'Alias.mkv')
         alias = registered
         target = video(other_root / ('Film.en.mkv' if competing else 'Unrelated.mkv'))
+        if coarse_timestamps:
+            directory_stat = other_root.stat()
+
+            def stat_with_coarse_timestamps(path, *args, **kwargs):
+                if os.fspath(path) == str(other_root):
+                    return directory_stat
+                return os.stat(path, *args, **kwargs)
+
+            monkeypatch.setattr(indexer, 'os', Mock(wraps=os, path=os.path, stat=stat_with_coarse_timestamps))
     if registry == 'source':
         registered_id = add_item(world.db, other_source, other_library, registered)
     else:
         world.db.execute(sa.insert(TableArrInstances).values(
             id=42, kind='radarr', name='Cinema', stable_key='cinema', port=9800, enabled=1,
-            path_mappings=json.dumps([['/movies', str(other_root)]])))
+            path_mappings=json.dumps([['/movies', str(mapped_root)]])))
         stored_path = f'/movies/{registered.name}'
         world.db.execute(sa.insert(TableMovies).values(
             id=73, arr_instance_id=42, radarrId=9000, title='Other', path=stored_path, tmdbId='73'))
-    stable_source, stable_library, stable_root = add_source(
-        world.db, world.tmp_path, name='Stable', folder='Stable')
-    unchanged = video(stable_root / 'Unchanged.mkv')
-    add_item(world.db, stable_source, stable_library, unchanged)
     registered_realpath = registered.resolve()
     indexer.index_item(context.item_id)
     first = _history(world.db, world.source_id, context.item_id, media, original)
     monkeypatch.setattr(upgrade, 'get_providers', lambda: ['fake'])
     monkeypatch.setattr(upgrade, 'jobs_queue', Mock())
     pipeline._download(monkeypatch)
-    reached, rollbacks, admitted_resolutions = [], [], []
-    inside_writer = False
+    reached, rollbacks = [], []
     publish = indexer.source_item_publication
-    resolve = indexer.SourcePublicationOwnerIndex._registered_owner_path
 
     @contextmanager
     def change_after_admission(source, **kwargs):
-        nonlocal inside_writer
         with publish(source, **kwargs) as guarded:
             current, connection = guarded
             assert current is not None and connection.in_transaction() and kwargs['shared']
             reached.append(source.item_id)
+            before = indexer.os.stat(other_root)
             alias.unlink()
             alias.symlink_to(target, target_is_directory=relative)
-            inside_writer = True
-            try:
-                yield guarded
-            finally:
-                inside_writer = False
-
-    def track_resolution(path):
-        if inside_writer:
-            admitted_resolutions.append(path)
-        return resolve(path)
+            if not relative:
+                os.utime(other_root, ns=(before.st_atime_ns, before.st_mtime_ns + 2_000_000_000))
+                after = indexer.os.stat(other_root)
+                assert (after.st_mtime_ns == before.st_mtime_ns) == coarse_timestamps
+                if coarse_timestamps:
+                    assert after.st_ctime_ns == before.st_ctime_ns
+            yield guarded
 
     def discard_at_commit(_connection):
         if not rollbacks and original.read_bytes() == pipeline.CONTENT:
@@ -706,7 +726,6 @@ def test_source_upgrade_rechecks_registered_filesystem_claims_after_writer_admis
             raise sa.exc.OperationalError('COMMIT', None, OSError('Lost the connection during commit'))
 
     monkeypatch.setattr(indexer, 'source_item_publication', change_after_admission)
-    monkeypatch.setattr(indexer.SourcePublicationOwnerIndex, '_registered_owner_path', staticmethod(track_resolution))
     engine = world.db.get_bind()
     if outcome == 'rollback':
         sa.event.listen(engine, 'commit', discard_at_commit)
@@ -717,8 +736,6 @@ def test_source_upgrade_rechecks_registered_filesystem_claims_after_writer_admis
             sa.event.remove(engine, 'commit', discard_at_commit)
 
     assert reached == [context.item_id]
-    assert str(registered) in admitted_resolutions
-    assert str(unchanged) not in admitted_resolutions
     assert rollbacks == ([True] if outcome == 'rollback' else [])
     if relative:
         assert registered.resolve() == registered_realpath

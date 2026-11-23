@@ -462,7 +462,8 @@ class SyncOutputOwnerIndex:
         from utilities.helper import get_target_folder
 
         # A symlink's own name and the canonical video can each claim its subtitles.
-        for name in {os.path.abspath(path), canonical}:
+        # Keep mapped path components intact until the filesystem resolves the folders.
+        for name in {os.fspath(path), canonical}:
             stem = _normalized_media_stem(name)
             if stems is not None and stem not in stems:
                 continue
