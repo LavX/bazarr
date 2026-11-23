@@ -1,4 +1,8 @@
-"""Dismissing a plugin's review notice writes the installation record, on SQLite and on PostgreSQL."""
+"""Review notices and retained plugin data persist on SQLite and PostgreSQL."""
+import json
+from types import SimpleNamespace
+from unittest.mock import Mock
+
 import pytest
 
 import provider_hub_state_engines as engines
@@ -70,43 +74,92 @@ def _stage_row(plugin_id, **row):
 
 
 @pytest.mark.parametrize("plugin_kind", ["subtitle_provider", "translator", "service"])
+@pytest.mark.parametrize("claim", ["same_owner", "other_source", "upload", "other_kind"])
 def test_kept_data_goes_back_only_to_the_same_plugin_from_the_same_source_and_kind(
-        hub_store, hub_engine, monkeypatch, tmp_path, plugin_kind):
-    from provider_hub import datadir, service
-    from provider_hub.state import load_state
+        hub_store, hub_engine, monkeypatch, tmp_path, plugin_kind, claim):
+    from compat import service as compat_service
+    from provider_hub import datadir, detach, kinds, leases, registry, service
+    from provider_hub.kinds import subtitle_provider, translator
+    from provider_hub.kinds.service import ServiceKind
+    from provider_hub.state import load_state, mutate_state
+    from subtitles.tools.translate.runtime import worker_binding
 
-    kind = _Kind()
-    kind.keeps_data = plugin_kind != "service"
-    monkeypatch.setattr(service, "get_kind", lambda name: kind)
+    # Keep the actual lifecycle hooks; isolate their settings, runtime and worker dependencies.
+    monkeypatch.setattr(subtitle_provider, "set_bazarr_provider_enabled", lambda plugin_id, enabled: True)
+    monkeypatch.setattr(subtitle_provider, "bazarr_enabled_providers", lambda: ["engine"])
+    monkeypatch.setattr(subtitle_provider, "reset_own_settings_section", lambda plugin_id: True)
+    monkeypatch.setattr(registry, "unregister_provider_class", lambda plugin_id: SimpleNamespace(removed=False))
+    monkeypatch.setattr(registry, "revoke_host_calls_of", lambda plugin_id: None)
+    monkeypatch.setattr(registry, "retire_provider_instances", lambda plugin_id, grace: [])
+    monkeypatch.setattr(compat_service, "reset_compat_pool", lambda: None)
+    monkeypatch.setattr(leases, "detach_service", lambda plugin_id: [])
+    monkeypatch.setattr(translator, "_store", lambda: SimpleNamespace(
+        release_plugin=lambda plugin_id: SimpleNamespace(notices=[]), delete_plugin_data=lambda plugin_id: None))
+    for name in ("plugin_changed", "plugin_kept", "plugin_installed", "discard_folders"):
+        monkeypatch.setattr(worker_binding, name, lambda plugin_id: None)
+    monkeypatch.setattr(worker_binding, "plugin_detached", lambda plugin_id, grace: [])
+    monkeypatch.setattr(worker_binding, "sweep_removed_plugins", lambda: None)
+    monkeypatch.setattr(detach, "snapshot_workers", lambda plugin_id: [])
+    hooks = {
+        "subtitle_provider": subtitle_provider.SubtitleProviderKind(),
+        "translator": translator.TranslatorKind(), "service": ServiceKind(),
+    }
+    observed_hooks = ("on_removed", "after_removed", "removal_finished", "discard_kept_data", "kept_data_reclaimed")
+    for name, hook in hooks.items():
+        for method in observed_hooks:
+            monkeypatch.setattr(hook, method, Mock(wraps=getattr(hook, method)))
+        monkeypatch.setitem(kinds._KINDS, name, hook)
+    kind = hooks[plugin_kind]
     monkeypatch.setattr(service, "provider_hub_dir", lambda: tmp_path)
-    manifest = {"schema_version": 2, "permissions": ["data_dir"]}
+    manifest = {"schema_version": 2, "kind": plugin_kind, "permissions": ["data_dir"], "version": "1.0.0"}
+    active = datadir.release_path(tmp_path, "engine", "a" * 32)
+    active.mkdir(parents=True)
+    (active / "saved.txt").write_text("saved state")
     retained = datadir.plugin_root(tmp_path, "engine") / "kept"
     marker = retained / "saved.txt"
-
-    def keep():
-        _removal(service, kind, "engine", True, kind=plugin_kind, manifest=manifest)
-        retained.mkdir(parents=True, exist_ok=True)
-        marker.write_text("saved state")
-
-    keep()
-    assert load_state()["kept_data"]["engine"] == {
-        "source_id": "official", "origin": None, "kind": plugin_kind, "config": None,
+    owner = {
+        "source_id": "official", "origin": "catalog", "kind": plugin_kind, "config": {"region": "eu"},
     }
+    mutate_state(lambda state: state["installations"].update(engine=_installation(
+        "engine", kind=plugin_kind, source_id="official", origin="catalog", manifest=manifest,
+        active_data_key=active.name, config={"region": "eu"})))
 
-    assert service.claim_kept_data("engine", "official", plugin_kind) is True
-    # Handed over: nothing discarded, the owner stays on record until a removal rewrites it.
-    assert kind.discarded == [] and kind.reclaimed == ["engine"]
-    assert load_state()["kept_data"]["engine"]["source_id"] == "official"
+    assert service.remove_installation("engine", keep_data=True) is True
+    assert detach.wait_idle(timeout=5)
+
+    stored = json.loads(raw_row(hub_engine)[1])
+    assert "engine" not in stored["installations"]
+    assert stored["kept_data"]["engine"] == owner
+    kind.on_removed.assert_called_once_with("engine")
+    kind.after_removed.assert_called_once_with("engine", keep_data=True)
+    kind.removal_finished.assert_called_once_with("engine")
+    assert not active.exists()
     assert marker.read_text() == "saved state"
 
-    # Another source, an upload over a catalog install, and another kind each start clean.
-    other_kind = "translator" if plugin_kind == "service" else "service"
-    for source, kind_name in (("community", plugin_kind), (None, plugin_kind), ("official", other_kind)):
-        keep()
-        assert service.claim_kept_data("engine", source, kind_name) is False, (source, kind_name)
-        assert "engine" not in load_state()["kept_data"], (source, kind_name)
+    source = "community" if claim == "other_source" else None if claim == "upload" else "official"
+    incoming_kind = ("translator" if plugin_kind == "service" else "service") if claim == "other_kind" else plugin_kind
+    origin = "local" if claim == "upload" else "catalog"
+    _stage_row("engine", kind=incoming_kind, source_id=source, origin=origin)
+
+    assert service.claim_kept_data("engine", source, incoming_kind, origin) is (claim == "same_owner")
+
+    state = load_state()
+    if claim == "same_owner":
+        kind.discard_kept_data.assert_not_called()
+        kind.kept_data_reclaimed.assert_called_once_with("engine")
+        assert state["kept_data"]["engine"] == {**owner, "config": None}
+        assert state["installations"]["engine"]["config"] == {"region": "eu"}
+        assert marker.read_text() == "saved state"
+    else:
+        kind.discard_kept_data.assert_called_once_with("engine")
+        kind.kept_data_reclaimed.assert_not_called()
+        assert "engine" not in state["kept_data"]
+        assert not state["installations"]["engine"].get("config")
         assert not retained.exists()
-    assert kind.discarded == ["engine"] * 3
+    for name, hook in hooks.items():
+        if name != plugin_kind:
+            for method in observed_hooks:
+                getattr(hook, method).assert_not_called()
 
 
 def test_a_plugins_saved_settings_come_back_with_its_kept_data_once(hub_store, hub_engine, monkeypatch):
