@@ -431,7 +431,7 @@ def _search_source_item(item_id, job_id):
     if item.missing_subtitles is None or not index_matches_file(item, stat):
         # The scanner still owns admission and re-identification. Refresh the tracks
         # and wanted languages of the file at this path for the immediate search.
-        if index_item(item_id) is None:
+        if index_item(item_id, keep_index_on_probe_failure=True) is None:
             raise JobFailed('The source subtitle index could not be refreshed. Try again.', reason='conflict')
         item = repository.get_item(item_id)
         if item is None:
@@ -466,7 +466,7 @@ def _search_source_item(item_id, job_id):
                                          job_id=job_id, source=context):
             if not result:
                 continue
-            index_item(item_id)
+            # The shared download pipeline indexes the saved subtitle during processing.
             history_log_source(1, context, result)
             downloaded += 1
     except OSError as error:

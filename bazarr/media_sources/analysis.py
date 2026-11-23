@@ -47,14 +47,19 @@ def stamp_index(data, stamp):
     return pickle.dumps(data | {'source_file': stamp}, pickle.HIGHEST_PROTOCOL)
 
 
-def index_matches_file(item, stat):
-    """Does the stored subtitle index describe the current file?
+def _supports_stream_probe(item):
+    # The shared Arr parser can resolve these pointers to URLs. Sources probe local containers only.
+    return not item.path.lower().endswith('.strm')
 
-    A search can analyze a replacement before the scanner records its file identity.
-    A stamp without streams records a failed probe. Try it again on the next search.
-    """
-    if item.ffprobe_cache is not None:
+
+def index_matches_file(item, stat, *, allow_external_only=False):
+    """Check the stored index, requiring streams for supported files unless using the sidecar fallback."""
+    if not allow_external_only and _supports_stream_probe(item):
+        # NULL also occurs on pre-analysis rows. Both those rows and failed probes need a fresh attempt.
         return bool(streams(cached_metadata(item, stat)))
+    if item.ffprobe_cache is not None:
+        # An external-only index can describe a replacement that the scanner has yet to admit.
+        return bool(cached_metadata(item, stat))
     return _matches_admission(item, stat)
 
 
@@ -84,9 +89,7 @@ def probe_item(item, stat):
     parser = settings.general.embedded_subtitles_parser
     if cached.get(parser):
         return cached, None
-    # A source file is a local container. The Arr parser can also resolve a .strm
-    # file to a stream URL, which is outside the scope of this local scan.
-    if item.path.lower().endswith('.strm'):
+    if not _supports_stream_probe(item):
         return cached, None
     scope = _search_probe_failures.get()
     failures = scope[1] if scope is not None and scope[0] == item.id else None

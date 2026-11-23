@@ -28,7 +28,8 @@ from utilities.helper import get_subtitle_destination_folder, get_target_folder
 from utilities.video_analyzer import audio_languages_from_metadata, embedded_subtitles_from_metadata
 
 from . import repository
-from .analysis import cached_metadata, failed_probe_values, local_stat, probe_item, read_metadata, streams
+from .analysis import (cached_metadata, failed_probe_values, index_matches_file, local_stat, probe_item,
+                       read_metadata, streams)
 from .db import handle, source_transaction
 
 
@@ -240,8 +241,8 @@ def _file_signature(stat):
     return stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns
 
 
-def index_item(item_id, target=None, ownership_index=None):
-    """Analyze the source file and rebuild its subtitle listing. None means the index could not be written."""
+def index_item(item_id, target=None, ownership_index=None, *, keep_index_on_probe_failure=False):
+    """Analyze a source file and return its subtitle listing, or None if the index is unavailable."""
     item = repository.get_item(item_id, target)
     if item is None:
         logging.info('BAZARR source item %s no longer exists; its subtitles were not indexed', item_id)
@@ -264,6 +265,10 @@ def index_item(item_id, target=None, ownership_index=None):
             return None
         try:
             previous = ast.literal_eval(latest.subtitles) if latest.subtitles else []
+            if (keep_index_on_probe_failure and blob is None
+                    and latest.subtitles is not None and latest.missing_subtitles is not None
+                    and index_matches_file(latest, stat, allow_external_only=True)):
+                return previous
             external = list_external_subtitles(item.path, previous, ownership_index)
         except Exception:
             logging.exception('BAZARR unable to index external subtitles for this file %s', item.path)

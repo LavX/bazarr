@@ -150,9 +150,10 @@ def test_a_search_saves_a_subtitle_next_to_the_file_and_writes_history_and_the_i
     assert world.published[0].video_path == context.path
 
 
-def test_a_failed_probe_is_retried_once_per_search_even_with_download_reindexing(world, monkeypatch):
+@pytest.mark.parametrize("admitted", [False, True], ids=["replacement", "admitted"])
+def test_a_failed_probe_is_retried_once_per_search_even_with_download_reindexing(world, monkeypatch, admitted):
     from app.config import settings
-    from media_sources import analysis, identity, indexer, repository, service
+    from media_sources import analysis, identity, indexer, repository, scanner, service
     from utilities import video_analyzer
 
     monkeypatch.setattr(settings.general, "embedded_subtitles_parser", "ffprobe")
@@ -160,31 +161,61 @@ def test_a_failed_probe_is_retried_once_per_search_even_with_download_reindexing
     metadata = {"ffprobe": {"audio": [{"language": "eng"}]}, "mediainfo": {}}
     probe = Mock(return_value=metadata)
     monkeypatch.setattr(video_analyzer, "parse_video_metadata", probe)
-    context = _movie(world)
-    stamp = identity.stat_file(context.path)
-    repository.update_item(context.item_id, world.db, file_dev=stamp.dev, file_ino=stamp.ino,
-                           file_size=stamp.size, file_mtime_ns=stamp.mtime_ns)
-    Path(context.path).write_bytes(b"replacement" * 100)
-    probe.return_value = None
-    indexer.index_item(context.item_id)
-    assert not analysis.streams(analysis.read_metadata(repository.get_item(context.item_id).ffprobe_cache))
+    if admitted:
+        path = video(world.root / "Film.2001.1080p.BluRay.x264-GRP.mkv")
+        external = path.with_suffix(".hu.srt")
+        external.write_bytes(CONTENT)
+        probe.return_value = None
+        scanner.run_scan(world.source_id, world.library_id)
+        (item,) = repository.list_items(library_id=world.library_id)
+        item_id = item.id
+        assert str(external) in item.subtitles
+        assert identity.stored_content_stamp(item) == identity.stat_file(path)
+        probe.assert_called_once()
+    else:
+        context = _movie(world)
+        item_id = context.item_id
+        path = Path(context.path)
+        stamp = identity.stat_file(path)
+        repository.update_item(item_id, world.db, file_dev=stamp.dev, file_ino=stamp.ino,
+                               file_size=stamp.size, file_mtime_ns=stamp.mtime_ns)
+        path.write_bytes(b"replacement" * 100)
+        probe.return_value = None
+        indexer.index_item(item_id)
+    initial = repository.get_item(item_id)
+    assert initial.missing_subtitles == "['en']"
+    assert not analysis.streams(analysis.read_metadata(initial.ffprobe_cache))
     probe.reset_mock()
+    external_listing = Mock(wraps=indexer.list_external_subtitles)
+    monkeypatch.setattr(indexer, "list_external_subtitles", external_listing)
+
+    def providers_after_probe():
+        probe.assert_called_once()
+        return ["fake"]
+
+    monkeypatch.setattr(service, "get_providers", providers_after_probe)
     _download(monkeypatch)
 
-    service.search_source_item(context.item_id, job_id=3)
+    service.search_source_item(item_id, job_id=3)
 
     probe.assert_called_once()
-    saved = Path(context.path).with_suffix(".en.srt")
+    external_listing.assert_called_once()  # Only the downloaded sidecar needs a new listing.
+    saved = path.with_suffix(".en.srt")
     assert saved.read_bytes() == CONTENT
-    item = repository.get_item(context.item_id)
+    item = repository.get_item(item_id)
     assert str(saved) in item.subtitles and item.missing_subtitles == "[]"
+    assert identity.stored_content_stamp(item) == identity.stored_content_stamp(initial)
     assert world.db.execute(sa.select(sa.func.count()).select_from(repository.History)).scalar_one() == 1
 
     probe.return_value = metadata
-    service.search_source_item(context.item_id, job_id=4)
+    service.search_source_item(item_id, job_id=4)
     assert probe.call_count == 2
-    item = repository.get_item(context.item_id)
+    item = repository.get_item(item_id)
     assert analysis.read_metadata(item.ffprobe_cache)["ffprobe"] == metadata["ffprobe"]
+    external_listing.reset_mock()
+    service.search_source_item(item_id, job_id=5)
+    external_listing.assert_not_called()
+    assert probe.call_count == 2
 
 
 def test_a_search_with_nothing_missing_or_no_profile_does_not_ask_a_provider(world, monkeypatch):
