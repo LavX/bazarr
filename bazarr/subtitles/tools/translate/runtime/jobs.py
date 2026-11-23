@@ -65,6 +65,7 @@ RUNNING_REFUSAL = "This subtitle is already being translated. Wait for it to fin
 RACE_REFUSAL = "The translation queue changed while this request was made. Try again."
 MAX_ERROR_LENGTH = 500
 _REQUEST_ATTEMPTS = 3
+_ANY_QUEUE_JOB = object()
 
 
 
@@ -437,7 +438,8 @@ class TranslationJobs:
                                 _with=self.checkpoints._expiry_stmt(job.source_path, job.target, None))
 
     def start(self, job_id: int, *, source_digest: str, engine_instance_id: int, settings_revision: int,
-              release_digest: str = "") -> bool:
+              release_digest: str = "", expected_queue_job_id=_ANY_QUEUE_JOB,
+              queue_job_id: int | None = None) -> bool:
         """The job runs now, with the engine the dispatcher chose.
 
         Drops checkpoints the new key makes useless (an edited source, an older revision). False when
@@ -450,7 +452,9 @@ class TranslationJobs:
         now = self._clock()
         key = CheckpointKey(job.source_path, source_digest, job.target, engine_instance_id, settings_revision,
                             release_digest)
-        return self._transition(job_id, (QUEUED,), RUNNING, source_digest=source_digest,
+        attachment = {"queue_job_id": queue_job_id} if queue_job_id is not None else {}
+        return self._transition(job_id, (QUEUED,), RUNNING, _queue_job_id=expected_queue_job_id,
+                                source_digest=source_digest, **attachment,
                                 engine_instance_id=engine_instance_id, settings_revision=settings_revision,
                                 release_digest=release_digest, started_at=now,
                                 _with=self.checkpoints._prune_stmt(key))
@@ -518,7 +522,7 @@ class TranslationJobs:
 
     def cancel_source_retry(self, job_id, source_path, target, message):
         """End a detached source retry without changing a job that was requeued."""
-        return self._transition(job_id, (AWAITING_RETRY,), CANCELLED, _detached=True,
+        return self._transition(job_id, (AWAITING_RETRY,), CANCELLED, _queue_job_id=None,
                                 retry_at=None, error_class="source_changed", error_message=_scrubbed(message),
                                 finished_at=self._clock(), _with=self.checkpoints._delete_source_stmt(source_path, target))
 
@@ -528,14 +532,17 @@ class TranslationJobs:
         return self._end(job_id, FAILED, error_class=error_class, message=message)
 
     def await_retry(self, job_id: int, error_class: str, message: str | None = None, *,
-                    retry_at: datetime | None = None) -> bool:
+                    retry_at: datetime | None = None, expected_state: str | None = None,
+                    expected_queue_job_id=_ANY_QUEUE_JOB) -> bool:
         """A failure that will be retried. The checkpoints stay for the retention period."""
         job = self.get(job_id)
         if job is None:
             return False
         expiry = self.checkpoints._expiry_stmt(job.source_path, job.target, self._clock() + self._retention)
-        return self._transition(job_id, (RUNNING, QUEUED), AWAITING_RETRY, queue_job_id=None, retry_at=retry_at,
-                                error_class=error_class, error_message=_scrubbed(message), _with=expiry)
+        states = (expected_state,) if expected_state is not None else (RUNNING, QUEUED)
+        return self._transition(job_id, states, AWAITING_RETRY, _queue_job_id=expected_queue_job_id,
+                                queue_job_id=None, retry_at=retry_at, error_class=error_class,
+                                error_message=_scrubbed(message), _with=expiry)
 
     def recover_interrupted(self) -> list[int]:
         """After a restart: every job that was queued or running lost its place, so it awaits a retry.
@@ -593,7 +600,7 @@ class TranslationJobs:
 
     # ---------------------------------------------------------------- internals
     def _transition(self, job_id: int, from_states: Sequence[str], to_state: str | None, *, _with=None,
-                    _queue_job_id=None, _detached=False, **values) -> bool:
+                    _queue_job_id=_ANY_QUEUE_JOB, **values) -> bool:
         """Change a job only while it is in one of ``from_states``. False when it was not.
 
         ``_with`` is a checkpoint statement that goes in the same transaction, run only when the job
@@ -605,7 +612,7 @@ class TranslationJobs:
             changes["state"] = to_state
         statement = update(TableTranslatorJob).where(
             TableTranslatorJob.id == job_id, TableTranslatorJob.state.in_(from_states))
-        if _queue_job_id is not None or _detached:
+        if _queue_job_id is not _ANY_QUEUE_JOB:
             statement = statement.where(TableTranslatorJob.queue_job_id == _queue_job_id)
         with _write(self._session):
             changed = self._session.execute(statement.values(**changes)).rowcount
