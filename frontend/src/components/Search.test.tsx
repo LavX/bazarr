@@ -104,10 +104,21 @@ const leagues: ItemSearchResult[] = [
 function renderSearch(
   configuredInstances = instances,
   searchResults = results,
+  sourceVisibility?: boolean,
 ) {
   server.use(
+    http.get("/api/system/settings", () =>
+      HttpResponse.json({
+        general: {},
+        ...(sourceVisibility !== undefined && {
+          media_sources: { visible: sourceVisibility },
+        }),
+      }),
+    ),
     http.get("/api/system/searches", ({ request }) => {
-      expect(new URL(request.url).searchParams.get("sources")).toBe("1");
+      expect(new URL(request.url).searchParams.get("sources")).toBe(
+        sourceVisibility === true ? "1" : null,
+      );
       return HttpResponse.json(searchResults);
     }),
     http.get("/api/system/arr-instances", () =>
@@ -150,25 +161,29 @@ describe("Search Bar", () => {
     "opens $title when source and Arr IDs overlap",
     async ({ title, path, kind }) => {
       const user = userEvent.setup();
-      const { router } = renderSearch(instances, [
-        { ...results[0], title: "Standalone Arr show" },
-        {
-          id: 101,
-          origin: "source",
-          source_kind: "show",
-          title: "Standalone show",
-          year: "2020",
-          poster: null,
-        },
-        {
-          id: 101,
-          origin: "source",
-          source_kind: "movie",
-          title: "Standalone film",
-          year: "2021",
-          poster: null,
-        },
-      ]);
+      const { router } = renderSearch(
+        instances,
+        [
+          { ...results[0], title: "Standalone Arr show" },
+          {
+            id: 101,
+            origin: "source",
+            source_kind: "show",
+            title: "Standalone show",
+            year: "2020",
+            poster: null,
+          },
+          {
+            id: 101,
+            origin: "source",
+            source_kind: "movie",
+            title: "Standalone film",
+            year: "2021",
+            poster: null,
+          },
+        ],
+        true,
+      );
 
       await user.type(screen.getByPlaceholderText("Search"), "standalone");
 
@@ -185,35 +200,37 @@ describe("Search Bar", () => {
     },
   );
 
-  it("keeps source navigation hidden when the feature is off", async () => {
-    server.use(
-      http.get("/api/system/settings", () =>
-        HttpResponse.json({
-          general: {},
-          media_sources: { visible: false },
-        }),
-      ),
-    );
-    const user = userEvent.setup();
-    renderSearch(instances, [
-      { ...results[0], title: "Archive Arr title" },
-      {
-        id: 101,
-        origin: "source",
-        source_kind: "movie",
-        title: "Archive source title",
-        year: "2020",
-        poster: null,
-      },
-    ]);
-    await user.type(screen.getByPlaceholderText("Search"), "archive");
-    expect(
-      await screen.findByRole("option", { name: /Archive Arr title/ }),
-    ).toBeInTheDocument();
-    expect(
-      screen.queryByRole("option", { name: /Archive source title/ }),
-    ).not.toBeInTheDocument();
-  });
+  it.each([
+    { state: "disabled", visible: false },
+    { state: "missing", visible: undefined },
+  ])(
+    "keeps source navigation hidden when visibility is $state",
+    async ({ visible }) => {
+      const user = userEvent.setup();
+      renderSearch(
+        instances,
+        [
+          { ...results[0], title: "Archive Arr title" },
+          {
+            id: 101,
+            origin: "source",
+            source_kind: "movie",
+            title: "Archive source title",
+            year: "2020",
+            poster: null,
+          },
+        ],
+        visible,
+      );
+      await user.type(screen.getByPlaceholderText("Search"), "archive");
+      expect(
+        await screen.findByRole("option", { name: /Archive Arr title/ }),
+      ).toBeInTheDocument();
+      expect(
+        screen.queryByRole("option", { name: /Archive source title/ }),
+      ).not.toBeInTheDocument();
+    },
+  );
 
   it.each([
     { query: "CAFE", owner: "HD Series", path: "/series/101" },
