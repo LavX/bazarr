@@ -143,4 +143,8 @@ if not args.no_signalr:
 
 
 if __name__ == "__main__":
-    webserver.start()
+    exit_status = webserver.start()
+    if exit_status is not None:
+        # The listener loop owns this exit. Bypass interpreter shutdown's
+        # join of lookup workers still blocked inside requests.
+        os._exit(exit_status)

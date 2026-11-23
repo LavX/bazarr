@@ -49,6 +49,316 @@ def test_authenticated_crud_uuid_safe_key_and_status(instance_api, kind):
     assert instance_api.get(path + '/status', headers=HEADERS).status_code == 404
 
 
+def _isolated_server(monkeypatch, listener, calls):
+    import sys
+    import warnings
+    from importlib.util import module_from_spec, spec_from_file_location
+    from pathlib import Path
+    from types import SimpleNamespace
+
+    import app
+    import compat
+    from app import app as flask_app, host_allowlist
+    from sportarr import sse_client
+    from utilities import tracemalloc_dumper
+    from waitress import server as waitress_server
+
+    # Exercise the real Server methods without caching an app.server module
+    # or starting a listener, Socket.IO runtime, or boot-time handlers.
+    spec = spec_from_file_location('app._server_under_test', Path(app.__file__).with_name('server.py'))
+    server = module_from_spec(spec)
+    with monkeypatch.context() as setup, warnings.catch_warnings():
+        setup.setattr(waitress_server, 'create_server', lambda *args, **kwargs: listener)
+        setup.setattr(flask_app, 'create_app', lambda: Flask(__name__))
+        setup.setattr(compat, 'register', lambda *args, **kwargs: None)
+        setup.setattr(host_allowlist, 'announce_code', lambda: None)
+        setup.setattr(tracemalloc_dumper, 'install', lambda: None)
+        spec.loader.exec_module(server)
+    monkeypatch.delitem(sys.modules, 'subtitles.tools.ocr.decode', raising=False)
+    monkeypatch.delitem(sys.modules, 'subtitles.tools.translate.runtime.worker_binding', raising=False)
+    monkeypatch.setattr(server, 'signal', SimpleNamespace(SIGINT=2, SIGTERM=15, signal=lambda *_args: None))
+    monkeypatch.setattr(server, 'close_database', lambda: calls.append('database'))
+    monkeypatch.setattr(sse_client, 'stop_sportarr_clients', lambda: calls.append('streams'))
+    return server
+
+
+def _exercise_listener_process_exit(scenario):
+    import ast
+    import logging
+    import os
+    from pathlib import Path
+    from threading import Event, Thread, current_thread
+    from types import SimpleNamespace
+
+    from media_servers import links
+
+    monkeypatch = pytest.MonkeyPatch()
+    lookup_started, listener_closing, entrypoint_returned = Event(), Event(), Event()
+    snapshot = SimpleNamespace(id='destination', revision=1, kind='jellyfin', enabled=True,
+                               configuration_error=None, sendable=True)
+    destination, lane = links._lane(snapshot)
+    native = SimpleNamespace(read=lambda _id, guard: (snapshot.revision, snapshot, False))
+    worker = None
+    calls = []
+
+    def lookup(*_args):
+        nonlocal worker
+        worker = current_thread()
+        lookup_started.set()
+        Event().wait()  # Only process exit can end this lookup.
+
+    monkeypatch.setattr(links, '_lookup', lookup)
+    monkeypatch.setitem(links.BUDGETS, snapshot.kind, 1)
+    assert links._answer(links.Target(snapshot, 'Destination', None), 'movie', None,
+                         native, destination, lane)['state'] == 'unreachable'
+    assert lookup_started.is_set() and worker.is_alive()
+
+    def run():
+        if scenario == 'restart':
+            Thread(target=server.webserver.restart).start()
+            assert listener_closing.wait(3)
+
+    def close():
+        print('listener close')
+        if scenario == 'restart':
+            listener_closing.set()
+            assert entrypoint_returned.wait(3)
+        if scenario == 'listener':
+            raise RuntimeError('listener teardown failed')
+
+    def close_database():
+        assert calls == ['streams']
+        print('database cleanup')
+        if scenario == 'database':
+            raise RuntimeError('database teardown failed')
+
+    listener = SimpleNamespace(run=run, close=close, print_listen=lambda _message: None)
+    server = _isolated_server(monkeypatch, listener, calls)
+    monkeypatch.setattr(server, 'close_database', close_database)
+    shutdown = links.shutdown
+
+    def observe_shutdown():
+        shutdown()
+        assert destination.closed.is_set() and worker.is_alive()
+        print('lookup admission closed with worker still running')
+
+    monkeypatch.setattr(links, 'shutdown', observe_shutdown)
+    logging.basicConfig(level=logging.ERROR, force=True)
+
+    # Run the production entry point with its real process exit, skipping boot.
+    main = Path(server.__file__).parents[1] / 'main.py'
+    entrypoint = ast.Module(body=ast.parse(main.read_text(encoding='utf-8')).body[-1:], type_ignores=[])
+    exec(compile(entrypoint, str(main), 'exec'), {'__name__': '__main__', 'os': os, 'webserver': server.webserver})
+    print('listener entry point returned')
+    entrypoint_returned.set()
+
+
+@pytest.mark.parametrize('scenario, status', [('clean', 0), ('listener', 1), ('database', 1), ('restart', 0)])
+def test_listener_process_exits_without_joining_running_lookup(tmp_path, scenario, status):
+    import os
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[2]
+    restart_file, stop_file = tmp_path / 'restart', tmp_path / 'stop'
+    script = '''
+import runpy
+import sys
+runpy.run_path('tests/conftest.py')
+sys.path.insert(0, 'tests/bazarr')
+runpy.run_path('tests/bazarr/conftest.py')
+from test_media_server_instances_api import _exercise_listener_process_exit
+_exercise_listener_process_exit(sys.argv[1])
+'''
+    env = dict(os.environ, BAZARR_CONFIG_DIR=str(tmp_path), POSTGRES_ENABLED='false',
+               RESTARTFILE=str(restart_file), STOPFILE=str(stop_file))
+    try:
+        result = subprocess.run([sys.executable, '-u', '-c', script, scenario], cwd=root, env=env,
+                                capture_output=True, text=True, timeout=20)
+    except subprocess.TimeoutExpired as error:
+        pytest.fail(f'Listener process did not exit within {error.timeout}s.\n{error.stdout!r}\n{error.stderr!r}')
+    assert result.returncode == status, result.stdout + result.stderr
+    assert result.stdout.count('listener close') == 1
+    assert 'lookup admission closed with worker still running' in result.stdout
+    assert ('database cleanup' in result.stdout) is (scenario != 'listener')
+    assert ('listener entry point returned' in result.stdout) is (scenario == 'restart')
+    if status:
+        assert f'RuntimeError: {scenario} teardown failed' in result.stderr
+    assert restart_file.exists() is (scenario == 'restart')
+    assert not stop_file.exists()
+
+
+@pytest.mark.parametrize('lifecycle', [
+    'delete-idle', 'delete-active', 'restore', 'loop-return', 'loop-error', 'loop-oserror', 'loop-ebadf',
+    'loop-interrupt', 'loop-system-exit',
+])
+def test_play_on_workers_follow_destination_lifecycle(instance_api, monkeypatch, tmp_path, lifecycle):
+    import errno
+    import json
+    import sys
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Event, Lock, current_thread
+    from types import SimpleNamespace
+    from urllib.parse import urlsplit
+
+    import requests
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import scoped_session, sessionmaker
+
+    from api.system import media_server_instances
+    from app import database
+    from media_servers import links
+
+    engine = create_engine(f'sqlite:///{tmp_path / "library.db"}')
+    database.Base.metadata.create_all(engine)
+    sessions = sessionmaker(engine)
+    api_sessions = scoped_session(sessions)
+    instance_api.application.teardown_request(lambda _error: api_sessions.remove())
+    monkeypatch.setattr(media_server_instances, 'database', api_sessions)
+    monkeypatch.setattr(database, 'session_factory', sessions)
+    monkeypatch.setattr(links, '_lanes', {})
+    monkeypatch.setattr(links, '_lanes_closed', False)
+    with sessions.begin() as session:
+        session.add_all(database.TableMovies(id=i, path='/movies/Film.mkv', title='Film', tmdbId=str(i))
+                        for i in range(1, 7))
+
+    workers = set()
+    workers_lock = Lock()
+    both_running, release, queued = Event(), Event(), Event()
+    wire = []
+
+    def send(_session, request, **_kwargs):
+        url = urlsplit(request.url)
+        assert url.path.startswith('/prefix/api/v1/catalog/items/movie-tmdb-')
+        content_id = url.path.rsplit('/', 1)[-1]
+        wire.append((url.hostname, content_id))
+        if url.hostname == 'a.example' and content_id in ('movie-tmdb-2', 'movie-tmdb-3'):
+            with workers_lock:
+                workers.add(current_thread())
+                if len(workers) == 2:
+                    both_running.set()
+            release.wait()
+        response = requests.Response()
+        response.status_code = 200
+        response._content = json.dumps({'content_id': content_id}).encode()
+        response._content_consumed = True
+        return response
+
+    monkeypatch.setattr(requests.Session, 'send', send)
+
+    def create(name):
+        result = instance_api.post(ROOT, json=payload('silo', name), headers=HEADERS)
+        assert result.status_code == 201
+        return result.json['id']
+
+    removed, live = create('A'), create('B')
+
+    def resolve(destination, movie):
+        response = instance_api.get('/api/system/media-server-links/resolve', headers=HEADERS,
+                                    query_string={'instance_id': destination, 'media_type': 'movie', 'id': movie})
+        assert response.status_code == 200
+        return response.json['state']
+
+    deleting = lifecycle.startswith('delete-')
+    calls = []
+    if not deleting:
+        from utilities import backup
+
+        def run():
+            calls.append('run')
+            error = {
+                'loop-error': RuntimeError(),
+                'loop-oserror': OSError(errno.EIO, 'I/O error'),
+                'loop-ebadf': OSError(errno.EBADF, 'bad file descriptor'),
+                'loop-interrupt': KeyboardInterrupt(),
+                'loop-system-exit': SystemExit(),
+            }.get(lifecycle)
+            if error is not None:
+                raise error
+
+        listener = SimpleNamespace(run=run, close=lambda: calls.append('close'), print_listen=lambda _message: None)
+        server = _isolated_server(monkeypatch, listener, calls)
+        monkeypatch.setattr(server, 'stop_bazarr', lambda _status: calls.append('stop'))
+
+    def teardown():
+        if deleting:
+            return instance_api.delete(f'{ROOT}/{removed}', headers=HEADERS).status_code
+        if lifecycle == 'restore':
+            # Expose the isolated instance only to the real restore callback.
+            with monkeypatch.context() as restore:
+                restore.setitem(sys.modules, 'app.server', server)
+                restore.setattr(backup, 'restart_bazarr', lambda: calls.append('restart'))
+                backup._restart_after_restore()
+        else:
+            return server.webserver.start()
+
+    pools = set()
+    try:
+        assert resolve(removed, 1) == resolve(live, 1) == 'resolved'
+        live_lane = links._lanes[live]
+        pools.update((links._lanes[removed].lane.pool, live_lane.lane.pool))
+        with ThreadPoolExecutor(max_workers=4) as requests_pool:
+            try:
+                active = [requests_pool.submit(resolve, removed, i) for i in (2, 3)]
+                assert both_running.wait(3), wire
+                if lifecycle == 'delete-idle':
+                    release.set()
+                    assert [future.result(2) for future in active] == ['resolved', 'resolved']
+                else:
+                    pool = links._lanes[removed].lane.pool
+                    submit = pool.submit
+                    queued_work = []
+
+                    def observed_submit(*args, **kwargs):
+                        future = submit(*args, **kwargs)
+                        queued_work.append(future)
+                        queued.set()
+                        return future
+
+                    monkeypatch.setattr(pool, 'submit', observed_submit)
+                    pending = requests_pool.submit(resolve, removed, 4)
+                    assert queued.wait(3)
+
+                # A joining teardown fails here while the two HTTP requests
+                # still wait. Only this test's finally block can release them.
+                result = requests_pool.submit(teardown).result(3)
+                if lifecycle != 'delete-idle':
+                    assert all(not future.done() for future in active)
+                    assert queued_work[0].cancelled()
+                    assert pending.result(1) == 'unreachable'
+                if lifecycle == 'restore':
+                    assert calls == ['close', 'streams', 'database', 'restart']
+                elif not deleting:
+                    stopped = ['stop'] if lifecycle in ('loop-interrupt', 'loop-system-exit') else []
+                    assert calls == ['run', 'close', 'streams', 'database', *stopped]
+                    assert result == (None if stopped else 0)
+                else:
+                    assert result == 204
+                    assert resolve(removed, 5) == 'not_found'
+                    assert resolve(live, 5) == 'resolved'
+                    assert links._lanes[live] is live_lane
+            finally:
+                release.set()
+            if lifecycle != 'delete-idle':
+                assert [future.result(2) for future in active] == ['unreachable', 'unreachable']
+            assert removed not in links._lanes
+            assert sorted(item for host, item in wire if host == 'a.example') == [
+                'movie-tmdb-1', 'movie-tmdb-2', 'movie-tmdb-3']
+            for worker in workers:
+                worker.join(1)
+            assert not any(worker.is_alive() for worker in workers)
+            if not deleting:
+                assert not links._lanes
+                assert resolve(live, 6) == 'unreachable'
+    finally:
+        for destination in links._lanes.values():
+            pools.update(destination.pools)
+        for pool in pools:
+            pool.shutdown(wait=True, cancel_futures=True)
+        engine.dispose()
+
+
 def test_the_signed_in_plex_accounts_row_is_removed_by_signing_out_not_by_delete(instance_api, monkeypatch):
     """The startup import rebuilds the account's row, so a delete would come back."""
     from app.config import settings as app_settings
