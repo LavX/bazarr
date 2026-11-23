@@ -21,11 +21,11 @@ class DiscoverCopies(Resource):
 
     @authenticate
     def get(self):
-        allowed = {"media_type", "imdb_id", "season", "episode"}
+        allowed = {"media_type", "imdb_id", "tmdb_id", "season", "episode"}
         if set(request.args) - allowed or any(len(request.args.getlist(key)) > 1 for key in allowed):
             return {"message": "Choose a movie or an exact episode."}, 400
         target = {"media_type": request.args.get("media_type"),
-                  "imdb_id": request.args.get("imdb_id")}
+                  "imdb_id": request.args.get("imdb_id"), "tmdb_id": request.args.get("tmdb_id")}
         if request.args.get("media_type") == "episode":
             target["season"] = _number(request.args.get("season"))
             target["episode"] = _number(request.args.get("episode"))

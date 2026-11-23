@@ -521,6 +521,53 @@ const movieCopy = {
   unavailable_reason: null,
 };
 
+it("searches a TMDB-only movie from a media source using an explicitly chosen file", async () => {
+  const sourceCopy = {
+    ...movieCopy,
+    copy_id: "c1.movie.5.s2",
+    arr_instance_id: null,
+    instance_name: null,
+    source_id: 2,
+    source_name: "Local films",
+  };
+  copyPayload = { items: [sourceCopy], truncated: false, owning_titles: 1 };
+  server.use(
+    http.get("/api/discover/metadata/movies/:id", ({ params }) => {
+      expect(params.id).toBe("source:5");
+      return HttpResponse.json({
+        data: {
+          ...envelope,
+          source: "local",
+          item: {
+            ...movieDetail,
+            source: "local",
+            source_id: "source:movie:5",
+            id: "source:5",
+            imdb_id: null,
+            tmdb_id: 200,
+            copies: [{ local_id: 5, source_id: 2, arr_instance_id: null }],
+          },
+        },
+      });
+    }),
+  );
+
+  const { user } = browse("/discover?movie=source%3A5&source=local");
+  expect(await screen.findByText("In your library")).toBeVisible();
+  await pickOption(user, "Subtitle language", "English");
+  expect(screen.getByRole("button", { name: "Find subtitles" })).toBeDisabled();
+  await pickOption(user, "Library copy", describeCopy(sourceCopy));
+  expect(copyRequests[0]).toContain("tmdb_id=200");
+  await user.click(screen.getByRole("button", { name: "Find subtitles" }));
+  await waitFor(() => expect(searches).toHaveLength(1));
+  expect(searches[0]).toMatchObject({
+    media_type: "movie",
+    tmdb_id: 200,
+    copy_id: sourceCopy.copy_id,
+  });
+  expect(searches[0]).not.toHaveProperty("imdb_id");
+});
+
 it("matches a copy for an IMDb identifier typed straight into the form", async () => {
   copyPayload = { items: [movieCopy], truncated: false, owning_titles: 1 };
   const { user } = browse("/discover");

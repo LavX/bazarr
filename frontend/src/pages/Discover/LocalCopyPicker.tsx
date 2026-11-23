@@ -14,6 +14,7 @@ import styles from "./Discover.module.scss";
 const TITLE_ONLY = "title-only";
 
 export function copyLibraryRoute(copy: DiscoverCopy): string | null {
+  if (copy.source_id !== undefined) return null;
   if (copy.media_type === "movie") return `/movies/${copy.local_id}`;
   return copy.series_local_id === null
     ? null
@@ -21,6 +22,8 @@ export function copyLibraryRoute(copy: DiscoverCopy): string | null {
 }
 
 export function copyOwner(copy: DiscoverCopy): string {
+  if (copy.source_id !== undefined)
+    return copy.source_name ?? `Media source ${copy.source_id}`;
   if (copy.arr_instance_id === null) return "Owner unknown";
   return copy.instance_name ?? `Instance ${copy.arr_instance_id}`;
 }
@@ -82,17 +85,20 @@ export default function LocalCopyPicker() {
   const { state, updateDraft, updateBrowsing } = useDiscover();
   const { draft } = state;
   const location = useLocation();
-  const imdbId = draft.imdbId.trim().toLowerCase();
+  const imdbInput = draft.imdbId.trim().toLowerCase();
+  const imdbId = /^tt\d{7,10}$/.test(imdbInput) ? imdbInput : undefined;
+  const tmdbId = draft.copyTmdbId;
   const episode = draft.mediaType === "episode";
   const target =
-    draft.mode === "release" || !/^tt\d{7,10}$/.test(imdbId)
+    draft.mode === "release" || (!imdbId && (imdbInput || !tmdbId))
       ? null
       : !episode
-        ? { mediaType: "movie" as const, imdbId }
+        ? { mediaType: "movie" as const, imdbId, tmdbId }
         : /^\d{1,4}$/.test(draft.season) && /^[1-9]\d{0,3}$/.test(draft.episode)
           ? {
               mediaType: "episode" as const,
               imdbId,
+              tmdbId,
               season: Number(draft.season),
               episode: Number(draft.episode),
             }

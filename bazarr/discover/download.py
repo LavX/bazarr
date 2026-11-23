@@ -213,8 +213,8 @@ def _filename(record):
     if context.get("mode") == "release":
         title = secure_filename(context["query"])[:120].strip("._") or "release-query"
     else:
-        title = secure_filename(context.get("title") or context["imdb_id"])[:120].strip("._")
-        title = title or context["imdb_id"]
+        identity = context.get("imdb_id") or f"tmdb-{context.get('tmdb_id')}"
+        title = secure_filename(context.get("title") or identity)[:120].strip("._") or identity
         if context["media_type"] == "episode":
             title += f".S{context['season']:02d}E{context['episode']:02d}"
         elif context.get("year"):

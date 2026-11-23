@@ -21,6 +21,7 @@ export interface DiscoverDraft {
   query?: string;
   mediaType: "movie" | "episode";
   imdbId: string;
+  copyTmdbId?: number;
   language: string;
   season: string;
   episode: string;
@@ -192,12 +193,15 @@ export function searchSelection(
     return { mode: "release", query, language: draft.language };
   }
   const imdbId = draft.imdbId.trim().toLowerCase();
-  if (!/^tt\d{7,10}$/.test(imdbId) || !draft.language) return null;
+  const validImdb = /^tt\d{7,10}$/.test(imdbId);
+  const copyTmdbId = draft.copyId ? draft.copyTmdbId : undefined;
+  if ((!validImdb && (!copyTmdbId || imdbId)) || !draft.language) return null;
   /* eslint-disable camelcase -- the selection is the request body, so its keys
      keep the API spelling. */
   const selection: DiscoverSelection = {
     media_type: draft.mediaType,
-    imdb_id: imdbId,
+    ...(validImdb ? { imdb_id: imdbId } : {}),
+    ...(copyTmdbId ? { tmdb_id: copyTmdbId } : {}),
     language: draft.language,
   };
   /* eslint-enable camelcase */
@@ -303,7 +307,7 @@ export function episodeMatchesShow(
 function draftShow(draft: DiscoverDraft): ShowIdentity {
   return {
     id: draft.showId,
-    imdb_id: draft.imdbId.trim().toLowerCase(),
+    imdb_id: draft.imdbId.trim().toLowerCase() || undefined,
     tvdb_id: draft.showTvdbId,
     title: draft.title,
     year: draft.year,
@@ -328,6 +332,7 @@ export function copyTargetKey(draft: DiscoverDraft): string {
   return JSON.stringify([
     draft.mediaType,
     draft.imdbId.trim().toLowerCase(),
+    draft.copyTmdbId ?? null,
     draft.mediaType === "episode" ? draft.season : null,
     draft.mediaType === "episode" ? draft.episode : null,
   ]);
@@ -359,6 +364,7 @@ export function discoverContextKey(draft: DiscoverDraft): string {
     // A different copy is a different search context: its results, preview,
     // feedback and pending responses all belong to the copy that was chosen.
     draft.copyId ?? null,
+    draft.copyId ? (draft.copyTmdbId ?? null) : null,
   ]);
 }
 

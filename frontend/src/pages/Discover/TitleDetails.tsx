@@ -112,6 +112,9 @@ export default function TitleDetails({
 }) {
   const { state, updateBrowsing, updateDraft, cancelPending } = useDiscover();
   const { id, kind, source, details, received, movie } = useSelectedTitle();
+  const copyTmdbId = movie?.copies?.some((copy) => copy.source_id !== undefined)
+    ? ((movie.source === "tmdb" ? movie.id : movie.tmdb_id) ?? undefined)
+    : undefined;
   const heading = useRef<HTMLHeadingElement>(null);
   const [failedBackdrop, setFailedBackdrop] = useState<string | null>(null);
   const { nameById } = useArrInstanceLabels(
@@ -151,6 +154,7 @@ export default function TitleDetails({
             : undefined,
         showTvdbId: movie.media_type === "show" ? movie.tvdb_id : undefined,
         imdbId: movie.imdb_id ?? "",
+        copyTmdbId,
         title: movie.title,
         year: movie.year ?? undefined,
         ...(movie.source !== "tmdb"
@@ -178,6 +182,7 @@ export default function TitleDetails({
     id,
     kind,
     source,
+    copyTmdbId,
     state.browsing.adoptedSourceId,
     updateDraft,
     updateBrowsing,
@@ -185,15 +190,16 @@ export default function TitleDetails({
 
   const copies = movie?.copies ?? [];
   const inLibrary = movie?.source === "local" || copies.length > 0;
+  const arrCopies = copies.filter((copy) => copy.source_id === undefined);
   const localIds = copies.length
-    ? copies.map((copy) => copy.local_id)
+    ? arrCopies.map((copy) => copy.local_id)
     : movie?.source === "local"
       ? [Number(movie.id)]
       : [];
   const libraryDestinations = [...new Set(localIds)]
     .filter((localId) => Number.isSafeInteger(localId) && localId > 0)
     .map((localId, index) => {
-      const copy = copies.find((item) => item.local_id === localId);
+      const copy = arrCopies.find((item) => item.local_id === localId);
       const instanceName =
         copy?.arr_instance_id != null
           ? nameById.get(copy.arr_instance_id)
@@ -406,7 +412,7 @@ export default function TitleDetails({
           the Subtitle Hub.
         </Alert>
       )}
-      {movie && !movie.imdb_id && (
+      {movie && !movie.imdb_id && !copyTmdbId && (
         <Alert color="yellow">
           {movie.source === "local"
             ? "This local title"
@@ -416,10 +422,17 @@ export default function TitleDetails({
           Search options.
         </Alert>
       )}
+      {movie && !movie.imdb_id && copyTmdbId && !state.draft.copyId && (
+        <Alert color="yellow">
+          Choose a library copy to search this title.
+        </Alert>
+      )}
       {movie?.media_type === "show" && movie.source !== "tmdb" && (
         <Alert color="yellow">
-          This source does not provide verified episode numbering. Confirm the
-          series IMDb ID and enter the season and episode below.
+          This source does not provide verified episode numbering.{" "}
+          {movie.imdb_id || !copyTmdbId
+            ? "Confirm the series IMDb ID and enter the season and episode below."
+            : "Enter and confirm the season and episode below."}
         </Alert>
       )}
     </Stack>

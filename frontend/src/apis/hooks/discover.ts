@@ -64,7 +64,8 @@ export const COPIES_QUERY_KEY = [QueryKeys.Discover, "copies"] as const;
 export function useDiscoverCopies(
   target: {
     mediaType: "movie" | "episode";
-    imdbId: string;
+    imdbId?: string;
+    tmdbId?: number;
     season?: number;
     episode?: number;
   } | null,
@@ -72,7 +73,8 @@ export function useDiscoverCopies(
   const params = target
     ? {
         media_type: target.mediaType,
-        imdb_id: target.imdbId,
+        ...(target.imdbId ? { imdb_id: target.imdbId } : {}),
+        ...(target.tmdbId ? { tmdb_id: target.tmdbId } : {}),
         ...(target.mediaType === "episode"
           ? { season: target.season, episode: target.episode }
           : {}),
