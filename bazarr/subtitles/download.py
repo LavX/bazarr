@@ -13,7 +13,7 @@ import subliminal
 import ast
 from contextlib import ExitStack, contextmanager
 
-from sqlalchemy.exc import DBAPIError
+from sqlalchemy.exc import DBAPIError, SQLAlchemyError
 from subzero.language import Language
 from subliminal_patch.core import save_subtitles
 from subtitles.tools.subsync_engines import (
@@ -520,7 +520,7 @@ def _write_source_download(video_path, destination, content, *, source, language
                 try:
                     committed = source_upgrade_history_committed(
                         upgrade_history_id, upgrade.original_id, video_path, destination)
-                except DBAPIError:
+                except SQLAlchemyError:
                     committed = False
                 if committed:
                     logging.info('BAZARR confirmed a source upgrade after losing the database acknowledgement')
