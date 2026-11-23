@@ -572,10 +572,11 @@ def test_tmdb_only_catalog_episode_resolves_a_manually_confirmed_source_copy(
 def test_manual_episode_accepts_only_the_imdb_enriched_by_its_linked_source_group(
     authenticated_client, source_db, providers, monkeypatch, tmp_path, submitted_imdb, selected_episode,
 ):
+    import app.jobs_queue as queue_module
     from app import database as db
     from app.database import TableMediaSourceLibraryRoots, TableSourceGroups, TableSourceItems
     from discover import metadata
-    from discover.library import copy_identity
+    from discover.library import copy_identity, resolve_copy
     from plugin_platform_helpers import provider_manifest_v2
     from provider_hub import capabilities, registry
     from provider_hub.manifest import validate_manifest
@@ -587,7 +588,7 @@ def test_manual_episode_accepts_only_the_imdb_enriched_by_its_linked_source_grou
     owner = add_source(session, "series")
     session.add(TableMediaSourceLibraryRoots(library_id=owner[1], local_path=str(tmp_path)))
     group_id = add_title(session, owner, TableSourceGroups, kind="show", title="Moon Show", group_key="moon",
-                         tmdb_id="84", imdb_id="tt0000084", year="2008")
+                         tmdb_id="84", imdb_id="tt0000084", tvdb_id=701, year="2008")
     path = tmp_path / "Moon.Show.S02E03.mkv"
     path.write_bytes(b"source episode")
     episode_id = add_title(session, owner, TableSourceItems, kind="episode", title="Moon Show", group_id=group_id,
@@ -595,13 +596,13 @@ def test_manual_episode_accepts_only_the_imdb_enriched_by_its_linked_source_grou
     session.commit()
 
     catalog = {"source": "tmdb", "source_id": "tmdb:show:84", "id": 84, "media_type": "show",
-               "imdb_id": None, "title": "Moon Show", "year": 2008}
+               "imdb_id": None, "tvdb_id": 701, "title": "Moon Show", "year": 2008}
     monkeypatch.setattr(metadata, "show_details", lambda _: {"data": {"item": dict(catalog)}})
     monkeypatch.setattr(metadata, "_show_details_with_validity",
                         lambda _: ({"data": {"item": dict(catalog)}}, float("inf")))
     canonical = {"source": "tmdb", "id": 903, "show_id": 84, "season": 2, "episode": 3,
                  "target_season": None, "target_episode": None, "identity_status": "unverified",
-                 "show_imdb_id": None, "show_title": "Moon Show", "show_year": 2008}
+                 "show_imdb_id": None, "show_tvdb_id": 701, "show_title": "Moon Show", "show_year": 2008}
     monkeypatch.setattr(metadata, "_episode_details_with_validity",
                         lambda *_: ({"data": {"episode": dict(canonical)}}, float("inf")))
     details = authenticated_client.get("/api/discover/metadata/shows/84?source=tmdb", headers=HEADERS)
@@ -656,6 +657,47 @@ def test_manual_episode_accepts_only_the_imdb_enriched_by_its_linked_source_grou
         refused = copies_fixtures.post(authenticated_client, {**selection, **invalid})
         assert refused.status_code == 409
         assert len(admitted) == 1
+
+    conflict = add_title(session, owner, TableSourceGroups, kind="show", title="Different Show", group_key="different",
+                         tmdb_id="84", imdb_id="tt0000084", tvdb_id=702, year="2008")
+    other_path = tmp_path / "Different.Show.S02E03.mkv"
+    other_path.write_bytes(b"another source episode")
+    other_id = add_title(session, owner, TableSourceItems, kind="episode", title="Different Show", group_id=conflict,
+                         season=2, episode=3, path=str(other_path))
+    session.commit()
+    offered = copies_fixtures.copies(authenticated_client, **target).json["items"]
+    other_copy = next(entry for entry in offered if entry["local_id"] == other_id)
+    assert resolve_copy(other_copy["copy_id"], selection)["series_local_id"] == conflict
+    refused = copies_fixtures.post(authenticated_client, {**selection, "copy_id": other_copy["copy_id"]})
+    assert refused.status_code == 409
+    assert "confirmed show" in refused.json["message"]
+    assert len(admitted) == 1
+
+    real_queue = authenticated_client.inline_jobs.real
+    monkeypatch.setattr(queue_module, "jobs_queue", real_queue)
+    monkeypatch.setattr(queue_module, "event_stream", lambda **kwargs: None)
+    monkeypatch.setattr(real_queue, "force_start_pending_job", lambda *_: None)
+    queued_ids = []
+    for refresh in (True, False):
+        queued = authenticated_client.post("/api/discover/search", headers=HEADERS,
+                                           json={**selection, "refresh": refresh})
+        assert queued.status_code == 202
+        queued_ids.append(queued.json["job_id"])
+    assert len(set(queued_ids)) == 2
+    conflicting_group = session.get(TableSourceGroups, conflict)
+    conflicting_group.tvdb_id = 701
+    conflicting_group.imdb_id = "tt9999999"
+    session.commit()
+
+    current = resolve_copy(copy["copy_id"], selection)
+    assert current["file_revision"] == response.json["context"]["file_revision"]
+    fresh = authenticated_client.post("/api/discover/search", headers=HEADERS, json=selection)
+    assert fresh.status_code == 400
+    for job_id in queued_ids:
+        job = download_fixtures.run_queued_job(job_id)
+        assert job["status"] == "failed"
+        assert job["error"]["reason"] == "copy_unavailable"
+    assert len(admitted) == 1
 
 
 def test_unidentified_disabled_and_shadowed_source_rows_do_not_create_copy_options(

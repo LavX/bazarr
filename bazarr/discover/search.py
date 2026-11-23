@@ -108,15 +108,24 @@ class SearchRequest:
     # The resolved copy carries the mapped path and content hash, so it stays
     # out of repr and never travels with the serialized context.
     copy: dict | None = field(default=None, repr=False)
+    # Retain the catalog identity before the local association adds an IMDb.
+    linked_show: dict | None = field(default=None, repr=False)
 
 
 class SearchAdmissionExpired(ValueError):
     """Authoritative metadata expired before provider work could start."""
 
 
+def _require_current_target(request):
+    facts = require_copy_revision(request.context)
+    if request.linked_show is not None:
+        linked_groups = _linked_show_groups(request.linked_show, request.context["imdb_id"])
+        _require_linked_copy(facts, request.context["tmdb_id"], linked_groups)
+
+
 def _admit_provider_search(request):
     from . import metadata
-    require_copy_revision(request.context)
+    _require_current_target(request)
     try:
         metadata._require_dependency_validity(request.metadata_valid_until)
     except metadata.UpstreamFailure:
@@ -205,12 +214,13 @@ def validate_context(payload) -> SearchRequest:
             raise ValueError("Invalid title year.")
         context["year"] = year
     metadata_valid_until = None
-    linked_groups = None
+    linked_show = linked_groups = None
     if media_type == "episode":
-        metadata_valid_until, linked_groups = _reconcile_episode(payload, context)
+        metadata_valid_until, linked_show, linked_groups = _reconcile_episode(payload, context)
     elif any(key in payload for key in ("episode_identity", "manual_confirmed", "show_id")):
         raise ValueError("Movie searches cannot contain episode identity.")
-    return SearchRequest(context, refresh, metadata_valid_until, _reconcile_copy(payload, context, linked_groups))
+    facts = _reconcile_copy(payload, context, linked_groups)
+    return SearchRequest(context, refresh, metadata_valid_until, facts, linked_show)
 
 
 def _reconcile_copy(payload, context, linked_groups):
@@ -232,10 +242,8 @@ def _reconcile_copy(payload, context, linked_groups):
     if "tmdb_id" in context and context.get("show_id") not in (None, context["tmdb_id"]):
         raise ValueError("Conflicting show identity. Choose the episode again.")
     facts = resolve_copy(chosen, context)
-    if linked_groups is not None and (
-            (facts.get("source_id"), facts.get("series_local_id")) not in linked_groups
-            or facts.get("tmdb_id") != context["tmdb_id"]):
-        raise CopyUnavailable("Choose a library copy from the confirmed show.", "copy_missing")
+    if linked_groups is not None:
+        _require_linked_copy(facts, context["tmdb_id"], linked_groups)
     if "tmdb_id" in context:
         if facts.get("source_id") is None:
             context.pop("tmdb_id")
@@ -264,7 +272,7 @@ def _reconcile_episode(payload, context):
     identity = payload.get("episode_identity")
     show_id = payload.get("show_id")
     valid_until = None
-    linked_groups = None
+    linked_show = linked_groups = None
     if show_id is not None and not metadata._positive_id(show_id):
         raise ValueError("Invalid show identity.")
     if identity is not None:
@@ -308,13 +316,14 @@ def _reconcile_episode(payload, context):
         if context["imdb_id"] != show["imdb_id"]:
             if not manual or show["imdb_id"] is not None or context.get("tmdb_id") != show_id:
                 raise ValueError(show_error)
-            linked_groups = _linked_show_groups(show, context["imdb_id"])
+            linked_show = copy.deepcopy(show)
+            linked_groups = _linked_show_groups(linked_show, context["imdb_id"])
             if not linked_groups:
                 raise ValueError(show_error)
         context["show_id"] = show_id
     if manual:
         context["manual_confirmed"] = True
-    return valid_until, linked_groups
+    return valid_until, linked_show, linked_groups
 
 
 def _linked_show_groups(show, imdb_id):
@@ -326,6 +335,12 @@ def _linked_show_groups(show, imdb_id):
     if linked["imdb_id"] != imdb_id:
         return set()
     return {(entry["source_id"], entry["local_id"]) for entry in linked["copies"] if entry.get("source_id") is not None}
+
+
+def _require_linked_copy(facts, tmdb_id, linked_groups):
+    if ((facts.get("source_id"), facts.get("series_local_id")) not in linked_groups
+            or facts.get("tmdb_id") != tmdb_id):
+        raise CopyUnavailable("Choose a library copy from the confirmed show.", "copy_missing")
 
 
 def _retry_delay(outcome):
@@ -772,7 +787,7 @@ def search(request: SearchRequest, on_progress=None, *, observed: bool = True) -
     ))
     snapshot.pop("_eligibility", None)
     if not created:
-        require_copy_revision(context)
+        _require_current_target(request)
         if snapshot["cache_status"] != "stale":
             snapshot["cache_status"] = "cached"
     return snapshot
