@@ -245,6 +245,7 @@ from ..sandbox import (
     SandboxApplyError,
     SandboxRefused,
     WorkerProcess,
+    activity,
     shm_guardable,
     shm_state,
     spawn_worker,
@@ -3492,6 +3493,11 @@ class WorkerPool:
         but that cleanup, so none of those cases may release a worker's place in
         the pool.
         """
+        if activity.is_registered(process):
+            if not activity.tree_gone(process):
+                return False
+            activity.forget(process)
+            return True
         if isinstance(process, WorkerProcess) and (
                 process._anchor is not None or process._anchor_lost or process._leader_lost
                 or process.group_cleaned is False):
@@ -3499,9 +3505,6 @@ class WorkerPool:
             # anchor that somebody else reaped leaves a group nobody can vouch for.
             return False
         if not isinstance(process, LauncherProcess):
-            from provider_hub.sandbox import activity
-
-            activity.forget(process)
             return True
         if process.returncode < 0:
             return False

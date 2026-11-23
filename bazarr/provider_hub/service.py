@@ -5410,7 +5410,7 @@ def rollback_release(provider_id: str, consent_digest: str | None = None) -> Act
     return activate_release(provider_id)
 
 
-def _finish_removal(provider_id: str) -> bool:
+def _finish_removal(provider_id: str, previous_stopped: bool | None) -> bool:
     """The restart that follows a staged removal takes the plugin's row, and with it its releases, away."""
     state = load_state()
     installation = (state.get("installations") or {}).get(provider_id)
@@ -5425,7 +5425,7 @@ def _finish_removal(provider_id: str) -> bool:
         target_name=target_name,
         from_version=installation.get("active_version"),
     ) as job:
-        removed = _drop_removed_row(provider_id)
+        removed = _drop_removed_row(provider_id, previous_stopped=previous_stopped)
         if removed:
             job.update(message=f"Removed plugin '{target_name}' on restart")
     return removed
@@ -5483,7 +5483,7 @@ def activate_staged_installations() -> list[str]:
                             _wait_for_data_activation(provider_id, installation, previous_run=True)
                         continue
                 if removal:
-                    if _finish_removal(provider_id):
+                    if _finish_removal(provider_id, previous_stopped):
                         state["installations"].pop(provider_id, None)
                 elif activate_release(provider_id, at_boot=True).activated:
                     activated.append(provider_id)
@@ -5951,11 +5951,17 @@ def _settle_release_data(provider_id: str, installation, keep_data: bool) -> Non
 
 
 @datadir.serialized
-def _drop_removed_row(provider_id: str) -> bool:
+def _drop_removed_row(provider_id: str, *, previous_stopped: bool | None = None) -> bool:
     """Delete the row of a removed plugin, and with it its releases. A row that is not marked removed any more (it
     was installed again meanwhile) stays."""
     row = (load_state().get("installations") or {}).get(provider_id)
     if isinstance(row, dict) and row.get("state") == "removed":
+        if row.get("data_worker_cleanup_pending") and _has_removable_data(provider_id, row):
+            if previous_stopped is None:
+                previous_stopped = _previous_workers_stopped()
+            if not previous_stopped:
+                _defer_removal(provider_id)
+                return False
         _settle_release_data(provider_id, row, not row.get("delete_release_data", False))
 
     def drop(state: dict[str, Any]) -> bool:

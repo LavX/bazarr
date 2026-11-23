@@ -1887,7 +1887,6 @@ def test_unreadable_historical_exclusions_omit_that_release_data(data_release, t
 def test_boot_waits_for_the_previous_workers_before_finishing_uninstall(data_release, service_kind, monkeypatch):
     from provider_hub import detach, worker
     from provider_hub.kinds import DETACH_LIVE
-    from provider_hub.sandbox import sweep
     from provider_hub.state import load_state
 
     service, _, old = data_release
@@ -1900,14 +1899,13 @@ def test_boot_waits_for_the_previous_workers_before_finishing_uninstall(data_rel
     assert detach.wait_idle()
     assert old.exists()
 
-    outcomes = [sweep.SweptSession(1, (), "survivors")]
     monkeypatch.setattr(detach, "snapshot_workers", lambda provider_id: [])
-    monkeypatch.setattr(sweep, "sweep_leftovers", lambda config, **kwargs: sweep.SweepResult(sessions=outcomes))
+    monkeypatch.setattr(service, "_previous_workers_stopped", lambda: False)
     service.activate_staged_installations()
     assert old.exists()
     assert load_state()["installations"]["exampleservice"]["pending_restart"]
 
-    outcomes[:] = [sweep.SweptSession(1, (), "ended")]
+    monkeypatch.setattr(service, "_previous_workers_stopped", lambda: True)
     service.activate_staged_installations()
     assert "exampleservice" not in load_state()["installations"]
     assert not old.exists()
@@ -1917,14 +1915,13 @@ def test_legacy_provider_keep_leaves_data_in_the_home_used_on_reinstall(staged, 
     from provider_hub import datadir, service
     from provider_hub.detach import wait_idle
     from provider_hub.kinds import SUBTITLE_PROVIDER, get_kind
-    from provider_hub.sandbox import sweep
     from provider_hub.state import load_state, provider_hub_dir
 
     root = provider_hub_dir()
     legacy = datadir.legacy_data_path(root, "alpha")
     legacy.mkdir(parents=True)
     (legacy / "settings").write_text("preserved settings")
-    monkeypatch.setattr(sweep, "sweep_leftovers", lambda config: sweep.SweepResult())
+    monkeypatch.setattr(service, "_previous_workers_stopped", lambda: True)
     assert service.remove_installation("alpha")
     assert wait_idle()
     assert "alpha" not in load_state()["installations"]
@@ -2003,6 +2000,38 @@ def test_boot_activation_waits_until_previous_workers_release_the_active_data(
     assert service.activate_staged_installations() == ["exampleservice"]
     row = load_state()["installations"]["exampleservice"]
     assert row["active_version"] == "1.1.0"
+
+
+@pytest.mark.parametrize("keep_data", [True, False])
+def test_uninstall_preserves_the_worker_hold_set_by_boot(data_release, service_kind, monkeypatch, keep_data):
+    from provider_hub import detach
+    from provider_hub.kinds import DETACH_LIVE
+    from provider_hub.state import load_state
+
+    service, new, old = data_release
+    service_kind.detach_policy = DETACH_LIVE
+    service._stage_validated(service_kind.validate_manifest(new, True), True, "catalog", "official",
+                             lambda manifest, deadline: Path(_bundle(manifest.provider_id, manifest.version)))
+    sample = old / "sample"
+    sample.write_text("still in use")
+    monkeypatch.setattr(service, "_previous_workers_stopped", lambda: False)
+    assert service.activate_staged_installations() == []
+
+    monkeypatch.setattr(detach, "snapshot_workers", lambda provider_id: [])
+    assert service.remove_installation("exampleservice", keep_data=keep_data)
+    assert detach.wait_idle()
+    assert load_state()["installations"]["exampleservice"]["state"] == "removed"
+    assert sample.read_text() == "still in use"
+
+    monkeypatch.setattr(service, "_previous_workers_stopped", lambda: True)
+    service.activate_staged_installations()
+    assert "exampleservice" not in load_state()["installations"]
+    assert not sample.exists()
+    kept = old.parent / "kept" / "sample"
+    if keep_data:
+        assert kept.read_text() == "still in use"
+    else:
+        assert not kept.exists()
 
 
 def test_keep_retry_does_not_replace_the_already_retained_active_data_with_legacy_home(staged, monkeypatch):

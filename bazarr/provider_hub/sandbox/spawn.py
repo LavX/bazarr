@@ -45,7 +45,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from . import capabilities, landlock, seccomp
+from . import activity, capabilities, landlock, seccomp
 from .policy import (
     PolicyError,
     RuntimeSpec,
@@ -893,15 +893,13 @@ def _start_plain(command: list, **kwargs: Any) -> "WorkerProcess":
     ``poll``, ``wait`` or ``communicate`` without the group becoming
     unaddressable. Without an anchor the worker leads its own session instead.
     """
-    from . import activity
-
     anchor = _start_anchor()
     try:
         if anchor is not None:
             process = activity.start_worker(
-                lambda: WorkerProcess(command, process_group=anchor.pid, **kwargs), group=anchor.pid)
+                lambda argv: WorkerProcess(argv, process_group=anchor.pid, **kwargs), command, group=anchor.pid)
         else:
-            process = activity.start_worker(lambda: WorkerProcess(command, start_new_session=True, **kwargs))
+            process = activity.start_worker(lambda argv: WorkerProcess(argv, start_new_session=True, **kwargs), command)
     except BaseException:
         if anchor is not None:
             _finish_anchor(anchor)
@@ -1376,6 +1374,16 @@ class WorkerProcess(subprocess.Popen):
         group number may belong to someone else, so nothing can be said of what
         the worker left behind.
         """
+        job = getattr(self, "activity_job", None)
+        if job is not None:
+            try:
+                self._terminate_and_wait(grace)
+                if not job.empty():
+                    job.terminate()
+            except OSError:
+                return False
+            self._reap_quietly()
+            return activity.tree_gone(self, 5)
         killpg = getattr(os, "killpg", None)
         if killpg is None:
             # No process groups on this platform: the reap is all there is to end.

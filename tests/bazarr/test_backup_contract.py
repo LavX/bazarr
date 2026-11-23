@@ -723,6 +723,37 @@ def test_a_configuration_that_cannot_be_put_in_place_stops_the_start(backup_env,
     assert (backup_env.restore_dir / backup_env.module._RESTORE_HANDOFF).is_file()
 
 
+def test_postgresql_restore_resumes_after_config_swap_without_restoring_a_second_database(backup_env, monkeypatch):
+    _enable_postgresql(backup_env, monkeypatch)
+    log_path = _write_fake_tool(str(backup_env.tools_dir), 'pg_restore')
+    _stage_restore(backup_env, 'bazarr_postgres.dump')
+    (backup_env.restore_dir / 'config.yaml').write_text(yaml.safe_dump({
+        'general': {'port': 7000},
+        'postgresql': {'enabled': True, 'database': 'replacement'},
+    }), encoding='utf-8')
+    dest_config = backup_env.config_dir / 'config' / 'config.yaml'
+    real_replace = os.replace
+
+    with monkeypatch.context() as interruption:
+        def interrupt_after_config_swap(source, destination):
+            real_replace(source, destination)
+            if os.fspath(destination) == os.fspath(dest_config):
+                raise SystemExit(41)
+
+        interruption.setattr(os, 'replace', interrupt_after_config_swap)
+        with pytest.raises(SystemExit):
+            backup_env.module.restore_from_backup()
+    with open(log_path, encoding='utf-8') as handle:
+        before = handle.read()
+    assert before.count('ARGV') == 1 and '--dbname bazarr' in before
+    reloaded = yaml.safe_load(dest_config.read_text(encoding='utf-8'))
+    monkeypatch.setattr(backup_env.settings.postgresql, 'database', reloaded['postgresql']['database'])
+    assert backup_env.module.restore_from_backup()
+    assert backup_env.restarts == [True]
+    with open(log_path, encoding='utf-8') as handle:
+        assert handle.read() == before
+
+
 def test_a_start_with_nothing_to_restore_goes_on(backup_env, monkeypatch):
     _enable_postgresql(backup_env, monkeypatch)
 
