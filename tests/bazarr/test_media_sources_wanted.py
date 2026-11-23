@@ -480,6 +480,7 @@ def test_wanted_rechecks_a_release_excluded_on_another_source_item(
     from media_source_helpers import add_group
     from media_sources.context import resolve_item
     from subtitles import download
+    from subtitles.tools.subsync_engines import regular_subtitle_version
 
     context = pipeline._episode(world) if kind == 'episode' else pipeline._movie(world)
     other_source, other_library, other_root = add_source(
@@ -502,12 +503,17 @@ def test_wanted_rechecks_a_release_excluded_on_another_source_item(
     app = Flask(__name__)
     app.register_blueprint(api_bp)
     candidate = pipeline.FakeSubtitle()
+    history_id = repository.insert_history(
+        world.db, item_id=other.item_id, source_id=other.source_id, item_kind=other.kind,
+        video_path=other.path, subtitles_path=str(sidecar), language='en', action=1,
+        provider=candidate.provider_name, subs_id=candidate.id, description='Fixture acquisition',
+        published_file_version=list(regular_subtitle_version(sidecar)))
     releases = []
 
     def exclude():
         response = app.test_client().post(f'/api/sources/items/{other.item_id}/blacklist', headers=HEADERS, json={
             'subtitles_path': str(sidecar), 'language': 'en', 'provider': candidate.provider_name,
-            'subs_id': candidate.id,
+            'subs_id': candidate.id, 'history_id': history_id,
         })
         assert response.status_code == 204, response.get_json()
         assert not sidecar.exists()
@@ -539,7 +545,7 @@ def test_wanted_rechecks_a_release_excluded_on_another_source_item(
     assert not Path(context.path).with_suffix('.en.srt').exists()
     assert releases == [(context.kind, candidate.provider_name, candidate.id)]
     assert world.db.execute(sa.select(repository.Blacklist.c.item_id)).scalars().all() == [other.item_id]
-    assert world.db.execute(sa.select(repository.History.c.action)).scalars().all() == [0]
+    assert world.db.execute(sa.select(repository.History.c.action).order_by(repository.History.c.id)).scalars().all() == [1, 0]
     assert [event.operation for event in world.published] == ['delete']
 
 

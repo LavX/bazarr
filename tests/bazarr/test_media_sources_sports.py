@@ -1139,6 +1139,7 @@ def test_sports_wanted_rechecks_a_selected_release_excluded_during_provider_down
     from subliminal_patch import core
     from subzero.language import Language
     from subtitles import download, pool
+    from subtitles.tools.subsync_engines import regular_subtitle_version
 
     for integration in ('use_sonarr', 'use_radarr', 'use_sportarr'):
         monkeypatch.setattr(settings.general, integration, False)
@@ -1208,7 +1209,7 @@ def test_sports_wanted_rechecks_a_selected_release_excluded_during_provider_down
             provider_calls.append('downloading')
             response = client.post(f'/api/sources/items/{other_id}/blacklist', headers=HEADERS, json={
                 'subtitles_path': original.subtitles_path, 'language': original.language,
-                'provider': original.provider, 'subs_id': original.subs_id,
+                'provider': original.provider, 'subs_id': original.subs_id, 'history_id': original.id,
             })
             assert response.status_code == 204, response.get_data(as_text=True)
             assert not excluded_file.exists()
@@ -1238,6 +1239,7 @@ def test_sports_wanted_rechecks_a_selected_release_excluded_during_provider_down
         other_id, 1, 'fake', excluded_release)
     excluded_file = Path(original.subtitles_path)
     assert excluded_file.read_bytes() == pipeline.CONTENT
+    assert original.published_file_version == list(regular_subtitle_version(excluded_file))
     assert str(excluded_file) in repository.get_item(other_id).subtitles
 
     run_wanted(owner)
