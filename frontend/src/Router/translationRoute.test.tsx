@@ -10,7 +10,14 @@ import { AllProviders } from "@/providers";
 import { Router, useRoutes } from "@/Router";
 import TranslationGate from "@/Router/TranslationGate";
 import type { CustomRouteObject } from "@/Router/type";
-import { cleanup, customRender, rawRender, screen, waitFor } from "@/tests";
+import {
+  cleanup,
+  customRender,
+  fireEvent,
+  rawRender,
+  screen,
+  waitFor,
+} from "@/tests";
 import server from "@/tests/mocks/node";
 import { setAuthenticated } from "@/utilities/event";
 import { WHATS_NEW_SEEN_KEY } from "@/utilities/whatsNew";
@@ -91,7 +98,7 @@ it("keeps it out on a status that predates the field, after the status has arriv
   expect(list("navigation")).not.toContain("translation");
 });
 
-it("shows it as a first-level entry in the System group once the switch is on, with the old page still in Settings", async () => {
+it("shows it as a first-level entry in the System group once the switch is on, without a Settings entry", async () => {
   showStatus(true);
   showRoutes();
   expect(await screen.findByText("status loaded")).toBeInTheDocument();
@@ -101,7 +108,7 @@ it("shows it as a first-level entry in the System group once the switch is on, w
   expect(navigation.indexOf("translation")).toBe(
     navigation.indexOf("plugin-hub") + 1,
   );
-  expect(list("settings")).toContain("translator");
+  expect(list("settings")).not.toContain("translator");
   expect(list("settings")).not.toContain("translation");
 });
 
@@ -256,14 +263,19 @@ describe("Translation addresses in the mounted application router", () => {
     },
   );
 
-  it.each([false, undefined])(
-    "keeps the former Settings/Translation address gated when v2 is %s",
-    async (runtime) => {
+  it.each([
+    { runtime: false, base: "" },
+    { runtime: undefined, base: "" },
+    { runtime: false, base: "/bazarr" },
+    { runtime: undefined, base: "/bazarr" },
+  ])(
+    "keeps the former $base/settings/translation address gated when v2 is $runtime",
+    async ({ runtime, base }) => {
       showStatus(runtime);
-      showApplication(`/settings/translation${deepLink}`);
+      showApplication(`/settings/translation${deepLink}`, base);
 
       expect(await screen.findByText(/Page not found/)).toBeVisible();
-      expect(window.location.pathname).toBe("/translation");
+      expect(window.location.pathname).toBe(`${base}/translation`);
       expect(window.location.search).toBe("?tab=defaults&from=bookmark");
       expect(window.location.hash).toBe("#backend-2");
       expect(screen.queryByText("Translator Engine")).not.toBeInTheDocument();
@@ -273,9 +285,9 @@ describe("Translation addresses in the mounted application router", () => {
     },
   );
 
-  it.each(["translator", "translation"])(
-    "waits for status at /settings/%s without mounting legacy settings or Not Found",
-    async (path) => {
+  it.each(bookmarks)(
+    "retains $base/settings/$path while waiting for status without mounting a page",
+    async ({ path, base }) => {
       showStatus(true);
       const status = Promise.withResolvers<void>();
       const requested = Promise.withResolvers<void>();
@@ -286,12 +298,15 @@ describe("Translation addresses in the mounted application router", () => {
           return HttpResponse.json({ data: { translation_runtime_v2: true } });
         }),
       );
-      showApplication(`/settings/${path}${deepLink}`);
+      showApplication(`/settings/${path}${deepLink}`, base);
 
       try {
         await requested.promise;
         // The shell proves settings have arrived while system status is still pending.
         await screen.findByRole("button", { name: "Settings" });
+        expect(window.location.pathname).toBe(`${base}/settings/${path}`);
+        expect(window.location.search).toBe("?tab=defaults&from=bookmark");
+        expect(window.location.hash).toBe("#backend-2");
         expect(screen.queryByText("Translator Engine")).not.toBeInTheDocument();
         expect(screen.queryByText(/Page not found/)).not.toBeInTheDocument();
         expect(
@@ -301,12 +316,47 @@ describe("Translation addresses in the mounted application router", () => {
         expect(
           await screen.findByRole("tab", { name: "Defaults" }),
         ).toHaveAttribute("aria-selected", "true");
-        expect(window.location.pathname).toBe("/translation");
+        expect(window.location.pathname).toBe(`${base}/translation`);
         expect(window.location.search).toBe("?tab=defaults&from=bookmark");
         expect(window.location.hash).toBe("#backend-2");
       } finally {
         status.resolve();
       }
+    },
+  );
+
+  it.each(bookmarks)(
+    "keeps $base/settings/$path closed after an uncached status failure and retries before redirecting",
+    async ({ path, base }) => {
+      showStatus(true);
+      server.use(
+        http.get("/api/system/status", () =>
+          HttpResponse.json({ message: "Status unavailable" }, { status: 503 }),
+        ),
+      );
+      showApplication(`/settings/${path}${deepLink}`, base);
+
+      const retry = await screen.findByRole("button", { name: "Try again" });
+      expect(screen.getByRole("alert")).toBeVisible();
+      expect(window.location.pathname).toBe(`${base}/settings/${path}`);
+      expect(window.location.search).toBe("?tab=defaults&from=bookmark");
+      expect(window.location.hash).toBe("#backend-2");
+      expect(screen.queryByText("Translator Engine")).not.toBeInTheDocument();
+      expect(screen.queryByText(/Page not found/)).not.toBeInTheDocument();
+      expect(
+        screen.queryByRole("tab", { name: "Defaults" }),
+      ).not.toBeInTheDocument();
+
+      showStatus(true);
+      fireEvent.click(retry);
+
+      expect(
+        await screen.findByRole("tab", { name: "Defaults" }),
+      ).toHaveAttribute("aria-selected", "true");
+      expect(window.location.pathname).toBe(`${base}/translation`);
+      expect(window.location.search).toBe("?tab=defaults&from=bookmark");
+      expect(window.location.hash).toBe("#backend-2");
+      expect(screen.queryByText("Translator Engine")).not.toBeInTheDocument();
     },
   );
 });

@@ -382,6 +382,7 @@ export function useRoutes(): CustomRouteObject[] {
               {
                 path: "translator",
                 name: "AI Translator",
+                hidden: translationRuntime,
                 element: <TranslationSettingsRoute />,
               },
               {

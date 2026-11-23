@@ -1,7 +1,6 @@
 import { FunctionComponent, PropsWithChildren } from "react";
-import { LoadingOverlay } from "@mantine/core";
-import { useSystemStatus } from "@/apis/hooks/system";
 import NotFound from "@/pages/errors/NotFound";
+import SystemStatusGate from "./SystemStatusGate";
 
 /**
  * The Translation page belongs to the v2 translation runtime. While the
@@ -17,16 +16,12 @@ import NotFound from "@/pages/errors/NotFound";
  */
 const TranslationGate: FunctionComponent<PropsWithChildren> = ({
   children,
-}) => {
-  const { data, isPending } = useSystemStatus();
-  if (data?.translation_runtime_v2 === true) {
-    return children;
-  }
-  // The status has not answered yet: neither the page nor Not Found is known.
-  if (isPending) {
-    return <LoadingOverlay visible />;
-  }
-  return <NotFound />;
-};
+}) => (
+  <SystemStatusGate>
+    {(status) =>
+      status.translation_runtime_v2 === true ? children : <NotFound />
+    }
+  </SystemStatusGate>
+);
 
 export default TranslationGate;
