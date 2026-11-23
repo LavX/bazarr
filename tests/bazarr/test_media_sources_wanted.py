@@ -487,7 +487,8 @@ def test_explicit_api_opt_in_controls_search_all_but_not_the_source_schedule(
 
     monkeypatch.setattr(wanted, 'jobs_queue', isolated_jobs)
     monkeypatch.setattr(movies, 'jobs_queue', isolated_jobs)
-    monkeypatch.setattr(settings.media_sources, 'visible', False)
+    # An older config can still contain this key. It no longer gates the source schedule.
+    monkeypatch.setitem(settings.media_sources, 'visible', False)
     _, _, root = add_source(arr_library, tmp_path, profile_id=1)
     assert root.is_dir() and schedule.has_enabled_source(arr_library)
     plain = client.patch('/api/movies', headers=HEADERS, data={'action': 'search-wanted'})

@@ -385,8 +385,11 @@ def test_navigation_availability_keeps_browsing_and_searching_separate(api, cont
     from app.config import get_settings
     from media_sources import repository
 
-    assert get_settings()["media_sources"]["visible"] is False
+    assert "visible" not in get_settings()["media_sources"]
     hidden = {"browsable": False, "searchable": False, "retained": False}
+    retired = {**hidden, "retained": True}
+    if content_kind == "sports":
+        retired["removed"] = True
 
     def availability():
         response = api.client.get(SOURCES + "?availability=1", headers=HEADERS)
@@ -416,10 +419,10 @@ def test_navigation_availability_keeps_browsing_and_searching_separate(api, cont
         source_id=source_id, item_kind=item_kind, action=1, description="Downloaded"))
     api.db.execute(sa.insert(repository.Blacklist).values(source_id=source_id, item_kind=item_kind))
     assert api.client.delete(source_url, headers=HEADERS).status_code == 204
-    assert availability() == {**hidden, "retained": True}
+    assert availability() == retired
 
     api.db.execute(sa.delete(repository.History))
-    assert availability() == {**hidden, "retained": True}
+    assert availability() == retired
     api.db.execute(sa.delete(repository.Blacklist))
     assert availability() == hidden
 
