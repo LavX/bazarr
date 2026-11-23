@@ -323,7 +323,7 @@ def _postgres_server_major(connection):
         return None
 
 
-def _check_postgres_reachable(connection):
+def _check_postgres_reachable(connection, *, resolve_plugin_schema=False):
     """Raise PostgresUnreachableError unless the database takes a connection.
 
     Uses the settings pg_restore gets. pg_restore exits non-zero when it cannot
@@ -341,10 +341,49 @@ def _check_postgres_reachable(connection):
     if connection['password']:
         arguments['password'] = str(connection['password'])
     try:
-        driver.connect(_postgres_conninfo(connection), **arguments).close()
+        with closing(driver.connect(_postgres_conninfo(connection), **arguments)) as client:
+            if resolve_plugin_schema:
+                with closing(client.cursor()) as cursor:
+                    cursor.execute('''
+                        SELECT COALESCE((SELECT n.nspname
+                            FROM pg_catalog.pg_class AS c
+                            JOIN pg_catalog.pg_namespace AS n ON n.oid = c.relnamespace
+                            WHERE c.oid = pg_catalog.to_regclass('provider_hub_state')), current_schema())
+                    ''')
+                    return cursor.fetchone()[0]
     except Exception as error:
         raise PostgresUnreachableError(
             f'The PostgreSQL database could not be reached: {str(error).strip()}') from error
+
+
+def _verify_postgres_plugin_schema(dump_path):
+    """Require the dump's only plugin inventory to replace the one this connection reads."""
+    pg_restore = shutil.which('pg_restore')
+    if pg_restore is None:
+        raise BackupError(f'pg_restore was not found on PATH. {_PG_TOOLS_HINT}')
+    connection = _postgres_connection_settings()
+    if not _postgres_names_database(connection):
+        raise BackupError('No PostgreSQL database name is configured for the plugin data restore.')
+    schema = _check_postgres_reachable(connection, resolve_plugin_schema=True)
+    if not schema:
+        raise BackupError('The configured PostgreSQL connection does not resolve a plugin inventory schema.')
+
+    def inventory_entries(*selection):
+        # Let pg_restore select names, including schemas with spaces. The list
+        # contains object names and IDs, never data from any archived rows.
+        result = subprocess.run([pg_restore, '--list', '--table=provider_hub_state', *selection, dump_path],
+                                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, errors='replace')
+        if result.returncode != 0:
+            raise BackupError('The PostgreSQL dump catalog could not be read.')
+        return [entry for line in result.stdout.splitlines()
+                if (entry := re.match(r'^\d+;\s+\d+\s+\d+\s+(TABLE DATA|TABLE) ', line))]
+
+    archived = inventory_entries()
+    target = inventory_entries('--schema', schema)
+    expected = ['TABLE', 'TABLE DATA']
+    if sorted(entry[1] for entry in archived) != expected or sorted(entry[1] for entry in target) != expected:
+        raise BackupError('The PostgreSQL backup must contain a single plugin inventory in the schema '
+                          'the configured connection uses. The database was not changed.')
 
 
 def _dump_postgres_database(dest_path):
@@ -670,8 +709,9 @@ def _refuse_start_after_failed_restore(failed_dump_path, journal):
     """
     if journal.is_file():
         logging.critical('An earlier PostgreSQL restore failed partway. Bazarr will not start on this '
-                         'database. Keep the dump at %s and the checkpoint at %s. See the backup '
-                         'documentation for how to retry or complete the restore.', failed_dump_path, journal)
+                         'database. Keep the dump at %s and the checkpoint at %s. Verify that the old '
+                         'process has exited and follow the backup documentation to recover the '
+                         'database before clearing the checkpoint.', failed_dump_path, journal)
         stop_bazarr(EXIT_RESTORE_ERROR)
         return
     logging.critical('An earlier restore of the PostgreSQL database failed partway, so the database '
@@ -739,7 +779,11 @@ def _prepare_restored_configuration(source_path, staged_path, *, preserve_databa
         # The dump went to the currently configured database. The next boot
         # must read its plugin inventory through the same connection settings.
         database = dict(settings.postgresql)
-        if database.get('password'):
+        from secret_store.registry import is_user_visible_secret
+
+        credentials = [field for field, value in database.items()
+                       if value and is_user_visible_secret(f'postgresql.{field.lower()}')]
+        if credentials:
             from secret_store.crypto import encrypt_secret
 
             general = restored.setdefault(existing_key(restored, 'general'), {})
@@ -750,7 +794,8 @@ def _prepare_restored_configuration(source_path, staged_path, *, preserve_databa
             if not isinstance(master_key, str):
                 raise BackupError('The backup encryption key is invalid')
             general[key] = master_key
-            database['password'] = encrypt_secret(database['password'], master_key=master_key)
+            for field in credentials:
+                database[field] = encrypt_secret(database[field], master_key=master_key)
         restored[existing_key(restored, 'postgresql')] = database
 
     prepared_path = f'{staged_path}.prepared'
@@ -869,7 +914,10 @@ def _restore_from_archive(stage, payload):
         _clear_restore_directory(stage, payload)
         return False
 
-    if has_plugins:
+    postgres = _postgres_enabled()
+    if postgres and (payload / datadir.ARCHIVE_DIR).is_dir():
+        _verify_postgres_plugin_schema(restore_database_path)
+    if has_plugins or postgres:
         datadir.sync_file(Path(staged_config_path))
         datadir.sync_directory(Path(staged_config_path).parent)
         _write_plugin_restore_phase(journal, _DATABASE_STARTED)
@@ -877,8 +925,8 @@ def _restore_from_archive(stage, payload):
         _restore_database(restore_database_path, dest_database_path)
     except (BackupError, OSError, shutil.Error) as error:
         if isinstance(error, DatabaseRestoreUncertainError):
-            if not has_plugins and _postgres_enabled():
-                # Keep the original and staged configuration alongside the dump.
+            if not has_plugins and postgres:
+                # The checkpoint already fences replay even if parking fails.
                 os.replace(restore_database_path, failed_dump_path)
                 datadir.sync_directory(payload)
             logging.exception('The database restore outcome could not be confirmed. Bazarr is stopping. '
@@ -892,7 +940,7 @@ def _restore_from_archive(stage, payload):
             logging.error('%s. The restore did not start, so the database was not touched and nothing '
                           'was changed. The extracted backup stays in %s and the restore is tried again '
                           'at the next start.', error, payload)
-            if has_plugins:
+            if has_plugins or postgres:
                 journal.unlink()
                 datadir.sync_directory(stage)
             _delete_file(staged_config_path)
@@ -920,26 +968,19 @@ def _restore_from_archive(stage, payload):
                                   'kept there and the backup archive it came from is still in %s, so '
                                   'the restore can be retried.',
                                   failed_dump_path, get_backup_path())
-                if not has_plugins:
-                    _delete_file(restore_config_path)
-                    _delete_file(staged_config_path)
             else:
                 # The dump could not be moved aside, so the staged set is left
                 # whole. Deleting the configuration beside it would make the
                 # next start read the dump as a partial backup and delete the
                 # very file this message points at.
-                recovery = ('keep the staged files for manual recovery.' if has_plugins
-                            else 'the next start will try this restore again.')
                 logging.exception('Restoring the PostgreSQL database failed partway. pg_restore drops '
                                   'the existing objects before it loads the new ones and cannot undo '
                                   'that, so this database may now be partially restored and must not be '
                                   'used until it has been restored again or rebuilt. Bazarr is '
                                   'stopping. The extracted dump could not be moved aside either, so the '
-                                  'whole extracted backup has been left in %s. For recovery, %s', payload, recovery)
-                if not has_plugins:
-                    _delete_file(staged_config_path)
+                                  'whole extracted backup has been left in %s for manual recovery.', payload)
             stop_bazarr(EXIT_RESTORE_ERROR)
-        elif _postgres_enabled():
+        elif postgres:
             # Nothing reached pg_restore, so the database is exactly as it was.
             logging.exception('The restore was refused before pg_restore was started, so the database '
                               'was not touched and nothing was changed. Fix the problem reported above '

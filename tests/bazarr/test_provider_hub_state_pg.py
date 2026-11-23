@@ -673,6 +673,35 @@ def test_postgres_restore_keeps_an_ambiguous_database_step_for_operator_verifica
     assert instance.tool_runs.read_text(encoding="utf-8").splitlines() == ["pg_dump", "pg_restore"]
 
 
+@pytest.mark.parametrize('extra_inventory', [False, True], ids=['different-schema', 'multiple-schemas'])
+def test_postgres_restore_preserves_payload_when_its_inventory_does_not_match_live_schema(
+        postgres_restore_instance, extra_inventory):
+    from literals import EXIT_RESTORE_ERROR
+
+    instance = postgres_restore_instance
+    if extra_inventory:
+        instance.child('seed', 'other inventory in archive')
+    instance.configure('search_path')
+    archive = instance.archive()
+    instance.child('seed', 'current custom schema inventory')
+    instance.sample.write_text('current plugin files', encoding='utf-8')
+    if not extra_inventory:
+        instance.configure('direct')
+        instance.child('seed', 'current target schema inventory with matching data key')
+    instance.child('prepare', archive.name)
+    instance.child('boot', expected=EXIT_RESTORE_ERROR & 255)
+
+    expected = ('current custom schema inventory' if extra_inventory
+                else 'current target schema inventory with matching data key')
+    assert json.loads(instance.child('check'))['name'] == expected
+    assert instance.sample.read_text(encoding='utf-8') == 'current plugin files'
+    assert instance.tool_runs.read_text(encoding='utf-8').splitlines() == ['pg_dump']
+    assert archive.is_file()
+    assert (instance.stage / 'payload' / 'bazarr_postgres.dump').is_file()
+    assert (instance.stage / 'payload' / 'config.yaml').is_file()
+    assert not (instance.stage / '.plugin-restore-phase').exists()
+
+
 def test_postgres_restore_accepts_a_legacy_archive_without_plugin_metadata(postgres_restore_instance):
     from zipfile import ZipFile
 

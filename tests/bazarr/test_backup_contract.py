@@ -114,6 +114,7 @@ def backup_env(monkeypatch, tmp_path):
     # There is no server behind the fake client tools. The tests that are about
     # the connection check put the real one back.
     monkeypatch.setattr(backup_module, '_check_postgres_reachable', lambda connection: None)
+    monkeypatch.setattr(backup_module, '_verify_postgres_plugin_schema', lambda path: None)
 
     tools_dir = tmp_path / 'bin'
     tools_dir.mkdir()
@@ -339,7 +340,8 @@ def test_postgres_restore_aborts_before_the_restart_when_pg_restore_fails(backup
 
 
 @pytest.mark.parametrize('plugin_data', [False, True])
-@pytest.mark.parametrize('process_failure', ['output unavailable', 'process interrupted'])
+@pytest.mark.parametrize('process_failure', ['output unavailable', 'process interrupted', 'host exited',
+                                             'cannot park dump'])
 def test_pg_restore_keeps_inputs_after_an_uncertain_process_failure(
         backup_env, monkeypatch, plugin_data, process_failure):
     _enable_postgresql(backup_env, monkeypatch)
@@ -348,31 +350,52 @@ def test_pg_restore_keeps_inputs_after_an_uncertain_process_failure(
     module = backup_env.module
     if plugin_data:
         (backup_env.restore_dir / module.datadir.ARCHIVE_DIR).mkdir()
+    checkpoint = backup_env.restore_dir / module._PLUGIN_RESTORE_PHASE
 
     def communicate():
-        if process_failure == 'output unavailable':
+        if process_failure in {'output unavailable', 'cannot park dump'}:
             raise OSError('process output unavailable')
+        if process_failure == 'host exited':
+            raise SystemExit(42)
         return '', ''
 
     launched = []
 
     def start(command, **kwargs):
+        assert checkpoint.read_text().strip() == module._DATABASE_STARTED
         launched.append(command[0])
         return SimpleNamespace(communicate=communicate, stdout=None, stderr=None, returncode=-9)
 
     monkeypatch.setattr(module.subprocess, 'Popen', start)
-    for _ in range(2):
+    if process_failure == 'cannot park dump':
+        replace = os.replace
+
+        def cannot_park(source, destination):
+            if str(destination).endswith('.failed'):
+                raise OSError('dump could not be moved')
+            return replace(source, destination)
+
+        monkeypatch.setattr(os, 'replace', cannot_park)
+    if process_failure == 'host exited':
+        with pytest.raises(SystemExit, match='42'):
+            module.restore_from_backup()
+        assert backup_env.stops == []
+    else:
         assert not module.restore_from_backup()
+        assert backup_env.stops == [module.EXIT_RESTORE_ERROR]
+        backup_env.stops.clear()
+    assert not module.restore_from_backup()
     assert len(launched) == 1
-    assert backup_env.stops == [module.EXIT_RESTORE_ERROR] * 2
+    assert backup_env.stops == [module.EXIT_RESTORE_ERROR]
     assert backup_env.restarts == []
-    dump = 'bazarr_postgres.dump' if plugin_data else 'bazarr_postgres.dump.failed'
+    parked = not plugin_data and process_failure not in {'cannot park dump', 'host exited'}
+    dump = 'bazarr_postgres.dump.failed' if parked else 'bazarr_postgres.dump'
     assert (backup_env.restore_dir / dump).is_file()
     assert (backup_env.restore_dir / 'config.yaml').is_file()
     assert (backup_env.config_dir / 'config' / 'config.yaml.restore').is_file()
 
 
-def test_plugin_restore_preserves_the_current_database_password_under_the_archived_key(
+def test_plugin_restore_preserves_the_current_database_credentials_under_the_archived_key(
         backup_env, monkeypatch):
     from secret_store.crypto import decrypt_secret, encrypt_secret
 
@@ -393,9 +416,11 @@ def test_plugin_restore_preserves_the_current_database_password_under_the_archiv
     assert prepared['general']['secrets_encryption_key'] == archived_key
     assert prepared['postgresql']['enabled'] is True
     assert prepared['postgresql']['database'] == 'bazarr'
-    password = prepared['postgresql']['password']
-    assert password != backup_env.settings.postgresql.password
-    assert decrypt_secret(password, master_key=archived_key) == backup_env.settings.postgresql.password
+    for name in ('username', 'password'):
+        protected = prepared['postgresql'][name]
+        current = backup_env.settings.postgresql[name]
+        assert protected != current
+        assert decrypt_secret(protected, master_key=archived_key) == current
     assert prepared['opensubtitlescom'] == yaml.safe_load(source.read_text(encoding='utf-8'))['opensubtitlescom']
 
 
@@ -716,10 +741,11 @@ def test_a_dump_that_cannot_be_moved_aside_keeps_the_whole_staged_backup(backup_
     assert backup_env.restarts == []
     assert MID_RESTORE_WORDING in caplog.text
     assert 'could not be moved aside' in caplog.text
-    assert 'the next start will try this restore again' in caplog.text
-    # The whole staged set survives, so the next start can finish the job and
-    # nothing deletes the dump the message points at.
-    assert sorted(os.listdir(backup_env.restore_dir)) == ['bazarr_postgres.dump', 'config.yaml']
+    assert 'manual recovery' in caplog.text
+    # The whole staged set survives for manual recovery and cannot be replayed.
+    assert sorted(os.listdir(backup_env.restore_dir)) == [
+        backup_env.module._PLUGIN_RESTORE_PHASE, 'bazarr_postgres.dump', 'config.yaml',
+    ]
 
 
 def test_a_failing_pg_restore_says_the_database_may_be_half_restored(backup_env, monkeypatch, caplog):
@@ -739,7 +765,7 @@ def test_a_failing_pg_restore_says_the_database_may_be_half_restored(backup_env,
     kept = backup_env.restore_dir / 'bazarr_postgres.dump.failed'
     assert kept.is_file()
     assert str(kept) in caplog.text
-    assert not (backup_env.restore_dir / 'config.yaml').exists()
+    assert (backup_env.restore_dir / 'config.yaml').is_file()
 
 
 def test_a_failing_sqlite_restore_still_says_the_database_was_left_alone(backup_env, monkeypatch, caplog):
@@ -799,7 +825,8 @@ def test_a_pg_restore_that_fails_partway_stops_the_start(backup_env, monkeypatch
     assert 'Bazarr is stopping' in caplog.text
 
 
-def test_the_start_after_a_partial_pg_restore_is_refused_too(backup_env, monkeypatch, caplog):
+@pytest.mark.parametrize('checkpoint_exists', [True, False], ids=['checkpoint', 'legacy-failed-dump'])
+def test_the_start_after_a_partial_pg_restore_is_refused_too(backup_env, monkeypatch, caplog, checkpoint_exists):
     from literals import EXIT_RESTORE_ERROR
 
     _enable_postgresql(backup_env, monkeypatch)
@@ -813,7 +840,10 @@ def test_the_start_after_a_partial_pg_restore_is_refused_too(backup_env, monkeyp
     backup_env.stops.clear()
     caplog.clear()
 
-    # The next start: nothing is staged any more, only the parked dump.
+    # Older installations park only the dump and have no checkpoint.
+    checkpoint = backup_env.restore_dir / backup_env.module._PLUGIN_RESTORE_PHASE
+    if not checkpoint_exists:
+        checkpoint.unlink()
     with caplog.at_level('CRITICAL'):
         assert backup_env.module.restore_from_backup() is False
 
@@ -822,9 +852,13 @@ def test_the_start_after_a_partial_pg_restore_is_refused_too(backup_env, monkeyp
     assert kept.is_file(), 'the dump the message points at is gone'
     # The message says exactly how to get out of it.
     assert str(kept) in caplog.text
-    assert f'into {backup_env.restore_dir}' in caplog.text
-    assert str(backup_env.backup_dir) in caplog.text
-    assert 'pg_restore --clean --if-exists --no-owner' in caplog.text
+    if checkpoint_exists:
+        assert str(checkpoint) in caplog.text
+        assert 'old process has exited' in caplog.text
+    else:
+        assert f'into {backup_env.restore_dir}' in caplog.text
+        assert str(backup_env.backup_dir) in caplog.text
+        assert 'pg_restore --clean --if-exists --no-owner' in caplog.text
 
 
 @pytest.mark.parametrize('engine', ['sqlite', 'postgresql'])

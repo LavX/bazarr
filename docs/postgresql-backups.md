@@ -80,10 +80,14 @@ If the folder step fails, the staged files are retained and the next start retri
 For backups with plugin data, the restored configuration keeps the current database connection settings so
 the next boot can read the restored inventory. Keep the effective environment and libpq settings the same
 until the restore finishes.
+Before restoring an archive with plugin folders, Bazarr+ checks that the PostgreSQL dump contains a single
+plugin inventory in the schema the configured connection reads. If the schema cannot be matched, Bazarr+
+keeps the staged archive and stops before changing the database.
 
-For a plugin-bearing backup, `.plugin-restore-phase` sits beside the API extraction directory or at the top
-level of `restore` for a manual extraction. If it says `database-started`, the last database operation did
-not record completion. Keep the extracted files and make sure the old restore process has exited. To retry the
+The `.plugin-restore-phase` checkpoint covers PostgreSQL restores and SQLite restores with plugin data. It sits
+beside the API extraction directory or at the top level of `restore` for a manual extraction. If it says
+`database-started`, the last database operation did not record completion. Keep the extracted files and make
+sure the old restore process has exited. To retry the
 database restore, put the original dump and configuration back into the extraction directory, remove any
 `bazarr_postgres.dump.failed` and remove the checkpoint before starting Bazarr+. To continue after manually
 completing or verifying the same database restore, keep the staged configuration at
