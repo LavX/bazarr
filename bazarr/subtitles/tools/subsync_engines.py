@@ -220,7 +220,7 @@ def subtitle_mutation(video_path, *paths, invalidate_outputs=True, ownership_ind
 def staged_subtitle_write(video_path, destination, before_publish=None, allow_empty=False,
                           source_paths=(), after_publish=None, on_publish=None,
                           publication_guard=None, cancel=None, expected_versions=(),
-                          after_write=None, ownership_index=None):
+                          after_write=None, ownership_index=None, rollback_new_on_guard_error=False):
     """Compute privately, then publish only while source and destination are current."""
     with subtitle_write_locks(video_path, destination, *source_paths,
                               **({} if cancel is None else {'cancel': cancel})) as states:
@@ -244,20 +244,36 @@ def staged_subtitle_write(video_path, destination, before_publish=None, allow_em
                                   **({} if cancel is None else {'cancel': cancel})):
             with subtitle_mutation(video_path, destination,
                                    **({'ownership_index': ownership_index} if ownership_index is not None else {})):
-                with publication_guard() if publication_guard is not None else nullcontext():
-                    validate_subtitle_versions(expected_versions)
-                    if before_publish:
-                        before_publish()
-                    if destination_version != version(destination):
-                        raise SubtitleDestinationChanged('Subtitle changed during processing')
-                    if any(expected[1] is None or expected != version(path) for path, expected in source_versions.items()):
-                        raise SubtitleSourceChanged('Source subtitle changed during processing')
-                    if os.path.isfile(destination):
-                        shutil.copymode(destination, temporary)
-                    os.replace(temporary, destination)
-                    _report_subtitle_publication(on_publish, destination)
-                    if after_publish:
-                        after_publish()
+                installed = None
+                try:
+                    with publication_guard() if publication_guard is not None else nullcontext():
+                        validate_subtitle_versions(expected_versions)
+                        if before_publish:
+                            before_publish()
+                        if destination_version != version(destination):
+                            raise SubtitleDestinationChanged('Subtitle changed during processing')
+                        if any(expected[1] is None or expected != version(path)
+                               for path, expected in source_versions.items()):
+                            raise SubtitleSourceChanged('Source subtitle changed during processing')
+                        if os.path.isfile(destination):
+                            shutil.copymode(destination, temporary)
+                        staged = regular_subtitle_version(temporary) if rollback_new_on_guard_error else None
+                        os.replace(temporary, destination)
+                        if staged is not None:
+                            written = regular_subtitle_version(destination)
+                            # A rename can change ctime. Check that this is the staged file.
+                            if written is not None and written[:4] == staged[:4]:
+                                installed = written
+                        _report_subtitle_publication(on_publish, destination)
+                        if after_publish:
+                            after_publish()
+                except BaseException:
+                    if installed is not None and regular_subtitle_version(destination) == installed:
+                        try:
+                            os.replace(destination, temporary)
+                        except OSError:
+                            logging.exception('BAZARR could not roll back the new subtitle %s', destination)
+                    raise
             # Mutation revisions are settled. This still holds the coordinator,
             # but the optional publication writer transaction has ended.
             if after_write:
@@ -302,10 +318,12 @@ def validate_subtitle_versions(snapshots):
 
 
 def write_subtitle_file(video_path, destination, content, written_paths=None,
-                        on_publish=None, publication_guard=None, after_write=None, ownership_index=None):
+                        on_publish=None, publication_guard=None, after_write=None, ownership_index=None,
+                        rollback_new_on_guard_error=False):
     """Write one saver output atomically and record that exact successful path."""
     with staged_subtitle_write(video_path, destination, on_publish=on_publish,
                               publication_guard=publication_guard, after_write=after_write,
+                              rollback_new_on_guard_error=rollback_new_on_guard_error,
                               after_publish=(lambda: written_paths.append(destination))
                               if written_paths is not None else None,
                               **({'ownership_index': ownership_index} if ownership_index is not None else {})

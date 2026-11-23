@@ -10,7 +10,7 @@ from media_servers.events import publication_callback
 from arr_instances.resolution import scoped
 import subliminal
 import ast
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 
 from subzero.language import Language
 from subliminal_patch.core import save_subtitles
@@ -417,37 +417,40 @@ def _write_source_download(video_path, destination, content, *, source, language
     @contextmanager
     def publication():
         recheck_paths = (destination, old_path) if upgrade is not None else ()
-        with ownership_index.publication(source, prepare, destination=registry_destination,
-                                         recheck_paths=recheck_paths) as (
-                current, connection, external_subtitles):
-            if current is None or current.path != video_path:
-                raise SubtitleDestinationChanged('The source item moved or was removed')
-            overwrite = is_upgrade if upgrade is None else same_destination
-            if os.path.lexists(destination) and (not overwrite or regular_subtitle_version(destination) is None):
-                raise SubtitleDestinationChanged('The source subtitle destination is already occupied')
-            if upgrade is not None:
-                if current.profile_id != source.profile_id or not upgrade.can_publish(current, target=connection):
-                    raise SubtitleDestinationChanged('Source upgrade eligibility changed during search')
-            elif wanted_stamp is not None:
-                if not _wanted_source_can_publish(current, language, wanted_stamp, wanted_profile, target=connection):
-                    raise SubtitleDestinationChanged('Wanted source eligibility changed during search')
-            elif recheck_missing and language not in check_missing_languages_source(
-                    current, external_subtitles=external_subtitles, target=connection):
-                raise SubtitleDestinationChanged('The source language is no longer missing')
-            if remove_previous:
-                with subtitle_mutation(video_path, old_path, invalidate_outputs=False):
-                    with _retire_source_subtitle(old_path, upgrade.subtitle_version):
-                        yield
-                quarantine_sync_outputs_after_mutation(video_path, old_path, ownership_index)
-            else:
+        # Register retirement inside the transaction and keep its backup until commit exits.
+        with ExitStack() as retirement:
+            with ownership_index.publication(source, prepare, destination=registry_destination,
+                                             recheck_paths=recheck_paths) as (
+                    current, connection, external_subtitles):
+                if current is None or current.path != video_path:
+                    raise SubtitleDestinationChanged('The source item moved or was removed')
+                overwrite = is_upgrade if upgrade is None else same_destination
+                if os.path.lexists(destination) and (not overwrite or regular_subtitle_version(destination) is None):
+                    raise SubtitleDestinationChanged('The source subtitle destination is already occupied')
+                if upgrade is not None:
+                    if current.profile_id != source.profile_id or not upgrade.can_publish(current, target=connection):
+                        raise SubtitleDestinationChanged('Source upgrade eligibility changed during search')
+                elif wanted_stamp is not None:
+                    if not _wanted_source_can_publish(current, language, wanted_stamp, wanted_profile,
+                                                      target=connection):
+                        raise SubtitleDestinationChanged('Wanted source eligibility changed during search')
+                elif recheck_missing and language not in check_missing_languages_source(
+                        current, external_subtitles=external_subtitles, target=connection):
+                    raise SubtitleDestinationChanged('The source language is no longer missing')
+                if remove_previous:
+                    retirement.enter_context(subtitle_mutation(video_path, old_path, invalidate_outputs=False))
+                    retirement.enter_context(_retire_source_subtitle(old_path, upgrade.subtitle_version))
                 yield
+                if remove_previous:
+                    quarantine_sync_outputs_after_mutation(video_path, old_path, ownership_index)
 
     try:
         # Report a new filename only once the previous subtitle has been removed.
         write_subtitle_file(video_path, destination, content,
                             written_paths=None if remove_previous else written_paths,
                             on_publish=None if remove_previous else on_publish,
-                            publication_guard=publication, ownership_index=ownership_index)
+                            publication_guard=publication, ownership_index=ownership_index,
+                            rollback_new_on_guard_error=remove_previous)
     except SubtitleDestinationChanged as error:
         logging.info('BAZARR skipped saving a subtitle for source item %s: %s', source.item_id, error)
         return False

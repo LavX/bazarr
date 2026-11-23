@@ -1,7 +1,13 @@
 """Source upgrades and opt-in history statistics on SQLite and PostgreSQL."""
 import json
+import os
+import unicodedata
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from datetime import datetime, timedelta
 from pathlib import Path
+from threading import Event
+from time import monotonic, sleep
 from unittest.mock import Mock
 
 import pytest
@@ -176,7 +182,7 @@ def record_rows(db):
     return db.execute(sa.select(table.id, table.action, table.upgradedFromId).order_by(table.id)).all()
 
 
-@pytest.mark.parametrize('failure_step', ['remove old', 'publish new'])
+@pytest.mark.parametrize('failure_step', ['remove old', 'publish new', 'commit guard'])
 def test_failed_source_replacement_leaves_upgrade_retryable(world, monkeypatch, failure_step):
     from media_sources.history import get_upgradable_source_subtitles
     from media_sources.indexer import index_item
@@ -195,6 +201,7 @@ def test_failed_source_replacement_leaves_upgrade_retryable(world, monkeypatch, 
     remove = download.os.remove
     replace = download.os.replace
     failures = []
+    guard_backups = []
 
     def fail_original_removal(path, *args, **kwargs):
         if Path(path) == original:
@@ -208,6 +215,12 @@ def test_failed_source_replacement_leaves_upgrade_retryable(world, monkeypatch, 
             raise PermissionError('Cannot publish the new sidecar')
         return replace(source, target, *args, **kwargs)
 
+    def fail_guard_commit(connection):
+        if destination.exists() and not original.exists() and not failures:
+            failures.append('commit guard')
+            guard_backups.extend(path.read_bytes() for path in media.parent.glob('.bazarr-replaced-*'))
+            raise sa.exc.OperationalError('COMMIT', None, OSError('Lost the connection during commit'))
+
     with monkeypatch.context() as failure:
         if failure_step == 'remove old':
             failure.setattr(download.os, 'remove', fail_original_removal)
@@ -220,11 +233,20 @@ def test_failed_source_replacement_leaves_upgrade_retryable(world, monkeypatch, 
                 return real_unlink(path, *args, **kwargs)
 
             failure.setattr(download.os, 'unlink', fail_destination_cleanup)
-        else:
+        elif failure_step == 'publish new':
             failure.setattr(download.os, 'replace', fail_destination_publication)
-        upgrade.upgrade_source_subtitles(job_id=10)
+        engine = world.db.get_bind()
+        if failure_step == 'commit guard':
+            sa.event.listen(engine, 'commit', fail_guard_commit)
+        try:
+            upgrade.upgrade_source_subtitles(job_id=10)
+        finally:
+            if failure_step == 'commit guard':
+                sa.event.remove(engine, 'commit', fail_guard_commit)
 
     assert failures == [failure_step]
+    if failure_step == 'commit guard':
+        assert guard_backups == [b'Old subtitle']
     assert record_rows(world.db) == [(first, 1, None)]
     assert original.read_bytes() == b'Old subtitle'
     assert not destination.exists()
@@ -238,9 +260,88 @@ def test_failed_source_replacement_leaves_upgrade_retryable(world, monkeypatch, 
     assert not original.exists()
 
 
+def test_postgres_shared_upgrade_blocks_normal_arr_insert_through_publication(world, backend, monkeypatch):
+    if backend != 'postgresql':
+        pytest.skip('PostgreSQL is needed to observe a concurrent Arr insert')
+
+    from app.config import settings
+    from app.database import TableArrInstances, TableMovies
+    from media_sources.indexer import index_item
+    from radarr.sync import movies
+    from subtitles import download, upgrade
+
+    context = pipeline._movie(world)
+    media = Path(context.path)
+    folder = pipeline._custom_folder(world, monkeypatch, world.tmp_path)
+    original = folder / media.with_suffix('.en.hi.srt').name
+    destination = folder / media.with_suffix('.en.srt').name
+    arr_path = video(world.tmp_path / 'arr' / media.name)
+    original.write_bytes(b'Old subtitle')
+    index_item(context.item_id)
+    first = _history(world.db, world.source_id, context.item_id, media, original, language='en:hi')
+    world.db.execute(sa.insert(TableArrInstances).values(
+        id=42, kind='radarr', name='Cinema', stable_key='cinema', port=9800, enabled=1))
+    monkeypatch.setattr(settings.general, 'use_radarr', True)
+    monkeypatch.setattr(movies, 'database', world.db)
+    monkeypatch.setattr(movies, 'store_subtitles_movie', Mock())
+    monkeypatch.setattr(movies, 'event_stream', Mock())
+    monkeypatch.setattr(upgrade, 'get_providers', lambda: ['fake'])
+    monkeypatch.setattr(upgrade, 'jobs_queue', Mock())
+    pipeline._download(monkeypatch)
+
+    start_insert, insert_ready = Event(), Event()
+    writer_pids, blockers = [], []
+    engine = world.db.get_bind()
+    replace = download.os.replace
+
+    def insert_movie():
+        try:
+            assert start_insert.wait(10)
+            connection = world.db.connection()
+            connection.exec_driver_sql("SET statement_timeout = '10s'")
+            writer_pids.append(connection.exec_driver_sql('SELECT pg_backend_pid()').scalar_one())
+            insert_ready.set()
+            movies.add_movie(dict(id=73, arr_instance_id=42, radarrId=9000, title='Film',
+                                  path=str(arr_path), tmdbId='73'))
+        finally:
+            world.db.remove()
+
+    def observe_destination_swap(staged, target):
+        if Path(target) == destination:
+            start_insert.set()
+            assert insert_ready.wait(10)
+            with engine.connect() as observer:
+                deadline = monotonic() + 5
+                while not writer.done():
+                    pids = observer.scalar(sa.text('SELECT pg_blocking_pids(:pid)'), {'pid': writer_pids[0]})
+                    if pids:
+                        blockers.extend(pids)
+                        break
+                    assert monotonic() < deadline, 'Arr insert did not reach the ownership lock'
+                    sleep(0.01)
+        return replace(staged, target)
+
+    monkeypatch.setattr(download.os, 'replace', observe_destination_swap)
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        writer = pool.submit(insert_movie)
+        try:
+            upgrade.upgrade_source_subtitles(job_id=10)
+            assert start_insert.is_set(), 'upgrade never reached the file swap'
+        finally:
+            start_insert.set()
+        writer.result(timeout=10)
+
+    assert blockers, 'Ordinary Arr insert completed before the subtitle publication transaction exited'
+    assert world.db.scalar(sa.select(TableMovies.path)) == str(arr_path)
+    assert record_rows(world.db) == [(first, 1, None), (first + 1, 3, first)]
+    assert destination.read_bytes() == pipeline.CONTENT
+    assert not original.exists()
+
+
 @pytest.mark.parametrize('change', [
     'subtitle', 'monitoring', 'other destination', 'arr owner', 'arr owner after prepare',
-    'shared Arr owner after prepare', 'mapped shared Arr owner after prepare', 'history score', 'history superseded',
+    'shared Arr owner after prepare', 'mapped shared Arr owner after prepare', 'mapped shared Arr owner at old stem',
+    'history score', 'history superseded',
 ])
 def test_upgrade_preserves_files_when_eligibility_changes_during_download(world, monkeypatch, change):
     from app.config import settings
@@ -249,22 +350,29 @@ def test_upgrade_preserves_files_when_eligibility_changes_during_download(world,
     from media_sources.indexer import index_item
     from subtitles import download, upgrade
 
-    context = pipeline._movie(world)
+    old_stem_only = change == 'mapped shared Arr owner at old stem'
+    context = (pipeline._movie(world, name='Tűz.2001.1080p.BluRay.x264-GRP.mkv') if old_stem_only
+               else pipeline._movie(world))
     media = Path(context.path)
     shared = 'shared Arr' in change
-    mapped = change == 'mapped shared Arr owner after prepare'
+    mapped = change.startswith('mapped')
     folder = pipeline._custom_folder(world, monkeypatch, world.tmp_path) if shared else media.parent
     destination = folder / media.with_suffix('.en.srt').name
-    original = destination if mapped else folder / media.with_suffix('.en.hi.srt').name
-    arr_path = video(world.tmp_path / 'arr' / media.name) if shared else media
+    same_destination = mapped and not old_stem_only
+    original = destination if same_destination else folder / media.with_suffix('.en.hi.srt').name
+    arr_name = (unicodedata.normalize('NFD', original.with_suffix('.mkv').name.upper()) if old_stem_only
+                else media.name)
+    arr_path = video(world.tmp_path / 'arr' / arr_name) if shared else media
+    unrelated = world.tmp_path / 'arr' / 'Unrelated.mkv'
     stored_arr_path = '/remote/Arr Movie.mkv' if mapped else str(arr_path)
     mappings = [[stored_arr_path, str(arr_path)]] if mapped else []
     original.write_bytes(b'Old subtitle')
     index_item(context.item_id)
     first = _history(world.db, world.source_id, context.item_id, media, original,
-                     language='en' if mapped else 'en:hi')
+                     language='en' if same_destination else 'en:hi')
     monkeypatch.setattr(upgrade, 'get_providers', lambda: ['fake'])
     monkeypatch.setattr(upgrade, 'jobs_queue', Mock())
+    unrelated_resolutions = []
 
     def claim():
         monkeypatch.setattr(settings.general, 'use_radarr', True)
@@ -273,13 +381,28 @@ def test_upgrade_preserves_files_when_eligibility_changes_during_download(world,
             path_mappings=json.dumps(mappings)))
         world.db.execute(sa.insert(TableMovies).values(
             id=73, arr_instance_id=42, radarrId=9000, title='Film', path=stored_arr_path, tmdbId='73'))
+        if old_stem_only:
+            world.db.execute(sa.insert(TableMovies).values(
+                id=74, arr_instance_id=42, radarrId=9001, title='Unrelated', path=str(unrelated), tmdbId='74'))
 
     if change == 'arr owner after prepare' or shared:
         publication = indexer.source_item_publication
 
+        @contextmanager
         def claim_at_registry_lock(source, **kwargs):
             claim()
-            return publication(source, **kwargs)
+            realpath = os.path.realpath
+
+            def watch_realpath(path, **options):
+                if path == str(unrelated):
+                    unrelated_resolutions.append(path)
+                return realpath(path, **options)
+
+            with monkeypatch.context() as watch:
+                if old_stem_only:
+                    watch.setattr(os.path, 'realpath', watch_realpath)
+                with publication(source, **kwargs) as guarded:
+                    yield guarded
 
         monkeypatch.setattr(indexer, 'source_item_publication', claim_at_registry_lock)
 
@@ -304,7 +427,8 @@ def test_upgrade_preserves_files_when_eligibility_changes_during_download(world,
     upgrade.upgrade_source_subtitles(job_id=10)
     download_attempt.assert_called_once()
     if shared:
-        assert world.db.scalar(sa.select(TableMovies.path)) == stored_arr_path
+        assert world.db.scalar(sa.select(TableMovies.path).where(TableMovies.id == 73)) == stored_arr_path
+    assert not unrelated_resolutions
     expected_history = [(first, 1, None)]
     if change == 'history superseded':
         expected_history.append((first + 1, 2, None))

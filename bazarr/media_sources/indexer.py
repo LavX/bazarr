@@ -9,6 +9,7 @@ import ast
 import logging
 import os
 import sqlite3
+import unicodedata
 from contextlib import contextmanager
 from functools import partial
 from time import sleep
@@ -33,14 +34,14 @@ from subtitles.indexer.utils import (_get_lang_from_str, add_combined_outputs, a
                                      subtitle_language_with_sync_modifier)
 from subtitles.tools.combine.naming import parse_combined_filename
 from subtitles.tools.combine.rules import _dotted_custom_aliases
-from subtitles.tools.subsync_engines import (SYNC_ENGINE_LANGUAGE_MODIFIERS, SubtitleDestinationChanged,
-                                             SubtitleSourceChanged, SyncOutputOwnerIndex, _normalized_media_stem,
+from subtitles.tools.subsync_engines import (SYNC_ENGINES, SYNC_ENGINE_LANGUAGE_MODIFIERS, SubtitleDestinationChanged,
+                                             SubtitleSourceChanged, SyncOutputOwnerIndex, _normalized_media_stem, engine_output_path,
                                              read_regular_subtitle, regular_subtitle_version, subtitle_write_locks,
                                              sync_engine_from_output_path, sync_output_owner_is_unique)
 from utilities.helper import get_subtitle_destination_folder, get_target_folder
 from utilities.video_analyzer import audio_languages_from_metadata, embedded_subtitles_from_metadata
 
-from . import repository
+from . import identity, repository
 from .analysis import (cached_metadata, failed_probe_values, index_matches_file, local_stat, probe_item,
                        read_metadata, streams)
 from .context import resolve_same_item, source_item_publication
@@ -113,18 +114,67 @@ class SourcePublicationOwnersChanged(SubtitleDestinationChanged):
     """The prepared shared ownership could not be pinned for publication."""
 
 
+def _owner_stem_filter(path, stems, connection):
+    """Filter candidate mapped basenames before resolving their directories on disk."""
+    if connection.dialect.name == 'sqlite':
+        return sa.func.source_subtitle_stem(path).in_(stems)
+
+    if os.name == 'nt':
+        path = sa.func.replace(path, '\\', '/')
+    filename = sa.func.regexp_replace(path, '^.*/', '')
+    stem = sa.func.regexp_replace(filename, r'(^\.*[^.].*)\.[^.]*$', r'\1')
+    non_ascii = r'[^\x01-\x7f]'
+    if connection.connection.driver_connection.get_parameter_status('server_encoding') != 'UTF8':
+        return sa.or_(sa.func.lower(stem.collate('C')).in_(stems), stem.regexp_match(non_ascii))
+
+    # PostgreSQL's lowercase rules depend on its collation. Match the ASCII
+    # letters of the decomposed name and leave other characters to Python.
+    decomposed = sa.func.normalize(stem, sa.literal_column('NFD')).collate('C')
+    shape = sa.func.regexp_replace(sa.func.lower(decomposed), non_ascii, '?', 'g')
+    shapes = {''.join(char if char.isascii() else '?' for char in unicodedata.normalize('NFD', value))
+              for value in stems}
+    return shape.in_(shapes)
+
+
+def _upgrade_arr_owner_paths(connection, stems):
+    from app.database import TableArrInstances, TableEpisodes, TableMovies, TableSportsEvents
+    from utilities.path_mappings import _instance_path_mapping, path_mappings, read_sports_mappings
+
+    instances = connection.execute(sa.select(TableArrInstances.id, TableArrInstances.kind,
+                                             TableArrInstances.path_mappings)).all()
+    for table, media_type, fallback in ((TableMovies, 'movie', path_mappings.path_mapping_movies),
+                                        (TableEpisodes, 'episode', path_mappings.path_mapping_series)):
+        mappings = []
+        for instance in instances:
+            if not instance.path_mappings:
+                continue
+            rules = _instance_path_mapping(instance.id, media_type, target=connection)
+            if rules is not None and rules != fallback:
+                mappings.append((table.arr_instance_id == instance.id, identity._mapped_sql_path(table.path, rules)))
+        default = identity._mapped_sql_path(table.path, fallback)
+        mapped = sa.case(*mappings, else_=default) if mappings else default
+        yield from connection.scalars(sa.select(mapped).where(table.path.is_not(None),
+                                                             _owner_stem_filter(mapped, stems, connection)))
+
+    for instance in instances:
+        if instance.kind == 'sportarr':
+            table = TableSportsEvents
+            mapped = identity._mapped_sports_sql_path(table.path, read_sports_mappings(instance.path_mappings))
+            yield from connection.scalars(sa.select(mapped).where(table.arr_instance_id == instance.id,
+                                                                 table.path.is_not(None),
+                                                                 _owner_stem_filter(mapped, stems, connection)))
+
+
 class SourcePublicationOwnerIndex(SourceOutputOwnerIndex):
     """Source writes in shared subtitle folders must account for all media stored there."""
 
     def __init__(self):
         super().__init__()
         self._prepared_paths = None
-        self._prepared_source_owners = None
 
     def _load_owners(self):
         self._prepared_paths = self._source_owner_paths(None)
-        self._prepared_source_owners = self._map_source_owners(self._prepared_paths)
-        owners = {key: paths.copy() for key, paths in self._prepared_source_owners.items()}
+        owners = self._map_source_owners(self._prepared_paths)
         for key, paths in SyncOutputOwnerIndex._load_owners().items():
             owners.setdefault(key, set()).update(paths)
         return owners
@@ -145,6 +195,30 @@ class SourcePublicationOwnerIndex(SourceOutputOwnerIndex):
         directory = os.path.normcase(os.path.realpath(os.path.dirname(destination)))
         return directory != media_directory
 
+    def _recheck_upgrade_owners(self, current, paths, connection):
+        if connection.dialect.name == 'postgresql':
+            # Ordinary INSERT/UPDATE/DELETE take ROW EXCLUSIVE, including new
+            # owners with no row yet to lock. SHARE still allows readers.
+            connection.exec_driver_sql('LOCK TABLE arr_instances, table_episodes, table_movies, '
+                                       'table_sports_events IN SHARE MODE NOWAIT')
+        else:
+            connection.connection.driver_connection.create_function(
+                'source_subtitle_stem', 1, lambda path: _normalized_media_stem(path) if path else None,
+                deterministic=True)
+        paths = tuple(dict.fromkeys(paths))
+        generated = (str(engine_output_path(path, engine)) for path in paths
+                     if not sync_engine_from_output_path(path) for engine in SYNC_ENGINES)
+        stems = set().union(*(self.conflicting_stems(current.path, path) for path in (*paths, *generated)))
+        column = repository.Items.c.path
+        source_paths = connection.scalars(sa.select(column).where(_owner_stem_filter(column, stems, connection)))
+        candidates = (*source_paths, *_upgrade_arr_owner_paths(connection, stems))
+        self._owners = self._map_source_owners(path for path in candidates
+                                              if path and _normalized_media_stem(path) in stems)
+        self._loaded = True
+        for path in paths:
+            if not sync_output_owner_is_unique(current.path, path, ownership_index=self):
+                raise SourcePublicationOwnersChanged('The source upgrade subtitle does not have one media owner')
+
     @contextmanager
     def publication(self, source, prepare=None, *, destination=None, recheck_paths=()):
         """Prepare discovery before locking, then recheck requested upgrade paths during publication."""
@@ -152,7 +226,6 @@ class SourcePublicationOwnerIndex(SourceOutputOwnerIndex):
             self._loaded = False
             self._owners = {}
             self._prepared_paths = None
-            self._prepared_source_owners = None
             destination_setting = settings.general.subfolder, get_subtitle_destination_folder()
             prepared = prepare() if prepare is not None else None
             shared = self._needs_registry_guard(source, destination, destination_setting[1])
@@ -168,19 +241,11 @@ class SourcePublicationOwnerIndex(SourceOutputOwnerIndex):
                     with source_item_publication(source, shared=shared) as (current, connection):
                         if destination_setting != (settings.general.subfolder, get_subtitle_destination_folder()):
                             break
-                        if shared and current is not None and self._prepared_paths != self._source_owner_paths(connection):
-                            break
-                        if shared and current is not None and recheck_paths:
-                            # Upgrades may overwrite one path and retire another. Recheck both
-                            # against Arr owners committed since preparation on this connection.
-                            self._owners = {key: paths.copy() for key, paths in self._prepared_source_owners.items()}
-                            for key, paths in SyncOutputOwnerIndex._load_owners(connection).items():
-                                self._owners.setdefault(key, set()).update(paths)
-                            self._loaded = True
-                            for path in dict.fromkeys(recheck_paths):
-                                if not sync_output_owner_is_unique(current.path, path, ownership_index=self):
-                                    raise SourcePublicationOwnersChanged(
-                                        'The source upgrade subtitle does not have one media owner')
+                        if shared and current is not None:
+                            if recheck_paths:
+                                self._recheck_upgrade_owners(current, recheck_paths, connection)
+                            elif self._prepared_paths != self._source_owner_paths(connection):
+                                break
                         if current is not None:
                             state = repository.item_state(current.item_id, connection)
                             if (state is None or not state.source_enabled or not state.library_enabled
