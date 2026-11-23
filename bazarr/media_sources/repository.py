@@ -50,8 +50,11 @@ def _insert(target, table, values):
 
 # Sources, libraries and roots
 
-def get_source(source_id, target=None):
-    return _target(target).execute(sa.select(Sources).where(Sources.c.id == source_id)).first()
+def get_source(source_id, target=None, *, lock_key=False):
+    statement = sa.select(Sources).where(Sources.c.id == source_id)
+    if lock_key:
+        statement = statement.with_for_update(read=True, key_share=True)
+    return _target(target).execute(statement).first()
 
 
 def list_sources(target=None):

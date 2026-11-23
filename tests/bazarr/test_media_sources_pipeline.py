@@ -336,7 +336,7 @@ def test_post_save_indexing_leaves_a_moved_items_new_path_untouched(world, monke
 
     service.search_source_item(context.item_id, job_id=3)
 
-    assert attempted_paths == [context.path, context.path]
+    assert attempted_paths == [context.path]
     assert saved.read_bytes() == CONTENT
     assert replacement_subtitle.read_bytes() == b"Replacement subtitle\n"
     item = repository.get_item(context.item_id)
@@ -950,7 +950,7 @@ def test_an_item_deleted_between_the_search_and_the_finalize_logs_one_line_and_k
     with caplog.at_level(logging.INFO):
         result = process_subtitle(subtitle, "movie", "None", context.path, 100, source=context)
 
-    assert result is None
+    assert (result.path, result.subs_path, result.provider) == (context.path, subtitle.storage_path, "fake")
     lines = [record for record in caplog.records if record.levelno == logging.INFO
              and "was deleted while its subtitles were being fetched" in record.getMessage()]
     assert len(lines) == 1 and str(context.item_id) in lines[0].getMessage()
@@ -980,6 +980,73 @@ def test_processing_a_source_subtitle_returns_the_result_without_mapping_or_arr_
         getattr(processing, name).assert_not_called()
     for name in ("_trigger_auto_translation", "_trigger_combine"):
         assert getattr(processing, name).call_args.kwargs["source"] == context
+
+
+@pytest.mark.parametrize("change", ["move", "delete-item", "delete-source"])
+def test_source_download_records_history_when_the_item_changes_after_save(world, monkeypatch, isolated_jobs, change):
+    from app import notifier
+    from media_sources import repository, service
+    from subtitles import download, processing
+
+    context = _movie(world)
+    saved = Path(context.path).with_suffix(".en.srt")
+    replacement = video(world.root / "Replacement.mkv")
+    notify = Mock()
+    monkeypatch.setattr(notifier, "send_notifications_source", notify)
+    _download(monkeypatch)
+
+    def process_after_change(**kwargs):
+        assert saved.read_bytes() == CONTENT
+        if change == "move":
+            repository.update_item(context.item_id, world.db, path=str(replacement), title="Replacement")
+        elif change == "delete-item":
+            repository.delete_items([context.item_id], world.db)
+        else:
+            repository.delete_source(context.source_id, world.db)
+        return processing.process_subtitle(**kwargs)
+
+    monkeypatch.setattr(download, "process_subtitle", process_after_change)
+    service.search_source_item(context.item_id, translation_gate=False)
+    assert isolated_jobs._run_job(isolated_jobs._reserve_next_job())
+
+    (result,) = world.db.execute(sa.select(repository.History)).all()
+    assert result.action == 1 and result.provider == "fake" and result.language == "en"
+    assert (result.video_path, result.subtitles_path, result.item_title, result.source_name) == (
+        context.path, str(saved), "Film", "Local")
+    assert result.item_id == (context.item_id if change == "move" else None)
+    assert result.source_id == (None if change == "delete-source" else context.source_id)
+    assert not replacement.with_suffix(".en.srt").exists()
+    notify.assert_not_called()
+
+
+def test_source_publication_holds_the_item_until_the_registry_writer_can_continue(world):
+    from concurrent.futures import ThreadPoolExecutor, TimeoutError
+    from threading import Event
+
+    from media_sources import repository
+    from media_sources.db import source_transaction
+    from media_sources.indexer import SourcePublicationOwnerIndex
+
+    context = _movie(world)
+    replacement = video(world.root / "Replacement.mkv")
+    started = Event()
+
+    def move():
+        started.set()
+        with source_transaction() as connection:
+            repository.update_item(context.item_id, connection, path=str(replacement))
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        with SourcePublicationOwnerIndex().publication(context) as (current, connection):
+            assert current == context and connection.in_transaction()
+            pending = pool.submit(move)
+            assert started.wait(5)
+            with pytest.raises(TimeoutError):
+                pending.result(timeout=0.25)
+            assert repository.get_item(context.item_id, connection).path == context.path
+        pending.result(timeout=5)
+
+    assert repository.get_item(context.item_id).path == str(replacement)
 
 
 # Sync
@@ -2073,7 +2140,7 @@ def test_source_provider_fallback_uses_current_cutoff(world, monkeypatch, isolat
 
 @pytest.mark.parametrize("location", [
     "media", "configured", "untagged", "sync", "custom-hi", "custom-forced",
-    "regional-plain", "regional-hi", "regional-forced",
+    "regional-plain", "regional-hi", "regional-forced", "unknown-numeric",
 ])
 def test_source_provider_sees_cutoff_sidecar_before_index_refresh(world, monkeypatch, isolated_jobs, location):
     import json
@@ -2115,7 +2182,8 @@ def test_source_provider_sees_cutoff_sidecar_before_index_refresh(world, monkeyp
     folder.mkdir(exist_ok=True)
     suffix = {"untagged": ".srt", "sync": ".en.ffsubsync.srt", "custom-hi": ".pt-BR.hi.srt",
               "custom-forced": ".pt-BR.forced.srt", "regional-plain": ".es-419.srt",
-              "regional-hi": ".es-419.hi.srt", "regional-forced": ".es-419.forced.srt"}.get(location, ".en.srt")
+              "regional-hi": ".es-419.hi.srt", "regional-forced": ".es-419.forced.srt",
+              "unknown-numeric": ".en-123.srt"}.get(location, ".en.srt")
     name = media.with_suffix(suffix).name
     cutoff = folder / name
     content = CONTENT.replace(b"Downloaded", b"The children sat by the river while their mother read a story. "
@@ -2133,6 +2201,10 @@ def test_source_provider_sees_cutoff_sidecar_before_index_refresh(world, monkeyp
     assert isolated_jobs._run_job(isolated_jobs._reserve_next_job())
 
     assert cutoff.read_bytes() == content
+    if location == "unknown-numeric":
+        assert (folder / media.with_suffix(".hu.srt").name).is_file()
+        assert all(entry[1] != str(cutoff) for entry in index_item(context.item_id))
+        return
     assert not (folder / media.with_suffix(".hu.srt").name).exists()
     assert world.db.execute(sa.select(repository.History)).all() == []
     assert not world.published

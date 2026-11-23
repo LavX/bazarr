@@ -486,14 +486,17 @@ def _search_source_item(item_id, job_id, *, translation_gate, expected_source):
                                          **({} if translation_gate else {'auto_translate': False})):
             if not result:
                 continue
-            if getattr(result, 'source_indexed', False) is not True:
-                # Retry an incomplete listing, including results from outside shared processing.
-                index_and_notify_item(context)
             with source_transaction() as connection:
                 history_log_source(1, context, result, target=connection)
             downloaded += 1
+            current = resolve_same_item(context)
+            if current is None:
+                continue
+            if getattr(result, 'source_indexed', False) is not True:
+                # Retry an incomplete listing, including results from outside shared processing.
+                index_and_notify_item(current)
             try:
-                send_notifications_source(context, result.message)
+                send_notifications_source(current, result.message)
             except Exception:
                 logging.exception('BAZARR could not send a notification for source item %s', item_id)
     except OSError as error:

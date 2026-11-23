@@ -307,11 +307,11 @@ def _get_language_obj(languages):
     return language_set
 
 
-def check_missing_languages_source(source, *, ownership_index=None, written_paths=()):
+def check_missing_languages_source(source, *, ownership_index=None, written_paths=(), target=None):
     from media_sources.translation import missing_language_candidates
 
     return _get_language_obj(languages=missing_language_candidates(
-        source, ownership_index=ownership_index, written_paths=written_paths))
+        source, ownership_index=ownership_index, written_paths=written_paths, target=target))
 
 
 def _write_source_download(video_path, destination, content, *, source, language, recheck_missing, is_upgrade,
@@ -323,14 +323,17 @@ def _write_source_download(video_path, destination, content, *, source, language
 
     @contextmanager
     def publication():
-        if not sync_output_owner_is_unique(video_path, destination, ownership_index=ownership_index):
-            raise SubtitleDestinationChanged('The source subtitle destination does not have one media owner')
-        if os.path.lexists(destination) and (not is_upgrade or regular_subtitle_version(destination) is None):
-            raise SubtitleDestinationChanged('The source subtitle destination is already occupied')
-        if recheck_missing and language not in check_missing_languages_source(
-                source, ownership_index=ownership_index, written_paths=written_paths):
-            raise SubtitleDestinationChanged('The source language is no longer missing')
-        yield
+        with ownership_index.publication(source) as (current, connection):
+            if current is None or current.path != video_path:
+                raise SubtitleDestinationChanged('The source item moved or was removed')
+            if not sync_output_owner_is_unique(video_path, destination, ownership_index=ownership_index):
+                raise SubtitleDestinationChanged('The source subtitle destination does not have one media owner')
+            if os.path.lexists(destination) and (not is_upgrade or regular_subtitle_version(destination) is None):
+                raise SubtitleDestinationChanged('The source subtitle destination is already occupied')
+            if recheck_missing and language not in check_missing_languages_source(
+                    current, ownership_index=ownership_index, written_paths=written_paths, target=connection):
+                raise SubtitleDestinationChanged('The source language is no longer missing')
+            yield
 
     try:
         write_subtitle_file(video_path, destination, content, written_paths=written_paths, on_publish=on_publish,

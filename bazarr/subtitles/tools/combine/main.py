@@ -4,6 +4,7 @@ import logging
 import os
 import re
 import stat
+from contextlib import contextmanager
 from dataclasses import dataclass
 from subtitles.tools.subsync_engines import (capture_subtitle_versions, read_regular_subtitle,
                                              regular_subtitle_version, staged_subtitle_write,
@@ -161,19 +162,22 @@ def try_combine_for_video(video_path, media_type, sonarr_series_id=None,
                     _remove_stale_combined_siblings(out_path, video_path, on_publish=notify, **owner_kwargs)
 
             if source is not None:
-                owner_kwargs['ownership_index'] = SourcePublicationOwnerIndex()
+                owners = owner_kwargs['ownership_index'] = SourcePublicationOwnerIndex()
 
-                def validate_source():
-                    if _metadata_for(video_path, media_type, None, None, None, source=source) is None:
-                        raise ValueError('The source item moved or was removed during composition')
-                    if not sync_output_owner_is_unique(video_path, out_path, **owner_kwargs):
-                        raise ValueError('The combined output lost its unique owner during composition')
-                    for path, version in input_versions.items():
-                        if (regular_subtitle_version(path) != version
-                                or not sync_output_owner_is_unique(video_path, path, **owner_kwargs)):
-                            raise ValueError('A combined subtitle input changed or lost its unique owner')
+                @contextmanager
+                def publication():
+                    with owners.publication(source) as (current, _):
+                        if current is None or current.path != video_path:
+                            raise ValueError('The source item moved or was removed during composition')
+                        if not sync_output_owner_is_unique(video_path, out_path, **owner_kwargs):
+                            raise ValueError('The combined output lost its unique owner during composition')
+                        for path, version in input_versions.items():
+                            if (regular_subtitle_version(path) != version
+                                    or not sync_output_owner_is_unique(video_path, path, **owner_kwargs)):
+                                raise ValueError('A combined subtitle input changed or lost its unique owner')
+                        yield
 
-                write_kwargs['before_publish'] = validate_source
+                write_kwargs['publication_guard'] = publication
                 read_kwargs['read_bytes'] = lambda path: read_regular_subtitle(path, input_versions[path])
 
             def capture_published():

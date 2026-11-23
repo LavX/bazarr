@@ -19,19 +19,19 @@ from .context import resolve_same_item
 from .db import handle
 
 
-def live_source(source):
+def live_source(source, target=None):
     """Resolve the same active source file, accounting for SQLite's reusable row ids."""
-    current = resolve_same_item(source)
+    current = resolve_same_item(source, target)
     if current is None:
         return None
-    state = repository.item_state(current.item_id)
+    state = repository.item_state(current.item_id, target)
     if state is None or not state.source_enabled or not state.library_enabled or not os.path.isfile(current.path):
         return None
     return current
 
 
-def _active_item(source):
-    item = repository.get_item(source.item_id)
+def _active_item(source, target=None):
+    item = repository.get_item(source.item_id, target)
     if (item is None or not source.same_item(item) or not item.monitored or item.arr_shadow
             or item.server_missing or item.identity_state not in ('identified', 'parsed')):
         return None
@@ -47,7 +47,7 @@ def _source_paths(item, language):
                 yield entry[1]
 
 
-def _source_ready(source, subtitle_path, *, new_download=False, score=None):
+def _source_ready(source, subtitle_path, *, new_download=False, score=None, target=None):
     wait_minutes = settings.translator.min_source_wait_minutes
     min_score = settings.translator.min_source_score
     if new_download and wait_minutes:
@@ -57,7 +57,7 @@ def _source_ready(source, subtitle_path, *, new_download=False, score=None):
     if not (wait_minutes or (min_score and score is None)):
         return True
     history = repository.History.c
-    rows = handle().execute(select(history.subtitles_path, history.action, history.timestamp,
+    rows = handle(target).execute(select(history.subtitles_path, history.action, history.timestamp,
                                   history.score, history.score_out_of).where(
         history.item_id == source.item_id, history.subtitles_path == subtitle_path,
         history.action.in_(SOURCE_HISTORY_ACTIONS)
@@ -95,12 +95,12 @@ def _current_missing(item, profile_id, profile, *, ownership_index=None, written
                                      matches_audio=lambda language: language['language'] in audio_codes)
 
 
-def missing_language_candidates(source, *, ownership_index=None, written_paths=()):
+def missing_language_candidates(source, *, ownership_index=None, written_paths=(), target=None):
     """Read the live source policy and return the shared provider-search language tuples."""
-    current = live_source(source)
+    current = live_source(source, target)
     if current is None or current.profile_id is None:
         return []
-    item = repository.get_item(current.item_id)
+    item = repository.get_item(current.item_id, target)
     if item is None or not current.same_item(item):
         return []
     profile = get_profiles_list(profile_id=current.profile_id)
@@ -111,9 +111,9 @@ def missing_language_candidates(source, *, ownership_index=None, written_paths=(
     ]
 
 
-def automatic_translation_is_current(source, subtitle_path, from_lang, to_lang, forced, hi):
+def automatic_translation_is_current(source, subtitle_path, from_lang, to_lang, forced, hi, *, connection=None):
     """Recheck the live profile, indexed inputs, wait and threshold at dispatch and publication."""
-    item = _active_item(source)
+    item = _active_item(source, connection)
     if item is None or not source.profile_id:
         return False
     target = _target_code(to_lang, forced, hi)
@@ -121,7 +121,8 @@ def automatic_translation_is_current(source, subtitle_path, from_lang, to_lang, 
     rule = build_translate_from_map(profile).get(target)
     return (rule is not None and rule['from'] == from_lang
             and target in _current_missing(item, source.profile_id, profile)
-            and subtitle_path in _source_paths(item, from_lang) and _source_ready(source, subtitle_path))
+            and subtitle_path in _source_paths(item, from_lang)
+            and _source_ready(source, subtitle_path, target=connection))
 
 
 def queue_missing_translations(source, *, downloaded_path=None, downloaded_language=None, score=None):

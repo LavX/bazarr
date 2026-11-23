@@ -116,10 +116,13 @@ def translation_write_kwargs(translator, job_id):
 
         @contextmanager
         def publication():
-            validate_source_translation(source, translator.video_path, translator.source_srt_file,
-                                        translator.dest_srt_file, translator.from_lang, translator.orig_to_lang,
-                                        translator.forced, translator.hi, captured, owners)
-            yield
+            with owners.publication(source) as (current, connection):
+                if current is None:
+                    raise SourceTranslationChanged('The source item moved or was removed')
+                validate_source_translation(current, translator.video_path, translator.source_srt_file,
+                                            translator.dest_srt_file, translator.from_lang, translator.orig_to_lang,
+                                            translator.forced, translator.hi, captured, owners, connection=connection)
+                yield
         kwargs.update(publication_guard=publication, ownership_index=owners)
     return kwargs
 
@@ -133,19 +136,19 @@ class SourceTranslationInputAmbiguous(SourceTranslationChanged):
 
 
 def validate_source_translation(source, video_path, subtitle_path, destination, from_lang, to_lang, forced, hi,
-                                captured=(), owners=None):
+                                captured=(), owners=None, *, connection=None):
     """Validate the queued source item, profile and write destination."""
     from media_sources.indexer import SourcePublicationOwnerIndex
     from media_sources.translation import automatic_translation_is_current, live_source
     from subtitles.tools.subsync_engines import sync_output_owner_is_unique
 
-    current = live_source(source)
+    current = live_source(source, connection)
     if current is None or current.path != video_path:
         raise SourceTranslationChanged('The source item moved, was removed, or was disabled')
     if destination != translated_destination_path(video_path, to_lang, forced, hi):
         raise SourceTranslationChanged('The configured subtitle destination changed')
     if captured and (str(captured[0].path) != destination or not automatic_translation_is_current(
-            current, subtitle_path, from_lang, to_lang, forced, hi)):
+            current, subtitle_path, from_lang, to_lang, forced, hi, connection=connection)):
         raise SourceTranslationChanged('The source profile or translation eligibility changed')
     if owners is None:
         owners = SourcePublicationOwnerIndex()

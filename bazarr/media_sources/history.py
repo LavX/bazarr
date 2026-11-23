@@ -13,23 +13,24 @@ from . import repository
 from .context import SourceItemContext
 
 
-def _snapshot(context: SourceItemContext, target=None):
-    item = repository.get_item(context.item_id, target)
-    source = repository.get_source(context.source_id, target)
+def _snapshot(context: SourceItemContext, item, source):
     return dict(
         video_path=context.path,
-        item_title=item.title if item is not None and context.same_item(item) else context.title,
+        item_title=item.title if item is not None and item.path == context.path else context.title,
         group_title=context.group_title,
-        source_name=source.name if source is not None else None,
+        source_name=source.name if source is not None else context.source_name,
     )
 
 
-def _links(context, target):
-    """The links to store: an item or source deleted since the context was built is stored as NULL."""
-    item = repository.get_item(context.item_id, target)
-    item_id = context.item_id if item is not None and context.same_item(item) else None
-    source_id = context.source_id if repository.get_source(context.source_id, target) is not None else None
-    return item_id, source_id
+def _owners(context, target, *, lock=False):
+    """Resolve the original owners and hold their foreign keys for a transactional insert."""
+    source = repository.get_source(context.source_id, target, lock_key=lock)
+    if source is not None and context.source_created_at is not None and source.created_at != context.source_created_at:
+        source = None
+    item = repository.get_item(context.item_id, target, for_update=lock)
+    if item is not None and not context.same_item(item):
+        item = None
+    return item, source
 
 
 def history_log_source(action, context: SourceItemContext, result, fake_provider=None, fake_score=None,
@@ -39,11 +40,12 @@ def history_log_source(action, context: SourceItemContext, result, fake_provider
     score = fake_score or result.score
     ai_translated = (1 if getattr(result, 'ai_translated', False) is True else 0) if action in (1, 2, 3) else None
     full = MAX_SCORES['episode' if context.kind == 'episode' else 'movie']
-    item_id, source_id = _links(context, target)
-    snapshot = _snapshot(context, target)
+    item, source = _owners(context, target, lock=target is not None)
+    snapshot = _snapshot(context, item, source)
     snapshot['video_path'] = result.path or snapshot['video_path']
     return repository.insert_history(
-        target, item_id=item_id, source_id=source_id, item_kind=context.kind, action=action,
+        target, item_id=item.id if item is not None else None, source_id=source.id if source is not None else None,
+        item_kind=context.kind, action=action,
         description=result.message, language=result.language_code, provider=provider,
         ai_translated=ai_translated, score=score,
         score_out_of=full if score or (ai_translated == 1 and score == 0) else None,
@@ -54,10 +56,10 @@ def history_log_source(action, context: SourceItemContext, result, fake_provider
 
 
 def blacklist_log_source(context: SourceItemContext, provider, subs_id, language, target=None):
-    item_id, source_id = _links(context, target)
+    item, source = _owners(context, target)
     return repository.insert_blacklist(
-        target, item_id=item_id, source_id=source_id, item_kind=context.kind, provider=provider,
-        subs_id=subs_id, language=language, **_snapshot(context, target))
+        target, item_id=item.id if item is not None else None, source_id=source.id if source is not None else None,
+        item_kind=context.kind, provider=provider, subs_id=subs_id, language=language, **_snapshot(context, item, source))
 
 
 def get_blacklist_source(item_kind, target=None):

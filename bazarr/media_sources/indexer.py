@@ -9,6 +9,7 @@ import ast
 import logging
 import os
 import sqlite3
+from contextlib import contextmanager
 from functools import partial
 
 import sqlalchemy as sa
@@ -38,7 +39,7 @@ from utilities.video_analyzer import audio_languages_from_metadata, embedded_sub
 from . import repository
 from .analysis import (cached_metadata, failed_probe_values, index_matches_file, local_stat, probe_item,
                        read_metadata, streams)
-from .context import resolve_same_item
+from .context import resolve_same_item, source_item_publication
 from .db import handle, source_transaction
 
 
@@ -108,6 +109,15 @@ class SourcePublicationOwnerIndex(SourceOutputOwnerIndex):
     def folder_is_shared(self, directory):
         # A relative custom path can also resolve into another video's directory.
         return bool(get_subtitle_destination_folder())
+
+    @contextmanager
+    def publication(self, source):
+        with source_item_publication(source) as (current, connection):
+            self._target = connection
+            try:
+                yield current, connection
+            finally:
+                self._target = None
 
 
 def list_external_subtitles(path, previous=None, ownership_index=None, *, publication=False, written_paths=()):
