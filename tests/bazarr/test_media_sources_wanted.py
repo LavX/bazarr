@@ -234,11 +234,15 @@ def test_wanted_refreshes_stale_shadows_and_retains_mount_shadows(client, arr_li
 
 
 @pytest.mark.parametrize('windows,local,stored,claimed', [
-    (True, 'C:/Media', r'c:\MEDIA\épreuve.mkv', True),
-    (True, 'C:/Vidéos', r'c:\VIDÉOS\Épreuve.mkv', True),
-    (False, '/media', '/media/Épreuve.mkv', True),
-    (False, '/media', '/media/épreuve.mkv', False),
-    (False, '/media', r'/media\Épreuve.mkv', False),
+    pytest.param(True, 'C:/Media', r'c:\MEDIA\épreuve.mkv', True, id='windows-filename-case'),
+    pytest.param(True, 'C:/Vidéos', r'c:\VIDÉOS\Épreuve.mkv', True, id='windows-prefix-case'),
+    pytest.param(True, 'C:/İzmir', r'c:\İzmir\Épreuve.mkv', True, id='windows-expanding-prefix'),
+    pytest.param(True, 'C:/İzmir', r'c:\i̇zmir\épreuve.mkv', True, id='windows-longer-path-prefix'),
+    pytest.param(True, 'C:/i̇zmir', r'c:\İzmir\Épreuve.mkv', True, id='windows-shorter-path-prefix'),
+    pytest.param(True, 'C:/İzmir', r'c:\i̇zmir2\épreuve.mkv', False, id='windows-prefix-boundary'),
+    pytest.param(False, '/media', '/media/Épreuve.mkv', True, id='posix-exact'),
+    pytest.param(False, '/media', '/media/épreuve.mkv', False, id='posix-distinct-case'),
+    pytest.param(False, '/media', r'/media\Épreuve.mkv', False, id='posix-distinct-separator'),
 ])
 def test_sportarr_claim_matches_the_local_filesystem(
         client, arr_library, tmp_path, monkeypatch, windows, local, stored, claimed):
@@ -256,6 +260,8 @@ def test_sportarr_claim_matches_the_local_filesystem(
     assert (identity.ArrOwners.load().path_stage(stored) is not None) == claimed
     result = client.get('/api/movies/wanted?sources=1', headers=HEADERS).get_json()
     assert [row['id'] for row in result['data'] if row['origin'] == 'source'] == ([] if claimed else [item])
+    badges = client.get('/api/badges?sources=1', headers=HEADERS).get_json()
+    assert badges['source_movies'] == (0 if claimed else 1)
 
 
 @pytest.mark.parametrize('state', ['ready', 'waiting', 'recent failure', 'translated', 'moved translation', 'low score'])
@@ -579,6 +585,7 @@ def test_runtime_keeps_manual_and_wanted_translation_reservations_separate(world
         assert repository.get_item(context.item_id).arr_shadow == 1
         assert ledger.active_for(key, target) is None
         assert ledger.active_for(manual_key, target).queue_job_id == manual
+        assert [job.job_id for job in isolated_jobs.jobs_pending_queue] == [manual]
         assert not Path(context.path).with_suffix('.hu.srt').exists()
         assert world.db.execute(sa.select(repository.History.c.action)).scalars().all() == [1]
     finally:

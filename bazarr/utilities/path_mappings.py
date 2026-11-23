@@ -5,6 +5,7 @@ import logging
 import re
 
 from app.config import settings
+from .path_case import windows_path_lower
 
 
 def validate_sports_mappings(value):
@@ -84,16 +85,25 @@ def apply_sports_mapping(path, mapping, reverse=False, *, ignore_case=False):
     if path is None:
         return None
     normalized = path.replace('\\', '/')
-    compared = normalized.lower() if ignore_case else normalized
     source, target = (1, 0) if reverse else (0, 1)
     # Most-specific prefix wins. An interior filename substring never matches.
     for pair in sorted(validate_sports_mappings(mapping), key=lambda pair: len(pair[source]), reverse=True):
         prefix = pair[source].replace('\\', '/').rstrip('/')
-        compared_prefix = prefix.lower() if ignore_case else prefix
-        if compared.rstrip('/') == compared_prefix:
+        if ignore_case:
+            # Locate the original boundary before folding, which can change the prefix length.
+            components = prefix.count('/') + 1
+            original_prefix = '/'.join(normalized.split('/', components)[:components])
+            matches = windows_path_lower(original_prefix) == windows_path_lower(prefix)
+        else:
+            original_prefix = normalized[:len(prefix)]
+            matches = original_prefix == prefix
+        if not matches:
+            continue
+        suffix = normalized[len(original_prefix):]
+        if not suffix.rstrip('/'):
             return pair[target]
-        if compared.startswith(compared_prefix + '/'):
-            result = pair[target].rstrip('/\\') + normalized[len(prefix):]
+        if suffix.startswith('/'):
+            result = pair[target].rstrip('/\\') + suffix
             if pair[target].startswith('\\\\') or re.match(r'^[a-zA-Z]:\\', pair[target]):
                 return result.replace('/', '\\')
             return result

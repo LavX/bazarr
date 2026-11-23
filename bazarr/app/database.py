@@ -54,8 +54,9 @@ def configure_sqlite_connection(dbapi_connection, connection_record):
     if not isinstance(dbapi_connection, sqlite3.Connection):
         return
     # SQLite's lower() only folds ASCII. Windows paths also compare non-ASCII letters without case.
-    dbapi_connection.create_function('unicode_path_lower', 1, lambda path: path.lower() if path is not None else None,
-                                     deterministic=True)
+    from utilities.path_case import windows_path_lower
+
+    dbapi_connection.create_function('unicode_path_lower', 1, windows_path_lower, deterministic=True)
     cursor = dbapi_connection.cursor()
     try:
         cursor.execute("PRAGMA journal_mode=WAL")

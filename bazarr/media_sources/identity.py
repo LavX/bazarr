@@ -9,8 +9,11 @@ import errno
 import os
 from collections import defaultdict, namedtuple
 from dataclasses import dataclass, field
+from functools import cache
+from itertools import chain
 
 import sqlalchemy as sa
+from utilities.path_case import windows_path_lower, windows_path_lowercase
 
 FileStat = namedtuple('FileStat', 'dev ino size mtime_ns')
 
@@ -512,9 +515,10 @@ class ArrOwners:
             path_column = model.path
             local_candidates = candidates
             if mapper.sports:
-                lower = _windows_sql_lower(session)
+                codec = _windows_postgres_codec(session)
+                arr_paths = {_sports_path_key(candidate, codec) for candidate in arr_paths}
+                lower = _windows_sql_lower(arr_paths, codec)
                 path_column = _sports_sql_path_key(path_column, lower)
-                arr_paths = {_sports_path_key(candidate) for candidate in arr_paths}
                 if _LOCAL_WINDOWS_PATHS:
                     local_candidates = {_sports_path_key(candidate) for candidate in candidates}
             for row in session.execute(sa.select(model.id, model.path, model.file_size, file_id)
@@ -547,16 +551,71 @@ def _mapped_sql_path(path, rules, *, reverse=False):
     return sa.case(*matches, else_=path) if matches else path
 
 
-def _sports_path_key(path):
+def _sports_path_key(path, codec=None):
     normalized = path.replace('\\', '/')
-    return normalized.lower() if _LOCAL_WINDOWS_PATHS else normalized
+    if not _LOCAL_WINDOWS_PATHS:
+        return normalized
+    folded = windows_path_lower(normalized)
+    return _encodable_key(folded, codec) if codec else folded
 
 
-def _windows_sql_lower(session):
+def _encodable_key(key, codec):
+    # A folded character can be absent from a legacy server encoding. A
+    # backslash escape is unambiguous because the path uses forward slashes here.
+    return key.encode(codec, 'backslashreplace').decode(codec)
+
+
+@cache
+def _postgres_windows_case_mapping(codec):
+    singles, expansions = defaultdict(list), []
+    for original, lowered in windows_path_lowercase().items():
+        original = chr(original)
+        if original != _encodable_key(original, codec):
+            continue
+        lowered = _encodable_key(lowered, codec)
+        if len(lowered) == 1:
+            singles[lowered].append(original)
+        else:
+            expansions.append((original, lowered))
+    return singles, expansions
+
+
+def _windows_postgres_codec(session):
     if not _LOCAL_WINDOWS_PATHS:
         return None
-    dialect = session.dialect if isinstance(session, sa.engine.Connection) else session.get_bind().dialect
-    return sa.func.unicode_path_lower if dialect.name == 'sqlite' else sa.func.lower
+    bind = session if isinstance(session, sa.engine.Connection) else session.get_bind()
+    if bind.dialect.name != 'postgresql':
+        return None
+    from psycopg2.extensions import encodings
+
+    connection = session if isinstance(session, sa.engine.Connection) else session.connection()
+    encoding = connection.connection.driver_connection.get_parameter_status('server_encoding')
+    return encodings[encoding.replace('_', '')]
+
+
+def _windows_sql_lower(keys=(), codec=None):
+    if not _LOCAL_WINDOWS_PATHS:
+        return None
+    if codec is None:
+        return sa.func.unicode_path_lower
+
+    # PostgreSQL's lower() uses its database locale. Use the same case mapping
+    # as Python and SQLite. For membership against known folded keys, only
+    # characters that can produce text in those keys can affect the result.
+    symbols = set(chain.from_iterable(keys))
+    singles, expansions = _postgres_windows_case_mapping(codec)
+    rules = [(value, symbol) for symbol in sorted(symbols) for value in singles.get(symbol, ())]
+    args = tuple(sa.literal(''.join(values)) for values in zip(*rules))
+    expanded = [(sa.literal(before), sa.literal(after)) for before, after in expansions
+                if symbols.issuperset(after)]
+
+    def lower(path):
+        folded = sa.func.translate(path, *args) if args else path
+        for before, after in expanded:
+            folded = sa.func.replace(folded, before, after)
+        return folded.collate('C')
+
+    return lower
 
 
 def _sports_sql_path_key(path, lower):
@@ -564,59 +623,67 @@ def _sports_sql_path_key(path, lower):
     return lower(normalized) if lower is not None else normalized
 
 
-def _mapped_sports_sql_path(path, rules, *, reverse=False, reverse_lower=None):
-    source, target = (1, 0) if reverse else (0, 1)
+def _mapped_sports_sql_path(path, rules):
     normalized = sa.func.replace(path, '\\', '/')
-    compared = reverse_lower(normalized) if reverse_lower is not None else normalized
     matches = []
-    for rule in sorted(rules, key=lambda pair: len(pair[source]), reverse=True):
-        prefix = rule[source].replace('\\', '/').rstrip('/')
-        compared_prefix = prefix.lower() if reverse_lower is not None else prefix
-        destination = rule[target]
+    for remote, destination in sorted(rules, key=lambda pair: len(pair[0]), reverse=True):
+        prefix = remote.replace('\\', '/').rstrip('/')
         suffix = sa.func.substr(normalized, len(prefix) + 1)
         mapped = sa.literal(destination.rstrip('/\\')).concat(suffix)
         windows_drive = destination[:1].isascii() and destination[:1].isalpha() and destination[1:3] == ':\\'
         if destination.startswith('\\\\') or windows_drive:
             mapped = sa.func.replace(mapped, '/', '\\')
-        matches.extend(((sa.func.rtrim(compared, '/') == compared_prefix, destination),
-                        (sa.func.substr(compared, 1, len(prefix) + 1) == compared_prefix + '/', mapped)))
+        matches.extend(((sa.func.rtrim(normalized, '/') == prefix, destination),
+                        (sa.func.substr(normalized, 1, len(prefix) + 1) == prefix + '/', mapped)))
     return sa.case(*matches, else_=path) if matches else path
 
 
 def arr_claims_stored_path(path, target):
     """Exclude direct claims from every enabled Arr kind in the mixed SQL results.
 
-    Files that need a stat retain the scanner's recorded shadow. Here, reverse
-    each possible mapping to use the Arr index, then confirm the forward mapping.
+    Files that need a stat retain the scanner's recorded shadow. For Sportarr,
+    compare against the mapped paths of the active owners in one SQL set.
     """
     clauses = defaultdict(list)
+    sports_paths = []
+    postgres_keys = set()
     owners = ArrOwners.load(target)
-    lower = _windows_sql_lower(target)
+    codec = _windows_postgres_codec(target)
+    lower = None if codec else _windows_sql_lower()
     for instance in owners.instances.values():
         mapper = owners.mapper(instance.id)
         if mapper is None:
             continue
         model, _ = ArrOwners._columns(TABLE_OF_KIND[instance.kind])
-        claim = model.path == path
-        if mapper.sports and lower is not None:
-            claim = _sports_sql_path_key(model.path, lower) == _sports_sql_path_key(path, lower)
-        if mapper.rules:
-            if mapper.sports:
-                arr_path = _sports_sql_path_key(model.path, lower)
-                candidates = [_mapped_sports_sql_path(path, [rule], reverse=True, reverse_lower=lower)
-                              for rule in mapper.rules]
-                alternatives = (arr_path == _sports_sql_path_key(candidate, lower) for candidate in candidates)
-                mapped = _mapped_sports_sql_path(model.path, mapper.rules)
-                matches_local = (_sports_sql_path_key(mapped, lower) == _sports_sql_path_key(path, lower)
-                                 if lower is not None else mapped == path)
+        if mapper.sports:
+            owned = (model.arr_instance_id == instance.id, model.path.is_not(None))
+            if codec:
+                paths = target.scalars(sa.select(model.path).where(*owned))
+                postgres_keys.update(_sports_path_key(mapper.forward(value), codec) for value in paths)
             else:
-                candidates = [_mapped_sql_path(path, [rule], reverse=True) for rule in mapper.rules]
-                alternatives = (model.path == candidate for candidate in candidates)
-                matches_local = _mapped_sql_path(model.path, mapper.rules) == path
-            claim = sa.and_(sa.or_(claim, *alternatives), matches_local)
+                mapped = _mapped_sports_sql_path(model.path, mapper.rules)
+                if lower is not None:
+                    mapped = _sports_sql_path_key(mapped, lower)
+                sports_paths.append(sa.select(mapped.label('path')).where(*owned))
+            continue
+        claim = model.path == path
+        if mapper.rules:
+            candidates = [_mapped_sql_path(path, [rule], reverse=True) for rule in mapper.rules]
+            alternatives = (model.path == candidate for candidate in candidates)
+            claim = sa.and_(sa.or_(claim, *alternatives), _mapped_sql_path(model.path, mapper.rules) == path)
         clauses[model].append(sa.and_(model.arr_instance_id == instance.id, claim))
-    return sa.or_(sa.false(), *(sa.select(model.id).where(sa.or_(*conditions)).correlate(path.table).exists()
-                                for model, conditions in clauses.items()))
+    claims = [sa.select(model.id).where(sa.or_(*conditions)).correlate(path.table).exists()
+              for model, conditions in clauses.items()]
+    if sports_paths:
+        local = _sports_sql_path_key(path, lower) if lower is not None else path
+        claims.append(local.in_(sa.union_all(*sports_paths)))
+    if postgres_keys:
+        from sqlalchemy.dialects.postgresql import ARRAY
+
+        folded = _sports_sql_path_key(path, _windows_sql_lower(postgres_keys, codec))
+        keys = sa.literal(list(postgres_keys), ARRAY(sa.Text))
+        claims.append(folded.in_(sa.select(sa.func.unnest(keys))))
+    return sa.or_(sa.false(), *claims)
 
 
 def revalidate_shadow(item, owners, queue_scan=None, fetched=None):
