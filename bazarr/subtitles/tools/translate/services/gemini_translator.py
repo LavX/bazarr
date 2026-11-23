@@ -68,7 +68,7 @@ class GeminiTranslatorService:
     def __init__(self, source_srt_file, dest_srt_file, to_lang, media_type, sonarr_series_id, sonarr_episode_id,
                  radarr_id, forced, hi, video_path, from_lang, orig_to_lang,
                  arr_instance_id=None, sports_operation=None, cancel=None,
-                 expected_destination_versions=(), source=None, **kwargs):
+                 expected_destination_versions=(), source=None, source_video_version=None, **kwargs):
         self.source_srt_file = source_srt_file
         self.dest_srt_file = dest_srt_file
         self.to_lang = to_lang
@@ -80,6 +80,7 @@ class GeminiTranslatorService:
         self.arr_instance_id = arr_instance_id
         self.sports_operation = sports_operation
         self.source = source
+        self.source_video_version = source_video_version
         self.cancel = cancel
         self.from_lang = from_lang
         self.video_path = video_path

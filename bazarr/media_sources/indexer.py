@@ -672,9 +672,13 @@ def index_and_notify_item(source):
     indexed = index_saved_subtitle(source.item_id, expected_path=source.path, expected_source=source)
     current = resolve_same_item(source) if indexed else None
     if current is not None:
-        event_stream(type='source-item', payload=current.item_id)
-        if current.group_id is not None:
-            event_stream(type='source-group', payload=current.group_id)
+        for event_type, row_id in (('source-item', current.item_id), ('source-group', current.group_id)):
+            if row_id is not None:
+                try:
+                    event_stream(type=event_type, payload=row_id)
+                except Exception:
+                    logging.exception('BAZARR could not notify %s %s after indexing a saved subtitle',
+                                      event_type, row_id)
     return indexed
 
 
