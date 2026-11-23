@@ -99,7 +99,7 @@ def wanted_search_missing_subtitles_sources(kind=None, job_id=None, wait_for_com
 def queue_wanted_search(kind):
     """Queue Search All only for a kind with at least one enabled library."""
     sources, libraries = repository.Sources, repository.Libraries
-    content_kind = 'series' if kind == 'episode' else kind
+    content_kind = {'episode': 'series', 'sports_event': 'sports'}.get(kind, kind)
     enabled = sa.select(libraries.c.id).join(sources, libraries.c.source_id == sources.c.id).where(
         libraries.c.content_kind == content_kind, libraries.c.enabled == 1, sources.c.enabled == 1)
     if handle().scalar(sa.select(enabled.exists())):

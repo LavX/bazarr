@@ -6,6 +6,7 @@ import os
 from contextlib import contextmanager
 from dataclasses import dataclass
 
+from app.config import settings
 from app.database import get_audio_profile_languages
 from app.jobs_queue import JobFailed, jobs_queue
 from subtitles.tools.subsync_engines import (SubtitleDestinationChanged, regular_subtitle_version,
@@ -32,6 +33,13 @@ def validate_source_candidate(candidate, source, provider):
         raise JobFailed('This search result does not match the selected item or provider. Search again.')
     if (provider, str(candidate.subtitle.id)) in get_blacklist_source(source.kind):
         raise JobFailed('This release has been excluded. Search again.')
+    if source.kind == 'sports_event':
+        from subtitles.utils import _get_scores
+
+        minimum, _, _ = _get_scores('movie', settings.general.minimum_score_sports)
+        if candidate.subtitle.score is None or candidate.subtitle.score < int(minimum):
+            raise JobFailed('This release is below the current sports minimum score. Search again.',
+                            reason='below_minimum_score')
     return candidate.subtitle
 
 
@@ -62,7 +70,6 @@ def queue_source_download(source, provider, subtitle, hi, forced, original_forma
 
 
 def download_source_subtitle(source, provider, subtitle, hi, forced, original_format, job_id=None):
-    from app.config import settings
     from app.notifier import send_notifications_source
     from subtitles.manual import manual_download_subtitle
 

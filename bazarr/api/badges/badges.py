@@ -114,6 +114,9 @@ class Badges(Resource):
             if 'movie' in kinds:
                 source_counts['source_movies'] = wanted_language_count('movie', database)
                 missing_movies_count += source_counts['source_movies']
+            if 'sports_event' in kinds:
+                source_counts['source_sports'] = wanted_language_count('sports_event', database)
+                missing_sports_count += source_counts['source_sports']
 
         throttled_providers = len(get_throttled_providers())
 
