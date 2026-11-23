@@ -26,6 +26,9 @@ export const vttParser: SubtitleParser = {
     const lines = text.split("\n");
 
     // Verify WEBVTT header
+    if (strict && !/^WEBVTT(?:[ \t].*)?$/.test(lines[0].trim())) {
+      throw new Error("Invalid WebVTT header");
+    }
     if (!lines[0].trim().startsWith("WEBVTT")) {
       return { metadata: { format: "vtt" }, cues: [] };
     }
@@ -67,11 +70,18 @@ export const vttParser: SubtitleParser = {
 
     // Parse cue blocks
     const cues = [];
-    const blocks = text.split(/\n\n+/);
+    const blocks = strict
+      ? text.trimEnd().split(/\n(?:[ \t]*\n)+/)
+      : text.split(/\n\n+/);
 
-    for (const block of blocks) {
+    for (const [index, block] of blocks.entries()) {
+      if (strict && index === 0) {
+        if (block.includes("-->"))
+          throw new Error("Missing WebVTT header separator");
+        continue;
+      }
       const blockLines = block.trim().split("\n");
-      if (blockLines.length < 2) continue;
+      if (!strict && blockLines.length < 2) continue;
 
       // Find the timestamp line
       let tsLineIdx = -1;
@@ -81,7 +91,12 @@ export const vttParser: SubtitleParser = {
           break;
         }
       }
-      if (tsLineIdx === -1) continue;
+      if (tsLineIdx === -1) {
+        if (strict && !/^(?:NOTE|STYLE|REGION)(?:\s|$)/.test(block.trim())) {
+          throw new Error("Missing WebVTT cue timing");
+        }
+        continue;
+      }
 
       const tsLine = blockLines[tsLineIdx];
       // Split on --> but the right side may have positioning info
@@ -96,10 +111,15 @@ export const vttParser: SubtitleParser = {
       const endMs = parseTimestamp(rightTs);
       const cueText = blockLines.slice(tsLineIdx + 1).join("\n");
 
-      if (strict && (startMs === null || endMs === null)) {
+      if (strict && (tsLineIdx > 1 || startMs === null || endMs === null)) {
         throw new Error("Invalid WebVTT cue timing");
       }
-      if (!cueText.trim() && (startMs ?? 0) === 0 && (endMs ?? 0) === 0)
+      if (
+        !strict &&
+        !cueText.trim() &&
+        (startMs ?? 0) === 0 &&
+        (endMs ?? 0) === 0
+      )
         continue;
 
       cues.push({

@@ -231,6 +231,19 @@ it.each([
     respond: () => subtitleResponse("1\nbad --> bad\nUnreadable cue"),
   },
   {
+    reason: "backwards SRT timing",
+    respond: () =>
+      subtitleResponse("1\n00:00:02,000 --> 00:00:01,000\nBackwards cue"),
+  },
+  {
+    reason: "a WebVTT file with one valid and one malformed cue",
+    respond: () =>
+      subtitleResponse(
+        "WEBVTT\n\n00:00.000 --> 00:01.000\nValid cue\n\nbad --> bad",
+        "vtt",
+      ),
+  },
+  {
     reason: "invalid ASS timing",
     respond: () =>
       subtitleResponse(
@@ -382,6 +395,7 @@ it.each([
   ["ass", "[Script Info]\nScriptType: v4.00+\n\n[Events]"],
   ["smi", "<SAMI>\n<BODY>\n</BODY>\n</SAMI>"],
   ["smi", "<SAMI><BODY><SYNC Start=0><P Class=ENCC>&nbsp;</BODY></SAMI>"],
+  ["smi", "<SAMI><BODY><!-- <SYNC Start=example> --></BODY></SAMI>"],
 ])("can reload a valid empty %s document", async (format, content) => {
   const { user, editor, contentPath } = await openEditor("source");
   fireEvent.change(editor, { target: { value: "Discarded draft" } });

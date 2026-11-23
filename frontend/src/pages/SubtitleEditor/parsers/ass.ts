@@ -136,6 +136,15 @@ export const assParser: SubtitleParser = {
       });
     }
 
+    if (
+      strict &&
+      !cues.length &&
+      (!/^\[(?:Script Info|V4\+? Styles|Events)\][ \t]*$/im.test(text.trim()) ||
+        /^\s*Dialogue\s*:/im.test(text))
+    ) {
+      throw new Error("Invalid ASS document");
+    }
+
     return {
       metadata: {
         format,

@@ -9,7 +9,7 @@ function parseTimestampToMs(h: string, m: string, s: string): number {
 }
 
 export const txtParser: SubtitleParser = {
-  parse(content: string): ParseResult {
+  parse(content, { strict } = {}): ParseResult {
     const text = content.replace(/^\uFEFF/, "").replace(/\r\n/g, "\n");
 
     if (!text.trim()) {
@@ -31,7 +31,10 @@ export const txtParser: SubtitleParser = {
     if (isTmPlayer) {
       for (const line of lines) {
         const match = line.match(tmPlayerPattern);
-        if (!match) continue;
+        if (!match) {
+          if (strict) throw new Error("Invalid timed TXT cue");
+          continue;
+        }
 
         const [, h, m, s, cueText] = match;
         const startMs = parseTimestampToMs(h, m, s);
@@ -55,7 +58,10 @@ export const txtParser: SubtitleParser = {
 
       for (const line of lines) {
         const match = line.match(numberedPattern);
-        if (!match) continue;
+        if (!match) {
+          if (strict) throw new Error("Invalid timed TXT cue");
+          continue;
+        }
 
         const [, , h, m, s, cueText] = match;
         const startMs = parseTimestampToMs(h, m, s);

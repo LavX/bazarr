@@ -82,7 +82,7 @@ import JumpToCue from "./JumpToCue";
 import LineTranslationWatcher, {
   type LineTranslationJob,
 } from "./LineTranslationWatcher";
-import { detectFormat, getParser } from "./parsers";
+import { detectFormat, getParser, parseReplacementSubtitle } from "./parsers";
 import QCPanel from "./QCPanel";
 import SearchReplace from "./SearchReplace";
 import { createSubtitleSearchSource } from "./searchSource";
@@ -102,48 +102,11 @@ function escapeRegExp(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
-function parseSubtitleContent(
-  data: { format: string; content: string },
-  strict = false,
-) {
+function parseSubtitleContent(data: { format: string; content: string }) {
   try {
-    return getParser(data.format as SubtitleFormat).parse(data.content, {
-      strict,
-    });
+    return getParser(data.format as SubtitleFormat).parse(data.content);
   } catch {
     return null;
-  }
-}
-
-function isUsableReload(
-  data: { format: string; content: string },
-  parsed: ParseResult,
-) {
-  const content = data.content.trim();
-  if (parsed.cues.length || !content) return true;
-
-  // A parser can return no cues for unreadable content. Some formats also
-  // have a valid header or document wrapper even when they have no cues.
-  switch (data.format) {
-    case "ass":
-    case "ssa":
-      return (
-        /^\[(?:Script Info|V4\+? Styles|Events)\][ \t]*\r?$/im.test(content) &&
-        !/^\s*Dialogue\s*:/im.test(content)
-      );
-    case "vtt": {
-      const [header, ...blocks] = content.split(/\r?\n(?:[ \t]*\r?\n)+/);
-      return (
-        /^WEBVTT(?:[ \t][^\r\n]*)?(?:\r?\n|$)/.test(header) &&
-        blocks.every((block) =>
-          /^(?:NOTE|STYLE|REGION)(?:\s|$)/.test(block.trim()),
-        )
-      );
-    }
-    case "smi":
-      return /^<SAMI\b[^>]*>[\s\S]*<\/SAMI>$/i.test(content);
-    default:
-      return false;
   }
 }
 
@@ -924,16 +887,13 @@ export default function EditorPage() {
     try {
       const { data: latest } = await refetchSubtitle({ throwOnError: true });
       if (currentSyncDocumentRef.current?.subtitleKey !== subtitleKey) return;
-      const parsed = latest && parseSubtitleContent(latest.data, true);
-      if (
-        !latest ||
-        !parsed ||
-        !latest.etag ||
-        latest.data.exists === false ||
-        !isUsableReload(latest.data, parsed)
-      ) {
+      if (!latest || !latest.etag || latest.data.exists === false) {
         throw new Error("Incomplete subtitle document");
       }
+      const parsed = parseReplacementSubtitle(
+        latest.data.format as SubtitleFormat,
+        latest.data.content,
+      );
 
       reloadVersionRef.current += 1;
       loadFetchedDocument(latest, parsed);

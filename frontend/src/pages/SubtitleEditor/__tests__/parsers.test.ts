@@ -1,5 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { detectFormat, getParser } from "@/pages/SubtitleEditor/parsers";
+import {
+  detectFormat,
+  getParser,
+  parseReplacementSubtitle,
+} from "@/pages/SubtitleEditor/parsers";
 
 // Mock crypto.randomUUID since it may not be available in test env
 beforeEach(() => {
@@ -1061,5 +1065,92 @@ describe("TXT parser", () => {
     const numInput = "1 00:00:10 Hello";
     const numResult = parser.parse(numInput);
     expect(numResult.cues[0].text).toBe("Hello");
+  });
+});
+
+describe("parseReplacementSubtitle", () => {
+  const vtt = [
+    "WEBVTT - Example",
+    "",
+    "NOTE Metadata",
+    "",
+    "STYLE",
+    "::cue { color: white; }",
+    "",
+    "opening",
+    "00:00.000 --> 00:01.000",
+    "Valid cue",
+  ].join("\n");
+
+  it.each([
+    { format: "vtt", valid: vtt, invalid: "\n\nbad --> bad" },
+    { format: "vtt", valid: vtt, invalid: "\n\nopening2\nMissing timing" },
+    {
+      format: "sub",
+      valid: "{0}{24}Valid cue",
+      invalid: "\n{bad}{48}Broken cue",
+    },
+    {
+      format: "mpl",
+      valid: "[0][10]Valid cue",
+      invalid: "\n[bad][20]Broken cue",
+    },
+    {
+      format: "txt",
+      valid: "00:00:00:Valid cue",
+      invalid: "\n00:XX:02:Broken cue",
+    },
+    {
+      format: "txt",
+      valid: "1 00:00:00 Valid cue",
+      invalid: "\n2 00:XX:02 Broken cue",
+    },
+  ] as const)(
+    "rejects a partial $format replacement while ordinary parsing tolerates it",
+    ({ format, valid, invalid }) => {
+      expect(parseReplacementSubtitle(format, valid).cues).toMatchObject([
+        { startMs: 0, text: "Valid cue" },
+      ]);
+      expect(getParser(format).parse(valid + invalid).cues).toMatchObject([
+        { startMs: 0, text: "Valid cue" },
+      ]);
+      expect(() => parseReplacementSubtitle(format, valid + invalid)).toThrow();
+    },
+  );
+
+  it.each([
+    ["srt", "1\n00:00:02,000 --> 00:00:01,000\nBackwards cue"],
+    ["vtt", "WEBVTT\n\n00:02.000 --> 00:01.000\nBackwards cue"],
+    ["sub", "{48}{24}Backwards cue"],
+    ["mpl", "[20][10]Backwards cue"],
+    ["txt", "00:00:02:Backwards cue\n00:00:01:Next cue"],
+  ] as const)(
+    "cannot replace a draft with backwards %s timing",
+    (format, content) => {
+      expect(getParser(format).parse(content).cues[0]).toMatchObject({
+        text: "Backwards cue",
+      });
+      expect(() => parseReplacementSubtitle(format, content)).toThrow(
+        "Subtitle cue ends before it starts",
+      );
+    },
+  );
+
+  it("permits a cue whose start and end are both zero", () => {
+    expect(
+      parseReplacementSubtitle(
+        "srt",
+        "1\n00:00:00,000 --> 00:00:00,000\nAt zero",
+      ).cues,
+    ).toMatchObject([{ startMs: 0, endMs: 0, text: "At zero" }]);
+  });
+
+  it("ignores a commented SYNC example in an empty SAMI document", () => {
+    expect(
+      parseReplacementSubtitle(
+        "smi",
+        "<SAMI><BODY><!-- <SYNC Start=example> --></BODY></SAMI>",
+      ).cues,
+    ).toEqual([]);
   });
 });

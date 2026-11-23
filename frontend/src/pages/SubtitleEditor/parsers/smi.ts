@@ -16,11 +16,15 @@ function stripHtml(html: string): string {
 
 export const smiParser: SubtitleParser = {
   parse(content, { strict } = {}): ParseResult {
-    const text = content.replace(/^\uFEFF/, "").replace(/\r\n/g, "\n");
+    const normalized = content.replace(/^\uFEFF/, "").replace(/\r\n/g, "\n");
 
-    if (!text.trim()) {
+    if (!normalized.trim()) {
       return { metadata: { format: "smi" }, cues: [] };
     }
+
+    const text = strict
+      ? normalized.replace(/<!--[\s\S]*?-->/g, "")
+      : normalized;
 
     // Find all SYNC tags with their start times and collect text between them
     const syncPattern = /<SYNC\b(?:\s+Start\s*=\s*(\d+)\s*>)?/gi;
@@ -72,6 +76,14 @@ export const smiParser: SubtitleParser = {
         endMs,
         text: displayText,
       });
+    }
+
+    if (
+      strict &&
+      !cues.length &&
+      !/^<SAMI\b[^>]*>[\s\S]*<\/SAMI>$/i.test(text.trim())
+    ) {
+      throw new Error("Invalid SAMI document");
     }
 
     return {

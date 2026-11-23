@@ -26,6 +26,19 @@ export function getParser(format: SubtitleFormat): SubtitleParser {
   return parsers[format];
 }
 
+// Conflict recovery adopts the entire file, so partial parses cannot replace
+// the current draft. Ordinary open and import still use the lenient parsers.
+export function parseReplacementSubtitle(
+  format: SubtitleFormat,
+  content: string,
+) {
+  const parsed = getParser(format).parse(content, { strict: true });
+  if (parsed.cues.some((cue) => cue.endMs < cue.startMs)) {
+    throw new Error("Subtitle cue ends before it starts");
+  }
+  return parsed;
+}
+
 const extensionMap: Record<string, SubtitleFormat> = {
   ".srt": "srt",
   ".ass": "ass",

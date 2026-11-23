@@ -3,7 +3,7 @@ import type { SubtitleParser } from "./index";
 import { cueId } from "./uuid";
 
 export const mplParser: SubtitleParser = {
-  parse(content: string): ParseResult {
+  parse(content, { strict } = {}): ParseResult {
     const text = content.replace(/^\uFEFF/, "").replace(/\r\n/g, "\n");
 
     if (!text.trim()) {
@@ -18,7 +18,10 @@ export const mplParser: SubtitleParser = {
 
     for (const line of lines) {
       const match = line.match(pattern);
-      if (!match) continue;
+      if (!match) {
+        if (strict) throw new Error("Invalid MPL2 cue");
+        continue;
+      }
 
       const [, startDs, endDs, rawText] = match;
       const displayText = rawText.replace(/\|/g, "\n");
