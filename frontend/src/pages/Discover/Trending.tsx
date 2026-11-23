@@ -158,7 +158,7 @@ export default function Trending({
         year: item.year ?? undefined,
         episodeIdentity: undefined,
         manualConfirmed: false,
-        manualEntry: false,
+        manualEntry: undefined,
         season: "",
         episode: "",
       });

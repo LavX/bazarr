@@ -17,7 +17,7 @@ import { describe, expect, it, vi } from "vitest";
 import queryClient from "@/apis/queries";
 import { SportsEvent } from "@/apis/raw/sports";
 import { AllProviders } from "@/providers";
-import { act, rawRender, screen, waitFor } from "@/tests";
+import { act, rawRender, screen, waitFor, within } from "@/tests";
 import server from "@/tests/mocks/node";
 import Table from "./table";
 
@@ -87,6 +87,47 @@ function expectSameNodes(before: (Node | null)[], after: (Node | null)[]) {
 }
 
 describe("Sports events Table, an open badge menu", () => {
+  it("sets the score of the chosen sports file using its local event id and owner", async () => {
+    const user = userEvent.setup();
+    const bodies: FormData[] = [];
+    server.use(
+      http.get("/api/system/languages", () => HttpResponse.json([])),
+      http.post("/api/subtitles/score-override", async ({ request }) => {
+        bodies.push(await request.formData());
+        return new HttpResponse(null, { status: 204 });
+      }),
+    );
+    const event = makeEvent(1);
+    event.subtitles = [
+      ["en", "/sports/event1.en.srt", 10],
+      ["en", "/sports/event1.alt.en.srt", 20],
+    ];
+    event.manual_subtitle_scores = { "/sports/event1.alt.en.srt": 0 };
+    mountTable([event]);
+
+    const badge = await screen.findByTitle("/sports/event1.alt.en.srt");
+    expect(within(badge).getByText("0%")).toBeInTheDocument();
+    expect(
+      within(screen.getByTitle("/sports/event1.en.srt")).queryByText("0%"),
+    ).toBeNull();
+    await user.click(badge);
+    await user.click(
+      await screen.findByRole("menuitem", { name: "Set Score..." }),
+    );
+    const input = await screen.findByRole("textbox", { name: "Score (%)" });
+    await user.clear(input);
+    await user.type(input, "0");
+    await user.click(screen.getByRole("button", { name: "Set score" }));
+
+    await waitFor(() => expect(bodies).toHaveLength(1));
+    expect(bodies[0].get("sportsEventId")).toBe("61");
+    expect(bodies[0].get("arr_instance_id")).toBe("42");
+    expect(bodies[0].get("subtitlesPath")).toBe("/sports/event1.alt.en.srt");
+    expect(bodies[0].get("score")).toBe("0");
+    expect(bodies[0].has("radarrMovieId")).toBe(false);
+    expect(bodies[0].has("sonarrEpisodeId")).toBe(false);
+  });
+
   it("stays open while events before it are removed and added", async () => {
     server.use(http.get("/api/system/languages", () => HttpResponse.json([])));
     const user = userEvent.setup();

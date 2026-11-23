@@ -6,10 +6,11 @@ import re
 import stat
 from contextlib import contextmanager
 from dataclasses import dataclass
-from subtitles.tools.subsync_engines import (capture_subtitle_versions, quarantine_sync_outputs_after_mutation,
+from subtitles.tools.subsync_engines import (capture_subtitle_versions, local_subtitle_owner_is_clear,
+                                             plan_sync_output_cleanup, quarantine_sync_outputs_after_mutation,
                                              read_regular_subtitle,
                                              regular_subtitle_version, staged_subtitle_write,
-                                             subtitle_mutation, sync_output_owner_is_unique)
+                                             subtitle_mutation, subtitle_source_version, sync_output_owner_is_unique)
 from app.jobs_queue import JobCancelled
 from media_servers.events import publication_callback
 from sportarr.connection import check_cancelled
@@ -50,6 +51,9 @@ def try_combine_for_video(video_path, media_type, sonarr_series_id=None,
             from media_sources.indexer import SourcePublicationOwnerIndex
             if sports_operation is not None or arr_instance_id is not None:
                 raise ValueError('A source composition requires source media metadata')
+            video_version = subtitle_source_version(video_path)
+            if video_version is None:
+                return CombineResult(status="skipped", reason="source media file is missing or unavailable")
             owner_kwargs['ownership_index'] = SourcePublicationOwnerIndex()
 
         if media_type == 'sports' and source is None:
@@ -141,14 +145,11 @@ def try_combine_for_video(video_path, media_type, sonarr_series_id=None,
             notify = publication_callback(media_type, video_path, 'combine', arr_instance_id,
                                           **({'source': source} if source is not None else {}))
             published_versions = ()
-            removed_siblings = []
             if sports_operation is not None:
                 from sportarr.profile_hooks import finalize
                 sports_operation = sports_operation.bind(
                     (sources.primary, *sources.secondaries), out_path, cancel=cancel,
-                    extra_destinations=tuple(os.path.splitext(out_path)[0] + ext
-                                             for ext in _COMBINED_OUTPUT_EXTS
-                                             if ext != os.path.splitext(out_path)[1]))
+                    extra_destinations=_combined_format_siblings(out_path))
                 write_kwargs = dict(publication_guard=lambda: sports_operation.publication(cancel),
                                      expected_versions=sports_operation.versions, cancel=cancel,
                                      after_write=lambda: capture_published())
@@ -160,11 +161,7 @@ def try_combine_for_video(video_path, media_type, sonarr_series_id=None,
                 if sports_operation is not None:
                     _remove_stale_combined_siblings(out_path, video_path, on_publish=notify,
                                                     ownership_verified=True)
-                elif source is not None:
-                    removed_siblings.extend(_remove_stale_combined_siblings(
-                        out_path, video_path, on_publish=notify, ownership_verified=True,
-                        invalidate_outputs=False, **owner_kwargs))
-                else:
+                elif source is None:
                     _remove_stale_combined_siblings(out_path, video_path, on_publish=notify, **owner_kwargs)
 
             if source is not None:
@@ -177,22 +174,32 @@ def try_combine_for_video(video_path, media_type, sonarr_series_id=None,
                         if (regular_subtitle_version(path) != version
                                 or not sync_output_owner_is_unique(video_path, path, **owner_kwargs)):
                             raise ValueError('A combined subtitle input changed or lost its unique owner')
+                    return _plan_source_alternates(out_path, video_path, owners)
 
                 @contextmanager
                 def publication():
-                    with owners.publication(source, prepare, destination=out_path) as (current, _, _prepared):
+                    with owners.publication(source, prepare, destination=out_path, cleanup_outputs=True) as (
+                            current, _, alternates):
                         if current is None or current.path != video_path:
                             raise ValueError('The source item moved or was removed during composition')
+                        if subtitle_source_version(video_path) != video_version:
+                            raise ValueError('The source media file changed during composition')
+                        # The prepared registry owners are pinned here. Recheck
+                        # media-folder videos for inputs in either subtitle folder.
+                        if any(not sync_output_owner_is_unique(video_path, path, owners) for path in inputs):
+                            raise ValueError('A combined subtitle input lost its unique owner before publication')
                         yield
-
-                def quarantine_removed_siblings():
-                    ownership_index = SourcePublicationOwnerIndex()
-                    for sibling in removed_siblings:
-                        quarantine_sync_outputs_after_mutation(video_path, sibling, ownership_index)
+                        _retire_source_alternates(video_path, alternates, owners, notify)
 
                 write_kwargs['publication_guard'] = publication
-                write_kwargs['after_write'] = quarantine_removed_siblings
-                read_kwargs['read_bytes'] = lambda path: read_regular_subtitle(path, input_versions[path])
+                write_kwargs['invalidate_outputs'] = False
+
+                def read_input(path):
+                    if not sync_output_owner_is_unique(video_path, path, owners):
+                        raise ValueError('A combined subtitle input lost its unique owner before reading')
+                    return read_regular_subtitle(path, input_versions[path])
+
+                read_kwargs['read_bytes'] = read_input
 
             def capture_published():
                 nonlocal published_versions
@@ -270,6 +277,43 @@ def _normalize_language_codes(languages):
 _COMBINED_OUTPUT_EXTS = (".srt", ".ass", ".ssa")
 
 
+def _combined_format_siblings(out_path):
+    root, extension = os.path.splitext(out_path)
+    return tuple(root + alternate for alternate in _COMBINED_OUTPUT_EXTS if alternate != extension)
+
+
+def _plan_source_alternates(out_path, video_path, owners):
+    alternates = []
+    for sibling in _combined_format_siblings(out_path):
+        version = regular_subtitle_version(sibling)
+        if version is None and os.path.lexists(sibling):
+            continue
+        generated = plan_sync_output_cleanup(video_path, sibling, owners, include_combined=True)
+        if generated or (version is not None and sync_output_owner_is_unique(video_path, sibling, owners)):
+            alternates.append((sibling, version, generated))
+    return alternates
+
+
+def _retire_source_alternates(video_path, alternates, owners, notify):
+    for sibling, version, generated in alternates:
+        try:
+            with subtitle_mutation(video_path, sibling, invalidate_outputs=False):
+                if not local_subtitle_owner_is_clear(video_path, sibling, owners):
+                    continue
+                if version is None:
+                    if os.path.lexists(sibling):
+                        continue
+                elif regular_subtitle_version(sibling) == version:
+                    os.remove(sibling)
+                    if notify:
+                        notify(sibling)
+                else:
+                    continue
+            quarantine_sync_outputs_after_mutation(video_path, sibling, owners, prepared=generated)
+        except OSError:
+            logging.exception('BAZARR combine could not remove stale sibling %s', sibling)
+
+
 def _remove_stale_combined_siblings(out_path, video_path, on_publish=None, ownership_verified=False,
                                     invalidate_outputs=True, **owner_kwargs):
     """Remove combined-output siblings that share this output's stem but use a
@@ -283,12 +327,8 @@ def _remove_stale_combined_siblings(out_path, video_path, on_publish=None, owner
     if (os.path.dirname(out_real) != safe_dir
             or (not ownership_verified and not sync_output_owner_is_unique(video_path, out_path, **owner_kwargs))):
         return []
-    root, _ext = os.path.splitext(out_real)
     removed = []
-    for ext in _COMBINED_OUTPUT_EXTS:
-        sibling = root + ext
-        if sibling == out_real:
-            continue
+    for sibling in _combined_format_siblings(out_real):
         try:
             if os.path.commonpath([safe_dir, sibling]) != safe_dir:
                 continue

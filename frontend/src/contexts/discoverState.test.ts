@@ -2,7 +2,12 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import type { DiscoverDraft } from "@/contexts/discoverState";
-import { episodeMatchesShow, searchSelection } from "@/contexts/discoverState";
+import {
+  discoverContextKey,
+  episodeMatchesShow,
+  initialDiscoverState,
+  searchSelection,
+} from "@/contexts/discoverState";
 import type { MetadataEpisode } from "@/types/discover";
 
 const episode: MetadataEpisode = {
@@ -164,6 +169,18 @@ describe("episodeMatchesShow", () => {
 });
 
 describe("searchSelection", () => {
+  it("submits the chooser's linked show identity only when a copy is chosen", () => {
+    const draft = draftWith({ copyTmdbId: undefined });
+    expect(searchSelection(draft)).not.toHaveProperty("tmdb_id");
+    expect(
+      searchSelection({ ...draft, copyId: "c1.episode.3.s1" }),
+    ).toMatchObject({
+      imdb_id: "tt1234567",
+      show_id: 100,
+      tmdb_id: 100,
+      copy_id: "c1.episode.3.s1",
+    });
+  });
   // The draft reaches the comparison only through a valid IMDb id and a valid
   // season and episode, and spells an absent year as undefined rather than
   // null, so the cases that need those spellings are the predicate's alone.
@@ -186,7 +203,7 @@ describe("searchSelection", () => {
       const selection = searchSelection(
         draftWith({
           episodeIdentity: wire(e),
-          manualEntry: true,
+          manualEntry: "catalog",
           manualConfirmed: true,
           ...draft,
         }),
@@ -212,11 +229,84 @@ describe("searchSelection", () => {
       searchSelection(
         draftWith({
           episodeIdentity: wire({ identity_status: "conflict" }),
-          manualEntry: true,
+          manualEntry: "catalog",
           manualConfirmed: true,
         }),
       ),
     ).toBeNull();
+  });
+});
+
+describe("discoverContextKey", () => {
+  function unmappedMovie() {
+    const state = initialDiscoverState();
+    const draft: DiscoverDraft = {
+      mediaType: "movie",
+      imdbId: "",
+      title: "Shared title",
+      year: 2021,
+      language: "eng",
+      season: "",
+      episode: "",
+    };
+    return {
+      draft,
+      browsing: { ...state.browsing, selectedId: 200 },
+    };
+  }
+
+  it("separates empty-IMDb catalog movies with identical draft metadata", () => {
+    const first = unmappedMovie();
+    const second = {
+      ...first,
+      browsing: { ...first.browsing, selectedId: 201 },
+    };
+
+    expect(discoverContextKey(first)).not.toBe(discoverContextKey(second));
+  });
+
+  it.each(["tmdb", "local"] as const)(
+    "keeps the same %s title context for numeric and string selected IDs",
+    (selectedSource) => {
+      const state = unmappedMovie();
+      const numeric = {
+        ...state,
+        browsing: { ...state.browsing, selectedSource, selectedId: 200 },
+      };
+      const text = {
+        ...numeric,
+        browsing: { ...numeric.browsing, selectedId: "200" },
+      };
+
+      expect(discoverContextKey(numeric)).toBe(discoverContextKey(text));
+    },
+  );
+
+  it("separates source-folder movies and preserves the adopted title on Back", () => {
+    const state = unmappedMovie();
+    const selected = {
+      ...state,
+      browsing: {
+        ...state.browsing,
+        selectedSource: "local" as const,
+        selectedId: "source:5",
+      },
+    };
+    const other = {
+      ...selected,
+      browsing: { ...selected.browsing, selectedId: "source:6" },
+    };
+    const departed = {
+      ...selected,
+      browsing: {
+        ...selected.browsing,
+        selectedId: null,
+        adoptedSourceId: "source:movie:5",
+      },
+    };
+
+    expect(discoverContextKey(selected)).not.toBe(discoverContextKey(other));
+    expect(discoverContextKey(selected)).toBe(discoverContextKey(departed));
   });
 });
 

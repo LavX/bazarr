@@ -6,6 +6,7 @@ from contextlib import nullcontext
 import sys
 
 from flask_restx import Resource, Namespace, reqparse, fields, marshal
+from sqlalchemy.exc import OperationalError
 
 from app.database import (TableArrInstances, TableShows, TableEpisodes, TableMovies, TableSportsEvents,
                           database, select)
@@ -954,6 +955,17 @@ def _embedded_ocr_action(args, language, hi, forced, media_type, media_id, arr_i
     return {**queued_job_response(job_id or None), "path": destinations[0]}, 202
 
 
+def _score_override_integer(value):
+    if type(value) is float and value.is_integer():
+        return int(value)
+    if type(value) not in (int, str):
+        raise ValueError("A whole number is required")
+    return int(value)
+
+
+_score_override_integer.__schema__ = {"type": "integer"}
+
+
 @api_ns_subtitles.route("subtitles/score-override")
 class SubtitleScoreOverride(Resource):
     post_request_parser = reqparse.RequestParser()
@@ -967,38 +979,62 @@ class SubtitleScoreOverride(Resource):
         "sonarrEpisodeId", type=int, required=False, help="Sonarr Episode ID"
     )
     post_request_parser.add_argument(
-        "score", type=int, required=True, help="Manual score, a percentage from 0 to 100"
+        "sportsEventId", type=_score_override_integer, required=False, help="Local sports event id"
+    )
+    post_request_parser.add_argument(
+        "score", type=_score_override_integer, required=True, help="Manual score, a percentage from 0 to 100"
     )
     post_request_parser.add_argument(
         "arr_instance_id",
-        type=int,
+        type=_score_override_integer,
         required=False,
-        help="Owning Sonarr/Radarr instance id",
+        help="Owning Sonarr/Radarr/Sportarr instance id",
     )
 
     @authenticate
     @api_ns_subtitles.doc(parser=post_request_parser)
     @api_ns_subtitles.response(204, "Score set")
-    @api_ns_subtitles.response(400, "Give exactly one of radarrMovieId or sonarrEpisodeId, a non-empty "
+    @api_ns_subtitles.response(400, "Give exactly one media ID, a non-empty "
                                     "subtitlesPath, and a score from 0 to 100")
     @api_ns_subtitles.response(401, "Not Authenticated")
-    @api_ns_subtitles.response(404, "Movie or episode not found, or the path is not listed for it")
+    @api_ns_subtitles.response(404, "Media not found, or the path is not listed for it")
+    @api_ns_subtitles.response(409, "The sports event changed. Please retry.")
     def post(self):
-        """Pin a manual score on one listed subtitle of a movie or episode"""
+        """Pin a manual score on one listed external subtitle"""
         args = self.post_request_parser.parse_args()
         movie_id = args.get("radarrMovieId")
         episode_id = args.get("sonarrEpisodeId")
+        sports_event_id = args.get("sportsEventId")
         score = args.get("score")
         subtitles_path = args.get("subtitlesPath")
         arr_instance_id = args.get("arr_instance_id")
-        if (movie_id is None) == (episode_id is None):
-            return "Give exactly one of radarrMovieId or sonarrEpisodeId.", 400
+        if sum(id_ is not None for id_ in (movie_id, episode_id, sports_event_id)) != 1:
+            return "Give exactly one of radarrMovieId, sonarrEpisodeId or sportsEventId.", 400
         # reqparse accepts null and empty values for a required argument, and an
         # empty path would match an embedded track's listing, so refuse it here.
         if not subtitles_path:
             return "The subtitlesPath must be a listed subtitle file path.", 400
         if score is None or not 0 <= score <= 100:
             return "The score must be a percentage from 0 to 100.", 400
+        if sports_event_id is not None:
+            from sportarr.db import error_sqlstate
+            from sportarr.errors import SportsNotFound
+            from sportarr.workflows import require_sports_enabled
+
+            try:
+                require_sports_enabled()
+                set_score_override(database, "sports", sports_event_id, subtitles_path, score,
+                                   arr_instance_id=arr_instance_id)
+            except (SportsNotFound, LookupError) as exc:
+                return str(exc), 404
+            except ValueError as exc:
+                return str(exc), 400
+            except OperationalError as exc:
+                if error_sqlstate(exc) not in ('40001', '40P01'):
+                    raise
+                return "The sports event changed. Please retry.", 409
+            return '', 204
+
         media, item_id = ("movie", movie_id) if movie_id is not None else ("episode", episode_id)
         # The tables show a path through the global path mappings, while the
         # stored listing and the history rows keep the arr's own path. Take the

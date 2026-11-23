@@ -38,7 +38,7 @@ def sports_history(schema_session, monkeypatch):
 
 def _context():
     from types import SimpleNamespace
-    return SimpleNamespace(event_id=61, arr_instance_id=42, league_id=51)
+    return SimpleNamespace(event_id=61, arr_instance_id=42, league_id=51, original_path='/sports/race.mkv')
 
 
 def test_a_low_scoring_source_is_rejected(sports_history, monkeypatch):
@@ -47,7 +47,7 @@ def test_a_low_scoring_source_is_rejected(sports_history, monkeypatch):
 
     session, history = sports_history
     session.add(history(event_id=61, league_id=51, arr_instance_id=42, action=1,
-                        timestamp=datetime.now(), language='hu', score=10))
+                        timestamp=datetime.now(), language='hu', score=10, video_path=_context().original_path))
     session.commit()
     monkeypatch.setattr(settings.translator, 'min_source_score', 90)
 
@@ -60,7 +60,7 @@ def test_a_good_source_is_accepted(sports_history, monkeypatch):
 
     session, history = sports_history
     session.add(history(event_id=61, league_id=51, arr_instance_id=42, action=1,
-                        timestamp=datetime.now(), language='hu', score=360))
+                        timestamp=datetime.now(), language='hu', score=360, video_path=_context().original_path))
     session.commit()
     monkeypatch.setattr(settings.translator, 'min_source_score', 90)
 
@@ -75,7 +75,7 @@ def test_a_zero_score_source_is_rejected(sports_history, monkeypatch):
 
     session, history = sports_history
     session.add(history(event_id=61, league_id=51, arr_instance_id=42, action=1,
-                        timestamp=datetime.now(), language='hu', score=0))
+                        timestamp=datetime.now(), language='hu', score=0, video_path=_context().original_path))
     session.commit()
     monkeypatch.setattr(settings.translator, 'min_source_score', 90)
 
@@ -94,9 +94,9 @@ def test_a_hand_upload_over_a_low_scoring_download_is_accepted(sports_history, m
     session, history = sports_history
     now = datetime.now()
     session.add(history(event_id=61, league_id=51, arr_instance_id=42, action=1,
-                        timestamp=now - timedelta(hours=1), language='hu', score=10))
+                        timestamp=now - timedelta(hours=1), language='hu', score=10, video_path=_context().original_path))
     session.add(history(event_id=61, league_id=51, arr_instance_id=42, action=4,
-                        timestamp=now, language='hu', score=None))
+                        timestamp=now, language='hu', score=None, video_path=_context().original_path))
     session.commit()
     monkeypatch.setattr(settings.translator, 'min_source_score', 90)
     monkeypatch.setattr(settings.general, 'local_subtitle_score', local_score)
@@ -113,13 +113,68 @@ def test_a_download_after_a_hand_upload_is_held_to_the_threshold(sports_history,
     session, history = sports_history
     now = datetime.now()
     session.add(history(event_id=61, league_id=51, arr_instance_id=42, action=4,
-                        timestamp=now - timedelta(hours=1), language='hu', score=None))
+                        timestamp=now - timedelta(hours=1), language='hu', score=None, video_path=_context().original_path))
     session.add(history(event_id=61, league_id=51, arr_instance_id=42, action=1,
-                        timestamp=now, language='hu', score=10))
+                        timestamp=now, language='hu', score=10, video_path=_context().original_path))
     session.commit()
     monkeypatch.setattr(settings.translator, 'min_source_score', 90)
 
     assert _source_score_below_threshold(_context(), 'hu') is True
+
+
+@pytest.mark.parametrize('source_action,rejected', [(4, False), (1, True)])
+def test_a_zero_score_override_preserves_the_translation_sources_origin(
+    sports_history, monkeypatch, source_action, rejected
+):
+    from app.config import settings
+    from sportarr.profile_hooks import _source_score_below_threshold
+
+    session, history = sports_history
+    _history_rows(session, history, [
+        ('hu', source_action, None if source_action == 4 else 180, '/sports/race.hu.srt'),
+        ('hu', 9, 0, '/sports/race.hu.srt'),
+    ])
+    monkeypatch.setattr(settings.translator, 'min_source_score', 90)
+
+    assert _source_score_below_threshold(_context(), 'hu', '/sports/race.hu.srt') is rejected
+
+
+@pytest.mark.parametrize('old_action,old_score,current_action,current_score,rejected', [
+    (9, 0, 1, 180, False),
+    (4, None, 1, 10, True),
+    (4, None, 9, 0, True),
+])
+def test_an_old_videos_history_does_not_affect_the_same_sidecar(
+    sports_history, monkeypatch, old_action, old_score, current_action, current_score, rejected
+):
+    from datetime import timedelta
+
+    from app.config import settings
+    from sportarr.profile_hooks import _source_score_below_threshold
+
+    session, history = sports_history
+    path = '/sports/race.hu.srt'
+    _history_rows(session, history, [('hu', current_action, current_score, path)])
+    session.add(history(event_id=61, league_id=51, arr_instance_id=42, action=old_action,
+                        timestamp=datetime.now() + timedelta(seconds=1), language='hu', score=old_score,
+                        score_out_of=180, subtitles_path=path, video_path='/sports/replaced.mkv'))
+    session.commit()
+    monkeypatch.setattr(settings.translator, 'min_source_score', 90)
+
+    assert _source_score_below_threshold(_context(), 'hu', path) is rejected
+
+
+def test_the_manual_score_gate_uses_the_displayed_whole_percent(sports_history, monkeypatch):
+    from app.config import settings
+    from sportarr.profile_hooks import _source_score_below_threshold
+
+    session, history = sports_history
+    path = '/sports/race.hu.srt'
+    _history_rows(session, history, [('hu', 9, 59, path)])
+    monkeypatch.setattr(settings.translator, 'min_source_score', 33)
+    assert _source_score_below_threshold(_context(), 'hu', path) is False
+    monkeypatch.setattr(settings.translator, 'min_source_score', 34)
+    assert _source_score_below_threshold(_context(), 'hu', path) is True
 
 
 def test_a_hand_upload_of_another_language_does_not_vouch_for_this_one(sports_history, monkeypatch):
@@ -131,9 +186,9 @@ def test_a_hand_upload_of_another_language_does_not_vouch_for_this_one(sports_hi
     session, history = sports_history
     now = datetime.now()
     session.add(history(event_id=61, league_id=51, arr_instance_id=42, action=1,
-                        timestamp=now - timedelta(hours=1), language='hu', score=10))
+                        timestamp=now - timedelta(hours=1), language='hu', score=10, video_path=_context().original_path))
     session.add(history(event_id=61, league_id=51, arr_instance_id=42, action=4,
-                        timestamp=now, language='en', score=None))
+                        timestamp=now, language='en', score=None, video_path=_context().original_path))
     session.commit()
     monkeypatch.setattr(settings.translator, 'min_source_score', 90)
 
@@ -171,7 +226,7 @@ def test_another_owners_history_does_not_count(sports_history, monkeypatch):
                                   path='/sports/race.mkv', title='Race'))
     session.flush()
     session.add(history(event_id=62, league_id=52, arr_instance_id=43, action=1,
-                        timestamp=datetime.now(), language='hu', score=10))
+                        timestamp=datetime.now(), language='hu', score=10, video_path=_context().original_path))
     session.commit()
     monkeypatch.setattr(settings.translator, 'min_source_score', 90)
 
@@ -207,7 +262,7 @@ def _history_rows(session, history, rows):
     for offset, (language, action, score, path) in enumerate(rows):
         session.add(history(event_id=61, league_id=51, arr_instance_id=42, action=action,
                             timestamp=now - timedelta(hours=len(rows) - offset), language=language,
-                            score=score, subtitles_path=path))
+                            score=score, score_out_of=180, subtitles_path=path, video_path=_context().original_path))
     session.commit()
 
 
@@ -259,3 +314,30 @@ def test_the_source_path_is_matched_through_the_instance_path_mapping(sports_his
 
     assert _source_score_below_threshold(_context(), 'hu', '/sports/race.hu.srt') is True
     assert _source_score_below_threshold(_context(), 'hu', '/sports/race.hu.forced.srt') is False
+
+
+@pytest.mark.parametrize('origin_action,rejected', [(1, True), (4, False)])
+def test_windows_paths_match_the_owned_recording_and_source_origin(sports_history, monkeypatch, origin_action, rejected):
+    from datetime import timedelta
+
+    from app.config import settings
+    from app.database import TableArrInstances
+    from sportarr.profile_hooks import _source_score_below_threshold
+
+    session, history = sports_history
+    session.get(TableArrInstances, 42).path_mappings = '[["D:/Sports", "/sports"]]'
+    context = _context()
+    context.original_path = r'D:\Sports\race.mkv'
+    now = datetime.now()
+    session.add(history(event_id=61, league_id=51, arr_instance_id=42, action=origin_action,
+                        timestamp=now - timedelta(hours=1), language='hu',
+                        score=10 if origin_action == 1 else None,
+                        subtitles_path='D:/Sports/race.hu.srt', video_path='D:/Sports/race.mkv'))
+    if origin_action == 4:
+        session.add(history(event_id=61, league_id=51, arr_instance_id=42, action=9,
+                            timestamp=now, language='hu', score=0, score_out_of=180,
+                            subtitles_path=r'D:\Sports\race.hu.srt', video_path=context.original_path))
+    session.commit()
+    monkeypatch.setattr(settings.translator, 'min_source_score', 90)
+
+    assert _source_score_below_threshold(context, 'hu', '/sports/race.hu.srt') is rejected

@@ -1,6 +1,9 @@
 import { FC } from "react";
 import StepLayout from "@/pages/Setup/StepLayout";
-import type { WizardStepProps } from "@/pages/Setup/steps/types";
+import {
+  NOTHING_WRITTEN,
+  type WizardStepProps,
+} from "@/pages/Setup/steps/types";
 import { useOnboardingSelection } from "@/pages/Setup/useOnboardingSelection";
 import InstanceServerForm from "./InstanceServerForm";
 import PlexServerForm from "./PlexServerForm";
@@ -17,7 +20,12 @@ type Props = WizardStepProps;
  * of its own, which is what the test and libraries hooks need: they close over
  * the connection values and reset when one changes.
  */
-const MediaServerConfigureStep: FC<Props> = ({ draftId, onNext, onBack }) => {
+const MediaServerConfigureStep: FC<Props> = ({
+  draftId,
+  onNext,
+  onBack,
+  onWritten,
+}) => {
   const { drafts } = useOnboardingSelection();
   const draft = drafts.find((entry) => entry.draftId === draftId);
 
@@ -29,15 +37,27 @@ const MediaServerConfigureStep: FC<Props> = ({ draftId, onNext, onBack }) => {
         title="Media server"
         titleOrder={3}
         description="This server is no longer selected."
-        actions={<StepActions onNext={onNext} onBack={onBack} />}
+        actions={
+          <StepActions onNext={() => onNext(NOTHING_WRITTEN)} onBack={onBack} />
+        }
       />
     );
   }
 
   return draft.kind === "plex" ? (
-    <PlexServerForm draft={draft} onNext={onNext} onBack={onBack} />
+    <PlexServerForm
+      draft={draft}
+      onNext={onNext}
+      onBack={onBack}
+      onWritten={onWritten}
+    />
   ) : (
-    <InstanceServerForm draft={draft} onNext={onNext} onBack={onBack} />
+    <InstanceServerForm
+      draft={draft}
+      onNext={onNext}
+      onBack={onBack}
+      onWritten={onWritten}
+    />
   );
 };
 

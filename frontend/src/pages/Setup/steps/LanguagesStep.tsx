@@ -9,6 +9,7 @@ import {
   VisuallyHidden,
 } from "@mantine/core";
 import {
+  isSettingsFollowupError,
   useLanguageProfiles,
   useLanguages,
   useSettingsMutation,
@@ -100,7 +101,12 @@ function browserCandidates(): string[] {
  * Idempotent: if a profile already exists (re-entering the wizard), we show a
  * short note and let Continue advance without rewriting anything.
  */
-const LanguagesStep: FC<WizardStepProps> = ({ onNext, onBack, stepKey }) => {
+const LanguagesStep: FC<WizardStepProps> = ({
+  onNext,
+  onBack,
+  onWritten,
+  stepKey,
+}) => {
   const { data: languages, isLoading } = useLanguages();
   const {
     data: profiles,
@@ -129,10 +135,9 @@ const LanguagesStep: FC<WizardStepProps> = ({ onNext, onBack, stepKey }) => {
     return code === undefined ? [] : [code];
   }, [languages]);
 
-  const [draft, patchDraft] = useStepDraft<{ selected: string[] | null }>(
-    stepKey,
-    { selected: null },
-  );
+  const [draft, patchDraft] = useStepDraft<{
+    selected: string[] | null;
+  }>(stepKey, { selected: null });
   const selected = draft.selected ?? preselected;
   const setSelected = (next: string[]) => patchDraft({ selected: next });
   // What the last change to the selection did, said out loud. Measured with
@@ -189,14 +194,8 @@ const LanguagesStep: FC<WizardStepProps> = ({ onNext, onBack, stepKey }) => {
   const profilesUnknown = profilesLoading || profilesFailed;
 
   const handleContinue = () => {
-    if (profilesUnknown) {
-      // The profiles could not be read, so nothing is written and nothing is known.
+    if (profilesUnknown || alreadyConfigured) {
       onNext(NOTHING_WRITTEN);
-      return;
-    }
-    if (alreadyConfigured) {
-      // Profiles exist already, which is an answer.
-      onNext();
       return;
     }
 
@@ -238,7 +237,12 @@ const LanguagesStep: FC<WizardStepProps> = ({ onNext, onBack, stepKey }) => {
         onSuccess: () => {
           onNext();
         },
-        onError: () => setSaveFailed(true),
+        onError: (error) => {
+          if (isSettingsFollowupError(error)) {
+            onWritten?.();
+          }
+          setSaveFailed(true);
+        },
       },
     );
   };

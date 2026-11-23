@@ -204,9 +204,11 @@ def translation_write_kwargs(translator, job_id):
     if source is not None:
         from media_sources.indexer import SourcePublicationOwnerIndex, SourcePublicationOwnersChanged
         from media_sources.translation import automatic_translation_is_current
+        from subtitles.tools.subsync_engines import (SubtitleSourceChanged, subtitle_source_version,
+                                                      sync_output_owner_is_unique)
 
-        from subtitles.tools.subsync_engines import SubtitleSourceChanged
-
+        video_version = (getattr(translator, 'source_video_version', None)
+                         or source_translation_video_version(translator.video_path))
         owners = SourcePublicationOwnerIndex()
         source_tool = getattr(translator, 'source_tool', None)
 
@@ -218,12 +220,16 @@ def translation_write_kwargs(translator, job_id):
         @contextmanager
         def publication():
             try:
-                with owners.publication(source, prepare, destination=translator.dest_srt_file) as (
+                with owners.publication(source, prepare, destination=translator.dest_srt_file, cleanup_outputs=True) as (
                         current, connection, prepared):
                     if current is None or current.profile_id != prepared.profile_id:
                         raise SourceTranslationChanged('The source item moved, was disabled, or its profile changed')
                     if source_tool is not None:
                         source_tool.check_current(current, connection)
+                    if subtitle_source_version(translator.video_path) != video_version:
+                        raise SourceTranslationChanged('The source media file changed during translation')
+                    if not sync_output_owner_is_unique(translator.video_path, translator.source_srt_file, owners):
+                        raise SourceTranslationInputAmbiguous('The translation input lost its unique media owner')
                     if captured and not automatic_translation_is_current(
                             current, translator.source_srt_file, translator.from_lang, translator.orig_to_lang,
                             translator.forced, translator.hi, connection=connection):
@@ -231,7 +237,7 @@ def translation_write_kwargs(translator, job_id):
                     yield
             except (SourcePublicationOwnersChanged, SubtitleSourceChanged) as error:
                 raise SourceTranslationChanged(str(error)) from error
-        kwargs.update(publication_guard=publication, ownership_index=owners)
+        kwargs.update(publication_guard=publication, invalidate_outputs=False)
     return kwargs
 
 
@@ -241,6 +247,15 @@ class SourceTranslationChanged(JobCancelled):
 
 class SourceTranslationInputAmbiguous(SourceTranslationChanged):
     """The subtitle input is shared, so an automatic job can search providers instead."""
+
+
+def source_translation_video_version(video_path):
+    from subtitles.tools.subsync_engines import subtitle_source_version
+
+    version = subtitle_source_version(video_path)
+    if version is None:
+        raise SourceTranslationChanged('The source media file is missing or unavailable')
+    return version
 
 
 def validate_source_translation(source, video_path, subtitle_path, destination, from_lang, to_lang, forced, hi,
@@ -295,9 +310,11 @@ def record_source_translation(source, result):
     """Record an action-6 row when the translation belongs to a source item."""
     if source is None:
         return False
+    from media_sources.db import source_transaction
     from media_sources.history import history_log_source
 
-    history_log_source(6, source, result)
+    with source_transaction() as connection:
+        history_log_source(6, source, result, target=connection)
     return True
 
 
