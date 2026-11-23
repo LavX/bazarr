@@ -1191,7 +1191,7 @@ def test_source_publication_survives_an_unrelated_scanner_writer(world, monkeypa
 
     @contextmanager
     def observe_publication(source, *, shared=False):
-        assert shared is (layout == "absolute")
+        assert shared
         attempted.set()
         with publication(source, shared=shared) as result:
             yield result
@@ -1207,12 +1207,9 @@ def test_source_publication_survives_an_unrelated_scanner_writer(world, monkeypa
                                source=context, language=Language("eng"), recheck_missing=True,
                                is_upgrade=False, written_paths=[], on_publish=None)
             assert attempted.wait(10)
-            if layout == "relative":
-                assert save.result(timeout=5)
-                assert destination.read_bytes() == CONTENT
-            else:
-                with pytest.raises(TimeoutError):
-                    save.result(timeout=0.10)
+            with pytest.raises(TimeoutError):
+                save.result(timeout=0.10)
+            assert not destination.exists()
         finally:
             release_scanner.set()
         assert scan.result(timeout=10)[0].inserted == 1

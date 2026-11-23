@@ -129,25 +129,17 @@ class SourcePublicationOwnerIndex(SourceOutputOwnerIndex):
         # A relative custom path can also resolve into another video's directory.
         return bool(get_subtitle_destination_folder())
 
-    def _shared_destination(self, source, destination, destination_setting):
+    @staticmethod
+    def _needs_registry_guard(source, destination, custom_folder):
+        # Another media directory can resolve its relative subtitle folder to
+        # this directory, even before the first video there is admitted.
+        if custom_folder:
+            return True
         if destination is None:
             return False
         media_directory = os.path.normcase(os.path.realpath(os.path.dirname(source.path)))
         directory = os.path.normcase(os.path.realpath(os.path.dirname(destination)))
-        subfolder, custom = destination_setting
-        if not custom:
-            return directory != media_directory
-        relative = os.path.normcase(os.path.normpath(custom))
-        if (subfolder != 'relative' or os.path.isabs(relative)
-                or relative == '..' or relative.startswith('..' + os.sep)):
-            return True
-        # An ordinary child directory belongs to its media directory. A resolved
-        # alias or a folder already claimed from elsewhere shares the registry.
-        local_directory = os.path.join(media_directory, relative) if relative != '.' else media_directory
-        if directory not in (media_directory, local_directory):
-            return True
-        return any(folder == directory and any(os.path.dirname(video) != media_directory for video in videos)
-                   for (folder, _), videos in self._owners.items())
+        return directory != media_directory
 
     @contextmanager
     def publication(self, source, prepare=None, *, destination=None):
@@ -158,7 +150,7 @@ class SourcePublicationOwnerIndex(SourceOutputOwnerIndex):
             self._prepared_paths = None
             destination_setting = settings.general.subfolder, get_subtitle_destination_folder()
             prepared = prepare() if prepare is not None else None
-            shared = self._shared_destination(source, destination, destination_setting)
+            shared = self._needs_registry_guard(source, destination, destination_setting[1])
             if shared and self._prepared_paths is None:
                 raise SourcePublicationOwnersChanged('The shared subtitle owners could not be verified')
             # A scanner with the conflicting lock finishes outside this transaction.
