@@ -36,15 +36,15 @@ const MoviePlayCell = ({ row }: CellContext<History.MovieRow, unknown>) =>
 const MoviesHistoryView: FunctionComponent = () => {
   const addToBlacklist = useMovieAddBlacklist();
   const [includeEmbedded, setIncludeEmbedded] = useState(false);
-  const sources = useHistorySources("movie", "radarr");
+  const sources = useHistorySources("radarr");
   const query = useMovieHistoryPagination(
     includeEmbedded,
     sources.options,
     sources.enabled,
   );
-  const labels = sources.getLabels(query.data);
+  const { labels, nativeFallback } = sources.getPresentation(query.data);
   const { names: arrNames, defaultId: defaultArr } = sources.arrOwners;
-  const showBadge = sources.showBadge || labels.size > 0;
+  const showBadge = !nativeFallback;
   const rows = query.data?.data;
   const anchors = useMemo(() => historyAnchors(rows ?? []), [rows]);
 

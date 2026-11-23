@@ -6,21 +6,16 @@ import {
 } from "@/apis/hooks/arrInstances";
 import { isSourceKey, useMediaSources } from "@/apis/hooks/mediaSources";
 import { useSystemSettings } from "@/apis/hooks/system";
-import type { SourceContentKind } from "@/apis/raw/mediaSources";
 
 const removedKey = "source:removed";
 
-export function useHistorySources(
-  kind: Extract<SourceContentKind, "series" | "movie">,
-  arrKind: "sonarr" | "radarr",
-) {
+export function useHistorySources(arrKind: "sonarr" | "radarr") {
   const [params, setParams] = useSearchParams();
   const settings = useSystemSettings();
   const includeSources = settings.data?.media_sources?.visible === true;
   const master = settings.data?.general?.[`use_${arrKind}`] === true;
   const instances = useArrInstances(includeSources && master);
   const sources = useMediaSources();
-  const available = sources.data?.availability?.[kind];
   const sourceOnly =
     includeSources &&
     !isArrMediaRouteEnabled(arrKind, settings.data, instances.data);
@@ -66,11 +61,12 @@ export function useHistorySources(
     selected,
     sourceOnly,
     arrOwners,
-    getLabels(
+    getPresentation(
       data: History.Page<History.SourceRow | Wanted.ArrRow> | undefined,
     ) {
       const labels = new Map<MediaSourceKey, string>();
-      if (!includeSources) return labels;
+      const nativeFallback = !includeSources || data?.source_keys === undefined;
+      if (nativeFallback) return { labels, nativeFallback };
       for (const key of data?.source_keys ?? []) {
         if (key === removedKey) {
           labels.set(key, "Removed sources");
@@ -89,9 +85,8 @@ export function useHistorySources(
             : (sourceNames.get(selected) ?? "Media source");
         labels.set(selected, label);
       }
-      return labels;
+      return { labels, nativeFallback };
     },
-    showBadge: includeSources && (available?.browsable || available?.retained),
     onChange(value: string | null) {
       const next = new URLSearchParams(params);
       next.delete("page");

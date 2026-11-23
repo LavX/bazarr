@@ -3,6 +3,7 @@ import { useSearchParams } from "react-router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { isAxiosError } from "axios";
 import { QueryKeys } from "@/apis/queries/keys";
+import { invalidateSourceHistory } from "@/apis/queries/sourceHistory";
 import api from "@/apis/raw";
 import { withInlineErrors } from "@/apis/raw/inlineWrites";
 import type { SourceContentKind } from "@/apis/raw/mediaSources";
@@ -56,8 +57,12 @@ export function useWriteMediaSource() {
   const client = useQueryClient();
   return useMutation({
     mutationFn: (write: () => Promise<unknown>) => withInlineErrors(write),
-    onSuccess: () =>
-      client.invalidateQueries({ queryKey: mediaSourcesKey, exact: true }),
+    onSuccess: async () => {
+      await Promise.all([
+        client.invalidateQueries({ queryKey: mediaSourcesKey, exact: true }),
+        invalidateSourceHistory(client),
+      ]);
+    },
   });
 }
 

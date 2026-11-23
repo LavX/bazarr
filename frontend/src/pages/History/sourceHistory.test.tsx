@@ -2,7 +2,12 @@
 import userEvent from "@testing-library/user-event";
 import { http, HttpResponse } from "msw";
 import { vi } from "vitest";
-import { customRender, screen, waitFor, within } from "@/tests";
+import { useWriteMediaSource } from "@/apis/hooks/mediaSources";
+import queryClient from "@/apis/queries";
+import { QueryKeys } from "@/apis/queries/keys";
+import api from "@/apis/raw";
+import { createDefaultReducer } from "@/modules/socketio/reducer";
+import { act, customRender, screen, waitFor, within } from "@/tests";
 import server from "@/tests/mocks/node";
 import MoviesHistoryView from "./Movies";
 import SeriesHistoryView from "./Series";
@@ -26,6 +31,18 @@ const cases = [
   { kind: "series", arr: "sonarr", api: "episodes", View: SeriesHistoryView },
   { kind: "movie", arr: "radarr", api: "movies", View: MoviesHistoryView },
 ] as const;
+
+function RemoveSource() {
+  const mutation = useWriteMediaSource();
+  return (
+    <button
+      onClick={() => mutation.mutate(() => api.mediaSources.remove(8))}
+      disabled={mutation.isPending}
+    >
+      {mutation.isSuccess ? "Source removed" : "Remove source"}
+    </button>
+  );
+}
 
 afterEach(() => window.history.replaceState(null, "", "/"));
 
@@ -65,6 +82,16 @@ describe.each(cases)(
       video_path: "/archive/live.mkv",
       upgradedFromId: 7,
     };
+    const secondOwner = {
+      ...native,
+      source_key: "arr:6",
+      arr_instance_id: 6,
+      id: 32,
+      series_id: 34,
+      seriesTitle: "Second native title",
+      title: "Second native title",
+      history_id: 14,
+    };
     const removed = {
       ...live,
       source_key: "source:removed",
@@ -86,6 +113,7 @@ describe.each(cases)(
       nativeEnabled = true,
       retainedOnly = false,
       noSources = false,
+      emptyFolder = false,
     } = {}) {
       server.use(
         http.get("/api/system/settings", () =>
@@ -105,6 +133,13 @@ describe.each(cases)(
                     name: arr,
                     enabled: true,
                     is_default: true,
+                  },
+                  {
+                    id: 6,
+                    kind: arr,
+                    name: `${arr} secondary`,
+                    enabled: true,
+                    is_default: false,
                   },
                 ]
               : [],
@@ -133,7 +168,7 @@ describe.each(cases)(
                 : {
                     browsable: !retainedOnly,
                     searchable: !retainedOnly,
-                    retained: true,
+                    retained: !emptyFolder,
                   },
             },
           }),
@@ -156,8 +191,15 @@ describe.each(cases)(
             params.get("start"),
             params.get("length"),
           );
+          const rows = keys.includes("source:removed")
+            ? [removed]
+            : keys.includes("source:8")
+              ? [live]
+              : keys.includes("arr:6") || params.get("start") === "50"
+                ? [secondOwner]
+                : [native, live, removed];
           return HttpResponse.json({
-            data: keys.length ? [removed] : [native, live, removed],
+            data: rows,
             total: keys.length ? 1 : 75,
             source_keys: ["source:8", "source:removed"],
           });
@@ -193,6 +235,16 @@ describe.each(cases)(
         await screen.findByText("/archive/removed.mkv"),
       ).toBeInTheDocument();
 
+      await user.click(screen.getByRole("button", { name: "3" }));
+      expect(
+        await screen.findByRole("link", { name: "Second native title" }),
+      ).toHaveAttribute(
+        "href",
+        kind === "series" ? "/series/34" : "/movies/32",
+      );
+      expect(requests).toHaveBeenCalledWith("1", [], "50", "25");
+      expect(screen.getByText("Show 51 to 75 of 75 entries")).toBeVisible();
+
       await user.click(screen.getByRole("combobox", { name: "Source" }));
       await user.click(
         await screen.findByRole("option", { name: "Removed sources" }),
@@ -215,6 +267,227 @@ describe.each(cases)(
         "25",
       );
       expect(screen.queryByText("Native title")).not.toBeInTheDocument();
+
+      await user.click(screen.getByRole("combobox", { name: "Source" }));
+      await user.click(await screen.findByRole("option", { name: "Archive" }));
+      expect(await screen.findByText("Archive item")).toBeVisible();
+      expect(requests).toHaveBeenCalledWith("1", ["source:8"], "0", "25");
+      expect(screen.queryByText("Retained item")).not.toBeInTheDocument();
+      expect(screen.queryByText("Native title")).not.toBeInTheDocument();
+
+      await user.click(screen.getByRole("combobox", { name: "Source" }));
+      await user.click(
+        await screen.findByRole("option", { name: `${arr} secondary` }),
+      );
+      expect(
+        await screen.findByRole("link", { name: "Second native title" }),
+      ).toBeVisible();
+      expect(requests).toHaveBeenCalledWith("1", ["arr:6"], "0", "25");
+      expect(screen.queryByText("Archive item")).not.toBeInTheDocument();
+      expect(screen.queryByText("Retained item")).not.toBeInTheDocument();
+
+      await user.click(screen.getByRole("combobox", { name: "Source" }));
+      await user.click(
+        await screen.findByRole("option", { name: `${arr} secondary` }),
+      );
+      expect(
+        await screen.findByRole("link", { name: "Native title" }),
+      ).toBeVisible();
+      expect(screen.getByText("Archive item")).toBeVisible();
+      expect(screen.getByText("Retained item")).toBeVisible();
+      expect(requests).toHaveBeenCalledWith("1", [], "0", "25");
+      expect(screen.getByText("Show 1 to 25 of 75 entries")).toBeVisible();
+      expect(new URLSearchParams(window.location.search).has("source")).toBe(
+        false,
+      );
+    });
+
+    it.each([false, true])(
+      "refetches the selected History page when source-item precedes the commit: %s",
+      async (earlyEvent) => {
+        const user = userEvent.setup();
+        const requests = vi.fn();
+        let committed = false;
+        configure();
+        window.history.replaceState(null, "", "/?page=2&source=source%3A8");
+        server.use(
+          http.get(`/api/${api}/history`, ({ request }) => {
+            const params = new URL(request.url).searchParams;
+            requests(
+              params.get("sources"),
+              params.getAll("source_key[]"),
+              params.get("start"),
+              params.get("length"),
+              params.get("include_embedded"),
+            );
+            return HttpResponse.json({
+              data: [
+                committed
+                  ? {
+                      ...live,
+                      item_title: "New source history event",
+                      history_id: 15,
+                    }
+                  : live,
+              ],
+              total: 75,
+              source_keys: ["source:8"],
+            });
+          }),
+          http.get("/api/system/jobs", () => HttpResponse.json({ data: [] })),
+        );
+        const nativeKey = [
+          ...(kind === "series"
+            ? [QueryKeys.Series, QueryKeys.Episodes, QueryKeys.History]
+            : [QueryKeys.Movies, QueryKeys.History]),
+          false,
+          { includeSources: false },
+          QueryKeys.Range,
+          { start: 25, size: 25 },
+        ];
+        queryClient.setQueryData(nativeKey, { data: [native], total: 75 });
+        customRender(<View />);
+        expect(await screen.findByText("Archive item")).toBeVisible();
+        await user.click(
+          screen.getByRole("switch", { name: "Show Embedded Source records" }),
+        );
+        await waitFor(() =>
+          expect(requests).toHaveBeenLastCalledWith(
+            "1",
+            ["source:8"],
+            "25",
+            "25",
+            "true",
+          ),
+        );
+        const beforeEvent = requests.mock.calls.length;
+
+        committed = !earlyEvent;
+        await act(async () => {
+          const reducer = createDefaultReducer().find(
+            ({ key }) => key === "source-item",
+          );
+          expect(reducer).toBeDefined();
+          reducer?.any?.();
+        });
+
+        if (earlyEvent) {
+          // The source-item notification may reach the UI before the history write.
+          // Let that first refresh finish against the old data, then commit it.
+          await waitFor(() =>
+            expect(requests).toHaveBeenCalledTimes(beforeEvent + 1),
+          );
+          await waitFor(() => expect(queryClient.isFetching()).toBe(0));
+          expect(screen.getByText("Archive item")).toBeVisible();
+          committed = true;
+          await act(async () => {
+            const reducer = createDefaultReducer().find(
+              ({ key }) => key === "jobs",
+            );
+            if (reducer?.key !== "jobs")
+              throw new Error("jobs reducer is missing");
+            reducer.update?.([
+              {
+                job_id: 71,
+                status: "completed",
+                progress_value: 1,
+                progress_max: 1,
+                progress_message: "Finished source search",
+              },
+            ]);
+          });
+        }
+
+        expect(
+          await screen.findByText("New source history event"),
+        ).toBeVisible();
+        expect(requests).toHaveBeenCalledTimes(
+          beforeEvent + (earlyEvent ? 2 : 1),
+        );
+        expect(requests).toHaveBeenLastCalledWith(
+          "1",
+          ["source:8"],
+          "25",
+          "25",
+          "true",
+        );
+        expect(screen.getByText("Show 26 to 50 of 75 entries")).toBeVisible();
+        expect(queryClient.getQueryState(nativeKey)?.isInvalidated).toBe(false);
+      },
+    );
+
+    it("refreshes a recently visited History page after removing its source", async () => {
+      const user = userEvent.setup();
+      const requests = vi.fn();
+      let deleted = false;
+      configure();
+      window.history.replaceState(null, "", "/?page=2");
+      server.use(
+        http.get(`/api/${api}/history`, ({ request }) => {
+          const params = new URL(request.url).searchParams;
+          requests(params.get("start"), params.get("length"));
+          return HttpResponse.json({
+            data: [native, deleted ? removed : live],
+            total: 75,
+            source_keys: [deleted ? "source:removed" : "source:8"],
+          });
+        }),
+        http.delete("/api/system/media-sources/8", () => {
+          deleted = true;
+          return new HttpResponse(null, { status: 204 });
+        }),
+        http.get("/api/system/media-sources", () =>
+          HttpResponse.json({
+            data: deleted
+              ? []
+              : [
+                  {
+                    id: 8,
+                    name: "Archive",
+                    kind: "folder",
+                    enabled: true,
+                    libraries: [{ content_kind: kind, enabled: true }],
+                  },
+                ],
+            availability: {
+              series: absent,
+              movie: absent,
+              sports: absent,
+              [kind]: {
+                browsable: !deleted,
+                searchable: !deleted,
+                retained: true,
+              },
+            },
+          }),
+        ),
+      );
+      const { unmount: unmountHistory } = customRender(<View />);
+      expect(await screen.findByText("Archive item")).toBeVisible();
+      expect(requests).toHaveBeenCalledTimes(1);
+      unmountHistory();
+
+      const { unmount: unmountSettings } = customRender(<RemoveSource />);
+      await user.click(screen.getByRole("button", { name: "Remove source" }));
+      expect(
+        await screen.findByRole("button", { name: "Source removed" }),
+      ).toBeVisible();
+      unmountSettings();
+
+      customRender(<View />);
+      expect(await screen.findByText("Retained item")).toBeVisible();
+      expect(screen.getByText("Old archive (removed)")).toBeVisible();
+      expect(screen.queryByText("Archive item")).not.toBeInTheDocument();
+      expect(requests).toHaveBeenCalledTimes(2);
+      expect(requests).toHaveBeenLastCalledWith("25", "25");
+      expect(screen.getByText("Show 26 to 50 of 75 entries")).toBeVisible();
+      await user.click(screen.getByRole("combobox", { name: "Source" }));
+      expect(
+        await screen.findByRole("option", { name: "Removed sources" }),
+      ).toBeVisible();
+      expect(
+        screen.queryByRole("option", { name: "Archive" }),
+      ).not.toBeInTheDocument();
     });
 
     it("links upgrades only to an original from the same origin on the page", async () => {
@@ -339,25 +612,33 @@ describe.each(cases)(
       ).not.toBeInTheDocument();
     });
 
-    it("keeps the native table when opting in returns the legacy payload", async () => {
-      configure({ noSources: true });
-      server.use(
-        http.get(`/api/${api}/history`, ({ request }) => {
-          expect(new URL(request.url).searchParams.get("sources")).toBe("1");
-          return HttpResponse.json({
-            data: [{ ...native, origin: undefined, upgradedFromId: undefined }],
-            total: 1,
-          });
-        }),
-      );
-      customRender(<View />);
-      expect(
-        await screen.findByRole("link", { name: "Native title" }),
-      ).toBeVisible();
-      expect(screen.getByRole("button", { name: "Exclude" })).toBeEnabled();
-      expect(
-        screen.queryByRole("columnheader", { name: "Source" }),
-      ).not.toBeInTheDocument();
-    });
+    it.each([false, true])(
+      "keeps the native table for a legacy payload with an empty folder: %s",
+      async (emptyFolder) => {
+        configure({ noSources: !emptyFolder, emptyFolder });
+        server.use(
+          http.get(`/api/${api}/history`, ({ request }) => {
+            expect(new URL(request.url).searchParams.get("sources")).toBe("1");
+            return HttpResponse.json({
+              data: [
+                { ...native, origin: undefined, upgradedFromId: undefined },
+              ],
+              total: 1,
+            });
+          }),
+        );
+        customRender(<View />);
+        expect(
+          await screen.findByRole("link", { name: "Native title" }),
+        ).toBeVisible();
+        expect(screen.getByRole("button", { name: "Exclude" })).toBeEnabled();
+        expect(
+          screen.queryByRole("columnheader", { name: "Source" }),
+        ).not.toBeInTheDocument();
+        expect(
+          screen.queryByRole("combobox", { name: "Source" }),
+        ).not.toBeInTheDocument();
+      },
+    );
   },
 );

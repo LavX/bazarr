@@ -42,15 +42,15 @@ const EpisodePlayCell = ({
 const SeriesHistoryView: FunctionComponent = () => {
   const addToBlacklist = useEpisodeAddBlacklist();
   const [includeEmbedded, setIncludeEmbedded] = useState(false);
-  const sources = useHistorySources("series", "sonarr");
+  const sources = useHistorySources("sonarr");
   const query = useEpisodeHistoryPagination(
     includeEmbedded,
     sources.options,
     sources.enabled,
   );
-  const labels = sources.getLabels(query.data);
+  const { labels, nativeFallback } = sources.getPresentation(query.data);
   const { names: arrNames, defaultId: defaultArr } = sources.arrOwners;
-  const showBadge = sources.showBadge || labels.size > 0;
+  const showBadge = !nativeFallback;
   const rows = query.data?.data;
   const anchors = useMemo(() => historyAnchors(rows ?? []), [rows]);
 

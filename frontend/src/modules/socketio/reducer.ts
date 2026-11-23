@@ -2,6 +2,7 @@ import { isArray, isEmpty, isNumber } from "lodash";
 import queryClient from "@/apis/queries";
 import { scheduleEpisodesHistoryRefresh } from "@/apis/queries/episodeHistory";
 import { QueryKeys } from "@/apis/queries/keys";
+import { scheduleSourceHistoryRefresh } from "@/apis/queries/sourceHistory";
 import {
   scheduleSubtitleScoresRefresh,
   skipScoredRangeQueries,
@@ -361,7 +362,10 @@ export function createDefaultReducer(): SocketIO.Reducer[] {
     },
     {
       key: "source-item",
-      any: invalidateSourceWanted,
+      any: () => {
+        invalidateSourceWanted();
+        scheduleSourceHistoryRefresh(queryClient);
+      },
     },
     {
       key: "reset-episode-wanted",
@@ -391,6 +395,14 @@ export function createDefaultReducer(): SocketIO.Reducer[] {
       key: "jobs",
       update: (items) => {
         const keys = [QueryKeys.System, QueryKeys.Jobs];
+
+        if (
+          items.some((payload) =>
+            ["completed", "failed", "cancelled"].includes(payload.status),
+          )
+        ) {
+          scheduleSourceHistoryRefresh(queryClient);
+        }
 
         items.forEach((payload) => {
           // A job event names the backend run it came from. One from a run the
