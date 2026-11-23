@@ -208,6 +208,7 @@ def generate_subtitles(path, languages, audio_language, sceneName, title, media_
                                 written_paths = []
                                 writer = partial(write_subtitle_file, path, written_paths=written_paths,
                                                  on_publish=publish)
+                                writer_arg = 'write_subtitle'
                                 owner_kwargs = {}
                                 if source is not None:
                                     writer = partial(_write_source_download, path, source=source,
@@ -215,6 +216,8 @@ def generate_subtitles(path, languages, audio_language, sceneName, title, media_
                                                      is_upgrade=is_upgrade, written_paths=written_paths,
                                                      on_publish=publish, wanted_stamp=source_wanted_stamp,
                                                      wanted_profile=wanted_profile, video_version=video_version)
+                                    if source.kind == 'sports_event' and source_wanted_stamp is not None:
+                                        writer_arg = 'write_selected_subtitle'
                                     if is_upgrade:
                                         from media_sources.indexer import SourcePublicationOwnerIndex
 
@@ -226,7 +229,7 @@ def generate_subtitles(path, languages, audio_language, sceneName, title, media_
                                                                  chmod=chmod,
                                                                  formats=subtitle_formats,
                                                                  path_decoder=force_unicode,
-                                                                 write_subtitle=writer)
+                                                                 **{writer_arg: writer})
                                 if is_upgrade and previous_subtitles_to_delete and written_paths and (
                                         os.path.normcase(os.path.realpath(previous_subtitles_to_delete)) not in
                                         {os.path.normcase(os.path.realpath(written)) for written in written_paths}):
@@ -358,12 +361,17 @@ def check_missing_languages_source(source, *, stored=False, external_subtitles=N
 
 
 def _write_source_download(video_path, destination, content, *, source, language, recheck_missing, is_upgrade,
-                           written_paths, on_publish, wanted_stamp=None, wanted_profile=None, video_version=None):
+                           written_paths, on_publish, wanted_stamp=None, wanted_profile=None, video_version=None,
+                           selected_subtitle=None):
     """Publish the actual provider-selected file only while its destination is still eligible."""
+    from media_sources import repository
     from media_sources.indexer import SourcePublicationOwnerIndex
     from media_sources.translation import prepare_source_sidecars
 
     ownership_index = SourcePublicationOwnerIndex()
+    release = None
+    if selected_subtitle is not None:
+        release = source.kind, str(selected_subtitle.provider_name), str(selected_subtitle.id)
 
     def prepare():
         if wanted_stamp is not None and not _wanted_source_can_publish(source, language, wanted_stamp, wanted_profile):
@@ -382,7 +390,8 @@ def _write_source_download(video_path, destination, content, *, source, language
 
     @contextmanager
     def publication():
-        with ownership_index.publication(source, prepare, destination=destination, cleanup_outputs=True) as (
+        with ownership_index.publication(source, prepare, destination=destination, cleanup_outputs=True,
+                                         release=release) as (
                 current, connection, external_subtitles):
             if current is None or current.path != video_path:
                 raise SubtitleDestinationChanged('The source item moved or was removed')
@@ -393,6 +402,8 @@ def _write_source_download(video_path, destination, content, *, source, language
             if wanted_stamp is not None:
                 if not _wanted_source_can_publish(current, language, wanted_stamp, wanted_profile, target=connection):
                     raise SubtitleDestinationChanged('Wanted source eligibility changed during search')
+                if release is not None and repository.is_release_blacklisted(release, connection):
+                    raise SubtitleDestinationChanged('The selected release was excluded during search')
             elif recheck_missing and language not in check_missing_languages_source(
                     current, external_subtitles=external_subtitles, target=connection):
                 raise SubtitleDestinationChanged('The source language is no longer missing')

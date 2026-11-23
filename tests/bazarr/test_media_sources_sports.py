@@ -580,3 +580,140 @@ def test_manual_sports_download_rechecks_the_selected_event_before_publication(
     assert [(event.media_type, event.operation, event.arr_instance_id, event.source_item_id) for event in writes] == [
         ('sports', 'download', None, dated), ('sports', 'delete', None, dated),
     ]
+
+
+@pytest.mark.parametrize('excluded_release', ['selected-release', 'different-release'])
+def test_sports_wanted_rechecks_a_selected_release_excluded_during_provider_download(
+        client, arr_library, writes, isolated_jobs, tmp_path, monkeypatch, excluded_release):
+    from unittest.mock import Mock
+
+    import sqlalchemy as sa
+    from app.config import settings
+    from media_sources import history, indexer, repository, service, wanted
+    from media_sources.context import resolve_item
+    from subliminal_patch import core
+    from subzero.language import Language
+    from subtitles import download, pool
+
+    for integration in ('use_sonarr', 'use_radarr', 'use_sportarr'):
+        monkeypatch.setattr(settings.general, integration, False)
+    monkeypatch.setattr(settings.general, 'minimum_score_sports', 65)
+    monkeypatch.setattr(settings.general, 'adaptive_searching', False)
+    monkeypatch.setattr(indexer, 'probe_item', lambda *args, **kwargs: ({}, None))
+    monkeypatch.setattr(service, 'get_providers', lambda: ['fake'])
+    monkeypatch.setattr(wanted, 'jobs_queue', isolated_jobs)
+    monkeypatch.setattr(download.subliminal, 'region', Mock())
+
+    owner, _, target_id, target_round = _events(arr_library, tmp_path, name='Target Sports')
+    other_owner, _, other_id, other_round = _events(arr_library, tmp_path, name='Other Sports')
+    for item_id in (target_round, other_round):
+        repository.update_item(item_id, arr_library, monitored=0)
+    target = resolve_item(target_id)
+    destination = Path(target.path).with_suffix('.en.srt')
+    for item_id in (target_id, other_id):
+        assert indexer.index_item(item_id) is not None
+
+    class Candidate(pipeline.FakeSubtitle):
+        def __init__(self, release_id, matches):
+            super().__init__()
+            self.id = release_id
+            self.matches = matches
+            self.content = None
+
+        def get_matches(self, recording):
+            return self.matches.copy()
+
+    full_matches = {'title', 'year', 'source', 'edition', 'release_group'}
+    selected = Candidate('selected-release', full_matches)
+    previous = Candidate(excluded_release, full_matches)
+    low = Candidate('low-score-release', {'title'})
+    provider_calls = []
+
+    class Provider:
+        languages = {Language('eng')}
+
+        def __init__(self, **kwargs):
+            pass
+
+        @classmethod
+        def check(cls, recording):
+            return True
+
+        def initialize(self):
+            pass
+
+        def terminate(self):
+            pass
+
+        def list_subtitles(self, recording, languages):
+            if recording.source_context.item_id == other_id:
+                return [previous]
+            assert recording.source_context.item_id == target_id
+            provider_calls.append('listed')
+            return [low, selected]
+
+        def download_subtitle(self, subtitle):
+            if subtitle is previous:
+                subtitle.content = pipeline.CONTENT
+                return
+            # The real selector has already picked the winner, but its provider has not returned bytes yet.
+            assert subtitle is selected and subtitle.content is None
+            assert subtitle.source_context.item_id == target_id
+            assert not destination.exists()
+            provider_calls.append('downloading')
+            response = client.post(f'/api/sources/items/{other_id}/blacklist', headers=HEADERS, json={
+                'subtitles_path': original.subtitles_path, 'language': original.language,
+                'provider': original.provider, 'subs_id': original.subs_id,
+            })
+            assert response.status_code == 204, response.get_data(as_text=True)
+            assert not excluded_file.exists()
+            assert ('fake', excluded_release) in history.get_blacklist_source('sports_event')
+            provider_calls.append('exclusion-confirmed')
+            subtitle.content = pipeline.CONTENT
+
+    # Keep listing, scoring, winner selection and download validation real, replacing only the provider.
+    monkeypatch.setattr(core, 'provider_registry', {'fake': Provider})
+    controlled_pool = core.SZProviderPool(
+        providers=['fake'], blacklist=pool._blacklist('movie', source=target))
+    monkeypatch.setattr(download, '_get_pool', lambda *args, **kwargs: controlled_pool)
+
+    def run_wanted(source_id):
+        response = client.post('/api/sports/wanted', headers=HEADERS, json={}, query_string={
+            'sources': 1, 'source_key[]': f'source:{source_id}',
+        })
+        assert response.status_code == 202
+        job = isolated_jobs._reserve_next_job()
+        assert job.job_id == response.get_json()['job_id']
+        assert (job.kwargs['kind'], job.kwargs['source_ids']) == ('sports_event', (source_id,))
+        assert isolated_jobs._run_job(job), job.error
+
+    run_wanted(other_owner)
+    (original,) = arr_library.execute(sa.select(repository.History)).all()
+    assert (original.item_id, original.action, original.provider, original.subs_id) == (
+        other_id, 1, 'fake', excluded_release)
+    excluded_file = Path(original.subtitles_path)
+    assert excluded_file.read_bytes() == pipeline.CONTENT
+    assert str(excluded_file) in repository.get_item(other_id).subtitles
+
+    run_wanted(owner)
+    assert provider_calls == ['listed', 'downloading', 'exclusion-confirmed']
+
+    (blacklisted,) = arr_library.execute(sa.select(repository.Blacklist)).all()
+    assert (blacklisted.source_id, blacklisted.item_id, blacklisted.item_kind, blacklisted.provider,
+            blacklisted.subs_id) == (other_owner, other_id, 'sports_event', 'fake', excluded_release)
+    history_rows = arr_library.execute(sa.select(repository.History).order_by(repository.History.c.id)).all()
+    mutations = [(event.media_type, event.operation, event.source_item_id) for event in writes]
+    other_actions = [(other_id, 1), (other_id, 0)]
+    other_mutations = [('sports', 'download', other_id), ('sports', 'delete', other_id)]
+    if excluded_release == selected.id:
+        assert not destination.exists(), 'The confirmed excluded winner was saved after its provider returned'
+        assert [(row.item_id, row.action) for row in history_rows] == other_actions
+        assert mutations == other_mutations
+        assert 'en' in repository.get_item(target_id).missing_subtitles
+    else:
+        assert destination.read_bytes() == pipeline.CONTENT
+        assert [(row.item_id, row.action) for row in history_rows] == other_actions + [(target_id, 1)]
+        assert history_rows[-1].subs_id == selected.id
+        assert mutations == other_mutations + [('sports', 'download', target_id)]
+        assert repository.get_item(target_id).missing_subtitles == '[]'
+    assert not list(tmp_path.rglob('.bazarr-write-*'))
