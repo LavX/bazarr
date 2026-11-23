@@ -335,7 +335,7 @@ def _write_source_download(video_path, destination, content, *, source, language
 
     @contextmanager
     def publication():
-        with ownership_index.publication(source, prepare, destination=destination) as (
+        with ownership_index.publication(source, prepare, destination=destination, cleanup_outputs=True) as (
                 current, connection, external_subtitles):
             if current is None or current.path != video_path:
                 raise SubtitleDestinationChanged('The source item moved or was removed')
@@ -350,7 +350,7 @@ def _write_source_download(video_path, destination, content, *, source, language
 
     try:
         write_subtitle_file(video_path, destination, content, written_paths=written_paths, on_publish=on_publish,
-                            publication_guard=publication, ownership_index=ownership_index)
+                            publication_guard=publication, invalidate_outputs=False)
     except SubtitleDestinationChanged as error:
         logging.info('BAZARR skipped saving a subtitle for source item %s: %s', source.item_id, error)
         return False

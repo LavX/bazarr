@@ -213,7 +213,7 @@ def subtitle_mutation(video_path, *paths, invalidate_outputs=True, ownership_ind
 def staged_subtitle_write(video_path, destination, before_publish=None, allow_empty=False,
                           source_paths=(), after_publish=None, on_publish=None,
                           publication_guard=None, cancel=None, expected_versions=(),
-                          after_write=None, ownership_index=None):
+                          after_write=None, ownership_index=None, invalidate_outputs=True):
     """Compute privately, then publish only while source and destination are current."""
     with subtitle_write_locks(video_path, destination, *source_paths,
                               **({} if cancel is None else {'cancel': cancel})) as states:
@@ -235,7 +235,7 @@ def staged_subtitle_write(video_path, destination, before_publish=None, allow_em
             raise OSError('Subtitle writer did not produce a nonempty file')
         with subtitle_write_locks(video_path, destination, *source_paths,
                                   **({} if cancel is None else {'cancel': cancel})):
-            with subtitle_mutation(video_path, destination,
+            with subtitle_mutation(video_path, destination, invalidate_outputs=invalidate_outputs,
                                    **({'ownership_index': ownership_index} if ownership_index is not None else {})):
                 with publication_guard() if publication_guard is not None else nullcontext():
                     validate_subtitle_versions(expected_versions)
@@ -295,10 +295,12 @@ def validate_subtitle_versions(snapshots):
 
 
 def write_subtitle_file(video_path, destination, content, written_paths=None,
-                        on_publish=None, publication_guard=None, after_write=None, ownership_index=None):
+                        on_publish=None, publication_guard=None, after_write=None, ownership_index=None,
+                        invalidate_outputs=True):
     """Write one saver output atomically and record that exact successful path."""
     with staged_subtitle_write(video_path, destination, on_publish=on_publish,
                               publication_guard=publication_guard, after_write=after_write,
+                              invalidate_outputs=invalidate_outputs,
                               after_publish=(lambda: written_paths.append(destination))
                               if written_paths is not None else None,
                               **({'ownership_index': ownership_index} if ownership_index is not None else {})
@@ -383,39 +385,62 @@ class SyncOutputOwnerIndex:
         rows = []
         for table, media_type in ((TableEpisodes, 'episode'), (TableMovies, 'movie'),
                                   (TableSportsEvents, 'sports')):
-            query = select(table.path, table.arr_instance_id)
+            query = select(table.path, table.arr_instance_id, TableArrInstances.path_mappings)
             if media_type == 'sports':
-                query = query.add_columns(TableArrInstances.path_mappings).join(
+                query = query.join(
                     TableArrInstances, table.arr_instance_id == TableArrInstances.id).where(
                     TableArrInstances.kind == 'sportarr')
+            else:
+                query = query.outerjoin(TableArrInstances, table.arr_instance_id == TableArrInstances.id)
             rows.append((media_type, tuple(connection.execute(query.order_by(table.id)).all())))
         return tuple(rows)
 
     @staticmethod
-    def _map_registry_rows(registry_rows):
+    def _map_registry_rows(registry_rows, *, mappings=None, destination=None):
         from utilities.helper import get_target_folder
         from utilities.path_mappings import path_mappings
-        from utilities.path_mappings import apply_sports_mapping, read_sports_mappings
+        from utilities.path_mappings import _apply_mapping, apply_sports_mapping, read_arr_mappings, read_sports_mappings
 
         owners = {}
+        sports_fallback = [list(pair) for pair in mappings[2]] if mappings is not None else None
         for media_type, rows in registry_rows:
             for row in rows:
                 if not row.path:
                     continue
                 # Disabled sports owners retain physical files. They still reserve
                 # shared outputs, without authorizing any operation on those rows.
-                mapped_path = (apply_sports_mapping(row.path, read_sports_mappings(row.path_mappings))
-                               if media_type == 'sports' else path_mappings.path_replace_instance(
-                                   row.path, row.arr_instance_id, media_type))
+                if media_type == 'sports':
+                    mapped_path = apply_sports_mapping(row.path, read_sports_mappings(
+                        row.path_mappings, fallback=sports_fallback))
+                elif mappings is not None:
+                    instance_mapping = read_arr_mappings(row.path_mappings, media_type)
+                    fallback = mappings[0 if media_type == 'episode' else 1]
+                    mapped_path = _apply_mapping(row.path, fallback if instance_mapping is None else instance_mapping,
+                                                 reverse=False)
+                else:
+                    mapped_path = path_mappings.path_replace_instance(row.path, row.arr_instance_id, media_type)
                 mapped = os.path.normcase(os.path.realpath(mapped_path))
-                folders = {os.path.dirname(mapped)}
-                custom_folder = get_target_folder(mapped, create=False)
-                if custom_folder:
-                    folders.add(os.path.normcase(os.path.realpath(custom_folder)))
+                if destination is None:
+                    folders = {os.path.dirname(mapped)}
+                    custom_folder = get_target_folder(mapped, create=False)
+                    if custom_folder:
+                        folders.add(os.path.normcase(os.path.realpath(custom_folder)))
+                else:
+                    folders = SyncOutputOwnerIndex._owner_folders(mapped, destination)
                 stem = _normalized_media_stem(mapped)
                 for folder in folders:
                     owners.setdefault((folder, stem), set()).add(mapped)
         return owners
+
+    @staticmethod
+    def _owner_folders(path, destination):
+        mode, custom = destination
+        directory = os.path.dirname(path)
+        folders = {directory}
+        if custom and mode in ('absolute', 'relative'):
+            folder = custom if mode == 'absolute' else os.path.join(directory, custom)
+            folders.add(os.path.normcase(os.path.realpath(folder)))
+        return folders
 
     @staticmethod
     def _load_owners():
@@ -480,24 +505,32 @@ def sync_output_owner_is_unique(video_path, source_path, ownership_index=None):
         return False
 
 
-def quarantine_sync_outputs(video_path, source_path, ownership_index=None):
-    """Preserve proven generated siblings under names no subtitle scan accepts."""
-    if is_sync_engine_output(source_path) or not sync_output_owner_is_unique(
-            video_path, source_path, ownership_index=ownership_index):
-        return
+def plan_sync_output_cleanup(video_path, source_path, ownership_index=None):
+    """Find and version the exact generated siblings while discovery is allowed."""
+    if is_sync_engine_output(source_path):
+        return ()
+    candidates = {}
+    for engine in SYNC_ENGINES:
+        output = engine_output_path(source_path, engine)
+        if (version := regular_subtitle_version(output)) is not None:
+            candidates[output] = version
+    if not candidates or not sync_output_owner_is_unique(video_path, source_path, ownership_index=ownership_index):
+        return ()
+
     from subtitles.indexer.utils import add_sync_engine_outputs
 
     directory = os.path.dirname(source_path)
+    owned = add_sync_engine_outputs(directory, {}, video_path=video_path, ownership_index=ownership_index)
+    return tuple((output, version) for output, version in candidates.items() if output.name in owned)
+
+
+def quarantine_sync_outputs(video_path, source_path, ownership_index=None, *, prepared=None):
+    """Preserve proven generated siblings under names no subtitle scan accepts."""
+    directory = os.path.dirname(source_path)
     with subtitle_write_lock(video_path, directory) as state:
-        owned = add_sync_engine_outputs(directory, {}, video_path=video_path, ownership_index=ownership_index)
-        for engine in SYNC_ENGINES:
-            output = engine_output_path(source_path, engine)
-            if output.name not in owned:
-                continue
-            try:
-                if not stat.S_ISREG(output.lstat().st_mode):
-                    continue
-            except FileNotFoundError:
+        outputs = plan_sync_output_cleanup(video_path, source_path, ownership_index) if prepared is None else prepared
+        for output, version in outputs:
+            if regular_subtitle_version(output) != version:
                 continue
             fd, quarantine = tempfile.mkstemp(prefix=f'.bazarr-sync-obsolete-{output.name[:40]}-', suffix='.bak', dir=directory)
             os.close(fd)
@@ -509,10 +542,13 @@ def quarantine_sync_outputs(video_path, source_path, ownership_index=None):
             state.changed(output)
 
 
-def quarantine_sync_outputs_after_mutation(video_path, source_path, ownership_index=None):
+def quarantine_sync_outputs_after_mutation(video_path, source_path, ownership_index=None, *, prepared=None):
     """Report cleanup failure separately from an already completed file change."""
     try:
-        quarantine_sync_outputs(video_path, source_path, ownership_index)
+        if prepared is None:
+            quarantine_sync_outputs(video_path, source_path, ownership_index)
+        else:
+            quarantine_sync_outputs(video_path, source_path, ownership_index, prepared=prepared)
     except OSError as exc:
         logging.error(
             'BAZARR subtitle change completed for %s, but obsolete generated subtitle cleanup failed (%s). '

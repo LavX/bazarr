@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import text
+from sqlalchemy import select, text
 
 from . import repository
 from .db import source_transaction
@@ -145,7 +145,8 @@ def _same_context(source, current):
 def source_item_publication(source, *, shared=False):
     """Keep the captured item stable through an atomic subtitle publication."""
     with source_transaction() as connection:
-        shared_postgres = shared and connection.dialect.name == 'postgresql'
+        postgres = connection.dialect.name == 'postgresql'
+        shared_postgres = shared and postgres
         item = repository.get_item(source.item_id, connection, for_update=True, nowait=shared_postgres)
         if item is not None and shared_postgres:
             # The row lock alone cannot prevent a source, Arr or Sportarr
@@ -153,5 +154,9 @@ def source_item_publication(source, *, shared=False):
             # Take the item lock first and leave any busy writer free to finish.
             connection.execute(text('LOCK TABLE table_source_items, table_episodes, table_movies, '
                                     'table_sports_events, arr_instances IN SHARE MODE NOWAIT'))
+        if item is not None and postgres:
+            # Keep the enabled owner and library stable through the final eligibility check and file writes.
+            for table, row_id in ((repository.Sources, item.source_id), (repository.Libraries, item.library_id)):
+                connection.execute(select(table.c.id).where(table.c.id == row_id).with_for_update(read=True, nowait=True))
         current = _same_context(source, _context_for_item(item, connection)) if item is not None else None
         yield current, connection
