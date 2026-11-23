@@ -38,6 +38,8 @@ export const KeyStart: FunctionComponent<{
   locked: boolean;
   /** Opens the engine's set-up in the full page, where its switch is. */
   onOpenSetup: () => void;
+  /** Told once the back end is saved, before refreshing or selecting the engine. */
+  onBackendSaved?: () => void;
   /** Told once, when a start has gone through: the back end is saved and the engine is selected. */
   onStarted?: () => void;
   /** What the button that leaves for the engine's set-up says. */
@@ -48,6 +50,7 @@ export const KeyStart: FunctionComponent<{
   onBusy,
   locked,
   onOpenSetup,
+  onBackendSaved,
   onStarted,
   openLabel = "Open its set-up",
 }) => {
@@ -87,6 +90,7 @@ export const KeyStart: FunctionComponent<{
         created: created.current,
         onCreated: () => {
           created.current = true;
+          onBackendSaved?.();
           setKeySaved(true);
           // The key is stored. It has no reason to stay in the page.
           setKey("");

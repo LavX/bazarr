@@ -144,7 +144,13 @@ def _manual_search(path, profile_id, providers, sceneName, title, media_type, *,
     if context is not None:
         video_args['cancel'] = cancel
 
-    if context is not None:
+    signature = None
+    if source is not None:
+        from media_sources.analysis import local_content_stamp
+        signature = local_content_stamp(source.path)
+        if signature is None:
+            return []
+    elif context is not None:
         from sportarr.subtitles import candidate_signature
         signature = candidate_signature(context)
     if language_set is None:
@@ -258,7 +264,7 @@ def _manual_search(path, profile_id, providers, sceneName, title, media_type, *,
                          language=str(s.language.basename),
                          hearing_impaired=str(s.hearing_impaired),
                          provider=s.provider_name,
-                         subtitle=_cache_search_result(s, context, signature if context is not None else None, source),
+                         subtitle=_cache_search_result(s, context, signature, source),
                          url=s.page_link,
                          original_format=s.use_original_format,
                          matches=list(matches),
@@ -662,7 +668,7 @@ def clear_mismatch_after_manual_save(video, media_type, saved_subtitles, arr_ins
 def _cache_search_result(subtitle, context=None, signature=None, source=None):
     if source is not None:
         from media_sources.manual import SourceCandidate
-        subtitle = SourceCandidate(source, subtitle)
+        subtitle = SourceCandidate(source, subtitle, signature)
     elif context is not None:
         from sportarr.subtitles import bind_candidate
         subtitle = bind_candidate(context, subtitle, signature)

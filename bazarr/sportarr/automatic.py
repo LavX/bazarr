@@ -19,6 +19,7 @@ from app.database import (
     TableSportsLeagues,
 )
 from sportarr.connection import check_cancelled
+from sportarr.errors import SportsOwnersBusy
 from sportarr.identity import resolve_event_in_session
 from sportarr.settings import get_sports_settings
 from sportarr.subtitles import (
@@ -320,7 +321,9 @@ def search_event(
                         previous_artifact=previous_artifact,
                         replacement_state=replacement_state,
                     )
-                except ReplacementDestinationChanged as exc:
+                except (ReplacementDestinationChanged, SportsOwnersBusy) as exc:
+                    if isinstance(exc, SportsOwnersBusy) and minimum_score is None:
+                        raise
                     return {
                         "status": "skipped",
                         "message": str(exc),

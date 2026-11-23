@@ -13,6 +13,7 @@ import {
 import {
   getArrInstanceDeleteConflict,
   getArrInstanceErrorMessage,
+  isSettingsFollowupError,
   useArrInstances,
   useCreateArrInstance,
   useDeleteArrInstance,
@@ -152,7 +153,13 @@ interface FieldErrors {
  * health warning. So: an untouched step advances without creating, and a
  * touched one has to name an address and a key before anything is written.
  */
-const ArrStep: FC<ArrStepProps> = ({ kind, onNext, onBack, stepKey }) => {
+const ArrStep: FC<ArrStepProps> = ({
+  kind,
+  onNext,
+  onBack,
+  onWritten,
+  stepKey,
+}) => {
   const meta = KIND_META[kind];
 
   const { data: instances } = useArrInstances();
@@ -304,10 +311,14 @@ const ArrStep: FC<ArrStepProps> = ({ kind, onNext, onBack, stepKey }) => {
       { [`settings-general-use_${kind}`]: true },
       {
         onSuccess: () => onNext(),
-        onError: () =>
+        onError: (error) => {
+          if (isSettingsFollowupError(error)) {
+            onWritten?.();
+          }
           setSaveError(
             `${meta.label} was saved, but Bazarr+ could not turn it on. Open Settings, Connections after setup and enable ${meta.label} there.`,
-          ),
+          );
+        },
       },
     );
   };
@@ -319,7 +330,10 @@ const ArrStep: FC<ArrStepProps> = ({ kind, onNext, onBack, stepKey }) => {
         update.mutate(
           { id: existing.id, body: { enabled: true } },
           {
-            onSuccess: () => activate(),
+            onSuccess: () => {
+              onWritten?.();
+              activate();
+            },
             onError: (error) =>
               setSaveError(
                 getArrInstanceErrorMessage(
@@ -335,7 +349,7 @@ const ArrStep: FC<ArrStepProps> = ({ kind, onNext, onBack, stepKey }) => {
         activate();
         return;
       }
-      onNext();
+      onNext(NOTHING_WRITTEN);
       return;
     }
     // The instance is already written, whatever the list says. Pressing
@@ -376,6 +390,7 @@ const ArrStep: FC<ArrStepProps> = ({ kind, onNext, onBack, stepKey }) => {
     };
     create.mutate(body, {
       onSuccess: (created) => {
+        onWritten?.();
         setCreatedId(created.id);
         recordConnectionTest(connectionTestKey("arr", created.id), tested);
         activate();
@@ -395,28 +410,25 @@ const ArrStep: FC<ArrStepProps> = ({ kind, onNext, onBack, stepKey }) => {
       return;
     }
     setRemoveError(null);
-    remove.mutate(
-      { id: existing.id },
-      {
-        onSuccess: () => {
-          setConfirmRemove(false);
-          // The row this message was about is gone, so the message goes with it,
-          // and so does the memory of having written it.
-          setSaveError(null);
-          setCreatedId(null);
-        },
-        onError: (error) =>
-          setRemoveError(
-            // Deleting it together with its library is offered in Settings,
-            // Connections only, behind its own confirmation.
-            getArrInstanceDeleteConflict(error)?.can_remove_library
-              ? `${existing.name} has already synced its library, so setup cannot remove it on its own. After setup, you can delete it together with that library in Settings, Connections.`
-              : getArrInstanceErrorMessage(
-                  error,
-                  `Bazarr+ could not remove ${existing.name}. You can edit it in Settings, Connections after setup.`,
-                ),
-          ),
+    // The deletion can settle after the reader goes Back or skips this step.
+    void remove.mutateAsync({ id: existing.id }).then(
+      () => {
+        onWritten?.();
+        setConfirmRemove(false);
+        setSaveError(null);
+        setCreatedId(null);
       },
+      (error: unknown) =>
+        setRemoveError(
+          // Deleting it together with its library is offered in Settings,
+          // Connections only, behind its own confirmation.
+          getArrInstanceDeleteConflict(error)?.can_remove_library
+            ? `${existing.name} has already synced its library, so setup cannot remove it on its own. After setup, you can delete it together with that library in Settings, Connections.`
+            : getArrInstanceErrorMessage(
+                error,
+                `Bazarr+ could not remove ${existing.name}. You can edit it in Settings, Connections after setup.`,
+              ),
+        ),
     );
   };
 
@@ -442,7 +454,9 @@ const ArrStep: FC<ArrStepProps> = ({ kind, onNext, onBack, stepKey }) => {
             </Group>
             <Button
               onClick={handleContinue}
-              loading={update.isPending || settings.isPending}
+              loading={
+                update.isPending || settings.isPending || remove.isPending
+              }
             >
               Continue
             </Button>

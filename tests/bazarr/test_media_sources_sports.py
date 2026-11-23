@@ -495,43 +495,82 @@ def test_sportarr_search_all_intersects_the_explicit_owner_with_the_filter(clien
     assert queued == [3]
 
 
-def test_a_sports_identity_edit_during_download_refuses_publication(
-        client, arr_library, writes, isolated_jobs, tmp_path, monkeypatch):
+@pytest.mark.parametrize('change', ['event_identity', 'recording', 'unchanged'])
+def test_manual_sports_download_rechecks_the_selected_event_before_publication(
+        client, arr_library, writes, isolated_jobs, tmp_path, monkeypatch, change):
     import sqlalchemy as sa
     from media_sources import repository
     from subtitles import manual
     from subliminal_patch.score import MAX_SCORES
 
-    _, _, dated, _ = _events(arr_library, tmp_path)
+    source_id, _, dated, _ = _events(arr_library, tmp_path)
     path = Path(repository.get_item(dated, arr_library).path)
     candidate = pipeline.FakeSubtitle(score=MAX_SCORES['movie'])
     candidate.matches = {'title', 'year'}
     candidate.page_link = 'https://example.invalid/release'
-    corrections = []
 
     def search(videos, languages, pool, **kwargs):
         (recording,) = videos
+        assert recording.source_context.event_date == '2026-05-24'
         return {recording: [candidate]}
 
-    def edit_during_download(subtitles, pool):
+    def change_during_download(subtitles, pool):
         (subtitle,) = subtitles
         assert subtitle.source_context.title == 'Race Day Race'
-        correction = client.patch(f'/api/sources/items/{dated}', headers=HEADERS, json={
-            'title': 'Race Day', 'part_name': 'Qualifying',
-        })
-        assert correction.status_code == 200
-        corrections.append(correction.get_json()['part_name'])
+        if change == 'event_identity':
+            correction = client.patch(f'/api/sources/items/{dated}', headers=HEADERS, json={
+                'title': 'Race Day', 'part_name': 'Qualifying',
+            })
+            assert correction.status_code == 200
+            assert correction.get_json()['part_name'] == 'Qualifying'
+        elif change == 'recording':
+            video(path.with_name('replacement.mkv'), size=2000).replace(path)
 
     monkeypatch.setattr(manual, 'list_all_subtitles', search)
     monkeypatch.setattr(manual, 'compute_score', lambda *args, **kwargs: (candidate.score, candidate.score))
-    monkeypatch.setattr(manual, 'download_subtitles', edit_during_download)
-    url = f'/api/sources/items/{dated}/manual'
-    (choice,) = client.get(url, headers=HEADERS).get_json()['data']
-    response = client.post(url, headers=HEADERS, json={'provider': 'fake', 'subtitle': choice['subtitle']})
+    monkeypatch.setattr(manual, 'download_subtitles', change_during_download)
+    item_url = f'/api/sources/items/{dated}'
+    response = client.get(f'{item_url}/manual', headers=HEADERS)
+    assert response.status_code == 200
+    (choice,) = response.get_json()['data']
+    payload = {'provider': 'fake', 'subtitle': choice['subtitle']}
+    response = client.post(f'{item_url}/manual', headers=HEADERS, json=payload)
+    assert response.status_code == 202
+    job = isolated_jobs._reserve_next_job()
+    assert job.job_id == response.get_json()['job_id']
+    saved = path.with_suffix('.en.srt')
+
+    if change != 'unchanged':
+        assert not isolated_jobs._run_job(job)
+        if change == 'event_identity':
+            assert job.error['reason'] == 'identity_changed'
+        else:
+            assert 'video changed' in job.error['message'].lower()
+        assert not saved.exists()
+        assert writes == []
+        assert arr_library.execute(sa.select(repository.History)).all() == []
+        return
+
+    assert isolated_jobs._run_job(job), job.error
+    assert saved.read_bytes() == pipeline.CONTENT
+    response = client.post(f'{item_url}/blacklist', headers=HEADERS, json={
+        'subtitles_path': str(saved), 'language': 'en', 'provider': 'fake', 'subs_id': candidate.id,
+    })
+    assert response.status_code == 204
+    assert not saved.exists()
+    response = client.post(f'{item_url}/manual', headers=HEADERS, json=payload)
+    assert response.status_code == 202
     job = isolated_jobs._reserve_next_job()
     assert job.job_id == response.get_json()['job_id']
     assert not isolated_jobs._run_job(job)
-    assert corrections == ['Qualifying'] and job.error['reason'] == 'identity_changed'
-    assert not path.with_suffix('.en.srt').exists()
-    assert writes == []
-    assert arr_library.scalar(sa.select(sa.func.count()).select_from(repository.History)) == 0
+    assert 'has been excluded' in job.error['message']
+
+    (excluded,) = arr_library.execute(sa.select(repository.Blacklist)).all()
+    assert (excluded.source_id, excluded.item_id, excluded.item_kind) == (source_id, dated, 'sports_event')
+    history = arr_library.execute(sa.select(repository.History).order_by(repository.History.c.id)).all()
+    assert [(row.item_id, row.item_kind, row.action, row.video_path) for row in history] == [
+        (dated, 'sports_event', 2, str(path)), (dated, 'sports_event', 0, str(path)),
+    ]
+    assert [(event.media_type, event.operation, event.arr_instance_id, event.source_item_id) for event in writes] == [
+        ('sports', 'download', None, dated), ('sports', 'delete', None, dated),
+    ]

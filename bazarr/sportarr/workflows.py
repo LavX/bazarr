@@ -25,6 +25,7 @@ from sportarr.library import _event_query, _serialize_event, get_league, parse_s
 from sportarr.pagination import validate_page
 from sportarr.sync.leagues import require_sportarr
 from sportarr.errors import SportsNotFound
+from subtitles.score_override import MANUAL_SCORE_ACTION, newer_sports_file_history
 from subtitles.wanted.utils import evaluate_translation_gate
 
 
@@ -329,7 +330,8 @@ def _latest_history_rows(session, rows):
     where a row carries no timestamp: PostgreSQL sorts NULLs first under DESC,
     so such a row would be the one upgrade_rows sees and swallows. Treating it
     as the newest here keeps the flag on the conservative side on both
-    backends, rather than promising an upgrade that would never run.
+    backends, rather than promising an upgrade that would never run. Manual
+    scores are handled per path by the callers.
     """
     keys = {(row.arr_instance_id, row.event_id, row.language) for row in rows}
     if not keys:
@@ -339,7 +341,8 @@ def _latest_history_rows(session, rows):
                TableHistorySports.event_id, TableHistorySports.language,
                TableHistorySports.timestamp)
         .where(TableHistorySports.arr_instance_id.in_({key[0] for key in keys}),
-               TableHistorySports.event_id.in_({key[1] for key in keys}))
+               TableHistorySports.event_id.in_({key[1] for key in keys}),
+               TableHistorySports.action.is_distinct_from(MANUAL_SCORE_ACTION))
     ).all()
 
     def recency(candidate):
@@ -381,24 +384,26 @@ def upgradable_history_ids(session, history_ids):
     minimum_timestamp, actions = get_queries_condition_parameters()
     allow_high_score_ai = _ai_translated_subtitles_are_upgrade_candidates()
     rows = session.execute(
-        select(TableHistorySports)
+        select(TableHistorySports, newer_sports_file_history((MANUAL_SCORE_ACTION,)))
         .join(TableArrInstances,
               TableHistorySports.arr_instance_id == TableArrInstances.id)
         .where(TableArrInstances.kind == "sportarr", TableArrInstances.enabled == 1,
-               TableHistorySports.id.in_(list(history_ids)))
-    ).scalars().all()
+               TableHistorySports.id.in_(list(history_ids)),
+               TableHistorySports.action.is_distinct_from(MANUAL_SCORE_ACTION))
+    ).all()
     # Only the newest row of each (owner, event, language) can be upgraded:
     # upgrade_rows() walks history newest-first and marks the tuple seen before
     # it applies any eligibility filter, so it never reaches an older row.
     # Flagging one anyway put an upgrade indicator on the Sports History page
     # that the upgrade run would silently skip forever.
-    latest = _latest_history_rows(session, rows)
+    latest = _latest_history_rows(session, [row for row, _ in rows])
     upgradable = set()
-    for row in rows:
+    for row, pinned in rows:
         if latest.get((row.arr_instance_id, row.event_id, row.language)) != row.id:
             continue
         if (
-            row.action not in actions
+            pinned
+            or row.action not in actions
             or not row.timestamp
             or row.timestamp <= minimum_timestamp
             or (row.score is None and row.action != 6)
@@ -438,12 +443,13 @@ def upgrade_rows(session, arr_instance_id=None, job_id=None, *, event_ids=None, 
         require_sportarr(session, arr_instance_id)
     minimum_timestamp, actions = get_queries_condition_parameters()
     query = (
-        select(TableHistorySports)
+        select(TableHistorySports, newer_sports_file_history((MANUAL_SCORE_ACTION,)))
         .join(
             TableArrInstances,
             TableHistorySports.arr_instance_id == TableArrInstances.id,
         )
-        .where(TableArrInstances.kind == "sportarr", TableArrInstances.enabled == 1)
+        .where(TableArrInstances.kind == "sportarr", TableArrInstances.enabled == 1,
+               TableHistorySports.action.is_distinct_from(MANUAL_SCORE_ACTION))
         .order_by(TableHistorySports.timestamp.desc(), TableHistorySports.id.desc())
     )
     if arr_instance_id is not None:
@@ -457,14 +463,15 @@ def upgrade_rows(session, arr_instance_id=None, job_id=None, *, event_ids=None, 
             selected_events = selected_events.where(TableSportsEvents.arr_instance_id == arr_instance_id)
         query = query.where(TableHistorySports.event_id.in_(selected_events))
     seen, rows = set(), []
-    for row in session.execute(query).scalars():
+    for row, pinned in session.execute(query):
         check_cancelled(SportsJobSignal(row.arr_instance_id, job_id))
         key = (row.arr_instance_id, row.event_id, row.language)
         if key in seen:
             continue
         seen.add(key)
         if (
-            row.action not in actions
+            pinned
+            or row.action not in actions
             or not row.timestamp
             or row.timestamp <= minimum_timestamp
             or (row.score is None and row.action != 6)

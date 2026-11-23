@@ -1,6 +1,10 @@
 import { FC, useMemo, useState } from "react";
 import { Alert, Button, Checkbox, Group, Text } from "@mantine/core";
-import { useSettingsMutation, useSystemSettings } from "@/apis/hooks";
+import {
+  isSettingsFollowupError,
+  useSettingsMutation,
+  useSystemSettings,
+} from "@/apis/hooks";
 import { useMediaServerInstances } from "@/apis/hooks/mediaServers";
 import type {
   MediaServerInstance,
@@ -12,6 +16,7 @@ import StepLayout from "@/pages/Setup/StepLayout";
 import { useOnboardingSelection } from "@/pages/Setup/useOnboardingSelection";
 import { useReportStepBusy } from "@/pages/Setup/useStepBusy";
 import ConnectedServerRow from "./mediaServer/ConnectedServerRow";
+import { useMediaServerDisconnectPending } from "./mediaServer/operations";
 import StepActions from "./mediaServer/StepActions";
 import { NOTHING_WRITTEN, type WizardStepProps } from "./types";
 import styles from "./MediaServerStep.module.scss";
@@ -47,12 +52,17 @@ const ORDER: MediaServerKind[] = ["plex", "jellyfin", "emby", "silo"];
  * because Bazarr+ finds and downloads subtitles with no media server at all.
  * Skipping is the shell's control.
  */
-const MediaServerStep: FC<WizardStepProps> = ({ onNext, onBack }) => {
+const MediaServerStep: FC<WizardStepProps> = ({
+  onNext,
+  onBack,
+  onWritten,
+}) => {
   const { drafts, addDraft, removeKind, removeDraft } =
     useOnboardingSelection();
 
   const { data: settings, isPending: settingsPending } = useSystemSettings();
   const settingsMutation = useSettingsMutation(false, { inlineErrors: true });
+  const disconnecting = useMediaServerDisconnectPending();
   useReportStepBusy(settingsMutation.isPending);
   // Which kind's switch write failed. The client keeps a restarting or
   // unreachable Bazarr+ out of its toasts, so it is said here or not at all.
@@ -167,14 +177,6 @@ const MediaServerStep: FC<WizardStepProps> = ({ onNext, onBack }) => {
     (draft) => draft.instanceId === undefined,
   ).length;
 
-  // Continue with nothing connected writes nothing, whether or not a server was
-  // ticked: the ticked one is set up on its own step, which answers for itself.
-  // The rail draws this one as a walk past, like every other step left empty.
-  // A server whose row was just written counts, though the list has not caught up yet.
-  const untouched =
-    ORDER.every((kind) => connected[kind].length === 0) &&
-    drafts.every((draft) => draft.instanceId === undefined);
-
   // Whether the kind's master switch is on. The dispatcher reads it before it
   // reads any row, so an enabled instance under a switched-off kind refreshes
   // nothing; calling that connected is the same lie the Finish recap used to
@@ -217,8 +219,9 @@ const MediaServerStep: FC<WizardStepProps> = ({ onNext, onBack }) => {
       layout="wide"
       actions={
         <StepActions
-          onNext={() => (untouched ? onNext(NOTHING_WRITTEN) : onNext())}
+          onNext={() => onNext(NOTHING_WRITTEN)}
           onBack={onBack}
+          continuePending={settingsMutation.isPending || disconnecting}
           continueLabel={
             pendingTotal > 0
               ? `Set up ${pendingTotal} ${pendingTotal === 1 ? "server" : "servers"}`
@@ -321,6 +324,7 @@ const MediaServerStep: FC<WizardStepProps> = ({ onNext, onBack }) => {
                       ownershipPending={kind === "plex" && settingsPending}
                       kindEnabled={kindOn}
                       onDisconnected={forgetInstance}
+                      onWritten={onWritten}
                     />
                   ))}
                   {/* One pending server is undone by unticking the card, so it
@@ -364,7 +368,15 @@ const MediaServerStep: FC<WizardStepProps> = ({ onNext, onBack }) => {
                           setSwitchFailed(null);
                           settingsMutation.mutate(
                             { [`settings-general-use_${kind}`]: true },
-                            { onError: () => setSwitchFailed(kind) },
+                            {
+                              onSuccess: onWritten,
+                              onError: (error) => {
+                                if (isSettingsFollowupError(error)) {
+                                  onWritten?.();
+                                }
+                                setSwitchFailed(kind);
+                              },
+                            },
                           );
                         }}
                       >

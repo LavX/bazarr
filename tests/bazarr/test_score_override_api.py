@@ -4,7 +4,7 @@ the one the lookup reads, and an empty subtitles path is refused."""
 
 import pytest
 from flask import Flask
-from sqlalchemy import select
+from sqlalchemy import event, select
 
 from app.database import (
     TableEpisodes,
@@ -42,7 +42,8 @@ def _manual_rows(session):
     ).all()
 
 
-def test_score_override_reads_the_item_of_the_instance_named(score_api):
+@pytest.mark.parametrize('owner,score', [(2, 40), (2.0, 40.0)])
+def test_score_override_reads_the_item_of_the_instance_named(score_api, owner, score):
     """Two instances each hold a movie with radarr id 7. The request names
     instance 2, so the row must be the one of instance 2 and not the first
     match on the upstream id."""
@@ -75,9 +76,9 @@ def test_score_override_reads_the_item_of_the_instance_named(score_api):
         ROOT,
         json={
             "radarrMovieId": 7,
-            "arr_instance_id": 2,
+            "arr_instance_id": owner,
             "subtitlesPath": "/movies/b.en.srt",
-            "score": 40,
+            "score": score,
         },
         headers=HEADERS,
     )
@@ -552,3 +553,167 @@ def test_score_override_refuses_a_path_no_mapping_lists(score_api, monkeypatch):
     assert session.execute(
         select(TableHistoryMovie).where(TableHistoryMovie.action == MANUAL_SCORE_ACTION)
     ).all() == []
+
+
+@pytest.fixture
+def sports_score_api(score_api, monkeypatch):
+    import json
+
+    from app.config import settings
+    from app.database import TableArrInstances, TableSportsEvents, TableSportsLeagues
+
+    client, session = score_api
+    monkeypatch.setattr(settings.general, "use_sportarr", True)
+    for owner in (1, 2):
+        session.add(TableArrInstances(
+            id=owner, kind="sportarr", stable_key=str(owner), name=str(owner),
+            enabled=1, port=1867,
+            path_mappings=json.dumps([["/sports", f"/mapped/sports/{owner}"]]),
+        ))
+        session.flush()
+        session.add(TableSportsLeagues(
+            id=50 + owner, arr_instance_id=owner, sportarrLeagueId=7, title="League",
+        ))
+        session.flush()
+        session.add(TableSportsEvents(
+            id=60 + owner, arr_instance_id=owner, league_id=50 + owner,
+            sportarrEventId=8, file_id=9, path="/sports/event.mkv", title="Event",
+            subtitles="[['en', '/sports/event.en.srt', 100]]",
+        ))
+    session.commit()
+    return client, session
+
+
+@pytest.mark.parametrize("event_id,owner,score,stored_score", [(62, None, 0, 0), (62.0, 2.0, 40.0, 72)])
+def test_sports_score_override_stores_the_owned_mapped_file_on_the_movie_scale(
+    sports_score_api, event_id, owner, score, stored_score
+):
+    from app.database import TableHistorySports
+    from sportarr.library import get_event, list_events
+
+    client, session = sports_score_api
+    payload = {
+        "sportsEventId": event_id, "subtitlesPath": "/mapped/sports/2/event.en.srt", "score": score,
+    }
+    if owner is not None:
+        payload["arr_instance_id"] = owner
+    assert client.post(ROOT, json=payload).status_code == 401
+
+    assert client.post(ROOT, json=payload, headers=HEADERS).status_code == 204
+    row = session.execute(select(TableHistorySports)).scalar_one()
+    assert (
+        row.action, row.arr_instance_id, row.event_id, row.league_id, row.language,
+        row.provider, row.score, row.score_out_of, row.subtitles_path, row.video_path,
+    ) == (
+        MANUAL_SCORE_ACTION, 2, 62, 52, "en", None, stored_score, 180,
+        "/sports/event.en.srt", "/sports/event.mkv",
+    )
+    expected = {"/sports/event.en.srt": score}
+    assert get_event(session, 62, 2)["manual_subtitle_scores"] == expected
+    assert list_events(session, 52, 2)["data"][0]["manual_subtitle_scores"] == expected
+    assert get_event(session, 61, 1).get("manual_subtitle_scores", {}) == {}
+    assert list_events(session, 51, 1)["data"][0].get("manual_subtitle_scores", {}) == {}
+
+
+def test_mapped_sports_score_locks_owner_before_event(sports_score_api):
+    from app.database import TableArrInstances, TableSportsEvents
+
+    client, session = sports_score_api
+    locked = []
+
+    def capture_lock(state):
+        statement = state.statement
+        if state.is_select and statement._for_update_arg is not None:
+            locked.append(statement.column_descriptions[0]['entity'])
+
+    event.listen(session, 'do_orm_execute', capture_lock)
+    try:
+        response = client.post(ROOT, json={
+            'sportsEventId': 62, 'subtitlesPath': '/mapped/sports/2/event.en.srt', 'score': 40,
+        }, headers=HEADERS)
+    finally:
+        event.remove(session, 'do_orm_execute', capture_lock)
+
+    assert response.status_code == 204
+    assert locked == [TableArrInstances, TableSportsEvents]
+
+
+def test_a_replacement_with_normalized_windows_paths_releases_the_visible_pin(sports_score_api):
+    from datetime import timedelta
+
+    from app.database import TableHistorySports, TableSportsEvents
+    from sportarr.library import get_event
+
+    client, session = sports_score_api
+    event_row = session.get(TableSportsEvents, 62)
+    original = r'D:\Sports\event.en.srt'
+    event_row.path = r'D:\Sports\event.mkv'
+    event_row.subtitles = str([['en', original, 100]])
+    session.commit()
+    assert client.post(ROOT, json={
+        'sportsEventId': 62, 'subtitlesPath': original, 'score': 0,
+    }, headers=HEADERS).status_code == 204
+
+    normalized = 'D:/Sports/event.en.srt'
+    event_row.subtitles = str([['en', normalized, 100]])
+    session.commit()
+    assert get_event(session, 62, 2)['manual_subtitle_scores'] == {normalized: 0}
+
+    pin = session.execute(select(TableHistorySports)).scalar_one()
+    session.add(TableHistorySports(
+        event_id=62, league_id=52, arr_instance_id=2, action=1, language='en',
+        video_path='D:/Sports/event.mkv', subtitles_path=normalized,
+        timestamp=pin.timestamp + timedelta(seconds=1),
+    ))
+    session.commit()
+
+    assert get_event(session, 62, 2).get('manual_subtitle_scores', {}) == {}
+
+
+def test_a_concurrent_sports_event_change_returns_a_conflict(sports_score_api):
+    from app.database import TableHistorySports
+    from sqlalchemy.exc import OperationalError
+
+    client, session = sports_score_api
+
+    class ConcurrentUpdate(Exception):
+        pgcode = '40001'
+
+    def reject_history_insert(state):
+        if state.is_insert:
+            raise OperationalError(None, None, ConcurrentUpdate())
+
+    event.listen(session, 'do_orm_execute', reject_history_insert)
+    try:
+        response = client.post(ROOT, json={
+            'sportsEventId': 62, 'subtitlesPath': '/mapped/sports/2/event.en.srt', 'score': 40,
+        }, headers=HEADERS)
+    finally:
+        event.remove(session, 'do_orm_execute', reject_history_insert)
+
+    assert response.status_code == 409
+    assert session.execute(select(TableHistorySports)).all() == []
+
+
+@pytest.mark.parametrize("changes,status", [
+    ({"arr_instance_id": 2}, 404),
+    ({"sportsEventId": 8}, 404),
+    ({"subtitlesPath": "/sports/unlisted.en.srt"}, 404),
+    ({"score": -1}, 400),
+    ({"score": 101}, 400),
+    ({"score": 100.9}, 400),
+    ({"score": None}, 400),
+    ({"sonarrEpisodeId": 20}, 400),
+    ({"radarrMovieId": 7}, 400),
+])
+def test_sports_score_override_refuses_invalid_targets_and_scores(sports_score_api, changes, status):
+    from app.database import TableHistorySports
+
+    client, session = sports_score_api
+    payload = {
+        "sportsEventId": 61, "arr_instance_id": 1,
+        "subtitlesPath": "/sports/event.en.srt", "score": 40,
+    } | changes
+
+    assert client.post(ROOT, json=payload, headers=HEADERS).status_code == status
+    assert session.execute(select(TableHistorySports)).all() == []

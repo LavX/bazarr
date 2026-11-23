@@ -302,6 +302,7 @@ declare namespace Blacklist {
 
   type SourceRow = MediaSourceOwner & {
     id: number;
+    removal_key: string;
     source_id: number | null;
     source_item_id: number | null;
     video_path: string | null;
@@ -327,10 +328,12 @@ declare namespace Blacklist {
 
   type Scope = { includeSources?: boolean; sourceKeys?: MediaSourceKey[] };
 
+  type SourceOption = { key: MediaSourceKey; name: string };
+
   type Removal =
     | ({ all: true } & Scope)
     | { all: false; form: FormType.DeleteBlacklist }
-    | { sourceBlacklistId: number };
+    | { sourceBlacklistId: number; sourceBlacklistKey: string };
 }
 
 declare namespace History {
