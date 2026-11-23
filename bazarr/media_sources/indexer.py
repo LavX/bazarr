@@ -9,7 +9,7 @@ import ast
 import logging
 import os
 import sqlite3
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from functools import partial
 from time import sleep
 
@@ -181,12 +181,18 @@ class SourcePublicationOwnerIndex(SourceOutputOwnerIndex):
             self._loaded = False
             self._owners = {}
             self._prepared_owners = None
-            with self._settings_guard():
-                self._publication_settings = self._settings_snapshot()
+            self._publication_settings = self._settings_snapshot()
+            shared = self._needs_registry_guard(source, destination, self._publication_settings[0][1])
+            # Local release mutations use their own advisory lock. Their ownership
+            # depends on the media directory, without any cross-library mappings.
+            pin_settings = shared or release is None
+            if pin_settings:
+                with self._settings_guard():
+                    self._publication_settings = self._settings_snapshot()
+                shared = self._needs_registry_guard(source, destination, self._publication_settings[0][1])
             prepared = prepare() if prepare is not None else None
             outputs = (plan_sync_output_cleanup(source.path, destination, self, include_combined=True)
                        if cleanup_outputs else ())
-            shared = self._needs_registry_guard(source, destination, self._publication_settings[0][1])
             if shared and self._prepared_owners is None:
                 raise SourcePublicationOwnersChanged('The shared subtitle owners could not be verified')
             # A scanner with the conflicting lock finishes outside this transaction.
@@ -197,7 +203,8 @@ class SourcePublicationOwnerIndex(SourceOutputOwnerIndex):
                 publishing = False
                 try:
                     options = {'release': release} if release is not None else {}
-                    with self._settings_guard(), source_item_publication(source, shared=shared, **options) as (
+                    settings_guard = self._settings_guard() if pin_settings else nullcontext()
+                    with settings_guard, source_item_publication(source, shared=shared, **options) as (
                             current, connection):
                         if self._publication_settings != self._settings_snapshot():
                             break
