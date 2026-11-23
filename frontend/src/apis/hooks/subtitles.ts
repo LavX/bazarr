@@ -774,42 +774,52 @@ export function useSubtitleSave() {
         params.language,
         params.arrInstanceId,
       );
-      const wasFetching =
-        client.getQueryState(queryKey)?.fetchStatus === "fetching";
+      const queryState = client.getQueryState(queryKey);
+      const wasFetching = queryState?.fetchStatus === "fetching";
       const originalEtag = params.etag?.replace(/^"|"$/g, "");
       const savedEtag = result.etag?.replace(/^"|"$/g, "");
       // A background read may still contain the version before this save.
       // Cancel it before pairing the saved text with its new version, and
       // finish before the editor clears dirty and checks the cached version.
       await client.cancelQueries({ queryKey, exact: true });
-      client.setQueryData<Awaited<ReturnType<typeof api.subtitles.getContent>>>(
-        queryKey,
-        (previous) => {
-          if (!previous) return undefined;
-          const cachedEtag = previous.etag?.replace(/^"|"$/g, "");
-          // A different revision was read after the PUT wrote its file but
-          // before its response arrived. Keep that external replacement.
-          if (
-            cachedEtag &&
-            cachedEtag !== originalEtag &&
-            cachedEtag !== savedEtag
-          ) {
-            return previous;
-          }
-          return {
-            ...previous,
-            data: {
-              ...previous.data,
-              content: params.content,
-              encoding: params.encoding,
-            },
-            etag: result.etag,
-          };
-        },
-      );
-      // The canceled read may have followed an external change. Recheck only
-      // in that case, after publishing the saved text and version together.
-      if (wasFetching) {
+      // A read may already have established that this file was deleted after
+      // the PUT wrote it. Preserve that HTTP error until an authoritative read
+      // succeeds, rather than replacing it with the delayed save response.
+      if (
+        queryState?.status === "error" ||
+        client.getQueryState(queryKey)?.status === "error"
+      ) {
+        void client.invalidateQueries({ queryKey, exact: true });
+        return;
+      }
+      const savedSize =
+        params.encoding.toLowerCase().replace(/[-_]/g, "") === "utf8"
+          ? new TextEncoder().encode(params.content).byteLength
+          : undefined;
+      const previous =
+        client.getQueryData<
+          Awaited<ReturnType<typeof api.subtitles.getContent>>
+        >(queryKey);
+      const cachedEtag = previous?.etag?.replace(/^"|"$/g, "");
+      // A different revision was read after the PUT wrote its file but
+      // before its response arrived. Keep that external replacement.
+      const externalRevision =
+        cachedEtag && cachedEtag !== originalEtag && cachedEtag !== savedEtag;
+      if (previous && !externalRevision) {
+        client.setQueryData(queryKey, {
+          ...previous,
+          data: {
+            ...previous.data,
+            content: params.content,
+            encoding: params.encoding,
+            ...(savedSize !== undefined && { size: savedSize }),
+          },
+          etag: result.etag,
+        });
+      }
+      // Recheck canceled reads for external changes, and fetch the byte size
+      // for encodings the browser cannot encode.
+      if (wasFetching || savedSize === undefined) {
         void client.invalidateQueries({ queryKey, exact: true });
       }
     },

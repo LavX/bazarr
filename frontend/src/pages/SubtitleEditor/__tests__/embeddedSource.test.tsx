@@ -18,6 +18,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { useSubtitleContent, useSubtitleSave } from "@/apis/hooks/subtitles";
 import queryClient from "@/apis/queries";
 import { expireSourceSubtitleDocument } from "@/apis/queries/sourceSubtitleDocument";
+import { createDefaultReducer } from "@/modules/socketio/reducer";
 import SubtitleViewer from "@/pages/SubtitleEditor";
 import EditorPage from "@/pages/SubtitleEditor/EditorPage";
 import { buildEditorAutosaveKey } from "@/pages/SubtitleEditor/editorScope";
@@ -565,7 +566,7 @@ it("keeps saved source cues and their ETag through two successful saves", async 
           encoding: "utf-8",
           format: "srt",
           language: "en:hi",
-          size: content.length,
+          size: new TextEncoder().encode(content).byteLength,
           lastModified: 1,
           mediaId: 30,
         },
@@ -598,7 +599,7 @@ it("keeps saved source cues and their ETag through two successful saves", async 
   openAt("/subtitles/edit/source/30/en%3Ahi");
   const textarea = await screen.findByDisplayValue("From the file on disk");
   await user.clear(textarea);
-  await user.type(textarea, "First source edit");
+  await user.type(textarea, "Első forrás 🎬");
   const refetch = queryClient.invalidateQueries({
     queryKey: ["subtitles", "content", "source", 30, "en:hi"],
   });
@@ -608,7 +609,7 @@ it("keeps saved source cues and their ETag through two successful saves", async 
   await waitFor(() => {
     expect(puts).toHaveLength(1);
     expect(screen.queryByText("Unsaved")).not.toBeInTheDocument();
-    expect(screen.getByDisplayValue("First source edit")).toBeVisible();
+    expect(screen.getByDisplayValue("Első forrás 🎬")).toBeVisible();
     expect(
       queryClient.getQueryData([
         "subtitles",
@@ -621,7 +622,12 @@ it("keeps saved source cues and their ETag through two successful saves", async 
         null,
       ]),
     ).toMatchObject({
-      data: { content: "1\n00:00:01,000 --> 00:00:02,000\nFirst source edit" },
+      data: {
+        content: "1\n00:00:01,000 --> 00:00:02,000\nElső forrás 🎬",
+        size: new TextEncoder().encode(
+          "1\n00:00:01,000 --> 00:00:02,000\nElső forrás 🎬",
+        ).byteLength,
+      },
       etag: '"saved-1"',
     });
     expect(
@@ -643,23 +649,24 @@ it("keeps saved source cues and their ETag through two successful saves", async 
     await Promise.all([staleResponse.promise, refetch]);
   });
 
-  await user.clear(screen.getByDisplayValue("First source edit"));
-  await user.type(textarea, "Second source edit");
+  const readsBeforeSecondSave = reads;
+  await user.clear(screen.getByDisplayValue("Első forrás 🎬"));
+  await user.type(textarea, "Második forrás ő");
   await user.click(screen.getByRole("button", { name: "Save" }));
 
   await waitFor(() => {
     expect(puts).toEqual([
       {
-        content: "1\n00:00:01,000 --> 00:00:02,000\nFirst source edit",
+        content: "1\n00:00:01,000 --> 00:00:02,000\nElső forrás 🎬",
         ifMatch: "original",
       },
       {
-        content: "1\n00:00:01,000 --> 00:00:02,000\nSecond source edit",
+        content: "1\n00:00:01,000 --> 00:00:02,000\nMásodik forrás ő",
         ifMatch: "saved-1",
       },
     ]);
     expect(screen.queryByText("Unsaved")).not.toBeInTheDocument();
-    expect(screen.getByDisplayValue("Second source edit")).toBeVisible();
+    expect(screen.getByDisplayValue("Második forrás ő")).toBeVisible();
     expect(
       queryClient.getQueryData([
         "subtitles",
@@ -672,10 +679,16 @@ it("keeps saved source cues and their ETag through two successful saves", async 
         null,
       ]),
     ).toMatchObject({
-      data: { content: "1\n00:00:01,000 --> 00:00:02,000\nSecond source edit" },
+      data: {
+        content: "1\n00:00:01,000 --> 00:00:02,000\nMásodik forrás ő",
+        size: new TextEncoder().encode(
+          "1\n00:00:01,000 --> 00:00:02,000\nMásodik forrás ő",
+        ).byteLength,
+      },
       etag: '"saved-2"',
     });
   });
+  expect(reads).toBe(readsBeforeSecondSave);
 });
 
 it("retains a dirty source draft when a background read or save fails", async () => {
@@ -865,3 +878,95 @@ it.each(["completed", "pending"] as const)(
     ).toMatchObject({ data: { content: TRACK }, etag: '"external"' });
   },
 );
+
+it("preserves a completed GET 404 when an earlier successful PUT response arrives late", async () => {
+  const putStarted = Promise.withResolvers<void>();
+  const releasePut = Promise.withResolvers<void>();
+  const releaseRecheck = Promise.withResolvers<void>();
+  let reads = 0;
+  let deleted = false;
+  server.use(
+    ...pageHandlers,
+    http.get("/api/sources/items/30/subtitles/:language/content", async () => {
+      reads += 1;
+      if (reads === 3) await releaseRecheck.promise;
+      if (deleted) {
+        return HttpResponse.json(
+          { message: "Subtitle file no longer exists" },
+          { status: 404 },
+        );
+      }
+      return HttpResponse.json(
+        {
+          content: FILE,
+          encoding: "utf-8",
+          format: "srt",
+          language: "en:hi",
+          size: FILE.length,
+          mediaId: 30,
+        },
+        { headers: { ETag: '"original"' } },
+      );
+    }),
+    http.put("/api/sources/items/30/subtitles/:language/content", async () => {
+      putStarted.resolve();
+      await releasePut.promise;
+      return new HttpResponse(null, {
+        status: 204,
+        headers: { ETag: '"saved"' },
+      });
+    }),
+  );
+  openAt("/subtitles/preview/source/30/en%3Ahi");
+  const { result } = renderHook(
+    () => ({
+      document: useSubtitleContent("source", 30, "en:hi"),
+      save: useSubtitleSave(),
+    }),
+    { wrapper: AllProviders },
+  );
+  expect(await screen.findByText("1 cues")).toBeVisible();
+  const saving = result.current.save.mutateAsync({
+    mediaType: "source",
+    mediaId: 30,
+    language: "en:hi",
+    content: "My saved edit",
+    encoding: "utf-8",
+    etag: "original",
+  });
+  await putStarted.promise;
+  deleted = true;
+  const reducer = createDefaultReducer().find(
+    (entry) => entry.key === "source-item",
+  );
+  act(() => reducer?.delete?.([30]));
+  expect(await screen.findByRole("alert", { name: "Error" })).toHaveTextContent(
+    "Subtitle file no longer exists",
+  );
+  await waitFor(() => expect(result.current.document.status).toBe("error"));
+  expect(result.current.document.fetchStatus).toBe("idle");
+  await act(async () => {
+    releasePut.resolve();
+    await saving;
+  });
+  await waitFor(() => expect(reads).toBe(3));
+  expect(result.current.document.status).toBe("error");
+  expect(result.current.document.error).toMatchObject({
+    response: { status: 404 },
+  });
+  expect(result.current.document.data).toMatchObject({
+    data: { content: FILE },
+    etag: '"original"',
+  });
+  expect(screen.getByRole("alert", { name: "Error" })).toHaveTextContent(
+    "Subtitle file no longer exists",
+  );
+  expect(screen.queryByText("1 cues")).not.toBeInTheDocument();
+  await act(async () => {
+    releaseRecheck.resolve();
+  });
+  await waitFor(() => expect(result.current.document.fetchStatus).toBe("idle"));
+  expect(result.current.document.error).toMatchObject({
+    response: { status: 404 },
+  });
+});

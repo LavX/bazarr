@@ -8,7 +8,6 @@ import {
 } from "@fortawesome/free-solid-svg-icons";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import { isAxiosError } from "axios";
-import { useCombineSubtitles } from "@/apis/hooks/combine";
 import queryClient from "@/apis/queries";
 import { expireSourceSubtitleDocument } from "@/apis/queries/sourceSubtitleDocument";
 import api from "@/apis/raw";
@@ -93,14 +92,27 @@ function combineInputs(item: SourceItem) {
   );
 }
 
-function combineScope(item: SourceItem, output?: Subtitle) {
+function combineScope(
+  item: SourceItem,
+  output?: Subtitle,
+  rebuildRequest?: NonNullable<ReturnType<typeof combineRequestForSubtitle>>,
+) {
   return {
     kind: "source" as const,
     itemId: item.id,
     validate: async (body: Api.CombineRequest) => {
       const current = await sourceDetailApi.requireCurrentItem(item, output);
-      const available = combineInputs(current);
+      const available =
+        rebuildRequest && output
+          ? compatibleRebuildInputs(current, output, rebuildRequest.languages)
+          : combineInputs(current);
       if (
+        (rebuildRequest &&
+          (body.format !== rebuildRequest.format ||
+            body.languages?.length !== rebuildRequest.languages.length ||
+            body.languages.some(
+              (language, index) => language !== rebuildRequest.languages[index],
+            ))) ||
         !body.inputs ||
         body.inputs.length !== body.languages?.length ||
         body.inputs.some(
@@ -120,7 +132,7 @@ function combineScope(item: SourceItem, output?: Subtitle) {
   };
 }
 
-function rebuildInputs(
+function compatibleRebuildInputs(
   item: SourceItem,
   subtitle: Subtitle,
   languages: string[],
@@ -130,12 +142,31 @@ function rebuildInputs(
     ...(subtitle.hi || modifiers.includes("hi") ? ["hi"] : []),
     ...(subtitle.forced || modifiers.includes("forced") ? ["forced"] : []),
   ];
-  return languages.flatMap((language, index) => {
-    const exactLanguage = [language, ...primaryVariants].join(":");
-    const candidates = combineInputs(item).filter((row) =>
-      index === 0 && primaryVariants.length > 0
-        ? row.language === exactLanguage
-        : row.language.split(":")[0] === language,
+  return combineInputs(item).filter((input) => {
+    const [code, ...variants] = input.language.split(":");
+    if (
+      variants.length > 1 ||
+      (variants.length === 1 && !["hi", "forced"].includes(variants[0]))
+    )
+      return false;
+    if (!languages.includes(code)) return false;
+    return (
+      code !== languages[0] ||
+      primaryVariants.length === 0 ||
+      input.language === [code, ...primaryVariants].join(":")
+    );
+  });
+}
+
+function rebuildInputs(
+  item: SourceItem,
+  subtitle: Subtitle,
+  languages: string[],
+) {
+  const available = compatibleRebuildInputs(item, subtitle, languages);
+  return languages.flatMap((language) => {
+    const candidates = available.filter(
+      (input) => input.language.split(":")[0] === language,
     );
     return candidates.length === 1 ? candidates : [];
   });
@@ -190,7 +221,6 @@ export function SourceSubtitleMenu({
   const write = useSourceWrite({ notifyError: true });
   const deleteAndExclude = useSourceWrite();
   const excludeRelease = useSourceReleaseExclusion(item);
-  const rebuild = useCombineSubtitles();
   const { canCombine, openCombine } = useSourceCombineAction(item);
   const [opened, setOpened] = useState(false);
   const [fileError, setFileError] = useState<string>();
@@ -253,39 +283,18 @@ export function SourceSubtitleMenu({
           );
         },
       );
-      if (inputs.length !== body.languages.length) {
-        const sourceInputs = combineInputs(current);
-        modals.openContextModal(CombineModal, {
-          scope: combineScope(current, subtitle),
-          availableLanguages: [
-            ...new Set(
-              sourceInputs.map((input) => input.language.split(":")[0]),
-            ),
-          ],
-          sourceInputs,
-          initialRequest: { ...body, inputs },
-        });
-        return;
-      }
-      const result = await rebuild.mutateAsync({
-        scope: combineScope(current, subtitle),
-        body: { ...body, inputs },
+      const sourceInputs = compatibleRebuildInputs(
+        current,
+        subtitle,
+        body.languages,
+      );
+      modals.openContextModal(CombineModal, {
+        scope: combineScope(current, subtitle, body),
+        availableLanguages: body.languages,
+        sourceInputs,
+        initialRequest: { ...body, inputs },
+        rebuild: true,
       });
-      if (result.status === "built" && !result.error) {
-        showNotification(
-          notification.info(
-            "Combined subtitle generated",
-            `Saved to ${result.path}`,
-          ),
-        );
-      } else if (result.status !== "queued") {
-        showNotification(
-          notification.warn(
-            "Combine did not complete",
-            result.error ?? result.reason ?? "",
-          ),
-        );
-      }
     } catch (error) {
       setFileError(sourceError(error));
     } finally {
@@ -423,7 +432,6 @@ export function SourceSubtitleMenu({
             write.isPending ||
             deleteAndExclude.isPending ||
             excludeRelease.isPending ||
-            rebuild.isPending ||
             checkingRebuild
           }
         />

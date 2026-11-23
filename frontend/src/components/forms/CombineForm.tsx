@@ -7,6 +7,7 @@ import {
   Radio,
   Select,
   Stack,
+  Text,
 } from "@mantine/core";
 import { showNotification } from "@mantine/notifications";
 import { CombineScope, useCombineSubtitles } from "@/apis/hooks/combine";
@@ -19,6 +20,7 @@ interface Props {
   availableLanguages: string[];
   sourceInputs?: NonNullable<Api.CombineRequest["inputs"]>;
   initialRequest?: Api.CombineRequest;
+  rebuild?: boolean;
   onSubmit?: () => void;
 }
 
@@ -27,6 +29,7 @@ const CombineForm: FunctionComponent<Props> = ({
   availableLanguages,
   sourceInputs,
   initialRequest,
+  rebuild = false,
   onSubmit,
 }) => {
   const [selected, setSelected] = useState<
@@ -61,11 +64,17 @@ const CombineForm: FunctionComponent<Props> = ({
         const multipleFiles =
           sourceInputs.filter((row) => row.language.split(":")[0] === code)
             .length > 1;
+        const duplicateBasename = sourceInputs.some(
+          (row, rowIndex) =>
+            rowIndex !== index &&
+            row.language.split(":")[0] === code &&
+            basename(row.path) === basename(input.path),
+        );
         return {
           value: String(index),
           code,
           label: multipleFiles
-            ? `${code.toUpperCase()} (${basename(input.path)})`
+            ? `${code.toUpperCase()} (${duplicateBasename ? input.path : basename(input.path)})`
             : code.toUpperCase(),
         };
       })
@@ -78,9 +87,10 @@ const CombineForm: FunctionComponent<Props> = ({
     sourceInputs ? sourceInputs[Number(value)].language.split(":")[0] : value;
   const languages = selected.map((selection) => selection.code);
   const choicesFor = (index?: number) =>
-    options.filter(
-      (option) =>
-        !languages.some((code, i) => i !== index && code === option.code),
+    options.filter((option) =>
+      rebuild && index !== undefined
+        ? option.code === languages[index]
+        : !languages.some((code, i) => i !== index && code === option.code),
     );
 
   const addLang = (value: string | null) => {
@@ -154,32 +164,52 @@ const CombineForm: FunctionComponent<Props> = ({
   return (
     <Stack>
       <Alert>
-        Pick 2 to 3 languages from those already downloaded for this video.
-        Order is the display order; first language is primary.
+        {rebuild
+          ? "Confirm the files to use for this combined subtitle. The original inputs are unknown. Rebuild uses the language order and format shown here."
+          : "Pick 2 to 3 languages from those already downloaded for this video. Order is the display order; first language is primary."}
       </Alert>
       <Stack gap="xs">
         {selected.map((selection, idx) => (
-          <Group key={idx}>
-            <Select
-              aria-label={`Input ${idx + 1}`}
-              placeholder={`Choose ${selection.code.toUpperCase()} input`}
-              data={choicesFor(idx)}
-              value={selection.value}
-              onChange={(next) => {
-                if (next) {
-                  const updated = [...selected];
-                  updated[idx] = { code: languageFor(next), value: next };
-                  setSelected(updated);
-                }
-              }}
-              style={{ width: 160 }}
-            />
-            <Button size="xs" variant="subtle" onClick={() => removeAt(idx)}>
-              Remove
-            </Button>
-          </Group>
+          <Stack key={idx} gap={4}>
+            <Group>
+              <Select
+                aria-label={`Input ${idx + 1}`}
+                placeholder={`Choose ${selection.code.toUpperCase()} input`}
+                data={choicesFor(idx)}
+                value={selection.value}
+                onChange={(next) => {
+                  if (next) {
+                    const updated = [...selected];
+                    updated[idx] = { code: languageFor(next), value: next };
+                    setSelected(updated);
+                  }
+                }}
+                style={rebuild ? { flex: 1, minWidth: 160 } : { width: 160 }}
+              />
+              {!rebuild && (
+                <Button
+                  size="xs"
+                  variant="subtle"
+                  onClick={() => removeAt(idx)}
+                >
+                  Remove
+                </Button>
+              )}
+            </Group>
+            {rebuild && selection.value !== null && sourceInputs && (
+              <Text size="xs" c="dimmed" style={{ overflowWrap: "anywhere" }}>
+                {sourceInputs[Number(selection.value)].path}
+              </Text>
+            )}
+            {rebuild && choicesFor(idx).length === 0 && (
+              <Text size="sm" c="red">
+                No compatible {selection.code.toUpperCase()} input is currently
+                available.
+              </Text>
+            )}
+          </Stack>
         ))}
-        {selected.length < 3 && (
+        {!rebuild && selected.length < 3 && (
           <Select
             placeholder="Add language"
             data={choicesFor()}
@@ -194,8 +224,8 @@ const CombineForm: FunctionComponent<Props> = ({
         onChange={(f) => setFormat(f as "srt" | "ass")}
       >
         <Group>
-          <Radio value="srt" label="SRT stacked" />
-          <Radio value="ass" label="ASS positioned" />
+          <Radio value="srt" label="SRT stacked" disabled={rebuild} />
+          <Radio value="ass" label="ASS positioned" disabled={rebuild} />
         </Group>
       </Radio.Group>
       <Divider />

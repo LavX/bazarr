@@ -602,54 +602,91 @@ it.each([false, true])(
   },
 );
 
-it("rebuilds the selected source combined output with its format, order and indexed inputs", async () => {
-  const user = userEvent.setup();
-  const { subtitles } = fixture("movie");
-  const { item } = openPage("movie", {
-    subtitles: [
-      ...subtitles,
-      {
-        ...subtitles[1],
-        language: "fr:combined-en",
-        path: "/media/movie.fr.combined-en.ass",
-      },
-    ],
-  });
-  const combined: unknown[] = [];
-  server.use(
-    http.post("/api/sources/items/7/subtitles/combine", async ({ request }) => {
-      combined.push(await request.json());
-      return HttpResponse.json({
-        status: "built",
-        path: "/media/movie.fr.combined-en.ass",
-      });
-    }),
-  );
-  await openItem(user, item);
-  const row = await screen.findByRole("row", {
-    name: /movie.fr.combined-en.ass/,
-  });
-  await user.click(within(row).getByLabelText("Actions"));
-  await user.click(await screen.findByRole("menuitem", { name: "Rebuild" }));
-  expect(await screen.findByText("Combined subtitle generated")).toBeVisible();
-  expect(combined).toEqual([
-    {
-      languages: ["fr", "en"],
-      format: "ass",
-      inputs: [
-        { path: "/media/movie.fr.srt", language: "fr" },
-        { path: "/media/movie.en.hi.srt", language: "en:hi" },
+it.each([true, false])(
+  "confirms legacy rebuild inputs with primary HI present: %s",
+  async (hasHi) => {
+    const user = userEvent.setup();
+    const { subtitles } = fixture("movie");
+    if (!hasHi)
+      subtitles[0] = {
+        ...subtitles[0],
+        hi: false,
+        path: "/media/movie.en.srt",
+      };
+    const { item } = openPage("movie", {
+      subtitles: [
+        ...subtitles,
+        {
+          ...subtitles[1],
+          language: "fr:combined-en",
+          path: "/media/movie.fr.combined-en.ass",
+        },
       ],
-    },
-  ]);
-});
+    });
+    const combined: unknown[] = [];
+    server.use(
+      http.post(
+        "/api/sources/items/7/subtitles/combine",
+        async ({ request }) => {
+          combined.push(await request.json());
+          return HttpResponse.json({
+            status: "built",
+            path: "/media/movie.fr.combined-en.ass",
+          });
+        },
+      ),
+    );
+    await openItem(user, item);
+    const row = await screen.findByRole("row", {
+      name: /movie.fr.combined-en.ass/,
+    });
+    await user.click(within(row).getByLabelText("Actions"));
+    await user.click(await screen.findByRole("menuitem", { name: "Rebuild" }));
+    const dialog = await screen.findByRole("dialog", {
+      name: "Combine subtitles",
+    });
+    expect(combined).toEqual([]);
+    expect(
+      within(dialog).queryByPlaceholderText("Add language"),
+    ).not.toBeInTheDocument();
+    expect(
+      within(dialog).queryByRole("button", { name: "Remove" }),
+    ).not.toBeInTheDocument();
+    expect(
+      within(dialog).getByRole("radio", { name: "ASS positioned" }),
+    ).toBeChecked();
+    expect(
+      within(dialog).getByRole("radio", { name: "SRT stacked" }),
+    ).toBeDisabled();
+    await user.click(within(dialog).getByRole("button", { name: "Generate" }));
+    expect(
+      await screen.findByText("Combined subtitle generated"),
+    ).toBeVisible();
+    expect(combined).toEqual([
+      {
+        languages: ["fr", "en"],
+        format: "ass",
+        inputs: [
+          { path: "/media/movie.fr.srt", language: "fr" },
+          {
+            path: hasHi ? "/media/movie.en.hi.srt" : "/media/movie.en.srt",
+            language: hasHi ? "en:hi" : "en",
+          },
+        ],
+      },
+    ]);
+  },
+);
 
-it.each(["hi", "forced", "alternate"] as const)(
+it.each(["hi", "forced", "alternate", "same basename"] as const)(
   "asks which English input to rebuild when the %s input competes with plain",
   async (variant) => {
     const user = userEvent.setup();
     const { subtitles } = fixture("movie");
-    const selectedPath = `/media/movie.en.${variant}.srt`;
+    const selectedPath =
+      variant === "same basename"
+        ? "/subtitles/movie.en.srt"
+        : `/media/movie.en.${variant}.srt`;
     const { item } = openPage("movie", {
       subtitles: [
         { ...subtitles[0], hi: false, path: "/media/movie.en.srt" },
@@ -705,9 +742,26 @@ it.each(["hi", "forced", "alternate"] as const)(
       if (!value) throw new Error("The input selector did not open");
       return value;
     });
+    if (variant === "same basename") {
+      expect(
+        within(listbox).getByRole("option", {
+          name: "EN (/media/movie.en.srt)",
+          hidden: true,
+        }),
+      ).toBeInTheDocument();
+      expect(
+        within(listbox).getByRole("option", {
+          name: "EN (/subtitles/movie.en.srt)",
+          hidden: true,
+        }),
+      ).toBeInTheDocument();
+    }
     await user.click(
       within(listbox).getByRole("option", {
-        name: `EN (movie.en.${variant}.srt)`,
+        name:
+          variant === "same basename"
+            ? "EN (/subtitles/movie.en.srt)"
+            : `EN (movie.en.${variant}.srt)`,
         hidden: true,
       }),
     );
@@ -721,7 +775,9 @@ it.each(["hi", "forced", "alternate"] as const)(
             { path: "/media/movie.fr.srt", language: "fr" },
             {
               path: selectedPath,
-              language: variant === "alternate" ? "en" : `en:${variant}`,
+              language: ["alternate", "same basename"].includes(variant)
+                ? "en"
+                : `en:${variant}`,
             },
           ],
         },
@@ -730,7 +786,87 @@ it.each(["hi", "forced", "alternate"] as const)(
   },
 );
 
-it("requires a choice when a known primary HI input is gone and plain remains", async () => {
+it.each(["hi", "forced"] as const)(
+  "preserves a known primary %s input when plain is also available",
+  async (variant) => {
+    const user = userEvent.setup();
+    const { subtitles } = fixture("movie");
+    const exact = {
+      ...subtitles[0],
+      hi: variant === "hi",
+      forced: variant === "forced",
+      path: `/media/movie.en.${variant}.srt`,
+    };
+    const { item } = openPage("movie", {
+      subtitles: [
+        exact,
+        { ...subtitles[0], hi: false, path: "/media/movie.en.srt" },
+        subtitles[1],
+        {
+          ...exact,
+          language: `en:${variant}:combined-fr`,
+          path: "/media/movie.en.combined-fr.ass",
+        },
+      ],
+    });
+    const combined: unknown[] = [];
+    server.use(
+      http.post(
+        "/api/sources/items/7/subtitles/combine",
+        async ({ request }) => {
+          combined.push(await request.json());
+          return HttpResponse.json({
+            status: "built",
+            path: "/media/movie.en.combined-fr.ass",
+          });
+        },
+      ),
+    );
+    await openItem(user, item);
+    const row = await screen.findByRole("row", {
+      name: /movie.en.combined-fr.ass/,
+    });
+    await user.click(within(row).getByLabelText("Actions"));
+    await user.click(await screen.findByRole("menuitem", { name: "Rebuild" }));
+    const dialog = await screen.findByRole("dialog", {
+      name: "Combine subtitles",
+    });
+    expect(combined).toEqual([]);
+    await waitFor(() =>
+      expect(within(dialog).getByText(exact.path)).toBeVisible(),
+    );
+    const input = within(dialog).getByPlaceholderText("Choose EN input");
+    await user.click(input);
+    const listbox = await waitFor(() => {
+      const found = screen
+        .getAllByRole("listbox", { hidden: true })
+        .find((element) => element.id === input.getAttribute("aria-controls"));
+      if (!found) throw new Error("The input selector did not open");
+      return found;
+    });
+    expect(
+      within(listbox).getAllByRole("option", { hidden: true }),
+    ).toHaveLength(1);
+    await user.click(
+      within(listbox).getByRole("option", { name: "EN", hidden: true }),
+    );
+    await user.click(within(dialog).getByRole("button", { name: "Generate" }));
+    await waitFor(() =>
+      expect(combined).toEqual([
+        {
+          languages: ["en", "fr"],
+          format: "ass",
+          inputs: [
+            { path: exact.path, language: `en:${variant}` },
+            { path: "/media/movie.fr.srt", language: "fr" },
+          ],
+        },
+      ]),
+    );
+  },
+);
+
+it("blocks rebuild when a known primary HI input is gone and plain remains", async () => {
   const user = userEvent.setup();
   const { subtitles } = fixture("movie");
   const { item } = openPage("movie", {
@@ -774,23 +910,16 @@ it("requires a choice when a known primary HI input is gone and plain remains", 
   expect(
     within(dialog).getByRole("radio", { name: "ASS positioned" }),
   ).toBeChecked();
-  await user.click(within(dialog).getByPlaceholderText("Choose EN input"));
-  await user.click(
-    await screen.findByRole("option", { name: "EN", hidden: true }),
-  );
-  await user.click(within(dialog).getByRole("button", { name: "Generate" }));
   await waitFor(() =>
-    expect(combined).toEqual([
-      {
-        languages: ["en", "fr"],
-        format: "ass",
-        inputs: [
-          { path: "/media/movie.en.srt", language: "en" },
-          { path: "/media/movie.fr.srt", language: "fr" },
-        ],
-      },
-    ]),
+    expect(
+      within(dialog).getByText(
+        "No compatible EN input is currently available.",
+      ),
+    ).toBeVisible(),
   );
+  expect(
+    within(dialog).queryByRole("option", { name: "EN", hidden: true }),
+  ).not.toBeInTheDocument();
 });
 
 it.each([

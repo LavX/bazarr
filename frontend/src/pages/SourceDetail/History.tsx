@@ -341,16 +341,9 @@ export function useSourceUpgrade(item: SourceItem, disabled = false) {
         await refresh();
       }
     },
-    onSuccess: (upgraded, row) => {
+    onSuccess: (upgraded) => {
       if (upgraded === 0) return;
-      const language = row?.language;
-      void invalidateSourceSubtitleDocuments(
-        client,
-        [item.id],
-        language
-          ? sourceSubtitleVariant(language.code2, language.hi, language.forced)
-          : undefined,
-      );
+      void invalidateSourceSubtitleDocuments(client, [item.id]);
     },
   });
   return { ...mutation, queued, allowed, canUpgrade };

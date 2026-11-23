@@ -97,11 +97,13 @@ beforeEach(() => {
 function OpenDocument({
   mediaType = "source",
   id = item.id,
+  language = "en:hi",
 }: {
   mediaType?: "source" | "movie";
   id?: number;
+  language?: string;
 }) {
-  const { data } = useSubtitleContent(mediaType, id, "en:hi");
+  const { data } = useSubtitleContent(mediaType, id, language);
   return <output>{data?.data.content}</output>;
 }
 
@@ -232,11 +234,24 @@ it.each([0, 1])(
     const historyRead = vi.fn();
     const resultRead = vi.fn();
     const contentRead = vi.fn();
+    const nativeContentRead = vi.fn();
     let content = "original source cues";
     server.use(
-      http.get("/api/sources/items/7/subtitles/:language/content", () => {
-        contentRead();
-        return HttpResponse.json({ content });
+      http.get(
+        "/api/sources/items/:id/subtitles/:language/content",
+        ({ params }) => {
+          contentRead(String(params.id), String(params.language));
+          return HttpResponse.json({
+            content:
+              params.id === "7"
+                ? `${content} ${params.language}`
+                : "unrelated source cues",
+          });
+        },
+      ),
+      http.get("/api/movies/7/subtitles/:language/content", () => {
+        nativeContentRead();
+        return HttpResponse.json({ content: "native movie cues" });
       }),
       http.get("/api/sources/items/7/history", () => {
         historyRead();
@@ -266,9 +281,19 @@ it.each([0, 1])(
       <>
         <SourceHistoryView item={item} />
         <OpenDocument />
+        <OpenDocument language="en" />
+        <OpenDocument language="en:sync-ffsubsync" />
+        <OpenDocument id={8} />
+        <OpenDocument mediaType="movie" />
       </>,
     );
-    expect(await screen.findByText("original source cues")).toBeVisible();
+    expect(await screen.findByText("original source cues en:hi")).toBeVisible();
+    expect(await screen.findByText("original source cues en")).toBeVisible();
+    expect(
+      await screen.findByText("original source cues en:sync-ffsubsync"),
+    ).toBeVisible();
+    expect(await screen.findByText("unrelated source cues")).toBeVisible();
+    expect(await screen.findByText("native movie cues")).toBeVisible();
     await waitFor(() =>
       expect(screen.getByRole("button", { name: "Upgrade" })).toBeEnabled(),
     );
@@ -287,7 +312,7 @@ it.each([0, 1])(
       [{ job_id: 31, status: "completed", session: "other-run" }],
     );
     expect(resultRead).not.toHaveBeenCalled();
-    expect(contentRead).toHaveBeenCalledTimes(1);
+    expect(contentRead).toHaveBeenCalledTimes(4);
     if (upgraded) content = "upgraded source cues";
     queryClient.setQueryData(
       [QueryKeys.System, QueryKeys.Jobs],
@@ -301,9 +326,17 @@ it.each([0, 1])(
     expect(resultRead).toHaveBeenCalledTimes(1);
     expect(historyRead).toHaveBeenCalledTimes(3);
     if (upgraded) {
-      expect(await screen.findByText("upgraded source cues")).toBeVisible();
+      expect(
+        await screen.findByText("upgraded source cues en:hi"),
+      ).toBeVisible();
+      expect(await screen.findByText("upgraded source cues en")).toBeVisible();
+      expect(
+        await screen.findByText("upgraded source cues en:sync-ffsubsync"),
+      ).toBeVisible();
     }
-    expect(contentRead).toHaveBeenCalledTimes(upgraded ? 2 : 1);
+    expect(contentRead).toHaveBeenCalledTimes(upgraded ? 7 : 4);
+    expect(contentRead.mock.calls.filter(([id]) => id === "8")).toHaveLength(1);
+    expect(nativeContentRead).toHaveBeenCalledTimes(1);
   },
 );
 
