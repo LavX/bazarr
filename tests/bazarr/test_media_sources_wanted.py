@@ -576,26 +576,57 @@ def test_keyed_wanted_publication_keeps_the_subtitle_folder_stable(world, monkey
     assert world.db.execute(sa.select(repository.History.c.action)).scalars().all() == [1]
 
 
-@pytest.mark.parametrize('single,forced,suffix', [
-    (False, False, '.en'), (True, False, ''), (True, True, ''),
-], ids=['tagged', 'single-regular', 'single-forced'])
+@pytest.mark.parametrize('single,language,forced,hi,change', [
+    (False, 'en', False, False, None),
+    (True, 'en', False, False, None),
+    (True, 'en', True, False, None),
+    (True, 'en', False, True, None),
+    (True, 'pb', True, False, None),
+    (True, 'en', True, False, 'indexed sibling'),
+    (True, 'en', True, False, 'postprocess'),
+    (True, 'en', True, False, 'large'),
+], ids=['tagged', 'single-regular', 'single-forced', 'single-hi', 'single-brazilian',
+        'single-indexed-sibling', 'single-postprocessed', 'single-large'])
 def test_wanted_leaves_a_real_uploaded_language_sibling_before_upload_indexing(
-        world, monkeypatch, single, forced, suffix):
+        world, monkeypatch, single, language, forced, hi, change):
     import pysubs2
     from app.config import settings
     from app.database import TableLanguagesProfiles, update_profile_id_list
-    from media_sources import repository, wanted
-    from subtitles import download, upload
+    from languages import get_languages
+    from media_sources import indexer, repository, wanted
+    from subtitles import download, processing, upload
     from subzero.language import Language
 
     monkeypatch.setattr(settings.general, 'single_language', single)
-    profile = [{'id': 1, 'language': 'en', 'forced': str(forced), 'hi': 'False'}]
+    monkeypatch.setattr(get_languages, 'languages_dict', [*get_languages.languages_dict,
+        {'code2': 'pt', 'code3': 'por', 'name': 'Portuguese', 'code3b': 'por'},
+        {'code2': 'pb', 'code3': 'pob', 'name': 'Portuguese (Brazil)', 'code3b': 'pob'}])
+    lang_obj = Language('por', country='BR') if language == 'pb' else Language('eng')
+    monkeypatch.setattr(indexer, 'get_language_set', lambda: {lang_obj})
+    profile = [{'id': 1, 'language': language, 'forced': str(forced), 'hi': str(hi)}]
     world.db.execute(sa.update(TableLanguagesProfiles).values(originalFormat=1, items=json.dumps(profile)))
     update_profile_id_list.invalidate()
     context = pipeline._movie(world)
+    suffix = '' if single else f'.{language}'
     sibling = Path(context.path).with_suffix(f'{suffix}.ass')
-    language_code = 'en:forced' if forced else 'en'
-    content = pysubs2.SSAFile.from_string(pipeline.CONTENT.decode(), format_='srt').to_string('ass').encode()
+    language_code = language + (':forced' if forced else ':hi' if hi else '')
+    existing = Path(context.path).with_suffix('.fr.srt')
+    if change == 'indexed sibling':
+        existing.write_bytes(pipeline.CONTENT)
+        indexer.index_item(context.item_id)
+    subtitles = pysubs2.SSAFile.from_string(pipeline.CONTENT.decode(), format_='srt')
+    if change == 'large':
+        subtitles[0].text = 'Uploaded ' * 140000
+    content = subtitles.to_string('ass').encode()
+    if change == 'postprocess':
+        monkeypatch.setattr(processing, '_postprocessing_config', lambda *args: (True, 'fixture', None, None))
+        monkeypatch.setattr(upload, 'pp_replace', lambda *args: 'fixture')
+
+        def postprocess(command, path, *, subtitle_path):
+            with open(subtitle_path, 'ab') as saved:
+                saved.write(b'\n; postprocessed size change\n')
+
+        monkeypatch.setattr(upload, 'postprocessing', postprocess)
     finish_upload = upload._finish_source_upload
     pending_finish = []
     monkeypatch.setattr(upload, '_finish_source_upload', lambda *args: pending_finish.append(args))
@@ -603,12 +634,12 @@ def test_wanted_leaves_a_real_uploaded_language_sibling_before_upload_indexing(
     def download_best(videos, **kwargs):
         (found,) = videos
         result = upload.manual_upload_subtitle(
-            context.path, 'en', forced, False, context.media_type, BytesIO(content), 'uploaded.ass', 'None',
+            context.path, language, forced, hi, context.media_type, BytesIO(content), 'uploaded.ass', 'None',
             job_id=1, source=context)
         assert result == ('', 204)
         assert sibling.exists()
         assert repository.get_item(context.item_id).missing_subtitles == str([language_code])
-        return {found: [pipeline.FakeSubtitle(Language.rebuild(Language('eng'), forced=forced))]}
+        return {found: [pipeline.FakeSubtitle(Language.rebuild(lang_obj, forced=forced, hi=hi))]}
 
     monkeypatch.setattr(download, 'download_best_subtitles', download_best)
     wanted.wanted_search_missing_subtitles_sources(kind='movie', job_id=1)
@@ -616,14 +647,191 @@ def test_wanted_leaves_a_real_uploaded_language_sibling_before_upload_indexing(
     assert sibling.exists()
     assert not Path(context.path).with_suffix(f'{suffix}.srt').exists()
     assert world.db.execute(sa.select(repository.History.c.id)).all() == []
-    assert [event.operation for event in world.published] == ['upload']
+    assert [event.operation for event in world.published] == ['upload'] * (2 if change == 'postprocess' else 1)
     monkeypatch.setattr(upload, 'sync_subtitles', Mock())
     (finish_args,) = pending_finish
     finish_upload(*finish_args)
     indexed = repository.get_item(context.item_id)
     assert indexed.missing_subtitles == '[]'
-    assert [(code, path) for code, path, _ in ast.literal_eval(indexed.subtitles) if path] == [(language_code, str(sibling))]
+    expected = {(language_code, str(sibling))}
+    if change == 'indexed sibling':
+        expected.add(('fr', str(existing)))
+        assert existing.read_bytes() == pipeline.CONTENT
+    if change == 'postprocess':
+        assert sibling.read_bytes().endswith(b'; postprocessed size change\n')
+    if change == 'large':
+        assert sibling.stat().st_size > 1024 * 1024
+    assert {(entry[0], entry[1]) for entry in ast.literal_eval(indexed.subtitles) if entry[1]} == expected
+    from api import utils
+
+    public = utils.postprocess({'subtitles': indexed.subtitles}, source=True)['subtitles']
+    assert {(entry['language'], entry['path']) for entry in public} == expected
+    assert all(set(entry) == {'path', 'name', 'code2', 'code3', 'language', 'modifier', 'forced', 'hi',
+                              'file_size', 'codec'} for entry in public)
+    assert next(entry['file_size'] for entry in public if entry['path'] == str(sibling)) == sibling.stat().st_size
     assert world.db.execute(sa.select(repository.History.c.action)).scalars().all() == [4]
+
+
+def test_single_language_upload_finishes_after_metadata_write_failure(world, monkeypatch, caplog):
+    import sqlite3
+
+    from app.config import settings
+    from media_sources import indexer, repository
+    from subtitles import upload
+
+    monkeypatch.setattr(settings.general, 'single_language', True)
+    monkeypatch.setattr(upload, 'sync_subtitles', Mock())
+    context = pipeline._movie(world)
+    destination = Path(context.path).with_suffix('.srt')
+    destination.write_bytes(pipeline.CONTENT.replace(b'Downloaded', b'Previous subtitle'))
+    indexer.index_item(context.item_id)
+
+    write_item_index = repository.write_item_index
+
+    def unavailable(*args, indexed=True, **kwargs):
+        if not indexed:
+            raise sa.exc.OperationalError('save upload metadata', {}, sqlite3.OperationalError('database is locked'))
+        return write_item_index(*args, **kwargs)
+
+    monkeypatch.setattr(repository, 'write_item_index', unavailable)
+    with caplog.at_level('WARNING'):
+        result = upload.manual_upload_subtitle(
+            context.path, 'en', False, False, context.media_type, BytesIO(pipeline.CONTENT), 'uploaded.srt', 'None',
+            job_id=1, source=context)
+
+    assert result == ('', 204)
+    assert destination.read_bytes() == pipeline.CONTENT
+    assert [event.operation for event in world.published] == ['upload']
+    assert world.db.execute(sa.select(repository.History.c.action)).scalars().all() == [4]
+    indexed = repository.get_item(context.item_id)
+    assert indexed.missing_subtitles == '[]'
+    assert [(entry[0], entry[1]) for entry in ast.literal_eval(indexed.subtitles) if entry[1]] == [
+        ('en', str(destination))]
+    assert any(record.levelname == 'WARNING' and 'upload' in record.getMessage().lower()
+               for record in caplog.records)
+
+
+@pytest.mark.parametrize('role', ['forced', 'hi'])
+def test_single_language_upload_role_applies_only_to_the_published_file(world, monkeypatch, role):
+    from app.config import settings
+    from app.database import TableLanguagesProfiles, update_profile_id_list
+    from media_sources import indexer, repository
+    from subtitles import upload
+
+    monkeypatch.setattr(settings.general, 'single_language', True)
+    monkeypatch.setattr(upload, 'sync_subtitles', Mock())
+    profile = [{'id': 1, 'language': 'en', 'forced': str(role == 'forced'), 'hi': str(role == 'hi')}]
+    world.db.execute(sa.update(TableLanguagesProfiles).values(items=json.dumps(profile)))
+    update_profile_id_list.invalidate()
+    context = pipeline._movie(world)
+    destination = Path(context.path).with_suffix('.srt')
+    result = upload.manual_upload_subtitle(
+        context.path, 'en', role == 'forced', role == 'hi', context.media_type,
+        BytesIO(pipeline.CONTENT), 'uploaded.srt', 'None', job_id=1, source=context)
+    assert result == ('', 204)
+    assert repository.get_item(context.item_id).missing_subtitles == '[]'
+
+    previous = destination.stat()
+    replacement = destination.with_suffix('.replacement')
+    replacement.write_bytes(pipeline.CONTENT.replace(b'Downloaded', b'Replaced!!'))
+    os.utime(replacement, ns=(previous.st_atime_ns, previous.st_mtime_ns))
+    os.replace(replacement, destination)
+    assert destination.stat().st_size == previous.st_size
+    assert destination.stat().st_mtime_ns == previous.st_mtime_ns
+
+    indexer.index_item(context.item_id)
+    indexed = repository.get_item(context.item_id)
+    assert ast.literal_eval(indexed.missing_subtitles) == [f'en:{role}']
+    assert all(entry[0] not in ('en:forced', 'en:hi')
+               for entry in ast.literal_eval(indexed.subtitles) if entry[1])
+
+
+@pytest.mark.parametrize('role', ['forced', 'hi'])
+def test_single_language_historical_role_needs_an_indexed_hint(world, monkeypatch, role):
+    from app.config import settings
+    from media_sources import indexer
+
+    monkeypatch.setattr(settings.general, 'single_language', True)
+    context = pipeline._movie(world)
+    sidecar = Path(context.path).with_suffix('.srt')
+    sidecar.write_bytes(pipeline.CONTENT)
+    historical = [[f'en:{role}', str(sidecar), sidecar.stat().st_size]]
+
+    assert [entry[0] for entry in indexer.list_external_subtitles(context.path, historical)] == [f'en:{role}']
+    assert all(entry[0] not in ('en:forced', 'en:hi')
+               for entry in indexer.list_external_subtitles(context.path))
+
+
+def test_single_language_delayed_finish_keeps_the_replacement_upload_role(world, monkeypatch):
+    from app.config import settings
+    from app.database import TableLanguagesProfiles, update_profile_id_list
+    from media_sources import repository
+    from subtitles import upload
+
+    monkeypatch.setattr(settings.general, 'single_language', True)
+    monkeypatch.setattr(upload, 'sync_subtitles', Mock())
+    profile = [{'id': 1, 'language': 'en', 'forced': 'True', 'hi': 'False'},
+               {'id': 2, 'language': 'en', 'forced': 'False', 'hi': 'True'}]
+    world.db.execute(sa.update(TableLanguagesProfiles).values(items=json.dumps(profile)))
+    update_profile_id_list.invalidate()
+    context = pipeline._movie(world)
+    finish_upload = upload._finish_source_upload
+    pending = []
+    monkeypatch.setattr(upload, '_finish_source_upload', lambda *args: pending.append(args))
+    assert upload.manual_upload_subtitle(
+        context.path, 'en', True, False, context.media_type, BytesIO(pipeline.CONTENT), 'first.srt', 'None',
+        job_id=1, source=context) == ('', 204)
+
+    monkeypatch.setattr(upload, '_finish_source_upload', finish_upload)
+    replacement = pipeline.CONTENT.replace(b'Downloaded', b'Replacement upload')
+    assert upload.manual_upload_subtitle(
+        context.path, 'en', False, True, context.media_type, BytesIO(replacement), 'second.srt', 'None',
+        job_id=1, source=context) == ('', 204)
+    (first_finish,) = pending
+    finish_upload(*first_finish)
+
+    indexed = repository.get_item(context.item_id)
+    assert ast.literal_eval(indexed.missing_subtitles) == ['en:forced']
+    assert [entry[0] for entry in ast.literal_eval(indexed.subtitles) if entry[1]] == ['en:hi']
+    assert Path(context.path).with_suffix('.srt').read_bytes() == replacement
+    assert world.db.execute(sa.select(repository.History.c.action)).scalars().all() == [4, 4]
+
+
+def test_single_language_upload_keeps_its_role_after_queued_sync_overwrites_it(world, isolated_jobs, monkeypatch):
+    from app.config import settings
+    from app.database import TableLanguagesProfiles, update_profile_id_list
+    from media_sources import indexer, repository
+    from subtitles import sync, upload
+    from subtitles.tools import subsyncer
+
+    monkeypatch.setattr(settings.general, 'single_language', True)
+    monkeypatch.setattr(settings.subsync, 'output_mode', 'overwrite')
+    monkeypatch.setattr(sync, 'jobs_queue', isolated_jobs)
+    monkeypatch.setattr(sync, '_resolve_subsync_overrides', lambda *args: (True, False, 0, ['alass'], '60'))
+    profile = [{'id': 1, 'language': 'en', 'forced': 'False', 'hi': 'True'}]
+    world.db.execute(sa.update(TableLanguagesProfiles).values(items=json.dumps(profile)))
+    update_profile_id_list.invalidate()
+    context = pipeline._movie(world)
+    destination = Path(context.path).with_suffix('.srt')
+    aligned = pipeline.CONTENT.replace(b'Downloaded', b'Synchronized upload')
+
+    def align(self, engine, output_path, video_path, no_fix_framerate):
+        output_path.write_bytes(aligned)
+        return {'offset_seconds': 1.0, 'framerate_scale_factor': 1.0}
+
+    monkeypatch.setattr(subsyncer.SubSyncer, '_run_external_engine', align)
+    assert upload.manual_upload_subtitle(
+        context.path, 'en', False, True, context.media_type, BytesIO(pipeline.CONTENT), 'uploaded.srt', 'None',
+        job_id=1, source=context) == ('', 204)
+    job = isolated_jobs._reserve_next_job()
+    assert job is not None
+    assert isolated_jobs._run_job(job), job.error
+    assert destination.read_bytes() == aligned
+    indexer.index_item(context.item_id)
+    indexed = repository.get_item(context.item_id)
+    assert indexed.missing_subtitles == '[]'
+    assert [entry[:3] for entry in ast.literal_eval(indexed.subtitles) if entry[1]] == [
+        ['en:hi', str(destination), len(aligned)]]
 
 
 @pytest.mark.parametrize('change', ['file removed', 'video replaced', 'profile edited', 'arr claimed',

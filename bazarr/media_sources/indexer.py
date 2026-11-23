@@ -244,7 +244,8 @@ def list_external_subtitles(path, previous=None, ownership_index=None, *, public
     """List sidecars beside ``path``. An unrecovered cached language leaves the index incomplete.
 
     The caller holds the subtitle write locks. Publication checks fresh ownership before counting a sidecar.
-    Previously indexed paths supply language guesses for files discovered in this scan.
+    Previously indexed paths supply language guesses. A bare upload can also carry the exact version
+    of the file whose language and role the user supplied.
     """
     if ownership_index is None:
         ownership_index = SourceOutputOwnerIndex()
@@ -254,7 +255,7 @@ def list_external_subtitles(path, previous=None, ownership_index=None, *, public
     excluded = {os.path.normcase(os.path.abspath(subtitle_path)) for subtitle_path in written_paths}
     indexed, rejected_paths = {}, set()
     for entry in previous or []:
-        if len(entry) != 3 or not entry[1]:
+        if len(entry) not in (3, 4) or not entry[1]:
             continue
         key = os.path.normcase(os.path.abspath(entry[1]))
         if _can_borrow_language(entry[0]):
@@ -281,11 +282,17 @@ def list_external_subtitles(path, previous=None, ownership_index=None, *, public
             version = regular_subtitle_version(subtitle_path, strict=publication)
             if version is None:
                 continue
+            previous_entry = indexed.get(path_key)
+            if previous_entry and len(previous_entry) == 4:
+                # A bare upload has an explicit role, even when its contents are too large to guess.
+                if previous_entry[3] == version:
+                    actual[path_key] = previous_entry
+                    continue
+                previous_entry = None
             if version[2] <= MAXIMUM_SUBTITLE_SIZE:
                 try:
                     read_sample = partial(read_regular_subtitle, expected_version=version,
                                           max_bytes=MAXIMUM_SUBTITLE_SIZE)
-                    previous_entry = indexed.get(path_key)
                     language = guess_external_subtitles(
                         directory, {subtitle: language}, 'movie', (previous_entry,) if previous_entry else None,
                         path_reverse=os.fspath, read_bytes=read_sample)[subtitle]
@@ -457,7 +464,7 @@ def _can_borrow_language(key):
 
 
 def index_item(item_id, target=None, ownership_index=None, *, keep_index_on_probe_failure=False, expected_path=None,
-               expected_source=None):
+               expected_source=None, uploaded_entry=None):
     """Analyze a source file and return its subtitle listing, or None if the index is unavailable."""
     item = repository.get_item(item_id, target)
     if item is None:
@@ -493,16 +500,19 @@ def index_item(item_id, target=None, ownership_index=None, *, keep_index_on_prob
             return None
         if not isinstance(previous, (list, tuple)) or any(
                 not isinstance(entry, (list, tuple))
-                or (len(entry) == 3 and (entry[0] is not None and not isinstance(entry[0], str)
+                or (len(entry) in (3, 4) and (entry[0] is not None and not isinstance(entry[0], str)
                                          or entry[1] is not None and not isinstance(entry[1], str)))
                 for entry in previous):
             logging.warning('BAZARR invalid stored subtitle listing for this file %s', item.path)
             return None
-        if (keep_index_on_probe_failure and blob is None
-                and all(len(entry) != 3 or not entry[1] or _can_borrow_language(entry[0]) for entry in previous)
+        if (keep_index_on_probe_failure and blob is None and uploaded_entry is None
+                and all(len(entry) < 2 or not entry[1] or (len(entry) == 3 and _can_borrow_language(entry[0]))
+                        for entry in previous)
                 and latest.subtitles is not None and latest.missing_subtitles is not None
                 and index_matches_file(latest, stat, allow_external_only=True)):
             return previous
+        if uploaded_entry is not None and regular_subtitle_version(uploaded_entry[1]) == uploaded_entry[3]:
+            previous = (*previous, uploaded_entry)
         try:
             external = list_external_subtitles(item.path, previous, ownership_index)
         except (OSError, UnicodeDecodeError):
@@ -540,12 +550,9 @@ def index_item(item_id, target=None, ownership_index=None, *, keep_index_on_prob
     return None
 
 
-def remember_single_language_upload(source, path, language, version):
+def remember_single_language_upload(source, entry):
     """Preserve the language and variant omitted by a single-language filename."""
-    code = alpha2_from_alpha3(language.alpha3)
-    if not code or version is None:
-        return
-    code = normalize_subtitle_language_variant(code, forced=language.forced, hi=language.hi and not language.forced)
+    _, path, _, version = entry
     with source_transaction() as connection:
         item = repository.get_item(source.item_id, connection, for_update=True)
         if (item is None or not source.same_item(item)
@@ -560,8 +567,8 @@ def remember_single_language_upload(source, path, language, version):
             return
         if not isinstance(listing, (list, tuple)) or any(not isinstance(entry, (list, tuple)) for entry in listing):
             return
-        listing = [entry for entry in listing if len(entry) != 3 or entry[1] != path]
-        listing.append([code, path, version[2]])
+        listing = [existing for existing in listing if len(existing) < 2 or existing[1] != path]
+        listing.append(entry)
         repository.write_item_index(item.id, str(listing), item.missing_subtitles, connection, indexed=False)
 
 
@@ -591,14 +598,15 @@ def _recoverable_index_database_error(error):
     return error.connection_invalidated
 
 
-def index_saved_subtitle(item_id, *, expected_path, expected_source=None):
+def index_saved_subtitle(item_id, *, expected_path, expected_source=None, uploaded_entry=None):
     """Index after a save without letting recoverable failures discard the saved result or its history."""
     try:
         # Keep repository and ownership reads in the same isolated session. The index write has
         # its own transaction, which rolls back before a failure reaches this boundary.
         with Session(bind=handle().get_bind()) as session:
             listing = index_item(item_id, target=session, ownership_index=SourceOutputOwnerIndex(session),
-                                 expected_path=expected_path, expected_source=expected_source)
+                                 expected_path=expected_path, expected_source=expected_source,
+                                 uploaded_entry=uploaded_entry)
     except (sa.exc.DBAPIError, OSError) as error:
         if isinstance(error, sa.exc.DBAPIError):
             if not _recoverable_index_database_error(error):
@@ -615,11 +623,12 @@ def index_saved_subtitle(item_id, *, expected_path, expected_source=None):
     return listing is not None
 
 
-def index_and_notify_item(source):
+def index_and_notify_item(source, *, uploaded_entry=None):
     """Refresh a source item's subtitles and the views that show it after a save."""
     from app.event_handler import event_stream
 
-    indexed = index_saved_subtitle(source.item_id, expected_path=source.path, expected_source=source)
+    indexed = index_saved_subtitle(source.item_id, expected_path=source.path, expected_source=source,
+                                   uploaded_entry=uploaded_entry)
     current = resolve_same_item(source) if indexed else None
     if current is not None:
         for event_type, row_id in (('source-item', current.item_id), ('source-group', current.group_id)):
