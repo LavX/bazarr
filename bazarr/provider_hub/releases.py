@@ -253,14 +253,15 @@ def legacy_restage_sources_current(data: dict[str, Any], previous_source: str | 
 def _legacy_manifest_provenance_matches(data, source_id, source, plugin_id, version, manifest) -> bool:
     """Use the original URL or a matching entry, with no conflicting current digest."""
     entries = data.get("catalog_entries")
-    commit = source.get("resolved_commit")
+    commit = manifest["source"].get("commit")
     declared_url = manifest["source"].get("catalog_url")
     direct = declared_url == source["url"]
     id_key = "id" if manifest.get("schema_version") == 2 else "provider_id"
     if (not isinstance(entries, dict) or not isinstance(commit, str) or not commit
-            or manifest.get(id_key) != plugin_id or manifest.get("version") != version
-            or manifest["source"].get("commit") != commit):
+            or manifest.get(id_key) != plugin_id or manifest.get("version") != version):
         return direct
+    if not direct and source.get("resolved_commit") != commit:
+        return False
 
     digest = manifest.get("bundle_sha256")
     if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-fA-F]{64}", digest):
