@@ -482,7 +482,7 @@ const OnboardingWizardBody: FunctionComponent = () => {
               // waits for a step that is in the middle of work it has to
               // finish. An install left this way kept going into nothing and
               // restarted Bazarr+ at a reader who was already somewhere else.
-              disabled={stepBusy || disconnecting}
+              disabled={stepBusy}
               onClick={() => {
                 setLeaveError(null);
                 setLeaving(true);
