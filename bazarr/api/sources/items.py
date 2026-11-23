@@ -13,7 +13,7 @@ from werkzeug.datastructures import FileStorage
 from media_sources import identify, overrides, repository, service
 from media_sources.api_rows import postprocess_source
 from media_sources.db import handle
-from media_sources.history import source_subtitle_summary
+from media_sources.history import exclude_source_history_release, source_subtitle_summary
 from media_sources.history_rows import item_history, source_history_fields
 from media_sources.service import SourceError
 from media_sources.context import SourceItemGone, resolve_item, source_item_title
@@ -242,10 +242,10 @@ def _subtitle_language(code):
     return code
 
 
-def _delete_args():
+def _delete_args(*, required=True):
     parser = _subtitle_options()
-    parser.add_argument('subtitles_path', type=str, required=True, nullable=False)
-    parser.add_argument('language', type=_subtitle_language, required=True, nullable=False, help='Subtitle language code')
+    parser.add_argument('subtitles_path', type=str, required=required, nullable=False)
+    parser.add_argument('language', type=_subtitle_language, required=required, nullable=False, help='Subtitle language code')
     return parser
 
 
@@ -257,7 +257,7 @@ def _delete_item_subtitle(item_id, args, blacklist=None):
         removed = delete_subtitles(source.media_type, args['language'], args['forced'], args['hi'],
                                    source.path, args['subtitles_path'], source=source, blacklist=blacklist)
     except SubtitleDeletionError as error:
-        return {'message': str(error)}, error.status
+        return {'message': str(error), **({'code': error.code} if error.code else {})}, error.status
     return ('', 204) if removed else ({'message': 'The subtitle could not be deleted.'}, 409)
 
 
@@ -396,7 +396,8 @@ class SourceItemSubtitlesCombine(Resource):
 
 @api_ns_sources_items.route("sources/items/<int:item_id>/blacklist")
 class SourceItemBlacklist(Resource):
-    post_request_parser = _delete_args()
+    post_request_parser = _delete_args(required=False)
+    post_request_parser.add_argument('delete_file', type=inputs.boolean, default=True, nullable=False)
     post_request_parser.add_argument('provider', type=str, required=True, nullable=False)
     post_request_parser.add_argument('subs_id', type=str, required=True, nullable=False)
     post_request_parser.add_argument('history_id', type=inputs.positive, required=True, nullable=False)
@@ -404,8 +405,19 @@ class SourceItemBlacklist(Resource):
     @authenticate
     @api_ns_sources_items.doc(parser=post_request_parser)
     def post(self, item_id):
-        """Delete a source item's subtitle and exclude its provider release"""
+        """Exclude a confirmed provider release, optionally deleting its current subtitle."""
         args = self.post_request_parser.parse_args()
         if not args['provider'].strip() or not args['subs_id'].strip():
             return {'message': 'A provider and subtitle ID are required.'}, 400
-        return _delete_item_subtitle(item_id, args, blacklist=(args['history_id'], args['provider'], args['subs_id']))
+        release = args['history_id'], args['provider'], args['subs_id']
+        if args['delete_file']:
+            if not args['subtitles_path'] or not args['language']:
+                return {'message': 'A subtitle path and language are required to delete the file.'}, 400
+            return _delete_item_subtitle(item_id, args, blacklist=release)
+        try:
+            source = resolve_item(item_id)
+        except SourceItemGone:
+            return {'error': 'not_found'}, 404
+        if not exclude_source_history_release(source, *release):
+            return {'message': 'This item no longer has the selected provider release in its history.'}, 409
+        return '', 204

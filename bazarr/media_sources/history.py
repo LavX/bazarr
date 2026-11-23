@@ -13,13 +13,14 @@ import sqlalchemy as sa
 
 from app.config import settings
 from app.database import get_profiles_list
+from app.event_handler import event_stream
 from subliminal_patch.score import MAX_SCORES
 from subtitles.score_override import MANUAL_SCORE_ACTION
 from subtitles.tools.subsync_engines import regular_subtitle_version
 
 from . import identity, repository
 from .analysis import local_content_stamp
-from .context import SourceItemContext
+from .context import SourceItemContext, source_item_publication
 from .db import handle, lock_source_release, source_transaction
 from .wanted import arr_claim_blocks_wanted, automatic_items
 
@@ -37,28 +38,43 @@ def _stored_subtitles(raw):
             and (entry[1] is None or isinstance(entry[1], str))]
 
 
-def current_source_release_version(source, path, language, history_id, provider, subs_id, target):
-    """Prove that the newest file-changing row still describes this sidecar."""
-    from .subtitle_tools import SOURCE_SUBTITLE_EDITED_ACTION
-    from subtitles.upgrade import _FILE_WRITING_ACTIONS
-
+def source_provider_release(source, history_id, provider, subs_id, target):
     history = repository.History.c
-    latest = handle(target).execute(sa.select(
-        history.id, history.action, history.provider, history.subs_id, history.language, history.timestamp
-    ).where(
-        history.item_id == source.item_id, history.source_id == source.source_id,
-        history.item_kind == source.kind, history.video_path == source.path, history.subtitles_path == path,
-        history.action.in_((*_FILE_WRITING_ACTIONS, 5, SOURCE_SUBTITLE_EDITED_ACTION)),
-    ).order_by(history.timestamp.desc(), history.id.desc()).limit(1)).first()
-    if (latest is None or latest.action not in (1, 2, 3)
-            or (latest.id, latest.provider, latest.subs_id, latest.language) != (history_id, provider, subs_id, language)):
+    return handle(target).execute(sa.select(
+        history.provider, history.subs_id, history.language, history.video_path, history.subtitles_path,
+        history.published_file_version,
+    ).where(history.id == history_id, history.item_id == source.item_id,
+            history.source_id == source.source_id, history.item_kind == source.kind,
+            history.action.in_((1, 2, 3)), history.provider == provider, history.subs_id == subs_id)).first()
+
+
+def current_source_release_version(source, path, language, history_id, provider, subs_id, target):
+    """Match a current sidecar to the version captured by its provider writer."""
+    release = source_provider_release(source, history_id, provider, subs_id, target)
+    if release is None or (release.video_path, release.subtitles_path, release.language) != (source.path, path, language):
         return None
     version = regular_subtitle_version(path)
-    # A replacement can be on disk before its history transaction starts.
-    # It must not inherit the older release just because the path is unchanged.
-    if version is None or max(version[3:]) > int(latest.timestamp.timestamp() * 1_000_000_000):
-        return None
-    return version
+    return version if version is not None and list(version) == release.published_file_version else None
+
+
+def exclude_source_history_release(source, history_id, provider, subs_id):
+    """Exclude a confirmed provider release independently of its sidecar."""
+    with source_item_publication(source, release=(source.kind, provider, subs_id)) as (current, connection):
+        if current is None:
+            return False
+        release = source_provider_release(current, history_id, provider, subs_id, connection)
+        if release is None:
+            return False
+        blacklist = repository.Blacklist.c
+        already_excluded = connection.scalar(sa.select(sa.exists().where(
+            blacklist.item_id == current.item_id, blacklist.source_id == current.source_id,
+            blacklist.item_kind == current.kind, blacklist.provider == release.provider,
+            blacklist.subs_id == release.subs_id)))
+        if already_excluded:
+            return True
+        blacklist_log_source(current, release.provider, release.subs_id, release.language, target=connection)
+    event_stream(type=f'{source.publication_type}-blacklist')
+    return True
 
 
 def _source_upgrade_query():
@@ -214,6 +230,8 @@ def history_log_source(action, context: SourceItemContext, result, fake_provider
     provider = fake_provider or result.provider
     score = fake_score or result.score
     ai_translated = (1 if getattr(result, 'ai_translated', False) is True else 0) if action in (1, 2, 3) else None
+    version = getattr(result, 'published_file_version', None)
+    published_file_version = list(version) if action in (1, 2, 3) and isinstance(version, tuple) else None
     full = MAX_SCORES['episode' if context.kind == 'episode' else 'movie']
     item, source = _owners(context, target, lock=target is not None)
     snapshot = _snapshot(context, item, source)
@@ -224,7 +242,8 @@ def history_log_source(action, context: SourceItemContext, result, fake_provider
         description=result.message, language=result.language_code, provider=provider,
         ai_translated=ai_translated, score=score,
         score_out_of=full if score or (ai_translated == 1 and score == 0) else None,
-        subs_id=result.subs_id, subtitles_path=result.subs_path,
+        subs_id=str(result.subs_id) if result.subs_id is not None else None, subtitles_path=result.subs_path,
+        published_file_version=published_file_version,
         matched=str(result.matched) if result.matched else None,
         not_matched=str(result.not_matched) if result.not_matched else None,
         upgradedFromId=upgraded_from_id, **snapshot)

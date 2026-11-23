@@ -234,11 +234,13 @@ def _delete_source_subtitle(source, subtitle_path, language_code, language_name,
                     version = current_source_release_version(current, subtitle_path, language_code, *blacklist,
                                                              target=connection)
                     if version is None:
-                        raise SubtitleDeletionError('The selected release is no longer the current subtitle.', 409)
+                        raise SubtitleDeletionError('The current subtitle could not be verified for this release.',
+                                                    409, code='source_release_changed')
 
                     def revalidate():
                         if regular_subtitle_version(subtitle_path) != version:
-                            raise SubtitleDeletionError('The selected subtitle changed before deletion.', 409)
+                            raise SubtitleDeletionError('The selected subtitle changed before deletion.',
+                                                        409, code='source_release_changed')
 
                 removed = _delete_subtitle_file(
                     current.path, subtitle_path,

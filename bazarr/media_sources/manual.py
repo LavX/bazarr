@@ -113,7 +113,7 @@ def manual_source_publication(source, destination, ownership_index, *, release=N
         yield current, connection
 
 
-def write_source_subtitle(source, destination, content, *, written_paths, on_publish, candidate=None):
+def write_source_subtitle(source, destination, content, *, written_paths, on_publish, candidate=None, mode=None):
     ownership_index = SourcePublicationOwnerIndex()
     release = None if candidate is None else (source.kind, candidate.subtitle.provider_name, candidate.subtitle.id)
 
@@ -125,5 +125,6 @@ def write_source_subtitle(source, destination, content, *, written_paths, on_pub
                 validate_source_candidate(candidate, current, candidate.subtitle.provider_name, target=connection)
             yield
 
-    write_subtitle_file(source.path, destination, content, written_paths=written_paths, on_publish=on_publish,
-                        publication_guard=publication, ownership_index=ownership_index)
+    return write_subtitle_file(source.path, destination, content, written_paths=written_paths, on_publish=on_publish,
+                               publication_guard=publication, ownership_index=ownership_index,
+                               mode=mode, capture_version=True)

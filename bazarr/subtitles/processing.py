@@ -35,7 +35,7 @@ from .tools.translate.availability import translation_available
 class ProcessSubtitlesResult:
     def __init__(self, message, reversed_path, downloaded_language_code2, downloaded_provider, score, forced,
                  subtitle_id, reversed_subtitles_path, hearing_impaired, matched=None, not_matched=None,
-                 ai_translated=None, *, source_indexed=False):
+                 ai_translated=None, *, source_indexed=False, published_file_version=None):
         self.message = message
         self.path = reversed_path
         self.provider = downloaded_provider
@@ -46,6 +46,7 @@ class ProcessSubtitlesResult:
         self.not_matched = not_matched
         self.ai_translated = ai_translated if type(ai_translated) is bool else None
         self.source_indexed = source_indexed
+        self.published_file_version = published_file_version
 
         if hearing_impaired:
             self.language_code = f"{downloaded_language_code2}:hi"
@@ -326,7 +327,7 @@ def _postprocessing_config(media_type, arr_instance_id):
 def process_subtitle(subtitle, media_type, audio_language, path, max_score, is_upgrade=False, is_manual=False,
                      job_id=None, arr_instance_id=None, *,
                      context=None, validate=None, cancel=None, publication_guard=None, auto_translate=True,
-                     source=None) -> ProcessSubtitlesResult | None:
+                     source=None, published_file_version=None) -> ProcessSubtitlesResult | None:
     if media_type == 'sports' and (context is None or validate is None or publication_guard is None):
         raise ValueError('Sports processing requires its owned publication guard')
     if context is not None and media_type != 'sports':
@@ -373,7 +374,7 @@ def process_subtitle(subtitle, media_type, audio_language, path, max_score, is_u
                                       reversed_subtitles_path=subtitles_path, hearing_impaired=subtitle.language.hi,
                                       matched=list(subtitle.matches or []), not_matched=_get_not_matched(subtitle, media_type),
                                       ai_translated=getattr(subtitle, 'ai_translated', False) is True,
-                                      source_indexed=source_indexed)
+                                      source_indexed=source_indexed, published_file_version=published_file_version)
 
     sync_checker = _defaul_sync_checker
     logging.debug("Sync checker: %s", sync_checker)

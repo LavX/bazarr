@@ -236,6 +236,7 @@ def test_scheduled_job_replaces_source_file_and_preserves_original_history(world
     from media_sources.history import get_upgradable_source_subtitles
     from media_sources.indexer import index_item
     from subtitles import upgrade
+    from subtitles.tools.subsync_engines import regular_subtitle_version
 
     context = pipeline._movie(world)
     target = Path(context.path).with_suffix('.en.srt')
@@ -256,6 +257,9 @@ def test_scheduled_job_replaces_source_file_and_preserves_original_history(world
     assert asked['min_score'] == 61
     assert record_rows(world.db) == [(history_id, 1, None), (history_id + 1, 3, history_id)]
     assert target.read_bytes() == pipeline.CONTENT
+    version = world.db.scalar(sa.select(repository.History.c.published_file_version).where(
+        repository.History.c.id == history_id + 1))
+    assert version == list(regular_subtitle_version(target))
     assert original == target or not original.exists()
     assert [event.subtitle_path for event in world.published] == [
         str(path) for path in dict.fromkeys((target, original))

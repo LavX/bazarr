@@ -11,7 +11,7 @@ import flask_migrate
 from dogpile.cache import make_region
 from datetime import datetime
 
-from sqlalchemy import event, create_engine, inspect, CheckConstraint, DateTime, ForeignKey, ForeignKeyConstraint, UniqueConstraint, Index, Integer, LargeBinary, Text, Boolean, Float, func, text, BigInteger
+from sqlalchemy import event, create_engine, inspect, CheckConstraint, DateTime, ForeignKey, ForeignKeyConstraint, UniqueConstraint, Index, Integer, LargeBinary, Text, Boolean, Float, func, text, BigInteger, JSON
 # importing here to be indirectly imported in other modules later
 from sqlalchemy import update, delete, select, func  # noqa: F401, F811
 from sqlalchemy.orm import scoped_session, sessionmaker, mapped_column, close_all_sessions, declarative_base
@@ -1201,6 +1201,7 @@ class TableSourceHistory(Base):
     score_out_of = mapped_column(Integer)
     subs_id = mapped_column(Text)
     subtitles_path = mapped_column(Text)
+    published_file_version = mapped_column(JSON(none_as_null=True))
     timestamp = mapped_column(DateTime, nullable=False, default=datetime.now)
     video_path = mapped_column(Text)
     matched = mapped_column(Text)

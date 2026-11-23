@@ -3,6 +3,7 @@ import ast
 import logging
 import re
 import sqlite3
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -294,24 +295,31 @@ def test_download_keeps_a_provider_result_from_reaching_a_replaced_video(world, 
 # The whole flow
 
 def test_a_search_saves_a_subtitle_next_to_the_file_and_writes_history_and_the_index(world, monkeypatch):
+    from app.config import settings
     from media_sources import repository, service
     from media_sources.context import SourceItemContext
+    from subtitles.tools.subsync_engines import regular_subtitle_version
 
     context = _movie(world)
     asked = _download(monkeypatch)
     jobs = []
     monkeypatch.setattr(service.jobs_queue, "update_job_progress", lambda **kwargs: jobs.append(kwargs))
+    monkeypatch.setattr(settings.general, 'chmod_enabled', True)
+    monkeypatch.setattr(settings.general, 'chmod', '0640')
     assert repository.get_item(context.item_id).missing_subtitles == "['en']"
 
     service.search_source_item(context.item_id, job_id=3)
 
     saved = context.path.replace(".mkv", ".en.srt")
     assert open(saved, "rb").read() == CONTENT
+    if not sys.platform.startswith('win'):
+        assert Path(saved).stat().st_mode & 0o777 == 0o640
     item = repository.get_item(context.item_id)
     assert "Film.2001.1080p.BluRay.x264-GRP.en.srt" in item.subtitles and item.missing_subtitles == "[]"
     (row,) = world.db.execute(sa.select(repository.History)).all()
     assert (row.item_id, row.source_id, row.item_kind, row.action) == (context.item_id, world.source_id, "movie", 1)
     assert (row.language, row.provider, row.score, row.subs_id) == ("en", "fake", 100, "sub-1")
+    assert row.published_file_version == list(regular_subtitle_version(saved))
     assert (row.item_title, row.source_name, row.video_path, row.subtitles_path) == ("Film", "Local", context.path,
                                                                                       saved)
     assert jobs[-1]["progress_message"] == "1 subtitle(s) downloaded"

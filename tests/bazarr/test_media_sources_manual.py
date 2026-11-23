@@ -36,12 +36,15 @@ def _item(db, tmp_path, kind, *, folder='source'):
     return resolve_item(item)
 
 
-def _record_provider_sidecar(db, source, path, provider, subs_id):
+def _record_provider_sidecar(db, source, path, provider, subs_id, *, publication_proof=True):
     from media_sources import repository
+    from subtitles.tools.subsync_engines import regular_subtitle_version
 
     return repository.insert_history(db, item_id=source.item_id, source_id=source.source_id, item_kind=source.kind,
                                      video_path=source.path, subtitles_path=str(path), language='en', action=2,
-                                     provider=provider, subs_id=subs_id, description='Fixture acquisition')
+                                     provider=provider, subs_id=subs_id, description='Fixture acquisition',
+                                     published_file_version=list(regular_subtitle_version(path))
+                                     if publication_proof else None)
 
 
 def _history_id(client, url):
@@ -152,7 +155,7 @@ def _search_for_download(client, monkeypatch, source, during_search=None):
     from subtitles import manual
 
     candidate = pipeline.FakeSubtitle()
-    candidate.matches = {'title', 'year'}
+    candidate.matches = {'series', 'season', 'episode'} if source.kind == 'episode' else {'title', 'year'}
     candidate.page_link = 'https://example.invalid/release'
 
     def listing(videos, *args, **kwargs):
@@ -817,3 +820,114 @@ def test_postgres_release_exclusion_orders_writes_across_different_items(
     row = arr_library.execute(sa.select(repository.Blacklist)).one()
     assert (row.item_id, row.subs_id) == (excluding.item_id, excluded_release)
     assert [event.operation for event in writes] == (['download', 'delete'] if same_release else ['delete', 'download'])
+
+
+@pytest.mark.parametrize('kind', ['movie', 'episode'])
+def test_provider_history_recorded_after_a_source_editor_save_cannot_claim_the_edited_file(
+        client, arr_library, writes, isolated_jobs, tmp_path, monkeypatch, kind):
+    from media_sources import repository
+    from media_sources.subtitle_tools import SOURCE_SUBTITLE_EDITED_ACTION
+    from subtitles import manual
+    from subtitles.tools.subsync_engines import regular_subtitle_version
+
+    source = _item(arr_library, tmp_path, kind)
+    payload, release = _search_for_download(client, monkeypatch, source)
+    monkeypatch.setattr(manual, 'download_subtitles', lambda subtitles, pool: None)
+    subtitle = Path(source.path).with_suffix('.en.srt')
+    edited = pipeline.CONTENT.replace(b'Downloaded', b'Editor saved this cue')
+    url = f'/api/sources/items/{source.item_id}'
+    download = manual.manual_download_subtitle
+    editor_saves = []
+    provider_versions = []
+
+    def edit_after_provider_publication(*args, **kwargs):
+        result = download(*args, **kwargs)
+        assert result is not None
+        assert subtitle.read_bytes() == pipeline.CONTENT
+        provider_versions.append(list(regular_subtitle_version(subtitle)))
+        assert arr_library.scalar(sa.select(sa.func.count()).select_from(repository.History)) == 0
+        opened = client.get(f'{url}/subtitles/en/content', headers=HEADERS)
+        assert opened.status_code == 200 and opened.json['content'] == pipeline.CONTENT.decode()
+        saved = client.put(f'{url}/subtitles/en/content',
+                           headers={**HEADERS, 'If-Match': opened.headers['ETag']},
+                           json={'content': edited.decode()})
+        assert saved.status_code == 204
+        editor_saves.append(saved.status_code)
+        return result
+
+    monkeypatch.setattr(manual, 'manual_download_subtitle', edit_after_provider_publication)
+    response = client.post(f'{url}/manual', headers=HEADERS, json=payload)
+    assert response.status_code == 202
+    job = isolated_jobs._reserve_next_job()
+    assert job.job_id == response.json['job_id']
+    assert isolated_jobs._run_job(job), job.error
+    assert editor_saves == [204]
+    rows = arr_library.execute(sa.select(repository.History).order_by(repository.History.c.id)).all()
+    assert [row.action for row in rows] == [SOURCE_SUBTITLE_EDITED_ACTION, 2]
+    acquired = rows[-1]
+    assert acquired.timestamp >= rows[0].timestamp
+    assert acquired.published_file_version == provider_versions[0]
+    assert acquired.published_file_version != list(regular_subtitle_version(subtitle))
+    assert subtitle.read_bytes() == edited
+    evidence = {'subtitles_path': str(subtitle), 'language': 'en', 'provider': payload['provider'],
+                'subs_id': release, 'history_id': acquired.id}
+
+    refused = client.post(f'{url}/blacklist', headers=HEADERS, json=evidence)
+    assert refused.status_code == 409, refused.get_data(as_text=True)
+    assert refused.json['code'] == 'source_release_changed'
+    assert subtitle.read_bytes() == edited
+    assert arr_library.scalar(sa.select(sa.func.count()).select_from(repository.Blacklist)) == 0
+    assert not any(event.operation == 'delete' for event in writes)
+
+    excluded = client.post(f'{url}/blacklist', headers=HEADERS, json={
+        'delete_file': False, 'provider': payload['provider'], 'subs_id': release, 'history_id': acquired.id,
+    })
+    assert excluded.status_code == 204
+    assert subtitle.read_bytes() == edited
+    (blacklisted,) = arr_library.execute(sa.select(repository.Blacklist)).all()
+    assert (blacklisted.item_id, blacklisted.provider, blacklisted.subs_id) == (
+        source.item_id, payload['provider'], release)
+    assert [row.action for row in arr_library.execute(
+        sa.select(repository.History).order_by(repository.History.c.id))] == [SOURCE_SUBTITLE_EDITED_ACTION, 2]
+    assert not any(event.operation == 'delete' for event in writes)
+
+
+def test_legacy_release_exclusion_requires_matching_history_and_keeps_the_current_file(
+        client, arr_library, writes, tmp_path):
+    from media_sources import indexer, repository
+
+    source = _item(arr_library, tmp_path, 'movie')
+    other = _item(arr_library, tmp_path, 'movie', folder='Different item')
+    subtitle = Path(source.path).with_suffix('.en.srt')
+    other_subtitle = Path(other.path).with_suffix('.en.srt')
+    subtitle.write_bytes(pipeline.CONTENT)
+    other_subtitle.write_bytes(pipeline.CONTENT)
+    indexer.index_item(source.item_id)
+    acquired = _record_provider_sidecar(arr_library, source, subtitle, 'fixture', 'ours', publication_proof=False)
+    foreign = _record_provider_sidecar(arr_library, other, other_subtitle, 'fixture', 'theirs')
+    url = f'/api/sources/items/{source.item_id}/blacklist'
+    evidence = {'subtitles_path': str(subtitle), 'language': 'en', 'provider': 'fixture', 'subs_id': 'ours',
+                'history_id': acquired}
+
+    refused = client.post(url, headers=HEADERS, json=evidence)
+    assert refused.status_code == 409
+    assert refused.json['code'] == 'source_release_changed'
+    assert subtitle.read_bytes() == pipeline.CONTENT
+    for changed in ({'history_id': foreign}, {'provider': 'wrong'}, {'subs_id': 'theirs'}):
+        rejected = client.post(url, headers=HEADERS, json=evidence | {'delete_file': False} | changed)
+        assert rejected.status_code == 409
+        assert subtitle.read_bytes() == pipeline.CONTENT
+        assert arr_library.scalar(sa.select(sa.func.count()).select_from(repository.Blacklist)) == 0
+
+    excluded = client.post(url, headers=HEADERS, json=evidence | {'delete_file': False, 'language': 'de'})
+    assert excluded.status_code == 204
+    assert subtitle.read_bytes() == other_subtitle.read_bytes() == pipeline.CONTENT
+    (blacklisted,) = arr_library.execute(sa.select(repository.Blacklist)).all()
+    assert (blacklisted.item_id, blacklisted.provider, blacklisted.subs_id, blacklisted.language) == (
+        source.item_id, 'fixture', 'ours', 'en')
+    repeated = client.post(url, headers=HEADERS, json=evidence | {'delete_file': False})
+    assert repeated.status_code == 204
+    assert arr_library.scalar(sa.select(sa.func.count()).select_from(repository.Blacklist)) == 1
+    assert subtitle.read_bytes() == pipeline.CONTENT
+    assert list(arr_library.scalars(sa.select(repository.History.c.action))) == [2, 2]
+    assert not any(event.operation == 'delete' for event in writes)

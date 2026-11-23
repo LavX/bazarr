@@ -442,13 +442,15 @@ def manual_download_subtitle(path, audio_language, hi, forced, subtitle, provide
         if context is not None:
             from sportarr.subtitles import save_sports_subtitle
             return save_sports_subtitle(video, subtitle, candidate, audio_language, job_id=job_id, cancel=cancel)
+        published_versions = {}
         try:
             with subtitle_write_locks(path, os.path.join(get_target_folder(path) or os.path.dirname(path), '.destination')):
                 saved_subtitles = _save_downloaded_subtitles(
                     video, subtitle, path,
                     on_publish=publication_callback(media_type, path, 'download', arr_instance_id,
                                                     **({'source': source} if source is not None else {})),
-                    **({'source': source, 'source_candidate': source_candidate} if source is not None else {}))
+                    **({'source': source, 'source_candidate': source_candidate, 'published_versions': published_versions}
+                       if source is not None else {}))
 
         except JobFailed:
             raise
@@ -465,7 +467,9 @@ def manual_download_subtitle(path, audio_language, hi, forced, subtitle, provide
                                                           audio_language=audio_language, is_upgrade=False,
                                                           is_manual=True, path=path, max_score=max_score,
                                                           job_id=job_id, arr_instance_id=arr_instance_id,
-                                                          **({'source': source, 'auto_translate': False}
+                                                          **({'source': source, 'auto_translate': False,
+                                                              'published_file_version': published_versions.get(
+                                                                  saved_subtitle.storage_path)}
                                                              if source is not None else {}))
                     if processed_subtitle:
                         return processed_subtitle
@@ -677,7 +681,8 @@ def _cache_search_result(subtitle, context=None, signature=None, source=None):
 
 
 def _save_downloaded_subtitles(video, subtitle, path, validate=None, publication_guard=None,
-                               written_paths=None, on_publish=None, source=None, source_candidate=None):
+                               written_paths=None, on_publish=None, source=None, source_candidate=None,
+                               published_versions=None):
     """Publish provider bytes using the common format, naming and atomic writer."""
     chmod = int(settings.general.chmod, 8) if not sys.platform.startswith('win') and settings.general.chmod_enabled else None
     written_paths = [] if written_paths is None else written_paths
@@ -686,12 +691,15 @@ def _save_downloaded_subtitles(video, subtitle, path, validate=None, publication
             validate(destination)
         if source is not None:
             from media_sources.manual import write_source_subtitle
-            return write_source_subtitle(source, destination, content, written_paths=written_paths,
-                                         on_publish=on_publish, candidate=source_candidate)
+            published_versions[destination] = write_source_subtitle(
+                source, destination, content, written_paths=written_paths, on_publish=on_publish,
+                candidate=source_candidate, mode=chmod or None)
+            return
         return write_subtitle_file(path, destination, content, written_paths=written_paths,
                                    on_publish=on_publish,
                                    **({'publication_guard': publication_guard} if publication_guard is not None else {}))
     saved = save_subtitles(video.original_path, [subtitle], single=settings.general.single_language, tags=None,
-                           directory=get_target_folder(path), chmod=chmod, formats=(subtitle.format,),
+                           directory=get_target_folder(path), chmod=chmod if source is None else None,
+                           formats=(subtitle.format,),
                            path_decoder=force_unicode, write_subtitle=write)
     return [item for item in saved if item.storage_path in written_paths]

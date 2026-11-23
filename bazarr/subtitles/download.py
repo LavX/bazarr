@@ -209,6 +209,7 @@ def generate_subtitles(path, languages, audio_language, sceneName, title, media_
                             with subtitle_write_locks(path, os.path.join(fld or os.path.dirname(path), '.destination'),
                                                       previous_subtitles_to_delete or path):
                                 written_paths = []
+                                published_versions = {}
                                 writer = partial(write_subtitle_file, path, written_paths=written_paths,
                                                  on_publish=publish)
                                 owner_kwargs = {}
@@ -219,6 +220,7 @@ def generate_subtitles(path, languages, audio_language, sceneName, title, media_
                                                      on_publish=publish, wanted_stamp=source_wanted_stamp,
                                                      wanted_profile=wanted_profile, upgrade=source_upgrade,
                                                      video_version=video_version,
+                                                     published_versions=published_versions, mode=chmod or None,
                                                      destination_setting=destination_setting)
                                     if is_upgrade and source_upgrade is None:
                                         from media_sources.indexer import SourcePublicationOwnerIndex
@@ -228,7 +230,7 @@ def generate_subtitles(path, languages, audio_language, sceneName, title, media_
                                                                  single=settings.general.single_language,
                                                                  tags=None,  # fixme
                                                                  directory=fld,
-                                                                 chmod=chmod,
+                                                                 chmod=chmod if source is None else None,
                                                                  formats=subtitle_formats,
                                                                  path_decoder=force_unicode,
                                                                  write_subtitle=writer)
@@ -282,7 +284,11 @@ def generate_subtitles(path, languages, audio_language, sceneName, title, media_
                                                                       is_upgrade=is_upgrade, is_manual=False,
                                                                       path=path, max_score=max_score, job_id=job_id,
                                                                       arr_instance_id=arr_instance_id,
-                                                                      **({} if source is None else {'source': source}),
+                                                                      **({} if source is None else {
+                                                                          'source': source,
+                                                                          'published_file_version': published_versions.get(
+                                                                              subtitle.storage_path),
+                                                                      }),
                                                                       **({} if auto_translate else {'auto_translate': False}))
                                 if not processed_subtitle:
                                     logging.debug(f"BAZARR unable to process this subtitles: {subtitle}")  # noqa: G004
@@ -430,7 +436,7 @@ def _source_subtitle_destination_setting():
 
 def _write_source_download(video_path, destination, content, *, source, language, recheck_missing, is_upgrade,
                            written_paths, on_publish, wanted_stamp=None, wanted_profile=None, upgrade=None,
-                           video_version=None, destination_setting=None):
+                           video_version=None, destination_setting=None, published_versions=None, mode=None):
     """Publish the actual provider-selected file only while its destination is still eligible."""
     from media_sources.indexer import SourcePublicationOwnerIndex
     from media_sources.translation import prepare_source_sidecars
@@ -502,11 +508,12 @@ def _write_source_download(video_path, destination, content, *, source, language
         with ExitStack() as files:
             if upgrade is not None:
                 files.enter_context(subtitle_write_locks(video_path, destination, old_path))
-            write_subtitle_file(video_path, destination, content,
-                                written_paths=written_paths if upgrade is None else None,
-                                on_publish=on_publish if upgrade is None else None,
-                                publication_guard=partial(publication, files),
-                                rollback_new_on_guard_error=upgrade is not None, invalidate_outputs=False)
+            version = write_subtitle_file(video_path, destination, content,
+                                          written_paths=written_paths if upgrade is None else None,
+                                          on_publish=on_publish if upgrade is None else None,
+                                          publication_guard=partial(publication, files),
+                                          rollback_new_on_guard_error=upgrade is not None, invalidate_outputs=False,
+                                          mode=mode, capture_version=published_versions is not None)
     except SubtitleDestinationChanged as error:
         logging.info('BAZARR skipped saving a subtitle for source item %s: %s', source.item_id, error)
         return False
@@ -515,6 +522,8 @@ def _write_source_download(video_path, destination, content, *, source, language
         _report_subtitle_publication(on_publish, destination)
         if remove_previous:
             _report_subtitle_publication(on_publish, old_path)
+    if published_versions is not None:
+        published_versions[destination] = version
     return True
 
 

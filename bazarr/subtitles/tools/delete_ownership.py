@@ -20,9 +20,10 @@ from utilities.path_mappings import path_mappings
 class SubtitleDeletionError(ValueError):
     """A refused deletion, carrying the HTTP status the endpoint answers with."""
 
-    def __init__(self, message, status):
+    def __init__(self, message, status, *, code=None):
         super().__init__(message)
         self.status = status
+        self.code = code
 
 
 @dataclass(frozen=True)

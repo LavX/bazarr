@@ -20,6 +20,7 @@ REVISION = "b4d1f7a39c25"
 PREVIOUS = "c3e8a1f5b972"
 POSTERS = "1f4c2a6b8d03"
 REMOVAL_KEYS = "2a7e4c8f109b"
+PUBLISHED_FILE_VERSION = "81f9c46a2b73"
 
 
 def _migration(revision=REVISION):
@@ -88,7 +89,8 @@ def test_the_revision_follows_the_previous_head_and_is_the_one_head():
     assert parent_of[REVISION] == (PREVIOUS,)
     assert parent_of[POSTERS] == (REVISION,)
     assert parent_of[REMOVAL_KEYS] == (POSTERS,)
-    assert heads == {REMOVAL_KEYS}, f"expected the source blacklist revision to be the single head, found {sorted(heads)}"
+    assert parent_of[PUBLISHED_FILE_VERSION] == (REMOVAL_KEYS,)
+    assert heads == {PUBLISHED_FILE_VERSION}, f"expected the source history revision to be the single head, found {sorted(heads)}"
     migration = _migration()
     assert (migration.revision, migration.down_revision) == (REVISION, PREVIOUS)
 
@@ -107,6 +109,7 @@ def test_the_migration_builds_what_the_models_build(backend, tmp_path):
         _run(migrated_engine, _migration().upgrade)
         _run(migrated_engine, _migration(POSTERS).upgrade)
         _run(migrated_engine, _migration(REMOVAL_KEYS).upgrade)
+        _run(migrated_engine, _migration(PUBLISHED_FILE_VERSION).upgrade)
         built, migrated = _shape(model_engine), _shape(migrated_engine)
         for name in SOURCE_TABLES:
             for part in ("columns", "indexes", "foreign_keys", "checks", "primary"):
@@ -125,7 +128,9 @@ def test_the_migration_is_a_no_op_where_the_tables_exist_and_downgrades_cleanly(
         before = _shape(engine)
         _run(engine, _migration().upgrade)
         _run(engine, _migration(REMOVAL_KEYS).upgrade)
+        _run(engine, _migration(PUBLISHED_FILE_VERSION).upgrade)
         assert _shape(engine) == before
+        _run(engine, _migration(PUBLISHED_FILE_VERSION).downgrade)
         _run(engine, _migration(REMOVAL_KEYS).downgrade)
         _run(engine, _migration(POSTERS).downgrade)
         assert "poster" not in _shape(engine)["table_source_items"]["columns"]
@@ -136,6 +141,7 @@ def test_the_migration_is_a_no_op_where_the_tables_exist_and_downgrades_cleanly(
         _run(engine, _migration().upgrade)
         _run(engine, _migration(POSTERS).upgrade)
         _run(engine, _migration(REMOVAL_KEYS).upgrade)
+        _run(engine, _migration(PUBLISHED_FILE_VERSION).upgrade)
         assert _shape(engine) == before
     finally:
         cleanup()
@@ -173,6 +179,56 @@ def test_blacklist_removal_keys_backfill_existing_rows_without_changing_snapshot
         _run(engine, _migration(REMOVAL_KEYS).downgrade)
         with engine.connect() as connection:
             assert connection.execute(sa.select(table).order_by(table.c.id)).mappings().all() == before
+    finally:
+        cleanup()
+
+
+def test_history_file_version_keeps_legacy_rows_unproven_and_round_trips_exactly(backend, tmp_path):
+    from app import database as db
+
+    engine, cleanup = make_engine(backend, tmp_path)
+    try:
+        _models_without_the_source_tables(db.Base.metadata, engine)
+        _run(engine, _migration().upgrade)
+        _run(engine, _migration(POSTERS).upgrade)
+        _run(engine, _migration(REMOVAL_KEYS).upgrade)
+        legacy = next(table for table in _migration()._tables() if table.name == 'table_source_history')
+        with engine.connect() as connection:
+            for kind in ('movie', 'episode'):
+                connection.execute(sa.insert(legacy).values(
+                    item_kind=kind, action=2, description='Downloaded subtitle.',
+                    provider='alpha', subs_id='same', language='en',
+                    video_path='/media/Video.mkv', subtitles_path='/media/Video.en.srt',
+                    item_title='Retained title', source_name='Removed source', timestamp=datetime(2026, 11, 23)))
+            before = connection.execute(sa.select(legacy).order_by(legacy.c.id)).mappings().all()
+
+        _run(engine, _migration(PUBLISHED_FILE_VERSION).upgrade)
+        current = db.TableSourceHistory.__table__
+        version = [int(BIG), int(BIG), 4096, 1_700_000_000_000_000_001, 1_700_000_000_000_000_003]
+        with engine.connect() as connection:
+            rows = connection.execute(sa.select(current).order_by(current.c.id)).mappings().all()
+            assert all(row['published_file_version'] is None for row in rows)
+            assert [{key: value for key, value in row.items() if key != 'published_file_version'}
+                    for row in rows] == before
+            published_id = connection.execute(sa.insert(current).values(
+                item_kind='movie', action=2, description='Downloaded subtitle.', provider='alpha', subs_id='new',
+                published_file_version=version)).inserted_primary_key[0]
+            unproven_id = connection.execute(sa.insert(current).values(
+                item_kind='episode', action=2, description='Unproven subtitle.', provider='alpha', subs_id='unproven',
+                published_file_version=None)).inserted_primary_key[0]
+
+        _run(engine, _migration(PUBLISHED_FILE_VERSION).upgrade)
+        with engine.connect() as connection:
+            assert connection.scalar(sa.select(current.c.published_file_version)
+                                     .where(current.c.id == published_id)) == version
+            unproven = connection.execute(sa.select(current.c.id)
+                                         .where(current.c.published_file_version.is_(None))).scalars().all()
+            assert set(unproven) == {row['id'] for row in before} | {unproven_id}
+            connection.execute(sa.delete(current).where(current.c.id.in_((published_id, unproven_id))))
+
+        _run(engine, _migration(PUBLISHED_FILE_VERSION).downgrade)
+        with engine.connect() as connection:
+            assert connection.execute(sa.select(legacy).order_by(legacy.c.id)).mappings().all() == before
     finally:
         cleanup()
 
@@ -236,7 +292,7 @@ REQUIRED_COLUMNS = {
     "table_source_history": {"id", "item_id", "source_id", "item_kind", "item_title", "group_title",
                              "source_name", "action", "description", "language", "provider", "ai_translated",
                              "score", "score_out_of", "subs_id", "subtitles_path", "timestamp", "video_path",
-                             "matched", "not_matched", "upgradedFromId"},
+                             "matched", "not_matched", "upgradedFromId", "published_file_version"},
     "table_source_blacklist": {"id", "removal_key", "item_id", "source_id", "item_kind", "video_path", "item_title",
                                "group_title", "source_name", "provider", "subs_id", "language", "timestamp"},
 }
@@ -257,6 +313,9 @@ def test_every_column_the_later_slices_need_is_there_with_its_type():
     assert isinstance(groups.tmdb_id.type, sa.Text) and isinstance(groups.tvdb_id.type, sa.Integer)
     assert isinstance(items.file_size.type, sa.BigInteger) and isinstance(items.file_mtime_ns.type, sa.BigInteger)
     assert isinstance(db.Base.metadata.tables["media_sources"].c.media_server_instance_id.type, sa.Text)
+    published_file_version = db.Base.metadata.tables["table_source_history"].c.published_file_version
+    assert isinstance(published_file_version.type, sa.JSON) and published_file_version.nullable
+    assert published_file_version.type.none_as_null
 
 
 def test_the_partial_indexes_carry_the_same_predicate_on_both_dialects():

@@ -222,7 +222,7 @@ def staged_subtitle_write(video_path, destination, before_publish=None, allow_em
                           source_paths=(), after_publish=None, on_publish=None,
                           publication_guard=None, cancel=None, expected_versions=(),
                           after_write=None, ownership_index=None, rollback_new_on_guard_error=False,
-                          invalidate_outputs=True):
+                          invalidate_outputs=True, *, mode=None, on_version=None):
     """Compute privately, then publish only while source and destination are current."""
     with subtitle_write_locks(video_path, destination, *source_paths,
                               **({} if cancel is None else {'cancel': cancel})) as states:
@@ -257,15 +257,21 @@ def staged_subtitle_write(video_path, destination, before_publish=None, allow_em
                         if any(expected[1] is None or expected != version(path)
                                for path, expected in source_versions.items()):
                             raise SubtitleSourceChanged('Source subtitle changed during processing')
-                        if os.path.isfile(destination):
+                        if mode is not None:
+                            os.chmod(temporary, mode)
+                        elif os.path.isfile(destination):
                             shutil.copymode(destination, temporary)
-                        staged = regular_subtitle_version(temporary) if rollback_new_on_guard_error else None
+                        staged = (regular_subtitle_version(temporary)
+                                  if rollback_new_on_guard_error or on_version is not None else None)
                         os.replace(temporary, destination)
                         if staged is not None:
                             written = regular_subtitle_version(destination)
                             # A rename can change ctime. Check that this is the staged file.
                             if written is not None and written[:4] == staged[:4]:
-                                installed = written
+                                if rollback_new_on_guard_error:
+                                    installed = written
+                                if on_version is not None:
+                                    on_version(written)
                         _report_subtitle_publication(on_publish, destination)
                         if after_publish:
                             after_publish()
@@ -321,18 +327,27 @@ def validate_subtitle_versions(snapshots):
 
 def write_subtitle_file(video_path, destination, content, written_paths=None,
                         on_publish=None, publication_guard=None, after_write=None, ownership_index=None,
-                        rollback_new_on_guard_error=False, invalidate_outputs=True):
-    """Write one saver output atomically and record that exact successful path."""
+                        rollback_new_on_guard_error=False, invalidate_outputs=True, *,
+                        mode=None, capture_version=False):
+    """Write one saver output atomically and optionally return the published file version."""
+    version = None
+
+    def record_version(written):
+        nonlocal version
+        version = written
+
     with staged_subtitle_write(video_path, destination, on_publish=on_publish,
                               publication_guard=publication_guard, after_write=after_write,
                               invalidate_outputs=invalidate_outputs,
                               rollback_new_on_guard_error=rollback_new_on_guard_error,
+                              mode=mode, on_version=record_version if capture_version else None,
                               after_publish=(lambda: written_paths.append(destination))
                               if written_paths is not None else None,
                               **({'ownership_index': ownership_index} if ownership_index is not None else {})
                               ) as temporary:
         with open(temporary, 'wb') as handle:
             handle.write(content)
+    return version
 
 
 # The subtitle editor aligns content that is not a library subtitle yet: its source
