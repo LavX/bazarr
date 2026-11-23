@@ -184,6 +184,88 @@ def test_source_download_does_not_clean_generated_siblings_after_releasing_the_o
     assert destination.read_bytes() == protected.read_bytes() == CONTENT
 
 
+def test_source_download_keeps_the_primary_write_when_a_shared_subtitle_folder_cannot_be_listed(world, monkeypatch):
+    import os
+
+    from subtitles.download import _write_source_download
+
+    folder = _custom_folder(world, monkeypatch, world.tmp_path)
+    context = _movie(world, 'Film.mkv')
+    destination = folder / 'Film.en.srt'
+    generated = folder / 'Film.en.alass.srt'
+    generated.write_bytes(CONTENT)
+    scandir = os.scandir
+    refused = []
+
+    def no_subtitle_listing(path):
+        if isinstance(path, (str, os.PathLike)) and Path(path) == folder:
+            refused.append(True)
+            raise PermissionError('The subtitle folder is write-only')
+        return scandir(path)
+
+    monkeypatch.setattr(os, 'scandir', no_subtitle_listing)
+    assert _write_source_download(context.path, str(destination), CONTENT, source=context,
+                                  language=Language('eng'), recheck_missing=False, is_upgrade=False,
+                                  written_paths=[], on_publish=None)
+    assert refused == [True]
+    assert destination.read_bytes() == generated.read_bytes() == CONTENT
+
+
+@pytest.mark.parametrize('late_change', ['video', 'subtitle'])
+def test_source_download_preserves_own_folder_siblings_that_change_after_planning(world, monkeypatch, late_change):
+    import tempfile
+    from contextlib import contextmanager
+
+    from app.config import settings
+    from media_sources import indexer
+    from subtitles.download import _write_source_download
+
+    monkeypatch.setattr(settings.general, 'subfolder', 'current')
+    context = _movie(world, 'Film.mkv')
+    media = Path(context.path)
+    destination = media.with_suffix('.en.srt')
+    protected = media.with_suffix('.en.ffsubsync.srt')
+    obsolete = media.with_suffix('.en.alass.srt')
+    protected.write_bytes(CONTENT)
+    obsolete.write_bytes(CONTENT)
+    publication = indexer.source_item_publication
+    mkstemp = tempfile.mkstemp
+    expected = CONTENT
+    changed = []
+
+    def late_video(*args, **kwargs):
+        result = mkstemp(*args, **kwargs)
+        if kwargs.get('prefix', '').startswith(f'.bazarr-sync-obsolete-{protected.name}'):
+            # This video arrives while the quarantine placeholder is created,
+            # after planning but before moving the unchanged sidecar.
+            changed.append(video(protected.with_suffix('.mkv')))
+        return result
+
+    @contextmanager
+    def late_sibling(source, *, shared=False):
+        nonlocal expected
+        with publication(source, shared=shared) as outcome:
+            if late_change == 'subtitle':
+                expected = CONTENT.replace(b'Downloaded', b'New version')
+                replacement = protected.with_suffix('.tmp')
+                replacement.write_bytes(expected)
+                replacement.replace(protected)
+                changed.append(protected)
+            yield outcome
+
+    if late_change == 'video':
+        monkeypatch.setattr(tempfile, 'mkstemp', late_video)
+    monkeypatch.setattr(indexer, 'source_item_publication', late_sibling)
+    assert _write_source_download(context.path, str(destination), CONTENT, source=context,
+                                  language=Language('eng'), recheck_missing=False, is_upgrade=False,
+                                  written_paths=[], on_publish=None)
+    assert destination.read_bytes() == CONTENT
+    assert len(changed) == 1
+    assert protected.read_bytes() == expected
+    assert not obsolete.exists()
+    assert len(list(media.parent.glob('.bazarr-sync-obsolete-*.bak'))) == 1
+
+
 def test_download_keeps_a_provider_result_from_reaching_a_replaced_video(world, monkeypatch):
     from media_sources import repository
     from subtitles import download
@@ -1491,6 +1573,35 @@ def test_source_download_rechecks_mappings_for_an_existing_owner_in_a_shared_rel
     assert not sync_output_owner_is_unique(context.path, str(destination), ownership_index=SourcePublicationOwnerIndex())
 
 
+def test_source_download_reserves_a_mapped_owners_logical_parent_for_relative_subtitles(world, monkeypatch):
+    from app.config import settings
+    from subtitles.download import _write_source_download
+    from utilities.helper import get_target_folder
+    from utilities.path_mappings import path_mappings
+
+    monkeypatch.setattr(settings.general, 'subfolder', 'relative')
+    monkeypatch.setattr(settings.general, 'subfolder_custom', 'Subs')
+    context = _movie(world, 'Film.mkv')
+    folder = Path(context.path).parent / 'Subs'
+    folder.mkdir()
+    actual = video(world.tmp_path / 'library' / 'Film.mkv')
+    alias = world.tmp_path / 'alias' / 'Film.mkv'
+    alias.parent.mkdir()
+    alias.symlink_to(actual)
+    (alias.parent / 'Subs').symlink_to(folder, target_is_directory=True)
+    remote = world.tmp_path / 'remote'
+    monkeypatch.setattr(path_mappings, 'path_mapping_movies', [[str(remote), str(alias.parent)]])
+    world.db.execute(_legacy_owner_insert(world, 'radarr', remote / 'Film.mkv'))
+    assert Path(get_target_folder(str(alias), create=False)).resolve() == folder
+    assert Path(get_target_folder(str(actual), create=False)).resolve() != folder
+
+    destination = folder / 'Film.en.srt'
+    assert not _write_source_download(context.path, str(destination), CONTENT, source=context,
+                                      language=Language('eng'), recheck_missing=False, is_upgrade=False,
+                                      written_paths=[], on_publish=None)
+    assert not destination.exists()
+
+
 @pytest.mark.parametrize("layout", ["relative", "absolute"])
 def test_source_publication_survives_an_unrelated_scanner_writer(world, monkeypatch, layout):
     from concurrent.futures import ThreadPoolExecutor, TimeoutError
@@ -1640,7 +1751,8 @@ def test_source_translation_rechecks_library_enablement_after_preparation(world,
     assert not Path(destination).exists()
 
 
-def test_source_combine_sweeps_stale_siblings_without_scanning_under_the_writer(world, monkeypatch):
+@pytest.mark.parametrize('replace_alternate', [False, True])
+def test_source_combine_sweeps_stale_siblings_without_scanning_under_the_writer(world, monkeypatch, replace_alternate):
     import os
     from contextlib import contextmanager
 
@@ -1654,9 +1766,15 @@ def test_source_combine_sweeps_stale_siblings_without_scanning_under_the_writer(
     media.with_suffix(".hu.srt").write_bytes(CONTENT)
     superseded = folder / media.with_suffix(".en.combined-hu.ass").name
     superseded.write_bytes(CONTENT)
+    superseded_variant = superseded.with_suffix('.ffsubsync.ass')
+    current_variant = superseded.with_suffix('.alass.srt')
+    superseded_variant.write_bytes(CONTENT)
+    current_variant.write_bytes(CONTENT)
+    replacement = CONTENT.replace(b'Downloaded', b'Updated')
     publication = indexer.source_item_publication
     scandir = os.scandir
     locked_scans = []
+    exists_before_unlock = []
     writer_open = False
 
     @contextmanager
@@ -1665,7 +1783,13 @@ def test_source_combine_sweeps_stale_siblings_without_scanning_under_the_writer(
         with publication(source, shared=shared) as result:
             writer_open = True
             try:
+                if replace_alternate:
+                    updated = superseded.with_suffix('.tmp')
+                    updated.write_bytes(replacement)
+                    updated.replace(superseded)
                 yield result
+                exists_before_unlock.append(
+                    (superseded.exists(), superseded_variant.exists(), current_variant.exists()))
             finally:
                 writer_open = False
 
@@ -1679,7 +1803,10 @@ def test_source_combine_sweeps_stale_siblings_without_scanning_under_the_writer(
     result = combine.try_combine_for_video(context.path, "movie", languages=["en", "hu"], format="srt", source=context)
 
     assert result.status == "built" and Path(result.path).is_file()
-    assert not superseded.exists()
+    assert exists_before_unlock == [(replace_alternate, replace_alternate, False)]
+    if replace_alternate:
+        assert superseded.read_bytes() == replacement
+        assert superseded_variant.read_bytes() == CONTENT
     assert not locked_scans
 
 
@@ -2005,48 +2132,47 @@ def test_a_source_publication_proves_ownership_from_the_source_tables_only(world
         next(s for s in statements if ARR_READ.search(s)))])
 
 
-def test_the_syncer_hands_a_source_ownership_index_to_the_publication_and_the_cleanup(world, monkeypatch, tmp_path):
-    from media_sources.indexer import SourceOutputOwnerIndex
+def test_automatic_source_sync_keeps_a_mapped_arr_owners_exact_variant(world, monkeypatch):
+    from app.config import settings
+    from media_sources import repository
+    from subtitles import processing, sync
     from subtitles.tools import subsyncer
+    from utilities.path_mappings import path_mappings
 
-    subtitles = _custom_folder(world, monkeypatch, tmp_path)
-    context = _movie(world)
-    base = context.path.rsplit("/", 1)[1].replace(".mkv", "")
-    source = subtitles / f"{base}.en.srt"
-    source.write_text(CONTENT.decode())
-    stale = subtitles / f"{base}.en.ffsubsync.srt"
-    stale.write_text(CONTENT.decode())
-    seen = {}
+    folder = _custom_folder(world, monkeypatch, world.tmp_path)
+    context = _movie(world, 'Film.mkv')
+    competing = video(world.tmp_path / 'arr' / 'Film.en.ffsubsync.mkv')
+    remote = world.tmp_path / 'remote'
+    monkeypatch.setattr(path_mappings, 'path_mapping_movies', [[str(remote), str(competing.parent)]])
+    world.db.execute(_legacy_owner_insert(world, 'radarr', remote / competing.name))
+    protected = folder / 'Film.en.ffsubsync.srt'
+    protected_content = CONTENT.replace(b'Downloaded', b'Arr subtitle')
+    protected.write_bytes(protected_content)
+    obsolete = folder / 'Film.en.alass.srt'
+    synced_content = CONTENT.replace(b'Downloaded', b'Synchronized')
+    calls = []
 
-    class Publication:
-        def __init__(self, video_path, srt_path, version, **kwargs):
-            seen["publication"] = kwargs
-            self.state = None
+    def align(self, engine, output_path, video_path, no_fix_framerate):
+        calls.append((engine, video_path))
+        output_path.write_bytes(synced_content)
+        # A generated variant owned by this source appears after the download
+        # completed and before auto sync claims its final output.
+        obsolete.write_bytes(CONTENT)
+        return {'offset_seconds': 1.5, 'framerate_scale_factor': 1.0, 'quality_of_fit': 0.9}
 
-        def release(self):
-            pass
+    _download(monkeypatch)
+    monkeypatch.setattr(processing, '_defaul_sync_checker', lambda subtitle: True)
+    monkeypatch.setattr(sync, '_report_progress', lambda *a, **k: None)
+    monkeypatch.setattr(subsyncer.SubSyncer, '_run_external_engine', align)
+    monkeypatch.setattr(settings.subsync, 'output_mode', 'overwrite')
+    monkeypatch.setattr(settings.subsync, 'enabled_engines', ['alass'])
+    assert len(_generate(context, job_id=1, auto_translate=False)) == 1
 
-    class Runner:
-        def run(self, **kwargs):
-            seen["after_publish"] = kwargs["after_publish"]
-            kwargs["after_publish"]()
-            raise RuntimeError("stop after the cleanup")
-
-    monkeypatch.setattr(subsyncer, "SubtitlePublication", Publication)
-    monkeypatch.setattr(subsyncer, "SubsyncEngineRunner", Runner)
-    statements, stop = _statements(world)
-    try:
-        with pytest.raises(RuntimeError, match="stop after the cleanup"):
-            subsyncer.SubSyncer().sync(
-                video_path=context.path, srt_path=str(source), srt_lang="en", hi=False, forced=False,
-                max_offset_seconds="60", no_fix_framerate=False, gss=False, output_mode="overwrite",
-                enabled_engines=["ffsubsync"], source=context)
-    finally:
-        stop()
-    assert isinstance(seen["publication"]["ownership_index"], SourceOutputOwnerIndex)
-    assert not any(ARR_READ.search(s) for s in statements)
-    # The generated output of this item was proven its own and quarantined, which an arr lookup would not do.
-    assert not stale.exists() and list(subtitles.glob(".bazarr-sync-obsolete-*"))
+    assert calls == [('alass', context.path)]
+    assert (folder / 'Film.en.srt').read_bytes() == synced_content
+    assert protected.read_bytes() == protected_content
+    assert not obsolete.exists()
+    assert world.db.scalar(sa.select(repository.History.c.action).where(repository.History.c.item_id == context.item_id)) == 5
 
 
 def test_an_arr_sync_keeps_the_call_it_always_made(world, monkeypatch, tmp_path):
