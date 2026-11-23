@@ -394,7 +394,7 @@ class Dispatcher:
                 raise DispatchFailed(row.error_class or fail.INTERNAL, hold, retry_later=True, retry_at=row.retry_at)
             # The enqueue thread may already have made this retry ready with our queue ID.
             # Keep the retry bound to its worker and check the fresh owner before dispatch.
-            jobs.requeue(row.id, spec.queue_job_id)
+            jobs.requeue(row.id, spec.queue_job_id, retry_snapshot=(row.updated_at, row.retry_at))
             row = jobs.get(row.id)
         if row is None or row.state != QUEUED:
             return None
