@@ -21,7 +21,10 @@ import {
   HistoryInfo,
   HistoryUpgrade,
 } from "@/pages/History/HistoryCells";
-import { useHistorySources } from "@/pages/History/sourceHistory";
+import {
+  useHistorySourcePresentation,
+  useHistorySources,
+} from "@/pages/History/sourceHistory";
 import HistoryView from "@/pages/views/HistoryView";
 import SourceFilter from "@/pages/views/SourceFilter";
 import { episodeCodeOf } from "@/utilities/episodes";
@@ -48,7 +51,10 @@ const SeriesHistoryView: FunctionComponent = () => {
     sources.options,
     sources.enabled,
   );
-  const { labels, nativeFallback } = sources.getPresentation(query.data);
+  const { labels, nativeFallback, selected } = useHistorySourcePresentation(
+    sources,
+    query,
+  );
   const { names: arrNames, defaultId: defaultArr } = sources.arrOwners;
   const showBadge = !nativeFallback;
   const rows = query.data?.data;
@@ -102,6 +108,9 @@ const SeriesHistoryView: FunctionComponent = () => {
                   labels={labels}
                   arrNames={arrNames}
                   defaultArr={defaultArr}
+                  preferSnapshot={
+                    original.origin === "source" && original.item_id === null
+                  }
                 />
               ),
             } satisfies ColumnDef<History.EpisodeRow>,
@@ -247,7 +256,7 @@ const SeriesHistoryView: FunctionComponent = () => {
         <Group justify="flex-end" mb="xs">
           <SourceFilter
             labels={labels}
-            value={sources.selected}
+            value={selected}
             onChange={sources.onChange}
             showSingle={!sources.sourceOnly}
           />

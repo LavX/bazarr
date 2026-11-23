@@ -8,6 +8,7 @@ interface Props {
   labels: Map<MediaSourceKey, string>;
   arrNames: Map<number, string>;
   defaultArr: number | null;
+  preferSnapshot?: boolean;
 }
 
 export default function SourceBadge({
@@ -15,6 +16,7 @@ export default function SourceBadge({
   labels,
   arrNames,
   defaultArr,
+  preferSnapshot = false,
 }: Props) {
   if (row.origin !== "source") {
     return (
@@ -28,7 +30,7 @@ export default function SourceBadge({
 
   const removed = row.source_key === "source:removed";
   const name =
-    (removed
+    (removed || preferSnapshot
       ? row.source_name
       : (labels.get(row.source_key) ?? row.source_name)) ?? "Media source";
   return (

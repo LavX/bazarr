@@ -302,3 +302,42 @@ def test_arr_history_hydrates_only_a_matching_original_off_page(client, arr_libr
     arr_library.execute(sa.update(history).where(history.id == 1).values(arr_instance_id=99))
     [upgrade] = _get(client, endpoint, args)['data']
     assert upgrade['original'] is upgrade['upgradedFromId'] is None
+
+
+@pytest.mark.parametrize('removed', ['item', 'source'])
+def test_retained_history_keeps_active_exclusion_until_cleared(
+        client, arr_library, tmp_path, history_kind, removed):
+    from media_sources import repository
+
+    kind, endpoint, _, _ = history_kind
+    source_id, item_id, _, media, subtitle = _source_item(arr_library, tmp_path, kind)
+    event = _event(arr_library, kind, source_id, item_id, media, subtitle, datetime.now())
+    blacklist_id = repository.insert_blacklist(
+        arr_library, item_id=item_id, source_id=source_id, item_kind=kind,
+        provider='fake', subs_id='release', language='en')
+    other_kind = 'episode' if kind == 'movie' else 'movie'
+    repository.insert_blacklist(arr_library, item_kind=other_kind, provider='fake', subs_id='release', language='en')
+    item_endpoint = f'/api/sources/items/{item_id}/history'
+    assert _get(client, item_endpoint)['data'][0]['blacklisted'] is True
+
+    if removed == 'item':
+        repository.delete_items([item_id], arr_library)
+        source_key = f'source:{source_id}'
+    else:
+        repository.delete_source(source_id, arr_library)
+        source_key = 'source:removed'
+
+    params = {'sources': 1, 'source_key[]': source_key}
+    [retained] = _get(client, endpoint, params)['data']
+    assert retained['history_id'] == event
+    assert retained['id'] is retained['item_id'] is None
+    assert retained['upgradable'] is False
+    assert client.get(item_endpoint, headers=HEADERS).status_code == 404
+    assert repository.blacklist_pairs(kind, arr_library) == [('fake', 'release')]
+    assert retained['blacklisted'] is True
+
+    arr_library.execute(sa.delete(repository.Blacklist).where(repository.Blacklist.c.id == blacklist_id))
+    assert repository.blacklist_pairs(kind, arr_library) == []
+    assert repository.blacklist_pairs(other_kind, arr_library) == [('fake', 'release')]
+    [retained] = _get(client, endpoint, params)['data']
+    assert retained['blacklisted'] is False

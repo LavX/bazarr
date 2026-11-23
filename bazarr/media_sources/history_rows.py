@@ -222,7 +222,7 @@ def _source_history_row(row, upgrades):
         'provider': row.provider, 'ai_translated': bool(row.ai_translated), 'score': score, 'subs_id': row.subs_id,
         'subtitles_path': row.subtitles_path, 'video_path': row.video_path, 'monitored': row.monitored,
         'timestamp': pretty_date(row.timestamp), 'timestamp_iso': row.timestamp.isoformat(),
-        'parsed_timestamp': row.timestamp.strftime('%x %X'), 'blacklisted': bool(live_item_id and row.blacklisted),
+        'parsed_timestamp': row.timestamp.strftime('%x %X'), 'blacklisted': bool(row.blacklisted),
         'matches': ast.literal_eval(row.matched) if row.matched else [],
         'dont_matches': ast.literal_eval(row.not_matched) if row.not_matched else [],
         'upgradedFromId': row.upgradedFromId, 'original_id': upgrades.get(row.id),

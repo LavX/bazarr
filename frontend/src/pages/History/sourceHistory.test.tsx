@@ -760,6 +760,317 @@ describe.each(cases)(
       ).not.toBeInTheDocument();
     });
 
+    it.each(["source:8", "source:removed"])(
+      "clears a saved %s filter when this kind has no source history",
+      async (source) => {
+        const requests = vi.fn();
+        configure({ emptyFolder: true });
+        window.history.replaceState(
+          null,
+          "",
+          `/?page=2&source=${encodeURIComponent(source)}`,
+        );
+        server.use(
+          http.get(`/api/${api}/history`, ({ request }) => {
+            const params = new URL(request.url).searchParams;
+            const keys = params.getAll("source_key[]");
+            requests(
+              params.get("sources"),
+              keys,
+              params.get("start"),
+              params.get("length"),
+            );
+            return HttpResponse.json({
+              data: keys.length ? [] : [native],
+              total: keys.length ? 0 : 1,
+            });
+          }),
+        );
+        customRender(<View />);
+
+        expect(
+          await screen.findByRole("link", { name: "Native title" }),
+        ).toBeVisible();
+        await waitFor(() =>
+          expect(
+            new URLSearchParams(window.location.search).has("source"),
+          ).toBe(false),
+        );
+        expect(new URLSearchParams(window.location.search).has("page")).toBe(
+          false,
+        );
+        expect(requests).toHaveBeenLastCalledWith("1", [], "0", "25");
+        expect(
+          screen.queryByRole("combobox", { name: "Source" }),
+        ).not.toBeInTheDocument();
+        expect(
+          screen.queryByRole("columnheader", { name: "Source" }),
+        ).not.toBeInTheDocument();
+        expect(screen.getByRole("button", { name: "Exclude" })).toBeEnabled();
+      },
+    );
+
+    it("clears the mounted selection after the final source event disappears", async () => {
+      const user = userEvent.setup();
+      const requests = vi.fn();
+      let sourceHistoryRemoved = false;
+      configure();
+      server.use(
+        http.get(`/api/${api}/history`, ({ request }) => {
+          const params = new URL(request.url).searchParams;
+          const keys = params.getAll("source_key[]");
+          requests(params.get("sources"), keys);
+          if (sourceHistoryRemoved) {
+            return HttpResponse.json({
+              data: keys.length ? [] : [native],
+              total: keys.length ? 0 : 1,
+            });
+          }
+          return HttpResponse.json({
+            data: keys.length ? [live] : [native, live],
+            total: keys.length ? 1 : 2,
+            source_keys: ["source:8"],
+          });
+        }),
+      );
+      customRender(<View />);
+      expect(await screen.findByText("Archive item")).toBeVisible();
+      await user.click(screen.getByRole("combobox", { name: "Source" }));
+      await user.click(await screen.findByRole("option", { name: "Archive" }));
+      await waitFor(() =>
+        expect(requests).toHaveBeenLastCalledWith("1", ["source:8"]),
+      );
+      expect(new URLSearchParams(window.location.search).get("source")).toBe(
+        "source:8",
+      );
+      expect(screen.queryByText("Native title")).not.toBeInTheDocument();
+
+      sourceHistoryRemoved = true;
+      await act(async () => {
+        const reducer = createDefaultReducer().find(
+          ({ key }) => key === "source-item",
+        );
+        if (reducer?.key !== "source-item")
+          throw new Error("source-item reducer is missing");
+        reducer.any?.();
+      });
+
+      await waitFor(() => {
+        expect(requests).toHaveBeenLastCalledWith("1", []);
+        expect(queryClient.isFetching()).toBe(0);
+        expect(
+          screen.getByRole("link", { name: "Native title" }),
+        ).toBeVisible();
+        expect(screen.queryByText("Archive item")).not.toBeInTheDocument();
+      });
+      await waitFor(() =>
+        expect(new URLSearchParams(window.location.search).has("source")).toBe(
+          false,
+        ),
+      );
+      expect(requests).toHaveBeenLastCalledWith("1", []);
+      expect(screen.queryByText("Archive item")).not.toBeInTheDocument();
+      expect(
+        screen.queryByRole("combobox", { name: "Source" }),
+      ).not.toBeInTheDocument();
+      expect(
+        screen.queryByRole("columnheader", { name: "Source" }),
+      ).not.toBeInTheDocument();
+
+      sourceHistoryRemoved = false;
+      await act(async () => {
+        const reducer = createDefaultReducer().find(
+          ({ key }) => key === "source-item",
+        );
+        if (reducer?.key !== "source-item")
+          throw new Error("source-item reducer is missing");
+        reducer.any?.();
+      });
+
+      await waitFor(() => {
+        expect(queryClient.isFetching()).toBe(0);
+        expect(screen.getByText("Archive item")).toBeVisible();
+        expect(
+          screen.getByRole("link", { name: "Native title" }),
+        ).toBeVisible();
+        expect(
+          screen.getByRole("columnheader", { name: "Source" }),
+        ).toBeVisible();
+      });
+      await user.click(screen.getByRole("combobox", { name: "Source" }));
+      await user.click(await screen.findByRole("option", { name: "Archive" }));
+      await waitFor(() =>
+        expect(requests).toHaveBeenLastCalledWith("1", ["source:8"]),
+      );
+      expect(new URLSearchParams(window.location.search).get("source")).toBe(
+        "source:8",
+      );
+      expect(screen.queryByText("Native title")).not.toBeInTheDocument();
+    });
+
+    it("drops automatic source-only keys when no source history remains", async () => {
+      const requests = vi.fn();
+      configure({ nativeEnabled: false, emptyFolder: true });
+      server.use(
+        http.get(`/api/${api}/history`, ({ request }) => {
+          const params = new URL(request.url).searchParams;
+          const keys = params.getAll("source_key[]");
+          requests(params.get("sources"), keys);
+          return HttpResponse.json({
+            data: keys.length ? [] : [native],
+            total: keys.length ? 0 : 1,
+          });
+        }),
+      );
+      customRender(<View />);
+
+      expect(
+        await screen.findByRole("link", { name: "Native title" }),
+      ).toBeVisible();
+      expect(requests).toHaveBeenCalledWith("1", [
+        "source:removed",
+        "source:8",
+      ]);
+      expect(requests).toHaveBeenLastCalledWith("1", []);
+      expect(
+        screen.queryByRole("combobox", { name: "Source" }),
+      ).not.toBeInTheDocument();
+      expect(
+        screen.queryByRole("columnheader", { name: "Source" }),
+      ).not.toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "Exclude" })).toBeEnabled();
+    });
+
+    it("preserves a selected source on an empty page when kind-wide metadata still has source history", async () => {
+      const requests = vi.fn();
+      configure();
+      window.history.replaceState(null, "", "/?source=source%3A8");
+      server.use(
+        http.get(`/api/${api}/history`, ({ request }) => {
+          const params = new URL(request.url).searchParams;
+          requests(params.get("sources"), params.getAll("source_key[]"));
+          return HttpResponse.json({
+            data: [],
+            total: 0,
+            source_keys: ["source:9"],
+          });
+        }),
+      );
+      customRender(<View />);
+
+      expect(
+        await screen.findByText(
+          `Nothing Found in ${kind === "series" ? "Series" : "Movies"} History`,
+        ),
+      ).toBeVisible();
+      await waitFor(() => expect(queryClient.isFetching()).toBe(0));
+      expect(new URLSearchParams(window.location.search).get("source")).toBe(
+        "source:8",
+      );
+      await waitFor(() =>
+        expect(screen.getByRole("combobox", { name: "Source" })).toHaveValue(
+          "Archive",
+        ),
+      );
+      expect(
+        screen.getByRole("columnheader", { name: "Source" }),
+      ).toBeVisible();
+      expect(requests).toHaveBeenLastCalledWith("1", ["source:8"]);
+      expect(screen.queryByText("Native title")).not.toBeInTheDocument();
+    });
+
+    it("keeps the selected source while a stale native payload is being refreshed", async () => {
+      const requests = vi.fn();
+      let finishRefresh: (() => void) | undefined;
+      const refreshing = new Promise<void>((resolve) => {
+        finishRefresh = resolve;
+      });
+      configure();
+      window.history.replaceState(null, "", "/?source=source%3A8");
+      const scopedKey = [
+        ...(kind === "series"
+          ? [QueryKeys.Series, QueryKeys.Episodes, QueryKeys.History]
+          : [QueryKeys.Movies, QueryKeys.History]),
+        false,
+        { includeSources: true, sourceKeys: ["source:8"] },
+        QueryKeys.Range,
+        { start: 0, size: 25 },
+      ];
+      queryClient.setQueryData(
+        scopedKey,
+        { data: [native], total: 1 },
+        { updatedAt: Date.now() - 120_000 },
+      );
+      server.use(
+        http.get(`/api/${api}/history`, async ({ request }) => {
+          const params = new URL(request.url).searchParams;
+          requests(params.get("sources"), params.getAll("source_key[]"));
+          await refreshing;
+          return HttpResponse.json({
+            data: [],
+            total: 0,
+            source_keys: ["source:9"],
+          });
+        }),
+      );
+      customRender(<View />);
+
+      try {
+        await waitFor(() => expect(requests).toHaveBeenCalledTimes(1));
+        expect(queryClient.getQueryState(scopedKey)?.fetchStatus).toBe(
+          "fetching",
+        );
+        expect(requests).toHaveBeenLastCalledWith("1", ["source:8"]);
+        expect(new URLSearchParams(window.location.search).get("source")).toBe(
+          "source:8",
+        );
+      } finally {
+        finishRefresh?.();
+      }
+
+      await waitFor(() => expect(queryClient.isFetching()).toBe(0));
+      await waitFor(() =>
+        expect(screen.getByRole("combobox", { name: "Source" })).toHaveValue(
+          "Archive",
+        ),
+      );
+      expect(new URLSearchParams(window.location.search).get("source")).toBe(
+        "source:8",
+      );
+      expect(requests).toHaveBeenCalledTimes(1);
+      expect(requests).toHaveBeenLastCalledWith("1", ["source:8"]);
+    });
+
+    it("shows the recorded owner name on a non-linkable handover event", async () => {
+      configure();
+      server.use(
+        http.get(`/api/${api}/history`, () =>
+          HttpResponse.json({
+            data: [
+              {
+                ...live,
+                source_name: "Recorded folder",
+                id: null,
+                item_id: null,
+                series_id: null,
+              },
+            ],
+            total: 1,
+            source_keys: ["source:8"],
+          }),
+        ),
+      );
+      customRender(<View />);
+
+      const row = await screen.findByRole("row", { name: /Archive item/ });
+      expect(within(row).getByText("Recorded folder")).toBeVisible();
+      expect(within(row).queryByText("Archive")).not.toBeInTheDocument();
+      expect(within(row).queryByRole("link")).not.toBeInTheDocument();
+      expect(
+        within(row).queryByRole("button", { name: "Exclude" }),
+      ).not.toBeInTheDocument();
+    });
+
     it.each([false, true])(
       "keeps the native table for a legacy payload with an empty folder: %s",
       async (emptyFolder) => {
