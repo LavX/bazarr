@@ -58,15 +58,16 @@ const DISABLED = { ...ABSENT, browsable: true };
 const RETAINED = { ...ABSENT, retained: true };
 
 it.each([
-  { visible: true, status: 200, sibling: false, enabledFolder: false },
-  { visible: true, status: 200, sibling: false, enabledFolder: true },
-  { visible: true, status: 503, sibling: false, enabledFolder: false },
-  { visible: false, status: 200, sibling: false, enabledFolder: false },
-  { visible: false, status: 503, sibling: false, enabledFolder: false },
-  { visible: false, status: 200, sibling: true, enabledFolder: false },
+  { visible: true, status: 200, sibling: false, folder: "disabled" },
+  { visible: true, status: 200, sibling: false, folder: "populated" },
+  { visible: true, status: 200, sibling: false, folder: "empty" },
+  { visible: true, status: 503, sibling: false, folder: "disabled" },
+  { visible: false, status: 200, sibling: false, folder: "disabled" },
+  { visible: false, status: 503, sibling: false, folder: "disabled" },
+  { visible: false, status: 200, sibling: true, folder: "disabled" },
 ])(
-  "updates Radarr badges on disable (folders visible: $visible, PATCH $status, enabled sibling: $sibling, enabled folder: $enabledFolder)",
-  async ({ visible, status, sibling, enabledFolder }) => {
+  "updates Radarr badges on disable (folders visible: $visible, PATCH $status, enabled sibling: $sibling, folder: $folder)",
+  async ({ visible, status, sibling, folder }) => {
     const user = userEvent.setup();
     const movie = makeInstance({ kind: "radarr", name: "Radarr" });
     const series = makeInstance({ id: 1 });
@@ -77,7 +78,9 @@ it.each([
     }
     const patch = Promise.withResolvers<void>();
     const refresh = Promise.withResolvers<void>();
+    const badgeRefresh = Promise.withResolvers<void>();
     const patchStarted = vi.fn();
+    const badgeRefreshStarted = vi.fn();
     const list = vi.fn();
     const sources = vi.fn();
     const excluded = vi.fn();
@@ -115,25 +118,32 @@ it.each([
         return HttpResponse.json({
           data: [],
           availability: {
-            movie: { ...(enabledFolder ? ENABLED : DISABLED), retained: true },
+            movie: {
+              ...(folder === "disabled" ? DISABLED : ENABLED),
+              retained: true,
+            },
             series: ABSENT,
             sports: ABSENT,
           },
         });
       }),
-      http.get("/api/badges", ({ request }) =>
-        HttpResponse.json({
-          movies:
-            confirmed && new URL(request.url).searchParams.has("sources")
-              ? 3
-              : 9,
+      http.get("/api/badges", async ({ request }) => {
+        const mixed = new URL(request.url).searchParams.has("sources");
+        if (confirmed && mixed) {
+          badgeRefreshStarted();
+          await badgeRefresh.promise;
+        }
+        const sourceCount = folder === "populated" && mixed;
+        return HttpResponse.json({
+          movies: sourceCount && confirmed ? 3 : 9,
+          ...(sourceCount ? { source_movies: confirmed ? 3 : 1 } : {}),
           episodes: 4,
           sports: 2,
           radarr_signalr: "DOWN",
           sonarr_signalr: "LIVE",
           sportarr_sse: "LIVE",
-        }),
-      ),
+        });
+      }),
       http.get("/api/system/status", () => HttpResponse.json({ data: {} })),
       http.get("/api/system/jobs", () => HttpResponse.json({ data: [] })),
       http.get("/api/system/searches", () => HttpResponse.json([])),
@@ -206,6 +216,23 @@ it.each([
       expect(
         await screen.findByRole("switch", { name: "Enable instance" }),
       ).not.toBeChecked();
+      if (visible) {
+        await waitFor(() => expect(badgeRefreshStarted).toHaveBeenCalledOnce());
+        expect(wanted()).toHaveAttribute(
+          "aria-description",
+          "Sports: 2, Episodes: 4",
+        );
+        badgeRefresh.resolve();
+        await waitFor(() =>
+          expect(
+            queryClient.getQueryState([
+              QueryKeys.System,
+              QueryKeys.Badges,
+              true,
+            ])?.fetchStatus,
+          ).toBe("idle"),
+        );
+      }
 
       const expectBadges = () => {
         expect(moviesLink()).toHaveAttribute("href", "/movies");
@@ -221,7 +248,7 @@ it.each([
           "aria-description",
           sibling
             ? initialCounts
-            : enabledFolder
+            : folder === "populated"
               ? "Sports: 2, Episodes: 4, Movies: 3"
               : "Sports: 2, Episodes: 4",
         );
@@ -272,6 +299,7 @@ it.each([
     } finally {
       patch.resolve();
       refresh.resolve();
+      badgeRefresh.resolve();
       unmount();
       bounds.mockRestore();
       window.history.replaceState(null, "", "/");
@@ -848,7 +876,12 @@ it.each([
         }),
       ),
       http.get("/api/badges", () =>
-        HttpResponse.json({ episodes: 2, movies: 2 }),
+        HttpResponse.json({
+          episodes: 2,
+          movies: 2,
+          source_episodes: 2,
+          source_movies: 2,
+        }),
       ),
       http.get(path, ({ request }) => {
         const params = new URL(request.url).searchParams;

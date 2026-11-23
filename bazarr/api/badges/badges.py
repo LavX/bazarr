@@ -105,11 +105,15 @@ class Badges(Resource):
         missing_sports_count = (
             wanted_badge(database) if settings.general.use_sportarr else 0)
 
+        # The folder-only sidebar uses the source contribution when the Arr route is disabled.
+        source_counts = {}
         if include_sources:
             if 'episode' in kinds:
-                missing_episodes_count += wanted_language_count('episode', database)
+                source_counts['source_episodes'] = wanted_language_count('episode', database)
+                missing_episodes_count += source_counts['source_episodes']
             if 'movie' in kinds:
-                missing_movies_count += wanted_language_count('movie', database)
+                source_counts['source_movies'] = wanted_language_count('movie', database)
+                missing_movies_count += source_counts['source_movies']
 
         throttled_providers = len(get_throttled_providers())
 
@@ -128,4 +132,4 @@ class Badges(Resource):
             "sportarr_sse": live_str if all_sportarr_sse_connected() else "DOWN",
             "announcements": len(get_all_announcements()),
         }
-        return marshal(result, self.get_model)
+        return {**marshal(result, self.get_model), **source_counts}

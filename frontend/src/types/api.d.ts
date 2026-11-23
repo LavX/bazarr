@@ -1,6 +1,8 @@
 interface Badge {
   episodes: number;
   movies: number;
+  source_episodes?: number;
+  source_movies?: number;
   sports?: number;
   providers: number;
   status: number;

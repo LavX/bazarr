@@ -55,9 +55,8 @@ export function useMediaNavigation() {
     sonarrBadges,
     radarrBadges,
     sportarrBadges: showBadges("sportarr", sportarr),
-    wantedEpisodesBadge:
-      sonarrBadges || availability?.series.searchable === true,
-    wantedMoviesBadge: radarrBadges || availability?.movie.searchable === true,
+    folderSeriesSearchable: availability?.series.searchable === true,
+    folderMoviesSearchable: availability?.movie.searchable === true,
   };
 }
 

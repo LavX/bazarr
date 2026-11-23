@@ -19,7 +19,7 @@ import { JobFailedError, JobStoppedError, waitForJob } from "@/utilities/jobs";
 export function useBadges() {
   const { data: settings } = useSystemSettings();
   const includeSources = settings?.media_sources?.visible === true;
-  return useQuery({
+  return useQuery<Partial<Badge>>({
     queryKey: [QueryKeys.System, QueryKeys.Badges, includeSources],
     queryFn: () => api.badges.all(includeSources),
     placeholderData: undefined,

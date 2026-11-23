@@ -93,8 +93,8 @@ export function useRoutes(): CustomRouteObject[] {
     sonarrBadges,
     radarrBadges,
     sportarrBadges,
-    wantedEpisodesBadge,
-    wantedMoviesBadge,
+    folderSeriesSearchable,
+    folderMoviesSearchable,
   } = useMediaNavigation();
   // The Translation page exists only while the v2 translation runtime is on.
   const translationRuntime = useTranslationRuntime();
@@ -236,7 +236,11 @@ export function useRoutes(): CustomRouteObject[] {
               {
                 name: "Episodes",
                 path: "series",
-                badge: wantedEpisodesBadge ? data?.episodes : undefined,
+                badge: sonarrBadges
+                  ? data?.episodes
+                  : folderSeriesSearchable
+                    ? data?.source_episodes
+                    : undefined,
                 hidden: !seriesActivity,
                 element: folderSeries ? (
                   <WantedSeriesView />
@@ -249,7 +253,11 @@ export function useRoutes(): CustomRouteObject[] {
               {
                 name: "Movies",
                 path: "movies",
-                badge: wantedMoviesBadge ? data?.movies : undefined,
+                badge: radarrBadges
+                  ? data?.movies
+                  : folderMoviesSearchable
+                    ? data?.source_movies
+                    : undefined,
                 hidden: !movieActivity,
                 element: folderMovies ? (
                   <WantedMoviesView />
@@ -538,6 +546,8 @@ export function useRoutes(): CustomRouteObject[] {
     [
       data?.episodes,
       data?.movies,
+      data?.source_episodes,
+      data?.source_movies,
       data?.sports,
       data?.providers,
       data?.sonarr_signalr,
@@ -558,8 +568,8 @@ export function useRoutes(): CustomRouteObject[] {
       sonarrBadges,
       radarrBadges,
       sportarrBadges,
-      wantedEpisodesBadge,
-      wantedMoviesBadge,
+      folderSeriesSearchable,
+      folderMoviesSearchable,
       translationRuntime,
     ],
   );

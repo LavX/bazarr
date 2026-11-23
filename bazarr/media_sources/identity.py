@@ -512,7 +512,8 @@ class ArrOwners:
             path_column = model.path
             local_candidates = candidates
             if mapper.sports:
-                path_column = _sports_sql_path_key(path_column)
+                lower = _windows_sql_lower(session)
+                path_column = _sports_sql_path_key(path_column, lower)
                 arr_paths = {_sports_path_key(candidate) for candidate in arr_paths}
                 if _LOCAL_WINDOWS_PATHS:
                     local_candidates = {_sports_path_key(candidate) for candidate in candidates}
@@ -551,19 +552,26 @@ def _sports_path_key(path):
     return normalized.lower() if _LOCAL_WINDOWS_PATHS else normalized
 
 
-def _sports_sql_path_key(path):
+def _windows_sql_lower(session):
+    if not _LOCAL_WINDOWS_PATHS:
+        return None
+    dialect = session.dialect if isinstance(session, sa.engine.Connection) else session.get_bind().dialect
+    return sa.func.unicode_path_lower if dialect.name == 'sqlite' else sa.func.lower
+
+
+def _sports_sql_path_key(path, lower):
     normalized = sa.func.replace(path, '\\', '/')
-    return sa.func.lower(normalized) if _LOCAL_WINDOWS_PATHS else normalized
+    return lower(normalized) if lower is not None else normalized
 
 
-def _mapped_sports_sql_path(path, rules, *, reverse=False):
+def _mapped_sports_sql_path(path, rules, *, reverse=False, reverse_lower=None):
     source, target = (1, 0) if reverse else (0, 1)
     normalized = sa.func.replace(path, '\\', '/')
-    compared = sa.func.lower(normalized) if reverse and _LOCAL_WINDOWS_PATHS else normalized
+    compared = reverse_lower(normalized) if reverse_lower is not None else normalized
     matches = []
     for rule in sorted(rules, key=lambda pair: len(pair[source]), reverse=True):
         prefix = rule[source].replace('\\', '/').rstrip('/')
-        compared_prefix = prefix.lower() if reverse and _LOCAL_WINDOWS_PATHS else prefix
+        compared_prefix = prefix.lower() if reverse_lower is not None else prefix
         destination = rule[target]
         suffix = sa.func.substr(normalized, len(prefix) + 1)
         mapped = sa.literal(destination.rstrip('/\\')).concat(suffix)
@@ -583,25 +591,28 @@ def arr_claims_stored_path(path, target):
     """
     clauses = defaultdict(list)
     owners = ArrOwners.load(target)
+    lower = _windows_sql_lower(target)
     for instance in owners.instances.values():
         mapper = owners.mapper(instance.id)
         if mapper is None:
             continue
         model, _ = ArrOwners._columns(TABLE_OF_KIND[instance.kind])
         claim = model.path == path
-        if mapper.sports and _LOCAL_WINDOWS_PATHS:
-            claim = _sports_sql_path_key(model.path) == _sports_sql_path_key(path)
+        if mapper.sports and lower is not None:
+            claim = _sports_sql_path_key(model.path, lower) == _sports_sql_path_key(path, lower)
         if mapper.rules:
-            mapped_path = _mapped_sports_sql_path if mapper.sports else _mapped_sql_path
-            candidates = [mapped_path(path, [rule], reverse=True) for rule in mapper.rules]
             if mapper.sports:
-                arr_path = _sports_sql_path_key(model.path)
-                alternatives = (arr_path == _sports_sql_path_key(candidate) for candidate in candidates)
+                arr_path = _sports_sql_path_key(model.path, lower)
+                candidates = [_mapped_sports_sql_path(path, [rule], reverse=True, reverse_lower=lower)
+                              for rule in mapper.rules]
+                alternatives = (arr_path == _sports_sql_path_key(candidate, lower) for candidate in candidates)
+                mapped = _mapped_sports_sql_path(model.path, mapper.rules)
+                matches_local = (_sports_sql_path_key(mapped, lower) == _sports_sql_path_key(path, lower)
+                                 if lower is not None else mapped == path)
             else:
+                candidates = [_mapped_sql_path(path, [rule], reverse=True) for rule in mapper.rules]
                 alternatives = (model.path == candidate for candidate in candidates)
-            mapped = mapped_path(model.path, mapper.rules)
-            matches_local = (_sports_sql_path_key(mapped) == _sports_sql_path_key(path)
-                             if mapper.sports and _LOCAL_WINDOWS_PATHS else mapped == path)
+                matches_local = _mapped_sql_path(model.path, mapper.rules) == path
             claim = sa.and_(sa.or_(claim, *alternatives), matches_local)
         clauses[model].append(sa.and_(model.arr_instance_id == instance.id, claim))
     return sa.or_(sa.false(), *(sa.select(model.id).where(sa.or_(*conditions)).correlate(path.table).exists()

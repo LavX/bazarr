@@ -3,7 +3,6 @@
 import ast
 import json
 import os
-from dataclasses import replace
 from datetime import datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -234,13 +233,15 @@ def test_wanted_refreshes_stale_shadows_and_retains_mount_shadows(client, arr_li
     assert client.get('/api/badges?sources=1', headers=HEADERS).get_json()['movies'] == 6
 
 
-@pytest.mark.parametrize('windows,local,stored', [
-    (True, 'C:/Media', r'c:\MEDIA\race.mkv'),
-    (False, '/media', '/media/Race.mkv'),
-    (False, '/media', '/Media/race.mkv'),
-    (False, '/media', r'/media\Race.mkv'),
+@pytest.mark.parametrize('windows,local,stored,claimed', [
+    (True, 'C:/Media', r'c:\MEDIA\épreuve.mkv', True),
+    (True, 'C:/Vidéos', r'c:\VIDÉOS\Épreuve.mkv', True),
+    (False, '/media', '/media/Épreuve.mkv', True),
+    (False, '/media', '/media/épreuve.mkv', False),
+    (False, '/media', r'/media\Épreuve.mkv', False),
 ])
-def test_sportarr_claim_matches_the_local_filesystem(client, arr_library, tmp_path, monkeypatch, windows, local, stored):
+def test_sportarr_claim_matches_the_local_filesystem(
+        client, arr_library, tmp_path, monkeypatch, windows, local, stored, claimed):
     from app.database import TableArrInstances, TableSportsEvents
     from media_sources import identity
 
@@ -250,9 +251,8 @@ def test_sportarr_claim_matches_the_local_filesystem(client, arr_library, tmp_pa
     arr_library.execute(sa.update(TableArrInstances).where(TableArrInstances.id == 3).values(
         path_mappings=json.dumps([[r'D:\Races', local]])))
     arr_library.execute(sa.update(TableSportsEvents).where(TableSportsEvents.id == 1).values(
-        path='D:/Races/Race.mkv'))
+        path='D:/Races/Épreuve.mkv'))
 
-    claimed = windows or stored == '/media/Race.mkv'
     assert (identity.ArrOwners.load().path_stage(stored) is not None) == claimed
     result = client.get('/api/movies/wanted?sources=1', headers=HEADERS).get_json()
     assert [row['id'] for row in result['data'] if row['origin'] == 'source'] == ([] if claimed else [item])
@@ -495,36 +495,94 @@ def test_sports_badge_excludes_library_rows_until_the_sports_wanted_list_support
     assert client.get('/api/badges?sources=1', headers=HEADERS).data == client.get('/api/badges', headers=HEADERS).data
 
 
+def test_folder_only_badge_does_not_reuse_legacy_arr_count(client, arr_library, tmp_path):
+    from app.database import TableArrInstances
+
+    source, library, root = add_source(arr_library, tmp_path, profile_id=1)
+    arr_library.execute(sa.update(TableArrInstances).where(TableArrInstances.id == 2).values(enabled=0, is_default=0))
+    legacy = client.get('/api/badges', headers=HEADERS)
+    assert legacy.get_json()['movies'] == 1
+    assert client.get('/api/badges?sources=1', headers=HEADERS).data == legacy.data
+
+    add_item(arr_library, source, library, root / 'Movie.mkv', missing_subtitles="['en', 'hu']")
+    combined = client.get('/api/badges?sources=1', headers=HEADERS).get_json()
+    assert combined['movies'] == combined['source_movies'] == 2
+    assert client.get('/api/badges', headers=HEADERS).data == legacy.data
+
+
 def test_runtime_keeps_manual_and_wanted_translation_reservations_separate(world, isolated_jobs, monkeypatch):
+    import pysubs2
+
     from app import database
     from app.config import settings
-    from media_sources.analysis import local_content_stamp
+    from app.database import TableArrInstances, TableLanguagesProfiles, TableMovies, update_profile_id_list
+    from media_sources import repository, wanted
     from subtitles.tools.translate import main, runtime
+    from subtitles.tools.translate.runtime import gate, service as runtime_service
     from subtitles.tools.translate.runtime.jobs import TranslationJobs, target_key
+    from translator_dispatch_helpers import Env
 
+    monkeypatch.setattr(wanted, 'jobs_queue', isolated_jobs)
     monkeypatch.setattr(settings.translator, 'runtime_v2', True)
     monkeypatch.setattr(database, 'engine', world.db.get_bind())
     monkeypatch.setattr(runtime, '_tables_present', False)
     monkeypatch.setattr(runtime, '_absent_until', 0.0)
     assert runtime.runtime_v2_enabled()
+    monkeypatch.setattr(settings.translator, 'min_source_wait_minutes', 0)
+    monkeypatch.setattr(settings.translator, 'min_source_score', 0)
+    profile = [
+        {'id': 1, 'language': 'en', 'forced': 'False', 'hi': 'False'},
+        {'id': 2, 'language': 'hu', 'forced': 'False', 'hi': 'False', 'translate_from': 'en'},
+    ]
+    world.db.execute(sa.update(TableLanguagesProfiles).values(items=json.dumps(profile)))
+    update_profile_id_list.invalidate()
     context = pipeline._movie(world)
     subtitle = Path(context.path).with_suffix('.en.srt')
-    subtitle.write_bytes(pipeline.CONTENT)
-    wanted_context = replace(context, wanted_file_stamp=local_content_stamp(context.path))
+    pipeline._download(monkeypatch)
+    env = Env(world.db, world.tmp_path)
+    try:
+        env.ai_engine()
+        monkeypatch.setattr(gate, 'translation_gate', lambda: gate.evaluate(env.store, env.holds, env.workers))
+        monkeypatch.setattr(runtime_service, 'Dispatcher', env.dispatcher)
 
-    def queue(source):
-        return main.translate_subtitles_file(context.path, str(subtitle), 'en', 'hu', False, False, 'movies',
-                                             None, None, None, None, source=source)
+        wanted.wanted_search_missing_subtitles_sources(kind='movie')
+        assert isolated_jobs._run_job(isolated_jobs._reserve_next_job())
+        (automatic,) = isolated_jobs.jobs_pending_queue
+        assert automatic.kwargs['source'].wanted_file_stamp is not None
+        assert automatic.kwargs['source_srt_file'] == str(subtitle)
+        assert main.translate_subtitles_file(**automatic.kwargs) == automatic.job_id
+        manual = main.translate_subtitles_file(context.path, str(subtitle), 'en', 'hu', False, False, 'movies',
+                                               None, None, None, None, source=context)
+        assert manual is not None and manual != automatic.job_id
+        assert [job.job_id for job in isolated_jobs.jobs_pending_queue] == [automatic.job_id, manual]
+        key = main._job_source_key(context.path, subtitle, None, automatic.kwargs['source'])
+        manual_key = main._job_source_key(context.path, subtitle, None, context)
+        target = target_key('hu', False, False)
+        ledger = TranslationJobs(world.db)
+        assert ledger.active_for(key, target).queue_job_id == automatic.job_id
 
-    manual_id, wanted_id = queue(context), queue(wanted_context)
-    assert manual_id and wanted_id and manual_id != wanted_id
-    assert queue(wanted_context) == wanted_id
-    assert queue(context) == manual_id
-    assert [job.kwargs['source'] for job in isolated_jobs.jobs_pending_queue] == [context, wanted_context]
-    ledger = TranslationJobs(world.db)
-    for source, queue_id in ((context, manual_id), (wanted_context, wanted_id)):
-        key = main._job_source_key(context.path, subtitle, None, source)
-        assert ledger.active_for(key, target_key('hu', False, False)).queue_job_id == queue_id
+        save = pysubs2.SSAFile.save
+
+        def save_and_claim(subtitles, *args, **kwargs):
+            save(subtitles, *args, **kwargs)
+            monkeypatch.setattr(settings.general, 'use_radarr', True)
+            world.db.execute(sa.insert(TableArrInstances).values(
+                id=42, kind='radarr', name='Cinema', stable_key='cinema', port=9800, enabled=1, path_mappings='[]'))
+            world.db.execute(sa.insert(TableMovies).values(
+                id=73, arr_instance_id=42, radarrId=9000, title='Film', path=context.path, tmdbId='73'))
+
+        monkeypatch.setattr(pysubs2.SSAFile, 'save', save_and_claim)
+        assert isolated_jobs._reserve_next_job() is automatic
+        assert isolated_jobs._run_job(automatic)
+        (worker_request,) = env.requests()
+        assert worker_request['request']['media']['title'] == 'Film'
+        assert repository.get_item(context.item_id).arr_shadow == 1
+        assert ledger.active_for(key, target) is None
+        assert ledger.active_for(manual_key, target).queue_job_id == manual
+        assert not Path(context.path).with_suffix('.hu.srt').exists()
+        assert world.db.execute(sa.select(repository.History.c.action)).scalars().all() == [1]
+    finally:
+        env.close()
 
 
 @pytest.mark.parametrize('change', ['translator unavailable', 'arr claimed', 'arr claimed during translation'])
