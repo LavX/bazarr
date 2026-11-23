@@ -433,9 +433,11 @@ it("excludes a confirmed release without deleting or expiring the current subtit
     name: "Exclude release from search?",
   });
   expect(writes).toEqual([]);
-  expect(
-    within(confirm).getByText(/without deleting a subtitle file/i),
-  ).toBeVisible();
+  await waitFor(() =>
+    expect(
+      within(confirm).getByText(/without deleting a subtitle file/i),
+    ).toBeVisible(),
+  );
   await user.click(
     within(confirm).getByRole("button", { name: "Exclude release" }),
   );
