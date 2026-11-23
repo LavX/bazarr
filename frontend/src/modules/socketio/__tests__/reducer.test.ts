@@ -374,5 +374,8 @@ describe("sports reducer", () => {
     expect(queryClientMock.invalidateQueries).toHaveBeenCalledWith({
       queryKey: [QueryKeys.System, QueryKeys.Languages, "audio", true],
     });
+    expect(queryClientMock.invalidateQueries).toHaveBeenCalledWith({
+      queryKey: [QueryKeys.System, QueryKeys.Languages, "audio", false],
+    });
   });
 });

@@ -16,6 +16,7 @@ FileStat = namedtuple('FileStat', 'dev ino size mtime_ns')
 
 # The rungs of "same file", in the order they are tried. They are also what a shadow records.
 RUNG_PATH, RUNG_INODE, RUNG_ATTRIBUTES = 'path', 'inode', 'attributes'
+_LOCAL_WINDOWS_PATHS = os.name == 'nt'
 
 
 def unsigned(value):
@@ -375,7 +376,8 @@ class _Mapper:
         from utilities import path_mappings as module
 
         if self.sports:
-            mapped = (module.apply_sports_mapping(path, [rule], reverse=True) for rule in self.rules)
+            mapped = (module.apply_sports_mapping(path, [rule], reverse=True, ignore_case=_LOCAL_WINDOWS_PATHS)
+                      for rule in self.rules)
         else:
             mapped = (module._apply_mapping(path, [rule], reverse=True) for rule in self.rules)
         return {path, *mapped}
@@ -508,14 +510,20 @@ class ArrOwners:
             model, file_id = self._columns(table)
             arr_paths = {mapped for candidate in candidates for mapped in mapper.candidate_paths(candidate)}
             path_column = model.path
+            local_candidates = candidates
             if mapper.sports:
-                path_column = sa.func.replace(path_column, '\\', '/')
-                arr_paths = {candidate.replace('\\', '/') for candidate in arr_paths}
+                path_column = _sports_sql_path_key(path_column)
+                arr_paths = {_sports_path_key(candidate) for candidate in arr_paths}
+                if _LOCAL_WINDOWS_PATHS:
+                    local_candidates = {_sports_path_key(candidate) for candidate in candidates}
             for row in session.execute(sa.select(model.id, model.path, model.file_size, file_id)
                                        .where(model.arr_instance_id == instance.id, path_column.in_(arr_paths))
                                        .order_by(model.id)).all():
                 arr_row = self._arr_row(instance, table, row[0], row[1], row[2], row[3])
-                if arr_row is not None and arr_row.path in candidates:
+                if arr_row is None:
+                    continue
+                local_path = _sports_path_key(arr_row.path) if mapper.sports and _LOCAL_WINDOWS_PATHS else arr_row.path
+                if local_path in local_candidates:
                     return arr_row, RUNG_PATH
         return None
 
@@ -538,20 +546,32 @@ def _mapped_sql_path(path, rules, *, reverse=False):
     return sa.case(*matches, else_=path) if matches else path
 
 
+def _sports_path_key(path):
+    normalized = path.replace('\\', '/')
+    return normalized.lower() if _LOCAL_WINDOWS_PATHS else normalized
+
+
+def _sports_sql_path_key(path):
+    normalized = sa.func.replace(path, '\\', '/')
+    return sa.func.lower(normalized) if _LOCAL_WINDOWS_PATHS else normalized
+
+
 def _mapped_sports_sql_path(path, rules, *, reverse=False):
     source, target = (1, 0) if reverse else (0, 1)
     normalized = sa.func.replace(path, '\\', '/')
+    compared = sa.func.lower(normalized) if reverse and _LOCAL_WINDOWS_PATHS else normalized
     matches = []
     for rule in sorted(rules, key=lambda pair: len(pair[source]), reverse=True):
         prefix = rule[source].replace('\\', '/').rstrip('/')
+        compared_prefix = prefix.lower() if reverse and _LOCAL_WINDOWS_PATHS else prefix
         destination = rule[target]
         suffix = sa.func.substr(normalized, len(prefix) + 1)
         mapped = sa.literal(destination.rstrip('/\\')).concat(suffix)
         windows_drive = destination[:1].isascii() and destination[:1].isalpha() and destination[1:3] == ':\\'
         if destination.startswith('\\\\') or windows_drive:
             mapped = sa.func.replace(mapped, '/', '\\')
-        matches.extend(((sa.func.rtrim(normalized, '/') == prefix, destination),
-                        (sa.func.substr(normalized, 1, len(prefix) + 1) == prefix + '/', mapped)))
+        matches.extend(((sa.func.rtrim(compared, '/') == compared_prefix, destination),
+                        (sa.func.substr(compared, 1, len(prefix) + 1) == compared_prefix + '/', mapped)))
     return sa.case(*matches, else_=path) if matches else path
 
 
@@ -569,15 +589,20 @@ def arr_claims_stored_path(path, target):
             continue
         model, _ = ArrOwners._columns(TABLE_OF_KIND[instance.kind])
         claim = model.path == path
+        if mapper.sports and _LOCAL_WINDOWS_PATHS:
+            claim = _sports_sql_path_key(model.path) == _sports_sql_path_key(path)
         if mapper.rules:
             mapped_path = _mapped_sports_sql_path if mapper.sports else _mapped_sql_path
             candidates = [mapped_path(path, [rule], reverse=True) for rule in mapper.rules]
             if mapper.sports:
-                arr_path = sa.func.replace(model.path, '\\', '/')
-                alternatives = (arr_path == sa.func.replace(candidate, '\\', '/') for candidate in candidates)
+                arr_path = _sports_sql_path_key(model.path)
+                alternatives = (arr_path == _sports_sql_path_key(candidate) for candidate in candidates)
             else:
                 alternatives = (model.path == candidate for candidate in candidates)
-            claim = sa.and_(sa.or_(claim, *alternatives), mapped_path(model.path, mapper.rules) == path)
+            mapped = mapped_path(model.path, mapper.rules)
+            matches_local = (_sports_sql_path_key(mapped) == _sports_sql_path_key(path)
+                             if mapper.sports and _LOCAL_WINDOWS_PATHS else mapped == path)
+            claim = sa.and_(sa.or_(claim, *alternatives), matches_local)
         clauses[model].append(sa.and_(model.arr_instance_id == instance.id, claim))
     return sa.or_(sa.false(), *(sa.select(model.id).where(sa.or_(*conditions)).correlate(path.table).exists()
                                 for model, conditions in clauses.items()))

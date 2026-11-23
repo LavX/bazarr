@@ -94,6 +94,9 @@ export function createDefaultReducer(): SocketIO.Reducer[] {
       any: () => {
         void queryClient.invalidateQueries({ queryKey: [QueryKeys.Sports] });
         invalidateSourceWanted();
+        void queryClient.invalidateQueries({
+          queryKey: [QueryKeys.System, QueryKeys.Languages, "audio", false],
+        });
         invalidateHiddenTracks("sports");
       },
     },

@@ -3,6 +3,7 @@
 import ast
 import json
 import os
+from dataclasses import replace
 from datetime import datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -231,6 +232,30 @@ def test_wanted_refreshes_stale_shadows_and_retains_mount_shadows(client, arr_li
     rows = client.get('/api/movies/wanted?sources=1', headers=HEADERS).get_json()['data']
     assert {row['title'] for row in rows if row['origin'] == 'source'} == {'gone', 'owner gone'}
     assert client.get('/api/badges?sources=1', headers=HEADERS).get_json()['movies'] == 6
+
+
+@pytest.mark.parametrize('windows,local,stored', [
+    (True, 'C:/Media', r'c:\MEDIA\race.mkv'),
+    (False, '/media', '/media/Race.mkv'),
+    (False, '/media', '/Media/race.mkv'),
+    (False, '/media', r'/media\Race.mkv'),
+])
+def test_sportarr_claim_matches_the_local_filesystem(client, arr_library, tmp_path, monkeypatch, windows, local, stored):
+    from app.database import TableArrInstances, TableSportsEvents
+    from media_sources import identity
+
+    monkeypatch.setattr(identity, '_LOCAL_WINDOWS_PATHS', windows)
+    source, library, _ = add_source(arr_library, tmp_path, profile_id=1)
+    item = add_item(arr_library, source, library, stored, missing_subtitles="['en']")
+    arr_library.execute(sa.update(TableArrInstances).where(TableArrInstances.id == 3).values(
+        path_mappings=json.dumps([[r'D:\Races', local]])))
+    arr_library.execute(sa.update(TableSportsEvents).where(TableSportsEvents.id == 1).values(
+        path='D:/Races/Race.mkv'))
+
+    claimed = windows or stored == '/media/Race.mkv'
+    assert (identity.ArrOwners.load().path_stage(stored) is not None) == claimed
+    result = client.get('/api/movies/wanted?sources=1', headers=HEADERS).get_json()
+    assert [row['id'] for row in result['data'] if row['origin'] == 'source'] == ([] if claimed else [item])
 
 
 @pytest.mark.parametrize('state', ['ready', 'waiting', 'recent failure', 'translated', 'moved translation', 'low score'])
@@ -470,7 +495,39 @@ def test_sports_badge_excludes_library_rows_until_the_sports_wanted_list_support
     assert client.get('/api/badges?sources=1', headers=HEADERS).data == client.get('/api/badges', headers=HEADERS).data
 
 
-@pytest.mark.parametrize('change', ['translator unavailable', 'arr claimed'])
+def test_runtime_keeps_manual_and_wanted_translation_reservations_separate(world, isolated_jobs, monkeypatch):
+    from app import database
+    from app.config import settings
+    from media_sources.analysis import local_content_stamp
+    from subtitles.tools.translate import main, runtime
+    from subtitles.tools.translate.runtime.jobs import TranslationJobs, target_key
+
+    monkeypatch.setattr(settings.translator, 'runtime_v2', True)
+    monkeypatch.setattr(database, 'engine', world.db.get_bind())
+    monkeypatch.setattr(runtime, '_tables_present', False)
+    monkeypatch.setattr(runtime, '_absent_until', 0.0)
+    assert runtime.runtime_v2_enabled()
+    context = pipeline._movie(world)
+    subtitle = Path(context.path).with_suffix('.en.srt')
+    subtitle.write_bytes(pipeline.CONTENT)
+    wanted_context = replace(context, wanted_file_stamp=local_content_stamp(context.path))
+
+    def queue(source):
+        return main.translate_subtitles_file(context.path, str(subtitle), 'en', 'hu', False, False, 'movies',
+                                             None, None, None, None, source=source)
+
+    manual_id, wanted_id = queue(context), queue(wanted_context)
+    assert manual_id and wanted_id and manual_id != wanted_id
+    assert queue(wanted_context) == wanted_id
+    assert queue(context) == manual_id
+    assert [job.kwargs['source'] for job in isolated_jobs.jobs_pending_queue] == [context, wanted_context]
+    ledger = TranslationJobs(world.db)
+    for source, queue_id in ((context, manual_id), (wanted_context, wanted_id)):
+        key = main._job_source_key(context.path, subtitle, None, source)
+        assert ledger.active_for(key, target_key('hu', False, False)).queue_job_id == queue_id
+
+
+@pytest.mark.parametrize('change', ['translator unavailable', 'arr claimed', 'arr claimed during translation'])
 def test_translation_after_a_wanted_download_keeps_its_publication_scope(world, isolated_jobs, monkeypatch, change):
     from app.config import settings
     from app.database import TableArrInstances, TableLanguagesProfiles, TableMovies, update_profile_id_list
@@ -492,7 +549,16 @@ def test_translation_after_a_wanted_download_keeps_its_publication_scope(world, 
     media = Path(context.path)
     pipeline._download(monkeypatch)
     engine = Mock(side_effect=AssertionError('the translator should not run'))
-    monkeypatch.setattr(main.TranslatorFactory, 'create_translator', engine)
+    during_translation = change == 'arr claimed during translation'
+    if not during_translation:
+        monkeypatch.setattr(main.TranslatorFactory, 'create_translator', engine)
+
+    def claim_media():
+        monkeypatch.setattr(settings.general, 'use_radarr', True)
+        world.db.execute(sa.insert(TableArrInstances).values(
+            id=42, kind='radarr', name='Cinema', stable_key='cinema', port=9800, enabled=1, path_mappings='[]'))
+        world.db.execute(sa.insert(TableMovies).values(
+            id=73, arr_instance_id=42, radarrId=9000, title='Film', path=context.path, tmdbId='73'))
 
     wanted.wanted_search_missing_subtitles_sources(kind='movie')
     assert isolated_jobs._run_job(isolated_jobs._reserve_next_job())
@@ -501,17 +567,32 @@ def test_translation_after_a_wanted_download_keeps_its_publication_scope(world, 
     assert translation.kwargs['source'].wanted_file_stamp is not None
 
     if change == 'arr claimed':
-        monkeypatch.setattr(settings.general, 'use_radarr', True)
-        world.db.execute(sa.insert(TableArrInstances).values(
-            id=42, kind='radarr', name='Cinema', stable_key='cinema', port=9800, enabled=1, path_mappings='[]'))
-        world.db.execute(sa.insert(TableMovies).values(
-            id=73, arr_instance_id=42, radarrId=9000, title='Film', path=context.path, tmdbId='73'))
+        claim_media()
+    elif during_translation:
+        from subtitles.tools.translate.services import google_translator
+
+        transport = Mock()
+        transport.return_value.translate.return_value = 'Translated cue'
+        monkeypatch.setattr(google_translator, 'GoogleTranslator', transport)
+        monkeypatch.setattr(google_translator, 'jobs_queue', isolated_jobs)
+        save = google_translator.pysubs2.SSAFile.save
+
+        def save_and_claim(subtitles, *args, **kwargs):
+            save(subtitles, *args, **kwargs)
+            claim_media()
+
+        monkeypatch.setattr(google_translator.pysubs2.SSAFile, 'save', save_and_claim)
     else:
         monkeypatch.setattr(main, 'translation_available', lambda: SimpleNamespace(available=False))
     assert isolated_jobs._run_job(isolated_jobs._reserve_next_job())
-    engine.assert_not_called()
+    if during_translation:
+        transport.return_value.translate.assert_called()
+    else:
+        engine.assert_not_called()
     assert not media.with_suffix('.hu.srt').exists()
-    if change == 'arr claimed':
+    assert media.with_suffix('.en.srt').exists()
+    assert world.db.execute(sa.select(repository.History.c.action)).scalars().all() == [1]
+    if change != 'translator unavailable':
         assert repository.get_item(context.item_id).arr_shadow == 1
         assert not isolated_jobs.jobs_pending_queue
     else:

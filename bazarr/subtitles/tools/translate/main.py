@@ -97,9 +97,13 @@ def _job_source_key(video_path, source_srt_file, embedded_source, source=None):
     """What the runtime keys a translation job by as its source: the file, or the embedded track it is read from."""
     if source is not None:
         stamp = source.created_at.isoformat() if source.created_at is not None else ''
+        namespace = 'source'
+        if source.wanted_file_stamp is not None:
+            # Wanted jobs must retain their publication and fallback rules when the same subtitle is queued manually.
+            namespace = 'source-wanted:' + ':'.join(str(value) for value in source.wanted_file_stamp)
         # Normalize the filesystem component before namespacing it. The queue, ledger and dispatcher
         # must look up the same composite key even when its custom subtitle folder contains "..".
-        return f"source:{source.item_id}:{stamp}:{normpath(str(source_srt_file))}"
+        return f"{namespace}:{source.item_id}:{stamp}:{normpath(str(source_srt_file))}"
     if embedded_source:
         return (f"{video_path}#embedded:{embedded_source.get('language') or ''}:"
                 f"{'hi' if embedded_source.get('hi') else ''}:{'forced' if embedded_source.get('forced') else ''}")

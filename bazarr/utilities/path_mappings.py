@@ -80,17 +80,19 @@ def read_sports_mappings(value, inherit=True):
     return mappings or (global_sports_mappings() if inherit else [])
 
 
-def apply_sports_mapping(path, mapping, reverse=False):
+def apply_sports_mapping(path, mapping, reverse=False, *, ignore_case=False):
     if path is None:
         return None
     normalized = path.replace('\\', '/')
+    compared = normalized.lower() if ignore_case else normalized
     source, target = (1, 0) if reverse else (0, 1)
     # Most-specific prefix wins. An interior filename substring never matches.
     for pair in sorted(validate_sports_mappings(mapping), key=lambda pair: len(pair[source]), reverse=True):
         prefix = pair[source].replace('\\', '/').rstrip('/')
-        if normalized.rstrip('/') == prefix:
+        compared_prefix = prefix.lower() if ignore_case else prefix
+        if compared.rstrip('/') == compared_prefix:
             return pair[target]
-        if normalized == prefix or normalized.startswith(prefix + '/'):
+        if compared.startswith(compared_prefix + '/'):
             result = pair[target].rstrip('/\\') + normalized[len(prefix):]
             if pair[target].startswith('\\\\') or re.match(r'^[a-zA-Z]:\\', pair[target]):
                 return result.replace('/', '\\')
