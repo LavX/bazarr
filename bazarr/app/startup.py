@@ -23,13 +23,21 @@ def prepare_database_and_plugins(app) -> bool:
         logger.exception("Unable to start the translation runtime after the migrations")
     upgrade_languages_profile_values()
     fix_languages_profiles_with_duplicate_ids()
+    pending_google_release = None
     try:
         if getattr(settings.translator, "runtime_v2", False) is True:
-            from subtitles.tools.translate.runtime.startup import start_google_from_seed
-            start_google_from_seed()
+            from subtitles.tools.translate.runtime.startup import pending_google_seed_release, start_google_from_seed
+            if not start_google_from_seed():
+                pending_google_release = pending_google_seed_release()
     except Exception:  # pragma: no cover - the engine must not prevent startup
         logger.exception("Unable to start the seeded Google Translate engine")
     registration_ok = start_after_migrations()
+    if pending_google_release is not None:
+        try:
+            # The boot activation pass can finish an update deferred by the first hook.
+            start_google_from_seed(activated_release=pending_google_release)
+        except Exception:  # pragma: no cover - the engine must not prevent startup
+            logger.exception("Unable to select the activated seeded Google Translate engine")
     try:
         # A removal staged in the last run is finished by now: clear what the removed translators left.
         if getattr(settings.translator, "runtime_v2", False) is True:

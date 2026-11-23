@@ -3902,12 +3902,15 @@ def _stage_validated(
     catalog_list: str | None = None,
     ready_release: seed.Release | None = None,
     expected_installation: Any = _ANY_INSTALLATION,
+    defer_active_data_copy: bool = False,
 ) -> dict[str, Any]:
     """Shared install core: prepare the release, smoke-test, record.
 
     A verified runtime pair can be staged directly. A seeded release stays
     outside the writable environment registry and the list of files to clean up.
     When boot supplies an expected installation, a concurrent change wins.
+    Boot can defer the active data copy and its smoke test until activation has
+    confirmed that previous workers have stopped.
 
     ``bundle_stager(validated, deadline) -> Path`` decides where the bundle comes
     from (catalog fetch vs already-extracted local files). ``install_timeout``, when
@@ -3927,6 +3930,7 @@ def _stage_validated(
     data_key = None
     data_fingerprint = None
     data_from_active = False
+    data_deferred = False
     state = load_state()
     # Every route that installs or updates ends here, a local package included, so a revoked release is
     # refused whichever way it was asked for.
@@ -3995,17 +3999,20 @@ def _stage_validated(
                     )
                 smoke_timeout = min(10.0, left)
             if datadir.declared(validated.raw):
-                data_key = uuid.uuid4().hex
-                data_path = datadir.release_path(provider_hub_dir(), validated.provider_id, data_key)
                 source = _stage_data_source(validated.provider_id, existing or {},
                                             (state.get("kept_data") or {}).get(validated.provider_id),
                                             source_id, validated.kind, origin, validated.raw)
                 data_from_active = source is not None and source == _active_data_path(
                     validated.provider_id, existing or {})
-                data_fingerprint = datadir.copy_folder(source, data_path)
-            get_kind(validated.kind).smoke_test(
-                validated, bundle_path, staged_python_path, timeout=smoke_timeout,
-                **({"data_dir": data_path} if data_path is not None else {}))
+                data_deferred = defer_active_data_copy and data_from_active
+                if not data_deferred:
+                    data_key = uuid.uuid4().hex
+                    data_path = datadir.release_path(provider_hub_dir(), validated.provider_id, data_key)
+                    data_fingerprint = datadir.copy_folder(source, data_path)
+            if not data_deferred:
+                get_kind(validated.kind).smoke_test(
+                    validated, bundle_path, staged_python_path, timeout=smoke_timeout,
+                    **({"data_dir": data_path} if data_path is not None else {}))
             step("Recording the installation")
         except ProviderHubStopped:
             if data_path is not None:
@@ -4068,6 +4075,7 @@ def _stage_validated(
             if data_key:
                 installation["staged_data_key"] = data_key
                 installation["staged_data_fingerprint"] = data_fingerprint
+            if data_key or data_deferred:
                 installation["staged_data_from_active"] = data_from_active
             plugin = parse_plugin_manifest(validated.raw) if validated.raw.get("schema_version") == 2 else None
             if plugin is not None:
@@ -4316,6 +4324,7 @@ def activate_google_seed() -> bool:
     _stage_validated(
         chosen.manifest, True, "catalog", OFFICIAL_CATALOG_SOURCE_ID, None,
         catalog_list=CATALOG_LIST_PLUGINS, ready_release=chosen, expected_installation=existing,
+        defer_active_data_copy=True,
     )
     with datadir.release_lock:
         staged = (load_state().get("installations") or {}).get(plugin_id)
@@ -5223,7 +5232,8 @@ def _prepare_activation_data(plugin_id, row, active_data, files) -> tuple[str | 
     if path.is_symlink() or path.is_junction():
         raise datadir.DataFolderError("The staged release data folder is unsafe")
     if not path.exists():
-        # An older staged release or one restored from backup has no staged data folder.
+        # Boot can stage a seed before it is safe to copy its data. An older
+        # staged release or one restored from backup can also lack the folder.
         carry_active = row.get("staged_data_from_active", True) and not row.get("delete_release_data")
         datadir.copy_folder(active_data if carry_active else None, path)
     elif row.get("staged_data_from_active") and datadir.fingerprint(active_data) != row.get("staged_data_fingerprint"):

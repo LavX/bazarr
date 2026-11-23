@@ -1769,29 +1769,51 @@ def test_seeded_translator_update_waits_for_previous_release_data_writers(
     root = hub.provider_hub_dir()
     _no_network(monkeypatch, hub)
     _build_runtime_snapshot(tmp_path / "old-image", monkeypatch, keys, google_fields={"permissions": ["data_dir"]})
-    start, _ = google_startup
+    start, store = google_startup
     assert start()
+    selection = store.pointers()
     active = hub.load_state()["installations"][plugin_id]
     old_data = datadir.release_path(root, plugin_id, active["active_data_key"])
-    (old_data / "state.txt").write_text("before the update")
+    old_file = old_data / "state.txt"
+    old_file.write_text("before the update")
 
     new_image = _build_runtime_snapshot(tmp_path / "new-image", monkeypatch, keys,
                                         google_fields={"version": "1.1.0", "permissions": ["data_dir"]})
     monkeypatch.setattr(hub, "_previous_workers_stopped", lambda: False)
-    assert not start()
+    listdir = os.listdir
+    old_stat = old_data.stat()
+    renamed = old_file.with_name("renamed.txt")
+
+    def list_while_previous_worker_writes(directory):
+        names = listdir(directory)
+        copying_old_data = (os.path.samestat(os.fstat(directory), old_stat) if isinstance(directory, int)
+                            else Path(directory) == old_data)
+        if copying_old_data:
+            # A writer can rename the file after listing but before the copy stats it.
+            old_file.rename(renamed)
+        return names
+
+    with monkeypatch.context() as race:
+        race.setattr(datadir.os, "listdir", list_while_previous_worker_writes)
+        assert not start()
+        assert hub.activate_staged_installations() == []
+
     staged = hub.load_state()["installations"][plugin_id]
     assert staged["active_version"] == "1.0.0" and staged["staged_version"] == "1.1.0"
     assert staged["active_data_key"] == old_data.name
     assert staged["data_worker_cleanup_pending"] is True
+    assert not staged.get("staged_data_key")
 
-    (old_data / "state.txt").write_text("final write")
+    old_file.rename(renamed)
+    renamed.write_text("final write")
     monkeypatch.setattr(hub, "_previous_workers_stopped", lambda: True)
     assert hub.activate_staged_installations() == [plugin_id]
     active = hub.load_state()["installations"][plugin_id]
     assert active["active_version"] == "1.1.0" and Path(active["active_path"]).is_relative_to(new_image)
     current_data = datadir.release_path(root, plugin_id, active["active_data_key"])
     assert current_data != old_data
-    assert (current_data / "state.txt").read_text() == "final write"
+    assert (current_data / renamed.name).read_text() == "final write"
+    assert store.pointers() == selection
 
 
 def test_failed_seed_smoke_keeps_the_data_of_a_concurrently_staged_release(
@@ -1950,3 +1972,57 @@ def test_refused_first_activation_preserves_owner_settings_for_a_retired_provide
     assert settings.general.disabled_providers == ([] if enabled else [provider_id])
     assert settings.general.provider_priorities == {provider_id: 70}
     assert getattr(settings, provider_id) == saved_section and provider_id not in removed
+
+
+@pytest.mark.parametrize("boot", ["same", "next"])
+def test_deferred_google_activation_finishes_default_selection_on_that_boot(
+    boot, tmp_path, monkeypatch, keys, register_seed_translator, hub, google_startup,
+):
+    import sys
+    from app.config import settings
+    from app.startup import prepare_database_and_plugins
+    from provider_hub import startup as hub_startup
+    from provider_hub.state import mutate_state
+    from subtitles.tools.translate import runtime
+
+    _no_network(monkeypatch, hub)
+    _build_runtime_snapshot(tmp_path / "old-image", monkeypatch, keys,
+                            google_fields={"permissions": ["data_dir"]})
+    start, store = google_startup
+    assert start()
+    store.set_engine(None)
+    mutate_state(lambda state: state.pop("google_seed_selected", None))
+    new_image = _build_runtime_snapshot(tmp_path / "new-image", monkeypatch, keys,
+                                        google_fields={"version": "1.1.0", "permissions": ["data_dir"]})
+    workers_ready = [False]
+    monkeypatch.setattr(hub, "_previous_workers_stopped", lambda: workers_ready[0])
+    database = sys.modules["app.database"]
+    monkeypatch.setattr(database, "migrate_db", lambda _app: None, raising=False)
+    monkeypatch.setattr(database, "upgrade_languages_profile_values", lambda: None, raising=False)
+    monkeypatch.setattr(database, "fix_languages_profiles_with_duplicate_ids", lambda: None, raising=False)
+    monkeypatch.setattr(runtime, "run_startup_tasks", lambda: True)
+    monkeypatch.setattr("app.config.write_config", lambda: True)
+    monkeypatch.setattr(settings.general, "enabled_providers", [])
+    monkeypatch.setattr(settings.general, "disabled_providers", [])
+    real_start = hub_startup.start_after_migrations
+
+    def finish_boot():
+        workers_ready[0] = True
+        return real_start()
+
+    if boot == "same":
+        monkeypatch.setattr(hub_startup, "start_after_migrations", finish_boot)
+    else:
+        # The first full boot stays deferred, with no migration marker or pointer.
+        assert prepare_database_and_plugins(object())
+        assert hub.load_state()["installations"]["google_translate"]["state"] == "staged"
+        assert store.pointers() == (None, None)
+        assert not hub.load_state().get("google_seed_selected")
+        workers_ready[0] = True
+    assert prepare_database_and_plugins(object())
+    active = hub.load_state()["installations"]["google_translate"]
+    assert active["state"] == "active" and active["active_version"] == "1.1.0"
+    assert Path(active["active_path"]).is_relative_to(new_image)
+    google, = store.list_instances("google_translate")
+    assert store.pointers() == (google.id, None)
+    assert hub.load_state()["google_seed_selected"] is True
