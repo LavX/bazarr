@@ -250,6 +250,8 @@ class Movies(Resource):
     patch_request_parser.add_argument('radarrid', type=int, required=False, help='Radarr movie ID')
     patch_request_parser.add_argument('arr_instance_id', type=int, required=False,
                                       help='Owning Radarr instance id (#156)')
+    patch_request_parser.add_argument('sources', type=int, required=False,
+                                      help='Set to 1 to include media sources in Search All')
     patch_request_parser.add_argument('action', type=str, required=False, help='Action to perform from ["scan-disk", '
                                                                                '"search-missing", "search-wanted", "sync"]')
 
@@ -281,7 +283,7 @@ class Movies(Resource):
         elif action == "search-wanted":
             from media_sources.wanted import arr_wanted_condition, queue_wanted_search
 
-            source_job = queue_wanted_search('movie')
+            source_job = queue_wanted_search('movie') if args.get("sources") == 1 else None
             if not source_job:
                 wanted_search_missing_subtitles_movies()
             elif database.scalar(select(select(TableMovies.id).where(

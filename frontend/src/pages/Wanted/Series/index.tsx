@@ -38,8 +38,9 @@ const WantedSeriesView: FunctionComponent = () => {
     tagFilter.length > 0 ||
     missingLanguage !== null;
 
-  const { data: audioLangs = [] } = useAudioLanguages();
   const {
+    includeSources,
+    showBadge,
     labels,
     sourceKeys,
     arrActions,
@@ -48,7 +49,12 @@ const WantedSeriesView: FunctionComponent = () => {
     selected,
     onChange,
   } = useSourceFilter("series", "sonarr");
-  const query = useEpisodeWantedPagination(hasActiveFilter, sourceKeys);
+  const { data: audioLangs = [] } = useAudioLanguages(true, includeSources);
+  const query = useEpisodeWantedPagination(
+    hasActiveFilter,
+    sourceKeys,
+    includeSources,
+  );
   // The query is typed for the paging wrapper only; this page's endpoint adds the pending count.
   const forcedPending =
     (query.data as Wanted.EpisodePage<Wanted.EpisodeRow> | undefined)
@@ -166,11 +172,11 @@ const WantedSeriesView: FunctionComponent = () => {
           );
         },
       },
-      ...(labels.size > 1
+      ...(showBadge
         ? [
             {
               id: "source",
-              header: "Source",
+              header: includeSources ? "Source" : "Instance",
               cell: ({ row: { original } }) => (
                 <SourceBadge
                   row={original}
@@ -263,7 +269,7 @@ const WantedSeriesView: FunctionComponent = () => {
         },
       },
     ],
-    [download, labels, arrNames, defaultArr],
+    [download, includeSources, showBadge, labels, arrNames, defaultArr],
   );
 
   const getWantedItem = useCallback(
@@ -290,7 +296,12 @@ const WantedSeriesView: FunctionComponent = () => {
       query={query}
       arrActions={arrActions}
       sourceFilter={
-        <SourceFilter labels={labels} value={selected} onChange={onChange} />
+        <SourceFilter
+          labels={labels}
+          value={selected}
+          onChange={onChange}
+          includeSources={includeSources}
+        />
       }
       searchValue={search}
       onSearchChange={setSearch}
@@ -307,7 +318,10 @@ const WantedSeriesView: FunctionComponent = () => {
       dataFilter={hasActiveFilter ? dataFilter : undefined}
       pendingSearchCount={forcedPending}
       searchAll={async () => {
-        await mutateAsync({ action: "search-wanted" });
+        await mutateAsync({
+          action: "search-wanted",
+          sources: includeSources ? 1 : undefined,
+        });
       }}
       scanAll={async () => {
         await mutateAsync({ action: "scan-wanted" });

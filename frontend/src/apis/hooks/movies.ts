@@ -98,14 +98,18 @@ export function useMovieAction() {
 export function useMovieWantedPagination(
   fetchAll = false,
   sourceKeys: MediaSourceKey[] = [],
+  includeSources = false,
 ) {
   return usePaginationQuery(
-    [QueryKeys.Movies, QueryKeys.Wanted, sourceKeys],
+    [QueryKeys.Movies, QueryKeys.Wanted, { sourceKeys, includeSources }],
     (param) =>
-      api.movies.wanted({
-        ...param,
-        sourceKeys: sourceKeys.length ? sourceKeys : undefined,
-      }),
+      api.movies.wanted(
+        {
+          ...param,
+          sourceKeys: sourceKeys.length ? sourceKeys : undefined,
+        },
+        includeSources,
+      ),
     false,
     fetchAll,
   );

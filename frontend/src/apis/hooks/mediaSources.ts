@@ -106,6 +106,7 @@ export function useSourceFilter(
         : [],
     [data, isEnabled, kind],
   );
+  const includeSources = settings?.media_sources?.visible === true;
   const enabledArr = settings?.general?.[`use_${arr}`] === true;
   const arrConfigured =
     enabledArr &&
@@ -135,7 +136,10 @@ export function useSourceFilter(
   }, [enabledArr, arrLabels.enabledOptions, sources, kind]);
 
   const legacy = params.get("instance");
-  const key = params.get("source") ?? (legacy ? `arr:${legacy}` : null);
+  const sourceParam = params.get("source");
+  const scopedSource =
+    includeSources || sourceParam?.startsWith("arr:") ? sourceParam : null;
+  const key = scopedSource ?? (legacy ? `arr:${legacy}` : null);
   const selected = isSourceKey(key) ? key : null;
 
   const sourceKeys = useMemo<MediaSourceKey[]>(() => {
@@ -152,6 +156,8 @@ export function useSourceFilter(
   }, [arrConfigured, selected, sources]);
 
   return {
+    includeSources,
+    showBadge: includeSources ? labels.size > 1 : arrLabels.multiInstance,
     labels,
     sourceKeys,
     arrActions: sources.length === 0 || arrConfigured,

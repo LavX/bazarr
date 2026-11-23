@@ -578,3 +578,70 @@ it.each([
     ).not.toBeInTheDocument();
   },
 );
+
+it.each([
+  ["series", "sonarr", "/api/episodes/wanted", "/api/series", "seriesTitle"],
+  ["movies", "radarr", "/api/movies/wanted", "/api/movies", "title"],
+] as const)(
+  "keeps hidden folder data out of the %s Wanted UI",
+  async (kind, arr, wanted, action, titleKey) => {
+    const user = userEvent.setup();
+    const reads = vi.fn();
+    const writes = vi.fn();
+    server.use(
+      http.get("/api/system/settings", () =>
+        HttpResponse.json({
+          general: { [`use_${arr}`]: true },
+          media_sources: { visible: false },
+        }),
+      ),
+      http.get("/api/system/status", () => HttpResponse.json({ data: {} })),
+      http.get("/api/system/media-sources", () => {
+        reads("folder API");
+        return HttpResponse.json({ data: [] });
+      }),
+      http.get("/api/system/languages/audio", ({ request }) => {
+        reads("audio", new URL(request.url).searchParams.get("sources"));
+        return HttpResponse.json([]);
+      }),
+      http.get("/api/badges", ({ request }) => {
+        reads("badges", new URL(request.url).searchParams.get("sources"));
+        return HttpResponse.json({});
+      }),
+      http.get(wanted, ({ request }) => {
+        const sources = new URL(request.url).searchParams.get("sources");
+        reads("wanted", sources);
+        return HttpResponse.json({
+          data: [
+            {
+              id: 42,
+              series_id: 42,
+              [titleKey]: sources ? "Hidden folder title" : "Arr title",
+              missing_subtitles: [],
+            },
+          ],
+          total: 1,
+        });
+      }),
+      http.patch(action, async ({ request }) => {
+        const form = await request.formData();
+        writes(form.get("action"), form.get("sources"));
+        return new HttpResponse(null, { status: 204 });
+      }),
+    );
+    customRender(<MediaPage group="wanted" path={kind} />);
+    expect(await screen.findByText("Arr title")).toBeInTheDocument();
+    expect(screen.queryByText("Hidden folder title")).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("combobox", { name: "Source" }),
+    ).not.toBeInTheDocument();
+    expect(reads).toHaveBeenCalledWith("wanted", null);
+    expect(reads).toHaveBeenCalledWith("badges", null);
+    expect(reads).toHaveBeenCalledWith("audio", null);
+    expect(reads).not.toHaveBeenCalledWith("folder API");
+    await user.click(screen.getByRole("button", { name: "Search All" }));
+    await waitFor(() =>
+      expect(writes).toHaveBeenCalledWith("search-wanted", null),
+    );
+  },
+);

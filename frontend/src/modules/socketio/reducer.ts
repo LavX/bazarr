@@ -342,7 +342,9 @@ export function createDefaultReducer(): SocketIO.Reducer[] {
         void queryClient.invalidateQueries({
           queryKey: [QueryKeys.Movies, QueryKeys.Wanted],
         });
-        void queryClient.invalidateQueries({ queryKey: [QueryKeys.Badges] });
+        void queryClient.invalidateQueries({
+          queryKey: [QueryKeys.System, QueryKeys.Badges],
+        });
       },
     },
     {

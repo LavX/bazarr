@@ -9,7 +9,7 @@ from api.swaggerui import subtitles_language_model, audio_language_model
 from media_sources import repository
 from media_sources.api_rows import source_row_fields, wanted_rows
 from media_sources.union import SourceKeyFilter, add_source_arguments, includes_sources, union_page
-from media_sources.wanted import arr_wanted_condition, wanted_items
+from media_sources.wanted import arr_wanted_condition, wanted_list_items
 
 from ..utils import authenticate
 
@@ -107,7 +107,7 @@ class EpisodesWanted(Resource):
         mixed = includes_sources(args, database, items, items.c.kind == 'episode') if args.get('sources') == '1' else False
         if mixed:
             arr_condition = arr_wanted_condition('sonarr', TableEpisodes.arr_instance_id)
-            source = _source_query(source_filter)
+            source = _source_query(source_filter, database)
             if episodeid:
                 source = source.where(sa.false())  # An explicit upstream ID selects Arr rows only.
             arr = stmt.where(arr_condition).add_columns(TableEpisodes.arr_instance_id.label('_owner'),
@@ -143,14 +143,15 @@ class EpisodesWanted(Resource):
                        self.mixed_response_model if mixed else self.get_response_model)
 
 
-def _source_query(source_filter):
+def _source_query(source_filter, session):
     items, groups, sources = repository.Items.c, repository.Groups.c, repository.Sources.c
     number = sa.cast(items.season, sa.Text).concat('x').concat(sa.cast(items.episode, sa.Text))
-    return wanted_items(
+    return wanted_list_items(
+        'episode', session,
         items.audio_language, items.id, items.group_id.label('series_id'),
         groups.title.label('seriesTitle'), number.label('episode_number'),
         func.coalesce(items.episode_title, items.title).label('episodeTitle'),
         items.missing_subtitles, items.scene_name.label('sceneName'),
         items.source_id.label('_owner'), items.season.label('_season'), items.episode.label('_episode'),
         items.source_id, sources.name.label('source_name'), sources.kind.label('source_kind'), items.identity_state, items.shadow_owner.label('shadowed_by'),
-        items.monitored, groups.poster, kind='episode').where(source_filter.source(items.source_id))
+        items.monitored, groups.poster).where(source_filter.source(items.source_id))

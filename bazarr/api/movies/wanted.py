@@ -9,7 +9,7 @@ from api.swaggerui import subtitles_language_model, audio_language_model
 from media_sources import repository
 from media_sources.api_rows import source_row_fields, wanted_rows
 from media_sources.union import SourceKeyFilter, add_source_arguments, includes_sources, union_page
-from media_sources.wanted import arr_wanted_condition, wanted_items
+from media_sources.wanted import arr_wanted_condition, wanted_list_items
 
 from api.utils import authenticate
 
@@ -91,7 +91,7 @@ class MoviesWanted(Resource):
         mixed = includes_sources(args, database, items, items.c.kind == 'movie') if args.get('sources') == '1' else False
         if mixed:
             arr_condition = arr_wanted_condition('radarr', TableMovies.arr_instance_id)
-            source = _source_query(source_filter)
+            source = _source_query(source_filter, database)
             if radarrid:
                 source = source.where(sa.false())  # An explicit upstream ID selects Arr rows only.
             arr = stmt.where(arr_condition).add_columns(TableMovies.arr_instance_id.label('_owner'),
@@ -115,10 +115,11 @@ class MoviesWanted(Resource):
                        self.mixed_response_model if mixed else self.get_response_model)
 
 
-def _source_query(source_filter):
+def _source_query(source_filter, session):
     items, sources = repository.Items.c, repository.Sources.c
-    return wanted_items(
+    return wanted_list_items(
+        'movie', session,
         items.audio_language, items.id, items.title, items.missing_subtitles, items.scene_name.label('sceneName'),
         items.source_id.label('_owner'), items.source_id, sources.name.label('source_name'), sources.kind.label('source_kind'), items.identity_state,
-        items.shadow_owner.label('shadowed_by'), items.monitored, items.poster, kind='movie',
+        items.shadow_owner.label('shadowed_by'), items.monitored, items.poster,
     ).where(source_filter.source(items.source_id))

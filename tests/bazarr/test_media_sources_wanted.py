@@ -2,6 +2,7 @@
 
 import ast
 import json
+import os
 from datetime import datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -174,24 +175,28 @@ def test_source_row_format_preserves_local_paths_and_absolute_posters(languages_
 
 
 def test_wanted_refreshes_stale_shadows_and_retains_mount_shadows(client, arr_library, tmp_path, monkeypatch):
-    from app.database import TableMovies
+    from app.database import TableArrInstances, TableMovies
     from media_sources import repository, wanted
     from media_sources import identity
     from subtitles import download
 
     source, library, root = add_source(arr_library, tmp_path, profile_id=1)
     arr_library.execute(sa.update(TableMovies).where(TableMovies.id == 1).values(movie_file_id=100))
-    for row_id, name in ((2, 'second'), (3, 'same path')):
-        path = root / 'same path.mkv' if row_id == 3 else f'/arr/movies/{name}.mkv'
+    for row_id, name in ((2, 'second'), (3, 'same path'), (4, 'mapped path')):
+        paths = {3: root / 'same path.mkv', 4: '/incoming/mapped path.mkv'}
+        path = paths.get(row_id, f'/arr/movies/{name}.mkv')
         arr_library.execute(sa.insert(TableMovies).values(
             id=row_id, arr_instance_id=2, radarrId=50 + row_id, tmdbId=str(700 + row_id), title=f'Arr {name}', path=str(path),
             profileId=1, monitored='True', movie_file_id=100, missing_subtitles="['en']"))
+    arr_library.execute(sa.update(TableArrInstances).where(TableArrInstances.id == 2).values(
+        path_mappings=json.dumps([['/incoming', str(root)]])))
     cases = {
         'bind': {'shadow_rung': 'inode', 'shadow_arr_row_id': 1, 'shadow_arr_path': '/arr/movies/Arr Movie.mkv'},
         'second': {'shadow_rung': 'attributes', 'shadow_arr_row_id': 2, 'shadow_arr_path': '/arr/movies/second.mkv'},
         'gone': {'shadow_rung': 'inode', 'shadow_arr_row_id': 999, 'shadow_arr_path': '/arr/removed.mkv'},
         'owner gone': {'shadow_rung': 'inode', 'shadow_instance_id': None, 'shadow_arr_row_id': 1},
         'same path': {'arr_shadow': 0},
+        'mapped path': {'arr_shadow': 0},
     }
     item_ids = {}
     for title, values in cases.items():
@@ -206,18 +211,23 @@ def test_wanted_refreshes_stale_shadows_and_retains_mount_shadows(client, arr_li
     stat = Mock(side_effect=AssertionError('unchanged mount shadows should not be statted'))
     monkeypatch.setattr(identity, 'stat_file', stat)
 
+    before = client.get('/api/movies/wanted?sources=1', headers=HEADERS).get_json()['data']
+    assert all(row['origin'] == 'arr' for row in before)
+    assert client.get('/api/badges?sources=1', headers=HEADERS).get_json()['movies'] == 4
+    assert repository.get_item(item_ids['mapped path']).arr_shadow == 0
+
     wanted.wanted_search_missing_subtitles_sources(kind='movie', job_id=23)
 
     assert {call.kwargs['source'].title for call in providers.call_args_list} == {'gone', 'owner gone'}
     stat.assert_not_called()
     assert {title for title, item_id in item_ids.items() if repository.get_item(item_id).arr_shadow} == {
-        'bind', 'second', 'same path'}
+        'bind', 'second', 'same path', 'mapped path'}
     rows = client.get('/api/movies/wanted?sources=1', headers=HEADERS).get_json()['data']
     assert {row['title'] for row in rows if row['origin'] == 'source'} == {'gone', 'owner gone'}
-    assert client.get('/api/badges?sources=1', headers=HEADERS).get_json()['movies'] == 5
+    assert client.get('/api/badges?sources=1', headers=HEADERS).get_json()['movies'] == 6
 
 
-@pytest.mark.parametrize('state', ['ready', 'waiting', 'recent failure', 'translated', 'low score'])
+@pytest.mark.parametrize('state', ['ready', 'waiting', 'recent failure', 'translated', 'moved translation', 'low score'])
 def test_wanted_checks_translation_before_asking_providers(world, isolated_jobs, monkeypatch, state):
     from app.config import settings
     from app.database import TableLanguagesProfiles, update_profile_id_list
@@ -243,12 +253,16 @@ def test_wanted_checks_translation_before_asking_providers(world, isolated_jobs,
     update_profile_id_list.invalidate()
     repository.update_item(context.item_id, world.db, subtitles=str([['en', str(source_subtitle), 100]]),
                            missing_subtitles="['hu']")
-    if state == 'translated':
-        translated = Path(context.path).with_suffix('.hu.ass')
+    if state in ('translated', 'moved translation'):
+        recorded_video = Path(context.path)
+        if state == 'moved translation':
+            recorded_video = world.tmp_path / 'before-move' / recorded_video.name
+            recorded_video.parent.mkdir()
+        translated = recorded_video.with_suffix('.hu.ass')
         translated.write_bytes(pipeline.CONTENT)
         repository.insert_history(world.db, item_id=context.item_id, source_id=context.source_id,
                                   item_kind='movie', action=6, description='translated', language='hu', subtitles_path=str(translated),
-                                  video_path=context.path, source_name='Local', item_title='Film')
+                                  video_path=str(recorded_video), source_name='Local', item_title='Film')
     if state == 'low score':
         repository.insert_history(world.db, item_id=context.item_id, source_id=context.source_id,
                                   item_kind='movie', action=1, description='downloaded', language='en', subtitles_path=str(source_subtitle),
@@ -262,7 +276,7 @@ def test_wanted_checks_translation_before_asking_providers(world, isolated_jobs,
     try:
         wanted.wanted_search_missing_subtitles_sources(kind='movie', job_id=1)
         pending = isolated_jobs.jobs_pending_queue
-        if state == 'ready':
+        if state in ('ready', 'moved translation'):
             assert len(pending) == 1 and pending[0].func == 'translate_subtitles_file'
             assert pending[0].kwargs['source'] == context
             wanted.wanted_search_missing_subtitles_sources(kind='movie', job_id=2)
@@ -327,7 +341,7 @@ def test_search_all_queues_both_jobs_and_source_job_saves_through_shared_pipelin
     item = add_item(arr_library, source, library, path, title='Film', year='2001',
                     missing_subtitles="['en']", scene_name=path.stem)
     asked = pipeline._download(monkeypatch)
-    response = client.patch('/api/movies', headers=HEADERS, data={'action': 'search-wanted'})
+    response = client.patch('/api/movies', headers=HEADERS, data={'action': 'search-wanted', 'sources': 1})
     assert response.status_code == 204
     jobs = isolated_jobs.jobs_pending_queue
     assert {(job.module, job.func) for job in jobs} == {
@@ -340,27 +354,106 @@ def test_search_all_queues_both_jobs_and_source_job_saves_through_shared_pipelin
     assert repository.get_item(item).missing_subtitles == '[]'
     assert arr_library.scalar(sa.select(repository.History.c.item_id)) == item
     monkeypatch.setattr(settings.general, 'use_radarr', False)
-    response = client.patch('/api/movies', headers=HEADERS, data={'action': 'search-wanted'})
+    response = client.patch('/api/movies', headers=HEADERS, data={'action': 'search-wanted', 'sources': 1})
     assert response.status_code == 204
     assert len([job for job in isolated_jobs.jobs_pending_queue if job.module == 'subtitles.wanted.movies']) == 1
 
 
 def test_automatic_search_leaves_a_subtitle_that_arrived_during_provider_search(world, monkeypatch):
+    from app.config import settings
     from media_sources import repository, wanted
     from subtitles import download
 
     context = pipeline._movie(world)
     destination = Path(context.path).with_suffix('.en.srt')
+    monkeypatch.setattr(settings.general, 'chmod_enabled', True)
+    monkeypatch.setattr(settings.general, 'chmod', '0644')
     arriving_content = b'a subtitle saved by another operation'
     provider_result = pipeline.FakeSubtitle()
 
     def download_best(videos, **kwargs):
         (found,) = videos
         destination.write_bytes(arriving_content)
+        destination.chmod(0o600)
         return {found: [provider_result]}
 
     monkeypatch.setattr(download, 'download_best_subtitles', download_best)
     wanted.wanted_search_missing_subtitles_sources(kind='movie', job_id=1)
 
     assert destination.read_bytes() == arriving_content
+    assert destination.stat().st_mode & 0o777 == 0o600
     assert world.db.execute(sa.select(repository.History.c.id)).all() == []
+
+
+@pytest.mark.parametrize('change', ['file removed', 'video replaced', 'profile edited', 'arr claimed'])
+def test_provider_return_rechecks_file_profile_and_arr_claim(world, monkeypatch, change):
+    from app.config import settings
+    from app.database import TableArrInstances, TableLanguagesProfiles, TableMovies, update_profile_id_list
+    from media_sources import repository, wanted
+    from subtitles import download
+
+    context = pipeline._movie(world)
+    video_path = Path(context.path)
+    if change == 'arr claimed':
+        monkeypatch.setattr(settings.general, 'use_radarr', True)
+
+    def download_best(videos, **kwargs):
+        (found,) = videos
+        if change == 'file removed':
+            video_path.unlink()
+        elif change == 'video replaced':
+            replacement = video(video_path.with_suffix('.new'), size=2000)
+            os.replace(replacement, video_path)
+        elif change == 'profile edited':
+            profile = json.dumps([{'id': 1, 'language': 'hu', 'forced': 'False', 'hi': 'False'}])
+            world.db.execute(sa.update(TableLanguagesProfiles).values(items=profile))
+            update_profile_id_list.invalidate()
+        else:
+            world.db.execute(sa.insert(TableArrInstances).values(
+                id=42, kind='radarr', name='Cinema', stable_key='cinema', port=9800, enabled=1, path_mappings='[]'))
+            world.db.execute(sa.insert(TableMovies).values(
+                id=73, arr_instance_id=42, radarrId=9000, title='Film', path=context.path, tmdbId='73'))
+        return {found: [pipeline.FakeSubtitle()]}
+
+    monkeypatch.setattr(download, 'download_best_subtitles', download_best)
+    wanted.wanted_search_missing_subtitles_sources(kind='movie', job_id=1)
+
+    assert not video_path.with_suffix('.en.srt').exists()
+    assert world.db.execute(sa.select(repository.History.c.id)).all() == []
+    assert bool(repository.get_item(context.item_id).arr_shadow) == (change == 'arr claimed')
+
+
+def test_explicit_api_opt_in_controls_search_all_but_not_the_source_schedule(
+        client, arr_library, isolated_jobs, tmp_path, monkeypatch):
+    from app.config import settings
+    from media_sources import schedule, wanted
+    from subtitles.wanted import movies
+
+    monkeypatch.setattr(wanted, 'jobs_queue', isolated_jobs)
+    monkeypatch.setattr(movies, 'jobs_queue', isolated_jobs)
+    monkeypatch.setattr(settings.media_sources, 'visible', False)
+    _, _, root = add_source(arr_library, tmp_path, profile_id=1)
+    assert root.is_dir() and schedule.has_enabled_source(arr_library)
+    plain = client.patch('/api/movies', headers=HEADERS, data={'action': 'search-wanted'})
+    assert plain.status_code == 204
+    assert [job.module for job in isolated_jobs.jobs_pending_queue] == ['subtitles.wanted.movies']
+    explicit = client.patch('/api/movies', headers=HEADERS, data={'action': 'search-wanted', 'sources': 1})
+    assert explicit.status_code == 204
+    assert any(job.module == 'media_sources.wanted' for job in isolated_jobs.jobs_pending_queue)
+
+
+def test_audio_filter_can_list_a_language_only_present_in_a_folder(client, arr_library, tmp_path):
+    source, library, root = add_source(arr_library, tmp_path, profile_id=1)
+    add_item(arr_library, source, library, root / 'Film.mkv', audio_language="['French']", missing_subtitles="['en']")
+    url = '/api/system/languages/audio'
+    assert client.get(url, headers=HEADERS).get_json() == []
+    assert client.get(url + '?sources=1', headers=HEADERS).get_json() == [{'code2': 'fr', 'name': 'French'}]
+
+
+def test_sports_badge_excludes_library_rows_until_the_sports_wanted_list_supports_them(
+        client, arr_library, tmp_path):
+    source, library, root = add_source(arr_library, tmp_path, content_kind='sports', profile_id=1)
+    group = add_group(arr_library, source, library, kind='league', title='F1')
+    add_item(arr_library, source, library, root / 'Race.mkv', kind='sports_event', group_id=group,
+             missing_subtitles="['en']")
+    assert client.get('/api/badges?sources=1', headers=HEADERS).data == client.get('/api/badges', headers=HEADERS).data

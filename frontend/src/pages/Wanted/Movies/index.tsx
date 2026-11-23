@@ -38,8 +38,9 @@ const WantedMoviesView: FunctionComponent = () => {
     tagFilter.length > 0 ||
     missingLanguage !== null;
 
-  const { data: audioLangs = [] } = useAudioLanguages();
   const {
+    includeSources,
+    showBadge,
     labels,
     sourceKeys,
     arrActions,
@@ -48,7 +49,12 @@ const WantedMoviesView: FunctionComponent = () => {
     selected,
     onChange,
   } = useSourceFilter("movie", "radarr");
-  const query = useMovieWantedPagination(hasActiveFilter, sourceKeys);
+  const { data: audioLangs = [] } = useAudioLanguages(true, includeSources);
+  const query = useMovieWantedPagination(
+    hasActiveFilter,
+    sourceKeys,
+    includeSources,
+  );
 
   const langOptions = useMemo(
     () => audioLangs.map((l) => ({ value: l.code2, label: l.name })),
@@ -158,11 +164,11 @@ const WantedMoviesView: FunctionComponent = () => {
           );
         },
       },
-      ...(labels.size > 1
+      ...(showBadge
         ? [
             {
               id: "source",
-              header: "Source",
+              header: includeSources ? "Source" : "Instance",
               cell: ({ row: { original } }) => (
                 <SourceBadge
                   row={original}
@@ -229,7 +235,7 @@ const WantedMoviesView: FunctionComponent = () => {
         },
       },
     ],
-    [download, labels, arrNames, defaultArr],
+    [download, includeSources, showBadge, labels, arrNames, defaultArr],
   );
 
   const getWantedItem = useCallback(
@@ -254,7 +260,12 @@ const WantedMoviesView: FunctionComponent = () => {
       query={query}
       arrActions={arrActions}
       sourceFilter={
-        <SourceFilter labels={labels} value={selected} onChange={onChange} />
+        <SourceFilter
+          labels={labels}
+          value={selected}
+          onChange={onChange}
+          includeSources={includeSources}
+        />
       }
       searchValue={search}
       onSearchChange={setSearch}
@@ -270,7 +281,10 @@ const WantedMoviesView: FunctionComponent = () => {
       missingLangOptions={langOptions}
       dataFilter={hasActiveFilter ? dataFilter : undefined}
       searchAll={async () => {
-        await mutateAsync({ action: "search-wanted" });
+        await mutateAsync({
+          action: "search-wanted",
+          sources: includeSources ? 1 : undefined,
+        });
       }}
       scanAll={async () => {
         await mutateAsync({ action: "scan-wanted" });

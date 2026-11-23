@@ -4,6 +4,7 @@
 import os
 import sys
 import logging
+from copy import deepcopy
 from functools import partial
 from media_servers.events import publication_callback
 from arr_instances.resolution import scoped
@@ -32,7 +33,7 @@ from .processing import process_subtitle
 def generate_subtitles(path, languages, audio_language, sceneName, title, media_type, profile_id,
                        forced_minimum_score=None, is_upgrade=False, check_if_still_required=False,
                        previous_subtitles_to_delete=None, job_id=None, fallback_allowed=False,
-                       arr_instance_id=None, source=None, auto_translate=True, source_wanted=False):
+                       arr_instance_id=None, source=None, auto_translate=True, source_wanted_stamp=None):
     if not languages:
         return None
 
@@ -54,6 +55,7 @@ def generate_subtitles(path, languages, audio_language, sceneName, title, media_
     language_set = _get_language_obj(languages=languages)
     profile = get_profiles_list(profile_id=profile_id)
     original_format = profile['originalFormat']
+    wanted_profile = deepcopy(profile) if source_wanted_stamp is not None else None
     hi_required = "force HI" if all([x.hi for x in language_set]) else "don't prefer"
 
     try:
@@ -194,16 +196,20 @@ def generate_subtitles(path, languages, audio_language, sceneName, title, media_
                                 written_paths = []
                                 write = partial(write_subtitle_file, path, written_paths=written_paths,
                                                 on_publish=publish, **owner_kwargs)
-                                if source_wanted and source is not None:
-                                    write = partial(_write_wanted_source_subtitle, source, language, write)
+                                if wanted_profile is not None and source is not None:
+                                    write = partial(_write_wanted_source_subtitle, source, language, source_wanted_stamp,
+                                                    wanted_profile, write)
                                 saved_subtitles = save_subtitles(video.original_path, subtitles,
                                                                  single=settings.general.single_language,
                                                                  tags=None,  # fixme
                                                                  directory=fld,
-                                                                 chmod=chmod,
+                                                                 chmod=chmod if wanted_profile is None else None,
                                                                  formats=subtitle_formats,
                                                                  path_decoder=force_unicode,
                                                                  write_subtitle=write)
+                                if wanted_profile is not None and chmod:
+                                    for written in written_paths:
+                                        os.chmod(written, chmod)
                                 if is_upgrade and previous_subtitles_to_delete and written_paths and (
                                         os.path.normcase(os.path.realpath(previous_subtitles_to_delete)) not in
                                         {os.path.normcase(os.path.realpath(written)) for written in written_paths}):
@@ -297,22 +303,31 @@ def _get_language_obj(languages):
     return language_set
 
 
-def _write_wanted_source_subtitle(source, language, write, destination, content):
+def _write_wanted_source_subtitle(source, language, stamp, profile, write, destination, content):
     """Recheck the item and destination after the provider, under the subtitle write lock."""
     from media_sources import repository
+    from media_sources.analysis import local_content_stamp
     from media_sources.db import handle
     from media_sources.indexer import SourcePublicationOwnerIndex
+    from media_sources.shadows import path_stage_shadow
     from media_sources.wanted import wanted_items
     from subtitles.tools.subsync_engines import sync_output_owner_is_unique
 
-    if os.path.lexists(destination) or not os.path.isfile(source.path):
+    if os.path.lexists(destination) or local_content_stamp(source.path) != stamp:
+        return
+    if get_profiles_list(profile_id=source.profile_id) != profile:
         return
     items = repository.Items.c
     live = handle().execute(wanted_items(items.id, kind=source.kind, profile_id=source.profile_id).where(
         items.id == source.item_id, items.created_at == source.created_at, items.path == source.path,
         items.source_id == source.source_id, items.library_id == source.library_id)).first()
-    if (live is not None and language in check_missing_languages_source(source)
-            and sync_output_owner_is_unique(source.path, destination, ownership_index=SourcePublicationOwnerIndex())):
+    if live is None or language not in check_missing_languages_source(source):
+        return
+    if path_stage_shadow(source.item_id):
+        from media_sources.wanted import notify_wanted_changes
+        notify_wanted_changes(source.kind)
+        return
+    if sync_output_owner_is_unique(source.path, destination, ownership_index=SourcePublicationOwnerIndex()):
         write(destination, content)
 
 

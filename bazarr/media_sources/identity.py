@@ -366,9 +366,10 @@ def master_toggles():
 class _Mapper:
     """An arr instance's path mapping, loaded once, so mapping a hundred thousand rows asks the database once."""
 
-    def __init__(self, forward, reverse):
+    def __init__(self, forward, reverse, rules=()):
         self.forward = forward
         self.reverse = reverse
+        self.rules = rules
 
 
 def _mapper_for(instance):
@@ -385,11 +386,11 @@ def _mapper_for(instance):
     own = module._instance_path_mapping(instance.id, media_type)
     if own is not None:
         return _Mapper(lambda path: module._apply_mapping(path, own, reverse=False),
-                       lambda path: module._apply_mapping(path, own, reverse=True))
+                       lambda path: module._apply_mapping(path, own, reverse=True), own)
     shared = module.path_mappings
     if media_type == 'movie':
-        return _Mapper(shared.path_replace_movie, shared.path_replace_reverse_movie)
-    return _Mapper(shared.path_replace, shared.path_replace_reverse)
+        return _Mapper(shared.path_replace_movie, shared.path_replace_reverse_movie, shared.path_mapping_movies)
+    return _Mapper(shared.path_replace, shared.path_replace_reverse, shared.path_mapping_series)
 
 
 class ArrOwners:
@@ -498,7 +499,7 @@ class ArrOwners:
                 continue
             table = TABLE_OF_KIND[instance.kind]
             model, file_id = self._columns(table)
-            arr_paths = {mapper.reverse(candidate) for candidate in candidates}
+            arr_paths = candidates | {mapper.reverse(candidate) for candidate in candidates}
             for row in session.execute(sa.select(model.id, model.path, model.file_size, file_id)
                                        .where(model.arr_instance_id == instance.id, model.path.in_(arr_paths))
                                        .order_by(model.id)).all():
@@ -506,6 +507,47 @@ class ArrOwners:
                 if arr_row is not None and arr_row.path in candidates:
                     return arr_row, RUNG_PATH
         return None
+
+
+def _mapped_sql_path(path, rules, *, reverse=False):
+    """Use the same first matching Arr mapping for exact stored-path checks."""
+    matches = []
+    for remote, local, *_unused in rules:
+        start, end = (local, remote) if reverse else (remote, local)
+        if not start or not end or start == end:
+            continue
+        mapped = sa.func.replace(path, start, end)
+        normalized = sa.case(
+            (sa.func.substr(mapped, 1, 1) == '/', sa.func.replace(mapped, '\\', '/')),
+            (sa.or_(sa.func.substr(mapped, 1, 2) == '\\\\', sa.func.substr(mapped, 2, 2) == ':\\'),
+             sa.func.replace(mapped, '/', '\\')),
+            else_=mapped,
+        )
+        matches.append((mapped != path, normalized))
+    return sa.case(*matches, else_=path) if matches else path
+
+
+def arr_claims_stored_path(item_kind, path, target):
+    """A read-only exact Arr path exclusion for the mixed SQL lists and badge counts.
+
+    Mount and symlink matches still come from the recorded shadow. A direct path
+    claim made after the last scan is visible as soon as its Arr row is persisted.
+    """
+    table, arr_kind = {'episode': ('episode', 'sonarr'), 'movie': ('movie', 'radarr')}[item_kind]
+    model, _ = ArrOwners._columns(table)
+    clauses = []
+    owners = ArrOwners.load(target)
+    for instance in owners.instances.values():
+        if instance.kind != arr_kind or (mapper := owners.mapper(instance.id)) is None:
+            continue
+        claim = model.path == path
+        if mapper.rules:
+            # An Arr row can already use the local path, even if this owner has mappings.
+            claim = sa.and_(
+                sa.or_(claim, model.path == _mapped_sql_path(path, mapper.rules, reverse=True)),
+                _mapped_sql_path(model.path, mapper.rules) == path)
+        clauses.append(sa.and_(model.arr_instance_id == instance.id, claim))
+    return sa.select(model.id).where(sa.or_(sa.false(), *clauses)).correlate(path.table).exists()
 
 
 def revalidate_shadow(item, owners, queue_scan=None, fetched=None):

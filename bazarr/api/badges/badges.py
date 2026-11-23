@@ -60,7 +60,7 @@ class Badges(Resource):
         include_sources = request.args.get('sources') == '1'
         arr_conditions = {}
         if include_sources:
-            from media_sources.wanted import arr_wanted_condition, configured_item_kinds, wanted_counts
+            from media_sources.wanted import arr_wanted_condition, configured_item_kinds, wanted_language_count
 
             kinds = configured_item_kinds(database)
             if 'episode' in kinds:
@@ -105,11 +105,11 @@ class Badges(Resource):
         missing_sports_count = (
             wanted_badge(database) if settings.general.use_sportarr else 0)
 
-        if include_sources and kinds:
-            counts = wanted_counts(database)
-            missing_episodes_count += counts['episode']
-            missing_movies_count += counts['movie']
-            missing_sports_count += counts['sports_event']
+        if include_sources:
+            if 'episode' in kinds:
+                missing_episodes_count += wanted_language_count('episode', database)
+            if 'movie' in kinds:
+                missing_movies_count += wanted_language_count('movie', database)
 
         throttled_providers = len(get_throttled_providers())
 

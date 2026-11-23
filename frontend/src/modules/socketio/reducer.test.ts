@@ -147,6 +147,20 @@ describe("socketio reducer", () => {
     },
   );
 
+  it("refreshes both Wanted lists and the navigation badge after a source save", () => {
+    reducerFor("source-item").any?.();
+
+    for (const queryKey of [
+      [QueryKeys.Series, QueryKeys.Wanted],
+      [QueryKeys.Movies, QueryKeys.Wanted],
+      [QueryKeys.System, QueryKeys.Badges],
+    ]) {
+      expect(queryClientMock.invalidateQueries).toHaveBeenCalledWith({
+        queryKey,
+      });
+    }
+  });
+
   it("invalidates the wanted series query for reset-episode-wanted events", () => {
     reducerFor("reset-episode-wanted").any?.();
 

@@ -17,7 +17,7 @@ from app.jobs_queue import JobFailed, jobs_queue
 from subtitles.indexer.missing_refresh import queue_missing_subtitles_recalculation
 
 from . import identity, paths, repository
-from .analysis import index_matches_file, local_stat, source_search_probes
+from .analysis import index_matches_file, local_content_stamp, local_stat, source_search_probes
 from .context import SourceItemGone, resolve_item, resolve_same_item
 from .db import source_transaction
 from .history import history_log_source
@@ -520,7 +520,10 @@ def search_wanted_item(item_id, created_at, job_id):
     same_row = (items.c.id == item_id, items.c.created_at == created_at)
     session = handle()
     item = session.execute(wanted_items(*items.c).where(*same_row)).first()
-    if item is None or local_stat(item.path) is None:
+    if item is None:
+        return
+    stamp = local_content_stamp(item.path)
+    if stamp is None:
         return
     if path_stage_shadow(item_id):
         notify_wanted_changes(item.kind)
@@ -547,7 +550,7 @@ def search_wanted_item(item_id, created_at, job_id):
     if not languages:
         return
     with source_search_probes(item_id):
-        downloaded = _download_source_subtitles(context, current, languages, job_id, automatic=True)
+        downloaded = _download_source_subtitles(context, current, languages, job_id, wanted_stamp=stamp)
     failed = {_language_code(*entry) for entry in languages} - set(downloaded)
     if failed:
         with source_transaction() as connection:
@@ -562,7 +565,7 @@ def search_wanted_item(item_id, created_at, job_id):
                 repository.set_failed_attempts(item_id, attempts, connection)
 
 
-def _download_source_subtitles(context, item, languages, job_id, *, translation_gate=True, automatic=False):
+def _download_source_subtitles(context, item, languages, job_id, *, translation_gate=True, wanted_stamp=None):
     audio_languages = get_audio_profile_languages(item.audio_language)
     audio_language = audio_languages[0]['name'] if audio_languages else 'None'
     # For an episode the title the providers get is the show's.
@@ -576,7 +579,7 @@ def _download_source_subtitles(context, item, languages, job_id, *, translation_
         for result in generate_subtitles(context.path, languages, audio_language, str(context.scene_name), title,
                                          context.media_type, context.profile_id, check_if_still_required=True,
                                          job_id=job_id, source=context,
-                                         **({'source_wanted': True} if automatic else {}),
+                                         **({'source_wanted_stamp': wanted_stamp} if wanted_stamp is not None else {}),
                                          **({} if translation_gate else {'auto_translate': False})):
             if not result:
                 continue

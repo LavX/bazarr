@@ -17,9 +17,11 @@ import { setAuthenticated } from "@/utilities/event";
 import { JobFailedError, JobStoppedError, waitForJob } from "@/utilities/jobs";
 
 export function useBadges() {
+  const { data: settings } = useSystemSettings();
+  const includeSources = settings?.media_sources?.visible === true;
   return useQuery({
-    queryKey: [QueryKeys.System, QueryKeys.Badges],
-    queryFn: () => api.badges.all(),
+    queryKey: [QueryKeys.System, QueryKeys.Badges, includeSources],
+    queryFn: () => api.badges.all(includeSources),
     refetchOnWindowFocus: "always",
     refetchInterval: 1000 * 60,
     staleTime: 1000 * 10,

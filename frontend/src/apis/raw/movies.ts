@@ -43,12 +43,13 @@ class MovieApi extends BaseApi {
   }
 
   async wanted(
-    params: Wanted.Range,
-  ): Promise<DataWrapperWithTotal<Wanted.MovieRow>>;
-  async wanted(
     params: Parameter.Range,
     includeSources: false,
   ): Promise<DataWrapperWithTotal<Wanted.Movie>>;
+  async wanted(
+    params: Wanted.Range,
+    includeSources?: boolean,
+  ): Promise<DataWrapperWithTotal<Wanted.MovieRow>>;
   async wanted({ sourceKeys, ...params }: Wanted.Range, includeSources = true) {
     return this.get<DataWrapperWithTotal<Wanted.MovieRow>>("/wanted", {
       ...params,

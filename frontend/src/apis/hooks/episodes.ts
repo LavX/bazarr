@@ -44,14 +44,18 @@ export function useEpisodesBySeriesId(id: number) {
 export function useEpisodeWantedPagination(
   fetchAll = false,
   sourceKeys: MediaSourceKey[] = [],
+  includeSources = false,
 ) {
   return usePaginationQuery(
-    [QueryKeys.Series, QueryKeys.Wanted, sourceKeys],
+    [QueryKeys.Series, QueryKeys.Wanted, { sourceKeys, includeSources }],
     (param) =>
-      api.episodes.wanted({
-        ...param,
-        sourceKeys: sourceKeys.length ? sourceKeys : undefined,
-      }),
+      api.episodes.wanted(
+        {
+          ...param,
+          sourceKeys: sourceKeys.length ? sourceKeys : undefined,
+        },
+        includeSources,
+      ),
     false,
     fetchAll,
   );

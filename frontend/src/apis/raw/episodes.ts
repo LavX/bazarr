@@ -23,12 +23,13 @@ class EpisodeApi extends BaseApi {
   }
 
   async wanted(
-    params: Wanted.Range,
-  ): Promise<Wanted.EpisodePage<Wanted.EpisodeRow>>;
-  async wanted(
     params: Parameter.Range,
     includeSources: false,
   ): Promise<Wanted.EpisodePage>;
+  async wanted(
+    params: Wanted.Range,
+    includeSources?: boolean,
+  ): Promise<Wanted.EpisodePage<Wanted.EpisodeRow>>;
   async wanted({ sourceKeys, ...params }: Wanted.Range, includeSources = true) {
     return this.get<Wanted.EpisodePage<Wanted.EpisodeRow>>("/wanted", {
       ...params,

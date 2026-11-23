@@ -33,17 +33,19 @@ def wanted_items(*columns, kind=None, profile_id=None):
     return query if kind is None else query.where(items.c.kind == kind)
 
 
+def wanted_list_items(kind, session, *columns):
+    return wanted_items(*columns, kind=kind).where(
+        ~identity.arr_claims_stored_path(kind, repository.Items.c.path, session))
+
+
 def configured_item_kinds(session):
     items = repository.Items
     return set(session.scalars(sa.select(items.c.kind).distinct()))
 
 
-def wanted_counts(session=None):
-    items = repository.Items
-    counts = dict.fromkeys(repository.ITEM_KINDS, 0)
-    for kind, missing in handle(session).execute(wanted_items(items.c.kind, items.c.missing_subtitles)):
-        counts[kind] += len(ast.literal_eval(missing))
-    return counts
+def wanted_language_count(kind, session):
+    rows = session.scalars(wanted_list_items(kind, session, repository.Items.c.missing_subtitles))
+    return sum(len(ast.literal_eval(missing)) for missing in rows)
 
 
 def wanted_search_missing_subtitles_sources(kind=None, job_id=None, wait_for_completion=False):
