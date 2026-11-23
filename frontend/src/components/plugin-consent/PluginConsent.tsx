@@ -159,6 +159,7 @@ const PluginConsent: FunctionComponent<PluginConsentProps> = ({
     (rollingBack
       ? Boolean(
           rollbackPreview?.previous_version &&
+          rollbackPreview.confirmation_identity &&
           !rollbackPreview.blocked_reason &&
           (!rollbackPreview.consent ||
             (digest &&
@@ -187,6 +188,8 @@ const PluginConsent: FunctionComponent<PluginConsentProps> = ({
         rollbackResult = await rollback.mutateAsync({
           id: target.pluginId,
           version: rollbackPreview!.previous_version!,
+          // eslint-disable-next-line camelcase -- API transport field.
+          confirmation_identity: rollbackPreview!.confirmation_identity!,
           ...(digest ? { consent: digest } : {}),
         });
       } else {
@@ -217,7 +220,7 @@ const PluginConsent: FunctionComponent<PluginConsentProps> = ({
           notification.info(
             rollbackResult.status === "activated"
               ? "Rolled back"
-              : "Roll back awaiting restart",
+              : "Rollback awaiting restart",
             rollbackResult.status === "activated"
               ? `${name} v${rollbackResult.version} is now active.`
               : `${name} v${rollbackResult.version} is staged. Restart Bazarr+ when you are ready to activate it.`,
@@ -340,12 +343,9 @@ const PluginConsent: FunctionComponent<PluginConsentProps> = ({
                   ) : (
                     <>
                       <p>
-                        This returns the plugin code to the previous release and
-                        uses your current plugin data and settings, including
-                        changes made since the update. No backup of data or
-                        settings is restored. Activation may remove settings
-                        this release does not support or turn incompatible saved
-                        instances off for review.
+                        This switches the plugin to the previous release. Older
+                        releases may not support all saved data or settings.
+                        Back up any important plugin data before continuing.
                       </p>
                       <p className={styles.quiet}>
                         The release becomes active now if this plugin supports

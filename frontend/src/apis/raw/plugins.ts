@@ -157,6 +157,8 @@ export interface PluginInstallation extends ProviderHubInstallation {
   review_pending?: boolean;
   /** The previous release and the server's reason when it cannot be restored. */
   rollback?: PluginRollbackAvailability;
+  /** The action that produced the staged release, when it is a rollback. */
+  staged_action?: "rollback" | null;
 }
 
 export interface PluginRollbackAvailability {
@@ -165,11 +167,13 @@ export interface PluginRollbackAvailability {
 }
 
 export interface PluginRollbackPreview extends PluginRollbackAvailability {
+  confirmation_identity: string | null;
   consent: PluginUpdateDelta | null;
 }
 
 export interface PluginRollbackRequest {
   version: string;
+  confirmation_identity: string;
   consent?: string | null;
 }
 

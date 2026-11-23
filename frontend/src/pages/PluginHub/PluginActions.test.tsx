@@ -216,6 +216,7 @@ describe("rolling back a plugin from its card", () => {
   const name = "Opencode back end";
   const activeVersion = "1.0.0";
   const previousVersion = "0.9.0";
+  const confirmationIdentity = "retained-release-identity";
   const rollbackPath = "/api/plugins/installations/opencode_backend/rollback";
   const delta: PluginUpdateDelta = {
     ...updateDelta,
@@ -248,7 +249,11 @@ describe("rolling back a plugin from its card", () => {
       ),
       http.get(rollbackPath, () => {
         record("get", "rollback");
-        return HttpResponse.json({ ...availability, consent: null });
+        return HttpResponse.json({
+          ...availability,
+          confirmation_identity: confirmationIdentity,
+          consent: null,
+        });
       }),
     );
     showPage();
@@ -285,11 +290,114 @@ describe("rolling back a plugin from its card", () => {
     },
   );
 
+  it("shows the server's discard instruction instead of suggesting restart for a staged update", async () => {
+    const refusal = "Discard the staged update before rolling back.";
+    present({ ...availability, blocked_reason: refusal });
+    installed = installed.map((item) => ({
+      ...item,
+      state: "staged",
+      staged_version: "2.0.0",
+      needs_restart: true,
+    }));
+    await menuOf(name);
+    const item = await screen.findByRole("menuitem", { name: /Roll back/ });
+    expect(item).toHaveAttribute("aria-disabled", "true");
+    expect(item).toHaveTextContent(refusal);
+    expect(item).not.toHaveTextContent("Restart Bazarr+");
+    expect(calls).toEqual([]);
+  });
+
+  it("sends the reviewed release identity without access consent after password confirmation", async () => {
+    present();
+    auth = { type: "form", username: "admin", password: "***" };
+    server.use(
+      http.post("/api/system/account/confirm", () => {
+        record("post", "confirm");
+        return HttpResponse.json({});
+      }),
+      http.post(rollbackPath, async ({ request }) => {
+        record("post", "rollback", await request.json());
+        return HttpResponse.json({
+          status: "activated",
+          version: previousVersion,
+        });
+      }),
+    );
+    const { user, confirm } = await openRollback();
+    await user.click(confirm);
+    await shown(await screen.findByText("Confirm your password"));
+    expect(calls.filter(({ method }) => method === "post")).toEqual([]);
+    await user.type(screen.getByLabelText("Password"), "example-password");
+    await user.click(screen.getByRole("button", { name: /^confirm$/i }));
+    await waitFor(() =>
+      expect(calls.filter(({ method }) => method === "post")).toEqual([
+        { method: "post", path: "confirm", body: null },
+        {
+          method: "post",
+          path: "rollback",
+          body: {
+            version: previousVersion,
+            confirmation_identity: confirmationIdentity,
+          },
+        },
+      ]),
+    );
+  });
+
+  it("refreshes a stale release identity and requires another confirmation without access consent", async () => {
+    present();
+    let identity = confirmationIdentity;
+    server.use(
+      http.get(rollbackPath, () => {
+        record("get", "rollback");
+        return HttpResponse.json({
+          ...availability,
+          confirmation_identity: identity,
+          consent: null,
+        });
+      }),
+      http.post(rollbackPath, async ({ request }) => {
+        const body = (await request.json()) as {
+          confirmation_identity: string;
+        };
+        record("post", "rollback", body);
+        if (body.confirmation_identity === confirmationIdentity) {
+          identity = "replacement-release-identity";
+          return HttpResponse.json(
+            "The retained release changed. Review it again.",
+            { status: 409 },
+          );
+        }
+        return HttpResponse.json({
+          status: "activated",
+          version: previousVersion,
+        });
+      }),
+    );
+    const { user, dialog, confirm } = await openRollback();
+    await user.click(confirm);
+    expect(
+      await within(dialog).findByText(/retained release changed/i),
+    ).toBeVisible();
+    await waitFor(() => expect(confirm).toBeEnabled());
+    expect(calls.filter(({ method }) => method === "post")).toHaveLength(1);
+    await user.click(confirm);
+    await waitFor(() =>
+      expect(calls.at(-1)).toEqual({
+        method: "post",
+        path: "rollback",
+        body: { version: previousVersion, confirmation_identity: identity },
+      }),
+    );
+  });
+
   it("names the retained release and explains plugin data before the user confirms", async () => {
     present();
     const { user, dialog } = await openRollback();
     expect(
-      within(dialog).getByText(/current.*data and settings/i),
+      within(dialog).getByText(
+        /older releases may not support all saved data or settings/i,
+      ),
     ).toBeVisible();
     expect(calls).toEqual([{ method: "get", path: "rollback", body: null }]);
     await user.click(within(dialog).getByRole("button", { name: "Cancel" }));
@@ -312,6 +420,7 @@ describe("rolling back a plugin from its card", () => {
         HttpResponse.json({
           ...availability,
           previous_version: freshVersion,
+          confirmation_identity: confirmationIdentity,
           consent: null,
         }),
       ),
@@ -335,7 +444,14 @@ describe("rolling back a plugin from its card", () => {
     await user.click(within(dialog).getByRole("button", { name: "Roll back" }));
     await waitFor(() =>
       expect(calls).toEqual([
-        { method: "post", path: "rollback", body: { version: freshVersion } },
+        {
+          method: "post",
+          path: "rollback",
+          body: {
+            version: freshVersion,
+            confirmation_identity: confirmationIdentity,
+          },
+        },
       ]),
     );
   });
@@ -346,7 +462,11 @@ describe("rolling back a plugin from its card", () => {
     server.use(
       http.get(rollbackPath, () => {
         record("get", "rollback");
-        return HttpResponse.json({ ...availability, consent: current });
+        return HttpResponse.json({
+          ...availability,
+          confirmation_identity: confirmationIdentity,
+          consent: current,
+        });
       }),
       http.post(rollbackPath, async ({ request }) => {
         const body = (await request.json()) as { consent: string };
@@ -383,6 +503,7 @@ describe("rolling back a plugin from its card", () => {
     await waitFor(() => expect(confirm).toBeEnabled());
     expect(calls[1].body).toEqual({
       version: previousVersion,
+      confirmation_identity: confirmationIdentity,
       consent: delta.digest,
     });
     await user.click(confirm);
@@ -392,7 +513,11 @@ describe("rolling back a plugin from its card", () => {
     expect(calls.at(-1)).toEqual({
       method: "post",
       path: "rollback",
-      body: { version: previousVersion, consent: "sha256:new-rollback" },
+      body: {
+        version: previousVersion,
+        confirmation_identity: confirmationIdentity,
+        consent: "sha256:new-rollback",
+      },
     });
   });
 
@@ -416,7 +541,11 @@ describe("rolling back a plugin from its card", () => {
       server.use(
         http.get(rollbackPath, () => {
           record("get", "rollback");
-          return HttpResponse.json({ ...availability, consent: delta });
+          return HttpResponse.json({
+            ...availability,
+            confirmation_identity: confirmationIdentity,
+            consent: delta,
+          });
         }),
         http.post(rollbackPath, async ({ request }) => {
           record("post", "rollback", await request.json());
@@ -428,6 +557,7 @@ describe("rolling back a plugin from its card", () => {
                     ...installedBackend,
                     state: "staged",
                     staged_version: previousVersion,
+                    staged_action: "rollback",
                     needs_restart: true,
                     rollback: {
                       ...availability,
@@ -453,9 +583,23 @@ describe("rolling back a plugin from its card", () => {
           await screen.findByText("1 plugin change is waiting for a restart."),
         ).toBeVisible();
         expect(screen.getByText(/v1\.0\.0 from Official/)).toBeVisible();
-        expect(screen.getAllByText("Awaiting restart").length).toBeGreaterThan(
-          0,
-        );
+        expect(screen.getByText("Rollback staged")).toBeVisible();
+        expect(screen.getByText("Rollback awaiting restart")).toBeVisible();
+        expect(screen.queryByText("Update staged")).not.toBeInTheDocument();
+        const updates = screen.getByRole("tab", { name: /Updates/ });
+        expect(
+          within(updates).queryByLabelText(/pending update/),
+        ).not.toBeInTheDocument();
+        await user.click(updates);
+        expect(
+          await screen.findByText("Everything is up to date"),
+        ).toBeVisible();
+        expect(
+          screen.queryByText("These updates are staged.", { exact: false }),
+        ).not.toBeInTheDocument();
+        expect(
+          screen.getByText("1 plugin change is waiting for a restart."),
+        ).toBeVisible();
       } else {
         expect(await screen.findByText(/v0\.9\.0 from Official/)).toBeVisible();
         expect(
@@ -466,7 +610,11 @@ describe("rolling back a plugin from its card", () => {
         {
           method: "post",
           path: "rollback",
-          body: { version: previousVersion, consent: delta.digest },
+          body: {
+            version: previousVersion,
+            confirmation_identity: confirmationIdentity,
+            consent: delta.digest,
+          },
         },
       ]);
     },

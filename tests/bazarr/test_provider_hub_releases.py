@@ -1051,6 +1051,50 @@ def test_a_rollback_stages_the_previous_release_and_the_boot_makes_it_active_aga
     assert {item.version: item.id for item in state_store.list_releases("alpha", bind=staged)} == ids
 
 
+def test_rollback_promotes_the_exact_row_when_version_and_bundle_path_match(staged):
+    from provider_hub import releases, service, state_store
+
+    service.activate_staged_installations()
+    [previous] = state_store.list_releases("alpha", bind=staged, states=(releases.RETIRED,))
+    [current] = state_store.list_releases("alpha", bind=staged, states=(releases.ACTIVE,))
+    assert previous.python_path != current.python_path
+    with staged.begin() as connection:
+        table = releases.releases_table
+        connection.execute(table.update().where(table.c.id == current.id).values(
+            version=previous.version, bundle_path=previous.bundle_path,
+            manifest=json.dumps(previous.manifest, sort_keys=True)))
+
+    assert service.rollback_release("alpha").outcome == service.ACTIVATION_WAITING
+    assert service.activate_staged_installations() == ["alpha"]
+
+    [active] = state_store.list_releases("alpha", bind=staged, states=(releases.ACTIVE,))
+    [retired] = state_store.list_releases("alpha", bind=staged, states=(releases.RETIRED,))
+    assert (active.id, active.state, active.python_path) == (previous.id, releases.ACTIVE, previous.python_path)
+    assert (retired.id, retired.state, retired.python_path) == (current.id, releases.RETIRED, current.python_path)
+
+
+def test_boot_rejects_a_replaced_staged_rollback_and_keeps_the_previous_release(staged, monkeypatch):
+    from provider_hub import releases, service, state_store
+    from provider_hub.state import load_state, mutate_state
+
+    service.activate_staged_installations()
+    [previous] = state_store.list_releases("alpha", bind=staged, states=(releases.RETIRED,))
+    [current] = state_store.list_releases("alpha", bind=staged, states=(releases.ACTIVE,))
+    assert service.rollback_release("alpha").outcome == service.ACTIVATION_WAITING
+    mutate_state(lambda state: state["installations"]["alpha"].update(
+        staged_python_path=_python("alpha", "replacement")))
+    monkeypatch.setattr(service, "_verified_staged_release",
+                        lambda *args: pytest.fail("The replacement must not be started"))
+
+    assert service.activate_staged_installations() == []
+
+    assert state_store.list_releases("alpha", bind=staged, states=(releases.ACTIVE,)) == [current]
+    [retained] = state_store.list_releases("alpha", bind=staged, states=(releases.RETIRED,))
+    assert (retained.id, retained.python_path, retained.manifest) == (previous.id, previous.python_path, previous.manifest)
+    row = load_state()["installations"]["alpha"]
+    assert row["staged_version"] is None and "staged rollback was discarded" in row["last_error"]
+
+
 def test_there_is_nothing_to_roll_back_to_without_a_previous_release(staged):
     from provider_hub.service import ProviderHubInstallError, rollback_release
 

@@ -304,13 +304,17 @@ class PluginsInstallationRollback(Resource):
         version = payload.get("version")
         if not isinstance(version, str) or not version.strip():
             return 'version is required', 400
+        confirmation_identity = payload.get("confirmation_identity")
+        if not isinstance(confirmation_identity, str) or not confirmation_identity.strip():
+            return 'confirmation_identity is required', 400
         digest = payload.get("consent")
         if digest is not None and not isinstance(digest, str):
             return 'consent must be the digest of the consent summary', 400
         if not _installation(plugin_id):
             return 'Plugin not found', 404
         try:
-            result = service.rollback_release(plugin_id, consent_digest=digest, expected_version=version)
+            result = service.rollback_release(plugin_id, consent_digest=digest, expected_version=version,
+                                              confirmation_identity=confirmation_identity)
         except ProviderHubConsentError as error:
             return refusal_text(error), 409 if error.changed or digest is not None else 400
         except service.ProviderHubInstallError as error:

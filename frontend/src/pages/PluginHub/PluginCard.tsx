@@ -100,8 +100,18 @@ const Action: FunctionComponent<PluginCardProps> = ({
   }
   if (installation && isAwaitingRestart(installation)) {
     return (
-      <Tooltip label="Restart Bazarr+ to finish this change">
-        <span className={styles.hubCardPendingText}>Awaiting restart</span>
+      <Tooltip
+        label={
+          installation.staged_action === "rollback"
+            ? "Restart Bazarr+ to activate the rollback"
+            : "Restart Bazarr+ to finish this change"
+        }
+      >
+        <span className={styles.hubCardPendingText}>
+          {installation.staged_action === "rollback"
+            ? "Rollback awaiting restart"
+            : "Awaiting restart"}
+        </span>
       </Tooltip>
     );
   }
@@ -323,6 +333,7 @@ export const PluginCard: FunctionComponent<PluginCardProps> = (props) => {
                 state={installation.state}
                 pendingRestart={isAwaitingRestart(installation)}
                 activeVersion={installation.active_version}
+                stagedAction={installation.staged_action}
                 needsRepair={installation.needs_repair}
               />
             ) : (
