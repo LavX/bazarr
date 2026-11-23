@@ -17,7 +17,7 @@ from subzero.language import Language
 from subliminal_patch.core import save_subtitles
 from subtitles.tools.subsync_engines import (
     SubtitleDestinationChanged, SubtitleSourceChanged, _report_subtitle_publication,
-    local_subtitle_owner_is_clear, plan_sync_output_cleanup, regular_subtitle_version, subtitle_mutation,
+    plan_sync_output_cleanup, regular_subtitle_version, subtitle_mutation,
     subtitle_source_version, subtitle_write_locks, sync_output_owner_is_unique, write_subtitle_file,
 )
 from subliminal_patch.core_persistent import download_best_subtitles
@@ -203,7 +203,8 @@ def generate_subtitles(path, languages, audio_language, sceneName, title, media_
 
                         try:
                             destination_setting = (
-                                _source_subtitle_destination_setting() if source_upgrade is not None else None
+                                _source_subtitle_destination_setting()
+                                if source_wanted_stamp is not None or source_upgrade is not None else None
                             )
                             fld = get_target_folder(path)
                             chmod = int(settings.general.chmod, 8) if not sys.platform.startswith(
@@ -483,26 +484,23 @@ def _write_source_download(video_path, destination, content, *, source, language
     @contextmanager
     def publication(files):
         with ownership_index.publication(source, prepare, destination=registry_destination,
-                                         cleanup_outputs=upgrade is None) as (current, connection, prepared):
+                                         cleanup_outputs=upgrade is None,
+                                         recheck_registered=wanted_stamp is not None) as (current, connection, prepared):
             if current is None or current.path != video_path:
                 raise SubtitleDestinationChanged('The source item moved or was removed')
             if video_version is not None and subtitle_source_version(video_path) != video_version:
                 raise SubtitleDestinationChanged('The media file changed while searching for subtitles')
+            if destination_setting is not None and destination_setting != _source_subtitle_destination_setting():
+                raise SubtitleDestinationChanged('The subtitle destination setting changed before publication')
             overwrite = is_upgrade if upgrade is None else same_destination
             if os.path.lexists(destination) and (not overwrite or regular_subtitle_version(destination) is None):
                 raise SubtitleDestinationChanged('The source subtitle destination is already occupied')
             if upgrade is not None:
                 if current.profile_id != source.profile_id or not upgrade.can_publish(current, target=connection):
                     raise SubtitleDestinationChanged('Source upgrade eligibility changed during search')
-                if destination_setting is not None and destination_setting != _source_subtitle_destination_setting():
-                    raise SubtitleDestinationChanged('The subtitle destination setting changed before publication')
                 paths, outputs, proof = prepared
                 output_paths = tuple(path for path, _ in outputs)
-                if not all(local_subtitle_owner_is_clear(video_path, path, ownership_index)
-                           for path in (*paths, *output_paths)):
-                    raise SubtitleDestinationChanged('Subtitle ownership in the source directory changed during search')
-                if not ownership_index.registered_ownership_is_current(proof):
-                    raise SubtitleDestinationChanged('Registered subtitle ownership changed before publication')
+                ownership_index.require_current_ownership(video_path, (*paths, *output_paths), proof)
                 files.enter_context(subtitle_mutation(video_path, old_path, *output_paths, invalidate_outputs=False))
                 files.enter_context(_preserve_source_subtitle(old_path, upgrade.subtitle_version, retire=remove_previous))
                 for output, version in outputs:

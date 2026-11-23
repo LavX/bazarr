@@ -223,6 +223,13 @@ class SourcePublicationOwnerIndex(SourceOutputOwnerIndex):
         except (OSError, ValueError):
             return False
 
+    def require_current_ownership(self, video_path, subtitle_paths, proof):
+        """Check local siblings and any prepared registry claims under the writer guard."""
+        if not all(local_subtitle_owner_is_clear(video_path, path, self) for path in subtitle_paths):
+            raise SourcePublicationOwnersChanged('Another video now owns a subtitle destination')
+        if not self.registered_ownership_is_current(proof):
+            raise SourcePublicationOwnersChanged('Registered subtitle ownership changed before publication')
+
     def subtitle_destination(self):
         if self._publication_settings is not None:
             return self._publication_settings[0]
@@ -245,7 +252,8 @@ class SourcePublicationOwnerIndex(SourceOutputOwnerIndex):
         return directory != media_directory
 
     @contextmanager
-    def publication(self, source, prepare=None, *, destination=None, cleanup_outputs=False):
+    def publication(self, source, prepare=None, *, destination=None, cleanup_outputs=False,
+                    recheck_registered=False):
         """Prepare subtitle changes before locking the registry for publication."""
         for _ in range(2):
             self._loaded = False
@@ -259,6 +267,12 @@ class SourcePublicationOwnerIndex(SourceOutputOwnerIndex):
             shared = self._needs_registry_guard(source, destination, self._publication_settings[0][1])
             if shared and self._prepared_owners is None:
                 raise SourcePublicationOwnersChanged('The shared subtitle owners could not be verified')
+            paths = (destination,) if destination is not None else ()
+            proof = None
+            if recheck_registered:
+                paths += tuple(path for path, _ in outputs)
+                if shared and paths:
+                    proof = self.prepare_registered_ownership(source.path, paths)
             # A scanner with the conflicting lock finishes outside this transaction.
             # Retrying after rollback leaves it free to finish any remaining row writes.
             for delay in (0, 0.025, 0.05, 0.10, 0.20, 0.40, 0.40):
@@ -276,9 +290,8 @@ class SourcePublicationOwnerIndex(SourceOutputOwnerIndex):
                             if (state is None or not state.source_enabled or not state.library_enabled
                                     or not os.path.isfile(current.path)):
                                 current = None
-                        if (current is not None and destination is not None
-                                and not local_subtitle_owner_is_clear(current.path, destination, self)):
-                            raise SourcePublicationOwnersChanged('Another video now owns the subtitle destination')
+                        if current is not None and paths:
+                            self.require_current_ownership(current.path, paths, proof)
                         publishing = True
                         yield current, connection, prepared
                         if current is not None and outputs:
