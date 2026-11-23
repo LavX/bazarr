@@ -17,6 +17,7 @@ from datetime import datetime, timedelta, timezone
 from zipfile import ZipFile, BadZipFile, ZIP_DEFLATED
 from glob import glob
 from pathlib import Path, PureWindowsPath
+from string import ascii_lowercase, ascii_uppercase
 
 from provider_hub import datadir, secret_paths
 
@@ -323,7 +324,29 @@ def _postgres_server_major(connection):
         return None
 
 
-def _check_postgres_reachable(connection, *, resolve_plugin_schema=False):
+_SEARCH_PATH_NAME = re.compile(r'\s*(?:"((?:[^"]|"")*)"|([^\s,"]+))\s*(?:,|$)')
+_POSTGRES_IDENTIFIER_CASE = str.maketrans(ascii_uppercase, ascii_lowercase)
+
+
+def _postgres_search_path_names(search_path, role):
+    """Read configured names, including those PostgreSQL skipped because they do not exist yet."""
+    names = []
+    offset = 0
+    while offset < len(search_path):
+        match = _SEARCH_PATH_NAME.match(search_path, offset)
+        if match is None:
+            return []
+        quoted, unquoted = match.groups()
+        name = quoted.replace('""', '"') if quoted is not None else unquoted.translate(_POSTGRES_IDENTIFIER_CASE)
+        if name == '$user':
+            name = role
+        if name != 'pg_temp':
+            names.append(name)
+        offset = match.end()
+    return names
+
+
+def _check_postgres_reachable(connection, *, resolve_plugin_schemas=False):
     """Raise PostgresUnreachableError unless the database takes a connection.
 
     Uses the settings pg_restore gets. pg_restore exits non-zero when it cannot
@@ -342,15 +365,27 @@ def _check_postgres_reachable(connection, *, resolve_plugin_schema=False):
         arguments['password'] = str(connection['password'])
     try:
         with closing(driver.connect(_postgres_conninfo(connection), **arguments)) as client:
-            if resolve_plugin_schema:
+            if resolve_plugin_schemas:
                 with closing(client.cursor()) as cursor:
                     cursor.execute('''
-                        SELECT COALESCE((SELECT n.nspname
+                        SELECT (SELECT n.nspname
                             FROM pg_catalog.pg_class AS c
                             JOIN pg_catalog.pg_namespace AS n ON n.oid = c.relnamespace
-                            WHERE c.oid = pg_catalog.to_regclass('provider_hub_state')), current_schema())
+                            WHERE c.oid = pg_catalog.to_regclass('provider_hub_state')),
+                            pg_catalog.current_schema(), pg_catalog.current_setting('search_path'), current_user,
+                            NOT EXISTS (SELECT 1 FROM pg_catalog.pg_class AS c
+                                JOIN pg_catalog.pg_namespace AS n ON n.oid = c.relnamespace
+                                WHERE pg_catalog.left(n.nspname, 3) <> 'pg_'
+                                AND n.nspname <> 'information_schema')
                     ''')
-                    return cursor.fetchone()[0]
+                    inventory, current, search_path, role, empty = cursor.fetchone()
+                schemas = [inventory or current]
+                # On an empty database a full dump can create the configured
+                # namespace. Once there is existing data, keep the authority
+                # of the inventory (or default schema) this connection sees.
+                if inventory is None and empty:
+                    schemas.extend(_postgres_search_path_names(search_path, role))
+                return tuple(dict.fromkeys(schema for schema in schemas if schema))
     except Exception as error:
         raise PostgresUnreachableError(
             f'The PostgreSQL database could not be reached: {str(error).strip()}') from error
@@ -364,8 +399,8 @@ def _verify_postgres_plugin_schema(dump_path):
     connection = _postgres_connection_settings()
     if not _postgres_names_database(connection):
         raise BackupError('No PostgreSQL database name is configured for the plugin data restore.')
-    schema = _check_postgres_reachable(connection, resolve_plugin_schema=True)
-    if not schema:
+    schemas = _check_postgres_reachable(connection, resolve_plugin_schemas=True)
+    if not schemas:
         raise BackupError('The configured PostgreSQL connection does not resolve a plugin inventory schema.')
 
     def inventory_entries(*selection):
@@ -379,7 +414,7 @@ def _verify_postgres_plugin_schema(dump_path):
                 if (entry := re.match(r'^\d+;\s+\d+\s+\d+\s+(TABLE DATA|TABLE) ', line))]
 
     archived = inventory_entries()
-    target = inventory_entries('--schema', schema)
+    target = inventory_entries(*(f'--schema={schema}' for schema in schemas))
     expected = ['TABLE', 'TABLE DATA']
     if sorted(entry[1] for entry in archived) != expected or sorted(entry[1] for entry in target) != expected:
         raise BackupError('The PostgreSQL backup must contain a single plugin inventory in the schema '

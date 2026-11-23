@@ -1549,6 +1549,11 @@ def test_plugin_backup_uses_the_published_pg_restore_and_checkpoints_its_result(
     with zipfile.ZipFile(archive, 'a') as zip_file:
         zip_file.writestr(secret_paths.HISTORY_ARCHIVE, '{}')
 
+    def unexpected_schema_check(path):
+        pytest.fail('A backup with plugin metadata alone must not check the dump for an inventory')
+
+    monkeypatch.setattr(module, '_verify_postgres_plugin_schema', unexpected_schema_check)
+
     assert module.prepare_restore(archive.name)
     assert not tool_log.exists()
     assert module.restore_from_backup() is (exit_code == 0)

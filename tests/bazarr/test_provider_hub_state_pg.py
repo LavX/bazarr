@@ -518,19 +518,26 @@ def postgres_restore_instance(tmp_path):
     password = url.query.get("password") or url.password
     if password:
         environment["POSTGRES_PASSWORD"] = password
-    created = False
+    created = []
     try:
         with admin.connect() as connection:
             info = connection.connection.driver_connection.info
             host, port, user = info.host, info.port, info.user
             connection.exec_driver_sql(f'CREATE DATABASE "{database}"')
-            created = True
+            created.append(database)
         direct_url = sa.URL.create(url.drivername, username=user, database=database,
                                    query={"host": host, "port": str(port), "connect_timeout": "3"})
         schema = "plugin_restore"
 
-        def configure(mode):
-            connection_url = direct_url
+        def fresh_database():
+            target = "restore_" + uuid.uuid4().hex
+            with admin.connect() as connection:
+                connection.exec_driver_sql(f'CREATE DATABASE "{target}"')
+            created.append(target)
+            return direct_url.set(database=target)
+
+        def configure(mode, *, target=None, schema_name=schema, search_path=None, create_schema=True):
+            connection_url = target or direct_url
             environment.pop("PGSERVICEFILE", None)
             if mode == "service":
                 parser = configparser.ConfigParser(interpolation=None)
@@ -548,14 +555,19 @@ def postgres_restore_instance(tmp_path):
                 connection_url = direct_url.difference_update_query(("port",)).update_query_dict({
                     "host": (f"{unavailable}:{port}", f"{host}:{port}")})
             elif mode == "search_path":
-                database_engine = sa.create_engine(direct_url.set(password=password),
-                                                   isolation_level="AUTOCOMMIT", hide_parameters=True)
-                try:
-                    with database_engine.connect() as connection:
-                        connection.exec_driver_sql(f'CREATE SCHEMA "{schema}"')
-                finally:
-                    database_engine.dispose()
-                connection_url = direct_url.update_query_dict({"options": f"-csearch_path={schema}"})
+                if create_schema:
+                    database_engine = sa.create_engine(connection_url.set(password=password),
+                                                       isolation_level="AUTOCOMMIT", hide_parameters=True)
+                    try:
+                        with database_engine.connect() as connection:
+                            quoted_schema = connection.dialect.identifier_preparer.quote_identifier(schema_name)
+                            connection.exec_driver_sql(f'CREATE SCHEMA {quoted_schema}')
+                    finally:
+                        database_engine.dispose()
+                # libpq splits options at unescaped spaces before PostgreSQL
+                # interprets the quoted search_path identifiers.
+                path = (search_path or schema_name).replace(' ', r'\ ')
+                connection_url = connection_url.update_query_dict({"options": f"-csearch_path={path}"})
             elif mode != "direct":
                 raise AssertionError(mode)
             config.write_text(yaml.safe_dump({"general": {"port": 7000}, "postgresql": {
@@ -577,12 +589,14 @@ def postgres_restore_instance(tmp_path):
         configure("direct")
         yield SimpleNamespace(root=root, config=config, sample=sample, database=database, schema=schema,
                               configure=configure, child=child, archive=archive,
+                              fresh_database=fresh_database,
                               stage=root / "restore" / ".backup-staged",
                               tool_runs=root / "postgres-tool-runs", direct_url=direct_url.set(password=password))
     finally:
         if created:
             with admin.connect() as connection:
-                connection.exec_driver_sql(f'DROP DATABASE "{database}" WITH (FORCE)')
+                for name in created:
+                    connection.exec_driver_sql(f'DROP DATABASE "{name}" WITH (FORCE)')
         admin.dispose()
 
 
@@ -671,6 +685,62 @@ def test_postgres_restore_keeps_an_ambiguous_database_step_for_operator_verifica
     assert (instance.stage / "payload" / "config.yaml").is_file()
     assert archive.is_file()
     assert instance.tool_runs.read_text(encoding="utf-8").splitlines() == ["pg_dump", "pg_restore"]
+
+
+@pytest.mark.parametrize('path_kind', ['custom-only', 'public-fallback', 'quoted-fallback', 'populated'])
+def test_postgres_restore_creates_a_configured_schema_on_a_fresh_database(postgres_restore_instance, path_kind):
+    from literals import EXIT_RESTORE_ERROR
+    from zipfile import ZipFile
+
+    instance = postgres_restore_instance
+    schema = 'Plugin, Restore' if path_kind == 'quoted-fallback' else instance.schema
+    path = '"' + schema + '"' if path_kind == 'quoted-fallback' else schema.upper()
+    instance.configure('search_path', schema_name=schema, search_path=path)
+    archive = instance.archive()
+    if path_kind == 'custom-only':
+        payload = instance.root / 'restore'
+        with ZipFile(archive) as backup:
+            backup.extractall(payload)
+    else:
+        # Queue from the running instance. The subsequent boot below is the
+        # first application process to open the new database.
+        instance.child('prepare', archive.name)
+        payload = instance.stage / 'payload'
+    target = instance.fresh_database()
+
+    engine = sa.create_engine(target.set(password=instance.direct_url.password), hide_parameters=True)
+    try:
+        with engine.begin() as connection:
+            assert connection.execute(sa.text('SELECT to_regnamespace(:name)'), {'name': path}).scalar_one() is None
+            assert connection.exec_driver_sql("SELECT count(*) FROM information_schema.tables "
+                                              "WHERE table_schema = 'public'").scalar_one() == 0
+            if path_kind == 'populated':
+                connection.exec_driver_sql('CREATE TABLE public.current_records (id integer PRIMARY KEY)')
+                connection.exec_driver_sql('INSERT INTO public.current_records VALUES (12)')
+        if path_kind != 'custom-only':
+            path += ', public'
+        instance.configure('search_path', target=target, search_path=path, create_schema=False)
+        instance.sample.write_text('files before restore', encoding='utf-8')
+
+        if path_kind == 'populated':
+            instance.child('boot', expected=EXIT_RESTORE_ERROR & 255)
+            assert (payload / 'bazarr_postgres.dump').is_file()
+            assert instance.sample.read_text(encoding='utf-8') == 'files before restore'
+            assert instance.tool_runs.read_text(encoding='utf-8').splitlines() == ['pg_dump']
+            with engine.connect() as connection:
+                assert connection.exec_driver_sql('SELECT id FROM public.current_records').scalar_one() == 12
+        else:
+            instance.child('boot', expected=41)
+            instance.child('boot')
+            assert json.loads(instance.child('check')) == {
+                'database': target.database, 'schema': schema, 'name': 'archived row',
+            }
+            assert instance.sample.read_text(encoding='utf-8') == 'archived plugin files'
+            assert instance.tool_runs.read_text(encoding='utf-8').splitlines() == ['pg_dump', 'pg_restore']
+            assert not (payload / 'bazarr_postgres.dump').exists()
+            assert not instance.stage.exists()
+    finally:
+        engine.dispose()
 
 
 @pytest.mark.parametrize('extra_inventory', [False, True], ids=['different-schema', 'multiple-schemas'])
