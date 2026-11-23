@@ -230,6 +230,10 @@ def _group_running(group):
 
 
 def previous_workers_stopped(config_dir, *, deadline: float | None = None) -> bool:
+    """Check prior workers without changing records when a deadline is supplied.
+
+    Calls without a deadline also remove completed prior-owner records as maintenance.
+    """
     folder = _directory(config_dir)
     try:
         entries = list(folder.iterdir())
@@ -250,7 +254,8 @@ def previous_workers_stopped(config_dir, *, deadline: float | None = None) -> bo
                 continue
             if _still_running(path, record):
                 return False
-            path.unlink(missing_ok=True)
+            if deadline is None:
+                path.unlink(missing_ok=True)
         except (OSError, ValueError, KeyError, TypeError):
             return False
     return deadline is None or time.monotonic() < deadline

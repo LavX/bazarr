@@ -491,6 +491,7 @@ def _clear_marks(data: dict[str, Any]) -> None:
             if isinstance(installation, dict):
                 installation.pop(releases.DRAIN_PREVIOUS, None)
                 installation.pop(releases.FAIL_STAGED, None)
+                installation.pop(releases.PROMOTE_STAGED_DATA, None)
 
 
 def _listed_ids(text: str | None) -> set[str]:

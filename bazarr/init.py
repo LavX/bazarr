@@ -147,6 +147,15 @@ write_config()
 from languages.extra import register_extra_languages  # noqa: E402
 register_extra_languages()
 
+
+try:
+    from provider_hub.datadir import cleanup_probe_workspaces
+    from provider_hub.state import provider_hub_dir
+
+    cleanup_probe_workspaces(provider_hub_dir())
+except (OSError, ValueError):  # pragma: no cover - temporary files must not prevent startup
+    logging.warning("Unable to clear abandoned Provider Hub probe folders", exc_info=True)
+
 try:
     # The translator kind exists only while the translation runtime switch is on. Registered here, ahead of
     # anything that stages or activates a plugin, and not when the kinds package loads, because reading the

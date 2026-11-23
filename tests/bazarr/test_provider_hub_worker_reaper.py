@@ -583,6 +583,78 @@ def test_posix_launch_interrupted_before_spawn_can_clear_the_group_record(monkey
     assert list(activity._root.iterdir()) == []
 
 
+@pytest.fixture(params=["win32", "darwin"])
+def native_activity_records(request, tmp_path, monkeypatch):
+    import json
+    from types import SimpleNamespace
+
+    from provider_hub.sandbox import activity, sweep
+
+    monkeypatch.setattr(activity, "sys", SimpleNamespace(platform=request.param))
+    monkeypatch.setattr(sweep, "sys", SimpleNamespace(platform=request.param))
+    monkeypatch.setattr(activity, "time", SimpleNamespace(monotonic=lambda: 1.0))
+    monkeypatch.setattr(sweep, "_has_proc", lambda: pytest.fail("Linux process scan during native activity check"))
+    monkeypatch.setattr(sweep, "_uncertainty_directory", lambda *args, **kwargs: pytest.fail("Linux marker access"))
+    statuses = {}
+    monkeypatch.setattr(activity, "_windows_process", lambda pid: (42, statuses[pid]))
+    monkeypatch.setattr(activity, "_open_windows_job", lambda name: None)
+    monkeypatch.setattr(activity, "_group_running", lambda group: statuses[group])
+    folder = tmp_path / "provider_hub" / "worker-activity"
+    folder.mkdir(parents=True)
+
+    def record(number, *, running=False, owner="previous-run"):
+        statuses[number] = running
+        path = folder / f"{number:032x}.json"
+        identity = {"host": [number, 42]} if request.param == "win32" else {"group": number}
+        path.write_text(json.dumps({"owner": owner, **identity}), encoding="ascii")
+        return path
+
+    return tmp_path, folder, record
+
+
+def _activity_filesystem_snapshot(folder):
+    def identity(path):
+        info = path.stat()
+        return info.st_ino, info.st_mode, info.st_size, info.st_mtime_ns, info.st_ctime_ns
+
+    return identity(folder), {path.name: (identity(path), path.read_bytes()) for path in folder.iterdir()}
+
+
+def test_native_deadline_check_preserves_completed_and_current_activity(native_activity_records):
+    from provider_hub.sandbox import activity, sweep
+
+    config, folder, record = native_activity_records
+    completed = record(321)
+    current = record(322, running=True, owner=activity._owner)
+    before = _activity_filesystem_snapshot(folder)
+
+    assert sweep.previous_workers_stopped(config, deadline=10)
+    assert sweep.previous_workers_stopped(config, deadline=10)
+    assert _activity_filesystem_snapshot(folder) == before
+
+    # Maintenance still removes completed records without dropping this run's records.
+    assert sweep.previous_workers_stopped(config)
+    assert not completed.exists()
+    assert current.exists()
+
+
+@pytest.mark.parametrize("state", ["running", "malformed", "expired", "expired_after_status"])
+def test_native_deadline_refusal_preserves_activity(native_activity_records, state, monkeypatch):
+    from provider_hub.sandbox import activity, sweep
+
+    config, folder, record = native_activity_records
+    path = record(321, running=state == "running")
+    if state == "malformed":
+        path.write_text("{", encoding="ascii")
+    if state == "expired_after_status":
+        ticks = iter([1.0, 10.0])
+        monkeypatch.setattr(activity.time, "monotonic", lambda: next(ticks))
+    before = _activity_filesystem_snapshot(folder)
+
+    assert not sweep.previous_workers_stopped(config, deadline=1 if state == "expired" else 10)
+    assert _activity_filesystem_snapshot(folder) == before
+
+
 def test_posix_interruption_after_the_child_starts_never_reaches_plugin_code(monkeypatch, tmp_path):
     import os
     import subprocess

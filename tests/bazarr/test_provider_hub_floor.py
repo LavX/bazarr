@@ -1842,18 +1842,25 @@ def test_seeded_translator_update_waits_for_previous_release_data_writers(
         database.setattr(releases, "apply_plan", reject_promotion)
         assert hub.activate_staged_installations() == []
     assert hub_store.list_releases(plugin_id, states=(releases.STAGED,)) == [staged_release]
-    assert smoke_calls == [("1.1.0", staged_data, "final write")]
+    (version, first_probe, content), = smoke_calls
+    assert (version, content) == ("1.1.0", "final write")
+    assert first_probe != staged_data and not first_probe.exists()
+    assert not staged_data.exists()
+    staged_data.mkdir()
     (staged_data / renamed.name).write_text("left by the interrupted attempt")
 
     assert hub.activate_staged_installations() == [plugin_id]
     active_release, = hub_store.list_releases(plugin_id, states=(releases.ACTIVE,))
     assert (active_release.id, active_release.created_at) == (staged_release.id, staged_release.created_at)
-    assert active_release.data_key == staged_release.data_key == staged["staged_data_key"]
+    assert staged_release.data_key == staged["staged_data_key"]
+    assert active_release.data_key != staged_release.data_key
+    assert active_release.catalog_registration == staged_release.catalog_registration
     active = hub.load_state()["installations"][plugin_id]
     assert active["active_version"] == "1.1.0" and Path(active["active_path"]).is_relative_to(new_image)
     current_data = datadir.release_path(root, plugin_id, active["active_data_key"])
-    assert current_data == staged_data
-    assert smoke_calls == [("1.1.0", current_data, "final write")] * 2
+    assert current_data != staged_data and not staged_data.exists()
+    assert [(version, content) for version, _, content in smoke_calls] == [("1.1.0", "final write")] * 2
+    assert smoke_calls[1][1] != first_probe and not smoke_calls[1][1].exists()
     assert (current_data / renamed.name).read_text() == "final write"
     assert store.pointers() == selection
 

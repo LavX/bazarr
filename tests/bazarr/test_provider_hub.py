@@ -3749,7 +3749,7 @@ def test_get_providers_auth_includes_active_provider_hub_config(tmp_path, monkey
 @pytest.mark.parametrize("release_data", [False, True])
 def test_provider_hub_connection_test_runs_worker_health(tmp_path, monkeypatch, release_data):
     from plugin_platform_helpers import provider_manifest_v2
-    from provider_hub import datadir
+    from provider_hub import datadir, service
     from provider_hub.state import load_state, save_state
 
     requests = []
@@ -3781,6 +3781,7 @@ def test_provider_hub_connection_test_runs_worker_health(tmp_path, monkeypatch, 
     monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(tmp_path / "provider_hub" / "state.json"))
     monkeypatch.setattr("provider_hub.service.verify_bundle_tree", lambda _manifest, _path: None)
     monkeypatch.setattr("provider_hub.service.ProviderWorkerClient", FakeWorkerClient)
+    monkeypatch.setattr(service, "_previous_workers_stopped", lambda **_: True)
 
     state = load_state()
     state["installations"] = {
@@ -3814,7 +3815,7 @@ def test_provider_hub_connection_test_runs_worker_health(tmp_path, monkeypatch, 
     assert result["status"] == "ready"
     assert result["message"] == "Worker health check passed"
     assert requests[0][0] == "health"
-    assert requests[0][2] == 10
+    assert 0 < requests[0][2] <= service.PROBE_TIMEOUT
     assert str(requests[0][3]) == str(bundle_path)
     manifest = json.loads(requests[0][4]["BAZARR_PROVIDER_HUB_MANIFEST"])
     assert manifest.get("provider_id", manifest.get("id")) == "examplehub"

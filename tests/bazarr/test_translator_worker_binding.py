@@ -1245,6 +1245,39 @@ def test_translator_smoke_starts_with_only_the_staged_release_data(hub):
     assert runtime.env["BAZARR_PLUGIN_DATA_DIR"] == str(active)
 
 
+@pytest.mark.parametrize("confirmed", [True, False])
+def test_translator_smoke_keeps_temporary_files_until_stop_is_confirmed(hub, monkeypatch, confirmed):
+    from provider_hub import datadir
+    from provider_hub.runtime import pool, session
+
+    data = datadir.probe_workspace(hub.root) / "data"
+    data.mkdir()
+    stopped = []
+
+    class SmokeSession:
+        def __init__(self, **kwargs):
+            self.process = SimpleNamespace(returncode=0)
+            self.teardown_confirmed = confirmed
+
+        def start(self):
+            pass
+
+        def close(self):
+            stopped.append(True)
+
+    monkeypatch.setattr(session, "WorkerSession", SmokeSession)
+    monkeypatch.setattr(pool.WorkerPool, "_cleanup_confirmed", staticmethod(lambda process: confirmed))
+    validated = SimpleNamespace(raw=hub.manifest, provider_id=PLUGIN)
+    args = (validated, hub.bundle, Path(hub.installation.python_path), data)
+    if confirmed:
+        hub.definitions().smoke(*args, timeout=1)
+    else:
+        with pytest.raises(datadir.ProbeWorkerUnconfirmed, match="could not stop"):
+            hub.definitions().smoke(*args, timeout=1)
+    assert stopped == [True]
+    assert bool(list(data.parent.glob(".smoke-*"))) is not confirmed
+
+
 def test_data_quiesce_timeout_keeps_busy_translator_worker_serving():
     from subtitles.tools.translate.runtime.workers import PoolWorkers
 
