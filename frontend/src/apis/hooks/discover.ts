@@ -100,6 +100,8 @@ export function useDiscoverCopies(
     enabled: target !== null,
     staleTime: 30_000,
     gcTime: 300_000,
+    // A different target must never offer the previous target's copies.
+    placeholderData: undefined,
     retry: false,
     networkMode: "always",
   });

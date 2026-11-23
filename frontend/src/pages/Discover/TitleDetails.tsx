@@ -39,7 +39,13 @@ function useSelectedTitle() {
     kind,
     source,
   );
-  const received = details.data?.item;
+  const response = details.data?.item;
+  const received =
+    response?.id === id &&
+    response.media_type === kind &&
+    response.source === source
+      ? response
+      : undefined;
   const retained = state.browsing.retainedTitle;
   const movie =
     received ??

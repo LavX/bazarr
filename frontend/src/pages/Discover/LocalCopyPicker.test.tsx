@@ -527,6 +527,185 @@ const movieCopy = {
   unavailable_reason: null,
 };
 
+const sourceMovieCopy = {
+  ...movieCopy,
+  copy_id: "c1.movie.5.s2",
+  arr_instance_id: null,
+  instance_name: null,
+  source_id: 2,
+  source_name: "Local films",
+};
+const tmdbOnlyMovie = {
+  ...movieDetail,
+  imdb_id: null,
+  copies: [{ local_id: 5, source_id: 2, arr_instance_id: null }],
+};
+
+it("keeps a TMDB-only title's chosen copy usable during an in-place refresh", async () => {
+  copyPayload = {
+    items: [sourceMovieCopy],
+    truncated: false,
+    owning_titles: 1,
+  };
+  server.use(
+    http.get("/api/discover/metadata/movies/200", () =>
+      HttpResponse.json({ data: { ...envelope, item: tmdbOnlyMovie } }),
+    ),
+  );
+  const { user } = browse("/discover?movie=200");
+  await pickOption(user, "Library copy", describeCopy(sourceMovieCopy));
+  await pickOption(user, "Subtitle language", "English");
+  let finishRefresh: () => void = () => undefined;
+  const pending = new Promise<void>((resolve) => {
+    finishRefresh = resolve;
+  });
+  let refreshing = false;
+  server.use(
+    http.get("/api/discover/copies", async () => {
+      refreshing = true;
+      await pending;
+      return HttpResponse.json(copyPayload);
+    }),
+  );
+
+  const refreshed = queryClient.invalidateQueries({
+    queryKey: COPIES_QUERY_KEY,
+  });
+  await waitFor(() => expect(refreshing).toBe(true));
+  expect(selectInput("Library copy")).toHaveValue(
+    describeCopy(sourceMovieCopy),
+  );
+  expect(screen.getByText(/Chosen file:/)).toHaveTextContent(
+    "the.matrix.1999.mkv",
+  );
+  await user.click(screen.getByRole("button", { name: "Find subtitles" }));
+  await waitFor(() => expect(searches).toHaveLength(1));
+  expect(searches[0]).toMatchObject({
+    tmdb_id: 200,
+    copy_id: "c1.movie.5.s2",
+  });
+  expect(searches[0]).not.toHaveProperty("imdb_id");
+
+  finishRefresh();
+  await refreshed;
+  expect(selectInput("Library copy")).toHaveValue(
+    describeCopy(sourceMovieCopy),
+  );
+});
+
+it.each(["trending", "digital"])(
+  "opens a different TMDB-only movie from %s with a fresh copy choice",
+  async (feed) => {
+    const nextMovie = {
+      ...tmdbOnlyMovie,
+      id: 201,
+      source_id: "tmdb:movie:201",
+      title: "Southern Cross",
+      year: 2021,
+      copies: [{ local_id: 6, source_id: 2, arr_instance_id: null }],
+    };
+    const nextCopy = {
+      ...sourceMovieCopy,
+      copy_id: "c1.movie.6.s2",
+      local_id: 6,
+      title: "Southern Cross",
+      release: "Southern.Cross.2021.1080p.WEB",
+      filename: "southern.cross.2021.mkv",
+    };
+    const now = new Date().toISOString();
+    const day = now.slice(0, 10);
+    const feedEnvelope = {
+      ...envelope,
+      status: "live",
+      service_status: null,
+      fetched_at: now,
+      attempted_at: now,
+      last_success: now,
+      expires_at: new Date(Date.now() + 300_000).toISOString(),
+      stale_until: new Date(Date.now() + 3_600_000).toISOString(),
+    };
+    server.use(
+      http.get("/api/discover/metadata/movies/200", () =>
+        HttpResponse.json({ data: { ...envelope, item: tmdbOnlyMovie } }),
+      ),
+      http.get("/api/discover/metadata/movies/201", () =>
+        HttpResponse.json({ data: { ...envelope, item: nextMovie } }),
+      ),
+      http.get("/api/discover/feeds/trending", () =>
+        HttpResponse.json({
+          ...feedEnvelope,
+          period: "week",
+          scope: "global",
+          media_type: "all",
+          items: feed === "trending" ? [{ ...nextMovie, rank: 1 }] : [],
+        }),
+      ),
+      http.get("/api/discover/feeds/digital", () =>
+        HttpResponse.json({
+          ...feedEnvelope,
+          region: "US",
+          release_type: "digital",
+          window: {
+            start: new Date(Date.parse(day) - 29 * 86_400_000)
+              .toISOString()
+              .slice(0, 10),
+            end: day,
+          },
+          items:
+            feed === "digital"
+              ? [
+                  {
+                    ...nextMovie,
+                    release_date: day,
+                    region: "US",
+                    release_type: "digital",
+                  },
+                ]
+              : [],
+        }),
+      ),
+      http.get(
+        "/api/discover/feeds/recent-episodes",
+        () => new HttpResponse(null, { status: 503 }),
+      ),
+      http.get("/api/discover/copies", ({ request }) => {
+        const query = new URL(request.url);
+        copyRequests.push(query.search);
+        return HttpResponse.json({
+          items:
+            query.searchParams.get("tmdb_id") === "201"
+              ? [nextCopy]
+              : [sourceMovieCopy],
+          truncated: false,
+          owning_titles: 1,
+        });
+      }),
+    );
+    const { user } = browse("/discover?movie=200");
+    await pickOption(user, "Library copy", describeCopy(sourceMovieCopy));
+    await pickOption(user, "Subtitle language", "English");
+    await user.click(screen.getByRole("button", { name: "Back to Discover" }));
+    expect(screen.queryByLabelText("Library copy")).not.toBeInTheDocument();
+    await user.click(
+      await screen.findByRole("button", {
+        name: feed === "trending" ? "Explore Southern Cross" : /Southern Cross/,
+      }),
+    );
+    expect(await ready()).toHaveValue("Title only, no library copy");
+    expect(screen.queryByText(/Chosen file:/)).not.toBeInTheDocument();
+    expect(copyRequests.at(-1)).toContain("tmdb_id=201");
+    await pickOption(user, "Library copy", describeCopy(nextCopy));
+    await user.click(screen.getByRole("button", { name: "Find subtitles" }));
+    await waitFor(() => expect(searches).toHaveLength(1));
+    expect(searches[0]).toMatchObject({
+      tmdb_id: 201,
+      copy_id: "c1.movie.6.s2",
+      title: "Southern Cross",
+    });
+    expect(searches[0]).not.toHaveProperty("imdb_id");
+  },
+);
+
 it.each(["available", "failed"])(
   "retires a TMDB-only movie's copy on a title click while new details are pending and then %s",
   async (outcome) => {
@@ -559,6 +738,10 @@ it.each(["available", "failed"])(
     const pending = new Promise<void>((resolve) => {
       finishDetails = resolve;
     });
+    let finishCopies: () => void = () => undefined;
+    const copiesPending = new Promise<void>((resolve) => {
+      finishCopies = resolve;
+    });
     let detailRequested = false;
     copyPayload = { items: [oldCopy], truncated: false, owning_titles: 1 };
     server.use(
@@ -585,6 +768,19 @@ it.each(["available", "failed"])(
         return outcome === "failed"
           ? new HttpResponse(null, { status: 503 })
           : HttpResponse.json({ data: { ...envelope, item: nextMovie } });
+      }),
+      http.get("/api/discover/copies", async ({ request }) => {
+        const query = new URL(request.url).searchParams;
+        copyRequests.push(new URL(request.url).search);
+        if (query.get("tmdb_id") === "201") {
+          await copiesPending;
+          return HttpResponse.json({
+            items: [nextCopy],
+            truncated: false,
+            owning_titles: 1,
+          });
+        }
+        return HttpResponse.json(copyPayload);
       }),
     );
 
@@ -630,9 +826,32 @@ it.each(["available", "failed"])(
     expect(copyRequests).toEqual(originalRequests);
     expect(searches).toEqual([]);
 
-    copyPayload = { items: [nextCopy], truncated: false, owning_titles: 1 };
     finishDetails();
     if (outcome === "available") {
+      await waitFor(() => expect(copyRequests.at(-1)).toContain("tmdb_id=201"));
+      // The production client retains previous query data by default. A new
+      // target must not expose that old offer while its own request is pending.
+      // Attempt the old option through the normal control if it is still shown.
+      if (screen.queryAllByLabelText("Library copy").length) {
+        const listbox = await openSelect(user, "Library copy");
+        const oldOption = within(listbox).queryByRole("option", {
+          name: describeCopy(oldCopy),
+          hidden: true,
+        });
+        if (oldOption) await user.click(oldOption);
+        await user.keyboard("{Escape}");
+        expect(oldOption).toBeNull();
+      }
+      expect(screen.queryByText(/Chosen file:/)).not.toBeInTheDocument();
+      expect(
+        screen.getByRole("button", { name: "Find subtitles" }),
+      ).toBeDisabled();
+      expect(
+        JSON.parse(screen.getByTestId("slots").textContent!).draft,
+      ).not.toHaveProperty("copyId");
+      expect(searches).toEqual([]);
+
+      finishCopies();
       expect(await ready()).toHaveValue("Title only, no library copy");
       expect(copyRequests.at(-1)).toContain("tmdb_id=201");
       expect(copyRequests.at(-1)).not.toContain("tmdb_id=200");
