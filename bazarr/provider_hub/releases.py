@@ -237,20 +237,33 @@ def matches_catalog_registration(data: dict[str, Any], source_id: str | None, re
     return recorded == current or (recorded is None and current == _LEGACY_CATALOG_REGISTRATION)
 
 
-def _legacy_cached_manifest_matches(data, source_id, source, plugin_id, version, manifest) -> bool:
-    """Corroborate an installed artifact with one current catalog entry."""
+def legacy_restage_sources_current(data: dict[str, Any], previous_source: str | None,
+                                   selected_source: str | None) -> bool:
+    """Both registrations used by the historical writer remain, including the official source."""
+    from .state import OFFICIAL_CATALOG_SOURCE_ID
+
+    return (catalog_registration(data, previous_source) == _LEGACY_CATALOG_REGISTRATION
+            and (selected_source == OFFICIAL_CATALOG_SOURCE_ID
+                 or catalog_registration(data, selected_source) == _LEGACY_CATALOG_REGISTRATION))
+
+
+def _legacy_manifest_provenance_matches(data, source_id, source, plugin_id, version, manifest) -> bool:
+    """Use the original URL or a matching entry, with no conflicting current digest."""
     entries = data.get("catalog_entries")
     commit = source.get("resolved_commit")
-    digest = manifest.get("bundle_sha256")
+    declared_url = manifest["source"].get("catalog_url")
+    direct = declared_url == source["url"]
     id_key = "id" if manifest.get("schema_version") == 2 else "provider_id"
     if (not isinstance(entries, dict) or not isinstance(commit, str) or not commit
-            or not isinstance(digest, str) or not re.fullmatch(r"[0-9a-fA-F]{64}", digest)
             or manifest.get(id_key) != plugin_id or manifest.get("version") != version
             or manifest["source"].get("commit") != commit):
-        return False
+        return direct
 
+    digest = manifest.get("bundle_sha256")
+    if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-fA-F]{64}", digest):
+        return False
     digest = digest.lower()
-    expected_url = manifest["source"].get("catalog_url") or source["url"]
+    expected_url = declared_url or source["url"]
     installed = {**manifest, "source": {key: value for key, value in manifest["source"].items()
                                         if key not in ("catalog_url", "trusted")}}
     # Schema 2 subtitle installs materialize the schema 1 provider ID for downstream callers.
@@ -275,10 +288,10 @@ def _legacy_cached_manifest_matches(data, source_id, source, plugin_id, version,
         if id_key == "id" and comparable.get("provider_id") == plugin_id:
             comparable.pop("provider_id")
         if comparable == installed:
-            if matched:
+            if matched and not direct:
                 return False
             matched = True
-    return matched
+    return direct or matched
 
 
 def _legacy_catalog_attested(data, source_id, plugin_id, version, manifest) -> bool:
@@ -287,8 +300,7 @@ def _legacy_catalog_attested(data, source_id, plugin_id, version, manifest) -> b
     url = source.get("url") if isinstance(source, dict) and not source.get("registration") else None
     manifest_source = manifest.get("source") if isinstance(manifest, dict) else None
     return (isinstance(url, str) and bool(url) and isinstance(manifest_source, dict)
-            and (manifest_source.get("catalog_url") == url
-                 or _legacy_cached_manifest_matches(data, source_id, source, plugin_id, version, manifest)))
+            and _legacy_manifest_provenance_matches(data, source_id, source, plugin_id, version, manifest))
 
 
 def _legacy_catalog_registrations(data: dict[str, Any], plugin_id: str, row: dict[str, Any],
@@ -533,8 +545,7 @@ def backfill_legacy_registrations(data: dict[str, Any], rows: list[dict[str, Any
         registration = (_LEGACY_CATALOG_REGISTRATION if attested else _UNVERIFIED_LEGACY_CATALOG_REGISTRATION)
         if (is_selected and release["state"] == STAGED and _data_key(release) is None
                 and row.get("source_bound", True) is True and row.get("source_id") != source_id
-                and catalog_registration(data, source_id) == _LEGACY_CATALOG_REGISTRATION
-                and catalog_registration(data, row.get("source_id")) == _LEGACY_CATALOG_REGISTRATION):
+                and legacy_restage_sources_current(data, source_id, row.get("source_id"))):
             # The old writer changed the selected source without changing the release's original source.
             # This stage can proceed only after the new catalog's entry and actual bundle are verified.
             registration = LEGACY_RESTAGED_REGISTRATION

@@ -5467,8 +5467,7 @@ def _keyless_stage_owner(
         return None, "the staged release has conflicting origins"
     recorded_owner = _same_release_owner(state, stage, stage.source_id, stage.origin)
     legacy_restage = (stage.catalog_registration == releases.LEGACY_RESTAGED_REGISTRATION
-                      and releases.catalog_registration(state, stage.source_id) == "legacy"
-                      and releases.catalog_registration(state, source_id) == "legacy")
+                      and releases.legacy_restage_sources_current(state, stage.source_id, source_id))
     if stage.source_id == source_id or not (recorded_owner or legacy_restage):
         return unknown
 

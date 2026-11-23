@@ -1696,6 +1696,18 @@ def test_pre_key_provider_stage_reserves_data_identity_before_retry(hub, monkeyp
     assert state_store.list_releases(plugin_id, states=(releases.ACTIVE,))[0] == active
 
 
+def _reopen_pre_registration_store(plugin_id):
+    from provider_hub import releases, state_store
+
+    with state_store.write_transaction(state_store.engine()) as connection:
+        for saved in releases.read_rows(connection, plugin_id=plugin_id):
+            fields = [field for field in json.loads(saved["fields"])
+                      if not field.startswith("catalog_registration:")]
+            connection.execute(sa.update(releases.releases_table).where(
+                releases.releases_table.c.id == saved["id"]).values(fields=json.dumps(fields)))
+    state_store._ready.clear()
+
+
 @pytest.mark.parametrize("legacy_registry", [False, True])
 @pytest.mark.parametrize(("bundle_valid", "detach"),
                          [(True, None), (False, None), (True, "removed"), (True, "unbound")],
@@ -1778,14 +1790,7 @@ def test_reserving_data_does_not_activate_a_stage_replaced_by_another_catalogue(
                 state["catalog_sources"][catalog].pop("registration")
 
         mutate_state(remove_registrations)
-        with state_store.write_transaction(state_store.engine()) as connection:
-            rows = releases.read_rows(connection, plugin_id=plugin_id)
-            for saved in rows:
-                fields = [field for field in json.loads(saved["fields"])
-                          if not field.startswith("catalog_registration:")]
-                connection.execute(sa.update(releases.releases_table).where(
-                    releases.releases_table.c.id == saved["id"]).values(fields=json.dumps(fields)))
-        state_store._ready.clear()
+        _reopen_pre_registration_store(plugin_id)
         restaged, = state_store.list_releases(plugin_id, states=(releases.STAGED,))
         assert restaged.id == original.id
         assert restaged.catalog_registration == releases.LEGACY_RESTAGED_REGISTRATION
@@ -1886,6 +1891,55 @@ def test_reserving_data_does_not_activate_a_stage_replaced_by_another_catalogue(
     assert service.activate_staged_installations() == []
     assert len(copied) == (2 if rebind else 3) and len(checked) == (1 if rebind else 2)
     assert state_store.list_releases(plugin_id, states=(releases.ACTIVE,))[0] == active
+
+
+@pytest.mark.parametrize("selected_entry", [True, False], ids=["listed", "unlisted"])
+def test_a_legacy_community_stage_rebinds_to_its_selected_official_entry(hub, monkeypatch, selected_entry):
+    from plugin_platform_helpers import provider_manifest_v2
+    from provider_hub import releases, service, state_store
+    from provider_hub.kinds import SUBTITLE_PROVIDER, get_kind
+    from provider_hub.state import OFFICIAL_CATALOG_URL, mutate_state
+
+    plugin_id, version, previous = "examplehub", "1.1.0", "community"
+    community_url = "https://github.com/example/community/blob/main/catalog.json"
+    service.add_catalog_source(previous, community_url)
+    kind = get_kind(SUBTITLE_PROVIDER)
+    published = provider_manifest_v2(plugin_id, version, permissions=["data_dir"])
+    published["source"]["catalog_url"] = OFFICIAL_CATALOG_URL
+    manifest = kind.validate_manifest(published, False)
+    bundle = service._bundle_path_for(manifest)
+    bundle.mkdir(parents=True)
+    (bundle / "provider.py").write_bytes(b"class ExampleProvider: pass\n")
+    _seed(examplehub=_row(plugin_id, active="1.0.0", staged=version, source_id=previous, trusted=False,
+                          staged_manifest=manifest.raw, staged_path=str(bundle), catalog_list="plugins"))
+    original, = state_store.list_releases(plugin_id, states=(releases.STAGED,))
+
+    def historical_selection(state):
+        state["catalog_sources"][previous].pop("registration")
+        state["catalog_sources"]["official"]["trusted"] = False
+        state["installations"][plugin_id]["source_id"] = "official"
+        for source in (previous, "official") if selected_entry else (previous,):
+            state["catalog_entries"][f"{source}:plugins:{plugin_id}:{version}"] = {
+                "source": source, "source_name": source, "provider_id": plugin_id, "version": version,
+                "manifest": published, "catalog_list": "plugins", "trusted": False,
+            }
+
+    mutate_state(historical_selection)
+    _reopen_pre_registration_store(plugin_id)
+    stage, = state_store.list_releases(plugin_id, states=(releases.STAGED,))
+    assert stage.id == original.id and stage.catalog_registration == releases.LEGACY_RESTAGED_REGISTRATION
+    monkeypatch.setattr(service, "validated_bundle_path", lambda _root, path: Path(path))
+    monkeypatch.setattr(service, "validated_interpreter", lambda _root, path: Path(path))
+    monkeypatch.setattr(kind, "smoke_test", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(kind, "on_activated", lambda *_args: None)
+    result = service.activate_release(plugin_id, at_boot=True)
+    active, = state_store.list_releases(plugin_id, states=(releases.ACTIVE,))
+    if selected_entry:
+        assert result.activated
+        assert (active.id, active.source_id, active.version) == (original.id, "official", version)
+    else:
+        assert result.outcome == service.ACTIVATION_FAILED
+        assert active.version == "1.0.0" and active.id != original.id
 
 
 @pytest.mark.parametrize("catalog", ["unconfigured", "unlisted", "different-bundle"])
