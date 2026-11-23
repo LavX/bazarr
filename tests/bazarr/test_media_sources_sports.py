@@ -364,11 +364,80 @@ def test_source_sports_history_exclusion_preserves_a_replacement_subtitle(client
     assert {(row['origin'], row['subs_id']) for row in mixed} == {('arr', 'sp1'), ('source', 'first-release')}
 
 
-def test_unfiltered_sports_bulk_can_clear_arr_when_a_source_has_no_exclusions(client, arr_library, tmp_path, monkeypatch):
+@pytest.mark.parametrize('topology', ['library', 'retained_owner', 'removed_owner'])
+def test_unfiltered_sports_bulk_can_clear_arr_when_a_source_has_no_exclusions(
+        client, arr_library, tmp_path, monkeypatch, topology):
+    from media_sources import repository, service
+
     monkeypatch.setattr('app.event_handler.socketio.emit', lambda *args, **kwargs: None)
-    _events(arr_library, tmp_path)
+    monkeypatch.setattr(service, 'refresh_tasks', lambda: None)
+    owner, _, event_id, _ = _events(arr_library, tmp_path)
+    if topology != 'library':
+        item = repository.get_item(event_id)
+        history_id = repository.insert_history(
+            arr_library, item_id=event_id, source_id=owner, item_kind='sports_event',
+            action=1, description='Previously downloaded', item_title=item.title)
+        base = f'/api/system/media-sources/{owner}'
+        endpoint = f'{base}/libraries/{item.library_id}' if topology == 'retained_owner' else base
+        assert client.delete(endpoint, headers=HEADERS).status_code == 204
     response = client.delete('/api/sports/blacklist?sources=1', headers=HEADERS)
     assert response.status_code == 200 and response.json == {'removed': 1}
+    assert client.get('/api/sports/blacklist', headers=HEADERS).json['total'] == 0
+    if topology != 'library':
+        rows = client.get('/api/sports/history?sources=1', headers=HEADERS).json['data']
+        (retained,) = [row for row in rows if row['origin'] == 'source']
+        assert retained['id'] == history_id and retained['source_item_id'] is None
+        assert retained['source_id'] == (owner if topology == 'retained_owner' else None)
+
+
+def test_last_sports_library_removal_retains_its_source_scope(client, arr_library, tmp_path, monkeypatch):
+    from app.config import settings
+    from media_sources import repository, service
+
+    monkeypatch.setattr('app.event_handler.socketio.emit', lambda *args, **kwargs: None)
+    monkeypatch.setattr(service, 'refresh_tasks', lambda: None)
+    monkeypatch.setattr(settings.general, 'use_sportarr', False)
+    owner, _, event, _ = _events(arr_library, tmp_path, name='Former Sports')
+    current, _, current_event, _ = _events(arr_library, tmp_path, name='Active Sports')
+    library_id = repository.get_item(event).library_id
+    repository.create_library(
+        source_id=owner, content_kind='movie', locator=str(tmp_path / 'movies'), target=arr_library)
+    for source_id, item_id, title in ((owner, event, 'Former final'), (current, current_event, 'Active final')):
+        values = dict(source_id=source_id, item_id=item_id, item_kind='sports_event',
+                      item_title=title, provider='fixture', subs_id=title, language='en')
+        repository.insert_history(arr_library, action=1, description='Downloaded', **values)
+        repository.insert_blacklist(arr_library, **values)
+
+    catalogue = '/api/system/media-sources?availability=1'
+    assert 'retained_source_ids' not in client.get(catalogue, headers=HEADERS).json['availability']['sports']
+    response = client.delete(f'/api/system/media-sources/{owner}/libraries/{library_id}', headers=HEADERS)
+    assert response.status_code == 204
+    payload = client.get(catalogue, headers=HEADERS).json
+    assert payload['availability']['sports'] == {
+        'browsable': True, 'searchable': True, 'retained': True, 'retained_source_ids': [owner],
+    }
+    former = next(source for source in payload['data'] if source['id'] == owner)
+    assert [library['content_kind'] for library in former['libraries']] == ['movie']
+
+    for endpoint in ('history', 'blacklist'):
+        url = f'/api/sports/{endpoint}'
+        mixed = client.get(url, headers=HEADERS, query_string={
+            'sources': 1, 'source_key[]': [f'source:{owner}', f'source:{current}'],
+        }).json['data']
+        assert {row['source_key'] for row in mixed} == {f'source:{owner}', f'source:{current}'}
+        scoped = client.get(url, headers=HEADERS, query_string={
+            'sources': 1, 'source_key[]': f'source:{owner}',
+        }).json['data']
+        assert len(scoped) == 1 and scoped[0]['source_id'] == owner
+        assert scoped[0]['title'] == 'Former final' and scoped[0]['source_item_id'] is None
+    clear = client.delete('/api/sports/blacklist', headers=HEADERS, query_string={
+        'sources': 1, 'source_key[]': f'source:{owner}',
+    })
+    assert clear.status_code == 200 and clear.json == {'removed': 1}
+    rows = client.get('/api/sports/blacklist?sources=1', headers=HEADERS).json['data']
+    assert [row['source_id'] for row in rows] == [current]
+    monkeypatch.setattr(settings.general, 'use_sportarr', True)
+    assert client.get('/api/sports/blacklist', headers=HEADERS).json['total'] == 1
 
 
 def test_sports_exclusion_removal_keeps_a_replacement_for_another_source(client, arr_library, tmp_path, monkeypatch):

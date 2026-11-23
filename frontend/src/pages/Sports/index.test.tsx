@@ -104,6 +104,78 @@ describe("sports library", () => {
     await waitFor(() => expect(selected).toEqual(["source:8"]));
     expect(screen.queryByRole("link", { name: "Arr race league" })).toBeNull();
   });
+  it.each([
+    ["include", "Hungarian league", "English league"],
+    ["exclude", "English league", "Hungarian league"],
+  ])("uses standalone audio to %s leagues", async (filter, kept, omitted) => {
+    const user = userEvent.setup();
+    const unavailable = {
+      browsable: false,
+      searchable: false,
+      retained: false,
+    };
+    server.use(
+      http.get("/api/system/settings", () =>
+        HttpResponse.json({ general: { use_sportarr: false } }),
+      ),
+      http.get("/api/system/arr-instances", () => HttpResponse.json([])),
+      http.get("/api/system/media-sources", () =>
+        HttpResponse.json({
+          data: [
+            {
+              id: 8,
+              name: "Folder leagues",
+              kind: "folder",
+              enabled: true,
+              libraries: [{ id: 9, enabled: true, content_kind: "sports" }],
+            },
+          ],
+          availability: {
+            movie: unavailable,
+            series: unavailable,
+            sports: { ...unavailable, browsable: true, searchable: true },
+          },
+        }),
+      ),
+      http.get("/api/system/languages/audio", ({ request }) => {
+        const includesSources =
+          new URL(request.url).searchParams.get("sources") === "1";
+        return HttpResponse.json([
+          { code2: "en", name: "English" },
+          ...(includesSources ? [{ code2: "hu", name: "Hungarian" }] : []),
+        ]);
+      }),
+      http.get("/api/sports/leagues", () => {
+        const data = ["Hungarian", "English"].map((language, index) => ({
+          id: index + 51,
+          title: language + " league",
+          origin: "source",
+          source_key: "source:8",
+          source_name: "Folder leagues",
+          eventCount: 1,
+          eventFileCount: 1,
+          tags: [],
+          audio_language: [language],
+        }));
+        return HttpResponse.json({ data, total: data.length });
+      }),
+    );
+    customRender(<Sports />);
+    await waitFor(() => {
+      expect(screen.getByRole("link", { name: kept })).toBeVisible();
+      expect(screen.getByRole("link", { name: omitted })).toBeVisible();
+    });
+    await user.click(screen.getByRole("button", { name: "Toggle filters" }));
+    const listbox = await openSelect(user, `Select languages to ${filter}...`);
+    await user.click(
+      await within(listbox).findByRole("option", { name: "Hungarian" }),
+    );
+    await waitFor(() => {
+      expect(screen.getByRole("link", { name: kept })).toBeVisible();
+      expect(screen.queryByRole("link", { name: omitted })).toBeNull();
+    });
+  });
+
   it("renders leagues in the shared table with owner, sport and event counts", async () => {
     const user = userEvent.setup();
     let assigned: unknown;

@@ -502,9 +502,20 @@ def retained_activity_by_kind(target=None):
     checks = [sa.or_(sa.exists().where(History.c.item_kind == item_kind),
                      sa.exists().where(Blacklist.c.item_kind == item_kind)).label(content_kind)
               for content_kind, item_kind in by_kind.items()]
-    checks.append(sa.or_(*(sa.exists().where(table.c.item_kind == 'sports_event', table.c.source_id.is_(None))
-                           for table in (History, Blacklist))).label('removed_sports'))
     return _target(target).execute(sa.select(*checks)).mappings().one()
+
+
+def retained_sports_owners_without_libraries(target=None):
+    """Owners whose retained records would otherwise lack an entry in the Sports filter."""
+    libraries = Libraries.c
+    owners = sa.union(*(
+        sa.select(table.c.source_id).where(
+            table.c.item_kind == 'sports_event',
+            ~sa.exists().where(libraries.source_id == table.c.source_id, libraries.content_kind == 'sports'),
+        )
+        for table in (History, Blacklist)
+    ))
+    return set(_target(target).execute(owners).scalars())
 
 
 # Enabled flags, overlap and holders

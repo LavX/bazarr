@@ -37,11 +37,11 @@ export function useSportsAvailability() {
   };
 }
 
-export function useSportsActivityScope(includeRemovedSources = false) {
+export function useSportsActivityScope(includeRetainedSources = false) {
   const [params] = useSearchParams();
   const scope = useSourceFilter("sports", "sportarr", {
     includeDisabledSources: true,
-    includeRemovedSources,
+    includeRetainedSources,
     clearOnChange: ["event_id", "league"],
   });
   const legacy = params.get("instance");

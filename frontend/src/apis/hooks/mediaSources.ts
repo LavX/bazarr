@@ -87,7 +87,7 @@ export function useSourceFilter(
   arr: "sonarr" | "radarr" | "sportarr",
   {
     includeDisabledSources = false,
-    includeRemovedSources = false,
+    includeRetainedSources = false,
     clearOnChange = [] as string[],
   } = {},
 ) {
@@ -95,17 +95,22 @@ export function useSourceFilter(
   const arrLabels = useArrInstanceLabels(arr);
   const { data: settings } = useSystemSettings();
   const { data, isEnabled } = useMediaSources();
+  const retained = includeRetainedSources
+    ? data?.availability?.[kind]
+    : undefined;
+  const retainedIds = retained?.retained_source_ids;
   const sources = useMemo(
     () =>
       isEnabled
-        ? (data?.data ?? []).filter((source) =>
-            source.libraries.some((library) => library.content_kind === kind),
+        ? (data?.data ?? []).filter(
+            (source) =>
+              retainedIds?.includes(source.id) ||
+              source.libraries.some((library) => library.content_kind === kind),
           )
         : [],
-    [data, isEnabled, kind],
+    [data, isEnabled, kind, retainedIds],
   );
-  const removed =
-    includeRemovedSources && data?.availability?.[kind]?.removed === true;
+  const removed = retained?.removed === true;
   const enabledArr = settings?.general?.[`use_${arr}`] === true;
   const arrConfigured =
     enabledArr &&
@@ -156,7 +161,7 @@ export function useSourceFilter(
         : [selected];
     }
     // The API keeps its legacy Arr-only response when a folder has no scanned rows.
-    // On a folder-only page, send the configured source keys so that legacy Arr rows stay out.
+    // On a source-only page, send current and retained owners so that legacy Arr rows stay out.
     return arrConfigured
       ? []
       : [

@@ -29,6 +29,7 @@ export type SourceAvailability = Record<
     searchable: boolean;
     retained: boolean;
     removed?: boolean;
+    retained_source_ids?: number[];
   }
 >;
 

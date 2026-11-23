@@ -648,6 +648,7 @@ const SportarrLeagues: FunctionComponent<{ instances: ArrInstance[] }> = ({
         onAudioLanguagesChange={setAudioLanguages}
         excludeLanguages={excludeLanguages}
         onExcludeLanguagesChange={setExcludeLanguages}
+        includeSourceAudio={sourceBrowsable}
         instanceOptions={
           sourceBrowsable
             ? [...ownerFilter.labels].map(([value, label]) => ({

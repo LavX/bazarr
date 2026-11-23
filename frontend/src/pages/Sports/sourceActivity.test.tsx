@@ -240,67 +240,134 @@ it("refreshes a stale Sports exclusion and retries with the replacement row key"
   expect(keys).toEqual(["listed-entry", "replacement-entry"]);
 });
 
-it("keeps retained rows in source-only history and offers their owner filter", async () => {
-  window.history.replaceState(null, "", "/");
-  const user = userEvent.setup();
-  const gone = {
-    ...source,
-    id: 8,
-    source_id: null,
-    source_item_id: null,
-    source_group_id: null,
-    source_key: "source:removed",
-    source_name: "Former folder",
-    title: "Retained Final",
-  };
-  let keys: string[] = [];
-  server.use(
-    http.get("/api/system/settings", () =>
-      HttpResponse.json({ general: { use_sportarr: false } }),
-    ),
-    http.get("/api/system/status", () => HttpResponse.json({ data: {} })),
-    http.get("/api/system/arr-instances", () => HttpResponse.json([])),
-    http.get("/api/system/media-sources", () =>
-      HttpResponse.json({
-        data: [
-          {
-            id: 8,
-            name: "Local archive",
-            kind: "folder",
-            enabled: true,
-            libraries: [{ id: 9, enabled: true, content_kind: "sports" }],
+it.each(pages.slice(1))(
+  "keeps both kinds of retained owner on source-only %s",
+  async (route, Page) => {
+    window.history.replaceState(null, "", "/");
+    const user = userEvent.setup();
+    const gone = {
+      ...source,
+      id: 8,
+      source_id: null,
+      source_item_id: null,
+      source_group_id: null,
+      source_key: "source:removed",
+      source_name: "Former folder",
+      title: "Removed owner's final",
+    };
+    const retained = {
+      ...gone,
+      id: 9,
+      source_id: 12,
+      source_key: "source:12",
+      source_name: "Former sports folder",
+      title: "Former sports final",
+    };
+    let keys: string[] = [];
+    server.use(
+      http.get("/api/system/settings", () =>
+        HttpResponse.json({ general: { use_sportarr: false } }),
+      ),
+      http.get("/api/system/status", () => HttpResponse.json({ data: {} })),
+      http.get("/api/system/arr-instances", () => HttpResponse.json([])),
+      http.get("/api/system/media-sources", () =>
+        HttpResponse.json({
+          data: [
+            {
+              id: 8,
+              name: "Local archive",
+              kind: "folder",
+              enabled: true,
+              libraries: [{ id: 9, enabled: true, content_kind: "sports" }],
+            },
+            {
+              id: 12,
+              name: "Former sports folder",
+              kind: "folder",
+              enabled: true,
+              libraries: [{ id: 13, enabled: true, content_kind: "movie" }],
+            },
+          ],
+          availability: {
+            movie: availability,
+            series: availability,
+            sports: {
+              ...availability,
+              removed: true,
+              retained_source_ids: [12],
+            },
           },
-        ],
-        availability: {
-          movie: availability,
-          series: availability,
-          sports: { ...availability, removed: true },
-        },
+        }),
+      ),
+      http.get(`/api/sports/${route}`, ({ request }) => {
+        keys = new URL(request.url).searchParams.getAll("source_key[]");
+        const data = [source, gone, retained].filter((row) =>
+          keys.includes(row.source_key),
+        );
+        return HttpResponse.json({ data, total: data.length });
       }),
-    ),
-    http.get("/api/sports/history", ({ request }) => {
-      keys = new URL(request.url).searchParams.getAll("source_key[]");
-      const data = [source, gone].filter((row) =>
-        keys.includes(row.source_key),
-      );
-      return HttpResponse.json({ data, total: data.length });
-    }),
-  );
-  customRender(<SportsHistoryView />);
-  expect(
-    await screen.findByRole("row", { name: /Retained Final/ }),
-  ).toBeVisible();
-  expect(screen.getByRole("row", { name: /Source Final/ })).toBeVisible();
-  expect(keys).toEqual(["source:8", "source:removed"]);
-  const listbox = await openSelect(user, "All sources");
-  await user.click(
-    within(listbox).getByRole("option", { name: "Removed sources" }),
-  );
-  await waitFor(() => {
-    expect(keys).toEqual(["source:removed"]);
-    expect(screen.queryByRole("row", { name: /Source Final/ })).toBeNull();
-  });
-});
+    );
+    customRender(<Page />);
+    expect(
+      await screen.findByRole("row", { name: /Former sports final/i }),
+    ).toBeVisible();
+    expect(screen.getByRole("row", { name: /Source Final/ })).toBeVisible();
+    expect(
+      screen.getByRole("row", { name: /Removed owner's final/i }),
+    ).toBeVisible();
+    expect(keys).toEqual(["source:8", "source:12", "source:removed"]);
+    const listbox = await openSelect(user, "All sources");
+    expect(
+      within(listbox).getByRole("option", { name: "Removed sources" }),
+    ).toBeVisible();
+    await user.click(
+      within(listbox).getByRole("option", { name: "Former sports folder" }),
+    );
+    await waitFor(() => {
+      expect(keys).toEqual(["source:12"]);
+      expect(screen.queryByRole("row", { name: /Source Final/ })).toBeNull();
+      expect(
+        screen.queryByRole("row", { name: /Removed owner's final/i }),
+      ).toBeNull();
+    });
+    expect(
+      screen.getByRole("row", { name: /Former sports final/i }),
+    ).toBeVisible();
+  },
+);
+
+it.each(pages.slice(1))(
+  "keeps the native single-instance picker on Sports %s",
+  async (route, Page) => {
+    window.history.replaceState(null, "", "/");
+    const user = userEvent.setup();
+    let current = new URLSearchParams();
+    server.use(
+      http.get("/api/system/settings", () =>
+        HttpResponse.json({ general: { use_sportarr: true } }),
+      ),
+      http.get("/api/system/status", () => HttpResponse.json({ data: {} })),
+      http.get("/api/system/arr-instances", () =>
+        HttpResponse.json([sportarr]),
+      ),
+      http.get(`/api/sports/${route}`, ({ request }) => {
+        current = new URL(request.url).searchParams;
+        return HttpResponse.json({ data: [arr], total: 1 });
+      }),
+    );
+    customRender(<Page />);
+    await screen.findByRole("link", { name: "Arr Final" });
+    expect(screen.getByRole("combobox", { name: "Instance" })).toHaveValue("");
+    const listbox = await openSelect(user, "All instances");
+    await user.click(
+      within(listbox).getByRole("option", { name: sportarr.name }),
+    );
+    await waitFor(() => {
+      expect(current.get("arr_instance_id")).toBe("42");
+      expect(current.getAll("source_key[]")).toEqual(["arr:42"]);
+    });
+  },
+);
 
 it("confirms the complete mixed bulk scope when a text filter matches only the source", async () => {
   window.history.replaceState(null, "", "/");

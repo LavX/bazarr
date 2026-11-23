@@ -74,6 +74,7 @@ interface Props<T extends Item.Base = Item.Base> {
   onAudioLanguagesChange?: (values: string[]) => void;
   excludeLanguages?: string[];
   onExcludeLanguagesChange?: (values: string[]) => void;
+  includeSourceAudio?: boolean;
   // Subtitle-completeness filter: only wired when the page supplies both the
   // change handler and `subtitlesStatus`.
   subtitlesFilter?: SubtitlesFilter;
@@ -121,6 +122,7 @@ function ItemView<T extends Item.Base>({
   onAudioLanguagesChange,
   excludeLanguages = [],
   onExcludeLanguagesChange,
+  includeSourceAudio = false,
   subtitlesFilter = "any",
   onSubtitlesFilterChange,
   subtitlesStatus,
@@ -156,7 +158,7 @@ function ItemView<T extends Item.Base>({
     onSubtitlesFilterChange !== undefined && subtitlesStatus !== undefined;
   const showScoreFilter =
     onScoreFilterChange !== undefined && scoreValue !== undefined;
-  const { data: audioLangs = [] } = useAudioLanguages();
+  const { data: audioLangs = [] } = useAudioLanguages(true, includeSourceAudio);
   const [filtersOpen, setFiltersOpen] = useState(false);
 
   const langOptions = useMemo(

@@ -253,10 +253,13 @@ def clear_blacklist(session, scope):
             removed = connection.execute(sa.delete(source).where(
                 source.c.item_kind == _KIND, scope.source(source.c.source_id),
             )).rowcount
-        libraries = repository.Libraries.c
-        if not scope.keys and not removed and not connection.scalar(
-                sa.select(sa.exists().where(libraries.content_kind == 'sports'))):
-            raise ValueError('arr_instance_id is required and must be a positive integer')
+        if not scope.keys and not removed:
+            source_sports = sa.or_(
+                sa.exists().where(repository.Libraries.c.content_kind == 'sports'),
+                sa.exists().where(repository.History.c.item_kind == _KIND),
+            )
+            if not connection.scalar(sa.select(source_sports)):
+                raise ValueError('arr_instance_id is required and must be a positive integer')
         if settings.general.use_sportarr and scope.includes('arr'):
             enabled = sa.select(TableArrInstances.id).where(
                 TableArrInstances.kind == 'sportarr', TableArrInstances.enabled == 1)
