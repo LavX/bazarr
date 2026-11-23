@@ -418,9 +418,10 @@ class ArrOwners:
     def load(cls, target=None):
         from app.database import TableArrInstances, database
         toggles = master_toggles()
+        columns = (TableArrInstances.id, TableArrInstances.kind, TableArrInstances.name,
+                   TableArrInstances.path_mappings)
         rows = (database if target is None else target).execute(
-            sa.select(TableArrInstances).where(TableArrInstances.enabled == 1)
-            .execution_options(populate_existing=True)).scalars().all()
+            sa.select(*columns).where(TableArrInstances.enabled == 1)).all()
         return cls([row for row in rows if toggles.get(row.kind)], target)
 
     def counts(self, instance_id):
