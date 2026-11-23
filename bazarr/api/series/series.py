@@ -334,6 +334,8 @@ class Series(Resource):
     patch_request_parser.add_argument('seriesid', type=int, required=False, help='Sonarr series ID')
     patch_request_parser.add_argument('arr_instance_id', type=int, required=False,
                                       help='Owning Sonarr instance id (#156)')
+    patch_request_parser.add_argument('sources', type=int, required=False,
+                                      help='Set to 1 to include media sources in Search All')
     patch_request_parser.add_argument('action', type=str, required=False, help='Action to perform from ["scan-disk", '
                                                                                '"search-missing", "search-wanted", "sync"]')
 
@@ -363,7 +365,14 @@ class Series(Resource):
             else:
                 return queued_job_response(job_id or None), 202
         elif action == "search-wanted":
-            wanted_search_missing_subtitles_series()
+            from media_sources.wanted import arr_wanted_condition, queue_wanted_search
+
+            source_job = queue_wanted_search('episode') if args.get("sources") == 1 else None
+            if not source_job:
+                wanted_search_missing_subtitles_series()
+            elif database.scalar(select(select(TableEpisodes.id).where(
+                    arr_wanted_condition('sonarr', TableEpisodes.arr_instance_id)).exists())):
+                wanted_search_missing_subtitles_series(active_owners_only=True)
             return '', 204
         elif action == "scan-wanted":
             wanted_scan_subtitles_series()

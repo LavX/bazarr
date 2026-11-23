@@ -19,6 +19,12 @@ import { inlineWhen } from "@/apis/raw/inlineWrites";
 import { useSystemSettings } from "./system";
 
 const arrKey = [QueryKeys.ArrInstances];
+const mixedBadgesKey = [QueryKeys.System, QueryKeys.Badges, true];
+const wantedBadgeFields = {
+  radarr: ["movies", "source_movies"],
+  sonarr: ["episodes", "source_episodes"],
+  sportarr: ["sports"],
+} as const;
 
 export function getArrInstanceErrorMessage(error: unknown, fallback: string) {
   if (error instanceof AxiosError) {
@@ -124,6 +130,9 @@ export function useArrInstanceLabels(kind: ArrKind) {
       // are shown as a dim dash so only 2nd-instance items stand out.
       defaultId: ofKind.find((i) => i.is_default)?.id ?? null,
       options: ofKind.map((i) => ({ value: String(i.id), label: i.name })),
+      enabledOptions: ofKind
+        .filter((i) => i.enabled)
+        .map((i) => ({ value: i.id, label: i.name })),
     };
   }, [data, kind]);
 }
@@ -192,12 +201,28 @@ export function useUpdateArrInstance({
       ) {
         const { enabled } = updated;
         // A confirmed disable must reach route guards before a list refresh.
-        await client.cancelQueries({ queryKey: arrKey, exact: true });
+        await Promise.all([
+          client.cancelQueries({ queryKey: arrKey, exact: true }),
+          client.cancelQueries({ queryKey: mixedBadgesKey, exact: true }),
+        ]);
+        // The previous subtotal may include the old Arr owner or exclude its shadows.
+        client.setQueryData<Partial<Badge>>(mixedBadgesKey, (badge) => {
+          if (!badge) return undefined;
+          const current = { ...badge };
+          for (const field of wantedBadgeFields[updated.kind]) {
+            delete current[field];
+          }
+          return current;
+        });
         client.setQueryData<ArrInstance[]>(arrKey, (instances) =>
           instances?.map((instance) =>
             instance.id === id ? { ...instance, enabled } : instance,
           ),
         );
+        void client.invalidateQueries({
+          queryKey: mixedBadgesKey,
+          exact: true,
+        });
       }
       void client.invalidateQueries({ queryKey: arrKey });
     },

@@ -477,6 +477,16 @@ class TranslationJobs:
         """The job ends without a result. ``error_class`` says why when it was not a person's Stop."""
         return self._end(job_id, CANCELLED, error_class=error_class, message=message)
 
+    def cancel_waiting(self, job_id: int, queue_job_id: int, message: str) -> bool:
+        """End only the waiting row attached to this specific queue job."""
+        job = self.get(job_id)
+        if job is None:
+            return False
+        return self._transition(job_id, (QUEUED,), CANCELLED, _queue_job_id=queue_job_id,
+                                queue_job_id=None, retry_at=None, error_class="source_changed",
+                                error_message=_scrubbed(message), finished_at=self._clock(),
+                                _with=self.checkpoints._delete_source_stmt(job.source_path, job.target))
+
     def fail(self, job_id: int, error_class: str, message: str | None = None) -> bool:
         """A failure that will not be retried."""
         return self._end(job_id, FAILED, error_class=error_class, message=message)
@@ -547,7 +557,7 @@ class TranslationJobs:
 
     # ---------------------------------------------------------------- internals
     def _transition(self, job_id: int, from_states: Sequence[str], to_state: str | None, *, _with=None,
-                    **values) -> bool:
+                    _queue_job_id=None, **values) -> bool:
         """Change a job only while it is in one of ``from_states``. False when it was not.
 
         ``_with`` is a checkpoint statement that goes in the same transaction, run only when the job
@@ -557,10 +567,12 @@ class TranslationJobs:
         changes["updated_at"] = self._clock()
         if to_state is not None:
             changes["state"] = to_state
+        statement = update(TableTranslatorJob).where(
+            TableTranslatorJob.id == job_id, TableTranslatorJob.state.in_(from_states))
+        if _queue_job_id is not None:
+            statement = statement.where(TableTranslatorJob.queue_job_id == _queue_job_id)
         with _write(self._session):
-            changed = self._session.execute(update(TableTranslatorJob).where(
-                TableTranslatorJob.id == job_id, TableTranslatorJob.state.in_(from_states))
-                .values(**changes)).rowcount
+            changed = self._session.execute(statement.values(**changes)).rowcount
             if changed == 1 and _with is not None:
                 self._session.execute(_with)
         self._session.expire_all()

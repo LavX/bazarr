@@ -2,6 +2,7 @@
 # fmt: off
 
 import logging
+from dataclasses import replace
 import os
 from media_servers.events import observe_subtitle_change
 
@@ -27,14 +28,14 @@ from .post_processing import postprocessing
 from .utils import _get_scores
 from .language_profiles import profile_item_language_code
 from .tools.combine.main import try_combine_for_video
-from .tools.subsync_engines import subtitle_write_locks
+from .tools.subsync_engines import regular_subtitle_version, subtitle_write_locks
 from .tools.translate.availability import translation_available
 
 
 class ProcessSubtitlesResult:
     def __init__(self, message, reversed_path, downloaded_language_code2, downloaded_provider, score, forced,
                  subtitle_id, reversed_subtitles_path, hearing_impaired, matched=None, not_matched=None,
-                 ai_translated=None, *, source_indexed=False):
+                 ai_translated=None, *, source_indexed=False, published_file_version=None):
         self.message = message
         self.path = reversed_path
         self.provider = downloaded_provider
@@ -45,6 +46,7 @@ class ProcessSubtitlesResult:
         self.not_matched = not_matched
         self.ai_translated = ai_translated if type(ai_translated) is bool else None
         self.source_indexed = source_indexed
+        self.published_file_version = published_file_version
 
         if hearing_impaired:
             self.language_code = f"{downloaded_language_code2}:hi"
@@ -57,7 +59,7 @@ class ProcessSubtitlesResult:
 def _trigger_auto_translation(downloaded_lang, subtitle_path, video_path, media_type,
                               series_id=None, episode_id=None, radarr_id=None,
                               source_score_percent=None, forced=False, arr_instance_id=None,
-                              sports_operation=None, cancel=None):
+                              sports_operation=None, cancel=None, source=None):
     """
     After a subtitle is downloaded, check if any profile language is configured to
     auto-translate from the just-downloaded language. If so, queue translation.
@@ -74,6 +76,18 @@ def _trigger_auto_translation(downloaded_lang, subtitle_path, video_path, media_
     # gets queued for it. A closed gate leaves the language to the next
     # wanted scan, which asks the same gate before keeping a language away
     # from the provider search.
+    if source is not None:
+        if forced or not subtitle_path or not downloaded_lang:
+            return
+        try:
+            from media_sources.translation import queue_missing_translations
+
+            return queue_missing_translations(source, downloaded_path=subtitle_path, downloaded_language=downloaded_lang,
+                                              score=source_score_percent)
+        except Exception:
+            logging.exception('BAZARR could not queue a translation for source item %s', source.item_id)
+            return
+
     availability = translation_available()
     if not availability.available:
         logging.debug('BAZARR auto-translate skipped after this download: %s', availability.reason)
@@ -263,7 +277,7 @@ def _trigger_auto_translation(downloaded_lang, subtitle_path, video_path, media_
 
 
 def _trigger_combine(video_path, media_type, radarr_id, series_id, episode_id,
-                     arr_instance_id=None, sports_operation=None, cancel=None):
+                     arr_instance_id=None, sports_operation=None, cancel=None, source=None):
     """After a subtitle download/upgrade/translate completes, try to build or
     rebuild the combined subtitle file for the video's profile rule. Best-effort:
     never raises, never blocks the caller."""
@@ -277,6 +291,7 @@ def _trigger_combine(video_path, media_type, radarr_id, series_id, episode_id,
             sonarr_series_id=series_id,
             sonarr_episode_id=episode_id,
             arr_instance_id=arr_instance_id,
+            **({'source': source} if source is not None else {}),
         )
     except Exception:
         logging.exception("BAZARR error in _trigger_combine")
@@ -312,7 +327,7 @@ def _postprocessing_config(media_type, arr_instance_id):
 def process_subtitle(subtitle, media_type, audio_language, path, max_score, is_upgrade=False, is_manual=False,
                      job_id=None, arr_instance_id=None, *,
                      context=None, validate=None, cancel=None, publication_guard=None, auto_translate=True,
-                     source=None) -> ProcessSubtitlesResult | None:
+                     source=None, published_file_version=None) -> ProcessSubtitlesResult | None:
     if media_type == 'sports' and (context is None or validate is None or publication_guard is None):
         raise ValueError('Sports processing requires its owned publication guard')
     if context is not None and media_type != 'sports':
@@ -351,6 +366,16 @@ def process_subtitle(subtitle, media_type, audio_language, path, max_score, is_u
     message = (f"{downloaded_language}{modifier_string}{ai_label} subtitles {action} from {downloaded_provider} with a score of "
                f"{percent_score}%.")
 
+    def processed_result(video_path, subtitles_path, *, source_indexed=False):
+        return ProcessSubtitlesResult(message=message, reversed_path=video_path,
+                                      downloaded_language_code2=downloaded_language_code2,
+                                      downloaded_provider=downloaded_provider, score=subtitle.score,
+                                      forced=subtitle.language.forced, subtitle_id=subtitle_id,
+                                      reversed_subtitles_path=subtitles_path, hearing_impaired=subtitle.language.hi,
+                                      matched=list(subtitle.matches or []), not_matched=_get_not_matched(subtitle, media_type),
+                                      ai_translated=getattr(subtitle, 'ai_translated', False) is True,
+                                      source_indexed=source_indexed, published_file_version=published_file_version)
+
     sync_checker = _defaul_sync_checker
     logging.debug("Sync checker: %s", sync_checker)
 
@@ -362,16 +387,30 @@ def process_subtitle(subtitle, media_type, audio_language, path, max_score, is_u
         except SourceItemGone:
             logging.info('BAZARR source item %s was deleted while its subtitles were being fetched; the file '
                          'was kept: %s', source.item_id, downloaded_path)
-            return
-        series_id = ''
-        episode_id = ''
+            return processed_result(path, downloaded_path)
+        if (not source.same_item(current_source) or current_source.path != path
+                or current_source.source_id != source.source_id or current_source.library_id != source.library_id):
+            logging.info('BAZARR source item %s moved while its subtitles were being fetched; the file '
+                         'was kept: %s', source.item_id, downloaded_path)
+            return processed_result(path, downloaded_path)
+        if source.wanted_file_stamp is not None:
+            current_source = replace(current_source, wanted_file_stamp=source.wanted_file_stamp)
+        series_id = None
+        episode_id = None
         owner_instance_id = None
-        if sync_checker(subtitle) is True:
+        if published_file_version is not None and sync_checker(subtitle) is True:
             from .sync import sync_subtitles
+
+            def carry_overwrite_version(version):
+                nonlocal published_file_version
+                published_file_version = version
+
             sync_subtitles(video_path=path, srt_path=downloaded_path, forced=subtitle.language.forced,
                            hi=subtitle.language.hi, srt_lang=downloaded_language_code2,
                            percent_score=percent_score, job_id=job_id, owns_job_progress=False,
-                           publication_operation='download', source=current_source)
+                           track_job_progress=job_id is not None, publication_operation='download',
+                           source=current_source, expected_source_version=published_file_version,
+                           on_overwrite_version=carry_overwrite_version)
     elif media_type == 'sports':
         # A subtitle write does not change Sportarr's video inventory, so
         # Sportarr is not asked to rescan. The save that called this reports
@@ -473,10 +512,19 @@ def process_subtitle(subtitle, media_type, audio_language, path, max_score, is_u
                 lock_paths = (path, destination, downloaded_path)
                 # Match the command's complete lock set before observing any bytes.
                 with subtitle_write_locks(path, *lock_paths):
-                    with observe_subtitle_change(publication_type, path, downloaded_path, 'download',
-                                                 owner_instance_id):
-                        postprocessing(command, path, subtitle_path=downloaded_path, lock_paths=lock_paths)
-                        set_chmod(subtitles_path=downloaded_path)
+                    if source is not None and (published_file_version is None
+                                               or regular_subtitle_version(downloaded_path) != published_file_version):
+                        logging.info('BAZARR skipped post-processing because the downloaded subtitle changed: %s',
+                                     downloaded_path)
+                    else:
+                        if source is not None:
+                            # A command given the live path cannot attest which file it leaves there.
+                            published_file_version = None
+                        with observe_subtitle_change(publication_type, path, downloaded_path, 'download',
+                                                     owner_instance_id,
+                                                     **({'source': current_source} if source is not None else {})):
+                            postprocessing(command, path, subtitle_path=downloaded_path, lock_paths=lock_paths)
+                            set_chmod(subtitles_path=downloaded_path)
         elif command is not None:
             logging.debug(f"BAZARR post-processing skipped because subtitles score isn't below this "  # noqa: G004
                           f"threshold value: {pp_threshold}%")
@@ -485,10 +533,10 @@ def process_subtitle(subtitle, media_type, audio_language, path, max_score, is_u
     if source is not None:
         # The stored path is already the Bazarr-visible one: nothing is mapped, in either direction, and no arr
         # is told to rescan.
-        from media_sources.indexer import index_saved_subtitle
+        from media_sources.indexer import index_and_notify_item
         reversed_path = path
         reversed_subtitles_path = downloaded_path
-        source_indexed = index_saved_subtitle(source.item_id, expected_path=path)
+        source_indexed = index_and_notify_item(current_source)
     elif media_type == 'sports':
         from utilities.path_mappings import apply_sports_mapping, read_sports_mappings
         if validate is not None:
@@ -532,9 +580,9 @@ def process_subtitle(subtitle, media_type, audio_language, path, max_score, is_u
         media_type=publication_type
     )
 
-    # Auto-translate and combine read and write arr rows by arr ids, so a source item does not take this block yet:
-    # they arrive with the after-download work for source items.
-    if media_type != 'sports' and source is None:
+    if media_type != 'sports':
+        radarr_id = movie_metadata.radarrId if source is None and media_type != 'series' else None
+        source_kwargs = {'source': current_source} if source is not None else {}
         # Auto-translate: trigger translation to any profile language configured with translate_from.
         # A caller that downloads on purpose to replace a source it distrusts (the forced duplicate search)
         # turns it off, so the new file is not turned into translations of other languages.
@@ -546,11 +594,11 @@ def process_subtitle(subtitle, media_type, audio_language, path, max_score, is_u
                 media_type=media_type,
                 series_id=series_id if media_type == 'series' else None,
                 episode_id=episode_id if media_type == 'series' else None,
-                radarr_id=movie_metadata.radarrId if media_type != 'series' else None,
+                radarr_id=radarr_id,
                 source_score_percent=percent_score,
                 forced=subtitle.language.forced,
-                arr_instance_id=(episode_metadata.arr_instance_id if media_type == 'series'
-                                 else movie_metadata.arr_instance_id),
+                arr_instance_id=owner_instance_id,
+                **source_kwargs,
             )
 
         # Combined subtitle: if the profile defines a combine rule and all sources
@@ -558,25 +606,14 @@ def process_subtitle(subtitle, media_type, audio_language, path, max_score, is_u
         _trigger_combine(
             video_path=path,
             media_type=media_type,
-            radarr_id=movie_metadata.radarrId if media_type != 'series' else None,
+            radarr_id=radarr_id,
             series_id=series_id if media_type == 'series' else None,
             episode_id=episode_id if media_type == 'series' else None,
             arr_instance_id=owner_instance_id,
+            **source_kwargs,
         )
 
-    return ProcessSubtitlesResult(message=message,
-                                  reversed_path=reversed_path,
-                                  downloaded_language_code2=downloaded_language_code2,
-                                  downloaded_provider=downloaded_provider,
-                                  score=subtitle.score,
-                                  forced=subtitle.language.forced,
-                                  subtitle_id=subtitle.id,
-                                  reversed_subtitles_path=reversed_subtitles_path,
-                                  hearing_impaired=subtitle.language.hi,
-                                  matched=list(subtitle.matches or []),
-                                  not_matched=_get_not_matched(subtitle, media_type),
-                                  ai_translated=getattr(subtitle, 'ai_translated', False) is True,
-                                  source_indexed=source_indexed)
+    return processed_result(reversed_path, reversed_subtitles_path, source_indexed=source_indexed)
 
 
 def _get_not_matched(subtitle, media_type):
