@@ -256,6 +256,9 @@ def translate_subtitles_file(video_path, source_srt_file, from_lang, to_lang, fo
     if not job_id:
         with _SOURCE_ENQUEUE_LOCK if source is not None else nullcontext():
             try:
+                if source is None:
+                    # The queue captures frame locals, and native prechecks omit source-only arguments.
+                    del source_tool
                 # With the v2 runtime on, a request for a source and target that already has a job joins it.
                 # Reusing ``job_id`` keeps the frame the queue records to the function's own parameters.
                 job_id = _runtime_follow(video_path, source_srt_file, to_lang, forced, hi, embedded_source,
