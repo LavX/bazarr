@@ -30,12 +30,14 @@ export function serverSourceLibraryChoicesKey(instanceId: string) {
   return [...mediaSourcesKey, "server-libraries", instanceId] as const;
 }
 
+const mediaSourcesQuery = {
+  queryKey: mediaSourcesKey,
+  queryFn: ({ signal }: { signal: AbortSignal }) =>
+    withInlineErrors(() => api.mediaSources.list(signal)),
+};
+
 export function useMediaSources() {
-  return useQuery({
-    queryKey: mediaSourcesKey,
-    queryFn: ({ signal }) =>
-      withInlineErrors(() => api.mediaSources.list(signal)),
-  });
+  return useQuery(mediaSourcesQuery);
 }
 
 export function useServerSourceLibraryChoices(
@@ -165,6 +167,87 @@ function sourceOwnsSports(
   return sports.retained_source_ids?.includes(source.id) ?? false;
 }
 
+export async function refreshMediaSources(
+  client: QueryClient,
+  scope?: SourceDetailScope & { removed?: boolean },
+) {
+  await Promise.all([
+    client.invalidateQueries({ queryKey: mediaSourcesKey, exact: true }),
+    ...(scope ? [invalidateSportsSource(client, scope)] : []),
+  ]);
+}
+
+function sportsRemovalScope(
+  client: QueryClient,
+  source: MediaSource,
+  library?: SourceLibrary,
+) {
+  // A source can own retained activity after its last sports library is gone.
+  const ownsSports = library
+    ? library.content_kind === "sports"
+    : sourceOwnsSports(client, source, true);
+  return ownsSports
+    ? { sourceId: source.id, libraryId: library?.id, removed: !library }
+    : undefined;
+}
+
+export async function linkedServerRemovalScope(
+  client: QueryClient,
+  instanceId: string,
+) {
+  const cached =
+    client.getQueryData<Awaited<ReturnType<typeof api.mediaSources.list>>>(
+      mediaSourcesKey,
+    );
+  // Capture the linked source before the connection DELETE cascades its row.
+  const list = await client
+    .fetchQuery({ ...mediaSourcesQuery, staleTime: 0, retry: false })
+    .catch(() => cached);
+  const source = list?.data.find(
+    (row) => row.media_server_instance_id === instanceId,
+  );
+  return source ? sportsRemovalScope(client, source) : undefined;
+}
+
+export function useUpdateServerSourceRoots() {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: async ({
+      sourceId,
+      libraryId,
+      roots,
+      confirmedRemoved,
+    }: {
+      sourceId: number;
+      libraryId: number;
+      roots: ServerRootMapping[];
+      confirmedRemoved: number;
+    }) =>
+      (
+        await withInlineErrors(() =>
+          api.mediaSources.updateServerRoots(
+            sourceId,
+            libraryId,
+            roots,
+            confirmedRemoved,
+          ),
+        )
+      ).data,
+    onSuccess: async (updated, { sourceId }) => {
+      const scope =
+        updated.content_kind === "sports"
+          ? { sourceId, libraryId: updated.id }
+          : undefined;
+      const refresh = () => refreshMediaSources(client, scope);
+      // A root edit can remove indexed items immediately and discover new ones in its scan.
+      await refresh();
+      if (scope && typeof updated.job_id === "number") {
+        refreshWhenJobFinishes(client, updated.job_id, refresh);
+      }
+    },
+  });
+}
+
 export function useWriteMediaSource({
   source,
   library,
@@ -184,12 +267,7 @@ export function useWriteMediaSource({
       write: () => Promise<unknown>;
       sportsScope?: SourceDetailScope;
     }) => withInlineErrors(write),
-    onSuccess: async (_, { sportsScope }) => {
-      await Promise.all([
-        client.invalidateQueries({ queryKey: mediaSourcesKey, exact: true }),
-        ...(sportsScope ? [invalidateSportsSource(client, sportsScope)] : []),
-      ]);
-    },
+    onSuccess: (_, { sportsScope }) => refreshMediaSources(client, sportsScope),
   });
   // The form can change while a write is pending. Keep its submitted owner.
   const variables = (write: () => Promise<unknown>) => {
@@ -234,36 +312,26 @@ export function useRemoveMediaSource() {
           ? api.mediaSources.removeLibrary(source.id, library.id)
           : api.mediaSources.remove(source.id),
       ),
-    onSuccess: async (_, { source, library }) => {
-      // A source can own retained activity after its last sports library is gone.
-      const refreshSports = library
-        ? library.content_kind === "sports"
-        : sourceOwnsSports(client, source, true);
-      await Promise.all([
-        client.invalidateQueries({ queryKey: mediaSourcesKey, exact: true }),
-        ...(refreshSports
-          ? [
-              invalidateSportsSource(client, {
-                sourceId: source.id,
-                libraryId: library?.id,
-                removed: !library,
-              }),
-            ]
-          : []),
-      ]);
-    },
+    onSuccess: (_, { source, library }) =>
+      refreshMediaSources(client, sportsRemovalScope(client, source, library)),
   });
 }
 
 export function useScanMediaSource() {
   const client = useQueryClient();
   return useMutation({
-    mutationFn: (id: number) =>
-      withInlineErrors(() => api.mediaSources.scan(id)),
-    onSuccess: (jobId) =>
-      refreshWhenJobFinishes(client, jobId, () =>
-        client.invalidateQueries({ queryKey: mediaSourcesKey, exact: true }),
-      ),
+    mutationFn: (source: MediaSource) =>
+      withInlineErrors(() => api.mediaSources.scan(source.id)),
+    onSuccess: (jobId, source) => {
+      const scope = source.libraries.some(
+        ({ content_kind: kind }) => kind === "sports",
+      )
+        ? { sourceId: source.id }
+        : undefined;
+      return refreshWhenJobFinishes(client, jobId, () =>
+        refreshMediaSources(client, scope),
+      );
+    },
   });
 }
 

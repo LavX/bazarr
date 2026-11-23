@@ -258,7 +258,9 @@ def test_saved_connection_library_choices_and_root_edit_preview(saved, monkeypat
         'removed_items': 0}
     response = saved.client.patch(url, headers=HEADERS, json={'roots': remote_only, 'confirmed_removed': 0})
     assert response.status_code == 200 and response.json['removed_items'] == 0
-    saved.jobs._run_job(saved.jobs._reserve_next_job())
+    job = saved.jobs._reserve_next_job()
+    assert response.json['job_id'] == job.job_id
+    saved.jobs._run_job(job)
     assert set(_indexed(saved, lib)) == {'10', '20'}
 
     will_move.unlink()
@@ -273,7 +275,9 @@ def test_saved_connection_library_choices_and_root_edit_preview(saved, monkeypat
     response = saved.client.patch(url, headers=HEADERS, json={'roots': changed_roots, 'confirmed_removed': 1})
     assert response.status_code == 200 and response.json['removed_items'] == 1
     assert set(_indexed(saved, lib)) == {'20'}
-    saved.jobs._run_job(saved.jobs._reserve_next_job())
+    job = saved.jobs._reserve_next_job()
+    assert response.json['job_id'] == job.job_id
+    saved.jobs._run_job(job)
     assert _indexed(saved, lib)['20'].id == before['20'].id
     saved.rows[('movies', 'Movie')].append(_item(20, f'/mapped/{destination.name}'))
     _scan(saved, source['id'], lib)

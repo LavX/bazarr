@@ -5,12 +5,18 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, renderHook, waitFor } from "@testing-library/react";
 import { http, HttpResponse } from "msw";
 import { afterEach, expect, it, vi } from "vitest";
+import { useDeleteMediaServerInstance } from "@/apis/hooks/mediaServers";
 import {
   mediaSourcesKey,
   useRemoveMediaSource,
+  useScanMediaSource,
+  useUpdateServerSourceRoots,
   useWriteMediaSource,
 } from "@/apis/hooks/mediaSources";
-import { useSportsWantedPagination } from "@/apis/hooks/sports";
+import {
+  useSportsHistoryPagination,
+  useSportsWantedPagination,
+} from "@/apis/hooks/sports";
 import { useBadges } from "@/apis/hooks/system";
 import { QueryKeys } from "@/apis/queries/keys";
 import api from "@/apis/raw";
@@ -20,6 +26,7 @@ import { sportarr } from "@/pages/Settings/Connections/__tests__/fixtures";
 import {
   sourceDetailApi,
   sourceDetailKeys,
+  useSourceItem,
   useSourceLeagueEvents,
 } from "@/pages/SourceDetail/api";
 import server from "@/tests/mocks/node";
@@ -571,5 +578,204 @@ it.each(["refresh decision", "library owner"] as const)(
       ).toBe(false);
     }
     unmount();
+  },
+);
+
+it.each(["scan", "roots"] as const)(
+  "refreshes the source event when a vendor %s changes recording availability",
+  async (operation) => {
+    const { client, wrapper, source } = setup();
+    const vendor = {
+      ...source,
+      kind: "jellyfin" as const,
+      media_server_instance_id: "saved",
+    };
+    const { sibling, untouched } = primeMembers(client);
+    const eventKey = sourceDetailKeys.item(70, "sports_event");
+    client.removeQueries({ queryKey: eventKey, exact: true });
+    let unavailable = false;
+    let reads = 0;
+    const jobs = [QueryKeys.System, QueryKeys.Jobs];
+    server.use(
+      http.get("/api/sources/items/70", ({ request }) => {
+        expect(new URL(request.url).searchParams.get("kind")).toBe(
+          "sports_event",
+        );
+        reads++;
+        return HttpResponse.json({
+          id: 70,
+          kind: "sports_event",
+          source_id: vendor.id,
+          library_id: 9,
+          title: "Archive final",
+          server_missing: unavailable,
+        });
+      }),
+      http.post("/api/system/media-sources/8/scan", () =>
+        HttpResponse.json({ job_id: 31 }, { status: 202 }),
+      ),
+      http.patch(
+        "/api/system/media-sources/8/libraries/9",
+        async ({ request }) => {
+          const payload = await request.json();
+          expect(payload).toEqual({
+            roots: [
+              { server_path: "/server/events", local_path: "/local/events" },
+            ],
+            confirmed_removed: 1,
+          });
+          unavailable = true;
+          return HttpResponse.json({
+            ...vendor.libraries[0],
+            source_id: 8,
+            removed_items: 1,
+            job_id: 31,
+          });
+        },
+      ),
+    );
+    const { result } = renderHook(
+      () => ({
+        event: useSourceItem(70, "sports_event"),
+        scan: useScanMediaSource(),
+        roots: useUpdateServerSourceRoots(),
+      }),
+      { wrapper },
+    );
+    await waitFor(() =>
+      expect(result.current.event.data).toMatchObject({
+        server_missing: false,
+      }),
+    );
+    await act(async () => {
+      if (operation === "scan") {
+        await result.current.scan.mutateAsync(vendor);
+      } else {
+        await result.current.roots.mutateAsync({
+          sourceId: vendor.id,
+          libraryId: 9,
+          confirmedRemoved: 1,
+          roots: [
+            { server_path: "/server/events", local_path: "/local/events" },
+          ],
+        });
+      }
+    });
+    const rootEdit = operation === "roots";
+    expect(reads).toBe(rootEdit ? 2 : 1);
+    await waitFor(() =>
+      expect(result.current.event.data).toMatchObject({
+        server_missing: rootEdit,
+      }),
+    );
+    unavailable = !rootEdit;
+    await act(async () => {
+      client.setQueryData(jobs, [{ job_id: 31, status: "completed" }]);
+    });
+    await waitFor(() =>
+      expect(result.current.event.data).toMatchObject({
+        server_missing: !rootEdit,
+      }),
+    );
+    expect(reads).toBe(rootEdit ? 3 : 2);
+    expect(client.getQueryState(sibling)?.isInvalidated).toBe(!rootEdit);
+    for (const key of untouched)
+      expect(client.getQueryState(key)?.isInvalidated).toBe(false);
+  },
+);
+
+it.each(["jellyfin", "emby"] as const)(
+  "refreshes retained Sports history after deleting its %s connection",
+  async (kind) => {
+    const { client, wrapper, source } = setup();
+    const linked = {
+      ...source,
+      kind,
+      media_server_instance_id: "saved",
+      libraries: source.libraries.filter(
+        (library) => library.content_kind === "movie",
+      ),
+    };
+    const { affected, untouched } = primeMembers(client);
+    const { untouched: untouchedLists } = primeSportsLists(client);
+    const removedHistory = [
+      QueryKeys.Sports,
+      "history",
+      {
+        includeSources: true,
+        sourceKeys: ["source:removed"],
+      },
+    ];
+    client.setQueryData(removedHistory, { data: [], total: 0 });
+    let removed = false;
+    let reads = 0;
+    server.use(
+      http.get("/api/system/media-sources", () =>
+        HttpResponse.json({
+          data: removed ? [] : [linked],
+          availability: {
+            sports: {
+              browsable: false,
+              searchable: false,
+              retained: true,
+              removed,
+              retained_source_ids: removed ? [] : [linked.id],
+            },
+          },
+        }),
+      ),
+      http.delete("/api/system/media-server-instances/saved", () => {
+        removed = true;
+        return new HttpResponse(null, { status: 204 });
+      }),
+      http.get("/api/sports/history", () => {
+        reads++;
+        return HttpResponse.json({
+          data: [
+            {
+              id: 7,
+              origin: "source",
+              title: "Archive final",
+              action: 1,
+              source_id: removed ? null : linked.id,
+              source_key: removed ? "source:removed" : "source:8",
+            },
+          ],
+          total: 1,
+        });
+      }),
+    );
+    const { result } = renderHook(
+      () => ({
+        history: useSportsHistoryPagination({ includeSources: true }),
+        remove: useDeleteMediaServerInstance(kind, "saved", {
+          inlineErrors: true,
+        }),
+      }),
+      { wrapper },
+    );
+    await waitFor(() =>
+      expect(result.current.history.data?.data[0]).toMatchObject({
+        source_id: linked.id,
+        source_key: "source:8",
+      }),
+    );
+    await act(async () => {
+      await result.current.remove.mutateAsync();
+    });
+    await waitFor(() =>
+      expect(result.current.history.data?.data[0]).toMatchObject({
+        title: "Archive final",
+        source_id: null,
+        source_key: "source:removed",
+      }),
+    );
+    expect(reads).toBe(2);
+    for (const key of [...affected, removedHistory]) {
+      expect(client.getQueryState(key)?.isInvalidated).toBe(true);
+    }
+    for (const key of [...untouched, ...untouchedLists]) {
+      expect(client.getQueryState(key)?.isInvalidated).toBe(false);
+    }
   },
 );

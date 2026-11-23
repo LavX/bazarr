@@ -22,6 +22,7 @@ import {
   usePreviewServerSourceRoots,
   useScanMediaSource,
   useServerSourceLibraryChoices,
+  useUpdateServerSourceRoots,
   useValidateServerSourceRoots,
   useWriteMediaSource,
 } from "@/apis/hooks/mediaSources";
@@ -72,6 +73,7 @@ function SourceLibraryEditor({
   const discovery = useServerSourceLibraryChoices(instance.id, !library);
   const { data: profiles } = useLanguageProfiles();
   const save = useWriteMediaSource();
+  const rootWrite = useUpdateServerSourceRoots();
   const preview = usePreviewServerSourceRoots();
   const [name, setName] = useState(instance.name);
   const [selection, setSelection] = useState("");
@@ -85,7 +87,8 @@ function SourceLibraryEditor({
   );
   const [confirmedCount, setConfirmedCount] = useState<number>();
   const editingRoots = editor.mode === "roots";
-  const pending = save.isPending || preview.isPending;
+  const write = editingRoots ? rootWrite : save;
+  const pending = write.isPending || preview.isPending;
   const source = "source" in editor ? editor.source : undefined;
   const choices = (discovery.data?.data ?? []).filter(
     ({ id }) => !source?.libraries.some(({ locator }) => locator === id),
@@ -138,7 +141,7 @@ function SourceLibraryEditor({
         (editor.mode !== "create" || !!name.trim())));
   const clearFeedback = () => {
     preview.reset();
-    save.reset();
+    write.reset();
   };
   const changeRoot = (
     index: number,
@@ -171,7 +174,7 @@ function SourceLibraryEditor({
     event.stopPropagation();
     if (pending || !canSubmit) return;
     if (editor.mode === "roots") {
-      save.reset();
+      write.reset();
       preview.mutate(
         { sourceId: editor.source.id, libraryId: editor.library.id, roots },
         { onSuccess: setConfirmedCount },
@@ -200,14 +203,13 @@ function SourceLibraryEditor({
   const confirm = () => {
     if (editor.mode !== "roots" || confirmedCount === undefined || pending)
       return;
-    save.mutate(
-      () =>
-        api.mediaSources.updateServerRoots(
-          editor.source.id,
-          editor.library.id,
-          roots,
-          confirmedCount,
-        ),
+    rootWrite.mutate(
+      {
+        sourceId: editor.source.id,
+        libraryId: editor.library.id,
+        roots,
+        confirmedRemoved: confirmedCount,
+      },
       { onSuccess: onClose, onError: () => setConfirmedCount(undefined) },
     );
   };
@@ -252,7 +254,7 @@ function SourceLibraryEditor({
             <Button
               color={confirmedCount ? "red" : undefined}
               onClick={confirm}
-              loading={save.isPending}
+              loading={write.isPending}
             >
               Apply root changes
             </Button>
@@ -475,7 +477,7 @@ function SourceLibraryEditor({
                 )}
               </Stack>
             )}
-            {(preview.isError || save.isError) && (
+            {(preview.isError || write.isError) && (
               <Alert
                 role="alert"
                 color="red"
@@ -484,7 +486,7 @@ function SourceLibraryEditor({
                 }
               >
                 {mediaSourceErrorMessage(
-                  preview.isError ? preview.error : save.error,
+                  preview.isError ? preview.error : write.error,
                   "Check the paths and try again.",
                 )}
               </Alert>
@@ -567,7 +569,7 @@ export default function SourceLibraries({ instance, kind }: Props) {
                   !source.enabled ||
                   !source.libraries.some((library) => library.enabled)
                 }
-                onClick={() => scan.mutate(source.id)}
+                onClick={() => scan.mutate(source)}
               >
                 Scan libraries
               </Button>

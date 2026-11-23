@@ -397,9 +397,9 @@ def update_library(source_id, library_id, payload, session=None):
                           'immutable')
     if 'roots' in payload:
         _only(payload, ('roots', 'confirmed_removed'), 'editing server roots')
-        deleted = change_library_roots(source_id, library_id, payload['roots'], session,
-                                       confirmed_removed=payload.get('confirmed_removed'))
-        return {**describe_library(library_id, session), 'removed_items': deleted}
+        deleted, job_id = _change_library_roots(source_id, library_id, payload['roots'], session,
+                                                confirmed_removed=payload.get('confirmed_removed'))
+        return {**describe_library(library_id, session), 'removed_items': deleted, 'job_id': job_id or None}
     unknown = set(payload) - {'enabled', 'profile_id', 'name'}
     if unknown:
         raise SourceError(f"Cannot edit {', '.join(sorted(unknown))}")
@@ -494,7 +494,12 @@ def preview_library_roots(source_id, library_id, roots, session=None):
 
 
 def change_library_roots(source_id, library_id, roots, session=None, *, confirmed_removed=None):
-    """Replace the mappings and remove only the existing files confirmed in the preview."""
+    deleted, _ = _change_library_roots(source_id, library_id, roots, session, confirmed_removed=confirmed_removed)
+    return deleted
+
+
+def _change_library_roots(source_id, library_id, roots, session=None, *, confirmed_removed=None):
+    """Replace mappings, remove confirmed items and return the resulting scan job."""
     from .scanner import library_lock
 
     lock = library_lock(library_id)
@@ -514,10 +519,11 @@ def change_library_roots(source_id, library_id, roots, session=None, *, confirme
     finally:
         lock.release()
     try:
-        queue_scan(source_id, library_id)
+        job_id = queue_scan(source_id, library_id)
     except SourceError as error:
         logging.info('BAZARR no scan was queued after the roots of library %s changed: %s', library_id, error)
-    return deleted
+        job_id = None
+    return deleted, job_id
 
 
 def describe_source(source_id, session=None):

@@ -174,10 +174,10 @@ class MediaSourcesApi extends BaseApi {
     roots: ServerRootMapping[],
     confirmedRemoved: number,
   ) {
-    return this.patchRaw<SourceLibrary>(`/${id}/libraries/${libraryId}`, {
-      roots,
-      confirmed_removed: confirmedRemoved,
-    });
+    return this.patchRaw<SourceLibrary & { job_id?: number | null }>(
+      `/${id}/libraries/${libraryId}`,
+      { roots, confirmed_removed: confirmedRemoved },
+    );
   }
 
   update(id: number, payload: SourceSettings) {
