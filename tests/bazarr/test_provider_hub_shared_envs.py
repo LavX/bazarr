@@ -620,7 +620,7 @@ def test_a_stopped_install_removes_nothing_outside_the_hub(hub, tmp_path):
     sibling.mkdir()
 
     with pin_scope():
-        _discard_stopped_install([outside, link / "fp", sibling, hub], {})
+        _discard_stopped_install([outside, link / "fp", sibling, hub])
 
     assert (outside / "bin" / "python").exists()
     assert sibling.exists() and hub.exists()
@@ -634,7 +634,7 @@ def test_a_stopped_install_removes_a_bundle_inside_the_hub(hub):
     (bundle / "provider.py").write_text("", encoding="utf-8")
 
     with pin_scope():
-        _discard_stopped_install([bundle], {})
+        _discard_stopped_install([bundle])
 
     assert not bundle.exists()
 

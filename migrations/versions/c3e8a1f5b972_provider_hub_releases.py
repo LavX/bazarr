@@ -125,6 +125,21 @@ def _slot(row, keys, with_activation):
     }
 
 
+def _legacy_catalog_fields(document, row, manifest):
+    """Keep a pre-registration community catalog binding when the saved manifest corroborates it."""
+    source_id = row.get("source_id")
+    if (row.get("origin") != "catalog" or not row.get("source_bound")
+            or not isinstance(source_id, str) or source_id == "official"):
+        return []
+    sources = document.get("catalog_sources")
+    source = sources.get(source_id) if isinstance(sources, dict) else None
+    url = source.get("url") if isinstance(source, dict) and not source.get("registration") else None
+    manifest_source = manifest.get("source") if isinstance(manifest, dict) else None
+    if isinstance(url, str) and url and isinstance(manifest_source, dict) and manifest_source.get("catalog_url") == url:
+        return ["catalog_registration:legacy"]
+    return []
+
+
 def move_state_into_releases(bind):
     """Create a release row for each active and staged slot of the stored document and take the fields out of it.
 
@@ -162,6 +177,7 @@ def move_state_into_releases(bind):
             slot = _slot(row, keys, with_activation)
             if slot is None:
                 continue
+            fields = slot["present"] + _legacy_catalog_fields(document, row, row.get(keys[3]))
             result = bind.execute(sa.insert(releases).values(
                 plugin_id=plugin_id, version=slot["version"], state=slot_state, bundle_path=slot["bundle_path"],
                 python_path=slot["python_path"], bundle_digest=slot["bundle_digest"], env_key=None,
@@ -169,7 +185,7 @@ def move_state_into_releases(bind):
                 source_id=row.get("source_id") if isinstance(row.get("source_id"), str) else None,
                 origin=row.get("origin") if isinstance(row.get("origin"), str) else None,
                 activated_at=slot["activated_at"] if slot_state == "active" else None, retired_at=None,
-                ended_seq=None, fields=json.dumps(slot["present"])))
+                ended_seq=None, fields=json.dumps(fields)))
             release_id = result.inserted_primary_key[0]
             if slot["supplied_by"]:
                 bind.execute(sa.insert(bindings), [

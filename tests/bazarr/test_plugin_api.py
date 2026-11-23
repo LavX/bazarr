@@ -1026,10 +1026,28 @@ def community_install_job(client, rollback_store, tmp_path, monkeypatch):
     queued = []
     monkeypatch.setattr(jobs, "_enqueue", lambda _label, func, args: queued.append((func, args)) or "install-job")
     monkeypatch.setattr(jobs, "_checkpoint", lambda _job_id: lambda _message: None)
-    monkeypatch.setattr(service, "_fetch_bundle", lambda candidate, _deadline: (
-        root / "bundles" / provider_id / candidate.version))
-    monkeypatch.setattr(service.PluginEnvironment, "install", lambda _self, candidate, **_kwargs: (
-        root / "envs" / provider_id / candidate.version))
+    fetch_from_catalog = service._fetch_bundle
+    monkeypatch.setattr(service, "_fetch_github_bundle_file", lambda *_args, **_kwargs: (
+        b"class ExampleProvider: pass\n"))
+
+    def fetch_bundle(candidate, _deadline):
+        if candidate.version == "3.0.0":
+            return fetch_from_catalog(candidate, _deadline)
+        # Versions already in the rollback fixture use its existing on-disk layout.
+        bundle = root / "bundles" / provider_id / candidate.version
+        return bundle
+
+    def install_environment(_self, candidate, **_kwargs):
+        path = root / "envs" / provider_id / candidate.version
+        if candidate.version == "3.0.0":
+            path /= "fixture"
+        interpreter = path / "bin" / "python"
+        interpreter.parent.mkdir(parents=True, exist_ok=True)
+        interpreter.touch()
+        return path
+
+    monkeypatch.setattr(service, "_fetch_bundle", fetch_bundle)
+    monkeypatch.setattr(service.PluginEnvironment, "install", install_environment)
     monkeypatch.setattr(SUBTITLE_PROVIDER_KIND, "smoke_test", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(SUBTITLE_PROVIDER_KIND, "on_activated", lambda *_args: None)
 
@@ -1115,6 +1133,134 @@ def test_an_authenticated_reinstall_of_a_retained_version_can_later_roll_back(
     assert service.activate_staged_installations() == [provider_id]
     restored, = state_store.list_releases(provider_id, states=(releases.ACTIVE,))
     assert (restored.id, restored.catalog_registration) == (renewed.id, renewed.catalog_registration)
+
+
+def test_refused_install_keeps_the_bundle_staged_by_the_replacement_catalog(
+        community_install_job, monkeypatch):
+    from provider_hub import jobs, service, state
+
+    provider_id, _, replace_catalog, _, queue = community_install_job
+    run = queue("3.0.0")
+
+    def checkpoint(message):
+        if message == "Recording the installation":
+            monkeypatch.setattr(jobs, "_checkpoint", lambda _job_id: lambda _message: None)
+            replace_catalog()
+            queue("3.0.0")()
+
+    monkeypatch.setattr(jobs, "_checkpoint", lambda _job_id: checkpoint)
+    with pytest.raises(jobs.JobFailed, match="catalog registration changed"):
+        run()
+
+    row = state.load_state()["installations"][provider_id]
+    assert row["staged_version"] == "3.0.0"
+    assert Path(row["staged_path"], "provider.py").is_file()
+    assert service.activate_staged_installations() == [provider_id]
+
+
+def test_replacing_a_catalog_url_discards_its_unrefreshed_entries(client, community_install_job):
+    from provider_hub import state
+
+    provider_id, source_id, _, publish, _ = community_install_job
+    publish("3.0.0")
+    before = state.load_state()["catalog_sources"][source_id]
+
+    replacement = client.post("/api/plugins/catalog/sources", headers={"X-API-KEY": API_KEY}, json={
+        "name": source_id, "url": "https://github.com/example/replacement-catalog/blob/main/catalog.json",
+    })
+    assert replacement.status_code == 200
+    assert replacement.json["registration"] != before["registration"]
+    response = client.post("/api/provider-hub/installations", headers={"X-API-KEY": API_KEY}, json={
+        "source": source_id, "provider_id": provider_id, "version": "3.0.0",
+    })
+    assert response.status_code == 400 and "does not list" in response.json
+
+
+def test_an_authenticated_update_cannot_move_to_a_replacement_catalog_registration(
+        client, community_install_job, monkeypatch):
+    from provider_hub import jobs, service, state, state_store
+
+    provider_id, _, replace_catalog, publish, _ = community_install_job
+    publish("3.0.0")
+    selected = service._update_delta
+
+    def replace_after_selection(*args, **kwargs):
+        delta = selected(*args, **kwargs)
+        replace_catalog()
+        publish("3.0.0")
+        return delta
+
+    queued = []
+    monkeypatch.setattr(jobs, "_enqueue", lambda _label, func, args: queued.append((func, args)) or "update-job")
+    monkeypatch.setattr(service, "_update_delta", replace_after_selection)
+    before = state_store.list_releases(provider_id)
+    response = client.post("/api/provider-hub/updates/apply", headers={"X-API-KEY": API_KEY},
+                           json={"provider_id": provider_id})
+    assert response.status_code == 202
+    action, args = queued.pop()
+    assert action == "update_provider"
+
+    with pytest.raises(jobs.JobFailed, match="catalog registration changed"):
+        jobs.update_provider(**args)
+    assert state_store.list_releases(provider_id) == before
+    row = state.load_state()["installations"][provider_id]
+    assert row["active_version"] == "2.0.0" and not row.get("staged_version")
+
+
+def test_legacy_catalog_state_keeps_its_source_and_supports_rollback_after_the_staged_update(
+        client, rollback_store, hub_store, hub_engine, monkeypatch):  # noqa: F811
+    from migrations.versions.c3e8a1f5b972_provider_hub_releases import move_state_into_releases
+    from provider_hub import releases, service, state, state_store
+    from provider_hub.kinds.subtitle_provider import SUBTITLE_PROVIDER_KIND
+
+    plugin_id, source_id = "providerhub", "fixture-catalog"
+    source = {
+        "id": source_id, "name": source_id, "type": "github",
+        "url": "https://github.com/example/plugin-catalog/blob/main/catalog.json",
+        "enabled": True, "official": False, "trusted": False,
+        "dev_ref": None, "last_checked_at": None, "last_error": None,
+    }
+    previous, staged = [provider_manifest_v1(plugin_id, version) for version in ("1.0.0", "1.1.0")]
+    bundles, interpreters = [], []
+    for manifest in (previous, staged):
+        manifest["source"]["catalog_url"] = source["url"]
+        version = manifest["version"]
+        bundle = state.provider_hub_dir() / "bundles" / plugin_id / version / manifest["source"]["commit"]
+        bundle.mkdir(parents=True)
+        (bundle / "provider.py").write_bytes(b"class ExampleProvider: pass\n")
+        bundles.append(str(bundle))
+        interpreter = state.provider_hub_dir() / "envs" / plugin_id / version / "fixture" / "bin" / "python"
+        interpreter.parent.mkdir(parents=True)
+        interpreter.touch()
+        interpreters.append(str(interpreter))
+    write_state(
+        hub_store.legacy_state_path(), catalog_sources={source_id: source},
+        installations={plugin_id: {
+            "provider_id": plugin_id, "name": "Provider", "state": "staged", "pending_restart": True,
+            "source_id": source_id, "source_bound": True, "origin": "catalog", "trusted": False,
+            "active_version": previous["version"], "active_path": bundles[0], "python_path": interpreters[0],
+            "manifest": previous, "staged_version": staged["version"], "staged_path": bundles[1],
+            "staged_python_path": interpreters[1], "staged_manifest": staged, "config": {"region": "eu"},
+        }},
+    )
+    monkeypatch.setattr(SUBTITLE_PROVIDER_KIND, "smoke_test", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(SUBTITLE_PROVIDER_KIND, "on_activated", lambda *_args: None)
+
+    hub_store.ensure_ready()
+    with hub_store.write_transaction(hub_engine) as connection:
+        assert move_state_into_releases(connection) == 2
+    assert service.activate_staged_installations() == [plugin_id]
+    active, = state_store.list_releases(plugin_id, states=(releases.ACTIVE,))
+    retained, = state_store.list_releases(plugin_id, states=(releases.RETIRED,))
+    assert (retained.bundle_path, active.bundle_path) == tuple(bundles)
+    assert (retained.python_path, active.python_path) == tuple(interpreters)
+    assert retained.source_id == active.source_id == source_id
+    assert retained.catalog_registration == active.catalog_registration == "legacy"
+    assert state.load_state()["installations"][plugin_id]["config"] == {"region": "eu"}
+    assert _rollback(client, plugin_id=plugin_id).json == {"status": "waiting", "version": previous["version"]}
+    assert service.activate_staged_installations() == [plugin_id]
+    restored, = state_store.list_releases(plugin_id, states=(releases.ACTIVE,))
+    assert restored.id == retained.id
 
 
 def test_authenticated_rollback_smokes_a_private_snapshot_of_the_confirmed_release(

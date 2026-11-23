@@ -1,4 +1,5 @@
 /* eslint-disable camelcase -- transport names. */
+import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import type {
   ProviderHubCatalogEntry,
@@ -69,7 +70,8 @@ describe("the status of a revoked provider on its catalog card", () => {
   });
 });
 
-it("identifies a staged rollback on the Subtitle Hub card", () => {
+it("identifies a staged rollback on the Subtitle Hub card", async () => {
+  const user = userEvent.setup();
   show({
     ...running,
     state: "staged",
@@ -78,4 +80,8 @@ it("identifies a staged rollback on the Subtitle Hub card", () => {
   });
   expect(screen.getByText("Rollback staged")).toBeVisible();
   expect(screen.queryByText("Update staged")).not.toBeInTheDocument();
+  await user.hover(screen.getByText("Pending restart"));
+  expect(await screen.findByRole("tooltip")).toHaveTextContent(
+    "Restart Bazarr+ to activate the staged rollback",
+  );
 });

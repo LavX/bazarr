@@ -64,8 +64,8 @@ from .state import (
 from . import env_registry, transport
 from .bundled_wheels import declared_wheels
 from .venv import (
-    _ENV_LOCK, PluginEnvironment, environment_fingerprint, hold_environment, pin_scope, python_executable,
-    release_pins, validated_bundle_path, validated_interpreter,
+    _ENV_LOCK, _pin, PluginEnvironment, environment_fingerprint, hold_environment, is_pinned, path_key,
+    pin_scope, python_executable, release_pins, validated_bundle_path, validated_interpreter,
 )
 from .worker import ProviderWorkerClient, WorkerBusy, WorkerError, release_when_gone, worker_command
 
@@ -76,6 +76,10 @@ class CatalogSourceError(ValueError):
 
 class ProviderHubInstallError(RuntimeError):
     """Raised when a Provider Hub install could not be staged."""
+
+
+class CatalogRegistrationChanged(ProviderHubInstallError):
+    """An install or update was selected from a catalog that has since been replaced."""
 
 
 class ProviderHubConsentError(ProviderHubInstallError):
@@ -1022,6 +1026,13 @@ def _catalog_source_error_message(error: Exception) -> str:
     return str(error)
 
 
+def _discard_source_entries(state: dict[str, Any], source_id: str, source_name: str) -> None:
+    entries = state.setdefault("catalog_entries", {})
+    for key, entry in list(entries.items()):
+        if isinstance(entry, dict) and (entry.get("source") == source_id or entry.get("source_name") == source_name):
+            del entries[key]
+
+
 @datadir.serialized
 def add_catalog_source(
     name: str, url: str, trusted: bool = False, dev_ref: str | None = None
@@ -1062,6 +1073,9 @@ def add_catalog_source(
             existing = sources.get(name)
             if isinstance(existing, dict) and (existing.get("url"), existing.get("dev_ref")) == (url, dev_ref_value):
                 return dict(existing)
+            # Entries belong to the previous registration until the replacement is refreshed.
+            if isinstance(existing, dict):
+                _discard_source_entries(state, name, existing.get("name") or name)
             sources[name] = source
             return dict(source)
 
@@ -1096,12 +1110,7 @@ def remove_catalog_source(name: str) -> bool:
             # Drop catalog_entries that came from this source. Without this purge
             # the marketplace keeps offering stale entries and update checks may
             # match them as available upgrades, which surprises the user.
-            entries = state.setdefault("catalog_entries", {})
-            for key, entry in list(entries.items()):
-                if not isinstance(entry, dict):
-                    continue
-                if entry.get("source") == name or entry.get("source_name") == removed_name:
-                    del entries[key]
+            _discard_source_entries(state, name, removed_name)
             # Its installs stay, with no source to update from. A source added
             # later under the same name is a different catalog and must not
             # inherit them.
@@ -3270,7 +3279,9 @@ def _fetch_bundle(manifest, deadline: float | None = None) -> Path:
 
         _write_manifest_file(manifest, tmp_path)
         verify_bundle_tree(manifest, tmp_path)
-        shutil.move(str(tmp_path), str(target))
+        with _ENV_LOCK:
+            if not target.exists():
+                tmp_path.rename(target)
 
     verify_bundle_tree(manifest, target)
     return target
@@ -3391,7 +3402,9 @@ def _stage_local_bundle(validated, source_dir: Path) -> Path:
 
         _write_manifest_file(validated, tmp_path)
         verify_bundle_tree(validated, tmp_path)
-        shutil.move(str(tmp_path), str(target))
+        with _ENV_LOCK:
+            if not target.exists():
+                tmp_path.rename(target)
 
     verify_bundle_tree(validated, target)
     return target
@@ -4008,7 +4021,7 @@ def _check_catalog_registration(state, source_id, expected):
     if (expected is not _UNSET and source_id is not None
             and (source_id not in (state.get("catalog_sources") or {})
                  or releases.catalog_registration(state, source_id) != expected)):
-        raise ProviderHubInstallError("the catalog registration changed while the release was being prepared")
+        raise CatalogRegistrationChanged("the catalog registration changed while the release was being prepared")
 
 
 def _running_release_candidate(installation, kind):
@@ -4130,6 +4143,7 @@ def _stage_validated(
                     env_path = staged_python_path.parent.parent
             else:
                 step("Downloading the provider")
+                _pin(_bundle_path_for(validated))
                 bundle_path = bundle_stager(validated, deadline)
                 staged.append(bundle_path)
 
@@ -4163,10 +4177,10 @@ def _stage_validated(
                     validated, bundle_path, staged_python_path, timeout=smoke_timeout,
                     **({"data_dir": data_path} if data_path is not None else {}))
             step("Recording the installation")
-        except ProviderHubStopped:
+        except (ProviderHubStopped, CatalogRegistrationChanged):
             if data_path is not None:
                 datadir.remove(data_path)
-            _discard_stopped_install(staged, existing)
+            _discard_stopped_install(staged)
             raise
         except Exception as error:
             if data_path is not None:
@@ -4276,7 +4290,7 @@ def _stage_validated(
         except ProviderHubInstallError:
             if data_path is not None:
                 datadir.remove(data_path)
-            _discard_stopped_install(staged, existing)
+            _discard_stopped_install(staged)
             raise
         if is_fresh:
             # The saved settings may have come back with the kept data, so the row is read again before the
@@ -4338,35 +4352,36 @@ def _undo_staging(provider_id: str, previous: Any) -> None:
     mutate_state(restore)
 
 
-def _discard_stopped_install(paths, existing) -> None:
-    """Remove the bundle and venv a stopped install staged, unless they are in use.
-
-    The bundle lives at a path keyed by the version, so reinstalling the version
-    that is already active or staged lands on that installation's own files,
-    which stay. A venv can be shared, so any venv an installation references, the
-    environment record names, or another install is using right now stays too.
-    """
-    existing = existing if isinstance(existing, dict) else {}
-    in_use = {existing.get(key) for key in ("active_path", "staged_path", "python_path", "staged_python_path")}
-    # The files of the previous release, kept to go back to, are as much in use as the active ones.
-    for release in getattr(load_state(), "retained_releases", ()):
-        in_use.update((release.get("bundle_path"), release.get("python_path")))
-    in_use.discard(None)
-    # This install's own hold ends here, so only other installs' holds count.
-    release_pins()
+def _discard_stopped_install(paths) -> None:
+    """Remove files the refused install prepared if no current release or other install needs them."""
+    if not paths:
+        return
     hub = provider_hub_dir()
-    with _ENV_LOCK:
+    # A replacement can publish a slot for the same bundle while this job is running.
+    # Hold staging and pin changes until the current references have been checked.
+    with datadir.release_lock, _ENV_LOCK:
+        release_pins()
+        try:
+            state = load_state_strict()
+            env_registry.validate_inventory(state)
+        except Exception:
+            logging.getLogger(__name__).warning("Could not read the current plugin releases for cleanup", exc_info=True)
+            return
+        in_use = env_registry.referenced_env_paths(state)
+        in_use.update(
+            path_key(row[key])
+            for row in (state.get("installations") or {}).values() if isinstance(row, dict)
+            for key in ("active_path", "staged_path") if isinstance(row.get(key), str) and row[key]
+        )
+        in_use.update(path_key(release["bundle_path"]) for release in getattr(state, "retained_releases", ())
+                      if release.get("bundle_path"))
         for path in paths:
-            # A bundle is recorded by its directory, a venv by its interpreter.
-            if {str(path), str(python_executable(path))} & in_use:
-                continue
-            # Both removals stay inside the hub and never cross a symlink; a
-            # venv is also kept while anything references, records or pins it.
-            if env_registry.discard_if_unused(hub, path):
+            if path_key(path) in in_use or is_pinned(path):
                 continue
             if env_registry.is_environment_path(hub, path):
-                continue
-            env_registry.remove_inside_hub(hub, path)
+                env_registry.discard_if_unused(hub, path)
+            else:
+                env_registry.remove_inside_hub(hub, path)
 
 
 def stage_install(
@@ -4445,7 +4460,8 @@ def activate_google_seed() -> bool:
 
     The translator startup code decides whether the engine is wanted. This
     function stages only the designated Google release and uses normal
-    activation. Baked trust is read-only and no fetched catalog is needed.
+    activation. An explicit rollback keeps its verified release until another
+    release activates. Baked trust is read-only and no fetched catalog is needed.
     """
     plugin_id = seed.GOOGLE_PLUGIN_ID
     kind = get_kind(TRANSLATOR)
@@ -4462,6 +4478,16 @@ def activate_google_seed() -> bool:
         return False
 
     config = _running_release_candidate(existing, kind)
+    if config is not None and existing.get("google_seed_rollback") == _rollback_hash(
+            tuple(existing.get(key) for key in _ROLLBACK_ACTIVE_FIELDS)):
+        # Reverify the exact restored release, whether it lives in config or in the image.
+        restored = seed.select_release(
+            provider_hub_dir(), plugin_id, config_candidate=config, requested=config[0].raw,
+            usable=lambda release: not _revocation_refusal(
+                state, plugin_id, release.manifest.version, release.manifest.name),
+        )
+        if restored is not None and (str(restored.bundle), str(restored.interpreter)) == config[1:]:
+            return True
 
     def usable(release: seed.Release) -> bool:
         manifest = release.manifest
@@ -5683,6 +5709,12 @@ def activate_release(provider_id: str, *, at_boot: bool = False, _expected_stage
             row["last_error"] = None
             row.pop("needs_repair", None)
             row["activated_at"] = utcnow_iso()
+            if provider_id == seed.GOOGLE_PLUGIN_ID:
+                if rollback:
+                    row["google_seed_rollback"] = _rollback_hash(
+                        tuple(row.get(key) for key in _ROLLBACK_ACTIVE_FIELDS))
+                else:
+                    row.pop("google_seed_rollback", None)
             if isinstance(state, releases.StateDocument) and staged_release is not None and not same_owner:
                 # The old active slot may have identical files, even when it belongs to a different registration.
                 state.promoting_stage = provider_id
@@ -6259,10 +6291,7 @@ def _copy_staged_release_data(validated, expected_state, source_id, origin, targ
     def select_source():
         state = load_state()
         current = (state.get("installations") or {}).get(plugin_id) or {}
-        try:
-            check_catalog(state)
-        except ProviderHubInstallError as error:
-            raise datadir.SnapshotRefused(str(error)) from error
+        check_catalog(state)
         source = _stage_data_source(state, plugin_id, current, source_id, validated.kind, origin, validated.raw)
         if (not _same_data_release(current, expected, "active")
                 or _release_slots(state, plugin_id).get(releases.ACTIVE) != expected_slot
@@ -7100,13 +7129,14 @@ def update_consent(provider_id: str) -> dict[str, Any] | None:
 
 
 def apply_update(provider_id: str, checkpoint=None, consent_digest: str | None = None) -> dict[str, Any] | None:
-    provider = get_provider(provider_id, redact=False)
-    if not provider:
+    state = load_state()
+    row = (state.get("installations") or {}).get(provider_id)
+    if not isinstance(row, dict) or not row:
         return None
+    provider = _with_origin(row, state)
     if provider.get("origin") == "local":
         # A local package is never replaced by a catalog update; ignore the request.
         return _redact_installation(provider)
-    state = load_state()
     source_id = _bound_source_id(provider)
     catalog_list = _installed_catalog_list(provider)
     update = _latest_catalog_update(
@@ -7129,6 +7159,8 @@ def apply_update(provider_id: str, checkpoint=None, consent_digest: str | None =
             or "No update manifest is available"
         return _record_failed_update(provider_id, provider, message)
     entry, resolved = update
+    registration = releases.catalog_registration(state, source_id)
+    registration_kwargs = {"expected_registration": registration} if registration is not None else {}
     # An update that adds a destination, a permission, a binary or a plugin asks again first.
     delta = _update_delta(state, provider, entry, resolved)
     if delta and delta["needs_consent"] and consent_digest != delta["digest"]:
@@ -7137,12 +7169,17 @@ def apply_update(provider_id: str, checkpoint=None, consent_digest: str | None =
     if len(resolved.members) > 1:
         # A plugin the new release needs is staged first, as an install does.
         try:
-            members = _stage_closure_members(resolved, source_id, checkpoint)
+            members = _stage_closure_members(resolved, source_id, checkpoint, **registration_kwargs)
+        except CatalogRegistrationChanged:
+            raise
         except ProviderHubInstallError as error:
             return _record_failed_update(provider_id, provider, refusal_text(error))
     try:
-        return stage_install(entry["manifest"], checkpoint=checkpoint, source_id=source_id)
+        return stage_install(entry["manifest"], checkpoint=checkpoint, source_id=source_id, **registration_kwargs)
     except ProviderHubSettingsError:
+        raise
+    except CatalogRegistrationChanged:
+        _discard_staged_members(members, provider_id)
         raise
     except ProviderHubInstallError:
         _discard_staged_members(members, provider_id)

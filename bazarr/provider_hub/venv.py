@@ -30,9 +30,8 @@ from .manifest import ValidatedManifest
 _INSTALL_LOCK = threading.Lock()
 
 
-# Guards the in-flight pins below. An install that reuses or builds a shared
-# environment holds a pin on it until its row is recorded, so a cleanup that
-# runs on another thread never removes an environment that is about to be used.
+# An install pins the bundle and environment it prepares until its row is
+# recorded, so cleanup on another thread cannot delete files it is about to use.
 _ENV_LOCK = threading.RLock()
 _PINS: Counter[str] = Counter()
 _SCOPE = threading.local()
@@ -62,7 +61,7 @@ class PluginEnvironmentError(RuntimeError):
 
 @contextlib.contextmanager
 def pin_scope() -> Iterator[None]:
-    """Pin every environment ``PluginEnvironment.install`` hands out on this thread.
+    """Keep this install's bundle and environment pins on the current thread.
 
     The pins are released when the scope ends, which is after the installation
     that uses the environment has been recorded or has failed.
@@ -90,12 +89,12 @@ def path_key(path: str | os.PathLike[str]) -> str:
         return str(Path(path))
 
 
-def _pin(env_path: Path) -> None:
+def _pin(path: Path) -> None:
     held = getattr(_SCOPE, "held", None)
     if held is None:
         return
     with _ENV_LOCK:
-        key = path_key(env_path)
+        key = path_key(path)
         _PINS[key] += 1
         held.append(key)
 
@@ -114,9 +113,9 @@ def release_pins() -> None:
         held.clear()
 
 
-def is_pinned(env_path: str | os.PathLike[str]) -> bool:
+def is_pinned(path: str | os.PathLike[str]) -> bool:
     with _ENV_LOCK:
-        return _PINS.get(path_key(env_path), 0) > 0
+        return _PINS.get(path_key(path), 0) > 0
 
 
 def hold_environment(env_path: str | os.PathLike[str]):
@@ -144,7 +143,7 @@ def hold_environment(env_path: str | os.PathLike[str]):
 
 
 def pinned_paths() -> set[str]:
-    """Every environment an install in flight holds right now."""
+    """Every path an install in flight holds right now."""
     with _ENV_LOCK:
         return {key for key, count in _PINS.items() if count > 0}
 
