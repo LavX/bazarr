@@ -35,7 +35,8 @@ from subtitles.tools.combine.naming import parse_combined_filename
 from subtitles.tools.combine.rules import _dotted_custom_aliases
 from subtitles.tools.subsync_engines import (SYNC_ENGINE_LANGUAGE_MODIFIERS, SubtitleDestinationChanged,
                                              SubtitleSourceChanged, SyncOutputOwnerIndex, _normalized_media_stem,
-                                             plan_sync_output_cleanup, quarantine_sync_outputs_after_mutation,
+                                             local_subtitle_owner_is_clear, plan_sync_output_cleanup,
+                                             quarantine_sync_outputs_after_mutation,
                                              read_regular_subtitle, regular_subtitle_version, subtitle_write_locks,
                                              sync_engine_from_output_path, sync_output_owner_is_unique)
 from utilities.helper import get_subtitle_destination_folder, get_target_folder
@@ -98,10 +99,7 @@ class SourceOutputOwnerIndex(SyncOutputOwnerIndex):
             destination = settings.general.subfolder, get_subtitle_destination_folder()
         owners = {}
         for path in paths:
-            mapped = os.path.normcase(os.path.realpath(path))
-            stem = _normalized_media_stem(mapped)
-            for folder in SyncOutputOwnerIndex._owner_folders(mapped, destination):
-                owners.setdefault((folder, stem), set()).add(mapped)
+            SyncOutputOwnerIndex._record_owner(owners, path, destination)
         return owners
 
 
@@ -179,7 +177,8 @@ class SourcePublicationOwnerIndex(SourceOutputOwnerIndex):
             with self._settings_guard():
                 self._publication_settings = self._settings_snapshot()
             prepared = prepare() if prepare is not None else None
-            outputs = plan_sync_output_cleanup(source.path, destination, self) if cleanup_outputs else ()
+            outputs = (plan_sync_output_cleanup(source.path, destination, self, include_combined=True)
+                       if cleanup_outputs else ())
             shared = self._needs_registry_guard(source, destination, self._publication_settings[0][1])
             if shared and self._prepared_owners is None:
                 raise SourcePublicationOwnersChanged('The shared subtitle owners could not be verified')
@@ -200,6 +199,9 @@ class SourcePublicationOwnerIndex(SourceOutputOwnerIndex):
                             if (state is None or not state.source_enabled or not state.library_enabled
                                     or not os.path.isfile(current.path)):
                                 current = None
+                        if (current is not None and destination is not None
+                                and not local_subtitle_owner_is_clear(current.path, destination, self)):
+                            raise SourcePublicationOwnersChanged('Another video now owns the subtitle destination')
                         publishing = True
                         yield current, connection, prepared
                         if current is not None and outputs:
