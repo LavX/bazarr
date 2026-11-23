@@ -297,6 +297,8 @@ def translate_subtitles_file(video_path, source_srt_file, from_lang, to_lang, fo
                     del source_video_version
                 elif source_video_version is None:
                     source_video_version = source_translation_video_version(video_path)
+                elif source_video_version != source_translation_video_version(video_path):
+                    return None
                 # With the v2 runtime on, a request for a source and target that already has a job joins it.
                 # Reusing ``job_id`` keeps the frame the queue records to the function's own parameters.
                 job_id = _runtime_follow(

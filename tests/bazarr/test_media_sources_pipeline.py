@@ -2602,7 +2602,7 @@ def test_automatic_source_translation_checks_queued_video_version(world, monkeyp
 
 @pytest.mark.parametrize(
     "old_state", ["queued", "legacy-unsigned", "legacy-pinned", "legacy-current", "awaiting-retry", "legacy-recovered",
-                  "retry-during-replacement", "wanted-awaiting-retry", "wanted-legacy-stale-retry"])
+                  "retry-during-replacement", "legacy-removed", "wanted-awaiting-retry", "wanted-legacy-stale-retry"])
 def test_runtime_queues_a_new_source_translation_for_a_replacement_recording(
         world, monkeypatch, isolated_jobs, old_state):
     from dataclasses import replace
@@ -2669,6 +2669,9 @@ def test_runtime_queues_a_new_source_translation_for_a_replacement_recording(
                 (older_id, "completed")]
             return
         waits_for_retry = old_state in ("awaiting-retry", "legacy-recovered", "legacy-stale-retry")
+        removed = old_state == "legacy-removed"
+        if removed:
+            assert isolated_jobs.remove_job_from_pending_queue(job_id=older.job_id)
         if waits_for_retry:
             isolated_jobs.jobs_pending_queue.remove(older)
             jobs = TranslationJobs(world.db)
@@ -2687,19 +2690,28 @@ def test_runtime_queues_a_new_source_translation_for_a_replacement_recording(
 
         dispatched = old_state == "retry-during-replacement"
         if dispatched:
+            from types import SimpleNamespace
+
             from subtitles.tools.translate.core.translator_utils import SourceTranslationChanged
+            from subtitles.tools.translate.runtime.history import HistoryStore
+
+            history = HistoryStore(world.db)
+            state = SimpleNamespace(job_id=older_id, ledger_id=str(older_id))
+            history.open_job(state.ledger_id, source_language="en", target_language="hu")
 
             def retry_while_replacing(translator, job_id):
                 jobs = TranslationJobs(world.db)
                 assert jobs.start(older_id, source_digest="copy", engine_instance_id=1, settings_revision=1)
                 _replace_and_scan_movie(world, source)
                 assert queue_missing_translations(resolve_item(source.item_id)) == {"hu"}
-                assert jobs.await_retry(older_id, "publish_failed")
+                env.dispatcher()._await_retry(jobs, history, state, "publish_failed", "could not publish")
+                assert history.get_by_job(state.ledger_id)["status"] == "awaiting_retry"
                 raise SourceTranslationChanged("The recording changed while translation was running")
 
             with monkeypatch.context() as worker:
                 worker.setattr(runtime_service.RuntimeTranslatorService, "translate", retry_while_replacing)
                 assert isolated_jobs._reserve_next_job() is older and isolated_jobs._run_job(older)
+            assert history.get_by_job(state.ledger_id)["status"] == "cancelled"
         elif old_state != "legacy-recovered":
             _replace_and_scan_movie(world, source)
         current = resolve_item(source.item_id)
@@ -2708,7 +2720,7 @@ def test_runtime_queues_a_new_source_translation_for_a_replacement_recording(
         assert current.same_item(source) and current.path == source.path
         assert queue_missing_translations(current) == {"hu"}
         *earlier, newer = isolated_jobs.jobs_pending_queue
-        assert earlier == ([] if waits_for_retry or dispatched else [older])
+        assert earlier == ([] if waits_for_retry or dispatched or removed else [older])
         assert newer.job_id != older.job_id
         assert newer.kwargs["source_srt_file"] == older.kwargs["source_srt_file"] == str(subtitle)
         assert newer.kwargs["source_video_version"] == subtitle_source_version(path)
@@ -2719,7 +2731,17 @@ def test_runtime_queues_a_new_source_translation_for_a_replacement_recording(
         newer_id = world.db.execute(sa.select(TableTranslatorJob.id).where(
             TableTranslatorJob.queue_job_id == newer.job_id)).scalar_one()
 
-        if not waits_for_retry:
+        if old_state == "awaiting-retry":
+            assert isolated_jobs.remove_job_from_pending_queue(job_id=newer.job_id)
+            jobs = TranslationJobs(world.db)
+            assert jobs.await_retry(newer_id, "interrupted")
+            stale_request = {key: value for key, value in older.kwargs.items() if key != "job_id"}
+            assert main.translate_subtitles_file(**stale_request) is None
+            assert jobs.get(newer_id).state == "awaiting_retry"
+            assert queue_missing_translations(current) == {"hu"}
+            (newer,) = isolated_jobs.jobs_pending_queue
+            assert jobs.get(newer_id).queue_job_id == newer.job_id
+        if not waits_for_retry and not removed:
             if not dispatched:
                 assert isolated_jobs._reserve_next_job() is older and isolated_jobs._run_job(older)
             assert older.job_name.startswith("Skipped")
