@@ -1709,6 +1709,11 @@ def test_rollback_restores_the_exact_release_settings_and_keeps_unowned_values(
     preview = _get(client, f"/api/plugins/installations/{plugin_id}/rollback").json
     assert preview["restores_settings"] is True
     assert _rollback(client, plugin_id).json == {"status": status, "version": "1.0.0"}
+    if restarts:
+        from secret_store.scrub import scrub_persisted_secrets
+
+        scrub_persisted_secrets()
+        assert release_settings.record_for(state.load_state()["installations"][plugin_id], retired) == record
     # Startup also retires a replaced live release after its former workers have stopped.
     assert service.activate_staged_installations() == ([plugin_id] if restarts else [])
     assert state.load_state()["installations"][plugin_id]["config"] == {"region": "eu", "unrelated": "keep me"}

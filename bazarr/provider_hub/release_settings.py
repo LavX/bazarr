@@ -87,6 +87,23 @@ def unseal(content: str) -> dict:
     return result
 
 
+def is_sealed_state_field(path: tuple, value: str) -> bool:
+    """Recognize authenticated settings storage without exempting diagnostic text from scrubbing."""
+    if len(path) != 4 or path[0] != "installations" or not isinstance(path[1], str):
+        return False
+    expected = {
+        (RETAINED, "content"): {"config_fields", "config", "owners"},
+        (PENDING_HOOK, "settings_copy"): {"owners", "revisions"},
+        (PENDING_HOOK, "provider_settings_copy"): {"fields", "before", "after", "addresses"},
+    }.get(path[2:])
+    if expected is None:
+        return False
+    try:
+        return expected <= unseal(value).keys()
+    except ValueError:
+        return False
+
+
 def restore_config(state: dict, plugin_id: str, row: dict, snapshot: dict) -> None:
     """Restore declared public settings into this plugin's own configuration only."""
     if not snapshot:

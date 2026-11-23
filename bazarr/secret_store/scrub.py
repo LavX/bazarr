@@ -821,12 +821,15 @@ def scrub_state_secrets(state) -> bool:
     structure: an install whose username equals its provider id would
     otherwise have its installation and manifest ids rewritten to the mask.
     Credential containers are always left alone; the migration covers them.
+    Authenticated release settings copies are private storage, so their exact fields also survive.
     """
     if not isinstance(state, dict):
         return False
+    from provider_hub.release_settings import is_sealed_state_field
+
     changed = False
 
-    def walk(node, in_text):
+    def walk(node, in_text, path):
         nonlocal changed
         if isinstance(node, dict):
             for key, value in list(node.items()):
@@ -834,12 +837,14 @@ def scrub_state_secrets(state) -> bool:
                     continue
                 text_field = in_text or (isinstance(key, str) and key in _STATE_TEXT_FIELDS)
                 if isinstance(value, str):
+                    if is_sealed_state_field((*path, key), value):
+                        continue
                     masked = scrub_leaf(value) if text_field else _mask_patterns(value)
                     if masked != value:
                         node[key] = masked
                         changed = True
                 elif isinstance(value, (dict, list)):
-                    walk(value, text_field)
+                    walk(value, text_field, (*path, key))
         else:
             for index, value in enumerate(node):
                 if isinstance(value, str):
@@ -848,9 +853,9 @@ def scrub_state_secrets(state) -> bool:
                         node[index] = masked
                         changed = True
                 elif isinstance(value, (dict, list)):
-                    walk(value, in_text)
+                    walk(value, in_text, (*path, index))
 
-    walk(state, False)
+    walk(state, False, ())
     return changed
 
 
