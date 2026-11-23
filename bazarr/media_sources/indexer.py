@@ -22,6 +22,7 @@ from subliminal_patch import core
 from app.config import pin_subtitle_settings, settings
 from app.database import get_audio_profile_languages, get_profile_cutoff, get_profiles_list
 from constants import MAXIMUM_SUBTITLE_SIZE
+from languages import get_languages
 from languages.custom_lang import CustomLanguage
 from languages.get_languages import alpha2_from_alpha3, get_language_set
 from subtitles.adaptive_searching import is_search_given_up
@@ -258,7 +259,9 @@ def list_external_subtitles(path, previous=None, ownership_index=None, *, public
         if len(entry) not in (3, 4) or not entry[1]:
             continue
         key = os.path.normcase(os.path.abspath(entry[1]))
-        if _can_borrow_language(entry[0]):
+        valid_language = (_is_configured_upload_variant(entry[0]) if len(entry) == 4
+                          else _can_borrow_language(entry[0]))
+        if valid_language:
             indexed[key] = entry
         else:
             rejected_paths.add(key)
@@ -445,6 +448,15 @@ def _file_signature(stat):
     if stat is None:
         return None
     return stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns
+
+
+def _is_configured_upload_variant(key):
+    """An upload records Bazarr's configured language code and an optional role."""
+    if not isinstance(key, str) or not key:
+        return False
+    code, separator, role = key.partition(':')
+    return (not separator or role in ('forced', 'hi')) and any(
+        row['code2'] == code for row in get_languages.languages_dict)
 
 
 def _can_borrow_language(key):

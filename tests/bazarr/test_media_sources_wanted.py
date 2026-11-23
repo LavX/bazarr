@@ -711,25 +711,39 @@ def test_single_language_upload_finishes_after_metadata_write_failure(world, mon
                for record in caplog.records)
 
 
-@pytest.mark.parametrize('role', ['forced', 'hi'])
-def test_single_language_upload_role_applies_only_to_the_published_file(world, monkeypatch, role):
+@pytest.mark.parametrize('language,role', [('en', 'forced'), ('en', 'hi'), ('me', 'forced'), ('ea', 'hi')])
+def test_single_language_upload_role_applies_only_to_the_published_file(world, monkeypatch, language, role):
     from app.config import settings
     from app.database import TableLanguagesProfiles, update_profile_id_list
+    from languages import get_languages
+    from languages.custom_lang import LatinAmericanSpanish
+    from languages.extra import extra_settings_language_rows, register_extra_languages
     from media_sources import indexer, repository
     from subtitles import upload
 
+    register_extra_languages()
+    monkeypatch.setattr(get_languages, 'languages_dict', [
+        *get_languages.languages_dict,
+        *[dict(row, code3b=None) for row in extra_settings_language_rows()],
+        {'code2': 'es', 'code3': 'spa', 'code3b': None, 'name': 'Spanish'},
+        {'code2': LatinAmericanSpanish.alpha2, 'code3': LatinAmericanSpanish.alpha3,
+         'code3b': None, 'name': LatinAmericanSpanish.name},
+    ])
     monkeypatch.setattr(settings.general, 'single_language', True)
     monkeypatch.setattr(upload, 'sync_subtitles', Mock())
-    profile = [{'id': 1, 'language': 'en', 'forced': str(role == 'forced'), 'hi': str(role == 'hi')}]
+    profile = [{'id': 1, 'language': language, 'forced': str(role == 'forced'), 'hi': str(role == 'hi')}]
     world.db.execute(sa.update(TableLanguagesProfiles).values(items=json.dumps(profile)))
     update_profile_id_list.invalidate()
     context = pipeline._movie(world)
     destination = Path(context.path).with_suffix('.srt')
+    language_variant = f'{language}:{role}'
     result = upload.manual_upload_subtitle(
-        context.path, 'en', role == 'forced', role == 'hi', context.media_type,
+        context.path, language, role == 'forced', role == 'hi', context.media_type,
         BytesIO(pipeline.CONTENT), 'uploaded.srt', 'None', job_id=1, source=context)
     assert result == ('', 204)
-    assert repository.get_item(context.item_id).missing_subtitles == '[]'
+    indexed = repository.get_item(context.item_id)
+    assert indexed.missing_subtitles == '[]'
+    assert [entry[0] for entry in indexer.index_item(context.item_id) if entry[1]] == [language_variant]
 
     previous = destination.stat()
     replacement = destination.with_suffix('.replacement')
@@ -739,10 +753,10 @@ def test_single_language_upload_role_applies_only_to_the_published_file(world, m
     assert destination.stat().st_size == previous.st_size
     assert destination.stat().st_mtime_ns == previous.st_mtime_ns
 
-    indexer.index_item(context.item_id)
+    assert indexer.index_item(context.item_id) is not None
     indexed = repository.get_item(context.item_id)
-    assert ast.literal_eval(indexed.missing_subtitles) == [f'en:{role}']
-    assert all(entry[0] not in ('en:forced', 'en:hi')
+    assert ast.literal_eval(indexed.missing_subtitles) == [language_variant]
+    assert all(entry[0] not in (f'{language}:forced', f'{language}:hi')
                for entry in ast.literal_eval(indexed.subtitles) if entry[1])
 
 
