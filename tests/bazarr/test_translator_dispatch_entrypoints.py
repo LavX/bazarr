@@ -634,6 +634,8 @@ def test_an_editor_planner_cannot_release_another_queue_jobs_claim(
         assert failing_job.status == "failed"
         row = env.last_job()
         assert (row.state, row.queue_job_id) == ("running", winning_id)
+        history = env.history(row)
+        assert history["status"] == "running" and history["declined_reason"] is None
     finally:
         release.set()
         failing_worker.join(8)
@@ -674,6 +676,7 @@ def test_native_dispatch_preserves_its_claim_when_attachment_arrives_late(
     assert job.job_id == first and env.last_job().queue_job_id is None
     ready, release = Event(), Event()
     original_plan = Dispatcher._plan
+    original_run_plugin = Dispatcher._run_plugin
 
     def plan(dispatcher, spec):
         ready.set()
@@ -716,8 +719,15 @@ def test_native_dispatch_preserves_its_claim_when_attachment_arrives_late(
         assert env.last_job().state == "completed"
     else:
         assert job.status == "failed"
-        assert (env.last_job().state, env.last_job().queue_job_id) == ("awaiting_retry", None)
+        row = env.last_job()
+        assert (row.state, row.queue_job_id) == ("awaiting_retry", None)
         assert not media.dest.exists()
+        monkeypatch.setattr(Dispatcher, "_run_plugin", original_run_plugin)
+        attach(*args, **kwargs)
+        retry = queue._reserve_next_job()
+        assert retry.job_id == second and queue._run_job(retry)
+        assert "[fr] One" in media.dest.read_text()
+        assert (env.last_job().id, env.last_job().state) == (row.id, "completed")
 
 
 def test_lingarr_publishes_through_its_own_service_and_the_runtime_writes_nothing(env, media, monkeypatch):
