@@ -288,6 +288,7 @@ def test_scan_disk_job_that_works_completes_and_announces(queue, monkeypatch, ki
 def recalculation(queue, monkeypatch):
     """The library-wide passes, recorded instead of run."""
     from app.config import settings
+    from media_sources import repository
     from subtitles.indexer import movies as movies_indexer
     from subtitles.indexer import series as series_indexer
     from subtitles.indexer import missing_refresh
@@ -303,6 +304,7 @@ def recalculation(queue, monkeypatch):
     monkeypatch.setattr(settings.general, "use_sonarr", True)
     monkeypatch.setattr(settings.general, "use_radarr", True)
     monkeypatch.setattr(settings.general, "use_sportarr", False)
+    monkeypatch.setattr(repository, "has_sources", lambda: False)
     return missing_refresh, calls
 
 

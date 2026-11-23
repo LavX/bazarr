@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import type { WizardPhase } from "./steps/types";
 import {
   readOnboardingValue,
   removeOnboardingValue,
@@ -7,6 +8,7 @@ import {
 
 const STORAGE_NAME = "skipped";
 const ANSWERED_NAME = "answered";
+const WRITTEN_PHASES_NAME = "written-phases";
 
 function readKeys(name: string): string[] {
   const raw = readOnboardingValue(name);
@@ -23,10 +25,11 @@ function readKeys(name: string): string[] {
   }
 }
 
-/** Forgets both records without disturbing a mounted wizard. */
+/** Forgets the progress records without disturbing a mounted wizard. */
 export function clearPersistedSkips() {
   removeOnboardingValue(STORAGE_NAME);
   removeOnboardingValue(ANSWERED_NAME);
+  removeOnboardingValue(WRITTEN_PHASES_NAME);
 }
 
 function mirror(name: string, keys: string[]) {
@@ -48,10 +51,13 @@ function mirror(name: string, keys: string[]) {
  *
  * A step answered once stays answered when it is revisited and passed again
  * with nothing new to write, and an answer after an earlier skip takes the
- * skip back. Only the shell's own skip control can walk past a step that was
- * answered.
+ * skip back. The shell's own skip control can replace a Continue answer.
  *
- * Both are mirrored to localStorage like the cursor and the intent, because
+ * A confirmed write that can settle independently of Continue is tracked by
+ * phase. It still counts when a generated step disappears or a later part of
+ * the save fails. Skipping a step does not undo a write already made.
+ *
+ * These are mirrored to localStorage like the cursor and the intent, because
  * the providers step restarts Bazarr+ and the wizard resumes through a hard
  * redirect, which would otherwise hand every skipped phase its check back.
  */
@@ -62,6 +68,9 @@ export function useSkippedSteps() {
   const [answered, setAnswered] = useState<string[]>(() =>
     readKeys(ANSWERED_NAME),
   );
+  const [writtenPhases, setWrittenPhases] = useState(() =>
+    readKeys(WRITTEN_PHASES_NAME),
+  );
 
   // What markUnwritten reads: the latest record, not the one of the render it was made in.
   const answeredNow = useRef(answered);
@@ -71,12 +80,19 @@ export function useSkippedSteps() {
   // pure or StrictMode's double invocation writes twice.
   useEffect(() => mirror(STORAGE_NAME, skipped), [skipped]);
   useEffect(() => mirror(ANSWERED_NAME, answered), [answered]);
+  useEffect(() => mirror(WRITTEN_PHASES_NAME, writtenPhases), [writtenPhases]);
+
+  const markWritten = useCallback((phase: WizardPhase) => {
+    setWrittenPhases((current) =>
+      current.includes(phase) ? current : [...current, phase],
+    );
+  }, []);
 
   const markSkipped = useCallback((key: string) => {
     setSkipped((current) =>
       current.includes(key) ? current : [...current, key],
     );
-    // The shell's skip control is the reader saying no, whatever was written.
+    // Replace the navigation outcome. Confirmed writes are tracked separately.
     setAnswered((current) => current.filter((entry) => entry !== key));
   }, []);
 
@@ -104,7 +120,16 @@ export function useSkippedSteps() {
   const reset = useCallback(() => {
     setSkipped([]);
     setAnswered([]);
+    setWrittenPhases([]);
   }, []);
 
-  return { skipped, markSkipped, markAnswered, markUnwritten, reset };
+  return {
+    skipped,
+    writtenPhases,
+    markSkipped,
+    markAnswered,
+    markUnwritten,
+    markWritten,
+    reset,
+  };
 }
