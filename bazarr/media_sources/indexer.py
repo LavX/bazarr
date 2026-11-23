@@ -280,7 +280,8 @@ def index_item(item_id, target=None, ownership_index=None, *, keep_index_on_prob
             return None
         if not isinstance(previous, (list, tuple)) or any(
                 not isinstance(entry, (list, tuple))
-                or (len(entry) == 3 and entry[1] is not None and not isinstance(entry[1], str))
+                or (len(entry) == 3 and (entry[0] is not None and not isinstance(entry[0], str)
+                                         or entry[1] is not None and not isinstance(entry[1], str)))
                 for entry in previous):
             logging.warning('BAZARR invalid stored subtitle listing for this file %s', item.path)
             return None

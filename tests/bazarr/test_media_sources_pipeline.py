@@ -389,12 +389,16 @@ def test_shared_folder_owner_disconnect_preserves_the_saved_subtitle_and_history
     assert world.db.execute(sa.select(sa.literal(1))).scalar_one() == 1
 
 
-@pytest.mark.parametrize("stored", ["[", "[None]", "[['en', ['invalid-path'], 1]]"],
-                         ids=["invalid-literal", "invalid-row", "invalid-path"])
+@pytest.mark.parametrize("stored", ["[", "[None]", "[['en', ['invalid-path'], 1]]", "invalid-language"],
+                         ids=["invalid-literal", "invalid-row", "invalid-path", "invalid-language"])
 def test_indexing_leaves_a_malformed_stored_listing_incomplete(world, stored):
     from media_sources import indexer, repository
 
     context = _movie(world)
+    if stored == "invalid-language":
+        sidecar = Path(context.path).with_suffix(".srt")
+        sidecar.write_bytes(CONTENT)
+        stored = repr([[123, str(sidecar), len(CONTENT)]])
     repository.update_item(context.item_id, world.db, subtitles=stored)
     initial = repository.get_item(context.item_id)
 
