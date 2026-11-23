@@ -18,17 +18,18 @@ _PAGE_SIZE = 500
 _run_lock = Lock()
 
 
-def wanted_items(*columns, kind=None):
+def wanted_items(*columns, kind=None, profile_id=None):
     """Select items with stored missing subtitles and an effective, enabled profile."""
     items, sources, libraries, groups = repository.Items, repository.Sources, repository.Libraries, repository.Groups
     parents = items.join(sources, items.c.source_id == sources.c.id).join(
         libraries, items.c.library_id == libraries.c.id).outerjoin(groups, items.c.group_id == groups.c.id)
+    effective_profile = sa.func.coalesce(items.c.profile_id, groups.c.profile_id, libraries.c.profile_id)
+    profile = effective_profile.is_not(None) if profile_id is None else effective_profile == profile_id
     query = sa.select(*columns).select_from(parents).where(
         # Keep the literal predicate in the partial index usable in both dialects.
         items.c.missing_subtitles.is_not(None), items.c.missing_subtitles != sa.literal_column("'[]'"),
         sources.c.enabled == 1, libraries.c.enabled == 1, items.c.monitored == 1, items.c.arr_shadow == 0,
-        items.c.server_missing == 0, items.c.identity_state.in_(('identified', 'parsed')),
-        sa.func.coalesce(items.c.profile_id, groups.c.profile_id, libraries.c.profile_id).is_not(None))
+        items.c.server_missing == 0, items.c.identity_state.in_(('identified', 'parsed')), profile)
     return query if kind is None else query.where(items.c.kind == kind)
 
 

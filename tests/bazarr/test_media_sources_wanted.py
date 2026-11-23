@@ -221,11 +221,13 @@ def test_wanted_refreshes_stale_shadows_and_retains_mount_shadows(client, arr_li
 def test_wanted_checks_translation_before_asking_providers(world, isolated_jobs, monkeypatch, state):
     from app.config import settings
     from app.database import TableLanguagesProfiles, update_profile_id_list
-    from media_sources import repository, wanted
+    from media_sources import repository, translation, wanted
     from subtitles import download
     from subtitles.tools.translate import availability, failure_record
 
     monkeypatch.setattr(wanted, 'jobs_queue', isolated_jobs)
+    index_computation = Mock(side_effect=AssertionError('Wanted must use indexed missing subtitles'))
+    monkeypatch.setattr(translation, '_current_missing', index_computation)
     monkeypatch.setattr(settings.translator, 'runtime_v2', False)
     monkeypatch.setattr(availability, 'translation_available', lambda: SimpleNamespace(available=True))
     monkeypatch.setattr(settings.translator, 'min_source_wait_minutes', 10 if state == 'waiting' else 0)
@@ -242,7 +244,7 @@ def test_wanted_checks_translation_before_asking_providers(world, isolated_jobs,
     repository.update_item(context.item_id, world.db, subtitles=str([['en', str(source_subtitle), 100]]),
                            missing_subtitles="['hu']")
     if state == 'translated':
-        translated = Path(context.path).with_name('kept-translation.srt')
+        translated = Path(context.path).with_suffix('.hu.ass')
         translated.write_bytes(pipeline.CONTENT)
         repository.insert_history(world.db, item_id=context.item_id, source_id=context.source_id,
                                   item_kind='movie', action=6, description='translated', language='hu', subtitles_path=str(translated),
@@ -267,6 +269,7 @@ def test_wanted_checks_translation_before_asking_providers(world, isolated_jobs,
             assert len(isolated_jobs.jobs_pending_queue) == 1
         else:
             assert not pending
+        index_computation.assert_not_called()
         assert providers.call_count == (1 if state in ('recent failure', 'low score') else 0)
     finally:
         failure_record.clear_failed_translation(*failure_args, source_created_at=context.created_at)

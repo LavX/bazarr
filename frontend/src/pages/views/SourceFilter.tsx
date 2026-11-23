@@ -19,6 +19,7 @@ export default function SourceFilter({ labels, value, onChange }: Props) {
       searchable
       clearable
       size="sm"
+      w={156}
     />
   );
 }

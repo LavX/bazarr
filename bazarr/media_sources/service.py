@@ -517,8 +517,9 @@ def search_wanted_item(item_id, created_at, job_id):
     from subtitles.adaptive_searching import is_search_active, updateFailedAttempts
 
     items = repository.Items
-    query = wanted_items(*items.c).where(items.c.id == item_id, items.c.created_at == created_at)
-    item = handle().execute(query).first()
+    same_row = (items.c.id == item_id, items.c.created_at == created_at)
+    session = handle()
+    item = session.execute(wanted_items(*items.c).where(*same_row)).first()
     if item is None or local_stat(item.path) is None:
         return
     if path_stage_shadow(item_id):
@@ -539,7 +540,7 @@ def search_wanted_item(item_id, created_at, job_id):
         return
 
     # Settings, indexing and scanning can change eligibility while the translation gate runs.
-    current = handle().execute(query).first()
+    current = session.execute(wanted_items(*items.c, profile_id=context.profile_id).where(*same_row)).first()
     if current is None or current.path != context.path or current.library_id != context.library_id:
         return
     languages = [entry for entry in languages if entry in _missing_languages(current)]

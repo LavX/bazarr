@@ -301,15 +301,18 @@ def _write_wanted_source_subtitle(source, language, write, destination, content)
     """Recheck the item and destination after the provider, under the subtitle write lock."""
     from media_sources import repository
     from media_sources.db import handle
+    from media_sources.indexer import SourcePublicationOwnerIndex
     from media_sources.wanted import wanted_items
+    from subtitles.tools.subsync_engines import sync_output_owner_is_unique
 
-    if os.path.lexists(destination):
+    if os.path.lexists(destination) or not os.path.isfile(source.path):
         return
     items = repository.Items.c
-    live = handle().execute(wanted_items(items.id, kind=source.kind).where(
+    live = handle().execute(wanted_items(items.id, kind=source.kind, profile_id=source.profile_id).where(
         items.id == source.item_id, items.created_at == source.created_at, items.path == source.path,
         items.source_id == source.source_id, items.library_id == source.library_id)).first()
-    if live is not None and language in check_missing_languages_source(source):
+    if (live is not None and language in check_missing_languages_source(source)
+            and sync_output_owner_is_unique(source.path, destination, ownership_index=SourcePublicationOwnerIndex())):
         write(destination, content)
 
 

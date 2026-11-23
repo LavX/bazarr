@@ -115,6 +115,9 @@ const WantedMoviesView: FunctionComponent = () => {
           return (
             <Checkbox
               id="table-header-selection"
+              disabled={
+                !table.getRowModel().rows.some((row) => row.getCanSelect())
+              }
               indeterminate={table.getIsSomeRowsSelected()}
               checked={table.getIsAllRowsSelected()}
               onChange={table.getToggleAllRowsSelectedHandler()}

@@ -104,12 +104,13 @@ def automatic_translation_is_current(source, subtitle_path, from_lang, to_lang, 
             and subtitle_path in _source_paths(item, from_lang) and _source_hold(source, subtitle_path) is None)
 
 
-def _already_translated(source, target):
+def _already_translated(source, target, owners):
     history = repository.History.c
     path = handle().scalar(select(history.subtitles_path).where(
         history.item_id == source.item_id, history.language == target, history.action == 6
     ).order_by(history.timestamp.desc(), history.id.desc()).limit(1))
-    return bool(path and os.path.isfile(path))
+    return bool(path and os.path.isfile(path)
+                and sync_output_owner_is_unique(source.path, path, ownership_index=owners))
 
 
 def queue_missing_translations(source, *, downloaded_path=None, downloaded_language=None, score=None,
@@ -147,7 +148,7 @@ def queue_missing_translations(source, *, downloaded_path=None, downloaded_langu
         forced, hi = rule['forced'], rule['hi']
         if target not in missing or to_lang == from_lang:
             continue
-        if _already_translated(source, target):
+        if _already_translated(source, target, owners):
             covered.add(target)
             continue
         candidates = _source_paths(item, from_lang)
