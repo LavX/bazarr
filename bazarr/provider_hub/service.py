@@ -1399,10 +1399,6 @@ def _set_official_trust(
     source["trust_reason"] = reason
 
 
-_UNKNOWN_SOURCE_NOTE = (
-    "No configured catalog source is known to have published this version, so it "
-    "gets no updates. Reinstall it from a catalog source to get updates again."
-)
 _SOURCE_REMOVED_NOTE = (
     "Its catalog source was removed, so it gets no updates. Reinstall it from a "
     "catalog source to get updates again."
@@ -1479,7 +1475,7 @@ def _bind_by_evidence(row: dict[str, Any], manifest: Any, origin: dict[str, Any]
     if bound:
         row.update(source_bound=True, source_id=bound, trust_note=None)
     elif not unanswered:
-        row.update(source_bound=True, source_id=None, trust_note=_UNKNOWN_SOURCE_NOTE)
+        row.update(source_bound=True, source_id=None, trust_note=releases.UNKNOWN_CATALOG_SOURCE_NOTE)
 
 
 def _recheck_installed_trust(state: dict[str, Any], ancestry: _OfficialAncestry) -> None:
@@ -3818,7 +3814,7 @@ def _restore_active_source(state, plugin_id, row) -> None:
     if not _active_release_owned(state, row, active):
         removed = (row.get("trust_note") == _SOURCE_REMOVED_NOTE
                    or (active is not None and active.catalog_registration is not None))
-        note = _SOURCE_REMOVED_NOTE if removed else _UNKNOWN_SOURCE_NOTE
+        note = _SOURCE_REMOVED_NOTE if removed else releases.UNKNOWN_CATALOG_SOURCE_NOTE
         row.update(source_id=None, origin="catalog", source_bound=True, trusted=False, trust_note=note)
         row.pop("demoted_commit", None)
         return
@@ -7151,7 +7147,8 @@ def apply_update(provider_id: str, checkpoint=None, consent_digest: str | None =
     row = (state.get("installations") or {}).get(provider_id)
     if not isinstance(row, dict) or not row:
         return None
-    if expected_catalog_binding is not None and _update_catalog_binding(state, row) != expected_catalog_binding:
+    catalog_binding = _update_catalog_binding(state, row)
+    if expected_catalog_binding is not None and catalog_binding != expected_catalog_binding:
         raise CatalogRegistrationChanged("the catalog registration changed while the update was waiting")
     provider = _with_origin(row, state)
     if provider.get("origin") == "local":
@@ -7177,14 +7174,14 @@ def apply_update(provider_id: str, checkpoint=None, consent_digest: str | None =
             installed_kind=kind_of(provider),
         ) or (_supply_refusal(state) if source_id == OFFICIAL_CATALOG_SOURCE_ID else None) \
             or (provider.get("trust_note") if source_id is None else None) or "No update manifest is available"
-        return _record_failed_update(provider_id, provider, message)
+        return _record_failed_update(provider_id, provider, message, catalog_binding)
     entry, resolved = update
     registration = releases.catalog_registration(state, source_id)
     registration_kwargs = {"expected_registration": registration} if registration is not None else {}
     # An update that adds a destination, a permission, a binary or a plugin asks again first.
     delta = _update_delta(state, provider, entry, resolved)
     if delta and delta["needs_consent"] and consent_digest != delta["digest"]:
-        return _record_failed_update(provider_id, provider, consent.delta_text(delta))
+        return _record_failed_update(provider_id, provider, consent.delta_text(delta), catalog_binding)
     members: list[str] = []
     if len(resolved.members) > 1:
         # A plugin the new release needs is staged first, as an install does.
@@ -7193,7 +7190,7 @@ def apply_update(provider_id: str, checkpoint=None, consent_digest: str | None =
         except CatalogRegistrationChanged:
             raise
         except ProviderHubInstallError as error:
-            return _record_failed_update(provider_id, provider, refusal_text(error))
+            return _record_failed_update(provider_id, provider, refusal_text(error), catalog_binding)
     try:
         return stage_install(entry["manifest"], checkpoint=checkpoint, source_id=source_id, **registration_kwargs)
     except ProviderHubSettingsError:
@@ -7208,13 +7205,14 @@ def apply_update(provider_id: str, checkpoint=None, consent_digest: str | None =
         # The install path refused the manifest before it started a job, so the refusal is
         # recorded here as a failed update, the way a missing manifest is.
         _discard_staged_members(members, provider_id)
-        return _record_failed_update(provider_id, provider, refusal_text(error))
+        return _record_failed_update(provider_id, provider, refusal_text(error), catalog_binding)
     except Exception:
         _discard_staged_members(members, provider_id)
         raise
 
 
-def _record_failed_update(provider_id: str, provider: dict[str, Any], message: str) -> dict[str, Any]:
+def _record_failed_update(provider_id: str, provider: dict[str, Any], message: str,
+                          catalog_binding: str) -> dict[str, Any] | None:
     """Record an update that could not be staged: the reason on the installation and a failed job."""
     with record_job(
         "stage_update",
@@ -7223,18 +7221,22 @@ def _record_failed_update(provider_id: str, provider: dict[str, Any], message: s
         target_name=provider.get("name") or provider_id,
         from_version=provider.get("active_version") or provider.get("staged_version"),
     ) as job:
-        provider["last_error"] = message
+        def record_failure(state: dict[str, Any]) -> dict[str, Any] | None:
+            current = (state.get("installations") or {}).get(provider_id)
+            if not isinstance(current, dict) or current.get("state") == "removed":
+                return None
+            if current.get("origin") == "local" or _update_catalog_binding(state, current) != catalog_binding:
+                raise CatalogRegistrationChanged("the catalog registration changed while the update was being prepared")
+            current["last_error"] = message
+            return _with_origin(current, state)
 
-        def record_failure(state: dict[str, Any]) -> None:
-            state.setdefault("installations", {})[provider_id] = provider
-
-        mutate_state(record_failure)
+        current = mutate_state(record_failure)
         job.data["state"] = "failed"
         job.update(
             error=message,
             message=message,
         )
-    return _redact_installation(provider)
+    return _redact_installation(current) if current is not None else None
 
 
 def _parse_time(value: Any) -> datetime | None:

@@ -1266,11 +1266,48 @@ def test_a_replaced_legacy_catalog_discards_cached_entries_until_it_has_refreshe
     queue.assert_not_called()
 
 
-@pytest.mark.parametrize("has_binding_flag", [False, True], ids=["v2.7.0", "v2.7.2"])
-def test_legacy_catalog_state_keeps_its_source_and_supports_rollback_after_the_staged_update(
-        client, rollback_store, hub_store, hub_engine, monkeypatch, has_binding_flag):  # noqa: F811
-    from migrations.versions.c3e8a1f5b972_provider_hub_releases import move_state_into_releases
+def test_failed_update_keeps_the_source_detached_after_catalog_replacement(community_install_job, monkeypatch):
     from provider_hub import releases, service, state, state_store
+
+    plugin_id, source_id, _, publish, _ = community_install_job
+    publish("3.0.0")
+    assert service.apply_update(plugin_id)["staged_version"] == "3.0.0"
+    active, = state_store.list_releases(plugin_id, states=(releases.ACTIVE,))
+    state.mutate_state(lambda document: document["catalog_entries"].clear())
+    refused_update_reason = service._refused_update_reason
+
+    def replace_while_recording_failure(*args, **kwargs):
+        reason = refused_update_reason(*args, **kwargs)
+        service.add_catalog_source(source_id, "https://github.com/example/replacement-catalog/blob/main/catalog.json")
+        publish("3.0.0")
+        return reason
+
+    with monkeypatch.context() as update:
+        update.setattr(service, "_refused_update_reason", replace_while_recording_failure)
+        with pytest.raises(service.CatalogRegistrationChanged, match="catalog registration changed"):
+            service.apply_update(plugin_id)
+
+    assert state.load_state()["installations"][plugin_id]["source_id"] is None
+    for _ in range(2):
+        assert service.activate_staged_installations() == []
+        row = state.load_state()["installations"][plugin_id]
+        assert row["source_bound"] is True and row["source_id"] is None
+        assert row["active_version"] == "2.0.0" and not row.get("staged_version")
+        assert row["config"] == {"region": "eu"}
+        assert service.offered_update_version(plugin_id) is None
+        assert state_store.list_releases(plugin_id, states=(releases.ACTIVE,)) == [active]
+    assert state.load_state()["catalog_sources"][source_id]["registration"] != active.catalog_registration
+
+
+@pytest.mark.parametrize(("binding", "store_first"), [
+    ("v2.7.0", False), ("v2.7.2", False), ("v2.7.2", True),
+    ("replaced-url-active-only", False), ("replaced-url", False), ("replaced-url", True),
+    ("new-registration", False), ("new-registration", True),
+])
+def test_legacy_catalog_binding_requires_matching_evidence(
+        client, rollback_store, hub_store, hub_engine, monkeypatch, binding, store_first):  # noqa: F811
+    from migrations.versions.c3e8a1f5b972_provider_hub_releases import move_state_into_releases
+    from provider_hub import jobs, releases, service, state, state_store
     from provider_hub.kinds.subtitle_provider import SUBTITLE_PROVIDER_KIND
 
     plugin_id, source_id = "providerhub", "fixture-catalog"
@@ -1293,25 +1330,81 @@ def test_legacy_catalog_state_keeps_its_source_and_supports_rollback_after_the_s
         interpreter.parent.mkdir(parents=True)
         interpreter.touch()
         interpreters.append(str(interpreter))
+    unsupported = binding.startswith("replaced-url") or binding == "new-registration"
+    pending = binding != "replaced-url-active-only"
+    if binding.startswith("replaced-url"):
+        source["url"] = "https://github.com/example/replacement-catalog/blob/main/catalog.json"
+        source.update(last_checked_at="2026-11-22T00:00:00Z", resolved_commit=staged["source"]["commit"])
+    if binding == "new-registration":
+        source["registration"] = "current-registration"
+    published = {**staged, "source": {**staged["source"], "catalog_url": source["url"]}}
     write_state(
         hub_store.legacy_state_path(), catalog_sources={source_id: source},
+        catalog_entries={f"{source_id}:{plugin_id}:{staged['version']}": {
+            "provider_id": plugin_id, "version": staged["version"], "source": source_id,
+            "manifest": published, "trusted": False,
+        }} if source.get("resolved_commit") else {},
         installations={plugin_id: {
-            "provider_id": plugin_id, "name": "Provider", "state": "staged", "pending_restart": True,
+            "provider_id": plugin_id, "name": "Provider", "state": "staged" if pending else "active",
+            "pending_restart": pending,
             "source_id": source_id, "origin": "catalog", "trusted": False,
-            **({"source_bound": True} if has_binding_flag else {}),
+            **({"source_bound": True} if binding != "v2.7.0" else {}),
             "active_version": previous["version"], "active_path": bundles[0], "python_path": interpreters[0],
-            "manifest": previous, "staged_version": staged["version"], "staged_path": bundles[1],
-            "staged_python_path": interpreters[1], "staged_manifest": staged, "config": {"region": "eu"},
+            "manifest": previous, "config": {"region": "eu"},
+            **({"staged_version": staged["version"], "staged_path": bundles[1],
+                "staged_python_path": interpreters[1], "staged_manifest": staged} if pending else {}),
         }},
     )
     monkeypatch.setattr(SUBTITLE_PROVIDER_KIND, "smoke_test", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(SUBTITLE_PROVIDER_KIND, "on_activated", lambda *_args: None)
 
     hub_store.ensure_ready()
+    if store_first:
+        # A startup write can split the imported release slots before Alembic runs.
+        state.mutate_state(lambda document: None)
     with hub_store.write_transaction(hub_engine) as connection:
-        assert move_state_into_releases(connection) == 2
+        assert move_state_into_releases(connection) == (0 if store_first else 1 + pending)
     assert state.load_state()["installations"][plugin_id]["source_bound"] is True
+    if unsupported:
+        original, = state_store.list_releases(plugin_id, states=(releases.ACTIVE,))
+        assert original.source_id is None and original.catalog_registration is None
+        # A normal refresh supplies an update, but cannot rebind the old installation.
+        monkeypatch.setattr(service, "_fetch_github_catalog", lambda *args, **kwargs: (
+            {"providers": [{"manifest": published}]}, published["source"]["commit"]))
+        assert service.refresh_catalog(source_ids={source_id})["entries"] == 1
+        for _ in range(2):
+            assert service.activate_staged_installations() == []
+            row = state.load_state()["installations"][plugin_id]
+            assert row["source_bound"] is True and row["source_id"] is None
+            assert "Reinstall it from a catalog source" in row["trust_note"]
+            assert row["active_version"] == previous["version"] and not row.get("staged_version")
+            assert row["config"] == {"region": "eu"}
+            assert service.offered_update_version(plugin_id) is None
+            assert state_store.list_releases(plugin_id, states=(releases.ACTIVE,)) == [original]
+            assert Path(bundles[0], "provider.py").is_file() and Path(interpreters[0]).is_file()
+
+        queued = []
+        monkeypatch.setattr(jobs, "_enqueue", lambda _label, action, args: queued.append((action, args)) or "install-job")
+        monkeypatch.setattr(jobs, "_checkpoint", lambda _job_id: lambda _message: None)
+        monkeypatch.setattr(service, "_fetch_bundle", lambda *_args: Path(bundles[1]))
+        monkeypatch.setattr(service.PluginEnvironment, "install", lambda *_args, **_kwargs: Path(interpreters[1]).parents[1])
+        response = client.post("/api/provider-hub/installations", headers={"X-API-KEY": API_KEY}, json={
+            "source": source_id, "provider_id": plugin_id, "version": staged["version"],
+        })
+        assert response.status_code == 202, response.json
+        action, args = queued.pop()
+        assert action == "install_provider"
+        assert jobs.install_provider(**args)["staged_version"] == staged["version"]
+        assert service.activate_staged_installations() == [plugin_id]
+        installed, = state_store.list_releases(plugin_id, states=(releases.ACTIVE,))
+        assert installed.source_id == source_id
+        assert installed.catalog_registration == source.get("registration", "legacy")
+        row = state.load_state()["installations"][plugin_id]
+        assert row["source_id"] == source_id and not row.get("trust_note")
+        return
+
     assert service.activate_staged_installations() == [plugin_id]
+    assert service.activate_staged_installations() == []
     active, = state_store.list_releases(plugin_id, states=(releases.ACTIVE,))
     retained, = state_store.list_releases(plugin_id, states=(releases.RETIRED,))
     assert (retained.bundle_path, active.bundle_path) == tuple(bundles)
