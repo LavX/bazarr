@@ -30,8 +30,8 @@ def live_source(source, target=None):
     return current
 
 
-def _active_item(source, target=None):
-    item = repository.get_item(source.item_id, target)
+def _active_item(source):
+    item = repository.get_item(source.item_id)
     if (item is None or not source.same_item(item) or not item.monitored or item.arr_shadow
             or item.server_missing or item.identity_state not in ('identified', 'parsed')):
         return None
@@ -47,7 +47,7 @@ def _source_paths(item, language):
                 yield entry[1]
 
 
-def _source_ready(source, subtitle_path, *, new_download=False, score=None, target=None):
+def _source_ready(source, subtitle_path, *, new_download=False, score=None):
     wait_minutes = settings.translator.min_source_wait_minutes
     min_score = settings.translator.min_source_score
     if new_download and wait_minutes:
@@ -57,7 +57,7 @@ def _source_ready(source, subtitle_path, *, new_download=False, score=None, targ
     if not (wait_minutes or (min_score and score is None)):
         return True
     history = repository.History.c
-    rows = handle(target).execute(select(history.subtitles_path, history.action, history.timestamp,
+    rows = handle().execute(select(history.subtitles_path, history.action, history.timestamp,
                                   history.score, history.score_out_of).where(
         history.item_id == source.item_id, history.subtitles_path == subtitle_path,
         history.action.in_(SOURCE_HISTORY_ACTIONS)
@@ -76,26 +76,37 @@ def _target_code(to_lang, forced, hi):
     return f'{to_lang}:forced' if forced else f'{to_lang}:hi' if hi else to_lang
 
 
-def _current_missing(item, profile_id, profile, *, ownership_index=None, written_paths=()):
+def prepare_source_sidecars(source, ownership_index, written_paths):
+    """Classify the current external tracks under subtitle locks before the DB write lock."""
+    from .indexer import list_external_subtitles
+
+    item = repository.get_item(source.item_id)
+    if item is None or not source.same_item(item) or item.path != source.path:
+        return []
+    return list_external_subtitles(
+        source.path, ast.literal_eval(item.subtitles or '[]'), ownership_index,
+        publication=True, written_paths=written_paths)
+
+
+def _current_missing(item, profile_id, profile, *, external_subtitles=None):
     # Profile saves queue an index refresh. While that work waits, evaluate the live
     # policy against the indexed tracks instead of trusting its old missing list.
-    from .indexer import compute_missing_subtitles, list_external_subtitles
+    from .indexer import compute_missing_subtitles
 
     ignored = {'pgs': settings.general.ignore_pgs_subs, 'vobsub': settings.general.ignore_vobsub_subs,
                'ass': settings.general.ignore_ass_subs}
     indexed = ast.literal_eval(item.subtitles or '[]')
     listing = [entry for entry in indexed if not entry[1] and not ignored.get(entry_codec(entry))]
-    if ownership_index is None:
+    if external_subtitles is None:
         listing.extend(entry for entry in indexed if entry[1] and os.path.isfile(entry[1]))
     else:
-        listing.extend(list_external_subtitles(
-            item.path, indexed, ownership_index, publication=True, written_paths=written_paths))
+        listing.extend(external_subtitles)
     audio_codes = {entry['code2'] for entry in get_audio_profile_languages(item.audio_language)}
     return compute_missing_subtitles(profile, get_profile_cutoff(profile_id), listing, item.failed_attempts,
                                      matches_audio=lambda language: language['language'] in audio_codes)
 
 
-def missing_language_candidates(source, *, ownership_index=None, written_paths=(), target=None):
+def missing_language_candidates(source, *, external_subtitles=None, target=None):
     """Read the live source policy and return the shared provider-search language tuples."""
     current = live_source(source, target)
     if current is None or current.profile_id is None:
@@ -106,14 +117,13 @@ def missing_language_candidates(source, *, ownership_index=None, written_paths=(
     profile = get_profiles_list(profile_id=current.profile_id)
     return [
         (code.split(':', 1)[0], str(code.endswith(':hi')), str(code.endswith(':forced')))
-        for code in _current_missing(item, current.profile_id, profile, ownership_index=ownership_index,
-                                     written_paths=written_paths)
+        for code in _current_missing(item, current.profile_id, profile, external_subtitles=external_subtitles)
     ]
 
 
-def automatic_translation_is_current(source, subtitle_path, from_lang, to_lang, forced, hi, *, connection=None):
+def automatic_translation_is_current(source, subtitle_path, from_lang, to_lang, forced, hi):
     """Recheck the live profile, indexed inputs, wait and threshold at dispatch and publication."""
-    item = _active_item(source, connection)
+    item = _active_item(source)
     if item is None or not source.profile_id:
         return False
     target = _target_code(to_lang, forced, hi)
@@ -122,7 +132,7 @@ def automatic_translation_is_current(source, subtitle_path, from_lang, to_lang, 
     return (rule is not None and rule['from'] == from_lang
             and target in _current_missing(item, source.profile_id, profile)
             and subtitle_path in _source_paths(item, from_lang)
-            and _source_ready(source, subtitle_path, target=connection))
+            and _source_ready(source, subtitle_path))
 
 
 def queue_missing_translations(source, *, downloaded_path=None, downloaded_language=None, score=None):

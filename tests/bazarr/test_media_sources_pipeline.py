@@ -1037,7 +1037,7 @@ def test_source_publication_holds_the_item_until_the_registry_writer_can_continu
             repository.update_item(context.item_id, connection, path=str(replacement))
 
     with ThreadPoolExecutor(max_workers=1) as pool:
-        with SourcePublicationOwnerIndex().publication(context) as (current, connection):
+        with SourcePublicationOwnerIndex().publication(context) as (current, connection, _):
             assert current == context and connection.in_transaction()
             pending = pool.submit(move)
             assert started.wait(5)
@@ -1047,6 +1047,108 @@ def test_source_publication_holds_the_item_until_the_registry_writer_can_continu
         pending.result(timeout=5)
 
     assert repository.get_item(context.item_id).path == str(replacement)
+
+
+@pytest.mark.parametrize("same_stem", [False, True], ids=["distinct-owner", "competing-owner"])
+def test_source_provider_rechecks_scanner_admission_after_content_detection(world, monkeypatch, isolated_jobs,
+                                                                         same_stem):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Event
+
+    from media_sources import repository, scanner, service
+    from subtitles import download
+    from subtitles.indexer import utils
+    from utilities import video_analyzer
+
+    monkeypatch.setattr(video_analyzer, "parse_video_metadata", lambda *args, **kwargs: {
+        "ffprobe": {"audio": [{"language": "eng"}]}, "mediainfo": {},
+    })
+    folder = _custom_folder(world, monkeypatch, world.tmp_path)
+    context = _movie(world)
+    media = Path(context.path)
+    other_source, other_library, other_root = add_source(world.db, world.tmp_path, name="Other", folder="Other")
+    other = video(other_root / (media.name if same_stem else "Unrelated.2001.mkv"))
+    admitted = Event()
+    index_item = scanner.index_item
+
+    def record_admitted(item_id, *args, **kwargs):
+        assert repository.get_item(item_id).path == str(other)
+        admitted.set()
+        return index_item(item_id, *args, **kwargs)
+
+    def fetch(videos, languages, **kwargs):
+        assert {str(language) for language in languages} == {"en"}
+        media.with_suffix(".srt").write_bytes(CONTENT)
+        return {next(iter(videos)): [FakeSubtitle()]}
+
+    monkeypatch.setattr(scanner, "index_item", record_admitted)
+    monkeypatch.setattr(download, "download_best_subtitles", fetch)
+    pending = []
+    detected_after_admission = []
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        def detect_language(text):
+            if not pending:
+                pending.append(pool.submit(scanner.run_scan, other_source, other_library))
+                # The scanner may still be waiting to index the new item while this video is locked.
+                detected_after_admission.append(admitted.wait(10))
+            return "fr"
+
+        monkeypatch.setattr(utils, "guess_language", detect_language)
+        service.search_source_item(context.item_id, translation_gate=False)
+        assert isolated_jobs._run_job(isolated_jobs._reserve_next_job())
+        (scan,) = pending[0].result(timeout=10)
+        assert scan.inserted == 1
+
+    assert detected_after_admission == [True]
+    assert repository.get_item_by_path(str(other)) is not None
+    saved = folder / media.with_suffix(".en.srt").name
+    assert saved.is_file() is not same_stem
+    assert len(world.db.execute(sa.select(repository.History)).all()) == (0 if same_stem else 1)
+
+
+def test_source_shared_publication_serializes_a_scanner_admission(world, monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor, TimeoutError
+    from threading import Event
+
+    from media_sources import repository, scanner
+    from media_sources.indexer import SourcePublicationOwnerIndex
+    from subtitles.tools.subsync_engines import sync_output_owner_is_unique
+    from utilities import video_analyzer
+
+    monkeypatch.setattr(video_analyzer, "parse_video_metadata", lambda *args, **kwargs: {
+        "ffprobe": {"audio": [{"language": "eng"}]}, "mediainfo": {},
+    })
+    folder = _custom_folder(world, monkeypatch, world.tmp_path)
+    context = _movie(world)
+    media = Path(context.path)
+    destination = folder / media.with_suffix(".en.srt").name
+    other_source, other_library, other_root = add_source(world.db, world.tmp_path, name="Other", folder="Other")
+    other = video(other_root / media.name)
+    admitting = Event()
+    insert_batch = scanner._insert_batch
+
+    def admit(*args, **kwargs):
+        admitting.set()
+        return insert_batch(*args, **kwargs)
+
+    monkeypatch.setattr(scanner, "_insert_batch", admit)
+    owners = SourcePublicationOwnerIndex()
+
+    def prepare():
+        assert sync_output_owner_is_unique(context.path, destination, ownership_index=owners)
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        with owners.publication(context, prepare) as (current, connection, _):
+            assert current == context
+            pending = pool.submit(scanner.run_scan, other_source, other_library)
+            assert admitting.wait(10)
+            with pytest.raises(TimeoutError):
+                pending.result(timeout=0.25)
+            assert repository.get_item_by_path(str(other), connection) is None
+        (result,) = pending.result(timeout=10)
+
+    assert result.inserted == 1 and repository.get_item_by_path(str(other)) is not None
 
 
 # Sync

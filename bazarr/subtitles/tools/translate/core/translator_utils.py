@@ -18,6 +18,7 @@ from languages.custom_lang import CustomLanguage
 from languages.get_languages import alpha3_from_alpha2, language_from_alpha2, language_from_alpha3  # noqa: F401
 from subtitles.processing import ProcessSubtitlesResult
 from subtitles.indexer.utils import get_subtitle_destination_path
+from subtitles.tools.subsync_engines import SubtitleDestinationChanged
 from utilities.path_mappings import path_mappings
 
 from app.database import TableShows, TableEpisodes, TableMovies, database, select
@@ -114,15 +115,20 @@ def translation_write_kwargs(translator, job_id):
 
         owners = SourcePublicationOwnerIndex()
 
+        def prepare():
+            return validate_source_translation(source, translator.video_path, translator.source_srt_file,
+                                               translator.dest_srt_file, translator.from_lang, translator.orig_to_lang,
+                                               translator.forced, translator.hi, captured, owners)
+
         @contextmanager
         def publication():
-            with owners.publication(source) as (current, connection):
-                if current is None:
-                    raise SourceTranslationChanged('The source item moved or was removed')
-                validate_source_translation(current, translator.video_path, translator.source_srt_file,
-                                            translator.dest_srt_file, translator.from_lang, translator.orig_to_lang,
-                                            translator.forced, translator.hi, captured, owners, connection=connection)
-                yield
+            try:
+                with owners.publication(source, prepare) as (current, _, prepared):
+                    if current is None or current.profile_id != prepared.profile_id:
+                        raise SourceTranslationChanged('The source item moved or its profile changed')
+                    yield
+            except SubtitleDestinationChanged as error:
+                raise SourceTranslationChanged(str(error)) from error
         kwargs.update(publication_guard=publication, ownership_index=owners)
     return kwargs
 
@@ -136,19 +142,19 @@ class SourceTranslationInputAmbiguous(SourceTranslationChanged):
 
 
 def validate_source_translation(source, video_path, subtitle_path, destination, from_lang, to_lang, forced, hi,
-                                captured=(), owners=None, *, connection=None):
+                                captured=(), owners=None):
     """Validate the queued source item, profile and write destination."""
     from media_sources.indexer import SourcePublicationOwnerIndex
     from media_sources.translation import automatic_translation_is_current, live_source
     from subtitles.tools.subsync_engines import sync_output_owner_is_unique
 
-    current = live_source(source, connection)
+    current = live_source(source)
     if current is None or current.path != video_path:
         raise SourceTranslationChanged('The source item moved, was removed, or was disabled')
     if destination != translated_destination_path(video_path, to_lang, forced, hi):
         raise SourceTranslationChanged('The configured subtitle destination changed')
     if captured and (str(captured[0].path) != destination or not automatic_translation_is_current(
-            current, subtitle_path, from_lang, to_lang, forced, hi, connection=connection)):
+            current, subtitle_path, from_lang, to_lang, forced, hi)):
         raise SourceTranslationChanged('The source profile or translation eligibility changed')
     if owners is None:
         owners = SourcePublicationOwnerIndex()

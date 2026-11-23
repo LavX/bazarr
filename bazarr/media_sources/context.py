@@ -5,6 +5,8 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Optional
 
+from sqlalchemy import text
+
 from . import repository
 from .db import source_transaction
 
@@ -132,7 +134,10 @@ def resolve_same_item(source, target=None, *, for_update=False):
 
 
 @contextmanager
-def source_item_publication(source):
+def source_item_publication(source, *, shared=False):
     """Keep the captured item stable through an atomic subtitle publication."""
     with source_transaction() as connection:
+        if shared and connection.dialect.name == 'postgresql':
+            # The item row lock alone cannot see an owner the scanner is about to insert.
+            connection.execute(text('LOCK TABLE table_source_items IN SHARE MODE NOWAIT'))
         yield resolve_same_item(source, connection, for_update=True), connection

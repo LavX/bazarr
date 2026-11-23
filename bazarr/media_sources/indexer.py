@@ -30,7 +30,8 @@ from subtitles.indexer.utils import (add_combined_outputs, add_sync_engine_outpu
                                      subtitle_language_with_sync_modifier)
 from subtitles.tools.combine.naming import parse_combined_filename
 from subtitles.tools.combine.rules import _dotted_custom_aliases
-from subtitles.tools.subsync_engines import (SubtitleSourceChanged, SyncOutputOwnerIndex, _normalized_media_stem,
+from subtitles.tools.subsync_engines import (SubtitleDestinationChanged, SubtitleSourceChanged, SyncOutputOwnerIndex,
+                                             _normalized_media_stem,
                                              read_regular_subtitle, regular_subtitle_version, subtitle_write_locks,
                                              sync_engine_from_output_path, sync_output_owner_is_unique)
 from utilities.helper import get_subtitle_destination_folder, get_target_folder
@@ -78,13 +79,21 @@ class SourceOutputOwnerIndex(SyncOutputOwnerIndex):
                 stems.add(stem[:-len(alias) - 1])
         return stems
 
+    @staticmethod
+    def _source_owner_paths(target):
+        return tuple(handle(target).execute(sa.select(repository.Items.c.path).order_by(repository.Items.c.path)).scalars())
+
     def _load_owners(self):
+        return self._map_source_owners(self._source_owner_paths(self._target))
+
+    @staticmethod
+    def _map_source_owners(paths):
         custom_folder = get_subtitle_destination_folder()
         subfolder = settings.general.subfolder
         absolute_folder = os.path.normcase(os.path.realpath(custom_folder)) if subfolder == 'absolute' else None
         owners = {}
-        for row in handle(self._target).execute(sa.select(repository.Items.c.path)).all():
-            mapped = os.path.normcase(os.path.realpath(row.path))
+        for path in paths:
+            mapped = os.path.normcase(os.path.realpath(path))
             folders = {os.path.dirname(mapped)}
             if absolute_folder:
                 folders.add(absolute_folder)
@@ -100,8 +109,13 @@ class SourceOutputOwnerIndex(SyncOutputOwnerIndex):
 class SourcePublicationOwnerIndex(SourceOutputOwnerIndex):
     """Source writes in shared subtitle folders must account for all media stored there."""
 
+    def __init__(self):
+        super().__init__()
+        self._prepared_paths = None
+
     def _load_owners(self):
-        owners = super()._load_owners()
+        self._prepared_paths = self._source_owner_paths(None)
+        owners = self._map_source_owners(self._prepared_paths)
         for key, paths in SyncOutputOwnerIndex._load_owners().items():
             owners.setdefault(key, set()).update(paths)
         return owners
@@ -111,13 +125,33 @@ class SourcePublicationOwnerIndex(SourceOutputOwnerIndex):
         return bool(get_subtitle_destination_folder())
 
     @contextmanager
-    def publication(self, source):
-        with source_item_publication(source) as (current, connection):
-            self._target = connection
+    def publication(self, source, prepare=None):
+        """Keep slow ownership and subtitle discovery outside the writer transaction."""
+        for _ in range(2):
+            self._loaded = False
+            self._owners = {}
+            self._prepared_paths = None
+            destination_setting = settings.general.subfolder, get_subtitle_destination_folder()
+            shared = bool(destination_setting[1])
+            prepared = prepare() if prepare is not None else None
+            if shared and self._prepared_paths is None:
+                raise SubtitleDestinationChanged('The shared subtitle owners could not be verified')
+            publishing = False
             try:
-                yield current, connection
-            finally:
-                self._target = None
+                with source_item_publication(source, shared=shared) as (current, connection):
+                    if destination_setting != (settings.general.subfolder, get_subtitle_destination_folder()):
+                        continue
+                    if shared and self._prepared_paths != self._source_owner_paths(connection):
+                        continue
+                    publishing = True
+                    yield current, connection, prepared
+                    return
+            except sa.exc.OperationalError as error:
+                sqlstate = getattr(error.orig, 'sqlstate', None) or getattr(error.orig, 'pgcode', None)
+                if publishing or sqlstate != '55P03':
+                    raise
+                raise SubtitleDestinationChanged('The shared subtitle owners are being updated') from error
+        raise SubtitleDestinationChanged('The shared subtitle owners changed while preparing publication')
 
 
 def list_external_subtitles(path, previous=None, ownership_index=None, *, publication=False, written_paths=()):

@@ -164,17 +164,19 @@ def try_combine_for_video(video_path, media_type, sonarr_series_id=None,
             if source is not None:
                 owners = owner_kwargs['ownership_index'] = SourcePublicationOwnerIndex()
 
+                def prepare():
+                    if not sync_output_owner_is_unique(video_path, out_path, **owner_kwargs):
+                        raise ValueError('The combined output lost its unique owner during composition')
+                    for path, version in input_versions.items():
+                        if (regular_subtitle_version(path) != version
+                                or not sync_output_owner_is_unique(video_path, path, **owner_kwargs)):
+                            raise ValueError('A combined subtitle input changed or lost its unique owner')
+
                 @contextmanager
                 def publication():
-                    with owners.publication(source) as (current, _):
+                    with owners.publication(source, prepare) as (current, _, _prepared):
                         if current is None or current.path != video_path:
                             raise ValueError('The source item moved or was removed during composition')
-                        if not sync_output_owner_is_unique(video_path, out_path, **owner_kwargs):
-                            raise ValueError('The combined output lost its unique owner during composition')
-                        for path, version in input_versions.items():
-                            if (regular_subtitle_version(path) != version
-                                    or not sync_output_owner_is_unique(video_path, path, **owner_kwargs)):
-                                raise ValueError('A combined subtitle input changed or lost its unique owner')
                         yield
 
                 write_kwargs['publication_guard'] = publication
