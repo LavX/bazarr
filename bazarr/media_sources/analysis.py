@@ -14,6 +14,7 @@ from utilities.binaries import BinaryNotFound
 
 from . import repository
 from .identity import FileStat, file_content_stamp, stored_content_stamp, unsigned
+from .kinds import get_kind
 from .kinds.folder import is_video_file
 
 
@@ -95,11 +96,16 @@ def _probe_path(item, stamp, target):
     if not is_video_file(item.path):
         return None
 
-    roots = [os.path.realpath(root.local_path) for root in repository.get_roots(item.library_id, target)
-             if os.path.isabs(root.local_path) and os.path.isdir(root.local_path)]
+    library = repository.get_library(item.library_id, target)
+    if library is None or get_kind(source.kind).validate_library(source, library):
+        return None
+    # A folder library has one root, stored with the same path as its locator.
+    if not any(root.local_path == library.locator for root in repository.get_roots(item.library_id, target)):
+        return None
+    root = os.path.realpath(library.locator, strict=True)
     path = os.path.realpath(item.path, strict=True)
     # Pass the checked path to the parser. A resolved .strm would let it read a URL.
-    if not is_video_file(path) or path.lower().endswith('.strm') or not _path_under_any_root(path, roots):
+    if not is_video_file(path) or path.lower().endswith('.strm') or not _path_under_any_root(path, [root]):
         return None
     resolved_stat = os.stat(path)
     if not S_ISREG(resolved_stat.st_mode) or _content_stamp(resolved_stat) != stamp:

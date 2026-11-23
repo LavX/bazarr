@@ -127,12 +127,8 @@ def list_external_subtitles(path, previous=None, ownership_index=None):
         if custom is not None:
             actual.append([custom, subtitle_path, subtitle_size])
         elif str(language.basename) != 'und':
-            if language.forced:
-                language_str = f'{language}:forced'
-            elif language.hi:
-                language_str = f'{language}:hi'
-            else:
-                language_str = str(language)
+            language_str = normalize_subtitle_language_variant(language.basename, forced=language.forced,
+                                                               hi=language.hi)
             language_str = subtitle_language_with_sync_modifier(language_str, subtitle)
             language_str = subtitle_language_with_combined_modifier(language_str, subtitle)
             actual.append([language_str, subtitle_path, subtitle_size])
@@ -267,7 +263,8 @@ def _can_borrow_language(key):
         return False
     try:
         # The shared classifier parses the full key and handles custom aliases differently from IETF codes.
-        return _get_lang_from_str(key).alpha3 != 'und'
+        language = _get_lang_from_str(key)
+        return language.alpha3 != 'und' and bool(alpha2_from_alpha3(language.alpha3))
     except (LanguageError, ValueError):
         return False
 

@@ -70,6 +70,21 @@ def test_folder_probe_requires_known_media_inside_its_library(
         assert data == {} and blob is None
 
 
+def test_folder_probe_uses_the_scanners_config_directory_check(source_db, tmp_path, probe, monkeypatch):
+    from media_sources import analysis, repository
+    from media_sources.kinds import folder
+
+    source_id, library_id, root = add_source(source_db, tmp_path)
+    path = stamped_video(root / "Film.2001.mkv")
+    item_id = add_item(source_db, source_id, library_id, path)
+    reserved = root / "config"
+    reserved.mkdir()
+    monkeypatch.setattr(folder, "config_directory", lambda: str(reserved))
+
+    assert analysis.probe_item(repository.get_item(item_id), path.stat(), target=source_db) == ({}, None)
+    probe.assert_not_called()
+
+
 def test_probe_and_profile_filter_use_the_same_tracks(source_db, tmp_path, probe, monkeypatch):
     from app.config import settings
     from media_sources import indexer, repository
@@ -257,19 +272,28 @@ def test_an_arr_movie_and_a_source_movie_have_the_same_scored_fields(source_db, 
 
 def test_sports_runs_no_registered_refiner_and_episodes_get_group_ids(source_db, tmp_path, probe, monkeypatch):
     from app.config import settings
-    from media_sources import indexer
+    from app.database import TableMediaServerInstances
+    from media_sources import indexer, repository
     from media_sources.context import resolve_item
     from subtitles import utils
 
     monkeypatch.setattr(settings.general, "skip_hashing", True)
     refs = {name: Mock() for name in ("database", "ffprobe", "arr_history", "anidb", "anilist")}
     monkeypatch.setattr(utils, "registered_refiners", refs)
-    source_id, library_id, root = add_source(source_db, tmp_path, content_kind="sports")
+    root = tmp_path / "Sports"
+    server_id = "11111111-1111-1111-1111-111111111111"
+    source_db.execute(sa.insert(TableMediaServerInstances).values(
+        id=server_id, kind="jellyfin", name="Sports Server", url="http://example.invalid"))
+    source_id = repository.create_source(kind="jellyfin", name="Sports", media_server_instance_id=server_id,
+                                         target=source_db)
+    library_id = repository.create_library(source_id=source_id, content_kind="sports", locator="sports",
+                                           local_roots=[str(root)], target=source_db)
     league = add_group(source_db, source_id, library_id, kind="league", title="Formula 1")
     path = stamped_video(root / "Monaco.Grand.Prix.2024.mkv")
     sport_id = add_item(source_db, source_id, library_id, path, kind="sports_event", group_id=league,
                         title="Monaco Grand Prix", part_name="Race", event_date="2024-05-26")
     indexer.index_item(sport_id)
+    probe.assert_called_once_with(str(path), path.stat().st_size, use_cache=False)
     video = utils.get_video(str(path), "Monaco Grand Prix", "None", source=resolve_item(sport_id))
     assert (video.title, video.year, video.duration) == ("Monaco Grand Prix Race", 2024, 43.0)
     assert (video.video_codec, video.audio_codec, video.resolution) == ("H.264", "AAC", "720p")
