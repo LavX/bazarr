@@ -567,6 +567,139 @@ def test_tmdb_only_catalog_episode_resolves_a_manually_confirmed_source_copy(
     )
 
 
+@pytest.mark.parametrize("submitted_imdb", ["tt0000084", "tt9999999"], ids=["linked", "unrelated"])
+@pytest.mark.parametrize("selected_episode", [False, True], ids=["manual-numbers", "source-episode"])
+def test_manual_episode_accepts_only_the_imdb_enriched_by_its_linked_source_group(
+    authenticated_client, source_db, providers, monkeypatch, tmp_path, submitted_imdb, selected_episode,
+):
+    import app.jobs_queue as queue_module
+    from app import database as db
+    from app.database import TableMediaSourceLibraryRoots, TableSourceGroups, TableSourceItems
+    from discover import metadata
+    from discover.library import copy_identity, resolve_copy
+    from plugin_platform_helpers import provider_manifest_v2
+    from provider_hub import capabilities, registry
+    from provider_hub.manifest import validate_manifest
+    from provider_hub.worker import ProviderWorkerClient, WorkerResult
+    from subliminal_patch.extensions import provider_registry
+
+    session = source_db
+    monkeypatch.setattr(db, "engine", session.get_bind())
+    owner = add_source(session, "series")
+    session.add(TableMediaSourceLibraryRoots(library_id=owner[1], local_path=str(tmp_path)))
+    group_id = add_title(session, owner, TableSourceGroups, kind="show", title="Moon Show", group_key="moon",
+                         tmdb_id="84", imdb_id="tt0000084", tvdb_id=701, year="2008")
+    path = tmp_path / "Moon.Show.S02E03.mkv"
+    path.write_bytes(b"source episode")
+    episode_id = add_title(session, owner, TableSourceItems, kind="episode", title="Moon Show", group_id=group_id,
+                           season=2, episode=3, path=str(path))
+    session.commit()
+
+    catalog = {"source": "tmdb", "source_id": "tmdb:show:84", "id": 84, "media_type": "show",
+               "imdb_id": None, "tvdb_id": 701, "title": "Moon Show", "year": 2008}
+    monkeypatch.setattr(metadata, "show_details", lambda _: {"data": {"item": dict(catalog)}})
+    monkeypatch.setattr(metadata, "_show_details_with_validity",
+                        lambda _: ({"data": {"item": dict(catalog)}}, float("inf")))
+    canonical = {"source": "tmdb", "id": 903, "show_id": 84, "season": 2, "episode": 3,
+                 "target_season": None, "target_episode": None, "identity_status": "unverified",
+                 "show_imdb_id": None, "show_tvdb_id": 701, "show_title": "Moon Show", "show_year": 2008}
+    monkeypatch.setattr(metadata, "_episode_details_with_validity",
+                        lambda *_: ({"data": {"episode": dict(canonical)}}, float("inf")))
+    details = authenticated_client.get("/api/discover/metadata/shows/84?source=tmdb", headers=HEADERS)
+    assert details.status_code == 200
+    item = details.json["data"]["item"]
+    assert item["imdb_id"] == "tt0000084"
+    assert [copy["local_id"] for copy in item["copies"]] == [group_id]
+    target = {"media_type": "episode", "tmdb_id": item["id"], "imdb_id": item["imdb_id"],
+              "season": 2, "episode": 3}
+    offered = copies_fixtures.copies(authenticated_client, **target)
+    assert offered.status_code == 200
+    [copy] = offered.json["items"]
+    assert copy["local_id"] == episode_id
+
+    admitted = []
+    worker = ProviderWorkerClient(command=[])
+
+    def request_locked(operation, payload, timeout, *, source_media):
+        assert operation == "search"
+        admitted.append((payload, source_media))
+        return WorkerResult(ok=True, payload={"candidates": []}, events=[])
+
+    monkeypatch.setattr(worker, "_request_locked", request_locked)
+    name = providers.add("discover_source")
+    cls = provider_registry[name]
+    raw = provider_manifest_v2(name, permissions=["media_read"])
+    monkeypatch.setattr(cls, "manifest", validate_manifest(raw), raising=False)
+    monkeypatch.setattr(cls, "list_subtitles", registry.HubProxyProvider.list_subtitles)
+    monkeypatch.setattr(cls, "worker_client", worker, raising=False)
+    monkeypatch.setattr(capabilities, "live_row", lambda provider: {"enabled": True, "manifest": raw})
+
+    selection = {**target, "imdb_id": submitted_imdb, "copy_id": copy["copy_id"], "show_id": item["id"],
+                 "title": item["title"], "year": item["year"], "manual_confirmed": True, "language": "eng"}
+    if selected_episode:
+        selection["episode_identity"] = canonical
+    response = copies_fixtures.post(authenticated_client, selection)
+    if submitted_imdb != item["imdb_id"]:
+        assert response.status_code == 400
+        assert admitted == []
+        return
+    assert response.status_code == 200, response.json
+    assert response.json["context"]["copy"]["local_id"] == episode_id
+    assert response.json["coverage"]["providers"][0]["status"] == "empty"
+    [(payload, grant)] = admitted
+    video = payload["video"]
+    assert (video["series_imdb_id"], video["series_tmdb_id"], video["season"], video["episode"]) == (
+        item["imdb_id"], item["id"], 2, 3,
+    )
+    assert grant.path == path.resolve()
+    assert grant.identity == (path.stat().st_dev, path.stat().st_ino)
+    for invalid in ({"episode": 4}, {"copy_id": copy_identity("episode", 999999, f"s{owner[0]}")}):
+        refused = copies_fixtures.post(authenticated_client, {**selection, **invalid})
+        assert refused.status_code == 409
+        assert len(admitted) == 1
+
+    conflict = add_title(session, owner, TableSourceGroups, kind="show", title="Different Show", group_key="different",
+                         tmdb_id="84", imdb_id="tt0000084", tvdb_id=702, year="2008")
+    other_path = tmp_path / "Different.Show.S02E03.mkv"
+    other_path.write_bytes(b"another source episode")
+    other_id = add_title(session, owner, TableSourceItems, kind="episode", title="Different Show", group_id=conflict,
+                         season=2, episode=3, path=str(other_path))
+    session.commit()
+    offered = copies_fixtures.copies(authenticated_client, **target).json["items"]
+    other_copy = next(entry for entry in offered if entry["local_id"] == other_id)
+    assert resolve_copy(other_copy["copy_id"], selection)["series_local_id"] == conflict
+    refused = copies_fixtures.post(authenticated_client, {**selection, "copy_id": other_copy["copy_id"]})
+    assert refused.status_code == 409
+    assert "confirmed show" in refused.json["message"]
+    assert len(admitted) == 1
+
+    real_queue = authenticated_client.inline_jobs.real
+    monkeypatch.setattr(queue_module, "jobs_queue", real_queue)
+    monkeypatch.setattr(queue_module, "event_stream", lambda **kwargs: None)
+    monkeypatch.setattr(real_queue, "force_start_pending_job", lambda *_: None)
+    queued_ids = []
+    for refresh in (True, False):
+        queued = authenticated_client.post("/api/discover/search", headers=HEADERS,
+                                           json={**selection, "refresh": refresh})
+        assert queued.status_code == 202
+        queued_ids.append(queued.json["job_id"])
+    assert len(set(queued_ids)) == 2
+    conflicting_group = session.get(TableSourceGroups, conflict)
+    conflicting_group.tvdb_id = 701
+    conflicting_group.imdb_id = "tt9999999"
+    session.commit()
+
+    current = resolve_copy(copy["copy_id"], selection)
+    assert current["file_revision"] == response.json["context"]["file_revision"]
+    fresh = authenticated_client.post("/api/discover/search", headers=HEADERS, json=selection)
+    assert fresh.status_code == 400
+    for job_id in queued_ids:
+        job = download_fixtures.run_queued_job(job_id)
+        assert job["status"] == "failed"
+        assert job["error"]["reason"] == "copy_unavailable"
+    assert len(admitted) == 1
+
+
 def test_unidentified_disabled_and_shadowed_source_rows_do_not_create_copy_options(
     authenticated_client, copy_database, catalog_details, tmp_path,
 ):
