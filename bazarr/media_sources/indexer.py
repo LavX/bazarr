@@ -152,8 +152,11 @@ class SourcePublicationOwnerIndex(SourceOutputOwnerIndex):
         return self._source_owner_paths(target), self._registry_rows(target)
 
     def _load_owners(self):
-        source_paths, registry_rows = self._registry_snapshot()
-        self._prepared_owners = source_paths, registry_rows
+        self._prepared_owners = self._registry_snapshot()
+        return self._map_owners(self._prepared_owners)
+
+    def _map_owners(self, snapshot):
+        source_paths, registry_rows = snapshot
         destination, mappings = self._publication_settings or self._settings_snapshot()
         return self._map_source_owners(chain(source_paths, self._mapped_registry_paths(registry_rows, mappings)),
                                        destination)
@@ -236,6 +239,11 @@ class SourcePublicationOwnerIndex(SourceOutputOwnerIndex):
         if not self.registered_ownership_is_current(proof):
             raise SourcePublicationOwnersChanged('Registered subtitle ownership changed before publication')
 
+    def refresh_mapped_owners(self):
+        """Resolve current filesystem claims from the rows pinned by publication."""
+        if self._prepared_owners is not None:
+            self._owners = self._map_owners(self._prepared_owners)
+
     def subtitle_destination(self):
         if self._publication_settings is not None:
             return self._publication_settings[0]
@@ -259,7 +267,7 @@ class SourcePublicationOwnerIndex(SourceOutputOwnerIndex):
 
     @contextmanager
     def publication(self, source, prepare=None, *, destination=None, cleanup_outputs=False,
-                    recheck_registered=False):
+                    recheck_registered=False, guard_registry=False):
         """Prepare subtitle changes before locking the registry for publication."""
         for _ in range(2):
             self._loaded = False
@@ -274,11 +282,13 @@ class SourcePublicationOwnerIndex(SourceOutputOwnerIndex):
             if shared and self._prepared_owners is None:
                 raise SourcePublicationOwnersChanged('The shared subtitle owners could not be verified')
             paths = (destination,) if destination is not None else ()
-            proof = None
+            output_paths = tuple(path for path, _ in outputs)
             if recheck_registered:
-                paths += tuple(path for path, _ in outputs)
-                if shared and paths:
-                    proof = self.prepare_registered_ownership(source.path, paths)
+                paths += output_paths
+            # A planned sibling still needs its own registered proof at retirement.
+            registered_paths = paths if recheck_registered else output_paths
+            proof = (self.prepare_registered_ownership(source.path, registered_paths)
+                     if shared and registered_paths else None)
             # A scanner with the conflicting lock finishes outside this transaction.
             # Retrying after rollback leaves it free to finish any remaining row writes.
             for delay in (0, 0.025, 0.05, 0.10, 0.20, 0.40, 0.40):
@@ -286,7 +296,8 @@ class SourcePublicationOwnerIndex(SourceOutputOwnerIndex):
                     sleep(delay)
                 publishing = False
                 try:
-                    with self._settings_guard(), source_item_publication(source, shared=shared) as (current, connection):
+                    with (self._settings_guard(),
+                          source_item_publication(source, shared=shared or guard_registry) as (current, connection)):
                         if self._publication_settings != self._settings_snapshot():
                             break
                         if shared and current is not None and self._prepared_owners != self._registry_snapshot(connection):
@@ -297,7 +308,7 @@ class SourcePublicationOwnerIndex(SourceOutputOwnerIndex):
                                     or not os.path.isfile(current.path)):
                                 current = None
                         if current is not None and paths:
-                            self.require_current_ownership(current.path, paths, proof)
+                            self.require_current_ownership(current.path, paths, proof if recheck_registered else None)
                         publishing = True
                         yield current, connection, prepared
                         if current is not None and outputs:
@@ -456,14 +467,13 @@ def compute_missing_subtitles(profile, cutoff_items, subtitles, failed_attempts=
 
     result = []
     for item in missing:
-        if is_search_given_up(item['language'], failed_attempts):
-            continue
         code = item['language']
         if item['forced'] == 'True':
             code += ':forced'
         elif item['hi'] == 'True':
             code += ':hi'
-        result.append(code)
+        if not is_search_given_up(code, failed_attempts):
+            result.append(code)
     return result
 
 
@@ -672,9 +682,13 @@ def index_and_notify_item(source):
     indexed = index_saved_subtitle(source.item_id, expected_path=source.path, expected_source=source)
     current = resolve_same_item(source) if indexed else None
     if current is not None:
-        event_stream(type='source-item', payload=current.item_id)
-        if current.group_id is not None:
-            event_stream(type='source-group', payload=current.group_id)
+        for event_type, row_id in (('source-item', current.item_id), ('source-group', current.group_id)):
+            if row_id is not None:
+                try:
+                    event_stream(type=event_type, payload=row_id)
+                except Exception:
+                    logging.exception('BAZARR could not notify %s %s after indexing a saved subtitle',
+                                      event_type, row_id)
     return indexed
 
 

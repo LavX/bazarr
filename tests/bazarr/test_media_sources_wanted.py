@@ -358,6 +358,46 @@ def test_adaptive_search_and_provider_throttle_use_existing_attempts(world, monk
     assert repository.get_item(available.item_id).failed_attempts is None
 
 
+@pytest.mark.parametrize('expired,waiting,ready', [
+    ('en', 'en:hi', 'en:forced'),
+    ('en:hi', 'en:forced', 'en'),
+    ('en:forced', 'en', 'en:hi'),
+])
+def test_wanted_adaptive_attempts_keep_subtitle_variants_independent(world, monkeypatch, expired, waiting, ready):
+    from app.config import settings
+    from media_sources import indexer, repository, wanted
+    from subtitles import download
+
+    now = datetime.now()
+    attempts = [
+        [expired, (now - timedelta(days=60)).timestamp()], [expired, now.timestamp()],
+        [waiting, (now - timedelta(days=14)).timestamp()], [waiting, now.timestamp()],
+    ]
+    monkeypatch.setattr(settings.general, 'adaptive_searching', True)
+    monkeypatch.setattr(settings.general, 'adaptive_searching_max_age', '4w')
+    monkeypatch.setattr(settings.general, 'adaptive_searching_delay', '1w')
+    monkeypatch.setattr(settings.general, 'adaptive_searching_delta', '1w')
+    profile = add_profile(world.db, [
+        ('en', 'False', 'False'), ('en', 'False', 'True'), ('en', 'True', 'False'),
+    ], profile_id=2)
+    item = pipeline._movie(world)
+    repository.update_item(item.item_id, world.db, profile_id=profile, failed_attempts=str(attempts))
+    indexer.recalculate_missing_subtitles(library_id=world.library_id)
+    assert set(ast.literal_eval(repository.get_item(item.item_id).missing_subtitles)) == {waiting, ready}
+
+    providers = Mock(return_value=[])
+    monkeypatch.setattr(download, 'generate_subtitles', providers)
+    wanted.wanted_search_missing_subtitles_sources(kind='movie', job_id=1)
+    providers.assert_called_once()
+    languages = {
+        'en': ('en', 'False', 'False'), 'en:hi': ('en', 'True', 'False'), 'en:forced': ('en', 'False', 'True'),
+    }
+    assert providers.call_args.args[1] == [languages[ready]]
+    recorded = ast.literal_eval(repository.get_item(item.item_id).failed_attempts)
+    assert [row for row in recorded if row[0] != ready] == sorted(attempts, key=lambda row: row[0])
+    assert sum(code == ready for code, _ in recorded) == 1
+
+
 def test_search_all_queues_both_jobs_and_source_job_saves_through_shared_pipeline(
         client, arr_library, isolated_jobs, tmp_path, monkeypatch):
     from app.config import settings
@@ -732,8 +772,11 @@ def test_runtime_keeps_manual_and_wanted_translation_reservations_separate(world
                                                None, None, None, None, source=context)
         assert manual is not None and manual != automatic.job_id
         assert [job.job_id for job in isolated_jobs.jobs_pending_queue] == [automatic.job_id, manual]
-        key = main._job_source_key(context.path, subtitle, None, automatic.kwargs['source'])
-        manual_key = main._job_source_key(context.path, subtitle, None, context)
+        manual_job = isolated_jobs.jobs_pending_queue[-1]
+        key = main._job_source_key(context.path, subtitle, None, automatic.kwargs['source'],
+                                   automatic.kwargs['source_video_version'])
+        manual_key = main._job_source_key(context.path, subtitle, None, context,
+                                          manual_job.kwargs['source_video_version'])
         target = target_key('hu', False, False)
         ledger = TranslationJobs(world.db)
         assert ledger.active_for(key, target).queue_job_id == automatic.job_id
@@ -775,11 +818,15 @@ def test_runtime_keeps_manual_and_wanted_translation_reservations_separate(world
         env.close()
 
 
-@pytest.mark.parametrize('change', ['translator unavailable', 'arr claimed', 'arr claimed during translation'])
+@pytest.mark.parametrize('change', [
+    'translator unavailable', 'arr claimed', 'arr claimed during translation', 'arr claimed after preparation',
+    'mapped input owner changed', 'mapped destination owner changed', 'mapped generated owner changed', 'published',
+])
 def test_translation_after_a_wanted_download_keeps_its_publication_scope(world, isolated_jobs, monkeypatch, change):
     from app.config import settings
     from app.database import TableArrInstances, TableLanguagesProfiles, TableMovies, update_profile_id_list
-    from media_sources import repository, wanted
+    from media_sources import indexer, repository, wanted
+    from subtitles.tools.subsync_engines import subtitle_source_version, sync_output_owner_is_unique
     from subtitles.tools.translate import main
 
     monkeypatch.setattr(wanted, 'jobs_queue', isolated_jobs)
@@ -793,12 +840,19 @@ def test_translation_after_a_wanted_download_keeps_its_publication_scope(world, 
     ]
     world.db.execute(sa.update(TableLanguagesProfiles).values(items=json.dumps(profile)))
     update_profile_id_list.invalidate()
-    context = pipeline._movie(world)
+    mapped_owner = change.startswith('mapped ')
+    if mapped_owner:
+        monkeypatch.setattr(settings.general, 'subfolder', 'relative')
+        monkeypatch.setattr(settings.general, 'subfolder_custom', '../Subs')
+    context = pipeline._movie(world, 'Film.mkv')
     media = Path(context.path)
+    folder = world.tmp_path / 'Subs' if mapped_owner else media.parent
+    original = folder / 'Film.en.srt'
+    destination = folder / 'Film.hu.srt'
     pipeline._download(monkeypatch)
     engine = Mock(side_effect=AssertionError('the translator should not run'))
-    during_translation = change == 'arr claimed during translation'
-    if not during_translation:
+    translates = change not in ('translator unavailable', 'arr claimed')
+    if not translates:
         monkeypatch.setattr(main.TranslatorFactory, 'create_translator', engine)
 
     def claim_media():
@@ -813,37 +867,117 @@ def test_translation_after_a_wanted_download_keeps_its_publication_scope(world, 
     (translation,) = isolated_jobs.jobs_pending_queue
     assert translation.func == 'translate_subtitles_file'
     assert translation.kwargs['source'].wanted_file_stamp is not None
+    assert Path(translation.kwargs['source_srt_file']).resolve() == original
+    input_version = subtitle_source_version(original)
+    generated = folder / 'Film.hu.ffsubsync.srt'
+    generated.write_bytes(pipeline.CONTENT)
+    if change == 'mapped generated owner changed':
+        owned_generated = folder / 'Film.hu.alass.srt'
+        changed_generated = folder / 'Film.hu.autosubsync.srt'
+        owned_generated.write_bytes(pipeline.CONTENT)
+        changed_generated.write_bytes(pipeline.CONTENT)
+    cleanup = Mock(wraps=indexer.quarantine_sync_outputs_after_mutation)
+    monkeypatch.setattr(indexer, 'quarantine_sync_outputs_after_mutation', cleanup)
 
     if change == 'arr claimed':
         claim_media()
-    elif during_translation:
+    elif translates:
         from subtitles.tools.translate.services import google_translator
 
         transport = Mock()
         transport.return_value.translate.return_value = 'Translated cue'
         monkeypatch.setattr(google_translator, 'GoogleTranslator', transport)
         monkeypatch.setattr(google_translator, 'jobs_queue', isolated_jobs)
-        save = google_translator.pysubs2.SSAFile.save
+        if change == 'arr claimed during translation':
+            save = google_translator.pysubs2.SSAFile.save
 
-        def save_and_claim(subtitles, *args, **kwargs):
-            save(subtitles, *args, **kwargs)
-            claim_media()
+            def save_and_claim(subtitles, *args, **kwargs):
+                save(subtitles, *args, **kwargs)
+                claim_media()
 
-        monkeypatch.setattr(google_translator.pysubs2.SSAFile, 'save', save_and_claim)
+            monkeypatch.setattr(google_translator.pysubs2.SSAFile, 'save', save_and_claim)
+        elif change == 'arr claimed after preparation':
+            publication = indexer.source_item_publication
+
+            def claim_at_publication(source, **kwargs):
+                claim_media()
+                return publication(source, **kwargs)
+
+            monkeypatch.setattr(indexer, 'source_item_publication', claim_at_publication)
+        elif mapped_owner:
+            other = world.tmp_path / 'Other'
+            alias = other / 'Alias.mkv'
+            initial = video(other / 'Nested' / 'Other.mkv')
+            alias.symlink_to(initial)
+            owner = world.db.execute(sa.insert(TableArrInstances).values(
+                kind='radarr', name='Cinema', stable_key='cinema', port=9800, enabled=1,
+                path_mappings=json.dumps([['/cinema', str(other)]])).returning(TableArrInstances.id)).scalar_one()
+            world.db.execute(sa.insert(TableMovies).values(
+                arr_instance_id=owner, radarrId=9000, title='Other', path='/cinema/Alias.mkv', tmdbId='73'))
+            monkeypatch.setattr(settings.general, 'use_radarr', True)
+            publication = indexer.source_item_publication
+            registry = indexer.SourcePublicationOwnerIndex()._registry_snapshot()
+
+            def change_alias_at_publication(source, **kwargs):
+                alias.unlink()
+                collision = {
+                    'mapped input owner changed': 'Film.en.mkv',
+                    'mapped destination owner changed': 'Film.hu.mkv',
+                    'mapped generated owner changed': 'Film.hu.ffsubsync.mkv',
+                }[change]
+                alias.symlink_to(video(world.tmp_path / 'Relocated' / collision))
+                owners = indexer.SourcePublicationOwnerIndex()
+                assert owners._registry_snapshot() == registry
+                assert subtitle_source_version(original) == input_version
+                if change == 'mapped destination owner changed':
+                    assert sync_output_owner_is_unique(context.path, original, owners)
+                    assert not sync_output_owner_is_unique(context.path, destination, owners)
+                elif change == 'mapped generated owner changed':
+                    assert sync_output_owner_is_unique(context.path, original, owners)
+                    assert sync_output_owner_is_unique(context.path, destination, owners)
+                    assert not sync_output_owner_is_unique(context.path, generated, owners)
+                    assert sync_output_owner_is_unique(context.path, owned_generated, owners)
+                    changed_generated.write_bytes(b'Edited after cleanup was planned')
+                return publication(source, **kwargs)
+
+            monkeypatch.setattr(indexer, 'source_item_publication', change_alias_at_publication)
     else:
         monkeypatch.setattr(main, 'translation_available', lambda: SimpleNamespace(available=False))
     assert isolated_jobs._run_job(isolated_jobs._reserve_next_job())
-    if during_translation:
+    if translates:
         transport.return_value.translate.assert_called()
     else:
         engine.assert_not_called()
-    assert not media.with_suffix('.hu.srt').exists()
-    assert media.with_suffix('.en.srt').exists()
-    assert world.db.execute(sa.select(repository.History.c.action)).scalars().all() == [1]
-    if change != 'translator unavailable':
-        assert repository.get_item(context.item_id).arr_shadow == 1
+    assert original.read_bytes() == pipeline.CONTENT
+    actions = world.db.execute(sa.select(repository.History.c.action).order_by(repository.History.c.id)).scalars().all()
+    if change in ('published', 'mapped generated owner changed'):
+        assert b'Translated cue' in destination.read_bytes()
+        assert actions == [1, 6]
+        cleanup.assert_called_once()
+        if change == 'mapped generated owner changed':
+            assert generated.read_bytes() == pipeline.CONTENT
+            assert changed_generated.read_bytes() == b'Edited after cleanup was planned'
+            assert not owned_generated.exists()
+        else:
+            assert not generated.exists()
+        assert not isolated_jobs.jobs_pending_queue
+        return
+
+    assert not destination.exists()
+    assert generated.read_bytes() == pipeline.CONTENT
+    cleanup.assert_not_called()
+    assert actions == [1]
+    item = repository.get_item(context.item_id)
+    if change.startswith('arr claimed'):
+        assert (item.arr_shadow, item.shadow_instance_id, item.shadow_arr_row_id, item.shadow_arr_path) == (
+            1, 42, 73, context.path)
         assert not isolated_jobs.jobs_pending_queue
     else:
+        assert item.arr_shadow == 0
+        if change == 'mapped destination owner changed':
+            assert subtitle_source_version(original) == input_version
+            assert not isolated_jobs.jobs_pending_queue
+            return
         (fallback,) = isolated_jobs.jobs_pending_queue
         assert fallback.func == 'search_wanted_fallback'
         assert fallback.kwargs['target_language'] == 'hu'

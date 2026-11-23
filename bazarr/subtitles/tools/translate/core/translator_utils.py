@@ -113,7 +113,10 @@ def translation_write_kwargs(translator, job_id):
         from media_sources.indexer import SourcePublicationOwnerIndex, SourcePublicationOwnersChanged
         from media_sources.translation import automatic_translation_is_current
         from media_sources.wanted import arr_claim_blocks_wanted
+        from subtitles.tools.subsync_engines import subtitle_source_version, sync_output_owner_is_unique
 
+        video_version = (getattr(translator, 'source_video_version', None)
+                         or source_translation_video_version(translator.video_path))
         owners = SourcePublicationOwnerIndex()
 
         def prepare():
@@ -124,20 +127,28 @@ def translation_write_kwargs(translator, job_id):
         @contextmanager
         def publication():
             try:
-                with owners.publication(source, prepare, destination=translator.dest_srt_file, cleanup_outputs=True) as (
-                        current, connection, prepared):
+                with owners.publication(source, prepare, destination=translator.dest_srt_file, cleanup_outputs=True,
+                                        guard_registry=source.wanted_file_stamp is not None) as (
+                                            current, connection, prepared):
                     if current is None or current.profile_id != prepared.profile_id:
                         raise SourceTranslationChanged('The source item moved, was disabled, or its profile changed')
-                    if not (current.wanted_file_stamp is not None and arr_claim_blocks_wanted(
-                            current, target=connection)):
-                        if captured and not automatic_translation_is_current(
-                                current, translator.source_srt_file, translator.from_lang, translator.orig_to_lang,
-                                translator.forced, translator.hi, connection=connection):
-                            raise SourceTranslationChanged('The source translation is no longer eligible')
-                        yield
-                        return
+                    if current.wanted_file_stamp is not None and arr_claim_blocks_wanted(current, target=connection):
+                        raise _SourceTranslationArrClaimed('An Arr item now owns the source path')
+                    if subtitle_source_version(translator.video_path) != video_version:
+                        raise SourceTranslationChanged('The source media file changed during translation')
+                    owners.refresh_mapped_owners()
+                    if not sync_output_owner_is_unique(translator.video_path, translator.source_srt_file, owners):
+                        raise SourceTranslationInputAmbiguous('The translation input lost its unique media owner')
+                    if not sync_output_owner_is_unique(translator.video_path, translator.dest_srt_file, owners):
+                        raise SourceTranslationChanged('The translated subtitle destination lost its unique media owner')
+                    if captured and not automatic_translation_is_current(
+                            current, translator.source_srt_file, translator.from_lang, translator.orig_to_lang,
+                            translator.forced, translator.hi, connection=connection):
+                        raise SourceTranslationChanged('The source translation is no longer eligible')
+                    yield
+            except _SourceTranslationArrClaimed:
                 arr_claim_blocks_wanted(source)
-                raise SourceTranslationChanged('An Arr item now owns the source path')
+                raise
             except SourcePublicationOwnersChanged as error:
                 raise SourceTranslationChanged(str(error)) from error
         kwargs.update(publication_guard=publication, invalidate_outputs=False)
@@ -148,8 +159,21 @@ class SourceTranslationChanged(JobCancelled):
     """The source item or its translation request ceased to be current."""
 
 
+class _SourceTranslationArrClaimed(SourceTranslationChanged):
+    """Abort publication before recording the Arr shadow outside the transaction."""
+
+
 class SourceTranslationInputAmbiguous(SourceTranslationChanged):
     """The subtitle input is shared, so an automatic job can search providers instead."""
+
+
+def source_translation_video_version(video_path):
+    from subtitles.tools.subsync_engines import subtitle_source_version
+
+    version = subtitle_source_version(video_path)
+    if version is None:
+        raise SourceTranslationChanged('The source media file is missing or unavailable')
+    return version
 
 
 def validate_source_translation(source, video_path, subtitle_path, destination, from_lang, to_lang, forced, hi,
