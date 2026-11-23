@@ -10,6 +10,7 @@ from sportarr.sync.leagues import require_sportarr
 from sportarr.pagination import validate_page
 from utilities.path_mappings import apply_sports_mapping, read_sports_mappings
 from sportarr.errors import SportsNotFound
+from subtitles.score_override import add_sports_score_overrides
 
 
 def _query():
@@ -229,10 +230,15 @@ def list_events(session, league_id, arr_instance_id=None, start=0, length=100):
     from sportarr.sync_status import add_sync_status
     data = [_serialize_event(row) for row in rows]
     add_sync_status(session, rows, data)
+    add_sports_score_overrides(session, data)
     return {'data': data, 'total': count}
 
 
 def get_event(session, event_id, arr_instance_id=None, enabled_only=True):
     row = session.execute(_event_query(arr_instance_id, enabled_only).where(
         TableSportsEvents.id == event_id)).first()
-    return _serialize_event(row) if row else None
+    if row is None:
+        return None
+    event = _serialize_event(row)
+    add_sports_score_overrides(session, [event])
+    return event

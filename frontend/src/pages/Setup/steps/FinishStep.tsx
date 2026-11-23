@@ -41,6 +41,7 @@ import { clearPersistedSelection } from "@/pages/Setup/useOnboardingSelection";
 import { clearPersistedSkips } from "@/pages/Setup/useSkippedSteps";
 import { useReportStepBusy } from "@/pages/Setup/useStepBusy";
 import { clearPersistedStep } from "@/pages/Setup/useWizardStep";
+import { useMediaServerDisconnectPending } from "./mediaServer/operations";
 import type { WizardStepProps } from "./types";
 
 interface SummaryLine {
@@ -118,6 +119,7 @@ const FinishStep: FC<WizardStepProps> = ({ onBack }) => {
   // pressed again.
   const [settling, setSettling] = useState(false);
   const finishing = mutation.isPending || settling;
+  const disconnecting = useMediaServerDisconnectPending();
   // Leaving the step while it finishes is what the shell is told to prevent:
   // Back unmounted it mid-write, and the success that followed still cleared
   // the wizard and navigated away from under the step the reader went back to.
@@ -331,7 +333,7 @@ const FinishStep: FC<WizardStepProps> = ({ onBack }) => {
   }
 
   const handleFinish = () => {
-    if (finishing) {
+    if (finishing || disconnecting) {
       return;
     }
     setFailed(false);
@@ -418,7 +420,12 @@ const FinishStep: FC<WizardStepProps> = ({ onBack }) => {
               </Button>
             )}
           </Group>
-          <Button onClick={handleFinish} loading={finishing} size="md">
+          <Button
+            onClick={handleFinish}
+            loading={finishing}
+            disabled={disconnecting}
+            size="md"
+          >
             {discoverPath ? "Finish and open Discover" : "Finish"}
           </Button>
         </Group>

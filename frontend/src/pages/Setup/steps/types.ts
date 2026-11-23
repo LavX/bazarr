@@ -50,6 +50,8 @@ export const NOTHING_WRITTEN: StepOutcome = { answered: false };
 
 export interface WizardStepProps {
   onNext: (outcome?: StepOutcome) => void; // advance + persist
+  /** Records a confirmed write without moving the cursor. */
+  onWritten?: () => void;
   onBack?: () => void; // go back one step
   // Which media server draft this step configures. Only the generated media
   // server steps carry one; every other step ignores it.

@@ -2056,6 +2056,223 @@ def test_sports_upgrade_marker_uses_the_latest_history_row_including_ties(workfl
     assert workflows.upgrade_rows(session, 1) == []
 
 
+@pytest.mark.parametrize("pin_same_path", [True, False], ids=["same-path", "other-path"])
+def test_sports_score_pin_blocks_only_its_file_until_a_newer_provider_download(
+    workflow_library, monkeypatch, pin_same_path
+):
+    from datetime import datetime, timedelta
+
+    from app.config import settings
+    from app.database import TableHistorySports, TableSportsEvents
+    from sportarr.library import get_event, list_events
+    from subtitles.score_override import set_score_override
+    import subtitles.score_override as score_override
+
+    automatic, _, workflows, _, session, _ = workflow_library
+    monkeypatch.setattr(score_override, "event_stream", lambda **kwargs: None)
+    monkeypatch.setattr(settings.general, "upgrade_subs", True)
+    monkeypatch.setattr(settings.general, "upgrade_manual", True)
+    monkeypatch.setattr(settings.general, "upgrade_translated", False)
+    monkeypatch.setattr(settings.general, "days_to_upgrade_subs", 30)
+    automatic.search_event(61, 1)
+    candidate = session.execute(sa.select(TableHistorySports)).scalar_one()
+    candidate.score = 1
+    candidate.timestamp = datetime.now() - timedelta(hours=1)
+    session.get(TableSportsEvents, 61).subtitles = str([
+        ["en", "/sports/event.en.srt", 100],
+        ["en", "/sports/event.alt.en.srt", 100],
+    ])
+    session.commit()
+    pin_path = "/sports/event.en.srt" if pin_same_path else "/sports/event.alt.en.srt"
+    set_score_override(session, "sports", 61, pin_path, 0)
+    pin = session.execute(
+        sa.select(TableHistorySports).where(TableHistorySports.action == 9)
+    ).scalar_one()
+    expected = set() if pin_same_path else {candidate.id}
+
+    assert workflows.upgradable_history_ids(session, [candidate.id, pin.id]) == expected
+    assert {row["id"] for row in workflows.upgrade_rows(session, 1)} == expected
+    searches = []
+
+    def search(event_id, owner, **kwargs):
+        searches.append((event_id, owner, kwargs["upgraded_from_id"], kwargs["minimum_score"]))
+        return {"status": "no_result", "downloads": 0, "message": "No replacement"}
+
+    monkeypatch.setattr(workflows, "search_event", search)
+    workflows.upgrade_sports_subtitles(job_id="score-pin", arr_instance_id=1)
+    assert searches == ([] if pin_same_path else [(61, 1, candidate.id, 2)])
+
+    if pin_same_path:
+        replacement = TableHistorySports(
+            arr_instance_id=1, league_id=51, event_id=61, language="en", action=1,
+            provider=candidate.provider, score=1, score_out_of=180,
+            subtitles_path=candidate.subtitles_path, video_path=candidate.video_path,
+            artifact=candidate.artifact, timestamp=pin.timestamp + timedelta(seconds=1),
+        )
+        session.add(replacement)
+        session.commit()
+        assert workflows.upgradable_history_ids(
+            session, [candidate.id, pin.id, replacement.id]
+        ) == {replacement.id}
+        assert [row["id"] for row in workflows.upgrade_rows(session, 1)] == [replacement.id]
+        assert get_event(session, 61, 1).get("manual_subtitle_scores", {}) == {}
+        assert list_events(session, 51, 1)["data"][0].get("manual_subtitle_scores", {}) == {}
+
+
+@pytest.mark.parametrize('pin', ['destination', 'candidate-during-search', 'other-file'])
+def test_sports_upgrade_protects_pins_at_the_actual_publication_path(workflow_library, monkeypatch, pin):
+    from datetime import datetime, timedelta
+
+    from app.config import settings
+    from app.database import TableHistorySports, TableSportsEvents
+    from sportarr.artifacts import capture_artifact
+    from sportarr.identity import resolve_event_in_session
+    from sportarr.subtitles import candidate_signature
+    from subtitles import score_override
+
+    automatic, _, workflows, _, session, folder = workflow_library
+    monkeypatch.setattr(score_override, 'event_stream', lambda **kwargs: None)
+    monkeypatch.setattr(settings.general, 'upgrade_subs', True)
+    monkeypatch.setattr(settings.general, 'days_to_upgrade_subs', 30)
+    assert automatic.search_event(61, 1)['downloads'] == 1
+    candidate = session.execute(sa.select(TableHistorySports)).scalar_one()
+    destination = folder / '1/event.en.srt'
+    previous = destination.with_suffix('.ass')
+    destination.rename(previous)
+    previous_bytes = previous.read_bytes()
+    pinned = folder / '1/event.alt.en.srt' if pin == 'other-file' else destination
+    pinned.write_text('1\n00:00:00,000 --> 00:00:01,000\nOriginal sidecar\n')
+    original = pinned.read_bytes()
+    context = resolve_event_in_session(session, 61, 1)
+    candidate.subtitles_path = '/sports/event.en.ass'
+    candidate.artifact = capture_artifact(context, str(previous), candidate_signature(context, session))
+    candidate.score = 1
+    candidate.timestamp = datetime.now() - timedelta(hours=1)
+    listing = str([['en', f'/sports/{item.name}', 100] for item in (previous, pinned)])
+    session.get(TableSportsEvents, 61).subtitles = listing
+    session.commit()
+
+    def pin_file(subtitles_path):
+        score_override.set_score_override(session, 'sports', 61, subtitles_path, 0)
+
+    if pin == 'candidate-during-search':
+        provider_result = automatic._provider_result
+
+        def pin_during_search(*args, **kwargs):
+            session.get(TableSportsEvents, 61).subtitles = listing
+            pin_file(candidate.subtitles_path)
+            return provider_result(*args, **kwargs)
+
+        monkeypatch.setattr(automatic, '_provider_result', pin_during_search)
+    else:
+        pin_file(f'/sports/{pinned.name}')
+
+    result = workflows.upgrade_sports_subtitles(job_id='score-pin-publication', arr_instance_id=1)
+    assert pinned.read_bytes() == original
+    assert [item['downloads'] for item in result['data']] == [int(pin == 'other-file')]
+    if pin == 'other-file':
+        assert not previous.exists()
+    else:
+        assert previous.read_bytes() == previous_bytes
+
+
+def test_postgresql_upgrade_cannot_miss_a_pin_committed_after_its_snapshot(workflow_library, monkeypatch):
+    from sqlalchemy.orm import Session
+
+    from app.config import settings
+    from app.database import TableHistorySports
+    from subtitles import score_override
+
+    automatic, _, workflows, _, session, folder = workflow_library
+    engine = session.get_bind()
+    if engine.dialect.name != 'postgresql':
+        pytest.skip('Requires PostgreSQL snapshot isolation')
+    monkeypatch.setattr(score_override, 'event_stream', lambda **kwargs: None)
+    monkeypatch.setattr(settings.general, 'upgrade_subs', True)
+    monkeypatch.setattr(settings.general, 'days_to_upgrade_subs', 30)
+    assert automatic.search_event(61, 1)['downloads'] == 1
+    session.execute(sa.update(TableHistorySports).values(score=1))
+    session.commit()
+    destination = folder / '1/event.en.srt'
+    original = destination.read_bytes()
+    snapshots = []
+
+    def commit_pin_between_snapshot_and_lock(connection, cursor, statement, params, context, many):
+        if not snapshots and statement.startswith('LOCK TABLE arr_instances,'):
+            cursor.execute('SELECT pg_current_snapshot()')
+            snapshots.append(cursor.fetchone()[0])
+            with Session(engine) as writer:
+                score_override.set_score_override(writer, 'sports', 61, '/sports/event.en.srt', 0, 1)
+
+    sa.event.listen(engine, 'before_cursor_execute', commit_pin_between_snapshot_and_lock)
+    try:
+        result = workflows.upgrade_sports_subtitles(job_id='score-pin-race', arr_instance_id=1)
+    finally:
+        sa.event.remove(engine, 'before_cursor_execute', commit_pin_between_snapshot_and_lock)
+
+    assert len(snapshots) == 1
+    assert result['data'][0]['status'] == 'skipped'
+    assert result['data'][0]['downloads'] == 0
+    assert destination.read_bytes() == original
+    assert session.execute(sa.select(TableHistorySports.action).order_by(TableHistorySports.id)).scalars().all() == [1, 9]
+
+
+@pytest.mark.parametrize('windows_source', [False, True], ids=['local', 'windows-mapping'])
+def test_a_same_path_file_id_renumber_keeps_the_indexed_sidecar_score_and_upload_origin(
+    workflow_library, monkeypatch, windows_source,
+):
+    from app.config import settings
+    from app.database import TableArrInstances, TableHistorySports, TableSportsEvents, TableSportsFileIndex
+    from sportarr.identity import resolve_event_in_session
+    from sportarr.library import get_event
+    from sportarr.profile_hooks import _source_score_below_threshold
+    from sportarr.sync import events as sync
+    from subtitles.indexer.sports import store_subtitles_sports
+    from subtitles import score_override
+    from test_sportarr_events import event, file, remote
+
+    _, _, _, _, session, folder = workflow_library
+    monkeypatch.setattr(score_override, 'event_stream', lambda **kwargs: None)
+    monkeypatch.setattr(settings.translator, 'min_source_score', 90)
+    path = '/sports/event.en.srt'
+    source = folder / '1/event.en.srt'
+    video = source.with_name('event.mkv')
+    source.write_text('1\n00:00:00,000 --> 00:00:01,000\nA surviving subtitle\n')
+    if windows_source:
+        session.execute(sa.update(TableArrInstances).where(TableArrInstances.id == 1).values(
+            path_mappings=json.dumps([['D:/Sports', str(source.parent)]]),
+        ))
+        session.execute(sa.update(TableSportsEvents).where(TableSportsEvents.id == 61).values(
+            path=r'D:\Sports\event.mkv',
+        ))
+        path = 'D:/Sports/event.en.srt'
+    original = resolve_event_in_session(session, 61, 1)
+    recording = file(original.file_id, filePath=original.original_path, size=video.stat().st_size)
+    remote(monkeypatch, sync, [event([recording])])
+    assert sync.sync_events(51, 1) == [61]
+    stamp = session.get(TableSportsFileIndex, 61, populate_existing=True).stamp
+    assert stamp
+    store_subtitles_sports(61, 1)
+    session.execute(sa.insert(TableHistorySports).values(
+        event_id=61, league_id=51, arr_instance_id=1, action=4, language='en',
+        subtitles_path=path, video_path=original.original_path.replace('\\', '/'),
+    ))
+    score_override.set_score_override(session, 'sports', 61, path, 0, 1)
+    history = session.execute(sa.select(TableHistorySports).order_by(TableHistorySports.id)).scalars().all()
+    before = [row.to_dict() for row in history]
+
+    remote(monkeypatch, sync, [event([recording | {'id': 10}])])
+    assert sync.sync_events(51, 1) == [61]
+
+    current = resolve_event_in_session(session, 61, 1)
+    assert current.file_id == 10 and current.original_path == original.original_path
+    assert session.get(TableSportsFileIndex, 61, populate_existing=True).stamp == stamp
+    assert get_event(session, 61, 1)['manual_subtitle_scores'] == {path: 0}
+    assert _source_score_below_threshold(current, 'en', str(source)) is False
+    session.expire_all()
+    assert [row.to_dict() for row in history] == before
+
+
 def test_an_older_history_row_is_not_flagged_upgradable(workflow_library, monkeypatch):
     """The flag has to agree with the run, or it promises an upgrade forever.
 
