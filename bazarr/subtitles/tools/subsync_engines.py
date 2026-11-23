@@ -640,8 +640,8 @@ def quarantine_sync_outputs(video_path, source_path, ownership_index=None, *, pr
             fd, quarantine = tempfile.mkstemp(prefix=f'.bazarr-sync-obsolete-{output.name[:40]}-', suffix='.bak', dir=directory)
             os.close(fd)
             try:
-                if (not local_subtitle_owner_is_clear(video_path, output, ownership_index)
-                        or (output_is_current is not None and not output_is_current(output))
+                if ((output_is_current is not None and not output_is_current(output))
+                        or not local_subtitle_owner_is_clear(video_path, output, ownership_index)
                         or regular_subtitle_version(output) != version):
                     os.unlink(quarantine)
                     continue

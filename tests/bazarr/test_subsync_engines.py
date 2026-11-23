@@ -1032,6 +1032,44 @@ def test_tagged_sync_output_defers_only_to_an_actual_media_owner(
         assert result[subtitle].basename == 'en'
 
 
+def test_cleanup_preserves_output_claimed_locally_during_registered_ownership_lookup(tmp_path, monkeypatch):
+    from app.config import settings
+    from subtitles.tools.subsync_engines import (
+        engine_output_path,
+        plan_sync_output_cleanup,
+        quarantine_sync_outputs,
+    )
+
+    monkeypatch.setattr(settings.general, 'subfolder', 'current')
+    monkeypatch.setattr(settings.general, 'subfolder_custom', '')
+    video = tmp_path / 'Movie.mkv'
+    source = tmp_path / 'Movie.en.srt'
+    generated = engine_output_path(source, 'ffsubsync')
+    other_generated = engine_output_path(source, 'alass')
+    arriving_video = tmp_path / 'Movie.en.ffsubsync.mkv'
+    _write(video, 'video')
+    _write(source, 'New subtitle')
+    _write(generated, 'Claimed generated subtitle')
+    _write(other_generated, 'Obsolete generated subtitle')
+    prepared = plan_sync_output_cleanup(str(video), str(source))
+
+    def registered_ownership_is_current(output):
+        if output == generated:
+            _write(arriving_video, 'Arriving video')
+        return True
+
+    quarantine_sync_outputs(str(video), str(source), prepared=prepared,
+                            output_is_current=registered_ownership_is_current)
+
+    assert arriving_video.read_text(encoding='utf-8') == 'Arriving video'
+    assert generated.read_text(encoding='utf-8') == 'Claimed generated subtitle'
+    assert source.read_text(encoding='utf-8') == 'New subtitle'
+    assert not other_generated.exists()
+    quarantined = list(tmp_path.glob('.bazarr-sync-obsolete-*.bak'))
+    assert len(quarantined) == 1
+    assert quarantined[0].read_text(encoding='utf-8') == 'Obsolete generated subtitle'
+
+
 def test_preview_workspace_is_recognized_only_where_it_was_opened(tmp_path):
     """A preview namespace is what this process opened, never what a name says."""
     from subtitles.tools.subsync_engines import (
