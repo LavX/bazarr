@@ -163,9 +163,12 @@ describe("Episodes Table, hidden tracks", () => {
         );
         return HttpResponse.json({
           data: {
-            wanted: true,
             hidden: { code2: "fr", name: "French", hi: false, forced: false },
-            covered_by: [],
+            newly_wanted: [
+              { code2: "fr", name: "French", hi: false, forced: false },
+            ],
+            still_wanted: [],
+            remaining_subtitles: [],
           },
         });
       }),

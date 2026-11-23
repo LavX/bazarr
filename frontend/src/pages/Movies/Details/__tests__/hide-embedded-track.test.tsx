@@ -51,14 +51,15 @@ const embeddedEnglish: Subtitle = {
 function wantedAgain(form: Record<string, string>) {
   return HttpResponse.json({
     data: {
-      wanted: true,
+      newly_wanted: [{ code2: "en", name: "English", hi: true, forced: false }],
+      still_wanted: [],
       hidden: {
         code2: form.language,
         name: form.language,
         hi: form.hi === "True",
         forced: form.forced === "True",
       },
-      covered_by: [],
+      remaining_subtitles: [],
     },
   });
 }
@@ -133,26 +134,26 @@ describe("Movies Detail Table, Hide track", () => {
     );
   });
 
-  it("says so when another subtitle still covers the language", async () => {
+  it("says when hiding plain English leaves English HI in Wanted", async () => {
     mockCommon([], () =>
       HttpResponse.json({
         data: {
-          wanted: false,
-          hidden: { code2: "en", name: "English", hi: true, forced: false },
-          covered_by: [
-            {
-              code2: "en",
-              name: "English",
-              hi: false,
-              forced: false,
-              embedded: false,
-            },
+          hidden: { code2: "en", name: "English", hi: false, forced: false },
+          newly_wanted: [],
+          still_wanted: [
+            { code2: "en", name: "English", hi: true, forced: false },
           ],
+          remaining_subtitles: [],
         },
       }),
     );
     const user = userEvent.setup();
-    customRender(<Table movie={movieWith([embeddedEnglish])} history={[]} />);
+    customRender(
+      <Table
+        movie={movieWith([{ ...embeddedEnglish, hi: false }])}
+        history={[]}
+      />,
+    );
     await screen.findByText("Video File Subtitle Track");
     await waitFor(() => expect(queryClient.isFetching()).toBe(0));
 
@@ -169,9 +170,7 @@ describe("Movies Detail Table, Hide track", () => {
     );
 
     expect(
-      await screen.findByText(
-        "English (HI) is still covered by English (subtitle file), so Bazarr+ will not search for it.",
-      ),
+      await screen.findByText("English (HI) is still in Wanted."),
     ).toBeInTheDocument();
   });
 

@@ -1010,10 +1010,9 @@ export function useEmbeddedTrackVisibility() {
     mutationKey: [...hiddenTracksKey, "hide"],
     mutationFn: (form: EmbeddedTrackForm) => api.subtitles.hideTrack(form),
     onSuccess: (result) => {
-      const outcome = hiddenTrackOutcome(result);
-      if (outcome) {
-        showNotification(notification.info("Track hidden", outcome));
-      }
+      showNotification(
+        notification.info("Track hidden", hiddenTrackOutcome(result)),
+      );
     },
     onError: refused("Track not hidden"),
     onSettled: (_result, _error, form) => refresh(form),

@@ -91,9 +91,12 @@ function serve(hidden: EmbeddedHiddenTrack[]) {
       );
       return HttpResponse.json({
         data: {
-          wanted: true,
           hidden: { code2: "en", name: "English", hi: false, forced: false },
-          covered_by: [],
+          newly_wanted: [
+            { code2: "en", name: "English", hi: false, forced: false },
+          ],
+          still_wanted: [],
+          remaining_subtitles: [],
         },
       });
     }),

@@ -17,16 +17,18 @@ import SportsTable from "./table";
 
 // What the backend answers when the hidden track's language is now wanted.
 function wantedAgain(form: Record<string, string>) {
+  const language = {
+    code2: form.language,
+    name: form.language,
+    hi: form.hi === "True",
+    forced: form.forced === "True",
+  };
   return HttpResponse.json({
     data: {
-      wanted: true,
-      hidden: {
-        code2: form.language,
-        name: form.language,
-        hi: form.hi === "True",
-        forced: form.forced === "True",
-      },
-      covered_by: [],
+      hidden: language,
+      newly_wanted: [language],
+      still_wanted: [],
+      remaining_subtitles: [],
     },
   });
 }

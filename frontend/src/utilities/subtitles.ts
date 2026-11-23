@@ -83,20 +83,26 @@ export function hiddenTrackCodecs(codec: string | null): string[] {
     .filter((value) => value.length > 0);
 }
 
-/**
- * What to tell the user after a hide that did not make the language wanted,
- * or null when it did. The wanted computation counts an HI track as good as
- * a normal one and counts subtitle files too, so hiding the plain English
- * track can leave English satisfied, and a language the profile does not ask
- * for is never wanted.
- */
-export function hiddenTrackOutcome(result: HideTrackResult): string | null {
-  if (result.wanted) {
-    return null;
+/** Describe the indexer's Wanted result for a hide. */
+export function hiddenTrackOutcome(result: HideTrackResult): string {
+  const messages: string[] = [];
+  if (result.newly_wanted.length > 0) {
+    const added = result.newly_wanted.map(embeddedTrackLabel).join(", ");
+    messages.push(`Bazarr+ added ${added} to Wanted.`);
   }
+  if (result.still_wanted.length > 0) {
+    const stillWanted = result.still_wanted.map(embeddedTrackLabel).join(", ");
+    const verb = result.still_wanted.length === 1 ? "is" : "are";
+    messages.push(`${stillWanted} ${verb} still in Wanted.`);
+  }
+  if (messages.length > 0) {
+    return messages.join(" ");
+  }
+
   const language = embeddedTrackLabel(result.hidden);
-  if (result.covered_by.length > 0) {
-    const covering = result.covered_by
+  messages.push(`Hiding ${language} added no subtitles to Wanted.`);
+  if (result.remaining_subtitles.length > 0) {
+    const remaining = result.remaining_subtitles
       .map(
         (subtitle) =>
           `${embeddedTrackLabel(subtitle)} (${
@@ -104,9 +110,9 @@ export function hiddenTrackOutcome(result: HideTrackResult): string | null {
           })`,
       )
       .join(", ");
-    return `${language} is still covered by ${covering}, so Bazarr+ will not search for it.`;
+    messages.push(`Bazarr+ still lists ${remaining}.`);
   }
-  return `${language} is not wanted for this title under its languages profile, so Bazarr+ will not search for it.`;
+  return messages.join(" ");
 }
 
 export function buildComparableSubtitleVariantKey(subtitle: Subtitle): string {
