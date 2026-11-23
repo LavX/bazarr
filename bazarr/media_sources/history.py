@@ -8,6 +8,7 @@ stays meaningful once the item or the source is deleted and its links are NULL.
 import ast
 import logging
 from dataclasses import dataclass
+from datetime import datetime
 
 import sqlalchemy as sa
 
@@ -204,6 +205,28 @@ def history_log_source(action, context: SourceItemContext, result, fake_provider
         matched=str(result.matched) if result.matched else None,
         not_matched=str(result.not_matched) if result.not_matched else None,
         upgradedFromId=upgraded_from_id, **snapshot)
+
+
+def refresh_source_upgrade_history(context, path, history_id):
+    """Keep the recorded download score attached to its postprocessed subtitle."""
+    from .db import source_transaction
+
+    history = repository.History
+    with source_transaction() as connection:
+        connection.execute(sa.update(history).where(
+            history.c.id == history_id, history.c.item_id == context.item_id, history.c.source_id == context.source_id,
+            history.c.video_path == context.path, history.c.subtitles_path == path, history.c.action == 3,
+        ).values(timestamp=datetime.now()))
+
+
+def source_upgrade_history_committed(history_id, original_id, video_path, subtitles_path):
+    """A fresh read resolves a lost commit acknowledgement for this exact replacement."""
+    history = repository.History.c
+    with handle().get_bind().connect() as connection:
+        return connection.scalar(sa.select(history.id).where(
+            history.id == history_id, history.action == 3, history.upgradedFromId == original_id,
+            history.video_path == video_path, history.subtitles_path == subtitles_path,
+        )) is not None
 
 
 def blacklist_log_source(context: SourceItemContext, provider, subs_id, language, target=None):

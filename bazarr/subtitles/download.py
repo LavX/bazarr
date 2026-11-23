@@ -13,6 +13,7 @@ import subliminal
 import ast
 from contextlib import ExitStack, contextmanager
 
+from sqlalchemy.exc import DBAPIError
 from subzero.language import Language
 from subliminal_patch.core import save_subtitles
 from subtitles.tools.subsync_engines import (
@@ -24,7 +25,7 @@ from subliminal_patch.core_persistent import download_best_subtitles
 
 from app.config import settings
 from app.database import TableEpisodes, TableMovies, database, select, get_profiles_list
-from app.jobs_queue import JobCancelled
+from app.jobs_queue import JobCancelled, JobFailed
 from utilities.path_mappings import path_mappings
 from utilities.helper import force_unicode, get_subtitle_destination_folder, get_target_folder
 from languages.get_languages import alpha3_from_alpha2
@@ -37,6 +38,10 @@ from .processing import describe_subtitle_download, process_subtitle
 
 class SourceMissingLanguagesUnavailable(OSError):
     """The source publication cannot verify whether the target language is missing."""
+
+
+class SourceUpgradeHistoryFailed(JobFailed):
+    """An upgrade lost the transaction needed to record its replacement."""
 
 
 @update_pools
@@ -221,6 +226,7 @@ def generate_subtitles(path, languages, audio_language, sceneName, title, media_
                                 writer = partial(write_subtitle_file, path, written_paths=written_paths,
                                                  on_publish=publish)
                                 writer_options = {}
+                                upgrade_history = {}
                                 owner_kwargs = {}
                                 if source is not None:
                                     writer = partial(_write_source_download, path, source=source,
@@ -235,7 +241,8 @@ def generate_subtitles(path, languages, audio_language, sceneName, title, media_
                                             _retain_hash_match_fields(subtitle)
                                             result = describe_subtitle_download(
                                                 subtitle, media_type, path, destination, max_score, is_upgrade=True)
-                                            return writer(destination, content, upgrade_result=result)
+                                            return writer(destination, content, upgrade_result=result,
+                                                          upgrade_history=upgrade_history)
 
                                         writer_options['write_subtitle_with_metadata'] = write_upgrade
                                     if is_upgrade and source_upgrade is None:
@@ -262,9 +269,8 @@ def generate_subtitles(path, languages, audio_language, sceneName, title, media_
                                                           previous_subtitles_to_delete)
                                 saved_subtitles = [saved for saved in saved_subtitles if saved.storage_path in written_paths]
 
-                        except SourceMissingLanguagesUnavailable:
-                            # The source job must fail rather than report a completed search
-                            # when its final missing-language check could not be performed.
+                        except (SourceMissingLanguagesUnavailable, SourceUpgradeHistoryFailed):
+                            # Unverified source admission or an unavailable History write must fail the job.
                             raise
                         except Exception as e:
                             logging.exception(
@@ -302,6 +308,9 @@ def generate_subtitles(path, languages, audio_language, sceneName, title, media_
                                                                       path=path, max_score=max_score, job_id=job_id,
                                                                       arr_instance_id=arr_instance_id,
                                                                       **({} if source is None else {'source': source}),
+                                                                      **({'source_upgrade_history_id':
+                                                                          upgrade_history[subtitle.storage_path]}
+                                                                         if source_upgrade is not None else {}),
                                                                       **({} if auto_translate else {'auto_translate': False}))
                                 if not processed_subtitle:
                                     logging.debug(f"BAZARR unable to process this subtitles: {subtitle}")  # noqa: G004
@@ -454,7 +463,7 @@ def _source_subtitle_destination_setting():
 
 def _write_source_download(video_path, destination, content, *, source, language, recheck_missing, is_upgrade,
                            written_paths, on_publish, wanted_stamp=None, wanted_profile=None, upgrade=None,
-                           video_version=None, destination_setting=None, upgrade_result=None):
+                           video_version=None, destination_setting=None, upgrade_result=None, upgrade_history=None):
     """Publish the actual provider-selected file only while its destination is still eligible."""
     from media_sources.indexer import SourcePublicationOwnerIndex
     from media_sources.translation import prepare_source_sidecars
@@ -462,6 +471,7 @@ def _write_source_download(video_path, destination, content, *, source, language
 
     ownership_index = SourcePublicationOwnerIndex()
     old_path = upgrade.subtitles_path if upgrade is not None else None
+    upgrade_history_id = None
     same_destination = old_path is not None and os.path.normcase(os.path.realpath(old_path)) == (
         os.path.normcase(os.path.realpath(destination)))
     remove_previous = old_path is not None and not same_destination
@@ -497,10 +507,34 @@ def _write_source_download(video_path, destination, content, *, source, language
         return None
 
     @contextmanager
+    def check_history_commit():
+        try:
+            yield
+        except DBAPIError as error:
+            if upgrade_history_id is None:
+                raise
+            if error.connection_invalidated:
+                from media_sources.history import source_upgrade_history_committed
+
+                # The file backups are still held. Check the exact History row on a fresh connection before rollback.
+                try:
+                    committed = source_upgrade_history_committed(
+                        upgrade_history_id, upgrade.original_id, video_path, destination)
+                except DBAPIError:
+                    committed = False
+                if committed:
+                    logging.info('BAZARR confirmed a source upgrade after losing the database acknowledgement')
+                    return
+            raise SourceUpgradeHistoryFailed(
+                'Unable to commit the upgraded subtitle in History', reason='save_failed') from error
+
+    @contextmanager
     def publication(files):
-        with ownership_index.publication(source, prepare, destination=registry_destination,
-                                         cleanup_outputs=upgrade is None,
-                                         recheck_registered=wanted_stamp is not None) as (current, connection, prepared):
+        nonlocal upgrade_history_id
+        with (check_history_commit(),
+              ownership_index.publication(
+                  source, prepare, destination=registry_destination, cleanup_outputs=upgrade is None,
+                  recheck_registered=wanted_stamp is not None) as (current, connection, prepared)):
             if current is None or current.path != video_path:
                 raise SubtitleDestinationChanged('The source item moved or was removed')
             if video_version is not None and subtitle_source_version(video_path) != video_version:
@@ -530,7 +564,12 @@ def _write_source_download(video_path, destination, content, *, source, language
             if upgrade is not None:
                 from media_sources.history import history_log_source
 
-                history_log_source(3, current, upgrade_result, upgraded_from_id=upgrade.original_id, target=connection)
+                try:
+                    upgrade_history_id = history_log_source(
+                        3, current, upgrade_result, upgraded_from_id=upgrade.original_id, target=connection)
+                except Exception as error:
+                    raise SourceUpgradeHistoryFailed(
+                        'Unable to record the upgraded subtitle in History', reason='save_failed') from error
 
     try:
         with ExitStack() as files:
@@ -545,6 +584,7 @@ def _write_source_download(video_path, destination, content, *, source, language
         logging.info('BAZARR skipped saving a subtitle for source item %s: %s', source.item_id, error)
         return False
     if upgrade is not None:
+        upgrade_history[destination] = upgrade_history_id
         written_paths.append(destination)
         _report_subtitle_publication(on_publish, destination)
         if remove_previous:
