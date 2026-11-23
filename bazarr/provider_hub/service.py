@@ -21,6 +21,7 @@ from concurrent.futures import Future
 import threading
 from dataclasses import dataclass, field as dataclass_field
 from datetime import datetime, timezone
+from hashlib import sha256
 from pathlib import Path, PurePosixPath
 from collections.abc import Iterable
 from typing import Any
@@ -64,8 +65,8 @@ from .state import (
 from . import env_registry, transport
 from .bundled_wheels import declared_wheels
 from .venv import (
-    _ENV_LOCK, PluginEnvironment, environment_fingerprint, hold_environment, pin_scope, python_executable,
-    release_pins, validated_bundle_path, validated_interpreter,
+    _ENV_LOCK, _pin, PluginEnvironment, environment_fingerprint, hold_environment, is_pinned, path_key,
+    pin_scope, python_executable, release_pins, validated_bundle_path, validated_interpreter,
 )
 from .worker import ProviderWorkerClient, WorkerBusy, WorkerError, release_when_gone, worker_command
 
@@ -76,6 +77,10 @@ class CatalogSourceError(ValueError):
 
 class ProviderHubInstallError(RuntimeError):
     """Raised when a Provider Hub install could not be staged."""
+
+
+class CatalogRegistrationChanged(ProviderHubInstallError):
+    """An install or update was selected from a catalog that has since been replaced."""
 
 
 class ProviderHubConsentError(ProviderHubInstallError):
@@ -1023,6 +1028,30 @@ def _catalog_source_error_message(error: Exception) -> str:
     return str(error)
 
 
+def _discard_source_entries(state: dict[str, Any], source_id: str, source_name: str) -> None:
+    entries = state.setdefault("catalog_entries", {})
+    for key, entry in list(entries.items()):
+        if isinstance(entry, dict) and (entry.get("source") == source_id or entry.get("source_name") == source_name):
+            del entries[key]
+
+
+def _detach_catalog_installations(state: dict[str, Any], source_id: str) -> None:
+    """Leave installed releases in place when their catalog registration is gone."""
+    for plugin_id, installation in (state.get("installations") or {}).items():
+        if not isinstance(installation, dict):
+            continue
+        active = _release_slots(state, plugin_id).get(releases.ACTIVE)
+        if active is not None and (active.source_id, active.origin) == (source_id, "catalog"):
+            installation["trust_note"] = _SOURCE_REMOVED_NOTE
+        if installation.get("source_bound") and installation.get("source_id") == source_id:
+            installation["source_id"] = None
+            if not _active_release_owned(state, installation, active):
+                installation["trust_note"] = _SOURCE_REMOVED_NOTE
+    for kept in (state.get("kept_data") or {}).values():
+        if isinstance(kept, dict) and kept.get("source_id") == source_id:
+            kept.update(source_id=None, origin="catalog")
+
+
 @datadir.serialized
 def add_catalog_source(
     name: str, url: str, trusted: bool = False, dev_ref: str | None = None
@@ -1063,7 +1092,12 @@ def add_catalog_source(
             existing = sources.get(name)
             if isinstance(existing, dict) and (existing.get("url"), existing.get("dev_ref")) == (url, dev_ref_value):
                 return dict(existing)
+            # Entries belong to the previous registration until the replacement is refreshed.
+            if isinstance(existing, dict):
+                _discard_source_entries(state, name, existing.get("name") or name)
             sources[name] = source
+            if isinstance(existing, dict):
+                _detach_catalog_installations(state, name)
             return dict(source)
 
         source = mutate_state(store_source)
@@ -1097,28 +1131,8 @@ def remove_catalog_source(name: str) -> bool:
             # Drop catalog_entries that came from this source. Without this purge
             # the marketplace keeps offering stale entries and update checks may
             # match them as available upgrades, which surprises the user.
-            entries = state.setdefault("catalog_entries", {})
-            for key, entry in list(entries.items()):
-                if not isinstance(entry, dict):
-                    continue
-                if entry.get("source") == name or entry.get("source_name") == removed_name:
-                    del entries[key]
-            # Its installs stay, with no source to update from. A source added
-            # later under the same name is a different catalog and must not
-            # inherit them.
-            for plugin_id, installation in (state.get("installations") or {}).items():
-                if not isinstance(installation, dict):
-                    continue
-                active = _release_slots(state, plugin_id).get(releases.ACTIVE)
-                if active is not None and (active.source_id, active.origin) == (name, "catalog"):
-                    installation["trust_note"] = _SOURCE_REMOVED_NOTE
-                if installation.get("source_bound") and installation.get("source_id") == name:
-                    installation["source_id"] = None
-                    if not _active_release_owned(state, installation, active):
-                        installation["trust_note"] = _SOURCE_REMOVED_NOTE
-            for kept in (state.get("kept_data") or {}).values():
-                if isinstance(kept, dict) and kept.get("source_id") == name:
-                    kept.update(source_id=None, origin="catalog")
+            _discard_source_entries(state, name, removed_name)
+            _detach_catalog_installations(state, name)
             return True, removed_name
 
         removed, _removed_name = mutate_state(remove_source)
@@ -1384,10 +1398,6 @@ def _set_official_trust(
     source["trust_reason"] = reason
 
 
-_UNKNOWN_SOURCE_NOTE = (
-    "No configured catalog source is known to have published this version, so it "
-    "gets no updates. Reinstall it from a catalog source to get updates again."
-)
 _SOURCE_REMOVED_NOTE = (
     "Its catalog source was removed, so it gets no updates. Reinstall it from a "
     "catalog source to get updates again."
@@ -1464,7 +1474,7 @@ def _bind_by_evidence(row: dict[str, Any], manifest: Any, origin: dict[str, Any]
     if bound:
         row.update(source_bound=True, source_id=bound, trust_note=None)
     elif not unanswered:
-        row.update(source_bound=True, source_id=None, trust_note=_UNKNOWN_SOURCE_NOTE)
+        row.update(source_bound=True, source_id=None, trust_note=releases.UNKNOWN_CATALOG_SOURCE_NOTE)
 
 
 def _recheck_installed_trust(state: dict[str, Any], ancestry: _OfficialAncestry) -> None:
@@ -3317,7 +3327,9 @@ def _fetch_bundle(manifest, deadline: float | None = None) -> Path:
 
         _write_manifest_file(manifest, tmp_path)
         verify_bundle_tree(manifest, tmp_path)
-        shutil.move(str(tmp_path), str(target))
+        with _ENV_LOCK:
+            if not target.exists():
+                tmp_path.rename(target)
 
     verify_bundle_tree(manifest, target)
     return target
@@ -3438,7 +3450,9 @@ def _stage_local_bundle(validated, source_dir: Path) -> Path:
 
         _write_manifest_file(validated, tmp_path)
         verify_bundle_tree(validated, tmp_path)
-        shutil.move(str(tmp_path), str(target))
+        with _ENV_LOCK:
+            if not target.exists():
+                tmp_path.rename(target)
 
     verify_bundle_tree(validated, target)
     return target
@@ -3853,22 +3867,27 @@ def _restore_active_source(state, plugin_id, row) -> None:
     if not _active_release_owned(state, row, active):
         removed = (row.get("trust_note") == _SOURCE_REMOVED_NOTE
                    or (active is not None and active.catalog_registration is not None))
-        note = _SOURCE_REMOVED_NOTE if removed else _UNKNOWN_SOURCE_NOTE
+        note = _SOURCE_REMOVED_NOTE if removed else releases.UNKNOWN_CATALOG_SOURCE_NOTE
         row.update(source_id=None, origin="catalog", source_bound=True, trusted=False, trust_note=note)
         row.pop("demoted_commit", None)
         return
     owner = active.source_id, active.origin
-    row.pop("demoted_commit", None)
-    row.pop("trust_note", None)
     if isinstance(previous, dict) and (
             (previous.get("source_id"), previous.get("origin")) == owner or (
                 active.source_id == OFFICIAL_CATALOG_SOURCE_ID and previous.get("source_id") is None
                 and previous.get("trust_note") and previous.get("source_bound"))):
+        row.pop("demoted_commit", None)
+        row.pop("trust_note", None)
         row.update(_installation_source(previous))
         row["trusted"] = bool(previous.get("trusted"))
     else:
-        # With no saved decision, only the active release's recorded ownership can be restored.
-        row.update(source_id=active.source_id, origin=active.origin, trusted=False)
+        # Old stages did not save the active release's trust decision.
+        if (row.get("source_id"), row.get("origin")) != owner and not (
+                active.source_id == OFFICIAL_CATALOG_SOURCE_ID and row.get("demoted_commit")):
+            row.update(source_id=active.source_id, origin=active.origin)
+            row.pop("demoted_commit", None)
+            row.pop("trust_note", None)
+        row["trusted"] = False
     row["source_bound"] = True
     if active.source_id != OFFICIAL_CATALOG_SOURCE_ID:
         row["trusted"] = False
@@ -4050,6 +4069,13 @@ def _bundled_wheels_argument(validated, bundle_path: Path) -> dict[str, Path]:
 _ANY_INSTALLATION = object()
 
 
+def _check_catalog_registration(state, source_id, expected):
+    if (expected is not _UNSET and source_id is not None
+            and (source_id not in (state.get("catalog_sources") or {})
+                 or releases.catalog_registration(state, source_id) != expected)):
+        raise CatalogRegistrationChanged("the catalog registration changed while the release was being prepared")
+
+
 def _running_release_candidate(installation, kind):
     if not isinstance(installation, dict) or not installation.get("active_version"):
         return None
@@ -4109,10 +4135,7 @@ def _stage_validated(
     state = load_state()
 
     def check_catalog(state):
-        if (expected_registration is not _UNSET and source_id is not None
-                and (source_id not in (state.get("catalog_sources") or {})
-                     or releases.catalog_registration(state, source_id) != expected_registration)):
-            raise ProviderHubInstallError("the catalog registration changed while the release was being prepared")
+        _check_catalog_registration(state, source_id, expected_registration)
 
     check_catalog(state)
     # Every route that installs or updates ends here, a local package included, so a revoked release is
@@ -4173,6 +4196,7 @@ def _stage_validated(
                     env_path = staged_python_path.parent.parent
             else:
                 step("Downloading the provider")
+                _pin(_bundle_path_for(validated))
                 bundle_path = bundle_stager(validated, deadline)
                 staged.append(bundle_path)
 
@@ -4209,10 +4233,10 @@ def _stage_validated(
                     target = datadir.release_path(root, validated.provider_id, data_key)
                     datadir.publish_probe_data(probe_data, target)
                     data_path = target
-        except ProviderHubStopped:
+        except (ProviderHubStopped, CatalogRegistrationChanged):
             if data_path is not None:
                 datadir.remove(data_path)
-            _discard_stopped_install(staged, existing)
+            _discard_stopped_install(staged)
             raise
         except Exception as error:
             if data_path is not None:
@@ -4322,7 +4346,7 @@ def _stage_validated(
         except ProviderHubInstallError:
             if data_path is not None:
                 datadir.remove(data_path)
-            _discard_stopped_install(staged, existing)
+            _discard_stopped_install(staged)
             raise
         if is_fresh:
             # The saved settings may have come back with the kept data, so the row is read again before the
@@ -4384,40 +4408,41 @@ def _undo_staging(provider_id: str, previous: Any) -> None:
     mutate_state(restore)
 
 
-def _discard_stopped_install(paths, existing) -> None:
-    """Remove the bundle and venv a stopped install staged, unless they are in use.
-
-    The bundle lives at a path keyed by the version, so reinstalling the version
-    that is already active or staged lands on that installation's own files,
-    which stay. A venv can be shared, so any venv an installation references, the
-    environment record names, or another install is using right now stays too.
-    """
-    existing = existing if isinstance(existing, dict) else {}
-    in_use = {existing.get(key) for key in ("active_path", "staged_path", "python_path", "staged_python_path")}
-    # The files of the previous release, kept to go back to, are as much in use as the active ones.
-    for release in getattr(load_state(), "retained_releases", ()):
-        in_use.update((release.get("bundle_path"), release.get("python_path")))
-    in_use.discard(None)
-    # This install's own hold ends here, so only other installs' holds count.
-    release_pins()
+def _discard_stopped_install(paths) -> None:
+    """Remove files the refused install prepared if no current release or other install needs them."""
+    if not paths:
+        return
     hub = provider_hub_dir()
-    with _ENV_LOCK:
+    # A replacement can publish a slot for the same bundle while this job is running.
+    # Hold staging and pin changes until the current references have been checked.
+    with datadir.release_lock, _ENV_LOCK:
+        release_pins()
+        try:
+            state = load_state_strict()
+            env_registry.validate_inventory(state)
+        except Exception:
+            logging.getLogger(__name__).warning("Could not read the current plugin releases for cleanup", exc_info=True)
+            return
+        in_use = env_registry.referenced_env_paths(state)
+        in_use.update(
+            path_key(row[key])
+            for row in (state.get("installations") or {}).values() if isinstance(row, dict)
+            for key in ("active_path", "staged_path") if isinstance(row.get(key), str) and row[key]
+        )
+        in_use.update(path_key(release["bundle_path"]) for release in getattr(state, "retained_releases", ())
+                      if release.get("bundle_path"))
         for path in paths:
-            # A bundle is recorded by its directory, a venv by its interpreter.
-            if {str(path), str(python_executable(path))} & in_use:
-                continue
-            # Both removals stay inside the hub and never cross a symlink; a
-            # venv is also kept while anything references, records or pins it.
-            if env_registry.discard_if_unused(hub, path):
+            if path_key(path) in in_use or is_pinned(path):
                 continue
             if env_registry.is_environment_path(hub, path):
-                continue
-            env_registry.remove_inside_hub(hub, path)
+                env_registry.discard_if_unused(hub, path)
+            else:
+                env_registry.remove_inside_hub(hub, path)
 
 
 def stage_install(
     manifest: dict[str, Any], install_timeout: float | None = None, checkpoint=None,
-    source_id: str | None = None, catalog_list: str | None = None,
+    source_id: str | None = None, catalog_list: str | None = None, *, expected_registration: Any = _UNSET,
 ) -> dict[str, Any]:
     """Install ``manifest``, bound to the catalog entry Bazarr+ holds for it.
 
@@ -4428,6 +4453,7 @@ def stage_install(
     matching the manifest against the stored entries.
     """
     state = load_state()
+    _check_catalog_registration(state, source_id, expected_registration)
     if isinstance(manifest, dict):
         source_id, source_trusted = _catalog_binding(manifest, state, source_id)
         if catalog_list not in (CATALOG_LIST_PROVIDERS, CATALOG_LIST_PLUGINS):
@@ -4623,10 +4649,11 @@ def resolve_catalog_install(
     and version in both. The ``entry_key`` returned pins the one entry, so the
     install that follows reads the entry that was checked here.
     """
-    key, entry = _requested_entry(
-        load_state(), source_id, provider_id, version, manifest, catalog_list=catalog_list)
+    state = load_state()
+    key, entry = _requested_entry(state, source_id, provider_id, version, manifest, catalog_list=catalog_list)
     return {
         "source": entry["source"],
+        "catalog_registration": releases.catalog_registration(state, entry["source"]),
         "provider_id": entry["provider_id"],
         "version": entry["version"],
         "name": entry.get("name") or entry["provider_id"],
@@ -4684,7 +4711,7 @@ class _StagedMembers(list):
         return found
 
 
-def _stage_closure_members(resolved, source_id: str, checkpoint=None) -> list[str]:
+def _stage_closure_members(resolved, source_id: str, checkpoint=None, *, expected_registration: Any = _UNSET) -> list[str]:
     """Stage the plugins a closure adds, dependencies first, before the plugin that needs them.
 
     Returns the ids of the rows this call wrote, which is what to discard if the plugin they were staged
@@ -4722,6 +4749,7 @@ def _stage_closure_members(resolved, source_id: str, checkpoint=None) -> list[st
             stage_install(
                 member.entry["manifest"], checkpoint=checkpoint, source_id=source_id,
                 catalog_list=member.entry.get("catalog_list", CATALOG_LIST_PROVIDERS),
+                **({"expected_registration": expected_registration} if expected_registration is not _UNSET else {}),
             )
     except Exception as error:
         _discard_staged_members(written(), resolved.members[-1].plugin_id if resolved.members else None)
@@ -4841,7 +4869,7 @@ def check_install_consent(
 
 def install_catalog_entry(
     source_id: str, provider_id: str, version: str, checkpoint=None, entry_key: str | None = None,
-    consent_digest: str | None = None,
+    consent_digest: str | None = None, *, expected_registration: Any = _UNSET,
 ) -> dict[str, Any]:
     """Install the entry ``source_id`` lists for ``provider_id`` at ``version``.
 
@@ -4850,6 +4878,9 @@ def install_catalog_entry(
     replacement that adds access requires ``consent_digest`` to match the current summary, however it was queued.
     """
     state = load_state()
+    _check_catalog_registration(state, source_id, expected_registration)
+    registration = releases.catalog_registration(state, source_id)
+    registration_kwargs = {"expected_registration": registration} if registration is not None else {}
     _key, entry = _requested_entry(state, source_id, provider_id, version, entry_key=entry_key)
     resolved = None
     if closure.has_needs(entry.get("manifest")) or catalog_kind_of(entry) != SUBTITLE_PROVIDER:
@@ -4864,12 +4895,14 @@ def install_catalog_entry(
         if _closure_needs_consent(candidate) or _provider_replacement_delta(state, entry, candidate):
             raise ProviderHubConsentError(CONSENT_MISSING_REASON)
     # The plugins it extends or needs are installed first, from the same source, by the same rules.
-    members = _stage_closure_members(resolved, source_id, checkpoint) if resolved is not None else []
+    members = (_stage_closure_members(resolved, source_id, checkpoint, **registration_kwargs)
+               if resolved is not None else [])
     try:
         # An entry stored before the plugins list existed carries no list and came from providers.
         return stage_install(
             entry["manifest"], checkpoint=checkpoint, source_id=source_id,
             catalog_list=entry.get("catalog_list", CATALOG_LIST_PROVIDERS),
+            **registration_kwargs,
         )
     except ProviderHubSettingsError:
         # The plugin is staged and only could not be enabled: it keeps what it needs.
@@ -6151,10 +6184,7 @@ def _copy_staged_release_data(validated, expected_state, source_id, origin, targ
     def select_source():
         state = load_state()
         current = (state.get("installations") or {}).get(plugin_id) or {}
-        try:
-            check_catalog(state)
-        except ProviderHubInstallError as error:
-            raise datadir.SnapshotRefused(str(error)) from error
+        check_catalog(state)
         source = _stage_data_source(state, plugin_id, current, source_id, validated.kind, origin, validated.raw)
         if (not _same_data_release(current, expected, "active")
                 or _release_slots(state, plugin_id).get(releases.ACTIVE) != expected_slot
@@ -6999,14 +7029,32 @@ def update_consent(provider_id: str) -> dict[str, Any] | None:
     return _update_delta(state, provider, *update, marks=True) if update is not None else None
 
 
-def apply_update(provider_id: str, checkpoint=None, consent_digest: str | None = None) -> dict[str, Any] | None:
-    provider = get_provider(provider_id, redact=False)
-    if not provider:
+def _update_catalog_binding(state, row) -> str:
+    source_id = _bound_source_id(row)
+    binding = (source_id, releases.catalog_registration(state, source_id))
+    return sha256(json.dumps(binding, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
+def update_catalog_binding(provider_id: str) -> str:
+    """Pin a queued update to the installation's catalog registration."""
+    state = load_state()
+    row = (state.get("installations") or {}).get(provider_id)
+    return _update_catalog_binding(state, row if isinstance(row, dict) else {})
+
+
+def apply_update(provider_id: str, checkpoint=None, consent_digest: str | None = None,
+                 *, expected_catalog_binding: str | None = None) -> dict[str, Any] | None:
+    state = load_state()
+    row = (state.get("installations") or {}).get(provider_id)
+    if not isinstance(row, dict) or not row:
         return None
+    catalog_binding = _update_catalog_binding(state, row)
+    if expected_catalog_binding is not None and catalog_binding != expected_catalog_binding:
+        raise CatalogRegistrationChanged("the catalog registration changed while the update was waiting")
+    provider = _with_origin(row, state)
     if provider.get("origin") == "local":
         # A local package is never replaced by a catalog update; ignore the request.
         return _redact_installation(provider)
-    state = load_state()
     source_id = _bound_source_id(provider)
     catalog_list = _installed_catalog_list(provider)
     update = _latest_catalog_update(
@@ -7026,23 +7074,30 @@ def apply_update(provider_id: str, checkpoint=None, consent_digest: str | None =
             catalog_list,
             installed_kind=kind_of(provider),
         ) or (_supply_refusal(state) if source_id == OFFICIAL_CATALOG_SOURCE_ID else None) \
-            or "No update manifest is available"
-        return _record_failed_update(provider_id, provider, message)
+            or (provider.get("trust_note") if source_id is None else None) or "No update manifest is available"
+        return _record_failed_update(provider_id, provider, message, catalog_binding)
     entry, resolved = update
+    registration = releases.catalog_registration(state, source_id)
+    registration_kwargs = {"expected_registration": registration} if registration is not None else {}
     # An update that adds a destination, a permission, a binary or a plugin asks again first.
     delta = _update_delta(state, provider, entry, resolved)
     if delta and delta["needs_consent"] and consent_digest != delta["digest"]:
-        return _record_failed_update(provider_id, provider, consent.delta_text(delta))
+        return _record_failed_update(provider_id, provider, consent.delta_text(delta), catalog_binding)
     members: list[str] = []
     if len(resolved.members) > 1:
         # A plugin the new release needs is staged first, as an install does.
         try:
-            members = _stage_closure_members(resolved, source_id, checkpoint)
+            members = _stage_closure_members(resolved, source_id, checkpoint, **registration_kwargs)
+        except CatalogRegistrationChanged:
+            raise
         except ProviderHubInstallError as error:
-            return _record_failed_update(provider_id, provider, refusal_text(error))
+            return _record_failed_update(provider_id, provider, refusal_text(error), catalog_binding)
     try:
-        return stage_install(entry["manifest"], checkpoint=checkpoint, source_id=source_id)
+        return stage_install(entry["manifest"], checkpoint=checkpoint, source_id=source_id, **registration_kwargs)
     except ProviderHubSettingsError:
+        raise
+    except CatalogRegistrationChanged:
+        _discard_staged_members(members, provider_id)
         raise
     except ProviderHubInstallError:
         _discard_staged_members(members, provider_id)
@@ -7051,13 +7106,14 @@ def apply_update(provider_id: str, checkpoint=None, consent_digest: str | None =
         # The install path refused the manifest before it started a job, so the refusal is
         # recorded here as a failed update, the way a missing manifest is.
         _discard_staged_members(members, provider_id)
-        return _record_failed_update(provider_id, provider, refusal_text(error))
+        return _record_failed_update(provider_id, provider, refusal_text(error), catalog_binding)
     except Exception:
         _discard_staged_members(members, provider_id)
         raise
 
 
-def _record_failed_update(provider_id: str, provider: dict[str, Any], message: str) -> dict[str, Any]:
+def _record_failed_update(provider_id: str, provider: dict[str, Any], message: str,
+                          catalog_binding: str) -> dict[str, Any] | None:
     """Record an update that could not be staged: the reason on the installation and a failed job."""
     with record_job(
         "stage_update",
@@ -7066,18 +7122,22 @@ def _record_failed_update(provider_id: str, provider: dict[str, Any], message: s
         target_name=provider.get("name") or provider_id,
         from_version=provider.get("active_version") or provider.get("staged_version"),
     ) as job:
-        provider["last_error"] = message
+        def record_failure(state: dict[str, Any]) -> dict[str, Any] | None:
+            current = (state.get("installations") or {}).get(provider_id)
+            if not isinstance(current, dict) or current.get("state") == "removed":
+                return None
+            if current.get("origin") == "local" or _update_catalog_binding(state, current) != catalog_binding:
+                raise CatalogRegistrationChanged("the catalog registration changed while the update was being prepared")
+            current["last_error"] = message
+            return _with_origin(current, state)
 
-        def record_failure(state: dict[str, Any]) -> None:
-            state.setdefault("installations", {})[provider_id] = provider
-
-        mutate_state(record_failure)
+        current = mutate_state(record_failure)
         job.data["state"] = "failed"
         job.update(
             error=message,
             message=message,
         )
-    return _redact_installation(provider)
+    return _redact_installation(current) if current is not None else None
 
 
 def _parse_time(value: Any) -> datetime | None:

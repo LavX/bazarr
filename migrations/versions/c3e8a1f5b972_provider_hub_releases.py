@@ -37,6 +37,10 @@ _STAGED = ("staged_version", "staged_path", "staged_python_path", "staged_manife
 # What each key after the version is, in order. ``fields`` records which of them the row carried.
 _NAMES = ("path", "python_path", "manifest", "supplied_by", "activated_at")
 _NULL_BINDINGS = "supplied_by:null"
+_UNKNOWN_SOURCE_NOTE = (
+    "No configured catalog source is known to have published this version, so it "
+    "gets no updates. Reinstall it from a catalog source to get updates again."
+)
 
 
 def _guard(bind):
@@ -125,6 +129,54 @@ def _slot(row, keys, with_activation):
     }
 
 
+def _legacy_cached_manifest_matches(document, source_id, source, plugin_id, version, manifest):
+    """Frozen copy of the store's cached manifest check for this upgrade."""
+    entries = document.get("catalog_entries")
+    commit = source.get("resolved_commit")
+    id_key = "id" if manifest.get("schema_version") == 2 else "provider_id"
+    if (not isinstance(entries, dict) or not isinstance(commit, str) or not commit
+            or manifest.get(id_key) != plugin_id or manifest.get("version") != version
+            or manifest["source"].get("commit") != commit):
+        return False
+
+    installed = {**manifest, "source": {key: value for key, value in manifest["source"].items() if key != "trusted"}}
+    matched = False
+    for entry in entries.values():
+        if not (isinstance(entry, dict) and entry.get("source") == source_id
+                and entry.get("provider_id") == plugin_id and entry.get("version") == version
+                and entry.get("resolved_commit") == commit):
+            continue
+        cached = entry.get("manifest")
+        cached_source = cached.get("source") if isinstance(cached, dict) else None
+        if not isinstance(cached_source, dict) or cached_source.get("catalog_url") != source["url"]:
+            continue
+        comparable = {**cached, "source": {key: value for key, value in cached_source.items()
+                                           if key not in ("catalog_url", "trusted")}}
+        if comparable == installed:
+            if matched:
+                return False
+            matched = True
+    return matched
+
+
+def _legacy_catalog_fields(document, plugin_id, row, version, manifest):
+    """Keep a pre-registration community catalog binding when the saved state corroborates it."""
+    source_id = row.get("source_id")
+    if row.get("source_bound", True) is not True:
+        return []
+    sources = document.get("catalog_sources")
+    source = sources.get(source_id) if isinstance(sources, dict) else None
+    url = source.get("url") if isinstance(source, dict) and not source.get("registration") else None
+    manifest_source = manifest.get("source") if isinstance(manifest, dict) else None
+    if not isinstance(url, str) or not url or not isinstance(manifest_source, dict):
+        return []
+    if "catalog_url" in manifest_source:
+        matches = manifest_source["catalog_url"] == url
+    else:
+        matches = _legacy_cached_manifest_matches(document, source_id, source, plugin_id, version, manifest)
+    return ["catalog_registration:legacy"] if matches else []
+
+
 def move_state_into_releases(bind):
     """Create a release row for each active and staged slot of the stored document and take the fields out of it.
 
@@ -158,18 +210,35 @@ def move_state_into_releases(bind):
     for plugin_id, row in installations.items():
         if not isinstance(row, dict) or plugin_id in have:
             continue
+        slots = []
         for keys, slot_state, with_activation in ((_ACTIVE, "active", True), (_STAGED, "staged", False)):
             slot = _slot(row, keys, with_activation)
-            if slot is None:
-                continue
+            if slot is not None:
+                slots.append((keys, slot_state, slot))
+        source_id = row.get("source_id")
+        legacy_community = row.get("origin") == "catalog" and isinstance(source_id, str) and source_id != "official"
+        bindings_by_slot = {
+            slot_state: _legacy_catalog_fields(document, plugin_id, row, slot["version"], row.get(keys[3]))
+            for keys, slot_state, slot in slots
+        } if legacy_community else {}
+        if legacy_community and slots:
+            # v2.7.2 recorded the stage's source on the installation, even with older active code.
+            row["source_bound"] = True
+            if not bindings_by_slot.get("staged", bindings_by_slot.get("active")):
+                row.update(source_id=None, trusted=False, trust_note=_UNKNOWN_SOURCE_NOTE)
+        for keys, slot_state, slot in slots:
+            catalog_fields = bindings_by_slot.get(slot_state, [])
+            # Keep an unverified stage's former source so activation can discard it.
+            release_source = None if legacy_community and slot_state == "active" and not catalog_fields else source_id
+            fields = slot["present"] + catalog_fields
             result = bind.execute(sa.insert(releases).values(
                 plugin_id=plugin_id, version=slot["version"], state=slot_state, bundle_path=slot["bundle_path"],
                 python_path=slot["python_path"], bundle_digest=slot["bundle_digest"], env_key=None,
                 manifest=slot["manifest"], error=None, created_at=stamp,
-                source_id=row.get("source_id") if isinstance(row.get("source_id"), str) else None,
+                source_id=release_source if isinstance(release_source, str) else None,
                 origin=row.get("origin") if isinstance(row.get("origin"), str) else None,
                 activated_at=slot["activated_at"] if slot_state == "active" else None, retired_at=None,
-                ended_seq=None, fields=json.dumps(slot["present"])))
+                ended_seq=None, fields=json.dumps(fields)))
             release_id = result.inserted_primary_key[0]
             if slot["supplied_by"]:
                 bind.execute(sa.insert(bindings), [

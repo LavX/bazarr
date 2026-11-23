@@ -94,6 +94,11 @@ FAIL_STAGED = "fail_staged"
 # The stage's old data key when activation publishes a fresh directory. None marks a keyless stage.
 PROMOTE_STAGED_DATA = "promote_staged_data"
 
+UNKNOWN_CATALOG_SOURCE_NOTE = (
+    "No configured catalog source is known to have published this version, so it "
+    "gets no updates. Reinstall it from a catalog source to get updates again."
+)
+
 metadata = sa.MetaData()
 
 releases_table = sa.Table(
@@ -229,6 +234,67 @@ def matches_catalog_registration(data: dict[str, Any], source_id: str | None, re
     return recorded == current or (recorded is None and current == _LEGACY_CATALOG_REGISTRATION)
 
 
+def _legacy_cached_manifest_matches(data, source_id, source, plugin_id, version, manifest) -> bool:
+    """Corroborate an omitted URL with one entry from the registered catalog's saved refresh."""
+    entries = data.get("catalog_entries")
+    commit = source.get("resolved_commit")
+    id_key = "id" if manifest.get("schema_version") == 2 else "provider_id"
+    if (not isinstance(entries, dict) or not isinstance(commit, str) or not commit
+            or manifest.get(id_key) != plugin_id or manifest.get("version") != version
+            or manifest["source"].get("commit") != commit):
+        return False
+
+    installed = {**manifest, "source": {key: value for key, value in manifest["source"].items() if key != "trusted"}}
+    matched = False
+    for entry in entries.values():
+        if not (isinstance(entry, dict) and entry.get("source") == source_id
+                and entry.get("provider_id") == plugin_id and entry.get("version") == version
+                and entry.get("resolved_commit") == commit):
+            continue
+        cached = entry.get("manifest")
+        cached_source = cached.get("source") if isinstance(cached, dict) else None
+        if not isinstance(cached_source, dict) or cached_source.get("catalog_url") != source["url"]:
+            continue
+        comparable = {**cached, "source": {key: value for key, value in cached_source.items()
+                                           if key not in ("catalog_url", "trusted")}}
+        if comparable == installed:
+            if matched:
+                return False
+            matched = True
+    return matched
+
+
+def _legacy_catalog_registrations(data: dict[str, Any], plugin_id: str, row: dict[str, Any],
+                                  active: _Slot | None, staged: _Slot | None) -> dict[str, str | None] | None:
+    """Resolve each inline community release's binding before its first store write."""
+    from .state import OFFICIAL_CATALOG_SOURCE_ID
+
+    source_id = row.get("source_id")
+    if (row.get("origin") != "catalog" or not isinstance(source_id, str)
+            or source_id == OFFICIAL_CATALOG_SOURCE_ID or (active is None and staged is None)):
+        return None
+    source = (data.get("catalog_sources") or {}).get(source_id)
+    url = source.get("url") if (isinstance(source, dict) and not source.get("registration")
+                               and row.get("source_bound", True) is True) else None
+    registrations = {}
+    for state, slot in ((ACTIVE, active), (STAGED, staged)):
+        if slot is None:
+            continue
+        manifest_source = (slot.manifest or {}).get("source")
+        matches = False
+        if isinstance(url, str) and url and isinstance(manifest_source, dict):
+            if "catalog_url" in manifest_source:
+                matches = manifest_source["catalog_url"] == url
+            else:
+                matches = _legacy_cached_manifest_matches(data, source_id, source, plugin_id, slot.version,
+                                                         slot.manifest)
+        registrations[state] = _LEGACY_CATALOG_REGISTRATION if matches else None
+    row["source_bound"] = True
+    if not registrations.get(STAGED, registrations.get(ACTIVE)):
+        row.update(source_id=None, trusted=False, trust_note=UNKNOWN_CATALOG_SOURCE_NOTE)
+    return registrations
+
+
 def _loads(text: Any) -> dict[str, Any] | None:
     if not isinstance(text, str):
         return None
@@ -339,6 +405,7 @@ class StateDocument(dict):
     def __init__(self, data: dict[str, Any]):
         super().__init__(data)
         self.release_slots: dict[str, dict[str, SlotIdentity]] = {}
+        self.inline_releases: set[str] = set()
 
 
 def compose(data: dict[str, Any], rows: list[dict[str, Any]]) -> "StateDocument":
@@ -360,15 +427,19 @@ def compose(data: dict[str, Any], rows: list[dict[str, Any]]) -> "StateDocument"
          "data_key": _data_key(release)}
         for release in rows
         if release["state"] in (RETIRED, DRAINING) or release["plugin_id"] not in listed)
-    if not isinstance(installations, dict) or not rows:
+    if not isinstance(installations, dict):
         return document
     by_plugin: dict[str, dict[str, dict[str, Any]]] = {}
     for release in rows:
         if release["state"] in SLOT_STATES:
             by_plugin.setdefault(release["plugin_id"], {})[release["state"]] = release
     for plugin_id, installation in installations.items():
+        if not isinstance(installation, dict):
+            continue
         slots = by_plugin.get(plugin_id)
-        if not slots or not isinstance(installation, dict):
+        if not slots:
+            if installation.get("active_version") or installation.get("staged_version"):
+                document.inline_releases.add(plugin_id)
             continue
         document.release_slots[plugin_id] = {
             state: SlotIdentity(release["id"], release["created_at"], release.get("source_id"),
@@ -427,9 +498,9 @@ def split(data: dict[str, Any], rows: list[dict[str, Any]], *, now: str | None =
           previously_listed: "set[str] | None" = None) -> tuple[dict[str, Any], Plan]:
     """The document to store, and the release-table changes that go with it.
 
-    ``data`` is the full dict a caller works with. It is not changed (except that
-    the transient release marks are consumed from its rows):
-    the returned document is a copy without the release fields of the rows whose
+    ``data`` is the full dict a caller works with. The plan consumes transient marks
+    from its rows and records any legacy source detachment for the state.json copy.
+    The returned document is a copy without the release fields of the rows whose
     slots became releases. ``rows`` are the stored releases at the moment of the
     write, with their bindings, and with ``manifest`` for the ones in a slot.
     ``previously_listed`` is the set of plugin ids the document listed before this write. Only a plugin that was
@@ -462,9 +533,13 @@ def split(data: dict[str, Any], rows: list[dict[str, Any]], *, now: str | None =
         failure = installation.pop(FAIL_STAGED, None)
         promote_staged = PROMOTE_STAGED_DATA in installation
         staged_data = installation.pop(PROMOTE_STAGED_DATA, None)
+        active = _slot(installation, _ACTIVE_KEYS, True)
+        staged = _slot(installation, _STAGED_KEYS, False)
+        inline_source = installation.get("source_id")
+        legacy_registrations = None
+        if plugin_id in getattr(data, "inline_releases", ()) and getattr(data, "staging_install", None) != plugin_id:
+            legacy_registrations = _legacy_catalog_registrations(data, plugin_id, installation, active, staged)
         row = dict(installation)
-        active = _slot(row, _ACTIVE_KEYS, True)
-        staged = _slot(row, _STAGED_KEYS, False)
         existing = by_plugin.get(plugin_id, [])
         claimed: set[int] = set()
 
@@ -491,7 +566,9 @@ def split(data: dict[str, Any], rows: list[dict[str, Any]], *, now: str | None =
                 "error": None,
             }
             registration = None
-            if source_id is not None or (release is None and row.get("origin") == "catalog"):
+            if release is None and legacy_registrations is not None:
+                registration = legacy_registrations.get(state)
+            elif source_id is not None or (release is None and row.get("origin") == "catalog"):
                 registration = catalog_registration(data, source_id if source_id is not None else row.get("source_id"))
             elif release is not None:
                 registration = _field_value(release, _CATALOG_REGISTRATION)
@@ -504,6 +581,9 @@ def split(data: dict[str, Any], rows: list[dict[str, Any]], *, now: str | None =
                 values["source_id"] = source_id
             if release is None:
                 source, origin = row.get("source_id"), row.get("origin")
+                if legacy_registrations is not None:
+                    # Keep an unverified stage's former source so activation can discard it.
+                    source = inline_source if registration or state == STAGED else None
                 values.update(plugin_id=plugin_id, version=slot.version, created_at=stamp,
                               source_id=source if isinstance(source, str) else None,
                               origin=origin if isinstance(origin, str) else None)

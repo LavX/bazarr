@@ -1981,6 +1981,60 @@ def test_stage_install_refuses_a_changed_registration_before_copy_or_build(catal
     assert (active / "settings").read_text() == "private catalog A data"
 
 
+def test_replacing_catalog_url_keeps_cached_releases_out_of_the_new_registration(catalog_data_owner, monkeypatch):
+    from provider_hub import datadir, jobs, releases, state_store
+    from provider_hub.state import load_state, provider_hub_dir
+
+    service, kind, published, original_data, _ = catalog_data_owner
+    plugin_id, source_id, version = "examplehub", "catalog-a", "1.1.0"
+    old, = state_store.list_releases(plugin_id, states=(releases.ACTIVE,))
+    candidate = service.resolve_catalog_install(source_id, plugin_id, version)
+    assert candidate["catalog_registration"] == old.catalog_registration
+    queued = []
+    monkeypatch.setattr(jobs, "_enqueue", lambda _label, action, fields: queued.append((action, fields)) or 42)
+    monkeypatch.setattr(jobs, "_checkpoint", lambda _job_id: lambda _message: None)
+    jobs.queue_install(source_id, plugin_id, version, entry_key=candidate["entry_key"],
+                       catalog_registration=candidate["catalog_registration"])
+    jobs.queue_update(plugin_id)
+
+    new_url = "https://github.com/example/replacement-catalog/blob/main/catalog.json"
+    replacement = service.add_catalog_source(source_id, new_url)
+    assert replacement["registration"] != old.catalog_registration
+    entries = load_state()["catalog_entries"]
+    assert all(entry["source"] != source_id for entry in entries.values())
+    assert any(entry["source"] == "catalog-b" for entry in entries.values())
+    assert service.offered_update_version(plugin_id) is None
+
+    next_release = {**published, "source": {**published["source"], "catalog_url": new_url}}
+    monkeypatch.setattr(service, "_fetch_github_catalog", lambda *_args, **_kwargs: (
+        {"plugins": [{"manifest": next_release}]}, next_release["source"]["commit"]))
+    assert service.refresh_catalog(source_ids={source_id})["entries"] == 1
+    assert service.offered_update_version(plugin_id) is None
+    for action, fields in queued:
+        with pytest.raises(jobs.JobFailed, match="catalog registration changed"):
+            getattr(jobs, action)(**fields)
+    assert state_store.list_releases(plugin_id, states=(releases.ACTIVE,)) == [old]
+
+    def smoke(*_args, data_dir, **_kwargs):
+        if not (data_dir / "settings").exists():
+            (data_dir / "settings").write_text("new catalog settings")
+        assert (data_dir / "settings").read_text() == "new catalog settings"
+
+    monkeypatch.setattr(kind, "smoke_test", smoke)
+    candidate = service.resolve_catalog_install(source_id, plugin_id, version)
+    assert service.install_catalog_entry(source_id, plugin_id, version, entry_key=candidate["entry_key"],
+                                         expected_registration=candidate["catalog_registration"])["staged_version"] == version
+    assert service.activate_release(plugin_id, at_boot=True).activated
+    active, = state_store.list_releases(plugin_id, states=(releases.ACTIVE,))
+    assert (active.source_id, active.catalog_registration) == (source_id, replacement["registration"])
+    retired, = state_store.list_releases(plugin_id, states=(releases.RETIRED,))
+    assert (retired.id, retired.catalog_registration, retired.data_key) == (
+        old.id, old.catalog_registration, original_data.name)
+    assert (datadir.release_path(provider_hub_dir(), plugin_id, active.data_key) / "settings").read_text() == (
+        "new catalog settings")
+    assert (original_data / "settings").read_text() == "private catalog A data"
+
+
 @pytest.mark.parametrize("already_active", [False, True])
 def test_reinstalling_the_same_bundle_uses_the_new_catalog_registration(catalog_data_owner, monkeypatch, already_active):
     from plugin_platform_helpers import provider_manifest_v2
