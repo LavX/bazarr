@@ -11,6 +11,7 @@ import pytest
 from subzero.language import Language
 
 from provider_hub import protocol, registry, worker_runner
+from provider_hub.worker import RequestNotAdmitted
 from subliminal_patch import core, core_persistent
 from subliminal_patch.providers.utils import get_archive_from_bytes, get_subtitle_from_archive
 
@@ -327,7 +328,9 @@ class ArchiveSearchWorker:
         self.selections = []
         self.searches = []
 
-    def request(self, operation, request, timeout):
+    def request(self, operation, request, timeout, *, admit=None):
+        if admit is not None and not admit():
+            raise RequestNotAdmitted()
         if operation == "search":
             self.searches.append(request["video"])
             payload = self.payload(request["video"]) if callable(self.payload) else self.payload

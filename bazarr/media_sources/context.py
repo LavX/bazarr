@@ -45,6 +45,7 @@ class SourceItemContext:
     created_at: Optional[datetime] = None
     source_created_at: Optional[datetime] = None
     source_name: Optional[str] = None
+    pinned_file_identity: Optional[tuple[int, int]] = None  # device and inode from an explicit Discover copy
 
     def same_item(self, current):
         """SQLite may reuse the integer id of a deleted item."""
