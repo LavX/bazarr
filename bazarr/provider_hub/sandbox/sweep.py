@@ -187,6 +187,17 @@ def _remember_unproven_tree(instance: str, config_dir=None) -> bool:
     return _persist_uncertainty(instance, config_dir)
 
 
+def persist_previous_worker_observations(config_dir) -> None:
+    """Save observations from read-only checks before startup can restart Bazarr."""
+    if sys.platform != "linux":
+        return
+    instance = instance_key(config_dir)
+    with _previous_worker_lock:
+        remembered = instance in _previous_worker_uncertainty
+    if remembered:
+        _persist_uncertainty(instance, config_dir)
+
+
 def _has_unproven_tree(instance: str, config_dir=None, *, read_only=False) -> bool:
     with _previous_worker_lock:
         remembered = instance in _previous_worker_uncertainty

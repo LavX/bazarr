@@ -164,12 +164,9 @@ register_extra_languages()
 provider_hub_registration_ok = True
 try:
     from provider_hub.datadir import cleanup_probe_workspaces
-    from provider_hub.sandbox.sweep import previous_workers_stopped
     from provider_hub.state import provider_hub_dir
 
-    hub_dir = provider_hub_dir()
-    cleanup_probe_workspaces(
-        hub_dir, lambda: previous_workers_stopped(hub_dir.parent, deadline=time.monotonic() + 2.0))
+    cleanup_probe_workspaces(provider_hub_dir())
 except (OSError, ValueError):  # pragma: no cover - temporary files must not prevent startup
     logging.warning("Unable to clear abandoned Provider Hub probe folders", exc_info=True)
 # Auto-install official-catalog versions of enabled built-in providers so the
