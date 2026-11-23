@@ -76,16 +76,21 @@ def source_language_modules():
 @pytest.fixture
 def source_languages(source_language_modules, source_db):
     """Run language startup against this source database and own its lookup cache."""
+    from sqlalchemy.dialects.postgresql import insert as pg_insert
+    from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+
     custom_lang, get_languages = source_language_modules
+    insert = pg_insert if source_db.get_bind().dialect.name == "postgresql" else sqlite_insert
     missing = object()
     previous = getattr(get_languages, "languages_dict", missing)
     initialized = missing
     try:
-        # Both modules cache the database imported before source_db replaces it.
+        # Both modules cache the startup session and its dialect-specific insert.
         # Restore those references before the test can import another consumer.
         with pytest.MonkeyPatch.context() as patch:
-            patch.setattr(get_languages, "database", source_db)
-            patch.setattr(custom_lang, "database", source_db)
+            for module in (get_languages, custom_lang):
+                patch.setattr(module, "database", source_db)
+                patch.setattr(module, "insert", insert)
             get_languages.load_language_in_db()
             initialized = get_languages.languages_dict
         yield
