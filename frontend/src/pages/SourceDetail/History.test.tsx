@@ -345,10 +345,16 @@ it("shows a job failure and refreshes history without claiming an upgrade", asyn
   expect(historyRead).toHaveBeenCalledTimes(3);
 });
 
-it("excludes the current source release with its language flags and refreshes its history", async () => {
+it("excludes a confirmed release without deleting or expiring the current subtitle document", async () => {
   const user = userEvent.setup();
   const writes: Record<string, FormDataEntryValue>[] = [];
+  const contentRead = vi.fn();
+  let excluded = false;
   server.use(
+    http.get("/api/sources/items/7/subtitles/:language/content", () => {
+      contentRead();
+      return HttpResponse.json({ content: "Current source subtitle cues" });
+    }),
     http.get("/api/sources/items/7/history", () =>
       HttpResponse.json({
         data: [
@@ -360,7 +366,7 @@ it("excludes the current source release with its language flags and refreshes it
             subs_id: null,
             upgradable: false,
           },
-          row,
+          { ...row, blacklisted: excluded },
         ],
         total: 2,
       }),
@@ -370,29 +376,50 @@ it("excludes the current source release with its language flags and refreshes it
     ),
     http.post("/api/sources/items/7/blacklist", async ({ request }) => {
       writes.push(Object.fromEntries(await request.formData()));
+      excluded = true;
       return new HttpResponse(null, { status: 204 });
     }),
   );
-  customRender(<SourceHistoryView item={item} />);
+  customRender(
+    <>
+      <SourceHistoryView item={item} />
+      <OpenDocument />
+    </>,
+  );
+  expect(await screen.findByText("Current source subtitle cues")).toBeVisible();
   await waitFor(() =>
     expect(screen.getByRole("button", { name: "Exclude" })).toBeEnabled(),
   );
   expect(screen.getByRole("button", { name: "Upgrade" })).toBeDisabled();
   await user.click(screen.getByRole("button", { name: "Exclude" }));
+  const confirm = await screen.findByRole("dialog", {
+    name: "Exclude release from search?",
+  });
+  expect(writes).toEqual([]);
   expect(
-    await screen.findByText("Subtitle excluded from search."),
+    within(confirm).getByText(/without deleting a subtitle file/i),
+  ).toBeVisible();
+  await user.click(
+    within(confirm).getByRole("button", { name: "Exclude release" }),
+  );
+  expect(
+    await screen.findByText(
+      "Release excluded from search. No subtitle file was deleted.",
+    ),
   ).toBeVisible();
   expect(writes).toEqual([
     {
       history_id: "17",
       provider: "source-provider",
       subs_id: "source-release",
-      subtitles_path: subtitle.path,
-      language: "en",
-      hi: "true",
-      forced: "false",
+      delete_file: "false",
     },
   ]);
+  await waitFor(() =>
+    expect(screen.getByRole("button", { name: "Exclude" })).toBeDisabled(),
+  );
+  expect(screen.getByText("Current source subtitle cues")).toBeVisible();
+  expect(contentRead).toHaveBeenCalledTimes(1);
 });
 
 it("refuses a moved item before posting an upgrade", async () => {
@@ -466,19 +493,86 @@ it("does not claim an upgrade when the completed job has no result", async () =>
   expect(screen.queryByText("1 subtitle upgraded.")).not.toBeInTheDocument();
 });
 
-it("refuses exclusion when an upload replaced the release after opening history", async () => {
+it.each(["edited", "replaced", "missing"] as const)(
+  "excludes the selected historical release when the current subtitle was %s",
+  async (condition) => {
+    const user = userEvent.setup();
+    const writes: Record<string, FormDataEntryValue>[] = [];
+    const historical = { ...row, language: null, subtitles_path: null };
+    const replacement = {
+      ...row,
+      action: 4,
+      history_id: 20,
+      provider: null,
+      subs_id: null,
+      upgradable: false,
+      description: "Uploaded replacement subtitle",
+    };
+    server.use(
+      http.get("/api/sources/items/7", () =>
+        HttpResponse.json({
+          ...item,
+          subtitles: condition === "missing" ? [] : item.subtitles,
+        }),
+      ),
+      http.get("/api/sources/items/7/history", () =>
+        HttpResponse.json({
+          data:
+            condition === "replaced" ? [replacement, historical] : [historical],
+          total: condition === "replaced" ? 2 : 1,
+        }),
+      ),
+      http.post("/api/sources/items/7/blacklist", async ({ request }) => {
+        writes.push(Object.fromEntries(await request.formData()));
+        return new HttpResponse(null, { status: 204 });
+      }),
+    );
+    customRender(<SourceHistoryView item={item} />);
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Exclude" })).toBeEnabled(),
+    );
+    await user.click(screen.getByRole("button", { name: "Exclude" }));
+    const confirm = await screen.findByRole("dialog", {
+      name: "Exclude release from search?",
+    });
+    expect(writes).toEqual([]);
+    await user.click(
+      within(confirm).getByRole("button", { name: "Exclude release" }),
+    );
+    expect(
+      await screen.findByText(
+        "Release excluded from search. No subtitle file was deleted.",
+      ),
+    ).toBeVisible();
+    expect(writes).toEqual([
+      {
+        delete_file: "false",
+        history_id: "17",
+        provider: "source-provider",
+        subs_id: "source-release",
+      },
+    ]);
+    if (condition === "replaced") {
+      expect(screen.getByText("Uploaded replacement subtitle")).toBeVisible();
+    }
+  },
+);
+
+it("does not silently exclude different release metadata after confirmation", async () => {
   const user = userEvent.setup();
-  let replaced = false;
-  const write = vi.fn();
+  let changed = false;
+  const writes: Record<string, FormDataEntryValue>[] = [];
   server.use(
     http.get("/api/sources/items/7/history", () =>
       HttpResponse.json({
-        data: replaced ? [{ ...row, action: 4, history_id: 20 }, row] : [row],
-        total: replaced ? 2 : 1,
+        data: [
+          { ...row, subs_id: changed ? "replacement-release" : row.subs_id },
+        ],
+        total: 1,
       }),
     ),
-    http.post("/api/sources/items/7/blacklist", () => {
-      write();
+    http.post("/api/sources/items/7/blacklist", async ({ request }) => {
+      writes.push(Object.fromEntries(await request.formData()));
       return new HttpResponse(null, { status: 204 });
     }),
   );
@@ -486,14 +580,23 @@ it("refuses exclusion when an upload replaced the release after opening history"
   await waitFor(() =>
     expect(screen.getByRole("button", { name: "Exclude" })).toBeEnabled(),
   );
-  replaced = true;
   await user.click(screen.getByRole("button", { name: "Exclude" }));
+  const confirm = await screen.findByRole("dialog", {
+    name: "Exclude release from search?",
+  });
+  changed = true;
+  await user.click(
+    within(confirm).getByRole("button", { name: "Exclude release" }),
+  );
+  expect(await screen.findByRole("alert")).toHaveTextContent(
+    /no longer|changed|unavailable/i,
+  );
+  expect(writes).toEqual([]);
   expect(
-    await screen.findByText(
-      "This subtitle is no longer available for exclusion.",
+    screen.queryByText(
+      "Release excluded from search. No subtitle file was deleted.",
     ),
-  ).toBeVisible();
-  expect(write).not.toHaveBeenCalled();
+  ).not.toBeInTheDocument();
 });
 
 it("never reuses release metadata from a colliding item or a different language variant", () => {

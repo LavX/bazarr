@@ -7,6 +7,7 @@ import {
   faLayerGroup,
 } from "@fortawesome/free-solid-svg-icons";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
+import { isAxiosError } from "axios";
 import { useCombineSubtitles } from "@/apis/hooks/combine";
 import queryClient from "@/apis/queries";
 import { expireSourceSubtitleDocument } from "@/apis/queries/sourceSubtitleDocument";
@@ -37,6 +38,7 @@ import {
   sourceHistoryApi,
   sourceReleaseForSubtitle,
   useSourceHistory,
+  useSourceReleaseExclusion,
 } from "./History";
 
 export type OpenSourceEditor = (path: string) => void;
@@ -186,6 +188,8 @@ export function SourceSubtitleMenu({
 }) {
   const modals = useModals();
   const write = useSourceWrite({ notifyError: true });
+  const deleteAndExclude = useSourceWrite();
+  const excludeRelease = useSourceReleaseExclusion(item);
   const rebuild = useCombineSubtitles();
   const { canCombine, openCombine } = useSourceCombineAction(item);
   const [opened, setOpened] = useState(false);
@@ -336,30 +340,73 @@ export function SourceSubtitleMenu({
                       cancel: "Cancel",
                     },
                     confirmProps: { color: "red" },
-                    onConfirm: () =>
-                      write.mutate(async () => {
-                        const current =
-                          await sourceDetailApi.requireCurrentItem(
-                            item,
+                    onConfirm: () => {
+                      setFileError(undefined);
+                      excludeRelease.reset();
+                      deleteAndExclude.mutate(async () => {
+                        try {
+                          const current =
+                            await sourceDetailApi.requireCurrentItem(
+                              item,
+                              subtitle,
+                            );
+                          const { data } = await withInlineErrors(() =>
+                            sourceHistoryApi.history(item.id),
+                          );
+                          const latest = sourceReleaseForSubtitle(
+                            data,
+                            current,
                             subtitle,
                           );
-                        const { data } = await withInlineErrors(() =>
-                          sourceHistoryApi.history(item.id),
-                        );
-                        const latest = sourceReleaseForSubtitle(
-                          data,
-                          current,
-                          subtitle,
-                        );
-                        if (latest?.history_id !== release.history_id) {
-                          throw new Error(
-                            "The subtitle release changed. Reopen its actions to try again.",
+                          if (
+                            latest?.history_id !== release.history_id ||
+                            latest.provider !== release.provider ||
+                            latest.subs_id !== release.subs_id
+                          ) {
+                            throw new Error(
+                              "The subtitle release changed. Reopen its actions to try again.",
+                            );
+                          }
+                          await withInlineErrors(() =>
+                            sourceHistoryApi.exclude(item.id, latest),
                           );
+                        } catch (error) {
+                          if (
+                            !isAxiosError<{ code?: string }>(error) ||
+                            error.response?.status !== 409 ||
+                            error.response.data?.code !==
+                              "source_release_changed"
+                          ) {
+                            showNotification(
+                              notification.error(
+                                "Subtitle action failed",
+                                sourceError(error),
+                              ),
+                            );
+                          } else {
+                            modals.openConfirmModal({
+                              title: "Exclude release without deleting?",
+                              children: (
+                                <Text size="sm">
+                                  The current subtitle could not be verified for
+                                  this release, so no file was deleted. Exclude
+                                  only the selected release from future
+                                  searches? No subtitle file will be deleted,
+                                  even if it changed, was replaced, or is
+                                  already missing.
+                                </Text>
+                              ),
+                              labels: {
+                                confirm: "Exclude release only",
+                                cancel: "Cancel",
+                              },
+                              onConfirm: () => excludeRelease.mutate(release),
+                            });
+                          }
+                          throw error;
                         }
-                        return withInlineErrors(() =>
-                          sourceHistoryApi.exclude(item.id, latest),
-                        );
-                      }),
+                      });
+                    },
                   })
                 }
               >
@@ -372,10 +419,24 @@ export function SourceSubtitleMenu({
         <Action
           label="Actions"
           icon={faEllipsis}
-          disabled={write.isPending || rebuild.isPending || checkingRebuild}
+          disabled={
+            write.isPending ||
+            deleteAndExclude.isPending ||
+            excludeRelease.isPending ||
+            rebuild.isPending ||
+            checkingRebuild
+          }
         />
       </SubtitleToolsMenu>
       {fileError && <Alert color="red">{fileError}</Alert>}
+      {excludeRelease.isError && (
+        <Alert color="red">{sourceError(excludeRelease.error)}</Alert>
+      )}
+      {excludeRelease.isSuccess && (
+        <Text role="status" size="sm">
+          Release excluded from search. No subtitle file was deleted.
+        </Text>
+      )}
     </Stack>
   );
 }

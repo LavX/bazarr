@@ -9,6 +9,7 @@ import {
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ColumnDef } from "@tanstack/react-table";
 import queryClient from "@/apis/queries";
+import { QueryKeys } from "@/apis/queries/keys";
 import {
   expireSourceSubtitleDocument,
   invalidateSourceSubtitleDocuments,
@@ -73,13 +74,29 @@ function ownsHistory(row: SourceHistoryRow, item: SourceItem) {
   );
 }
 
+function canExcludeSourceRelease(row: SourceHistoryRow, item: SourceItem) {
+  return (
+    row.origin === "source" &&
+    row.source_key === `source:${item.source_id}` &&
+    row.source_id === item.source_id &&
+    row.item_id === item.id &&
+    row.item_kind === item.kind &&
+    Number.isSafeInteger(row.history_id) &&
+    row.history_id > 0 &&
+    [1, 2, 3].includes(row.action) &&
+    !row.blacklisted &&
+    !!row.provider?.trim() &&
+    !!row.subs_id?.trim()
+  );
+}
+
 export function sourceReleaseForSubtitle(
   rows: SourceHistoryRow[] | undefined,
   item: SourceItem,
   subtitle: Subtitle,
 ) {
-  // Source history is newest first. A replacement or deletion ends the old
-  // release's provenance even when the new subtitle keeps the same path.
+  // History identifies a candidate release. The backend must verify its
+  // published file version before deleting the current subtitle.
   const release = rows?.find(
     (row) =>
       ownsHistory(row, item) &&
@@ -141,20 +158,33 @@ class SourceHistoryApi extends BaseApi {
       );
     }
   }
+
+  async excludeRelease(id: number, row: SourceHistoryRow) {
+    await this.post(`/${id}/blacklist`, {
+      delete_file: false,
+      history_id: row.history_id,
+      provider: row.provider,
+      subs_id: row.subs_id,
+    });
+  }
 }
 
 export const sourceHistoryApi = new SourceHistoryApi();
 
+function sourceHistoryKey(item: SourceItem) {
+  return [
+    ...sourceDetailKeys.root,
+    "history",
+    item.source_id,
+    item.library_id,
+    item.kind,
+    item.id,
+  ];
+}
+
 export function useSourceHistory(item: SourceItem, enabled = true) {
   return useQuery({
-    queryKey: [
-      ...sourceDetailKeys.root,
-      "history",
-      item.source_id,
-      item.library_id,
-      item.kind,
-      item.id,
-    ],
+    queryKey: sourceHistoryKey(item),
     queryFn: ({ signal }) =>
       withInlineErrors(() => sourceHistoryApi.history(item.id, signal)),
     enabled:
@@ -164,6 +194,53 @@ export function useSourceHistory(item: SourceItem, enabled = true) {
       item.kind !== "sports",
     retry: false,
     placeholderData: undefined,
+  });
+}
+
+export function useSourceReleaseExclusion(item: SourceItem) {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: async (row: SourceHistoryRow) => {
+      if (!canExcludeSourceRelease(row, item)) {
+        throw new Error(
+          "This provider release is no longer available for exclusion.",
+        );
+      }
+      const current = await sourceDetailApi.requireCurrentItem(item);
+      const fresh = await withInlineErrors(() =>
+        sourceHistoryApi.history(item.id),
+      );
+      const release = fresh.data.find(
+        (value) => value.history_id === row.history_id,
+      );
+      if (
+        !release ||
+        !canExcludeSourceRelease(release, current) ||
+        release.provider !== row.provider ||
+        release.subs_id !== row.subs_id
+      ) {
+        throw new Error(
+          "This provider release is no longer available for exclusion.",
+        );
+      }
+      await withInlineErrors(() =>
+        sourceHistoryApi.excludeRelease(item.id, release),
+      );
+    },
+    onSuccess: async () => {
+      await Promise.all([
+        client.invalidateQueries({
+          queryKey: sourceHistoryKey(item),
+          exact: true,
+        }),
+        client.invalidateQueries({
+          queryKey:
+            item.kind === "episode"
+              ? [QueryKeys.Series, QueryKeys.Episodes, QueryKeys.Blacklist]
+              : [QueryKeys.Movies, QueryKeys.Blacklist],
+        }),
+      ]);
+    },
   });
 }
 
@@ -332,49 +409,14 @@ export function SourceUpgradeButton({
 }
 
 export function SourceHistoryView({ item }: { item: SourceItem }) {
+  const modals = useModals();
   const history = useSourceHistory(item);
   const current = useCurrentSourceItem(item);
   const upgrade = useSourceUpgrade(
     current.item ?? item,
     history.isError || !current.allowed,
   );
-  const refresh = useRefreshSourceDetails();
-  const exclude = useMutation({
-    mutationFn: async (row: SourceHistoryRow) => {
-      const live = current.item;
-      if (
-        !current.allowed ||
-        !live ||
-        history.isError ||
-        !live.subtitles.some(
-          (subtitle) =>
-            sourceReleaseForSubtitle(history.data?.data, live, subtitle)
-              ?.history_id === row.history_id,
-        )
-      ) {
-        throw new Error("This subtitle is no longer available for exclusion.");
-      }
-      const freshItem = await sourceDetailApi.requireCurrentItem(item);
-      const freshHistory = await withInlineErrors(() =>
-        sourceHistoryApi.history(item.id),
-      );
-      const freshRow = freshHistory.data.find(
-        (value) => value.history_id === row.history_id,
-      );
-      if (
-        !freshRow ||
-        !freshItem.subtitles.some(
-          (subtitle) =>
-            sourceReleaseForSubtitle(freshHistory.data, freshItem, subtitle)
-              ?.history_id === freshRow.history_id,
-        )
-      ) {
-        throw new Error("This subtitle is no longer available for exclusion.");
-      }
-      await withInlineErrors(() => sourceHistoryApi.exclude(item.id, freshRow));
-    },
-    onSuccess: refresh,
-  });
+  const exclude = useSourceReleaseExclusion(item);
   const columns: ColumnDef<SourceHistoryRow>[] = [
     {
       id: "action",
@@ -442,14 +484,6 @@ export function SourceHistoryView({ item }: { item: SourceItem }) {
     {
       id: "actions",
       cell: ({ row: { original } }) => {
-        const release = current.item?.subtitles.some(
-          (subtitle) =>
-            sourceReleaseForSubtitle(
-              history.data?.data,
-              current.item!,
-              subtitle,
-            )?.history_id === original.history_id,
-        );
         return (
           <Group gap="xs" wrap="nowrap">
             {original.upgradable && (
@@ -465,24 +499,34 @@ export function SourceHistoryView({ item }: { item: SourceItem }) {
                 onClick={() => upgrade.mutate(original)}
               />
             )}
-            {original.provider &&
-              original.subs_id &&
-              original.language &&
-              original.subtitles_path && (
-                <Action
-                  label="Exclude"
-                  icon={faFileExcel}
-                  disabled={
-                    !current.allowed ||
-                    history.isError ||
-                    !release ||
-                    original.blacklisted ||
-                    exclude.isPending ||
-                    upgrade.isPending
-                  }
-                  onClick={() => exclude.mutate(original)}
-                />
-              )}
+            {original.provider && original.subs_id && (
+              <Action
+                label="Exclude"
+                icon={faFileExcel}
+                disabled={
+                  !current.allowed ||
+                  history.isError ||
+                  !canExcludeSourceRelease(original, current.item ?? item) ||
+                  exclude.isPending ||
+                  upgrade.isPending
+                }
+                onClick={() =>
+                  modals.openConfirmModal({
+                    title: "Exclude release from search?",
+                    children: (
+                      <Text size="sm">
+                        Exclude this release from {original.provider} from
+                        future searches without deleting a subtitle file. This
+                        also works if the file was changed, replaced, or is
+                        already missing.
+                      </Text>
+                    ),
+                    labels: { confirm: "Exclude release", cancel: "Cancel" },
+                    onConfirm: () => exclude.mutate(original),
+                  })
+                }
+              />
+            )}
           </Group>
         );
       },
@@ -500,7 +544,7 @@ export function SourceHistoryView({ item }: { item: SourceItem }) {
       )}
       {exclude.isSuccess && (
         <Text role="status" size="sm">
-          Subtitle excluded from search.
+          Release excluded from search. No subtitle file was deleted.
         </Text>
       )}
       <SourceUpgradeFeedback upgrade={upgrade} />

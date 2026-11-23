@@ -13,6 +13,7 @@ import { act, rawRender, screen, waitFor, within } from "@/tests";
 import server from "@/tests/mocks/node";
 import * as files from "@/utilities/files";
 import { sourceDetailKeys, SourceItem } from "./api";
+import type { SourceHistoryRow } from "./History";
 import { SourceMovieDetailView, SourceSeriesDetailView } from ".";
 
 // The viewer virtualizes these rows, and jsdom has no viewport to lay out.
@@ -84,6 +85,31 @@ function fixture(kind: Kind): SourceItem {
     missing_subtitles: [
       { code2: "hu", name: "Hungarian", hi: false, forced: true },
     ],
+  };
+}
+
+function providerRelease(item: SourceItem): SourceHistoryRow {
+  return {
+    origin: "source",
+    source_key: "source:3",
+    source_id: 3,
+    item_id: item.id,
+    item_kind: item.kind,
+    history_id: 81,
+    action: 1,
+    language: { code2: "en", name: "English", hi: true, forced: false },
+    provider: "fixture-provider",
+    subs_id: "source-release-81",
+    subtitles_path: `/media/${item.kind}.en.hi.srt`,
+    video_path: item.path,
+    blacklisted: false,
+    upgradable: false,
+    score: "90%",
+    matches: [],
+    dont_matches: [],
+    timestamp: "a minute ago",
+    parsed_timestamp: "11/23/2026 05:00:00",
+    description: "Downloaded provider release",
   };
 }
 
@@ -867,26 +893,11 @@ it.each([
   },
 );
 
-it("excludes a current provider release from its physical source episode row", async () => {
+it("keeps the default delete-and-exclude request for a current source episode release", async () => {
   const user = userEvent.setup();
   const { item } = openPage("episode");
   const excluded: unknown[] = [];
-  const release = {
-    origin: "source",
-    source_key: "source:3",
-    source_id: 3,
-    item_id: 71,
-    item_kind: "episode",
-    history_id: 81,
-    action: 1,
-    language: { code2: "en", hi: true, forced: false },
-    provider: "fixture-provider",
-    subs_id: "source-release-81",
-    subtitles_path: "/media/episode.en.hi.srt",
-    video_path: "/media/episode.mkv",
-    blacklisted: false,
-    upgradable: false,
-  };
+  const release = providerRelease(item);
   server.use(
     http.get("/api/sources/items/71/history", () =>
       HttpResponse.json({ data: [release], total: 1 }),
@@ -924,6 +935,200 @@ it("excludes a current provider release from its physical source episode row", a
   );
   expect(writes).toEqual([]);
 });
+
+it.each(["confirm", "cancel"] as const)(
+  "requires a separate choice to %s exclusion only after the server refuses changed-release deletion",
+  async (choice) => {
+    const user = userEvent.setup();
+    const activeDocument = createMemoryRouter(
+      [
+        {
+          path: "/subtitles/preview/:mediaType/:mediaId/:language",
+          element: <SubtitleViewer />,
+        },
+      ],
+      { initialEntries: ["/subtitles/preview/source/7/en%3Ahi"] },
+    );
+    const { item } = openPage(
+      "movie",
+      {},
+      <section aria-label="Open source viewer">
+        <RouterProvider router={activeDocument} />
+      </section>,
+    );
+    const viewer = within(
+      screen.getByRole("region", { name: "Open source viewer" }),
+    );
+    const release = providerRelease(item);
+    const excluded: Record<string, FormDataEntryValue>[] = [];
+    const contentRead = vi.fn();
+    let blacklisted = false;
+    server.use(
+      http.get("/api/sources/items/7/history", () =>
+        HttpResponse.json({
+          data: [{ ...release, blacklisted }],
+          total: 1,
+        }),
+      ),
+      http.get("/api/sources/items/7/subtitles/:language/content", () => {
+        contentRead();
+        return HttpResponse.json({
+          content:
+            "1\n00:00:01,000 --> 00:00:02,000\nEdited current subtitle\n",
+          encoding: "utf-8",
+          format: "srt",
+          size: 70,
+          mediaId: 7,
+        });
+      }),
+      http.post("/api/sources/items/7/blacklist", async ({ request }) => {
+        const body = Object.fromEntries(await request.formData());
+        excluded.push(body);
+        if (body.delete_file !== "false") {
+          return HttpResponse.json(
+            {
+              code: "source_release_changed",
+              message: "The current subtitle no longer matches this release.",
+            },
+            { status: 409 },
+          );
+        }
+        blacklisted = true;
+        return new HttpResponse(null, { status: 204 });
+      }),
+    );
+    await openItem(user, item);
+    expect(await viewer.findByText("Edited current subtitle")).toBeVisible();
+    await openMenu(user, item);
+    await user.click(
+      await screen.findByRole("menuitem", { name: "Exclude from search..." }),
+    );
+    const deletion = await screen.findByRole("dialog", {
+      name: "Exclude from search?",
+    });
+    await user.click(
+      within(deletion).getByRole("button", { name: "Exclude from search" }),
+    );
+    const safeChoice = await screen.findByRole("dialog", {
+      name: "Exclude release without deleting?",
+    });
+    await waitFor(() =>
+      expect(
+        within(safeChoice).getByText(/no subtitle file will be deleted/i),
+      ).toBeVisible(),
+    );
+    expect(excluded).toEqual([
+      {
+        history_id: "81",
+        provider: "fixture-provider",
+        subs_id: "source-release-81",
+        subtitles_path: "/media/movie.en.hi.srt",
+        language: "en",
+        hi: "true",
+        forced: "false",
+      },
+    ]);
+    expect(viewer.getByText("Edited current subtitle")).toBeVisible();
+    expect(contentRead).toHaveBeenCalledTimes(1);
+    await user.click(
+      within(safeChoice).getByRole("button", {
+        name: choice === "confirm" ? "Exclude release only" : "Cancel",
+      }),
+    );
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("dialog", {
+          name: "Exclude release without deleting?",
+        }),
+      ).not.toBeInTheDocument(),
+    );
+    if (choice === "confirm") {
+      expect(
+        await screen.findByText(
+          "Release excluded from search. No subtitle file was deleted.",
+        ),
+      ).toBeVisible();
+      expect(excluded).toEqual([
+        {
+          history_id: "81",
+          provider: "fixture-provider",
+          subs_id: "source-release-81",
+          subtitles_path: "/media/movie.en.hi.srt",
+          language: "en",
+          hi: "true",
+          forced: "false",
+        },
+        {
+          delete_file: "false",
+          history_id: "81",
+          provider: "fixture-provider",
+          subs_id: "source-release-81",
+        },
+      ]);
+      await openMenu(user, item);
+      expect(
+        screen.queryByRole("menuitem", { name: "Exclude from search..." }),
+      ).not.toBeInTheDocument();
+    } else {
+      expect(excluded).toHaveLength(1);
+      expect(
+        screen.queryByText(
+          "Release excluded from search. No subtitle file was deleted.",
+        ),
+      ).not.toBeInTheDocument();
+    }
+    expect(viewer.getByText("Edited current subtitle")).toBeVisible();
+    expect(contentRead).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole("row", { name: /movie\.fr\.srt/ })).toBeVisible();
+    expect(writes).toEqual([]);
+  },
+);
+
+it.each([
+  { status: 409, code: "different_conflict" },
+  { status: 422, code: "source_release_changed" },
+])(
+  "does not offer exclusion-only fallback for status $status and code $code",
+  async ({ status, code }) => {
+    const user = userEvent.setup();
+    const { item } = openPage("episode");
+    const excluded: unknown[] = [];
+    server.use(
+      http.get("/api/sources/items/71/history", () =>
+        HttpResponse.json({ data: [providerRelease(item)], total: 1 }),
+      ),
+      http.post("/api/sources/items/71/blacklist", async ({ request }) => {
+        excluded.push(Object.fromEntries(await request.formData()));
+        return HttpResponse.json(
+          { code, message: "The selected release could not be excluded." },
+          { status },
+        );
+      }),
+    );
+    await openItem(user, item);
+    await openMenu(user, item);
+    await user.click(
+      await screen.findByRole("menuitem", { name: "Exclude from search..." }),
+    );
+    const deletion = await screen.findByRole("dialog", {
+      name: "Exclude from search?",
+    });
+    await user.click(
+      within(deletion).getByRole("button", { name: "Exclude from search" }),
+    );
+    await waitFor(() => expect(excluded).toHaveLength(1));
+    expect(
+      await screen.findByText("The selected release could not be excluded."),
+    ).toBeVisible();
+    expect(
+      screen.queryByRole("dialog", {
+        name: "Exclude release without deleting?",
+      }),
+    ).not.toBeInTheDocument();
+    expect(excluded).toHaveLength(1);
+    expect(writes).toEqual([]);
+  },
+);
 
 it("refreshes an open source viewer after a same-language upload and removes the document on deletion", async () => {
   const user = userEvent.setup();
