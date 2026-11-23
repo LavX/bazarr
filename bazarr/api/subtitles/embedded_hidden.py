@@ -136,11 +136,9 @@ def _outcome(media_type, media_id, key, previous_missing):
     before = {item for item in _listing(previous_missing) if isinstance(item, str)}
     after = dict.fromkeys(item for item in _listing(row.missing_subtitles if row else None)
                           if isinstance(item, str))
-    before_variants = {_variant(item) for item in before}
     after_variants = {_variant(item) for item in after}
-    # Keep the public response's same-language, same-forced-status comparison.
-    wanted = any(code == base and is_forced == forced
-                 for code, _hi, is_forced in after_variants - before_variants)
+    # Legacy callers ask whether a matching variant is missing after the hide.
+    wanted = any(code == base and is_forced == forced for code, _hi, is_forced in after_variants)
     # The stored missing keys capture the indexer's own HI, forced, and cutoff
     # rules. Hiding a cutoff track can add other languages to Wanted as well.
     newly_wanted = [_track_language(item) for item in after if item not in before]
@@ -160,6 +158,10 @@ def _outcome(media_type, media_id, key, previous_missing):
         remaining_subtitles.append(subtitle)
         if subtitle['forced'] == forced:
             covered_by.append(subtitle)
+        # Wanted can read a mixed HI+forced track as HI. Coverage still
+        # requires the actual forced status to match the hidden track.
+        if subtitle['forced'] != forced:
+            continue
         if target in after_variants or (subtitle['embedded'] and not settings.general.use_embedded_subs):
             continue
         actual = _coverage_variant(media_type, entry[0])

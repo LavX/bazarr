@@ -146,7 +146,7 @@ describe("Movies Detail Table, Hide track", () => {
     mockCommon([], () =>
       HttpResponse.json({
         data: {
-          wanted: false,
+          wanted: true,
           covered_by: [],
           hidden: { code2: "en", name: "English", hi: false, forced: false },
           newly_wanted: [],
@@ -197,6 +197,13 @@ describe("Movies Detail Table, Hide track", () => {
       covered: false,
       message:
         "Hiding English added no subtitles to Wanted. Bazarr+ still lists English (forced) (subtitle file).",
+    },
+    {
+      description: "lists a surviving HI and forced subtitle as inventory",
+      remaining: { hi: true, forced: true },
+      covered: false,
+      message:
+        "Hiding English added no subtitles to Wanted. Bazarr+ still lists English (HI, forced) (subtitle file).",
     },
   ])("$description", async ({ remaining, covered, message }) => {
     const plain = { ...embeddedEnglish, hi: false };

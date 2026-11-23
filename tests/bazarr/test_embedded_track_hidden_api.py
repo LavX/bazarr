@@ -119,7 +119,8 @@ def _hidden(session):
 
 
 def _english_variant(code):
-    return {"code2": "en", "name": "English", "hi": code == "en:hi", "forced": code == "en:forced"}
+    modifiers = code.split(":")[1:]
+    return {"code2": "en", "name": "English", "hi": "hi" in modifiers, "forced": "forced" in modifiers}
 
 
 def test_requires_authentication(hidden_api):
@@ -271,6 +272,7 @@ def _index_english_tracks(indexed_video_api, tmp_path, tracks, profile_variants)
     pytest.param(False, "en:hi", (False, False), True, True, id="hi-covers-plain"),
     pytest.param(True, "en", (False, False), True, False, id="plain-does-not-cover-hi"),
     pytest.param(False, "en:forced", (False, True), False, False, id="forced-does-not-cover-plain"),
+    pytest.param(False, "en:hi:forced", (False, False), False, False, id="hi-forced-does-not-cover-plain"),
 ])
 def test_hide_distinguishes_confirmed_coverage_from_track_inventory(
         indexed_video_api, tmp_path, track_hi, surviving, profile_flags, legacy_cover, confirmed_cover):
@@ -297,7 +299,7 @@ def test_hide_distinguishes_confirmed_coverage_from_track_inventory(
 
 
 @pytest.mark.parametrize("track_hi,track_forced,profile_variants,before,after,newly_wanted,still_wanted,wanted", [
-    pytest.param(False, False, [(True, False)], ["en:hi"], ["en:hi"], [], ["en:hi"], False,
+    pytest.param(False, False, [(True, False)], ["en:hi"], ["en:hi"], [], ["en:hi"], True,
                  id="plain-hide-keeps-already-missing-hi"),
     pytest.param(False, False, [(False, False)], [], ["en"], ["en"], [], True,
                  id="plain-hide-newly-wants-plain"),
@@ -317,7 +319,7 @@ def test_hide_distinguishes_confirmed_coverage_from_track_inventory(
                  id="hi-forced-hide-newly-wants-plain"),
     pytest.param(True, True, [(True, False)], [], ["en:hi"], ["en:hi"], [], False,
                  id="hi-forced-hide-newly-wants-hi"),
-    pytest.param(True, True, [(False, True)], ["en:forced"], ["en:forced"], [], ["en:forced"], False,
+    pytest.param(True, True, [(False, True)], ["en:forced"], ["en:forced"], [], ["en:forced"], True,
                  id="hi-forced-hide-keeps-already-missing-forced"),
 ])
 def test_hide_reports_new_and_existing_wanted_profile_variants(
