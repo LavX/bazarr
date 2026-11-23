@@ -7,7 +7,9 @@ import React, {
 } from "react";
 import {
   Button,
+  Checkbox,
   Divider,
+  Group,
   MantineColor,
   Select,
   Stack,
@@ -30,7 +32,12 @@ import { useMovieSubtitleModification } from "@/apis/hooks";
 import api from "@/apis/raw";
 import { subtitlesTypeOptions } from "@/components/forms/uploadFormSelectorTypes";
 import { shouldAutoCloseUpload } from "@/components/forms/uploadHelpers";
-import { Action, DropContent, Selector } from "@/components/inputs";
+import {
+  Action,
+  DropContent,
+  FullPageDropzone,
+  Selector,
+} from "@/components/inputs";
 import SimpleTable from "@/components/tables/SimpleTable";
 import TextPopover from "@/components/TextPopover";
 import { useModals, withModal } from "@/modules/modals";
@@ -57,7 +64,7 @@ type SubtitleValidateResult = {
 };
 
 const validator = (
-  movie: Item.Movie,
+  subtitles: readonly Subtitle[],
   file: SubtitleFile,
 ): SubtitleValidateResult => {
   if (file.language === null) {
@@ -66,7 +73,6 @@ const validator = (
       messages: "Language is not selected",
     };
   } else {
-    const { subtitles } = movie;
     const existing = subtitles.find(
       (v) => v.code2 === file.language?.code2 && isString(v.path),
     );
@@ -83,31 +89,34 @@ const validator = (
   };
 };
 
-interface Props {
+interface BatchProps {
   files: File[];
-  movie: Item.Movie;
+  subtitles: readonly Subtitle[];
+  languages: Language.Info[];
+  defaultLanguage: Language.Info | null;
+  upload: (form: FormType.UploadSubtitle) => void | Promise<unknown>;
+  capturePageDrops?: boolean;
+  independentFlags?: boolean;
+  error?: React.ReactNode;
   onComplete?: () => void;
 }
 
-const MovieUploadForm: FunctionComponent<Props> = ({
+export const SubtitleBatchUploadForm: FunctionComponent<BatchProps> = ({
   files,
-  movie,
+  subtitles,
+  languages,
+  defaultLanguage,
+  upload,
+  capturePageDrops = false,
+  independentFlags = false,
+  error,
   onComplete,
 }) => {
   const modals = useModals();
-
-  const profile = useLanguageProfileBy(movie.profileId);
-
-  const languages = useProfileItemsToLanguages(profile);
   const languageOptions = useSelectorOptions(
     uniqBy(languages, "code2"),
     (v) => v.name,
     (v) => v.code2,
-  );
-
-  const defaultLanguage = useMemo(
-    () => (languages.length > 0 ? languages[0] : null),
-    [languages],
   );
 
   const buildRow = useCallback(
@@ -118,12 +127,13 @@ const MovieUploadForm: FunctionComponent<Props> = ({
         forced: defaultLanguage?.forced ?? false,
         hi: defaultLanguage?.hi ?? false,
       };
-      return { ...row, validateResult: validator(movie, row) };
+      return { ...row, validateResult: validator(subtitles, row) };
     },
-    [defaultLanguage, movie],
+    [defaultLanguage, subtitles],
   );
 
   const [processing, setProcessing] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
   const [ready, setReady] = useState(false);
 
   const form = useForm({
@@ -209,7 +219,7 @@ const MovieUploadForm: FunctionComponent<Props> = ({
     form.setValues((values) => {
       const newFiles = fn(values.files ?? []);
       newFiles.forEach((v) => {
-        v.validateResult = validator(movie, v);
+        v.validateResult = validator(subtitles, v);
       });
 
       return { ...values, files: newFiles };
@@ -287,7 +297,9 @@ const MovieUploadForm: FunctionComponent<Props> = ({
           return (
             <Selector
               {...languageOptions}
+              aria-label="Language"
               className="table-long-break"
+              disabled={submitting}
               value={original.language}
               onChange={(item) => {
                 action.mutate(index, { ...original, language: item });
@@ -297,33 +309,65 @@ const MovieUploadForm: FunctionComponent<Props> = ({
         },
       },
       {
-        header: () => (
-          <Selector
-            options={subtitlesTypeOptions}
-            value={null}
-            placeholder="Type"
-            onChange={(value) => {
-              if (value) {
-                action.update((item) => {
-                  switch (value) {
-                    case "hi":
-                      return { ...item, hi: true, forced: false };
-                    case "forced":
-                      return { ...item, hi: false, forced: true };
-                    case "normal":
-                      return { ...item, hi: false, forced: false };
-                    default:
-                      return item;
+        header: independentFlags
+          ? "Type"
+          : () => (
+              <Selector
+                options={subtitlesTypeOptions}
+                value={null}
+                disabled={submitting}
+                placeholder="Type"
+                onChange={(value) => {
+                  if (value) {
+                    action.update((item) => {
+                      switch (value) {
+                        case "hi":
+                          return { ...item, hi: true, forced: false };
+                        case "forced":
+                          return { ...item, hi: false, forced: true };
+                        case "normal":
+                          return { ...item, hi: false, forced: false };
+                        default:
+                          return item;
+                      }
+                    });
                   }
-                });
-              }
-            }}
-          ></Selector>
-        ),
+                }}
+              ></Selector>
+            ),
         accessorKey: "type",
         cell: ({ row: { original, index } }) => {
+          if (independentFlags) {
+            return (
+              <Group wrap="nowrap">
+                <Checkbox
+                  label="Hearing impaired"
+                  checked={original.hi}
+                  disabled={submitting}
+                  onChange={(event) =>
+                    action.mutate(index, {
+                      ...original,
+                      hi: event.currentTarget.checked,
+                    })
+                  }
+                />
+                <Checkbox
+                  label="Forced"
+                  checked={original.forced}
+                  disabled={submitting}
+                  onChange={(event) =>
+                    action.mutate(index, {
+                      ...original,
+                      forced: event.currentTarget.checked,
+                    })
+                  }
+                />
+              </Group>
+            );
+          }
           return (
             <Select
+              disabled={submitting}
               value={
                 subtitlesTypeOptions.find((s) => {
                   if (original.hi) {
@@ -359,32 +403,42 @@ const MovieUploadForm: FunctionComponent<Props> = ({
               label="Remove"
               icon={faTrash}
               c="red"
+              disabled={submitting}
               onClick={() => action.remove(index)}
             ></Action>
           );
         },
       },
     ],
-    [action, languageOptions],
+    [action, independentFlags, languageOptions, submitting],
   );
-
-  const { upload } = useMovieSubtitleModification();
 
   return (
     <form
-      onSubmit={form.onSubmit(({ files }) => {
-        const { radarrId } = movie;
-
-        for (const { file, language, hi, forced } of files) {
-          if (language === null) {
-            throw new Error("Language is not selected");
+      onSubmit={form.onSubmit(async ({ files }) => {
+        if (processing || submitting) return;
+        setSubmitting(true);
+        let completed = 0;
+        try {
+          for (const { file, language, hi, forced } of files) {
+            if (language === null) {
+              throw new Error("Language is not selected");
+            }
+            const result = upload({
+              file,
+              language: language.code2,
+              hi,
+              forced,
+            });
+            if (result) await result;
+            completed += 1;
           }
-
-          upload.mutate({
-            radarrId,
-            arrInstanceId: movie.arr_instance_id,
-            form: { file, language: language.code2, hi, forced },
-          });
+        } catch {
+          // Keep the failed and unattempted files with their selected metadata.
+          form.setFieldValue("files", files.slice(completed));
+          return;
+        } finally {
+          setSubmitting(false);
         }
 
         onComplete?.();
@@ -392,10 +446,19 @@ const MovieUploadForm: FunctionComponent<Props> = ({
       })}
     >
       <Stack className="table-long-break">
+        {error}
+        {capturePageDrops && (
+          <FullPageDropzone
+            active
+            onDrop={(dropped) => {
+              if (!processing && !submitting) void addFiles(dropped);
+            }}
+          />
+        )}
         <Dropzone
           data-full-page-dropzone-ignore
           onDrop={(dropped) => void addFiles(dropped)}
-          loading={processing}
+          loading={processing || submitting}
           multiple
         >
           <DropContent></DropContent>
@@ -404,13 +467,45 @@ const MovieUploadForm: FunctionComponent<Props> = ({
         <Divider></Divider>
         <Button
           type="submit"
-          loading={processing}
-          disabled={processing || form.values.files.length === 0}
+          loading={processing || submitting}
+          disabled={processing || submitting || form.values.files.length === 0}
         >
           Upload
         </Button>
       </Stack>
     </form>
+  );
+};
+
+interface Props {
+  files: File[];
+  movie: Item.Movie;
+  onComplete?: () => void;
+}
+
+const MovieUploadForm: FunctionComponent<Props> = ({
+  files,
+  movie,
+  onComplete,
+}) => {
+  const profile = useLanguageProfileBy(movie.profileId);
+  const languages = useProfileItemsToLanguages(profile);
+  const { upload } = useMovieSubtitleModification();
+  return (
+    <SubtitleBatchUploadForm
+      files={files}
+      subtitles={movie.subtitles}
+      languages={languages}
+      defaultLanguage={languages[0] ?? null}
+      upload={(form) =>
+        upload.mutate({
+          radarrId: movie.radarrId,
+          arrInstanceId: movie.arr_instance_id,
+          form,
+        })
+      }
+      onComplete={onComplete}
+    />
   );
 };
 

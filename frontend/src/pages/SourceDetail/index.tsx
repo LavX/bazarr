@@ -30,6 +30,7 @@ import { QueryOverlay } from "@/components/async";
 import Language from "@/components/bazarr/Language";
 import SourceBadge from "@/components/bazarr/SourceBadge";
 import { ChangeProfileModal } from "@/components/forms/ChangeProfileForm";
+import { FullPageDropzone } from "@/components/inputs";
 import SimpleTable from "@/components/tables/SimpleTable";
 import { useModals, withModal } from "@/modules/modals";
 import ItemOverview, { OverviewItem } from "@/pages/views/ItemOverview";
@@ -51,6 +52,7 @@ import {
   useSourceWrite,
 } from "./api";
 import {
+  SourceDropUploadModal,
   SourceIdentityModal,
   SourceManualSearchModal,
   SourceUploadModal,
@@ -160,8 +162,20 @@ export function SourceMovieActions({
     hasFile &&
     ["identified", "parsed"].includes(item.identity_state);
   const manualReady = item.kind === "sports_event" ? filesAvailable : ready;
+  // An episode's actions are the active modal body. The movie page stays
+  // mounted underneath dialogs, where the foreground upload owns the drop.
+  const acceptsPageDrop =
+    ready && (item.kind === "episode" || modals.modals.length === 0);
   return (
     <Stack gap="xs">
+      {item.kind !== "sports_event" && (
+        <FullPageDropzone
+          active={acceptsPageDrop}
+          onDrop={(files) =>
+            modals.openContextModal(SourceDropUploadModal, { item, files })
+          }
+        />
+      )}
       <Group gap="xs">
         <Toolbox.Button
           icon={faSearch}

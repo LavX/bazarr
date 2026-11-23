@@ -18,6 +18,7 @@ import {
   sourceSubtitleVariant,
 } from "@/apis/queries/sourceSubtitleDocument";
 import { withInlineErrors } from "@/apis/raw/inlineWrites";
+import { SubtitleBatchUploadForm } from "@/components/forms/MovieUploadForm";
 import { ManualSearchView } from "@/components/modals/ManualSearchModal";
 import { useModals, withModal } from "@/modules/modals";
 import { searchAsJob, waitForJob } from "@/utilities/jobs";
@@ -244,11 +245,32 @@ export const SourceManualSearchModal = withModal(
   { title: "Search Subtitles", size: "calc(100vw - 4rem)" },
 );
 
+function useSourceSubtitleUpload(item: SourceItemTarget) {
+  const client = useQueryClient();
+  const write = useSourceWrite();
+  const upload = ({ file, language, hi, forced }: FormType.UploadSubtitle) =>
+    write.mutateAsync(async () => {
+      await sourceDetailApi.requireCurrentManualItem(item);
+      const job = await withInlineErrors(() =>
+        sourceDetailApi.upload(item.id, file, language, hi, forced),
+      );
+      try {
+        await waitForJob(client, job.job_id, job.session);
+      } finally {
+        void expireSourceSubtitleDocument(
+          client,
+          item.id,
+          sourceSubtitleVariant(language, hi, forced),
+        );
+      }
+    });
+  return { upload, write };
+}
+
 function SourceUploadForm({ item }: { item: SourceItemTarget }) {
   const { data: languages } = useEnabledLanguages();
-  const client = useQueryClient();
   const modals = useModals();
-  const write = useSourceWrite();
+  const { upload, write } = useSourceSubtitleUpload(item);
   const [file, setFile] = useState<File | null>(null);
   const [language, setLanguage] = useState<string | null>(null);
   const [hi, setHi] = useState(false);
@@ -258,22 +280,7 @@ function SourceUploadForm({ item }: { item: SourceItemTarget }) {
       onSubmit={(event) => {
         event.preventDefault();
         if (!file || !language) return;
-        void write
-          .mutateAsync(async () => {
-            await sourceDetailApi.requireCurrentManualItem(item);
-            const job = await withInlineErrors(() =>
-              sourceDetailApi.upload(item.id, file, language, hi, forced),
-            );
-            try {
-              await waitForJob(client, job.job_id, job.session);
-            } finally {
-              void expireSourceSubtitleDocument(
-                client,
-                item.id,
-                sourceSubtitleVariant(language, hi, forced),
-              );
-            }
-          })
+        void upload({ file, language, hi, forced })
           .then(() => modals.closeSelf())
           .catch(() => undefined);
       }}
@@ -324,3 +331,34 @@ export const SourceUploadModal = withModal(SourceUploadForm, "source-upload", {
   title: "Upload Subtitles",
   size: "md",
 });
+
+function SourceDropUploadForm({
+  item,
+  files,
+}: {
+  item: SourceItem;
+  files: File[];
+}) {
+  const { data: languages } = useEnabledLanguages();
+  const { upload, write } = useSourceSubtitleUpload(item);
+  return (
+    <SubtitleBatchUploadForm
+      files={files}
+      subtitles={item.subtitles}
+      languages={languages}
+      defaultLanguage={null}
+      capturePageDrops
+      independentFlags
+      upload={upload}
+      error={
+        write.isError && <Alert color="red">{sourceError(write.error)}</Alert>
+      }
+    />
+  );
+}
+
+export const SourceDropUploadModal = withModal(
+  SourceDropUploadForm,
+  "source-drop-upload",
+  { title: "Upload Subtitles", size: "xl" },
+);

@@ -6,13 +6,15 @@ import { http, HttpResponse } from "msw";
 import { vi } from "vitest";
 import queryClient from "@/apis/queries";
 import { QueryKeys } from "@/apis/queries/keys";
+import api from "@/apis/raw";
+import type { ArchiveExtractResponse } from "@/apis/raw/subtitles";
 import SubtitleViewer from "@/pages/SubtitleEditor";
 import type { Cue } from "@/pages/SubtitleEditor/types";
 import { AllProviders } from "@/providers";
-import { act, rawRender, screen, waitFor, within } from "@/tests";
+import { act, fireEvent, rawRender, screen, waitFor, within } from "@/tests";
 import server from "@/tests/mocks/node";
 import * as files from "@/utilities/files";
-import { sourceDetailKeys, SourceItem } from "./api";
+import { sourceDetailApi, sourceDetailKeys, SourceItem } from "./api";
 import type { SourceHistoryRow } from "./History";
 import { SourceMovieDetailView, SourceSeriesDetailView } from ".";
 
@@ -268,6 +270,204 @@ afterEach(() => {
   vi.restoreAllMocks();
   expect(arrRequests).toEqual([]);
 });
+
+function subtitleTransfer(...files: File[]) {
+  return {
+    files,
+    items: files.map((file) => ({
+      kind: "file",
+      type: file.type,
+      getAsFile: () => file,
+    })),
+    types: ["Files"],
+  };
+}
+
+it.each<Kind>(["movie", "episode"])(
+  "opens one upload batch when subtitles drop on the source %s detail",
+  async (kind) => {
+    const user = userEvent.setup();
+    const { item } = openPage(kind);
+    server.use(
+      http.get("/api/system/languages", () =>
+        HttpResponse.json([
+          { code2: "en", name: "English", enabled: true },
+          { code2: "fr", name: "French", enabled: true },
+        ]),
+      ),
+    );
+    await openItem(user, item);
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Upload" })).toBeEnabled(),
+    );
+    const primary = new File(["first subtitle"], "first.en.srt");
+    const secondary = new File(["second subtitle"], "second.fr.srt");
+    const page =
+      kind === "episode"
+        ? screen.getByRole("dialog", { name: item.title })
+        : document.body;
+    const dataTransfer = subtitleTransfer(primary, secondary);
+    fireEvent.dragEnter(page, { dataTransfer });
+    expect(screen.getByText(/Drop subtitle files or a/)).toBeVisible();
+    fireEvent.drop(page, { dataTransfer });
+    const dialog = await screen.findByRole("dialog", {
+      name: "Upload Subtitles",
+    });
+    expect(await within(dialog).findByText(primary.name)).toBeVisible();
+    expect(await within(dialog).findByText(secondary.name)).toBeVisible();
+    expect(
+      screen.getAllByRole("dialog", { name: "Upload Subtitles" }),
+    ).toHaveLength(1);
+    expect(
+      screen.queryByText(/Drop subtitle files or a/),
+    ).not.toBeInTheDocument();
+    // eslint-disable-next-line testing-library/no-node-access
+    const close = dialog.querySelector<HTMLButtonElement>(
+      ".mantine-Modal-close",
+    );
+    expect(close).not.toBeNull();
+    await user.click(close!);
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("dialog", { name: "Upload Subtitles" }),
+      ).not.toBeInTheDocument(),
+    );
+    if (kind === "episode") {
+      expect(screen.getByRole("dialog", { name: item.title })).toBeVisible();
+    }
+  },
+);
+
+it.each<Kind>(["movie", "episode"])(
+  "keeps source %s drop metadata through archive extraction and uploads the batch to that item",
+  async (kind) => {
+    const user = userEvent.setup();
+    const { item, state } = openPage(kind);
+    const posts: string[] = [];
+    const upload = vi.spyOn(sourceDetailApi, "upload");
+    let finishArchive: ((result: ArchiveExtractResponse) => void) | undefined;
+    const extract = vi
+      .spyOn(api.subtitles, "extractArchive")
+      .mockImplementation(
+        () =>
+          new Promise((resolve) => {
+            finishArchive = resolve;
+          }),
+      );
+    server.use(
+      http.get("/api/system/languages", () =>
+        HttpResponse.json([
+          { code2: "en", name: "English", enabled: true },
+          { code2: "fr", name: "French", enabled: true },
+        ]),
+      ),
+      http.post(
+        `/api/sources/items/${item.id}/subtitles`,
+        async ({ request }) => {
+          posts.push(await request.text());
+          return HttpResponse.json(
+            { job_id: 80 + posts.length, session: "drop-upload" },
+            { status: 202 },
+          );
+        },
+      ),
+    );
+    queryClient.setQueryData(
+      [QueryKeys.System, QueryKeys.Jobs],
+      [81, 82].map((jobId) => ({
+        job_id: jobId,
+        session: "drop-upload",
+        status: "completed",
+      })),
+    );
+    await openItem(user, item);
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Upload" })).toBeEnabled(),
+    );
+    const page =
+      kind === "episode"
+        ? screen.getByRole("dialog", { name: item.title })
+        : document.body;
+    fireEvent.drop(page, {
+      dataTransfer: subtitleTransfer(new File(["first"], "first.srt")),
+    });
+    const dialog = await screen.findByRole("dialog", {
+      name: "Upload Subtitles",
+    });
+    const first = within(
+      await within(dialog).findByRole("row", { name: /first\.srt/ }),
+    );
+    await user.click(first.getByRole("combobox", { name: "Language" }));
+    await user.click(await screen.findByRole("option", { name: "English" }));
+    await user.click(first.getByRole("checkbox", { name: "Forced" }));
+    await user.click(first.getByRole("checkbox", { name: "Hearing impaired" }));
+
+    const nested = within(dialog).getByText(/Attach as many files as you like/);
+    fireEvent.drop(nested, {
+      dataTransfer: subtitleTransfer(new File(["archive"], "entries.zip")),
+    });
+    await waitFor(() => expect(extract).toHaveBeenCalledTimes(1));
+    expect(
+      within(dialog).getByRole("button", { name: "Upload" }),
+    ).toBeDisabled();
+    // eslint-disable-next-line testing-library/no-node-access
+    const loading = dialog.querySelector<HTMLElement>(
+      ".mantine-LoadingOverlay-root",
+    );
+    expect(loading).not.toBeNull();
+    const ignored = subtitleTransfer(new File(["ignored"], "ignored.srt"));
+    fireEvent.dragEnter(loading!, { dataTransfer: ignored });
+    expect(screen.getByText(/Drop subtitle files or a/)).toBeVisible();
+    fireEvent.drop(loading!, { dataTransfer: ignored });
+    expect(
+      screen.queryByText(/Drop subtitle files or a/),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getAllByRole("dialog", { name: "Upload Subtitles" }),
+    ).toHaveLength(1);
+
+    await act(async () =>
+      finishArchive!({
+        files: [{ name: "second.srt", content: btoa("second") }],
+        count: 1,
+      }),
+    );
+    expect(within(dialog).queryByText("ignored.srt")).not.toBeInTheDocument();
+    expect(first.getByRole("combobox", { name: "Language" })).toHaveValue(
+      "English",
+    );
+    expect(first.getByRole("checkbox", { name: "Forced" })).toBeChecked();
+    expect(
+      first.getByRole("checkbox", { name: "Hearing impaired" }),
+    ).toBeChecked();
+    const second = within(
+      await within(dialog).findByRole("row", { name: /second\.srt/ }),
+    );
+    await user.click(second.getByRole("combobox", { name: "Language" }));
+    await user.click(await screen.findByRole("option", { name: "French" }));
+    await user.click(within(dialog).getByRole("button", { name: "Upload" }));
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("dialog", { name: "Upload Subtitles" }),
+      ).not.toBeInTheDocument(),
+    );
+    expect(posts).toHaveLength(2);
+    expect(upload.mock.calls.map(([, file]) => file.name)).toEqual([
+      "first.srt",
+      "second.srt",
+    ]);
+    expect(posts[0]).toContain('name="file"; filename=');
+    expect(posts[0]).toContain('name="language"\r\n\r\nen\r\n');
+    expect(posts[0]).toContain('name="hi"\r\n\r\ntrue\r\n');
+    expect(posts[0]).toContain('name="forced"\r\n\r\ntrue\r\n');
+    expect(posts[1]).toContain('name="file"; filename=');
+    expect(posts[1]).toContain('name="language"\r\n\r\nfr\r\n');
+    expect(posts[1]).toContain('name="hi"\r\n\r\nfalse\r\n');
+    expect(posts[1]).toContain('name="forced"\r\n\r\nfalse\r\n');
+    expect(state.reads.length).toBeGreaterThanOrEqual(3);
+    expect(state.reads.every((read) => read === kind)).toBe(true);
+  },
+);
 
 describe.each<Kind>(["movie", "episode"])(
   "source %s subtitle controls",
