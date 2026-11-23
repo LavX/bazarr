@@ -561,7 +561,7 @@ def test_keyed_wanted_publication_keeps_the_subtitle_folder_stable(world, monkey
                 checks.append(pool.submit(save_settings))
                 with config._subtitle_settings_condition:
                     assert config._subtitle_settings_condition.wait_for(
-                        lambda: config._subtitle_settings_saving or changed.is_set(), timeout=2)
+                        lambda: config._subtitle_settings_writer is not None or changed.is_set(), timeout=2)
                 assert not changed.is_set()
                 assert settings.general.subfolder == 'current'
             return real_replace(staged, installed)
