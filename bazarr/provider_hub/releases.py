@@ -147,6 +147,9 @@ _STAGED_KEYS = ("staged_version", "staged_path", "staged_python_path", "staged_m
 NULL_BINDINGS = "supplied_by:null"
 # The existing per-release field metadata also carries the opaque data folder key.
 _DATA_KEY = "data:"
+# A release written now can belong to a catalog that was registered before IDs were recorded.
+_CATALOG_REGISTRATION = "catalog_registration:"
+_LEGACY_CATALOG_REGISTRATION = "legacy"
 # What each key after the version is, in order, for the ``fields`` column.
 _FIELD_NAMES = ("path", "python_path", "manifest", "supplied_by", "activated_at")
 
@@ -185,6 +188,7 @@ class Release:
     source_id: str | None = None
     origin: str | None = None
     data_key: str | None = None
+    catalog_registration: str | None = None
 
 
 def release_of(row: dict[str, Any]) -> Release:
@@ -196,12 +200,31 @@ def release_of(row: dict[str, Any]) -> Release:
         error=row.get("error"), created_at=row.get("created_at"), activated_at=row.get("activated_at"),
         retired_at=row.get("retired_at"), ended_seq=row.get("ended_seq"), source_id=row.get("source_id"),
         origin=row.get("origin"), data_key=_data_key(row),
+        catalog_registration=_field_value(row, _CATALOG_REGISTRATION),
     )
 
 
+def _field_value(row: dict[str, Any], prefix: str) -> str | None:
+    return next((marker[len(prefix):] for marker in json.loads(row.get("fields") or "[]")
+                 if isinstance(marker, str) and marker.startswith(prefix)), None)
+
+
 def _data_key(row: dict[str, Any]) -> str | None:
-    return next((marker[len(_DATA_KEY):] for marker in json.loads(row.get("fields") or "[]")
-                 if isinstance(marker, str) and marker.startswith(_DATA_KEY)), None)
+    return _field_value(row, _DATA_KEY)
+
+
+def catalog_registration(data: dict[str, Any], source_id: str | None) -> str | None:
+    from .state import OFFICIAL_CATALOG_SOURCE_ID
+
+    if source_id == OFFICIAL_CATALOG_SOURCE_ID:
+        return None
+    source = (data.get("catalog_sources") or {}).get(source_id)
+    return (source.get("registration") or _LEGACY_CATALOG_REGISTRATION) if isinstance(source, dict) else None
+
+
+def matches_catalog_registration(data: dict[str, Any], source_id: str | None, recorded: str | None) -> bool:
+    current = catalog_registration(data, source_id)
+    return recorded == current or (recorded is None and current == _LEGACY_CATALOG_REGISTRATION)
 
 
 def _loads(text: Any) -> dict[str, Any] | None:
@@ -300,6 +323,7 @@ class SlotIdentity:
     source_id: str | None
     origin: str | None
     bundle_digest: str | None
+    catalog_registration: str | None = None
 
 
 class StateDocument(dict):
@@ -344,7 +368,8 @@ def compose(data: dict[str, Any], rows: list[dict[str, Any]]) -> "StateDocument"
             continue
         document.release_slots[plugin_id] = {
             state: SlotIdentity(release["id"], release["created_at"], release.get("source_id"),
-                                release.get("origin"), release.get("bundle_digest"))
+                                release.get("origin"), release.get("bundle_digest"),
+                                _field_value(release, _CATALOG_REGISTRATION))
             for state, release in slots.items()
         }
         for state, keys in ((ACTIVE, _ACTIVE_KEYS), (STAGED, _STAGED_KEYS)):
@@ -451,8 +476,15 @@ def split(data: dict[str, Any], rows: list[dict[str, Any]], *, now: str | None =
                 "manifest": _dumps(slot.manifest), "bundle_digest": _digest(slot.manifest),
                 "env_key": (release.get("env_key") if unchanged_env and release.get("env_key")
                             else _env_key(data, slot.python_path)),
-                "error": None, "fields": json.dumps(slot.present),
+                "error": None,
             }
+            registration = None
+            if source_id is not None or (release is None and row.get("origin") == "catalog"):
+                registration = catalog_registration(data, source_id if source_id is not None else row.get("source_id"))
+            elif release is not None:
+                registration = _field_value(release, _CATALOG_REGISTRATION)
+            fields = slot.present + ([_CATALOG_REGISTRATION + registration] if registration else [])
+            values["fields"] = json.dumps(fields)
             if state == ACTIVE:
                 values["activated_at"] = slot.activated_at
                 values["retired_at"] = None

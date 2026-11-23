@@ -1899,6 +1899,136 @@ def test_an_unsupported_pre_key_stage_owner_conflict_fails_before_reading_or_cop
     assert service.activate_release(plugin_id, at_boot=True).outcome == service.ACTIVATION_SKIPPED
 
 
+@pytest.fixture
+def catalog_data_owner(hub, monkeypatch):
+    from plugin_platform_helpers import provider_manifest_v2
+    from provider_hub import datadir, service
+    from provider_hub.kinds import SUBTITLE_PROVIDER, get_kind
+    from provider_hub.state import load_state, provider_hub_dir
+
+    plugin_id = "examplehub"
+    url = "https://github.com/owner/repo/blob/main/catalog.json"
+    published = provider_manifest_v2(plugin_id, "1.1.0", permissions=["data_dir"])
+    for source in ("catalog-a", "catalog-b"):
+        service.add_catalog_source(source, url)
+    monkeypatch.setattr(service, "_fetch_github_catalog", lambda *args, **kwargs: (
+        {"plugins": [{"manifest": published}]}, "b" * 40))
+    assert service.refresh_catalog(source_ids={"catalog-a", "catalog-b"})["entries"] == 2
+    kind = get_kind(SUBTITLE_PROVIDER)
+    published = load_state()["catalog_entries"]["catalog-a:plugins:examplehub:1.1.0"]["manifest"]
+    manifest = kind.validate_manifest(published, False).raw
+    _seed(examplehub=_row(
+        plugin_id, active="1.0.0", manifest={**manifest, "version": "1.0.0"},
+        source_id="catalog-a", catalog_list="plugins", active_data_key="a" * 32))
+    active = datadir.release_path(provider_hub_dir(), plugin_id, "a" * 32)
+    active.mkdir(parents=True)
+    (active / "settings").write_text("private catalog A data")
+    monkeypatch.setattr(service, "verify_bundle_tree", lambda *args: None)
+    monkeypatch.setattr(service, "validated_bundle_path", lambda root, path: Path(path))
+    monkeypatch.setattr(service, "validated_interpreter", lambda root, path: Path(path))
+    monkeypatch.setattr(service, "_fetch_bundle", lambda *args: Path(_bundle(plugin_id, "1.1.0")))
+    monkeypatch.setattr(service.PluginEnvironment, "install", lambda *args, **kwargs: (
+        Path(_python(plugin_id, "1.1.0")).parent.parent))
+    monkeypatch.setattr(service, "_previous_workers_stopped", lambda: True)
+    monkeypatch.setattr(kind, "smoke_test", lambda *args, **kwargs: None)
+    monkeypatch.setattr(kind, "on_activated", lambda *args: None)
+    return service, kind, published, active, url
+
+
+@pytest.mark.parametrize("action", ["restage", "keep", "activate"])
+def test_removing_only_the_staged_catalog_preserves_the_active_catalog_data_owner(
+        catalog_data_owner, monkeypatch, action):
+    from provider_hub import datadir, releases, state_store
+    from provider_hub.state import load_state, provider_hub_dir
+
+    service, kind, published, active_data, _ = catalog_data_owner
+    service.stage_install(published, source_id="catalog-b", catalog_list="plugins")
+    active, = state_store.list_releases("examplehub", states=(releases.ACTIVE,))
+    staged, = state_store.list_releases("examplehub", states=(releases.STAGED,))
+    assert active.source_id == "catalog-a" and staged.source_id == "catalog-b"
+
+    assert service.remove_catalog_source("catalog-b")
+    assert "catalog-a" in load_state()["catalog_sources"]
+    assert state_store.list_releases("examplehub", states=(releases.ACTIVE,)) == [active]
+    if action == "restage":
+        service.stage_install(published, source_id="catalog-a", catalog_list="plugins")
+        row = load_state()["installations"]["examplehub"]
+        staged_data = datadir.release_path(provider_hub_dir(), "examplehub", row["staged_data_key"])
+        assert (staged_data / "settings").read_text() == "private catalog A data"
+        assert (active_data / "settings").read_text() == "private catalog A data"
+    elif action == "keep":
+        assert service.remove_installation("examplehub", keep_data=True)
+        service.activate_staged_installations()
+        state = load_state()
+        assert "examplehub" not in state["installations"]
+        assert state["kept_data"]["examplehub"]["source_id"] == "catalog-a"
+        assert (active_data.parent / "kept" / "settings").read_text() == "private catalog A data"
+        service.stage_install(published, source_id="catalog-a", catalog_list="plugins")
+        row = load_state()["installations"]["examplehub"]
+        staged_data = datadir.release_path(provider_hub_dir(), "examplehub", row["staged_data_key"])
+        assert (staged_data / "settings").read_text() == "private catalog A data"
+    else:
+        monkeypatch.setattr(datadir, "copy_folder", lambda *args: pytest.fail("copied removed staged catalog data"))
+        monkeypatch.setattr(kind, "smoke_test", lambda *args, **kwargs: pytest.fail("smoked removed staged catalog"))
+        assert service.activate_release("examplehub", at_boot=True).outcome == service.ACTIVATION_FAILED
+        failed, = state_store.list_releases("examplehub", states=(releases.FAILED,))
+        assert failed.id == staged.id
+        assert state_store.list_releases("examplehub", states=(releases.ACTIVE,)) == [active]
+        assert service.activate_release("examplehub", at_boot=True).outcome == service.ACTIVATION_SKIPPED
+        assert [job["state"] for job in service.list_jobs() if job["action"] == "activate"] == ["failed"]
+        assert (active_data / "settings").read_text() == "private catalog A data"
+
+
+@pytest.mark.parametrize("registration", ["same", "readded", "unrecorded"])
+def test_rollback_restores_only_its_own_catalog_registrations_data(
+        catalog_data_owner, hub, monkeypatch, registration):
+    from provider_hub import datadir, releases, state_store
+    from provider_hub.state import load_state, mutate_state, provider_hub_dir
+
+    service, kind, published, old_data, url = catalog_data_owner
+    former, = state_store.list_releases("examplehub", states=(releases.ACTIVE,))
+    if registration == "readded":
+        assert service.remove_catalog_source("catalog-a")
+        service.add_catalog_source("catalog-a", url)
+        assert service.refresh_catalog(source_ids={"catalog-a"})["entries"] == 1
+    elif registration == "same":
+        service.add_catalog_source("catalog-a", url)
+    service.stage_install(published, source_id="catalog-a", catalog_list="plugins")
+    row = load_state()["installations"]["examplehub"]
+    new_data = datadir.release_path(provider_hub_dir(), "examplehub", row["staged_data_key"])
+    assert (new_data / "settings").exists() == (registration != "readded")
+    assert service.activate_staged_installations() == ["examplehub"]
+    if registration == "same":
+        assert service.rollback_release("examplehub").outcome == service.ACTIVATION_WAITING
+        assert service.activate_staged_installations() == ["examplehub"]
+        assert load_state()["installations"]["examplehub"]["active_data_key"] == old_data.name
+        return
+    if registration == "unrecorded":
+        # Simulate a state saved before registrations were tracked. The old
+        # release's source name alone cannot establish who owned its data.
+        mutate_state(lambda state: state["catalog_sources"]["catalog-a"].pop("registration"))
+        with hub.begin() as connection:
+            for release in releases.read_rows(connection, plugin_id="examplehub"):
+                fields = [field for field in json.loads(release["fields"])
+                          if not field.startswith("catalog_registration:")]
+                table = releases.releases_table
+                connection.execute(table.update().where(table.c.id == release["id"]).values(fields=json.dumps(fields)))
+    active, = state_store.list_releases("examplehub", states=(releases.ACTIVE,))
+    previous, = state_store.list_releases("examplehub", states=(releases.RETIRED,))
+    assert previous.id == former.id
+    before = load_state()["installations"]["examplehub"]
+    monkeypatch.setattr(datadir, "copy_folder", lambda *args: pytest.fail("copied a removed catalog's data"))
+    monkeypatch.setattr(kind, "smoke_test", lambda *args, **kwargs: pytest.fail("smoked a removed catalog's data"))
+
+    with pytest.raises(service.ProviderHubInstallError):
+        service.rollback_release("examplehub")
+
+    assert load_state()["installations"]["examplehub"] == before
+    assert state_store.list_releases("examplehub", states=(releases.ACTIVE,)) == [active]
+    assert state_store.list_releases("examplehub", states=(releases.RETIRED,)) == [previous]
+    assert (old_data / "settings").read_text() == "private catalog A data"
+
+
 def test_release_data_copy_preserves_local_links_and_rejects_external_files(tmp_path):
     from provider_hub import datadir
 
