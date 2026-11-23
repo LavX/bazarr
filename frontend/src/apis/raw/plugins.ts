@@ -155,6 +155,30 @@ export interface PluginInstallation extends ProviderHubInstallation {
   enabled_dependents?: string[];
   /** True while a plugin installed for the person has a review notice they have not dismissed. */
   review_pending?: boolean;
+  /** The previous release and the server's reason when it cannot be restored. */
+  rollback?: PluginRollbackAvailability;
+}
+
+export interface PluginRollbackAvailability {
+  previous_version: string | null;
+  blocked_reason: string | null;
+}
+
+export interface PluginRollbackPreview extends PluginRollbackAvailability {
+  confirmation_identity: string | null;
+  restores_settings?: boolean;
+  consent: PluginUpdateDelta | null;
+}
+
+export interface PluginRollbackRequest {
+  version: string;
+  confirmation_identity: string;
+  consent?: string | null;
+}
+
+export interface PluginRollbackResult {
+  status: "activated" | "waiting";
+  version: string;
 }
 
 /** A plugin's recent output, secrets already scrubbed. */
@@ -214,6 +238,18 @@ class PluginsApi extends BaseApi {
 
   updateConsent(id: string) {
     return this.get<PluginUpdateDelta>("/updates/consent", { id });
+  }
+
+  rollbackPreview(id: string) {
+    return this.get<PluginRollbackPreview>(`/installations/${id}/rollback`);
+  }
+
+  async rollback(id: string, request: PluginRollbackRequest) {
+    const response = await this.postRaw<PluginRollbackResult>(
+      `/installations/${id}/rollback`,
+      request,
+    );
+    return response.data;
   }
 
   async install(request: PluginInstallRequest) {

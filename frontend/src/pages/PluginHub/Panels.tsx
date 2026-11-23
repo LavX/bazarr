@@ -20,6 +20,7 @@ export interface CardActions extends Pick<
   | "openJobs"
   | "onToggle"
   | "onRepair"
+  | "onRollback"
   | "onLog"
   | "onRemove"
   | "onDismissReview"

@@ -45,21 +45,13 @@ _PROVIDER_HUB_REGISTRATION_DONE = False
 _REPORTED_RESERVED_SECTION_PLUGINS = set()
 
 
-def _decrypt_blocked_provider_ids():
-    """Provider ids whose stored credentials will not decrypt.
-
-    Carried through configuration, selection and admission, so a provider
-    left without a usable credential is left out of searches completely
-    instead of only out of the runtime config: without the selection and
-    admission legs the pool rebuilt its config from the installation row
-    and queried it anyway. Unavailable answers empty, because the pool has
-    to be built either way and runtime_provider_configs already refuses
-    the blocked providers their config."""
+def _runtime_blocked_provider_ids():
+    """Omit held providers from configuration, search selection and pool admission."""
     try:
-        from provider_hub.service import decrypt_blocked_provider_ids
-        return decrypt_blocked_provider_ids()
+        from provider_hub.service import runtime_blocked_provider_ids
+        return runtime_blocked_provider_ids()
     except Exception:
-        logging.exception("Unable to load the Provider Hub decrypt-blocked providers")
+        logging.exception("Unable to load unavailable Provider Hub providers")
         return set()
 
 
@@ -225,7 +217,7 @@ def provider_is_usable(name):
         return False
     if provider_is_throttled(name):
         return False
-    if name in _decrypt_blocked_provider_ids():
+    if name in _runtime_blocked_provider_ids():
         return False
     if _provider_detached(name):
         return False
@@ -338,9 +330,8 @@ def get_providers(include_throttled=False):
     _ensure_provider_hub_registered()
     providers_list = []
     existing_providers = provider_registry.names()
-    blocked = _decrypt_blocked_provider_ids()
-    # Selection: a provider whose stored credential will not decrypt is
-    # left out here, so no search asks the pool for it at all.
+    blocked = _runtime_blocked_provider_ids()
+    # Selection also excludes a built-in whose installed replacement is held back.
     providers = [x for x in settings.general.enabled_providers
                  if x in existing_providers and x not in blocked]
     for provider in providers:
@@ -602,7 +593,7 @@ def get_providers_auth():
     # kind owns that overlay.
     try:
         from provider_hub.kinds.subtitle_provider import apply_settings_overlay
-        blocked = _decrypt_blocked_provider_ids()
+        blocked = _runtime_blocked_provider_ids()
     except Exception:
         logging.exception("Unable to load Provider Hub settings config")
     else:

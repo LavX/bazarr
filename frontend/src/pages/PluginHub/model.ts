@@ -467,6 +467,7 @@ export function isWaitingUpdate(
   return Boolean(
     installation &&
     installation.needs_restart === true &&
+    installation.staged_action !== "rollback" &&
     installation.active_version &&
     installation.staged_version &&
     installation.state !== "removed",

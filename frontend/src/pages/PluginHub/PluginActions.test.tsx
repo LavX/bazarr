@@ -3,7 +3,12 @@ import userEvent from "@testing-library/user-event";
 import { http, HttpResponse } from "msw";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import queryClient from "@/apis/queries";
-import type { PluginInstallation, PluginJob } from "@/apis/raw/plugins";
+import type {
+  PluginInstallation,
+  PluginJob,
+  PluginUpdateDelta,
+} from "@/apis/raw/plugins";
+import { updateDelta } from "@/components/plugin-consent/fixtures";
 import { forgetPasswordConfirmation } from "@/modules/passwordConfirm";
 import { customRender, screen, waitFor, within } from "@/tests";
 import server from "@/tests/mocks/node";
@@ -205,6 +210,421 @@ describe("the actions of an installed plugin", () => {
     await user.click(await screen.findByRole("menuitem", { name: "View log" }));
     await shown(await screen.findByText(/No output yet/));
   });
+});
+
+describe("rolling back a plugin from its card", () => {
+  const name = "Opencode back end";
+  const activeVersion = "1.0.0";
+  const previousVersion = "0.9.0";
+  const confirmationIdentity = "retained-release-identity";
+  const rollbackPath = "/api/plugins/installations/opencode_backend/rollback";
+  const delta: PluginUpdateDelta = {
+    ...updateDelta,
+    plugin: {
+      id: "opencode_backend",
+      name,
+      from_version: activeVersion,
+      to_version: previousVersion,
+      kind: "translator_backend",
+    },
+    digest: "sha256:rollback",
+  };
+  const dependency =
+    "Example translator needs a capability this release would drop.";
+  const availability = {
+    previous_version: previousVersion,
+    blocked_reason: null,
+  };
+
+  const present = (
+    rollback: {
+      previous_version: string | null;
+      blocked_reason: string | null;
+    } = availability,
+    restoresSettings = false,
+  ) => {
+    installed = [{ ...installedBackend, rollback }];
+    server.use(
+      http.get("/api/plugins/installations/opencode_backend", () =>
+        HttpResponse.json(installed[0]),
+      ),
+      http.get(rollbackPath, () => {
+        record("get", "rollback");
+        return HttpResponse.json({
+          ...availability,
+          confirmation_identity: confirmationIdentity,
+          restores_settings: restoresSettings,
+          consent: null,
+        });
+      }),
+    );
+    showPage();
+  };
+
+  const openRollback = async () => {
+    const user = await menuOf(name);
+    const item = await screen.findByRole("menuitem", { name: /Roll back/ });
+    expect(item).toHaveTextContent(previousVersion);
+    await user.click(item);
+    const dialog = await screen.findByRole("dialog", {
+      name: /Roll back Opencode back end/,
+    });
+    await shown(dialog);
+    const confirm = within(dialog).getByRole("button", { name: "Roll back" });
+    await waitFor(() => expect(confirm).toBeEnabled());
+    return { user, dialog, confirm };
+  };
+
+  it.each([
+    [null, "No previous release is available."],
+    [previousVersion, dependency],
+  ])(
+    "disables rollback when the card reports %s with a refusal",
+    async (version, reason) => {
+      present({ previous_version: version, blocked_reason: reason });
+      const user = await menuOf(name);
+      const item = await screen.findByRole("menuitem", { name: /Roll back/ });
+      expect(item).toHaveAttribute("aria-disabled", "true");
+      expect(item).toHaveTextContent(reason);
+      await user.click(item);
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+      expect(calls).toEqual([]);
+    },
+  );
+
+  it("offers a restart to finish a staged update before rollback", async () => {
+    const refusal = "Discard the staged update before rolling back.";
+    present({ ...availability, blocked_reason: refusal });
+    installed = installed.map((item) => ({
+      ...item,
+      state: "staged",
+      staged_version: "2.0.0",
+      needs_restart: true,
+    }));
+    await menuOf(name);
+    const item = await screen.findByRole("menuitem", { name: /Roll back/ });
+    expect(item).toHaveAttribute("aria-disabled", "true");
+    expect(item).toHaveTextContent(
+      "Restart Bazarr+ to finish the change in progress.",
+    );
+    expect(item).not.toHaveTextContent(refusal);
+    expect(calls).toEqual([]);
+  });
+
+  it("sends the reviewed release identity without access consent after password confirmation", async () => {
+    present();
+    auth = { type: "form", username: "admin", password: "***" };
+    server.use(
+      http.post("/api/system/account/confirm", () => {
+        record("post", "confirm");
+        return HttpResponse.json({});
+      }),
+      http.post(rollbackPath, async ({ request }) => {
+        record("post", "rollback", await request.json());
+        return HttpResponse.json({
+          status: "activated",
+          version: previousVersion,
+        });
+      }),
+    );
+    const { user, confirm } = await openRollback();
+    await user.click(confirm);
+    await shown(await screen.findByText("Confirm your password"));
+    expect(calls.filter(({ method }) => method === "post")).toEqual([]);
+    await user.type(screen.getByLabelText("Password"), "example-password");
+    await user.click(screen.getByRole("button", { name: /^confirm$/i }));
+    await waitFor(() =>
+      expect(calls.filter(({ method }) => method === "post")).toEqual([
+        { method: "post", path: "confirm", body: null },
+        {
+          method: "post",
+          path: "rollback",
+          body: {
+            version: previousVersion,
+            confirmation_identity: confirmationIdentity,
+          },
+        },
+      ]),
+    );
+  });
+
+  it("refreshes a stale release identity and requires another confirmation without access consent", async () => {
+    present();
+    let identity = confirmationIdentity;
+    server.use(
+      http.get(rollbackPath, () => {
+        record("get", "rollback");
+        return HttpResponse.json({
+          ...availability,
+          confirmation_identity: identity,
+          consent: null,
+        });
+      }),
+      http.post(rollbackPath, async ({ request }) => {
+        const body = (await request.json()) as {
+          confirmation_identity: string;
+        };
+        record("post", "rollback", body);
+        if (body.confirmation_identity === confirmationIdentity) {
+          identity = "replacement-release-identity";
+          return HttpResponse.json(
+            "The retained release changed. Review it again.",
+            { status: 409 },
+          );
+        }
+        return HttpResponse.json({
+          status: "activated",
+          version: previousVersion,
+        });
+      }),
+    );
+    const { user, dialog, confirm } = await openRollback();
+    await user.click(confirm);
+    expect(
+      await within(dialog).findByText(/retained release changed/i),
+    ).toBeVisible();
+    await waitFor(() => expect(confirm).toBeEnabled());
+    expect(calls.filter(({ method }) => method === "post")).toHaveLength(1);
+    await user.click(confirm);
+    await waitFor(() =>
+      expect(calls.at(-1)).toEqual({
+        method: "post",
+        path: "rollback",
+        body: { version: previousVersion, confirmation_identity: identity },
+      }),
+    );
+  });
+
+  it.each([
+    [true, /discards edits made since the update/i],
+    [false, /no previous settings copy is available/i],
+  ])(
+    "explains the settings available to restore (%s)",
+    async (restoresSettings, copy) => {
+      present(availability, restoresSettings);
+      const { user, dialog } = await openRollback();
+      expect(within(dialog).getByText(copy)).toBeVisible();
+      expect(calls).toEqual([{ method: "get", path: "rollback", body: null }]);
+      await user.click(within(dialog).getByRole("button", { name: "Cancel" }));
+      await waitFor(() =>
+        expect(screen.queryByRole("dialog")).not.toBeInTheDocument(),
+      );
+      expect(calls).toHaveLength(1);
+      await waitFor(() =>
+        expect(
+          screen.getByRole("button", { name: `${name} actions` }),
+        ).toHaveFocus(),
+      );
+    },
+  );
+
+  it("asks the user to review a different release when the card is stale", async () => {
+    present();
+    const freshVersion = "0.8.0";
+    server.use(
+      http.get(rollbackPath, () =>
+        HttpResponse.json({
+          ...availability,
+          previous_version: freshVersion,
+          confirmation_identity: confirmationIdentity,
+          consent: null,
+        }),
+      ),
+      http.post(rollbackPath, async ({ request }) => {
+        record("post", "rollback", await request.json());
+        return HttpResponse.json({
+          status: "activated",
+          version: freshVersion,
+        });
+      }),
+    );
+    const user = await menuOf(name);
+    await user.click(
+      await screen.findByRole("menuitem", { name: /Roll back/ }),
+    );
+    const dialog = await screen.findByRole("dialog", {
+      name: /Roll back Opencode back end/,
+    });
+    await shown(await within(dialog).findByText(/previous release.*changed/i));
+    expect(calls).toEqual([]);
+    await user.click(within(dialog).getByRole("button", { name: "Roll back" }));
+    await waitFor(() =>
+      expect(calls).toEqual([
+        {
+          method: "post",
+          path: "rollback",
+          body: {
+            version: freshVersion,
+            confirmation_identity: confirmationIdentity,
+          },
+        },
+      ]),
+    );
+  });
+
+  it("requires another confirmation after a stale digest and sends the new digest", async () => {
+    present();
+    let current = delta;
+    server.use(
+      http.get(rollbackPath, () => {
+        record("get", "rollback");
+        return HttpResponse.json({
+          ...availability,
+          confirmation_identity: confirmationIdentity,
+          consent: current,
+        });
+      }),
+      http.post(rollbackPath, async ({ request }) => {
+        const body = (await request.json()) as { consent: string };
+        record("post", "rollback", body);
+        if (body.consent === delta.digest) {
+          current = { ...delta, digest: "sha256:new-rollback" };
+          return HttpResponse.json(
+            "The permissions changed. Review them again.",
+            {
+              status: 409,
+            },
+          );
+        }
+        return HttpResponse.json({
+          status: "activated",
+          version: previousVersion,
+        });
+      }),
+    );
+    const { user, dialog, confirm } = await openRollback();
+    expect(
+      within(
+        await within(dialog).findByRole("group", { name: "New permissions" }),
+      ).getByText("Read your media folders"),
+    ).toBeVisible();
+    expect(calls.map(({ method }) => method)).toEqual(["get"]);
+    await user.click(confirm);
+    expect(
+      await within(dialog).findByText(/permissions changed/),
+    ).toBeVisible();
+    await waitFor(() =>
+      expect(calls.map(({ method }) => method)).toEqual(["get", "post", "get"]),
+    );
+    await waitFor(() => expect(confirm).toBeEnabled());
+    expect(calls[1].body).toEqual({
+      version: previousVersion,
+      confirmation_identity: confirmationIdentity,
+      consent: delta.digest,
+    });
+    await user.click(confirm);
+    await waitFor(() =>
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument(),
+    );
+    expect(calls.at(-1)).toEqual({
+      method: "post",
+      path: "rollback",
+      body: {
+        version: previousVersion,
+        confirmation_identity: confirmationIdentity,
+        consent: "sha256:new-rollback",
+      },
+    });
+  });
+
+  it("keeps the active release when a dependency starts to block rollback", async () => {
+    present();
+    server.use(
+      http.post(rollbackPath, () =>
+        HttpResponse.json(dependency, { status: 400 }),
+      ),
+    );
+    const { user, dialog, confirm } = await openRollback();
+    await user.click(confirm);
+    expect(await within(dialog).findByText(dependency)).toBeVisible();
+    expect(screen.getByText(/v1\.0\.0 from Official/)).toBeVisible();
+  });
+
+  it.each(["activated", "waiting"] as const)(
+    "renders the server's %s result without calling restart",
+    async (status) => {
+      present();
+      server.use(
+        http.get(rollbackPath, () => {
+          record("get", "rollback");
+          return HttpResponse.json({
+            ...availability,
+            confirmation_identity: confirmationIdentity,
+            consent: delta,
+          });
+        }),
+        http.post(rollbackPath, async ({ request }) => {
+          record("post", "rollback", await request.json());
+          installed =
+            status === "activated"
+              ? [{ ...installedBackend, active_version: previousVersion }]
+              : [
+                  {
+                    ...installedBackend,
+                    state: "staged",
+                    staged_version: previousVersion,
+                    staged_action: "rollback",
+                    needs_restart: true,
+                    rollback: {
+                      ...availability,
+                      blocked_reason: "A release is already waiting.",
+                    },
+                  },
+                ];
+          return HttpResponse.json({ status, version: previousVersion });
+        }),
+        http.post("/api/system", () => {
+          record("post", "system");
+          return HttpResponse.json({});
+        }),
+      );
+      const { user, confirm } = await openRollback();
+      expect(screen.getByText(/v1\.0\.0 from Official/)).toBeVisible();
+      await user.click(confirm);
+      await waitFor(() =>
+        expect(screen.queryByRole("dialog")).not.toBeInTheDocument(),
+      );
+      if (status === "waiting") {
+        expect(
+          await screen.findByText("1 plugin change is waiting for a restart."),
+        ).toBeVisible();
+        expect(screen.getByText(/v1\.0\.0 from Official/)).toBeVisible();
+        expect(screen.getByText("Rollback staged")).toBeVisible();
+        expect(screen.getByText("Rollback awaiting restart")).toBeVisible();
+        expect(screen.queryByText("Update staged")).not.toBeInTheDocument();
+        const updates = screen.getByRole("tab", { name: /Updates/ });
+        expect(
+          within(updates).queryByLabelText(/pending update/),
+        ).not.toBeInTheDocument();
+        await user.click(updates);
+        expect(
+          await screen.findByText("Everything is up to date"),
+        ).toBeVisible();
+        expect(
+          screen.queryByText("These updates are staged.", { exact: false }),
+        ).not.toBeInTheDocument();
+        expect(
+          screen.getByText("1 plugin change is waiting for a restart."),
+        ).toBeVisible();
+      } else {
+        expect(await screen.findByText(/v0\.9\.0 from Official/)).toBeVisible();
+        expect(
+          screen.queryByRole("button", { name: "Restart Bazarr now" }),
+        ).not.toBeInTheDocument();
+      }
+      expect(calls.filter(({ method }) => method === "post")).toEqual([
+        {
+          method: "post",
+          path: "rollback",
+          body: {
+            version: previousVersion,
+            confirmation_identity: confirmationIdentity,
+            consent: delta.digest,
+          },
+        },
+      ]);
+    },
+  );
 });
 
 describe("removing a plugin", () => {
@@ -576,6 +996,7 @@ describe("one change at a time", () => {
         elsewhere
         onToggle={none}
         onRepair={none}
+        onRollback={none}
         onLog={none}
         onRemove={none}
       />,
@@ -671,6 +1092,7 @@ describe("an update and a removal while something else is going on", () => {
         elsewhere={false}
         onToggle={none}
         onRepair={none}
+        onRollback={none}
         onLog={none}
         onRemove={none}
       />,

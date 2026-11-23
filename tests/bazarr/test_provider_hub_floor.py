@@ -1875,6 +1875,169 @@ def test_seeded_translator_update_waits_for_previous_release_data_writers(
     assert store.pointers() == selection
 
 
+@pytest.mark.parametrize("failed_update_first", [False, True])
+def test_google_rollback_survives_two_ordinary_application_startups(
+    tmp_path, monkeypatch, register_seed_translator, hub_store, google_startup, failed_update_first,
+):
+    import sys
+
+    from app.config import settings
+    from app.startup import prepare_database_and_plugins
+    from plugin_platform_helpers import service_manifest
+    from provider_hub import datadir, releases, seed, service as hub, state
+    from provider_hub.kinds import TRANSLATOR, get_kind
+    from subtitles.tools.translate import runtime
+    from subtitles.tools.translate.runtime.plugin_update import NEEDS_ATTENTION
+
+    plugin_id = seed.GOOGLE_PLUGIN_ID
+    monkeypatch.setattr(state, "state_file", hub_store.legacy_state_path)
+    _no_network(monkeypatch, hub)
+    monkeypatch.setenv("BAZARR_CATALOG_FLOOR", str(tmp_path / "absent-image"))
+    root = hub.provider_hub_dir()
+    interpreter = root / "shared_envs" / "fixture" / "bin" / "python"
+    interpreter.parent.mkdir(parents=True)
+    interpreter.symlink_to(Path(sys.executable).resolve())
+    (interpreter.parent.parent / "pyvenv.cfg").write_text(f"version = {sys.version.split()[0]}\n")
+    payload = (
+        b"from bazarr_plugin_sdk.translator.v1 import TranslatorPlugin\n"
+        b"class FixtureTranslator(TranslatorPlugin):\n"
+        b"    def describe(self): return {'name': 'fixture'}\n"
+        b"    async def test(self, config, secrets, ctx=None): return {'ok': True}\n"
+    )
+
+    def prepared(version, *, seeded):
+        fields = [{"key": "mode", "type": "text"}, {
+            "key": "region", "type": "text", "required": version == "1.0.0",
+            "show_if": {"key": "mode", "equals": "special"},
+        }]
+        manifest = get_kind(TRANSLATOR).validate_manifest(service_manifest(
+            plugin_id, version, kind=TRANSLATOR, kind_api="bazarr.translator.v1",
+            entry_module="translator", entry_class="FixtureTranslator", permissions=["data_dir"],
+            settings_version=1, settings={"fields": fields},
+            file_payloads={"translator.py": payload}), True)
+        bundle = root / "bundles" / plugin_id / version / manifest.source_commit
+        bundle.mkdir(parents=True)
+        (bundle / "translator.py").write_bytes(payload)
+        return seed.Release(manifest, bundle, interpreter, seeded)
+
+    # Supply the already verified seed inventory. Config release checks, selection,
+    # staging, worker smoke tests and activation remain the ordinary production path.
+    inventory = []
+
+    def seed_inventory(wanted_id, _revocations, exact_version=None, requested=None):
+        return [release for release in inventory if release.manifest.provider_id == wanted_id
+                and (exact_version is None or release.manifest.version == exact_version)
+                and (requested is None or seed._same_manifest(release.manifest.raw, requested))]
+
+    monkeypatch.setattr(seed, "_seed_releases", seed_inventory)
+    old = prepared("1.0.0", seeded=False)
+    hub._stage_validated(old.manifest, True, "catalog", "official", None,
+                         catalog_list="plugins", ready_release=old)
+    assert hub.activate_staged_installations() == [plugin_id]
+    start, store = google_startup
+    assert start()
+    original, = hub_store.list_releases(plugin_id, states=(releases.ACTIVE,))
+    original_data = datadir.release_path(hub.provider_hub_dir(), plugin_id, original.data_key)
+    (original_data / "settings").write_text("restored settings")
+    selection = store.pointers()
+
+    inventory.append(prepared("1.1.0", seeded=True))
+    monkeypatch.setattr(hub, "_previous_workers_stopped", lambda **_: True)
+    assert start()
+    updated, = hub_store.list_releases(plugin_id, states=(releases.ACTIVE,))
+    updated_data = datadir.release_path(hub.provider_hub_dir(), plugin_id, updated.data_key)
+    (updated_data / "settings").write_text("updated settings")
+    incompatible = store.create_instance(plugin_id, settings={"mode": "special"}, plugin_version="1.1.0")
+    incompatible_id = incompatible.id
+    preview = hub.rollback_preview(plugin_id)
+    assert preview["blocked_reason"] is None
+    result = hub.rollback_release(plugin_id, consent_digest=preview["consent"]["digest"],
+                                  expected_version="1.0.0", confirmation_identity=preview["confirmation_identity"])
+    assert result.outcome == hub.ACTIVATION_WAITING
+
+    database = sys.modules["app.database"]
+    monkeypatch.setattr(database, "migrate_db", lambda _app: None, raising=False)
+    monkeypatch.setattr(database, "upgrade_languages_profile_values", lambda: None, raising=False)
+    monkeypatch.setattr(database, "fix_languages_profiles_with_duplicate_ids", lambda: None, raising=False)
+    monkeypatch.setattr(runtime, "run_startup_tasks", lambda: True)
+    monkeypatch.setattr("app.config.write_config", lambda: True)
+    monkeypatch.setattr(settings.general, "enabled_providers", [])
+    monkeypatch.setattr(settings.general, "disabled_providers", [])
+
+    kind = get_kind(TRANSLATOR)
+    on_activated = kind.on_activated
+
+    def interrupted_hook(*args):
+        active, = hub_store.list_releases(plugin_id, states=(releases.ACTIVE,))
+        assert active.id == original.id
+        if failed_update_first:
+            on_activated(*args)
+        raise SystemExit("interrupted rollback activation")
+
+    with monkeypatch.context() as activation:
+        activation.setattr(kind, "on_activated", interrupted_hook)
+        with pytest.raises(SystemExit, match="interrupted rollback activation"):
+            prepare_database_and_plugins(object())
+    promoted = hub.load_state()["installations"][plugin_id]
+    assert not promoted.get("staged_version") and promoted["pending_rollback_hook"]
+    store._session.expire_all()
+    assert store.get_instance(incompatible_id).enabled == int(not failed_update_first)
+
+    assert prepare_database_and_plugins(object())
+    reconciled = hub.load_state()["installations"][plugin_id]
+    assert reconciled["last_error"] == NEEDS_ATTENTION and "pending_rollback_hook" not in reconciled
+    store._session.expire_all()
+    held = store.get_instance(incompatible_id)
+    assert (held.enabled, held.awaiting_secrets, held.revision) == (0, 1, 2)
+
+    repaired_env = root / "shared_envs" / "repaired"
+    repaired_python = repaired_env / "bin" / "python"
+    repaired_python.parent.mkdir(parents=True)
+    repaired_python.symlink_to(Path(sys.executable).resolve())
+    (repaired_env / "pyvenv.cfg").write_text(f"version = {sys.version.split()[0]}\n")
+    monkeypatch.setattr(hub.PluginEnvironment, "install", lambda *_args, **_kwargs: repaired_env)
+    hub.repair_installation_environment(plugin_id)
+    repaired, = hub_store.list_releases(plugin_id, states=(releases.ACTIVE,))
+    assert (repaired.id, repaired.python_path) == (original.id, str(repaired_python))
+
+    if failed_update_first:
+        update = inventory[0]
+        hub._stage_validated(update.manifest, True, "catalog", "official", None,
+                             catalog_list="plugins", ready_release=update)
+
+        def no_health_response(*args, **kwargs):
+            raise RuntimeError("fixture translator did not start")
+
+        with monkeypatch.context() as activation:
+            activation.setattr(get_kind(TRANSLATOR), "smoke_test", no_health_response)
+            assert hub.activate_staged_installations() == []
+        row = hub.load_state()["installations"][plugin_id]
+        assert row["active_version"] == "1.0.0" and row["state"] == "active"
+        assert not row.get("staged_version") and row["google_seed_rollback"]
+
+    for _boot in range(2):
+        assert prepare_database_and_plugins(object())
+        restored, = hub_store.list_releases(plugin_id, states=(releases.ACTIVE,))
+        assert (restored.id, restored.created_at, restored.data_key) == (
+            original.id, original.created_at, original.data_key)
+        row = hub.load_state()["installations"][plugin_id]
+        assert row["active_version"] == "1.0.0" and not row.get("staged_version")
+        assert "pending_rollback_hook" not in row
+        store._session.expire_all()
+        assert store.get_instance(incompatible_id).revision == 2
+        assert (original_data / "settings").read_text() == "restored settings"
+        assert (updated_data / "settings").read_text() == "updated settings"
+        assert store.pointers() == selection
+
+    # An explicit update still replaces the restored release and ends its boot preference.
+    update = inventory[0]
+    hub._stage_validated(update.manifest, True, "catalog", "official", None,
+                         catalog_list="plugins", ready_release=update)
+    assert hub.activate_staged_installations() == [plugin_id]
+    row = hub.load_state()["installations"][plugin_id]
+    assert row["active_version"] == "1.1.0" and "google_seed_rollback" not in row
+
+
 def test_failed_seed_smoke_keeps_the_data_of_a_concurrently_staged_release(
     tmp_path, monkeypatch, keys, register_seed_translator, hub,
 ):

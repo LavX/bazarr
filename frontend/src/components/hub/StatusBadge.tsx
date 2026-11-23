@@ -60,6 +60,7 @@ export const ProviderStatusBadge: FunctionComponent<{
   state: ProviderState;
   pendingRestart?: boolean;
   activeVersion?: string | null;
+  stagedAction?: "rollback" | null;
   needsRepair?: boolean;
   /** The official catalog revoked the active release. Shown with its reason, whatever else is going on. */
   revoked?: boolean;
@@ -68,6 +69,7 @@ export const ProviderStatusBadge: FunctionComponent<{
   state,
   pendingRestart,
   activeVersion,
+  stagedAction,
   needsRepair,
   revoked,
   revokedReason,
@@ -126,10 +128,16 @@ export const ProviderStatusBadge: FunctionComponent<{
       return (
         <StatusBadge
           tone="warning"
-          label="Update staged"
+          label={
+            stagedAction === "rollback" ? "Rollback staged" : "Update staged"
+          }
           icon={meta.icon}
           variant="dot"
-          tooltip="Restart Bazarr+ to activate the staged update"
+          tooltip={
+            stagedAction === "rollback"
+              ? "Restart Bazarr+ to activate the staged rollback"
+              : "Restart Bazarr+ to activate the staged update"
+          }
         />
       );
     }

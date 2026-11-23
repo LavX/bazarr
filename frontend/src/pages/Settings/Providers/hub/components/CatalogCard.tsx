@@ -206,7 +206,9 @@ export const CatalogCard: FunctionComponent<CatalogCardProps> = ({
               pendingRemoval
                 ? "Restart Bazarr+ to remove this plugin"
                 : pendingUpdate
-                  ? "Restart Bazarr+ to activate the staged update"
+                  ? installed?.staged_action === "rollback"
+                    ? "Restart Bazarr+ to activate the staged rollback"
+                    : "Restart Bazarr+ to activate the staged update"
                   : "Restart Bazarr+ to activate this plugin"
             }
           >
@@ -368,6 +370,7 @@ export const CatalogCard: FunctionComponent<CatalogCardProps> = ({
               state={installed.state}
               pendingRestart={isAwaitingRestart(installed)}
               activeVersion={installed.active_version}
+              stagedAction={installed.staged_action}
               needsRepair={installed.needs_repair}
               revoked={installed.revoked}
               revokedReason={

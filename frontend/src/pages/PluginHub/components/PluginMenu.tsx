@@ -4,6 +4,7 @@ import {
   faEllipsis,
   faFileLines,
   faPowerOff,
+  faRotateLeft,
   faScrewdriverWrench,
   faTrash,
 } from "@fortawesome/free-solid-svg-icons";
@@ -26,6 +27,7 @@ export interface PluginMenuProps {
   elsewhere: boolean;
   onToggle: (row: PluginRow) => void;
   onRepair: (row: PluginRow) => void;
+  onRollback: (row: PluginRow) => void;
   onLog: (row: PluginRow) => void;
   onRemove: (row: PluginRow) => void;
 }
@@ -45,10 +47,11 @@ const Item: FunctionComponent<{
   icon: typeof faPowerOff;
   label: string;
   reason?: string | null;
+  detail?: string | null;
   disabled?: boolean;
   color?: string;
   onClick: () => void;
-}> = ({ icon, label, reason, disabled = false, color, onClick }) => (
+}> = ({ icon, label, reason, detail, disabled = false, color, onClick }) => (
   // Not the native disabled state: that takes the item out of the arrow-key order, and with it the reason.
   <Menu.Item
     color={color}
@@ -70,7 +73,7 @@ const Item: FunctionComponent<{
       }
     }}
   >
-    <Entry label={label} reason={disabled ? reason : null} />
+    <Entry label={label} reason={disabled ? reason : detail} />
   </Menu.Item>
 );
 
@@ -82,6 +85,7 @@ export const PluginMenu: FunctionComponent<PluginMenuProps> = ({
   elsewhere,
   onToggle,
   onRepair,
+  onRollback,
   onLog,
   onRemove,
 }) => {
@@ -103,6 +107,18 @@ export const PluginMenu: FunctionComponent<PluginMenuProps> = ({
     isOn && enabledDependents.length > 0
       ? `${enabledDependents.join(", ")} ${enabledDependents.length === 1 ? "needs" : "need"} it. Turn ${enabledDependents.length === 1 ? "that" : "those"} off first.`
       : null;
+  const rollback = installation.rollback;
+  const previous = rollback?.previous_version
+    ? `Previous release: v${rollback.previous_version}.`
+    : null;
+  const rollbackReason =
+    waiting ??
+    rollback?.blocked_reason ??
+    (!rollback
+      ? "Previous release information is unavailable. Reload the Plugin Hub."
+      : !rollback.previous_version
+        ? "No previous release is available."
+        : null);
   return (
     <Menu position="bottom-end" withinPortal>
       <Menu.Target>
@@ -122,6 +138,14 @@ export const PluginMenu: FunctionComponent<PluginMenuProps> = ({
           disabled={Boolean(needed ?? waiting)}
           reason={needed ?? waiting}
           onClick={() => onToggle(row)}
+        />
+        <Item
+          icon={faRotateLeft}
+          label="Roll back"
+          detail={previous}
+          disabled={Boolean(rollbackReason)}
+          reason={[previous, rollbackReason].filter(Boolean).join(" ")}
+          onClick={() => onRollback(row)}
         />
         <Item
           icon={faScrewdriverWrench}

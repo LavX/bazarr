@@ -55,6 +55,7 @@ export interface PluginCardProps {
   needsConsent: boolean;
   onToggle: (row: PluginRow) => void;
   onRepair: (row: PluginRow) => void;
+  onRollback: (row: PluginRow) => void;
   onLog: (row: PluginRow) => void;
   onRemove: (row: PluginRow) => void;
   onDismissReview: (row: PluginRow) => void;
@@ -99,8 +100,18 @@ const Action: FunctionComponent<PluginCardProps> = ({
   }
   if (installation && isAwaitingRestart(installation)) {
     return (
-      <Tooltip label="Restart Bazarr+ to finish this change">
-        <span className={styles.hubCardPendingText}>Awaiting restart</span>
+      <Tooltip
+        label={
+          installation.staged_action === "rollback"
+            ? "Restart Bazarr+ to activate the rollback"
+            : "Restart Bazarr+ to finish this change"
+        }
+      >
+        <span className={styles.hubCardPendingText}>
+          {installation.staged_action === "rollback"
+            ? "Rollback awaiting restart"
+            : "Awaiting restart"}
+        </span>
       </Tooltip>
     );
   }
@@ -210,10 +221,11 @@ export const PluginCard: FunctionComponent<PluginCardProps> = (props) => {
           <PluginMenu
             row={row}
             enabledDependents={row.enabledDependents}
-            busy={busy}
-            elsewhere={props.elsewhere}
+            busy={busy || props.updating}
+            elsewhere={props.elsewhere || props.blocked === true}
             onToggle={props.onToggle}
             onRepair={props.onRepair}
+            onRollback={props.onRollback}
             onLog={props.onLog}
             onRemove={props.onRemove}
           />
@@ -321,6 +333,7 @@ export const PluginCard: FunctionComponent<PluginCardProps> = (props) => {
                 state={installation.state}
                 pendingRestart={isAwaitingRestart(installation)}
                 activeVersion={installation.active_version}
+                stagedAction={installation.staged_action}
                 needsRepair={installation.needs_repair}
               />
             ) : (

@@ -2069,6 +2069,28 @@ def _usable_plugin_manifest(candidate):
     return isinstance(secrets, list) and all(isinstance(field, str) for field in secrets)
 
 
+def _plugin_destination_fields(manifest):
+    """The plugin's declared URI fields, secret names and effective field defaults."""
+    schema = manifest.get("config_schema")
+    properties = schema.get("properties") if isinstance(schema, dict) else None
+    uris = set()
+    secrets = {field.lower() for field in manifest.get("secret_fields", []) if isinstance(field, str)}
+    defaults = {}
+    if not isinstance(properties, dict):
+        return uris, secrets, defaults
+    for name, attribute in properties.items():
+        if not isinstance(name, str) or not isinstance(attribute, dict):
+            continue
+        field = name.lower()
+        if attribute.get("format") == "uri":
+            uris.add(field)
+        if attribute.get("secret") is True:
+            secrets.add(field)
+        if attribute.get("default") is not None:
+            defaults[field] = [attribute["default"]]
+    return uris, secrets, defaults
+
+
 def _installed_provider_hub_manifest_fields():
     """What each installed plugin's manifests declare about its config fields.
 
@@ -2152,35 +2174,13 @@ def _installed_provider_hub_manifest_fields():
             secrets = set()
             defaults = {}
             for manifest in manifests:
-                # The declarations are the union of the active and the staged
-                # manifest, because a pending update swaps the manifest in at
-                # activation and the token a save keeps now travels to the
-                # addresses the staged one declares from then on.
-                schema = manifest.get("config_schema")
-                properties = schema.get("properties") if isinstance(schema, dict) else None
-                secrets.update(field.lower() for field in manifest.get("secret_fields", [])
-                               if isinstance(field, str))
-                if isinstance(properties, dict):
-                    for field, attribute in properties.items():
-                        if not isinstance(field, str) or not isinstance(attribute, dict):
-                            continue
-                        if attribute.get("format") == "uri":
-                            uri_fields.add(field.lower())
-                        # A field may be declared a secret either way, in
-                        # secret_fields or with a secret attribute on its
-                        # property, a spelling the manifest validation
-                        # tolerates. Only an exact true counts, so no truthy
-                        # string stands in for it.
-                        if attribute.get("secret") is True:
-                            secrets.add(field.lower())
-                        if attribute.get("default") is not None:
-                            # The default destination a cleared or empty field
-                            # falls back to, the fallback the provider reader
-                            # applies; a pending update can still swap it, so
-                            # every manifest's default is kept.
-                            field_defaults = defaults.setdefault(field.lower(), [])
-                            if attribute["default"] not in field_defaults:
-                                field_defaults.append(attribute["default"])
+                # The pending update can swap the manifest, so keep the union of both declarations.
+                uris, fields, values = _plugin_destination_fields(manifest)
+                uri_fields |= uris
+                secrets |= fields
+                for field, choices in values.items():
+                    field_defaults = defaults.setdefault(field, [])
+                    field_defaults.extend(choice for choice in choices if choice not in field_defaults)
             hub_config = item.get("config") if isinstance(item.get("config"), dict) else {}
             declared[provider_id] = (uri_fields, secrets, defaults, hub_config)
         return declared, unreadable

@@ -36,7 +36,7 @@ from .manifest import ManifestValidationError, manifest_provider_id, validate_ma
 from .kinds import (ATTACH_LIVE, ATTACH_ON_RESTART, DETACH_LIVE, SUBTITLE_PROVIDER, TRANSLATOR, UnknownKindError,
                     catalog_kind_of, get_kind, kind_for_api, kind_of, known_kinds)
 from .kinds import subtitle_provider as provider_kind
-from . import catalog_feed, closure, consent, datadir, detach, dev_source, floor, releases, revocation, secret_paths, seed
+from . import catalog_feed, closure, consent, datadir, detach, dev_source, floor, release_settings, releases, revocation, secret_paths, seed
 from .bundle import verify_bundle_tree
 from .compatibility import (
     CATALOG_LIST_PLUGINS, CATALOG_LIST_PROVIDERS, HostFacts, current_host, entry_compatibility, refusal_text,
@@ -1180,6 +1180,7 @@ def update_catalog_source(name: str, dev_ref=_UNSET) -> dict[str, Any] | None:
         target_name=name,
     ) as job:
         validated_dev_ref = _validate_dev_ref(dev_ref) if dev_ref is not _UNSET else _UNSET
+        binding_revision = uuid.uuid4().hex
 
         def update_source(state: dict[str, Any]) -> tuple[dict[str, Any] | None, Any]:
             _key, source = _find_catalog_source(state, name)
@@ -1193,6 +1194,8 @@ def update_catalog_source(name: str, dev_ref=_UNSET) -> dict[str, Any] | None:
                 # stays correct for a new ref that resolves to the same one.
                 # The official trust input (previous_commit) keeps its value.
                 source["dev_ref"] = validated_dev_ref
+                if previous_dev_ref != validated_dev_ref:
+                    source["binding_revision"] = binding_revision
             return dict(source), previous_dev_ref
 
         source, previous_dev_ref = mutate_state(update_source)
@@ -2195,6 +2198,10 @@ def needs_restart(installation: dict[str, Any]) -> bool:
 
 def _redact_installation(installation: dict[str, Any]) -> dict[str, Any]:
     redacted = dict(installation)
+    if redacted.pop(releases.STAGED_ROLLBACK, None) and redacted.get("staged_version"):
+        redacted["staged_action"] = "rollback"
+    redacted.pop(_PENDING_ROLLBACK_HOOK, None)
+    redacted.pop(release_settings.RETAINED, None)
     redacted.pop("active_data_key", None)
     _clear_staged_data(redacted)
     redacted.pop("delete_release_data", None)
@@ -2261,9 +2268,9 @@ def _effective_installation_config(installation: dict[str, Any],
     active_manifest = installation.get("manifest")
     if not isinstance(active_manifest, dict):
         active_manifest = {}
-    from secret_store.registry import _manifest_field_names, manifest_secret_fields
+    from secret_store.registry import manifest_secret_fields
     secret_fields = manifest_secret_fields(active_manifest) | retained
-    effective = dict(config)
+    effective = provider_kind.visible_hub_config(config, active_manifest, retained)
     undecryptable = set()
     for field in secret_fields:
         if field in effective:
@@ -2272,12 +2279,6 @@ def _effective_installation_config(installation: dict[str, Any],
             except Exception:
                 del effective[field]
                 undecryptable.add(field)
-    declared = _manifest_field_names(active_manifest)
-    if retained:
-        for field in sorted(retained):
-            if field not in declared:
-                effective.pop(field, None)
-                undecryptable.discard(field)
     return effective, undecryptable
 
 
@@ -2686,8 +2687,8 @@ def runtime_provider_configs() -> dict[str, dict[str, Any]]:
         # to the class that took its id back (a built-in a plugin had replaced). The registry is what says whose
         # class holds the id: a row that still names a release (a revocation lifted without a restart, an install
         # over a removal) is not enough.
-        if installation.get("blocked") or (
-                installation.get("state") == "removed" and not installation.get("pending_restart")):
+        if (installation.get("blocked") or release_settings.provider_restore_pending(installation)
+                or (installation.get("state") == "removed" and not installation.get("pending_restart"))):
             continue
         from .registry import is_plugin_class
 
@@ -2827,6 +2828,7 @@ def _decrypt_block_state(cache_key: tuple) -> dict[str, Any]:
         "declared": {},      # provider_id -> fields the active manifest declares
         "starved": {},       # provider_id -> declared fields with no working stored value
         "working": {},       # provider_id -> secret fields with a working stored value
+        "restoring": set(),  # provider ids whose previous settings have not been applied
     }
     for provider_id, installation in (state.get("installations") or {}).items():
         if not isinstance(installation, dict) or not installation.get("active_version"):
@@ -2834,6 +2836,8 @@ def _decrypt_block_state(cache_key: tuple) -> dict[str, Any]:
         # Keyed by the lowercased id: decrypt_failure_paths() carries the
         # registry's lowercase form, whatever case state.json was written in.
         key = str(provider_id).lower()
+        if release_settings.provider_restore_pending(installation):
+            block["restoring"].add(key)
         active_manifest = installation.get("manifest")
         if not isinstance(active_manifest, dict):
             active_manifest = {}
@@ -2889,6 +2893,12 @@ def decrypt_blocked_provider_ids() -> set[str]:
             continue
         blocked.add(str(provider_id))
     return blocked
+
+
+def runtime_blocked_provider_ids() -> set[str]:
+    """Exclude providers missing credentials or waiting for their retained settings to be written."""
+    block = _decrypt_block_state(_block_cache_key())
+    return decrypt_blocked_provider_ids() | block["restoring"]
 
 
 def list_installations(redact: bool = True, *, kind: str | None = None) -> list[dict[str, Any]]:
@@ -3059,6 +3069,10 @@ def test_provider_connection(provider_id: str) -> dict[str, Any] | None:
                 "status": "pending_restart",
                 "message": "Restart Bazarr+ before testing this staged plugin",
             }
+        if release_settings.provider_restore_pending(provider):
+            return _blocked_connection_result(provider_id, {
+                "blocked_reason": "The previous provider settings have not finished restoring",
+            }, job)
         if provider.get("blocked"):
             return _blocked_connection_result(provider_id, provider, job)
 
@@ -3770,6 +3784,7 @@ def _abandon_staged_release(state: dict[str, Any], plugin_id: str,
                             installation: dict[str, Any], message: str) -> None:
     """Drop a staged release that will not activate and record why. The active release, if any, stays."""
     installation["last_error"] = message
+    installation.pop(releases.STAGED_ROLLBACK, None)
     _abandon_staged_catalog_list(installation)
     _restore_active_source(state, plugin_id, installation)
     installation["staged_version"] = None
@@ -3945,6 +3960,9 @@ def _staged_installation(
         "staged_version": validated.version,
         "active_path": existing.get("active_path"),
         **({"active_data_key": existing["active_data_key"]} if existing.get("active_data_key") else {}),
+        **({"google_seed_rollback": existing["google_seed_rollback"]} if existing.get("google_seed_rollback") else {}),
+        **({_PENDING_ROLLBACK_HOOK: existing[_PENDING_ROLLBACK_HOOK]} if _PENDING_ROLLBACK_HOOK in existing else {}),
+        **({release_settings.RETAINED: existing[release_settings.RETAINED]} if release_settings.RETAINED in existing else {}),
         **({"delete_release_data": True} if existing.get("delete_release_data") else {}),
         **({"data_worker_cleanup_pending": True} if existing.get("data_worker_cleanup_pending") else {}),
         "python_path": existing.get("python_path"),
@@ -4000,6 +4018,7 @@ def _failed_installation(
         installation = dict(existing)
         if installation.get("state") == "staged":
             # A restage that fails drops the staged update the row still holds.
+            installation.pop(releases.STAGED_ROLLBACK, None)
             _abandon_staged_catalog_list(installation)
             if state is not None:
                 _restore_active_source(state, validated.provider_id, installation)
@@ -4195,6 +4214,8 @@ def _stage_validated(
                 bundle_path = bundle_stager(validated, deadline)
                 staged.append(bundle_path)
 
+            if expected_registration is not _UNSET:
+                check_catalog(load_state())
             has_data = datadir.declared(validated.raw)
             if has_data:
                 step("Preparing the plugin's data")
@@ -4511,7 +4532,8 @@ def activate_google_seed() -> bool:
 
     The translator startup code decides whether the engine is wanted. This
     function stages only the designated Google release and uses normal
-    activation. Baked trust is read-only and no fetched catalog is needed.
+    activation. An explicit rollback keeps its verified release until another
+    release activates. Baked trust is read-only and no fetched catalog is needed.
     """
     plugin_id = seed.GOOGLE_PLUGIN_ID
     kind = get_kind(TRANSLATOR)
@@ -4528,6 +4550,15 @@ def activate_google_seed() -> bool:
         return False
 
     config = _running_release_candidate(existing, kind)
+    if config is not None and _google_rollback_held(existing, _release_slots(state, plugin_id).get(releases.ACTIVE)):
+        # Reverify the exact restored release, whether it lives in config or in the image.
+        restored = seed.select_release(
+            provider_hub_dir(), plugin_id, config_candidate=config, requested=config[0].raw,
+            usable=lambda release: not _revocation_refusal(
+                state, plugin_id, release.manifest.version, release.manifest.name),
+        )
+        if restored is not None and (str(restored.bundle), str(restored.interpreter)) == config[1:]:
+            return True
 
     def usable(release: seed.Release) -> bool:
         manifest = release.manifest
@@ -5420,8 +5451,8 @@ def _same_staged_release(row: Any, expected: dict[str, Any]) -> bool:
     return (isinstance(row, dict) and row.get("state") == "staged" and row.get("pending_restart")
             and all(row.get(key) == expected.get(key) for key in (
                 "staged_version", "staged_path", "staged_python_path", "staged_manifest", "staged_data_key",
-                "staged_supplied_by", "staged_data_rollback", "kind", "source_id", "origin", "catalog_list",
-                "trusted")))
+                "staged_supplied_by", "staged_data_rollback", releases.STAGED_ROLLBACK, "kind", "source_id",
+                "origin", "catalog_list", "trusted")))
 
 
 def _staged_catalog_changed(state, row, stage) -> bool:
@@ -5586,12 +5617,12 @@ def _prepare_activation_data(plugin_id, row, active_data, same_owner, testing: P
 
 
 @datadir.serialized
-def activate_release(provider_id: str, *, at_boot: bool = False) -> Activation:
+def activate_release(provider_id: str, *, at_boot: bool = False, _expected_staged=None) -> Activation:
     """The one way a staged release becomes the active one, at boot and while Bazarr+ runs.
 
-    The staged release is checked (not revoked, accepted by its kind, bundle matches its manifest, starts), the
-    kind's ``on_activated`` brings what it stores in line with the new manifest, and one write makes the
-    release active: the release it replaces is retired, or draining when a running process may still be
+    The staged release is checked (not revoked, accepted by its kind, bundle matches its manifest, starts).
+    The saved copy and the new release identity commit together before the translator settings are reconciled.
+    When the release becomes active, the release it replaces is retired, or draining when a running process may still be
     serving its calls, and the plugin's restart flag clears. A release that fails any step is dropped and the
     active one, if any, stays as it was, so a failed update never takes a working plugin away.
 
@@ -5602,7 +5633,9 @@ def activate_release(provider_id: str, *, at_boot: bool = False) -> Activation:
     state = load_state()
     installation = (state.get("installations") or {}).get(provider_id)
     if (not isinstance(installation, dict) or installation.get("state") != "staged"
-            or not installation.get("pending_restart")):
+            or not installation.get("pending_restart")
+            or (_expected_staged is not None
+                and any(installation.get(key) != value for key, value in _expected_staged.items()))):
         return Activation(provider_id, ACTIVATION_SKIPPED)
     previous_version = installation.get("active_version")
     previous_manifest = installation.get("manifest") if previous_version else None
@@ -5614,7 +5647,9 @@ def activate_release(provider_id: str, *, at_boot: bool = False) -> Activation:
         live = get_kind(kind_of(installation)).attach_policy == ATTACH_LIVE
     except UnknownKindError:
         live = False
-    if not at_boot and not live:
+    rollback = installation.get(releases.STAGED_ROLLBACK) is not None
+    refusal = _staged_rollback_refusal(state, provider_id, installation)
+    if not at_boot and not live and refusal is None:
         return Activation(provider_id, ACTIVATION_WAITING, target_version, previous_version)
     if (not at_boot and installation.get("data_worker_cleanup_pending")
             and _has_removable_data(provider_id, installation) and not _previous_workers_stopped()):
@@ -5624,9 +5659,8 @@ def activate_release(provider_id: str, *, at_boot: bool = False) -> Activation:
     staged_release = slots.get(releases.STAGED)
     active_release = slots.get(releases.ACTIVE)
     staged_owner = (staged_release.source_id, staged_release.origin) if staged_release is not None else (None, None)
-    refusal = None
-    if (datadir.declared(installation.get("staged_manifest")) and not installation.get("staged_data_key")
-            and not installation.get("staged_data_rollback")):
+    if (refusal is None and datadir.declared(installation.get("staged_manifest"))
+            and not installation.get("staged_data_key") and not installation.get("staged_data_rollback")):
         reserved, refusal = _reserve_staged_data_key(provider_id, installation, state)
         if reserved is None and refusal is None:
             return Activation(provider_id, ACTIVATION_SKIPPED, target_version, previous_version)
@@ -5639,8 +5673,9 @@ def activate_release(provider_id: str, *, at_boot: bool = False) -> Activation:
             staged_release = slots.get(releases.STAGED)
             active_release = slots.get(releases.ACTIVE)
             staged_owner = (reserved.get("source_id"), reserved.get("origin"))
-    elif (_staged_catalog_changed(state, installation, staged_release)
-          or (installation.get("staged_data_rollback") and not _rollback_owner_recorded(staged_release))):
+    elif refusal is None and (_staged_catalog_changed(state, installation, staged_release)
+                              or (installation.get("staged_data_rollback")
+                                  and not _rollback_owner_recorded(staged_release))):
         refusal = "the staged release's catalog binding cannot be verified"
 
     with record_job(
@@ -5651,10 +5686,28 @@ def activate_release(provider_id: str, *, at_boot: bool = False) -> Activation:
         from_version=previous_version,
         to_version=target_version,
     ) as job, contextlib.ExitStack() as activation_files:
+        def refused_rollback(message):
+            job.data["state"] = "failed"
+            job.update(error=message, message=message)
+            outcome = ACTIVATION_FAILED if at_boot else ACTIVATION_SKIPPED
+            return Activation(provider_id, outcome, target_version, previous_version, message)
+
         if refusal is not None:
+            if rollback:
+                if not at_boot:
+                    return refused_rollback(refusal)
+                refusal += "; the staged rollback was discarded"
             if _fail_staged_activation(provider_id, installation, staged_release, job, refusal, refusal):
                 return Activation(provider_id, ACTIVATION_FAILED, target_version, previous_version, refusal)
             return Activation(provider_id, ACTIVATION_SKIPPED, target_version, previous_version)
+
+        def activation_attention(manifest):
+            try:
+                return get_kind(kind_of(installation)).on_activated(provider_id, previous_manifest, manifest.raw)
+            except Exception:
+                logging.getLogger(__name__).exception("The kind's activation step failed for %s", provider_id)
+                return _ACTIVATION_HOOK_ERROR
+
         try:
             active_data = _active_data_path(provider_id, installation)
             if active_data is not None and not at_boot:
@@ -5678,29 +5731,78 @@ def activate_release(provider_id: str, *, at_boot: bool = False) -> Activation:
                 if target is not None:
                     # The saved stage stays available if this process exits before the promotion commits.
                     datadir.publish_activation_data(root, probe_data, target)
-            # The kind's step runs before the release is written, as it always has: a plugin whose saved
-            # settings cannot be brought up to date is active and says so, never half switched.
-            try:
-                attention = get_kind(kind_of(installation)).on_activated(provider_id, previous_manifest, manifest.raw)
-            except Exception:
-                logging.getLogger(__name__).exception("The kind's activation step failed for %s", provider_id)
-                attention = "Its saved settings could not be brought up to date with this version."
+            prior_settings = release_settings.record_for(installation, staged_release) if rollback else None
+            restored = release_settings.read(prior_settings)
+            provider_section = None
+            provider_settings_copy = None
+            if same_owner and kind_of(installation) == SUBTITLE_PROVIDER:
+                provider_section = release_settings.provider_section(provider_id)
+                if rollback:
+                    plan = release_settings.provider_restore_plan(state, provider_id, installation, manifest.raw,
+                                                                 restored, section=provider_section)
+                    approved = installation[releases.STAGED_ROLLBACK].get("provider_destination_digest")
+                    if approved != _rollback_hash(plan["changed"]) and (approved is not None or plan["changed"]):
+                        raise ProviderHubInstallError("The provider address changed after the rollback was approved")
+                    if plan["fields"]:
+                        provider_settings_copy = release_settings.seal(plan)
+            translator_owners = {}
+            retained_owner_settings = None
+            translator_update = kind_of(installation) == TRANSLATOR and isinstance(previous_manifest, dict)
+            if translator_update and same_owner:
+                from .kinds.translator import _store
+                from subtitles.tools.translate.runtime.plugin_update import capture_release_settings
+
+                translator_owners = capture_release_settings(_store(), provider_id, previous_manifest, manifest.raw)
+                if rollback and translator_owners:
+                    retained_owner_settings = release_settings.seal({
+                        "owners": restored.get("owners", {}),
+                        "revisions": {key: owner["revision"] for key, owner in translator_owners.items()},
+                    })
+            outgoing_settings = (release_settings.capture(state, provider_id, installation, active_release,
+                                                           translator_owners, section=provider_section)
+                                 if same_owner else None)
+            reconcile_after_commit = rollback or translator_update
+            attention = None if reconcile_after_commit else activation_attention(manifest)
         except Exception as error:
             message = refusal_text(error)
             if _fail_staged_activation(
                     provider_id, installation, staged_release, job, message, str(error) or error.__class__.__name__):
                 return Activation(provider_id, ACTIVATION_FAILED, target_version, previous_version, message)
+            if rollback:
+                job.data["state"] = "failed"
+                job.update(error=message, message=message)
+                return Activation(provider_id, ACTIVATION_FAILED, target_version, previous_version, message)
             return Activation(provider_id, ACTIVATION_SKIPPED, target_version, previous_version)
 
-        def promote(state: dict[str, Any]) -> bool:
+        def promote(state: dict[str, Any]) -> tuple[bool, str | None]:
             row = (state.get("installations") or {}).get(provider_id)
+            if (rollback and isinstance(row, dict) and row.get("state") == "staged"
+                    and all(row.get(key) == installation.get(key) for key in _ROLLBACK_STAGED_FIELDS)
+                    and _release_slots(state, provider_id).get(releases.STAGED) == staged_release
+                    and (reason := _staged_rollback_refusal(state, provider_id, row))):
+                if at_boot:
+                    reason += "; the staged rollback was discarded"
+                    _abandon_staged_release(state, provider_id, row, reason)
+                return False, reason
             if (not _same_staged_release(row, installation)
                     or _release_slots(state, provider_id) != slots
                     or _staged_catalog_changed(state, row, staged_release)
                     or revocation.lookup(_revocations(state), provider_id, target_version) is not None):
                 # Replaced, removed, revoked or finished by someone else while it was being checked: theirs
                 # stands, and a revoked release is dropped by the next refresh.
-                return False
+                return False, None
+            if outgoing_settings is not None and row.get("config") != installation.get("config"):
+                # A refused rollback must not remain queued for the next boot.
+                if rollback:
+                    _abandon_staged_release(state, provider_id, row, _ROLLBACK_CHANGED)
+                    return False, _ROLLBACK_CHANGED
+                return False, None
+            if restored:
+                release_settings.restore_config(state, provider_id, row, restored)
+            if outgoing_settings is not None:
+                row[release_settings.RETAINED] = outgoing_settings
+            else:
+                row.pop(release_settings.RETAINED, None)
             row["active_version"] = row.get("staged_version")
             if row.get("staged_path"):
                 row["active_path"] = row.get("staged_path")
@@ -5710,6 +5812,8 @@ def activate_release(provider_id: str, *, at_boot: bool = False) -> Activation:
             row["staged_path"] = None
             row["staged_python_path"] = None
             row["staged_manifest"] = None
+            if rollback:
+                row[releases.PROMOTE_ROLLBACK] = row.pop(releases.STAGED_ROLLBACK)["release_id"]
             if data_key:
                 row["active_data_key"] = data_key
             else:
@@ -5730,6 +5834,20 @@ def activate_release(provider_id: str, *, at_boot: bool = False) -> Activation:
             row["last_error"] = None
             row.pop("needs_repair", None)
             row["activated_at"] = utcnow_iso()
+            if reconcile_after_commit:
+                identity = _rollback_artifact_identity(row, staged_release)
+                row[_PENDING_ROLLBACK_HOOK] = {"identity": identity, "previous_manifest": previous_manifest}
+                if retained_owner_settings is not None:
+                    row[_PENDING_ROLLBACK_HOOK]["settings_copy"] = retained_owner_settings
+                if provider_settings_copy is not None:
+                    row[_PENDING_ROLLBACK_HOOK]["provider_settings_copy"] = provider_settings_copy
+            else:
+                row.pop(_PENDING_ROLLBACK_HOOK, None)
+            if provider_id == seed.GOOGLE_PLUGIN_ID:
+                if rollback:
+                    row["google_seed_rollback"] = identity
+                else:
+                    row.pop("google_seed_rollback", None)
             if (isinstance(state, releases.StateDocument) and staged_release is not None
                     and (not same_owner or staged_release.catalog_registration != active_release.catalog_registration)):
                 # Matching files can belong to another registration or predate registration records.
@@ -5742,9 +5860,12 @@ def activate_release(provider_id: str, *, at_boot: bool = False) -> Activation:
             # Activation swaps the installation's manifest for the staged one; the staged schema's secret
             # paths (a new version can add them) join the persisted set with it.
             _persist_plugin_secret_paths(state, row)
-            return True
+            return True, None
 
-        if not mutate_state(promote):
+        promoted, refusal = mutate_state(promote)
+        if refusal:
+            return refused_rollback(refusal)
+        if not promoted:
             job.update(message=f"Activation of '{target_name}' v{target_version} skipped: it changed meanwhile")
             return Activation(provider_id, ACTIVATION_SKIPPED, target_version, previous_version)
         if installation.get("delete_release_data"):
@@ -5759,7 +5880,11 @@ def activate_release(provider_id: str, *, at_boot: bool = False) -> Activation:
         if isinstance(previous_manifest, dict):
             _archive_active_manifest(provider_id, previous_manifest)
         _archive_active_manifest(provider_id, manifest.raw)
-        if previous_version:
+        if reconcile_after_commit:
+            _finish_rollback_activation(load_state_strict(), provider_id, just_promoted=True)
+        if rollback:
+            job.update(message=f"Activated rollback {previous_version} -> {target_version}")
+        elif previous_version:
             job.update(message=f"Activated update {previous_version} -> {target_version}")
         else:
             job.update(message=f"Activated plugin '{target_name}' v{target_version}")
@@ -5840,10 +5965,190 @@ def _previous_release(provider_id: str):
     return max(previous, key=lambda release: (release.ended_seq or 0, release.id)) if previous else None
 
 
-def rollback_consent(provider_id: str, *, _state=None, _row=None, _target=None) -> dict[str, Any] | None:
+_ROLLBACK_ACTIVE_FIELDS = ("active_version", "active_path", "python_path", "manifest", "kind", "active_data_key")
+_ROLLBACK_STAGED_FIELDS = (releases.STAGED_ROLLBACK, "staged_version", "staged_path",
+                           "staged_python_path", "staged_manifest", "staged_data_key", "staged_data_rollback")
+_ROLLBACK_CHANGED = "The previous release changed; review the rollback again"
+_PENDING_ROLLBACK_HOOK = release_settings.PENDING_HOOK
+_ACTIVATION_HOOK_ERROR = "Its saved settings could not be brought up to date with this version."
+
+
+def _rollback_hash(value: Any) -> str:
+    return sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
+def _rollback_release_identity(release: releases.Release, *, legacy_env=_UNSET) -> str:
+    # Registration can fill in env_key when the retained row becomes staged.
+    identity = (release.plugin_id, release.id, release.created_at, release.ended_seq,
+                release.version, release.bundle_path, release.bundle_digest, release.python_path)
+    if legacy_env is not _UNSET:
+        identity += (legacy_env,)
+    return _rollback_hash((*identity, release.source_id, release.origin,
+                           release.catalog_registration, release.data_key))
+
+
+def _rollback_artifact_identity(row, slot: releases.SlotIdentity | None) -> str | None:
+    if slot is None:
+        return None
+    # Repair can repoint the interpreter without replacing the release or its data.
+    return _rollback_hash((slot.id, slot.created_at, slot.source_id, slot.origin, slot.catalog_registration,
+                           slot.bundle_digest, row.get("activated_at"),
+                           [row.get(key) for key in _ROLLBACK_ACTIVE_FIELDS if key != "python_path"]))
+
+
+def _google_rollback_held(row, slot: releases.SlotIdentity | None) -> bool:
+    marker = row.get("google_seed_rollback")
+    return bool(slot is not None and marker and (
+        marker == _rollback_artifact_identity(row, slot)
+        or marker == _rollback_hash(tuple(row.get(key) for key in _ROLLBACK_ACTIVE_FIELDS))))
+
+
+def _finish_rollback_activation(state, provider_id: str, *, just_promoted=False) -> None:
+    def pending_row(document):
+        row = (document.get("installations") or {}).get(provider_id)
+        if not isinstance(row, dict) or row.get("state") == "removed":
+            return None
+        marker = row.get(_PENDING_ROLLBACK_HOOK)
+        if not isinstance(marker, dict):
+            return None
+        identity = _rollback_artifact_identity(row, _release_slots(document, provider_id).get(releases.ACTIVE))
+        return row if identity and marker.get("identity") == identity else None
+
+    row = pending_row(state)
+    if row is None:
+        return
+    marker = row[_PENDING_ROLLBACK_HOOK]
+    try:
+        if marker.get("provider_settings_copy") is not None:
+            plan = release_settings.unseal(marker["provider_settings_copy"], field="provider_settings_copy")
+            release_settings.restore_provider_section(provider_id, plan, row.get("config") or {}, row["manifest"],
+                                                      just_promoted=just_promoted)
+        if marker.get("settings_copy") is not None:
+            from .kinds.translator import _store
+            from subtitles.tools.translate.runtime.plugin_update import restore_release_settings
+
+            settings_copy = release_settings.unseal(marker["settings_copy"], field="settings_copy")
+            restore_release_settings(_store(), provider_id, marker.get("previous_manifest"), row["manifest"],
+                                     settings_copy["owners"], settings_copy["revisions"])
+        attention = get_kind(kind_of(row)).on_activated(provider_id, marker.get("previous_manifest"), row["manifest"])
+    except Exception:
+        logging.getLogger(__name__).exception("The kind's rollback activation step failed for %s", provider_id)
+        attention = _ACTIVATION_HOOK_ERROR
+        completed = False
+    else:
+        completed = True
+
+    def acknowledge(document):
+        current = pending_row(document)
+        if current is None or current[_PENDING_ROLLBACK_HOOK] != marker:
+            return
+        if completed:
+            current.pop(_PENDING_ROLLBACK_HOOK)
+        if attention:
+            current["last_error"] = refusal_text(attention)
+        elif current.get("last_error") == _ACTIVATION_HOOK_ERROR:
+            current["last_error"] = None
+
+    mutate_state(acknowledge)
+
+
+@datadir.serialized
+def resume_rollback_activations() -> None:
+    """Finish settings reconciliation for releases committed by an earlier run."""
+    state = load_state_strict()
+    for provider_id in state.get("installations", {}):
+        try:
+            _finish_rollback_activation(state, provider_id)
+        except Exception:
+            logging.getLogger(__name__).exception("Could not resume rollback activation for %s", provider_id)
+
+
+def _rollback_active_identity(state, provider_id, row) -> str:
+    slot = _release_slots(state, provider_id).get(releases.ACTIVE)
+    return _rollback_hash((
+        [row.get(key) for key in _ROLLBACK_ACTIVE_FIELDS],
+        (slot.id, slot.created_at, slot.source_id, slot.origin, slot.catalog_registration) if slot else None,
+    ))
+
+
+def _rollback_source_binding(state: dict[str, Any], row: dict[str, Any]) -> str:
+    source_id = row.get("source_id")
+    source = (state.get("catalog_sources") or {}).get(source_id) if isinstance(source_id, str) else None
+    registration = ([source.get(key) for key in ("type", "url", "dev_ref", "binding_revision", "enabled", "trusted")]
+                    if isinstance(source, dict) else None)
+    return _rollback_hash((source_id, row.get("origin"), row.get("source_bound"), row.get("trusted"),
+                           _installed_catalog_list(row), releases.catalog_registration(state, source_id), registration))
+
+
+def _rollback_owned(state, provider_id, row, target) -> bool:
+    active = _release_slots(state, provider_id).get(releases.ACTIVE)
+    return (_active_release_owned(state, row, active) and _rollback_owner_recorded(target)
+            and _same_release_owner(state, target, active.source_id, active.origin)
+            and (target.source_id, target.origin) == (row.get("source_id"), row.get("origin")))
+
+
+def retained_settings_manifest(provider_id: str) -> dict[str, Any] | None:
+    """The same-registration previous manifest whose saved settings may return."""
+    state = load_state()
+    row = (state.get("installations") or {}).get(provider_id)
+    if not isinstance(row, dict) or row.get("state") == "removed":
+        return None
+    if row.get(releases.STAGED_ROLLBACK) and _staged_rollback_refusal(state, provider_id, row) is None:
+        return row.get("staged_manifest")
+    target = _previous_release(provider_id)
+    if target is not None and _rollback_owned(state, provider_id, row, target):
+        return target.manifest
+    return None
+
+
+def _rollback_confirmation(state: dict[str, Any], row: dict[str, Any], target: releases.Release, *,
+                           legacy_env=_UNSET) -> str:
+    facts = (_rollback_release_identity(target, legacy_env=legacy_env), target.manifest,
+             _rollback_source_binding(state, row))
+    settings_copy = release_settings.record_for(row, target)
+    if settings_copy is not None:
+        facts += (settings_copy["content"],)
+    return _rollback_hash(facts)
+
+
+def _staged_rollback_refusal(state: dict[str, Any], provider_id: str, row: dict[str, Any]) -> str | None:
+    binding = row.get(releases.STAGED_ROLLBACK)
+    if binding is None:
+        return None
+    if not isinstance(binding, dict) or binding.get("source_binding") != _rollback_source_binding(state, row):
+        return "The catalog source binding changed"
+    staged = getattr(state, "staged_releases", {}).get(provider_id)
+    if (staged is None or staged.get("id") != binding.get("release_id")
+            or _rollback_active_identity(state, provider_id, row) != binding.get("active_identity")):
+        return "The previous release changed"
+    target = releases.release_of(staged)
+    # A rollback queued by an older build can have been confirmed before env_key was filled in.
+    confirmed = binding.get("confirmation_identity")
+    if (confirmed != _rollback_confirmation(state, row, target)
+            and confirmed != _rollback_confirmation(state, row, target, legacy_env=target.env_key)
+            and confirmed != _rollback_confirmation(state, row, target, legacy_env=None)):
+        return "The previous release changed"
+    if not _rollback_owned(state, provider_id, row, target):
+        return "The catalog source binding changed"
+    return None
+
+
+def _provider_rollback_plan(state, provider_id, row, target, settings_copy=_UNSET):
+    if kind_of(row) != SUBTITLE_PROVIDER:
+        return None
+    try:
+        if settings_copy is _UNSET:
+            settings_copy = release_settings.read(release_settings.record_for(row, target))
+        return release_settings.provider_restore_plan(state, provider_id, row, target.manifest, settings_copy)
+    except ValueError as error:
+        raise ProviderHubInstallError(str(error)) from None
+
+
+def rollback_consent(provider_id: str, *, _state=None, _row=None, _target=None,
+                     _provider_plan=_UNSET) -> dict[str, Any] | None:
     """What going back to the previous release adds to what the active release is allowed, or None.
 
-    Worked out from the two manifests alone, so it does not depend on the catalog still listing the old release.
+    Uses the retained manifest and settings rather than relying on the catalog to list the old release.
     The Subtitle Hub has no consent step for a provider without dependencies, as for an update. The digest in the
     result is what ``rollback_release`` takes as ``consent_digest``.
     """
@@ -5852,46 +6157,69 @@ def rollback_consent(provider_id: str, *, _state=None, _row=None, _target=None) 
     target = _target if _target is not None else _previous_release(provider_id)
     if not isinstance(row, dict) or target is None or target.manifest is None:
         return None
-    if kind_of(row) == SUBTITLE_PROVIDER and not closure.has_needs(target.manifest):
-        return None
-    return consent.update_delta(state, row.get("manifest"), {"manifest": target.manifest}, closure.Closure())
+    settings_copy = release_settings.read(release_settings.record_for(row, target))
+    provider = kind_of(row) == SUBTITLE_PROVIDER
+    ordinary_provider = provider and not closure.has_needs(target.manifest)
+    delta = None if ordinary_provider else consent.update_delta(
+        state, row.get("manifest"), {"manifest": target.manifest}, closure.Closure())
+    if provider:
+        plan = (_provider_rollback_plan(state, provider_id, row, target, settings_copy)
+                if _provider_plan is _UNSET else _provider_plan)
+        changed = plan["changed"]
+        if not changed:
+            return delta
+        if delta is None:
+            delta = {"plugin": {"id": provider_id, "name": row.get("name") or provider_id,
+                                "from_version": row.get("active_version"), "to_version": target.version,
+                                "kind": SUBTITLE_PROVIDER},
+                     "added": {key: [] for key in ("destinations", "destination_fields", "permissions",
+                                                   "binaries", "plugins")},
+                     "digest": _rollback_confirmation(state, row, target)}
+        restored = [address for addresses in changed.values() for address in addresses]
+        delta["added"]["destination_fields"] = sorted(set(delta["added"]["destination_fields"]) | set(changed))
+    elif settings_copy and kind_of(row) == TRANSLATOR:
+        from .kinds.translator import _store
+        from subtitles.tools.translate.runtime.plugin_update import rollback_settings_destinations
+
+        restored = rollback_settings_destinations(_store(), provider_id, target.manifest, settings_copy.get("owners", {}))
+        if not restored:
+            return delta
+    else:
+        return delta
+    # The consent pins the restored address. The confirmation shows only its origin.
+    origins = set(delta["added"]["destinations"])
+    for address in restored:
+        try:
+            parsed = urlparse(address)
+            if parsed.scheme in {"http", "https"} and parsed.hostname and not parsed.username and not parsed.password:
+                origins.add(f"{parsed.scheme}://{parsed.netloc}")
+        except ValueError:
+            continue
+    delta["added"]["destinations"] = sorted(origins)
+    delta["digest"] = consent.digest_of((delta["digest"], sorted(restored)))
+    delta["needs_consent"] = True
+    return delta
 
 
-@datadir.serialized
-def rollback_release(provider_id: str, consent_digest: str | None = None) -> Activation:
-    """Go back to the release this plugin ran before its active one.
-
-    The previous release is checked against what it was (its files are on disk and match its manifest, it comes
-    from the source the plugin comes from now, it is not revoked), then staged again under its own identity by the
-    same rules a new release is staged by (a plugin that relies on what the active release supplies refuses
-    it, its bindings are worked out again, what it adds over the active release needs consent), and activated by
-    ``activate_release``: a kind that attaches on restart waits for the boot, a kind that attaches live switches
-    now. Raises ``ProviderHubInstallError`` when there is nothing to go back to or the rules refuse it, and then
-    changes nothing: the previous release stays recorded.
-    """
-    _require_release_available(provider_id)
-    state = load_state()
+def _checked_rollback_target(state, provider_id, target, *, verify_files=True):
+    """The existing rollback guards, shared by its read preview and its writer."""
     row = (state.get("installations") or {}).get(provider_id)
     if not isinstance(row, dict) or not row.get("active_version") or row.get("state") == "removed":
         raise ProviderHubInstallError(f"{provider_id} is not installed")
+    if release_settings.provider_restore_pending(row):
+        raise ProviderHubInstallError("The previous provider settings have not finished restoring")
     if row.get("staged_version"):
-        raise ProviderHubInstallError(f"{provider_id} has an update waiting; discard it before going back")
-    target = _previous_release(provider_id)
+        if row.get(releases.STAGED_ROLLBACK):
+            status = "waiting for restart" if needs_restart(row) else "in progress"
+            raise ProviderHubInstallError(f"{provider_id} has a rollback {status}")
+        raise ProviderHubInstallError(f"{provider_id} has an update waiting; restart Bazarr+ to finish it")
     if target is None:
         raise ProviderHubInstallError(f"{provider_id} has no previous release to go back to")
     name = row.get("name") or provider_id
-
-    def same_owner(state, current):
-        active = _release_slots(state, provider_id).get(releases.ACTIVE)
-        return (_active_release_owned(state, current, active)
-                and _rollback_owner_recorded(target)
-                and _same_release_owner(state, target, active.source_id, active.origin)
-                and (target.source_id, target.origin) == (current.get("source_id"), current.get("origin")))
-
     if not _rollback_owner_recorded(target):
         raise ProviderHubInstallError(
             f"The catalog registration for {name} v{target.version} could not be verified, so it is not restored")
-    if not same_owner(state, row):
+    if not _rollback_owned(state, provider_id, row, target):
         raise ProviderHubInstallError(
             f"{name} v{target.version} was installed from another source than {name} is now, so it is not restored")
     found = revocation.lookup(_revocations(state), provider_id, target.version)
@@ -5904,29 +6232,126 @@ def rollback_release(provider_id: str, consent_digest: str | None = None) -> Act
     try:
         kind = get_kind(kind_of(row))
         manifest = kind.validate_manifest(target.manifest, bool(row.get("trusted", False)))
-        runtime = seed.resolve_paths(provider_hub_dir(), manifest.raw, target.bundle_path, target.python_path)
-        if (runtime is None or not runtime[0].is_dir() or not runtime[1].exists()
-                or (target.bundle_digest and manifest.bundle_sha256 != target.bundle_digest)):
-            raise ProviderHubInstallError("not on disk")
-        verify_bundle_tree(manifest, runtime[0])
+        if target.bundle_digest and manifest.bundle_sha256 != target.bundle_digest:
+            raise ProviderHubInstallError("bundle digest changed")
+        if verify_files:
+            runtime = seed.resolve_paths(provider_hub_dir(), manifest.raw, target.bundle_path, target.python_path)
+            if runtime is None or not runtime[0].is_dir() or not runtime[1].exists():
+                raise ProviderHubInstallError("not on disk")
+            verify_bundle_tree(manifest, runtime[0])
     except Exception as error:
         raise ProviderHubInstallError(
             f"{name} v{target.version} is no longer on disk, or no longer matches what it was, "
             f"so it cannot be restored ({refusal_text(error)})") from error
+    if verify_files:
+        try:
+            snapshot = release_settings.read(release_settings.record_for(row, target))
+            _provider_rollback_plan(state, provider_id, row, target, snapshot)
+        except ValueError as error:
+            raise ProviderHubInstallError(str(error)) from None
     plugin = parse_plugin_manifest(target.manifest) if target.manifest.get("schema_version") == 2 else None
     # An early answer. The check that counts runs again inside the write that stages the release.
     refusal = _rollback_needs_refusal(state, plugin, provider_id, name, target)
     if refusal:
         raise ProviderHubInstallError(refusal)
-    delta = rollback_consent(provider_id, _state=state, _row=row, _target=target)
+    return row, plugin
+
+
+def rollback_preview(provider_id: str, *, state=None, verify_files=True, include_consent=True) -> dict[str, Any]:
+    """The server-selected previous version and why it cannot return, without changing anything.
+
+    Listings skip file hashing and consent calculation. Opening the preview and submitting the rollback both
+    perform the full target checks; the listing is only a current hint.
+    """
+    state = state if state is not None else load_state()
+    target = _previous_release(provider_id)
+    result = {"previous_version": target.version if target is not None else None, "blocked_reason": None}
+    if include_consent:
+        row = (state.get("installations") or {}).get(provider_id)
+        result["consent"] = None
+        result["restores_settings"] = bool(isinstance(row, dict) and release_settings.record_for(row, target))
+        result["confirmation_identity"] = (_rollback_confirmation(state, row, target)
+                                           if isinstance(row, dict) and target is not None else None)
+    try:
+        row, _plugin = _checked_rollback_target(state, provider_id, target, verify_files=verify_files)
+        _refuse_a_release_that_breaks_dependents(state, provider_id, target.version, target.manifest)
+    except ProviderHubInstallError as error:
+        result["blocked_reason"] = refusal_text(error)
+    else:
+        if include_consent:
+            try:
+                result["consent"] = rollback_consent(provider_id, _state=state, _row=row, _target=target)
+            except ProviderHubInstallError as error:
+                result["blocked_reason"] = refusal_text(error)
+    return result
+
+
+@datadir.serialized
+def rollback_release(provider_id: str, consent_digest: str | None = None, *, expected_version: str | None = None,
+                     confirmation_identity: str | None = None) -> Activation:
+    """Go back to the release this plugin ran before its active one.
+
+    The previous release is checked against what it was (its files are on disk and match its manifest, it comes
+    from the source the plugin comes from now, it is not revoked), then staged again under its own identity by the
+    same rules a new release is staged by (a plugin that relies on what the active release supplies refuses
+    it, its bindings are worked out again, what it adds over the active release needs consent), and activated by
+    ``activate_release``: a kind that attaches on restart waits for the boot, a kind that attaches live switches
+    now. Raises ``ProviderHubInstallError`` when there is nothing to go back to or the rules refuse it, and then
+    changes nothing: the previous release stays recorded. A confirmation pins the server-selected release
+    and its source binding independently of permission consent.
+    """
+    _require_release_available(provider_id)
+    state = load_state()
+    target = _previous_release(provider_id)
+    row = (state.get("installations") or {}).get(provider_id)
+    if expected_version is not None or confirmation_identity is not None:
+        if (not isinstance(row, dict) or target is None or target.version != expected_version
+                or confirmation_identity != _rollback_confirmation(state, row, target)):
+            raise ProviderHubConsentError(_ROLLBACK_CHANGED, changed=True)
+    row, plugin = _checked_rollback_target(state, provider_id, target)
+    name = row.get("name") or provider_id
+
+    def matches_retained(document):
+        latest = max((release for release in getattr(document, "retained_releases", ())
+                      if release.get("plugin_id") == provider_id and release.get("state") == releases.RETIRED),
+                     key=lambda release: (release.get("ended_seq") or 0, release["id"]), default=None)
+        return latest is not None and _rollback_release_identity(releases.release_of(latest)) == release_identity
+
+    release_identity = _rollback_release_identity(target)
+    if not matches_retained(state):
+        raise ProviderHubConsentError(_ROLLBACK_CHANGED, changed=True)
+    provider_plan = _provider_rollback_plan(state, provider_id, row, target)
+    # Compute once so the acknowledged digest and the persisted approved destinations describe the same plan.
+    delta = (rollback_consent(provider_id, _state=state, _row=row, _target=target, _provider_plan=provider_plan)
+             if provider_plan is not None else rollback_consent(provider_id, _state=state, _row=row, _target=target))
+    if (expected_version is not None and consent_digest is not None
+            and (delta is None or consent_digest != delta["digest"])):
+        raise ProviderHubConsentError("The rollback consent changed; review the rollback again", changed=True)
     if delta and delta["needs_consent"] and consent_digest != delta["digest"]:
         raise ProviderHubConsentError(consent.delta_text(delta))
 
+    binding = {
+        "release_id": target.id,
+        "confirmation_identity": _rollback_confirmation(state, row, target),
+        "source_binding": _rollback_source_binding(state, row),
+        "active_identity": _rollback_active_identity(state, provider_id, row),
+    }
+    if provider_plan is not None:
+        binding["provider_destination_digest"] = _rollback_hash(provider_plan["changed"])
+    staged_identity = {releases.STAGED_ROLLBACK: binding, "staged_version": target.version,
+                       "staged_path": target.bundle_path, "staged_python_path": target.python_path,
+                       "staged_manifest": target.manifest, "staged_data_key": target.data_key,
+                       "staged_data_rollback": datadir.declared(target.manifest)}
+
     def stage(state: dict[str, Any]) -> bool:
         current = (state.get("installations") or {}).get(provider_id)
-        if (not isinstance(current, dict) or current.get("active_version") != row.get("active_version")
-                or current.get("staged_version") or current.get("state") == "removed"
-                or not same_owner(state, current)):
+        if (not isinstance(current, dict)
+                or _rollback_active_identity(state, provider_id, current) != binding["active_identity"]
+                or _rollback_source_binding(state, current) != binding["source_binding"]
+                or not _rollback_owned(state, provider_id, current, target)
+                or not matches_retained(state)
+                or (provider_plan is not None and current.get("config") != row.get("config"))
+                or current.get("staged_version") or current.get("state") == "removed"):
             return False
         # The rule every staging is held to: a plugin that relies on what the active release supplies refuses it.
         _refuse_a_release_that_breaks_dependents(state, provider_id, target.version, target.manifest)
@@ -5938,20 +6363,14 @@ def rollback_release(provider_id: str, consent_digest: str | None = None) -> Act
         current["previous_source"] = _installation_source(current)
         if current.get("catalog_list"):
             current["previous_catalog_list"] = current["catalog_list"]
-        current.update(
-            staged_version=target.version, staged_path=target.bundle_path, staged_python_path=target.python_path,
-            staged_manifest=target.manifest, state="staged", pending_restart=True, last_error=None)
-        if target.data_key:
-            current["staged_data_key"] = target.data_key
-        if datadir.declared(target.manifest):
-            current["staged_data_rollback"] = True
+        current.update(staged_identity, state="staged", pending_restart=True, last_error=None)
         if plugin is not None:
             current["staged_supplied_by"] = closure.supplier_map(state, plugin, provider_id)
         return True
 
     if not mutate_state(stage):
-        raise ProviderHubInstallError(f"{provider_id} changed while it was being rolled back")
-    return activate_release(provider_id)
+        raise ProviderHubConsentError(f"{provider_id} changed while it was being rolled back", changed=True)
+    return activate_release(provider_id, _expected_staged=staged_identity)
 
 
 def _boot_data_workers_ready(
@@ -6372,6 +6791,10 @@ def _repair_environment(provider_id: str, row, deadline: float, checkpoint=None)
                 # Another repair or an activation moved the installation while
                 # this one was building; theirs stands.
                 return {}
+            if provider_id == seed.GOOGLE_PLUGIN_ID:
+                slot = _release_slots(state, provider_id).get(releases.ACTIVE)
+                if _google_rollback_held(current, slot):
+                    current["google_seed_rollback"] = _rollback_artifact_identity(current, slot)
             current["python_path"] = str(python_path)
             if current.pop("needs_repair", None):
                 # A plugin held back at boot keeps saying why.
@@ -6541,6 +6964,7 @@ def remove_installation(provider_id: str, *, ignoring_dependents: frozenset[str]
             item["staged_path"] = None
             item["staged_python_path"] = None
             item["staged_manifest"] = None
+            item.pop(releases.STAGED_ROLLBACK, None)
             item.pop("staged_supplied_by", None)
             _clear_staged_data(item)
             item["last_error"] = None
@@ -7029,8 +7453,7 @@ def update_consent(provider_id: str) -> dict[str, Any] | None:
 
 def _update_catalog_binding(state, row) -> str:
     source_id = _bound_source_id(row)
-    binding = (source_id, releases.catalog_registration(state, source_id))
-    return sha256(json.dumps(binding, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    return _rollback_hash((source_id, releases.catalog_registration(state, source_id)))
 
 
 def update_catalog_binding(provider_id: str) -> str:

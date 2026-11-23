@@ -1,0 +1,265 @@
+# coding=utf-8
+"""Private settings copies attached to an exact retained release."""
+from __future__ import annotations
+
+import json
+from base64 import b64decode, urlsafe_b64encode
+from typing import Any
+
+RETAINED = "retained_release_settings"
+PENDING_HOOK = "pending_rollback_hook"
+_CONTENT = "content"
+_TRANSLATOR_COPY = "settings_copy"
+_PROVIDER_COPY = "provider_settings_copy"
+_PAYLOAD_FIELDS = {
+    _CONTENT: {"config_fields": list, "config": dict, "owners": dict},
+    _TRANSLATOR_COPY: {"owners": dict, "revisions": dict},
+    _PROVIDER_COPY: {"fields": list, "before": dict, "after": dict, "addresses": dict, "changed": dict,
+                     "secret_fields": list},
+}
+
+
+def provider_restore_pending(row: dict) -> bool:
+    marker = row.get(PENDING_HOOK)
+    return isinstance(marker, dict) and bool(marker.get("provider_settings_copy"))
+
+
+def _matches(record: Any, release) -> bool:
+    return bool(isinstance(record, dict) and release is not None and record.get("version") == 1
+                and (record.get("release_id"), record.get("created_at"), record.get("digest"))
+                == (release.id, release.created_at, release.bundle_digest)
+                and isinstance(record.get("content"), str))
+
+
+def record_for(installation: dict, release) -> dict | None:
+    record = installation.get(RETAINED)
+    return record if _matches(record, release) else None
+
+
+def _declared(manifest: dict) -> set[str]:
+    from secret_store.registry import _manifest_field_names
+
+    return {field.lower() for field in _manifest_field_names(manifest)}
+
+
+def _private_fields(state, plugin_id, installation) -> set[str]:
+    from secret_store.registry import installation_secret_fields
+
+    return installation_secret_fields(plugin_id, installation, state.get("plugin_secret_paths"))
+
+
+def capture(state: dict, plugin_id: str, installation: dict, release, translator_owners: dict,
+            *, section: dict | None = None) -> dict | None:
+    """Bind public plugin settings and scoped runtime owners to the exact outgoing release."""
+    if release is None:
+        return None
+    manifest = installation.get("manifest")
+    if not isinstance(manifest, dict):
+        return None
+    private = _private_fields(state, plugin_id, installation)
+    allowed = _declared(manifest) - private
+    future = _declared(installation.get("staged_manifest")) - private
+    if not allowed and not future and not translator_owners:
+        return None
+    config = installation.get("config")
+    config = config if isinstance(config, dict) else {}
+    payload = {"config_fields": sorted(allowed), "config": {key: config[key] for key in allowed if key in config},
+               "owners": translator_owners}
+    if section is not None:
+        payload["section"] = {key: section[key] for key in allowed if key in section}
+    content = seal(payload)
+    return {"version": 1, "release_id": release.id, "created_at": release.created_at,
+            "digest": release.bundle_digest, "content": content}
+
+
+def seal(payload: dict) -> str:
+    from secret_store.crypto import encrypt_secret, persist_master_key
+
+    persist_master_key()
+    return encrypt_secret(json.dumps(payload, sort_keys=True, separators=(",", ":")))
+
+
+def read(record: dict | None) -> dict:
+    return unseal(record[_CONTENT], field=_CONTENT) if record else {}
+
+
+def _valid_payload(data: dict, field: str) -> bool:
+    expected = _PAYLOAD_FIELDS[field]
+    if field == _CONTENT and "section" in data:
+        expected = {**expected, "section": dict}
+    if data.keys() != expected.keys() or any(not isinstance(data[key], kind) for key, kind in expected.items()):
+        return False
+    for key in ("config_fields", "fields", "secret_fields"):
+        if key in data and not all(isinstance(item, str) for item in data[key]):
+            return False
+    if field == _PROVIDER_COPY:
+        return all(isinstance(addresses, list) and all(isinstance(address, str) for address in addresses)
+                   for key in ("addresses", "changed") for addresses in data[key].values())
+    if field == _TRANSLATOR_COPY and any(type(revision) is not int for revision in data["revisions"].values()):
+        return False
+    return all(isinstance(owner, dict) and isinstance(owner.get("identity"), list)
+               and type(owner.get("revision")) is int and isinstance(owner.get("values"), dict)
+               for owner in data["owners"].values())
+
+
+def unseal(content: str, *, field: str) -> dict:
+    from secret_store.crypto import SECRET_MARKER_PREFIX, decrypt_secret, is_encrypted
+
+    if not is_encrypted(content):
+        raise ValueError("The retained settings copy is invalid")
+    try:
+        encoded = content[len(SECRET_MARKER_PREFIX):].encode("ascii")
+        decoded = b64decode(encoded, altchars=b"-_", validate=True)
+    except ValueError:
+        raise ValueError("The retained settings copy is invalid") from None
+    if urlsafe_b64encode(decoded) != encoded:
+        raise ValueError("The retained settings copy is invalid")
+    try:
+        result = json.loads(decrypt_secret(content))
+    except (TypeError, ValueError):
+        raise ValueError("The retained settings copy could not be read") from None
+    if not isinstance(result, dict) or not _valid_payload(result, field):
+        raise ValueError("The retained settings copy is invalid")
+    return result
+
+
+def is_sealed_state_field(path: tuple, value: str) -> bool:
+    """Recognize authenticated settings storage without exempting diagnostic text from scrubbing."""
+    if len(path) != 4 or path[0] != "installations" or not isinstance(path[1], str):
+        return False
+    container, field = path[2:]
+    if (container, field) not in ((RETAINED, _CONTENT), (PENDING_HOOK, _TRANSLATOR_COPY),
+                                  (PENDING_HOOK, _PROVIDER_COPY)):
+        return False
+    try:
+        unseal(value, field=field)
+    except ValueError:
+        return False
+    return True
+
+
+def restore_config(state: dict, plugin_id: str, row: dict, snapshot: dict) -> None:
+    """Restore declared public settings into this plugin's own configuration only."""
+    if not snapshot:
+        return
+    private = _private_fields(state, plugin_id, row)
+    previous = (_declared(row.get("staged_manifest")) & set(snapshot["config_fields"])) - private
+    current = _declared(row.get("manifest")) - private
+    owned = current | previous
+    existing = row.get("config")
+    existing = existing if isinstance(existing, dict) else {}
+    updated = {key: value for key, value in existing.items() if key not in owned}
+    updated.update((key, value) for key, value in snapshot["config"].items() if key in previous)
+    row["config"] = updated
+
+
+def provider_section(plugin_id: str) -> dict:
+    from app.config import settings
+    from .manifest import reserved_settings_sections
+
+    if plugin_id in reserved_settings_sections():
+        raise ValueError("The plugin does not own this settings section")
+    section = settings.get(plugin_id, {})
+    return dict(section) if hasattr(section, "items") else {}
+
+
+def _provider_credentials_present(plugin_id, names, section, hub_config) -> bool:
+    from app.config import _credential_present
+    from secret_store.migration import decrypt_failure_paths
+
+    failed = decrypt_failure_paths()
+    return any(f"{plugin_id}.{key}" in failed or _credential_present(section.get(key))
+               or _credential_present(hub_config.get(key)) for key in names)
+
+
+def _provider_destinations(manifest, section, hub, fields, private) -> dict:
+    from .kinds.subtitle_provider import overlay_provider_settings, visible_hub_config
+
+    schema = manifest.get("config_schema")
+    properties = schema.get("properties") if isinstance(schema, dict) else None
+    config = overlay_provider_settings(properties if isinstance(properties, dict) else {}, section,
+                                       visible_hub_config(hub, manifest, private))
+    destinations = {}
+    for key in fields:
+        value = config.get(key)
+        if value in (None, "", [], {}):
+            destinations[key] = []
+        elif isinstance(value, (str, int, float)):
+            destinations[key] = [str(value)]
+        else:
+            raise ValueError("The previous provider address could not be verified")
+    return destinations
+
+
+def _destination_fields(before_manifest, after_manifest):
+    from app.config import _plugin_destination_fields
+
+    before_uris, _, _ = _plugin_destination_fields(before_manifest)
+    after_uris, _, _ = _plugin_destination_fields(after_manifest)
+    known = _declared(before_manifest) | _declared(after_manifest)
+    return before_uris | after_uris | {key for key in known if key in ("url", "host", "endpoint")
+                                      or key.endswith(("_url", "_host"))}
+
+
+def provider_restore_plan(state, plugin_id, row, target_manifest, snapshot, *, section=None):
+    """Project the two stores without copying or decrypting a retained credential."""
+    current = row.get("manifest") or {}
+    restoring = {**row, "staged_manifest": target_manifest}
+    private = _private_fields(state, plugin_id, restoring)
+    section = provider_section(plugin_id) if section is None else section
+    prior = snapshot.get("section")
+    # A missing section makes no claim about what the previous YAML contained.
+    owned = (_declared(current) | _declared(target_manifest)) - private if isinstance(prior, dict) else set()
+    desired = {key: prior[key] for key in owned if key in prior}
+    before = {key: section[key] for key in owned if key in section}
+    projected_section = {key: value for key, value in section.items() if key not in owned} | desired
+    current_hub = row.get("config") if isinstance(row.get("config"), dict) else {}
+    proposed = dict(restoring)
+    restore_config(state, plugin_id, proposed, snapshot)
+    next_hub = proposed.get("config") or {}
+    fields = _destination_fields(current, target_manifest)
+    prior_addresses = _provider_destinations(current, section, current_hub, fields, private)
+    addresses = _provider_destinations(target_manifest, projected_section, next_hub, fields, private)
+    changed = {key for key, values in addresses.items() if values != prior_addresses[key]}
+    if changed and _provider_credentials_present(plugin_id, private, section, current_hub):
+        raise ValueError("Remove the saved provider credential before rolling back to a different address")
+    # Protected values are used only to compare effective settings in memory, never as consent data.
+    addresses = {key: [] if key in private else values for key, values in addresses.items()}
+    return {"fields": sorted(owned), "before": before, "after": desired,
+            "changed": {key: addresses[key] for key in changed}, "addresses": addresses,
+            "secret_fields": sorted(private)}
+
+
+def restore_provider_section(plugin_id: str, plan: dict, hub_config: dict, manifest: dict,
+                             *, just_promoted=False) -> None:
+    from app.config import settings, write_config
+    from discover.metadata import CONFIG_LOCK
+
+    with CONFIG_LOCK:
+        current = provider_section(plugin_id)
+        owned = set(plan["fields"])
+        existing = {key: current[key] for key in owned if key in current}
+        if existing == plan["after"]:
+            return
+        if existing != plan["before"]:
+            raise ValueError("The provider settings section changed before it could be restored")
+        projected = {key: value for key, value in current.items() if key not in owned} | plan["after"]
+        fields = _destination_fields(manifest, manifest)
+        private = set(plan["secret_fields"])
+        before = _provider_destinations(manifest, current, hub_config, fields, private)
+        after = _provider_destinations(manifest, projected, hub_config, fields, private)
+        moved = {key: values for key, values in after.items() if values != before[key]}
+        # Startup calls the first attempt during the same activation, whose paired address check already ran.
+        # A retry may see a later credential, so it must use the current effective address again.
+        if moved and not just_promoted and _provider_credentials_present(
+                plugin_id, plan["secret_fields"], current, hub_config):
+            raise ValueError("Remove the saved provider credential before restoring its previous address")
+        if any(plan["addresses"].get(key) != ([] if key in private else values) for key, values in moved.items()):
+            raise ValueError("The provider address changed after the rollback was approved")
+        settings[plugin_id] = projected
+        try:
+            if write_config() is not True:
+                raise ValueError("The previous provider settings could not be saved")
+        except BaseException:
+            settings[plugin_id] = current
+            raise

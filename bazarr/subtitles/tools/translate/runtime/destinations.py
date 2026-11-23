@@ -25,6 +25,12 @@ class DestinationSchema:
     fields: tuple[Mapping[str, Any], ...] = ()
     endpoints: tuple[str, ...] = ()
 
+    @property
+    def secret_fields(self) -> frozenset[str]:
+        from .field_schema import is_secret_field
+
+        return frozenset(item["key"] for item in self.fields if is_secret_field(item))
+
 
 class DestinationError(ValueError):
     """A destination that cannot be accepted. The message is fixed and never carries the value."""

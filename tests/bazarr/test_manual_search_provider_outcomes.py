@@ -99,7 +99,7 @@ def manual_endpoint(request, monkeypatch):
     for name, provider_class in registry.items():
         monkeypatch.setitem(core.provider_registry, name, provider_class)
     monkeypatch.setattr(get_providers, "_ensure_provider_hub_registered", lambda: None)
-    monkeypatch.setattr(get_providers, "_decrypt_blocked_provider_ids", set)
+    monkeypatch.setattr(get_providers, "_runtime_blocked_provider_ids", set)
     monkeypatch.setattr(get_providers, "tp", {})
     monkeypatch.setattr(get_providers, "throttle_count", {})
     monkeypatch.setattr(get_providers, "event_stream", lambda **kwargs: None)

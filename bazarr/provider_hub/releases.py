@@ -88,6 +88,9 @@ KEEP_FAILED = 1
 # calls are still being served. ``split`` consumes it: the replaced release goes
 # to ``draining`` instead of straight to ``retired``.
 DRAIN_PREVIOUS = "drain_previous"
+# The rollback carries the exact released row approved by the user.
+STAGED_ROLLBACK = "staged_rollback"
+PROMOTE_ROLLBACK = "promote_rollback"
 # Set on an installation row when a staged release is dropped because it failed to activate, with the reason.
 # ``split`` consumes it: that release is kept as failed, or as the previous release again when it came from there.
 # A staged release that leaves its slot for any other reason is forgotten, whatever error the row shows.
@@ -443,6 +446,7 @@ class StateDocument(dict):
     def __init__(self, data: dict[str, Any]):
         super().__init__(data)
         self.release_slots: dict[str, dict[str, SlotIdentity]] = {}
+        self.staged_releases: dict[str, dict[str, Any]] = {}
         self.inline_releases: set[str] = set()
 
 
@@ -460,8 +464,9 @@ def compose(data: dict[str, Any], rows: list[dict[str, Any]]) -> "StateDocument"
     # The previous and draining releases, and every release of a plugin the document does not list (what a
     # damaged document lost): they are kept until discarded on purpose, and so are their files.
     document.retained_releases = tuple(
-        {"plugin_id": release["plugin_id"], "version": release["version"], "state": release["state"],
-         "bundle_path": release.get("bundle_path"), "python_path": release.get("python_path"),
+        {**{key: release.get(key) for key in (
+            "id", "plugin_id", "version", "state", "bundle_path", "python_path", "bundle_digest", "env_key",
+            "created_at", "ended_seq", "source_id", "origin", "fields")},
          "data_key": _data_key(release)}
         for release in rows
         if release["state"] in (RETIRED, DRAINING) or release["plugin_id"] not in listed)
@@ -471,6 +476,8 @@ def compose(data: dict[str, Any], rows: list[dict[str, Any]]) -> "StateDocument"
     for release in rows:
         if release["state"] in SLOT_STATES:
             by_plugin.setdefault(release["plugin_id"], {})[release["state"]] = release
+        if release["state"] == STAGED:
+            document.staged_releases[release["plugin_id"]] = release
     for plugin_id, installation in installations.items():
         if not isinstance(installation, dict):
             continue
@@ -609,6 +616,7 @@ def split(data: dict[str, Any], rows: list[dict[str, Any]], *, now: str | None =
             continue
         drain = bool(installation.pop(DRAIN_PREVIOUS, False))
         failure = installation.pop(FAIL_STAGED, None)
+        promote_rollback = installation.pop(PROMOTE_ROLLBACK, None)
         promote_staged = PROMOTE_STAGED_DATA in installation
         staged_data = installation.pop(PROMOTE_STAGED_DATA, None)
         active = _slot(installation, _ACTIVE_KEYS, True)
@@ -621,10 +629,12 @@ def split(data: dict[str, Any], rows: list[dict[str, Any]], *, now: str | None =
         existing = by_plugin.get(plugin_id, [])
         claimed: set[int] = set()
 
-        def find(slot: _Slot, states: tuple[str, ...], *, for_install: bool = False) -> dict[str, Any] | None:
+        def find(slot: _Slot, states: tuple[str, ...], *,
+                 for_install: bool = False, release_id: int | None = None) -> dict[str, Any] | None:
             for state in states:
                 for release in existing:
-                    if release["id"] not in claimed and release["state"] == state and _matches(release, slot):
+                    if (release["id"] not in claimed and release["state"] == state and _matches(release, slot)
+                            and (release_id is None or release["id"] == release_id)):
                         if for_install and (
                                 (release.get("source_id"), release.get("origin"))
                                 != (row.get("source_id"), row.get("origin"))
@@ -690,18 +700,36 @@ def split(data: dict[str, Any], rows: list[dict[str, Any]], *, now: str | None =
                         or staged_release.get("origin") != row.get("origin")):
                     raise ReleaseTransitionError("the staged release changed before its data key could be recorded")
             else:
-                staged_release = find(staged, (STAGED, RETIRED),
-                                      for_install=getattr(data, "staging_install", None) == plugin_id)
+                rollback = row.get(STAGED_ROLLBACK)
+                rollback_id = rollback.get("release_id") if isinstance(rollback, dict) else None
+                for_install = getattr(data, "staging_install", None) == plugin_id
+                def same_contents(release):
+                    return (release.get("python_path") == staged.python_path
+                            and release.get("manifest") == _dumps(staged.manifest))
+
+                staged_release = find(staged, (STAGED,), for_install=for_install)
+                if (staged_release is not None and staged_release.get("retired_at")
+                        and not same_contents(staged_release)):
+                    # A replacement must leave the protected rollback row intact.
+                    staged_release = None
+                if staged_release is None:
+                    retained = find(staged, (RETIRED,), for_install=for_install, release_id=rollback_id)
+                    if retained is not None and (rollback_id is None or same_contents(retained)):
+                        staged_release = retained
             settle(staged, staged_release, STAGED, source_id=rebound_source)
         if active is not None:
-            if promote_staged and staged is None:
+            if promote_rollback is not None:
+                active_release = find(active, (STAGED,), release_id=promote_rollback)
+                if active_release is None:
+                    raise ReleaseTransitionError("the confirmed rollback release is no longer staged")
+            elif promote_staged and staged is None:
                 # Match the saved stage using its old key and write the active slot with the new key.
-                promoted = find(replace(active, data_key=staged_data), (STAGED,))
+                active_release = find(replace(active, data_key=staged_data), (STAGED,))
             else:
                 states = ((STAGED, ACTIVE, DRAINING, RETIRED) if getattr(data, "promoting_stage", None) == plugin_id
                           else (ACTIVE, STAGED, DRAINING, RETIRED))
-                promoted = find(active, states)
-            settle(active, promoted, ACTIVE)
+                active_release = find(active, states)
+            settle(active, active_release, ACTIVE)
         # What the slots no longer name.
         for release in existing:
             if release["id"] in claimed:

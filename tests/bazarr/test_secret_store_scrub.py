@@ -258,6 +258,31 @@ def test_state_diagnostics_are_masked_and_credential_containers_are_not(scrub_re
     assert state["catalog_sources"]["s"]["last_error"] == "Bearer ***"
 
 
+def test_state_scrubbing_preserves_only_authenticated_private_settings_copies(monkeypatch):
+    from app.config import settings
+    from provider_hub import release_settings
+
+    monkeypatch.setattr(settings.general, "secrets_encryption_key", "fixture-setting-encryption", raising=False)
+    retained = release_settings.seal({"config_fields": ["region"], "config": {"region": "EU"}, "owners": {}})
+    translator = release_settings.seal({"owners": {}, "revisions": {}})
+    provider = release_settings.seal({"fields": [], "before": {}, "after": {}, "addresses": {}, "changed": {},
+                                      "secret_fields": []})
+    invalid_shape = release_settings.seal({"owners": [], "revisions": {}})
+    selected = {"retained_release_settings": {"content": retained}, "pending_rollback_hook": {
+        "settings_copy": translator, "provider_settings_copy": provider}, "last_error": retained}
+    state = {"installations": {"selected": selected, "damaged": {"retained_release_settings": {
+        "content": STORED_CIPHERTEXT}, "pending_rollback_hook": {"settings_copy": invalid_shape}}},
+        "jobs": [{"details": {"settings_copy": translator}}]}
+
+    assert scrub_state_secrets(state)
+    assert selected["retained_release_settings"]["content"] == retained
+    assert selected["pending_rollback_hook"] == {"settings_copy": translator, "provider_settings_copy": provider}
+    assert selected["last_error"] == MASK
+    assert state["jobs"][0]["details"]["settings_copy"] == MASK
+    assert state["installations"]["damaged"]["retained_release_settings"]["content"] == MASK
+    assert state["installations"]["damaged"]["pending_rollback_hook"]["settings_copy"] == MASK
+
+
 def test_a_clean_state_document_reports_no_change():
     state = {"installations": {}, "jobs": [{"message": "Worker health check passed"}]}
     assert scrub_state_secrets(state) is False
