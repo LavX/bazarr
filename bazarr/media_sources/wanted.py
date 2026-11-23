@@ -48,6 +48,21 @@ def wanted_language_count(kind, session):
     return sum(len(ast.literal_eval(missing)) for missing in rows)
 
 
+def arr_claim_blocks_wanted(source, *, target=None):
+    """Check the exact Arr path again at the source publication boundary."""
+    if target is not None:
+        # The publication transaction pins the source registry. Keep this check read-only under that lock.
+        return identity.ArrOwners.load(target).path_stage(source.path) is not None
+    from .context import resolve_same_item
+
+    if resolve_same_item(source) is None:
+        return False
+    if shadows.path_stage_shadow(source.item_id):
+        notify_wanted_changes(source.kind)
+        return True
+    return False
+
+
 def wanted_search_missing_subtitles_sources(kind=None, job_id=None, wait_for_completion=False):
     """Queue a Wanted search, or run it within its JobsQueue job."""
     if not job_id:

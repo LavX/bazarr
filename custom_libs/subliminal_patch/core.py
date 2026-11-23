@@ -42,7 +42,7 @@ except ImportError:
     is_windows_special_path = False
 
 from subliminal_patch.hashes import hash_napiprojekt, hash_opensubtitles, hash_shooter, hash_thesubdb
-from subzero.language import Language, ENDSWITH_LANGUAGECODE_RE, FULL_LANGUAGE_LIST
+from subzero.language import Language, ENDSWITH_LANGUAGECODE_RE, FULL_LANGUAGE_LIST, REGIONAL_LANGUAGE_ALIASES
 
 logger = logging.getLogger(__name__)
 
@@ -2259,6 +2259,9 @@ def scan_video(path, dont_use_actual_file=False, hints=None, providers=None, ski
 
 def external_subtitle_base(stem):
     """Strip a recognized language tag from a subtitle filename stem."""
+    base, separator, suffix = stem.rpartition('.')
+    if separator and suffix.lower() in REGIONAL_LANGUAGE_ALIASES:
+        return base
     return ENDSWITH_LANGUAGECODE_RE.sub(
         lambda match: "" if match.group(1).lower() in FULL_LANGUAGE_LIST else match.group(0), stem)
 

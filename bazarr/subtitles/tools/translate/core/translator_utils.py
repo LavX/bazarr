@@ -110,16 +110,36 @@ def translation_write_kwargs(translator, job_id):
     kwargs = {'expected_versions': captured} if captured else {}
     source = getattr(translator, 'source', None)
     if source is not None:
-        from media_sources.indexer import SourcePublicationOwnerIndex
+        from media_sources.indexer import SourcePublicationOwnerIndex, SourcePublicationOwnersChanged
+        from media_sources.translation import automatic_translation_is_current
+        from media_sources.wanted import arr_claim_blocks_wanted
 
         owners = SourcePublicationOwnerIndex()
 
+        def prepare():
+            return validate_source_translation(source, translator.video_path, translator.source_srt_file,
+                                               translator.dest_srt_file, translator.from_lang, translator.orig_to_lang,
+                                               translator.forced, translator.hi, captured, owners)
+
         @contextmanager
         def publication():
-            validate_source_translation(source, translator.video_path, translator.source_srt_file,
-                                        translator.dest_srt_file, translator.from_lang, translator.orig_to_lang,
-                                        translator.forced, translator.hi, captured, owners)
-            yield
+            try:
+                with owners.publication(source, prepare, destination=translator.dest_srt_file) as (
+                        current, connection, prepared):
+                    if current is None or current.profile_id != prepared.profile_id:
+                        raise SourceTranslationChanged('The source item moved, was disabled, or its profile changed')
+                    if not (current.wanted_file_stamp is not None and arr_claim_blocks_wanted(
+                            current, target=connection)):
+                        if captured and not automatic_translation_is_current(
+                                current, translator.source_srt_file, translator.from_lang, translator.orig_to_lang,
+                                translator.forced, translator.hi, connection=connection):
+                            raise SourceTranslationChanged('The source translation is no longer eligible')
+                        yield
+                        return
+                arr_claim_blocks_wanted(source)
+                raise SourceTranslationChanged('An Arr item now owns the source path')
+            except SourcePublicationOwnersChanged as error:
+                raise SourceTranslationChanged(str(error)) from error
         kwargs.update(publication_guard=publication, ownership_index=owners)
     return kwargs
 

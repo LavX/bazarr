@@ -312,39 +312,36 @@ def _get_language_obj(languages):
     return language_set
 
 
-def _wanted_source_can_publish(source, language, stamp, profile):
+def _wanted_source_can_publish(source, language, stamp, profile, *, target=None):
     """Recheck the item and destination after the provider, under the subtitle write lock."""
     from media_sources import repository
     from media_sources.analysis import local_content_stamp
     from media_sources.db import handle
-    from media_sources.shadows import path_stage_shadow
-    from media_sources.wanted import notify_wanted_changes, wanted_items
+    from media_sources.translation import stored_missing_language_candidates
+    from media_sources.wanted import arr_claim_blocks_wanted, wanted_items
 
     if local_content_stamp(source.path) != stamp or get_profiles_list(profile_id=source.profile_id) != profile:
         return False
     items = repository.Items.c
-    live = handle().execute(wanted_items(items.id, kind=source.kind, profile_id=source.profile_id).where(
+    live = handle(target).execute(wanted_items(items.missing_subtitles, kind=source.kind, profile_id=source.profile_id).where(
         items.id == source.item_id, items.created_at == source.created_at, items.path == source.path,
         items.source_id == source.source_id, items.library_id == source.library_id)).first()
-    if live is None or language not in check_missing_languages_source(source, stored=True):
+    if live is None or language not in _get_language_obj(languages=stored_missing_language_candidates(live)):
         return False
-    if path_stage_shadow(source.item_id):
-        notify_wanted_changes(source.kind)
-        return False
-    return True
+    return not arr_claim_blocks_wanted(source, target=target)
 
 
-def check_missing_languages_source(source, *, stored=False, ownership_index=None, written_paths=()):
+def check_missing_languages_source(source, *, stored=False, external_subtitles=None, target=None):
     from media_sources import repository
     from media_sources.translation import missing_language_candidates, stored_missing_language_candidates
 
     if stored:
-        item = repository.get_item(source.item_id)
+        item = repository.get_item(source.item_id, target)
         if item is None or not source.same_item(item) or item.path != source.path:
             return set()
         candidates = stored_missing_language_candidates(item)
     else:
-        candidates = missing_language_candidates(source, ownership_index=ownership_index, written_paths=written_paths)
+        candidates = missing_language_candidates(source, external_subtitles=external_subtitles, target=target)
     return _get_language_obj(languages=candidates)
 
 
@@ -352,22 +349,34 @@ def _write_source_download(video_path, destination, content, *, source, language
                            written_paths, on_publish, wanted_stamp=None, wanted_profile=None):
     """Publish the actual provider-selected file only while its destination is still eligible."""
     from media_sources.indexer import SourcePublicationOwnerIndex
+    from media_sources.translation import prepare_source_sidecars
 
     ownership_index = SourcePublicationOwnerIndex()
 
-    @contextmanager
-    def publication():
-        if wanted_stamp is not None:
-            if not _wanted_source_can_publish(source, language, wanted_stamp, wanted_profile):
-                raise SubtitleDestinationChanged('Wanted source eligibility changed during search')
+    def prepare():
+        if wanted_stamp is not None and not _wanted_source_can_publish(source, language, wanted_stamp, wanted_profile):
+            raise SubtitleDestinationChanged('Wanted source eligibility changed during search')
         if not sync_output_owner_is_unique(video_path, destination, ownership_index=ownership_index):
             raise SubtitleDestinationChanged('The source subtitle destination does not have one media owner')
-        if os.path.lexists(destination) and (not is_upgrade or regular_subtitle_version(destination) is None):
-            raise SubtitleDestinationChanged('The source subtitle destination is already occupied')
-        if wanted_stamp is None and recheck_missing and language not in check_missing_languages_source(
-                source, ownership_index=ownership_index, written_paths=written_paths):
-            raise SubtitleDestinationChanged('The source language is no longer missing')
-        yield
+        if wanted_stamp is None and recheck_missing:
+            return prepare_source_sidecars(source, ownership_index, written_paths)
+        return None
+
+    @contextmanager
+    def publication():
+        with ownership_index.publication(source, prepare, destination=destination) as (
+                current, connection, external_subtitles):
+            if current is None or current.path != video_path:
+                raise SubtitleDestinationChanged('The source item moved or was removed')
+            if os.path.lexists(destination) and (not is_upgrade or regular_subtitle_version(destination) is None):
+                raise SubtitleDestinationChanged('The source subtitle destination is already occupied')
+            if wanted_stamp is not None:
+                if not _wanted_source_can_publish(current, language, wanted_stamp, wanted_profile, target=connection):
+                    raise SubtitleDestinationChanged('Wanted source eligibility changed during search')
+            elif recheck_missing and language not in check_missing_languages_source(
+                    current, external_subtitles=external_subtitles, target=connection):
+                raise SubtitleDestinationChanged('The source language is no longer missing')
+            yield
 
     try:
         write_subtitle_file(video_path, destination, content, written_paths=written_paths, on_publish=on_publish,

@@ -1,10 +1,14 @@
 # coding=utf-8
 """The one object the shared pipeline is given for a source item."""
+from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from datetime import datetime
 from typing import Optional
 
+from sqlalchemy import text
+
 from . import repository
+from .db import source_transaction
 
 
 class SourceItemGone(LookupError):
@@ -39,6 +43,8 @@ class SourceItemContext:
     series_identity_source: str = 'filename'
     group_id: Optional[int] = None
     created_at: Optional[datetime] = None
+    source_created_at: Optional[datetime] = None
+    source_name: Optional[str] = None
     wanted_file_stamp: Optional[tuple] = None
 
     def same_item(self, current):
@@ -85,8 +91,13 @@ def resolve_item(item_id, target=None) -> SourceItemContext:
     item = repository.get_item(item_id, target)
     if item is None:
         raise SourceItemGone(item_id)
+    return _context_for_item(item, target)
+
+
+def _context_for_item(item, target):
     group = repository.get_group(item.group_id, target) if item.group_id is not None else None
     library = repository.get_library(item.library_id, target)
+    source = repository.get_source(item.source_id, target)
     # An item's own profile wins, then its group's, then the library's. With none, it is never searched.
     profile_id = item.profile_id
     if profile_id is None and group is not None:
@@ -109,17 +120,37 @@ def resolve_item(item_id, target=None) -> SourceItemContext:
         series_tmdb_id=group.tmdb_id if is_episode and group is not None else None,
         series_year=_year(group.year) if is_episode and group is not None else None,
         series_identity_source=group.identity_source if is_episode and group is not None else 'filename',
-        group_id=item.group_id, created_at=item.created_at)
+        group_id=item.group_id, created_at=item.created_at,
+        source_created_at=source.created_at if source is not None else None,
+        source_name=source.name if source is not None else None)
 
 
 
-def resolve_same_item(source):
+def resolve_same_item(source, target=None):
     """Resolve a captured item only while its row, owner and path still match."""
     try:
-        current = resolve_item(source.item_id)
+        current = resolve_item(source.item_id, target)
     except SourceItemGone:
         return None
+    return _same_context(source, current)
+
+
+def _same_context(source, current):
     if not source.same_item(current) or (source.source_id, source.library_id, source.path, source.kind) != (
             current.source_id, current.library_id, current.path, current.kind):
         return None
     return replace(current, wanted_file_stamp=source.wanted_file_stamp) if source.wanted_file_stamp else current
+
+
+@contextmanager
+def source_item_publication(source, *, shared=False):
+    """Keep the captured item stable through an atomic subtitle publication."""
+    with source_transaction() as connection:
+        shared_postgres = shared and connection.dialect.name == 'postgresql'
+        item = repository.get_item(source.item_id, connection, for_update=True, nowait=shared_postgres)
+        if item is not None and shared_postgres:
+            # The item row lock alone cannot see an owner the scanner is about to insert.
+            # Take it first, as the scanner may need to upgrade from its row lock to UPDATE.
+            connection.execute(text('LOCK TABLE table_source_items IN SHARE MODE NOWAIT'))
+        current = _same_context(source, _context_for_item(item, connection)) if item is not None else None
+        yield current, connection

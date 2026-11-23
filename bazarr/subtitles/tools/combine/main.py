@@ -4,8 +4,10 @@ import logging
 import os
 import re
 import stat
+from contextlib import contextmanager
 from dataclasses import dataclass
-from subtitles.tools.subsync_engines import (capture_subtitle_versions, read_regular_subtitle,
+from subtitles.tools.subsync_engines import (capture_subtitle_versions, quarantine_sync_outputs_after_mutation,
+                                             read_regular_subtitle,
                                              regular_subtitle_version, staged_subtitle_write,
                                              subtitle_mutation, sync_output_owner_is_unique)
 from app.jobs_queue import JobCancelled
@@ -139,6 +141,7 @@ def try_combine_for_video(video_path, media_type, sonarr_series_id=None,
             notify = publication_callback(media_type, video_path, 'combine', arr_instance_id,
                                           **({'source': source} if source is not None else {}))
             published_versions = ()
+            removed_siblings = []
             if sports_operation is not None:
                 from sportarr.profile_hooks import finalize
                 sports_operation = sports_operation.bind(
@@ -157,15 +160,17 @@ def try_combine_for_video(video_path, media_type, sonarr_series_id=None,
                 if sports_operation is not None:
                     _remove_stale_combined_siblings(out_path, video_path, on_publish=notify,
                                                     ownership_verified=True)
+                elif source is not None:
+                    removed_siblings.extend(_remove_stale_combined_siblings(
+                        out_path, video_path, on_publish=notify, ownership_verified=True,
+                        invalidate_outputs=False, **owner_kwargs))
                 else:
                     _remove_stale_combined_siblings(out_path, video_path, on_publish=notify, **owner_kwargs)
 
             if source is not None:
-                owner_kwargs['ownership_index'] = SourcePublicationOwnerIndex()
+                owners = owner_kwargs['ownership_index'] = SourcePublicationOwnerIndex()
 
-                def validate_source():
-                    if _metadata_for(video_path, media_type, None, None, None, source=source) is None:
-                        raise ValueError('The source item moved or was removed during composition')
+                def prepare():
                     if not sync_output_owner_is_unique(video_path, out_path, **owner_kwargs):
                         raise ValueError('The combined output lost its unique owner during composition')
                     for path, version in input_versions.items():
@@ -173,7 +178,20 @@ def try_combine_for_video(video_path, media_type, sonarr_series_id=None,
                                 or not sync_output_owner_is_unique(video_path, path, **owner_kwargs)):
                             raise ValueError('A combined subtitle input changed or lost its unique owner')
 
-                write_kwargs['before_publish'] = validate_source
+                @contextmanager
+                def publication():
+                    with owners.publication(source, prepare, destination=out_path) as (current, _, _prepared):
+                        if current is None or current.path != video_path:
+                            raise ValueError('The source item moved or was removed during composition')
+                        yield
+
+                def quarantine_removed_siblings():
+                    ownership_index = SourcePublicationOwnerIndex()
+                    for sibling in removed_siblings:
+                        quarantine_sync_outputs_after_mutation(video_path, sibling, ownership_index)
+
+                write_kwargs['publication_guard'] = publication
+                write_kwargs['after_write'] = quarantine_removed_siblings
                 read_kwargs['read_bytes'] = lambda path: read_regular_subtitle(path, input_versions[path])
 
             def capture_published():
@@ -253,7 +271,7 @@ _COMBINED_OUTPUT_EXTS = (".srt", ".ass", ".ssa")
 
 
 def _remove_stale_combined_siblings(out_path, video_path, on_publish=None, ownership_verified=False,
-                                    **owner_kwargs):
+                                    invalidate_outputs=True, **owner_kwargs):
     """Remove combined-output siblings that share this output's stem but use a
     different subtitle extension (e.g. a stale `.ass` left next to a freshly
     written `.srt`). Best-effort: never raises.
@@ -264,8 +282,9 @@ def _remove_stale_combined_siblings(out_path, video_path, on_publish=None, owner
     out_real = os.path.realpath(out_path)
     if (os.path.dirname(out_real) != safe_dir
             or (not ownership_verified and not sync_output_owner_is_unique(video_path, out_path, **owner_kwargs))):
-        return
+        return []
     root, _ext = os.path.splitext(out_real)
+    removed = []
     for ext in _COMBINED_OUTPUT_EXTS:
         sibling = root + ext
         if sibling == out_real:
@@ -274,8 +293,9 @@ def _remove_stale_combined_siblings(out_path, video_path, on_publish=None, owner
             if os.path.commonpath([safe_dir, sibling]) != safe_dir:
                 continue
             if stat.S_ISREG(os.lstat(sibling).st_mode):
-                with subtitle_mutation(video_path, sibling, **owner_kwargs):
+                with subtitle_mutation(video_path, sibling, invalidate_outputs=invalidate_outputs, **owner_kwargs):
                     os.remove(sibling)
+                    removed.append(sibling)
                     if on_publish:
                         on_publish(sibling)
                 logging.info("BAZARR combine removed stale sibling %s", sibling)
@@ -284,6 +304,7 @@ def _remove_stale_combined_siblings(out_path, video_path, on_publish=None, owner
         except OSError:
             logging.exception(
                 "BAZARR combine could not remove stale sibling %s", sibling)
+    return removed
 
 
 def _resolve_rule(media_type, sonarr_series_id, sonarr_episode_id, radarr_id,

@@ -7,6 +7,8 @@ from babelfish.exceptions import LanguageError
 from babelfish import Language as Language_, basestr, LANGUAGE_MATRIX
 from six.moves import zip
 
+REGIONAL_LANGUAGE_ALIASES = {"es-419": "es-MX"}
+
 repl_map = {
     "dk": "da",
     "nld": "nl",
@@ -18,7 +20,6 @@ repl_map = {
     "chi": "zh",
     "cze": "cs",
     "dut": "nl",
-    "es-419": "es-MX",
     "fre": "fr",
     "geo": "ka",
     "ger": "de",
@@ -31,6 +32,7 @@ repl_map = {
     "rum": "ro",
     "slo": "sk",
     "tib": "bo",
+    **REGIONAL_LANGUAGE_ALIASES,
 }
 
 CUSTOM_LIST = ["chs", "sc", "zhs", "hans", "gb", u"简", u"双语",
@@ -163,4 +165,4 @@ class Language(Language_):
         return Language(*Language_.fromalpha3b(s).__getstate__())
 
 
-ENDSWITH_LANGUAGECODE_RE = re.compile(r"\.([^-.]{2,3})(?:-(?:[A-Za-z]{2,}|[0-9]{3}))?$")
+ENDSWITH_LANGUAGECODE_RE = re.compile(r"\.([^-.]{2,3})(?:-[A-Za-z]{2,})?$")

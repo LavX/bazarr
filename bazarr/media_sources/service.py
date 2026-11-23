@@ -512,7 +512,7 @@ def search_wanted_item(item_id, created_at, job_id, *, translation_gate=True, ex
     """Search only stored missing languages, after rechecking eligibility and the current Arr path."""
     from .shadows import path_stage_shadow
     from .translation import stored_missing_language_candidates
-    from .wanted import notify_wanted_changes, wanted_items
+    from .wanted import arr_claim_blocks_wanted, notify_wanted_changes, wanted_items
     from .db import handle
     from subtitles.adaptive_searching import is_search_active, updateFailedAttempts
 
@@ -560,7 +560,7 @@ def search_wanted_item(item_id, created_at, job_id, *, translation_gate=True, ex
         downloaded = _download_source_subtitles(wanted_source, current, languages, job_id,
                                                 translation_gate=translation_gate, wanted_stamp=stamp)
     failed = {_language_code(*entry) for entry in languages} - set(downloaded)
-    if failed and local_content_stamp(context.path) == stamp:
+    if failed and local_content_stamp(context.path) == stamp and not arr_claim_blocks_wanted(wanted_source):
         with source_transaction() as connection:
             current = repository.get_item(item_id, connection, for_update=True)
             if (current is None or not context.same_item(current) or current.path != context.path
@@ -592,14 +592,17 @@ def _download_source_subtitles(context, item, languages, job_id, *, translation_
                                          **({} if translation_gate else {'auto_translate': False})):
             if not result:
                 continue
-            if getattr(result, 'source_indexed', False) is not True:
-                # Retry an incomplete listing, including results from outside shared processing.
-                index_and_notify_item(context)
             with source_transaction() as connection:
                 history_log_source(1, context, result, target=connection)
             downloaded.append(result.language_code)
+            current = resolve_same_item(context)
+            if current is None:
+                continue
+            if getattr(result, 'source_indexed', False) is not True:
+                # Retry an incomplete listing, including results from outside shared processing.
+                index_and_notify_item(current)
             try:
-                send_notifications_source(context, result.message)
+                send_notifications_source(current, result.message)
             except Exception:
                 logging.exception('BAZARR could not send a notification for source item %s', context.item_id)
     except OSError as error:

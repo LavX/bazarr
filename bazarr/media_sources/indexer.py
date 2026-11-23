@@ -9,9 +9,12 @@ import ast
 import logging
 import os
 import sqlite3
+from contextlib import contextmanager
 from functools import partial
+from time import sleep
 
 import sqlalchemy as sa
+from babelfish.exceptions import LanguageError
 from sqlalchemy.orm import Session
 
 from subliminal_patch import core
@@ -23,13 +26,15 @@ from languages.custom_lang import CustomLanguage
 from languages.get_languages import alpha2_from_alpha3, get_language_set
 from subtitles.adaptive_searching import is_search_given_up
 from subtitles.indexer.entries import embedded_entry, normalize_codec
-from subtitles.indexer.utils import (add_combined_outputs, add_sync_engine_outputs, guess_external_subtitles,
+from subtitles.indexer.utils import (_get_lang_from_str, add_combined_outputs, add_sync_engine_outputs,
+                                     guess_external_subtitles,
                                      normalize_subtitle_language_variant, partition_embedded_entries,
                                      subtitle_language_with_combined_modifier,
                                      subtitle_language_with_sync_modifier)
 from subtitles.tools.combine.naming import parse_combined_filename
 from subtitles.tools.combine.rules import _dotted_custom_aliases
-from subtitles.tools.subsync_engines import (SubtitleSourceChanged, SyncOutputOwnerIndex, _normalized_media_stem,
+from subtitles.tools.subsync_engines import (SYNC_ENGINE_LANGUAGE_MODIFIERS, SubtitleDestinationChanged,
+                                             SubtitleSourceChanged, SyncOutputOwnerIndex, _normalized_media_stem,
                                              read_regular_subtitle, regular_subtitle_version, subtitle_write_locks,
                                              sync_engine_from_output_path, sync_output_owner_is_unique)
 from utilities.helper import get_subtitle_destination_folder, get_target_folder
@@ -38,7 +43,7 @@ from utilities.video_analyzer import audio_languages_from_metadata, embedded_sub
 from . import repository
 from .analysis import (cached_metadata, failed_probe_values, index_matches_file, local_stat, probe_item,
                        read_metadata, streams)
-from .context import resolve_same_item
+from .context import resolve_same_item, source_item_publication
 from .db import handle, source_transaction
 
 
@@ -77,13 +82,21 @@ class SourceOutputOwnerIndex(SyncOutputOwnerIndex):
                 stems.add(stem[:-len(alias) - 1])
         return stems
 
+    @staticmethod
+    def _source_owner_paths(target):
+        return tuple(handle(target).execute(sa.select(repository.Items.c.path).order_by(repository.Items.c.path)).scalars())
+
     def _load_owners(self):
+        return self._map_source_owners(self._source_owner_paths(self._target))
+
+    @staticmethod
+    def _map_source_owners(paths):
         custom_folder = get_subtitle_destination_folder()
         subfolder = settings.general.subfolder
         absolute_folder = os.path.normcase(os.path.realpath(custom_folder)) if subfolder == 'absolute' else None
         owners = {}
-        for row in handle(self._target).execute(sa.select(repository.Items.c.path)).all():
-            mapped = os.path.normcase(os.path.realpath(row.path))
+        for path in paths:
+            mapped = os.path.normcase(os.path.realpath(path))
             folders = {os.path.dirname(mapped)}
             if absolute_folder:
                 folders.add(absolute_folder)
@@ -96,11 +109,20 @@ class SourceOutputOwnerIndex(SyncOutputOwnerIndex):
         return owners
 
 
+class SourcePublicationOwnersChanged(SubtitleDestinationChanged):
+    """The prepared shared ownership could not be pinned for publication."""
+
+
 class SourcePublicationOwnerIndex(SourceOutputOwnerIndex):
     """Source writes in shared subtitle folders must account for all media stored there."""
 
+    def __init__(self):
+        super().__init__()
+        self._prepared_paths = None
+
     def _load_owners(self):
-        owners = super()._load_owners()
+        self._prepared_paths = self._source_owner_paths(None)
+        owners = self._map_source_owners(self._prepared_paths)
         for key, paths in SyncOutputOwnerIndex._load_owners().items():
             owners.setdefault(key, set()).update(paths)
         return owners
@@ -109,9 +131,61 @@ class SourcePublicationOwnerIndex(SourceOutputOwnerIndex):
         # A relative custom path can also resolve into another video's directory.
         return bool(get_subtitle_destination_folder())
 
+    @staticmethod
+    def _needs_registry_guard(source, destination, custom_folder):
+        # Another media directory can resolve its relative subtitle folder to
+        # this directory, even before the first video there is admitted.
+        if custom_folder:
+            return True
+        if destination is None:
+            return False
+        media_directory = os.path.normcase(os.path.realpath(os.path.dirname(source.path)))
+        directory = os.path.normcase(os.path.realpath(os.path.dirname(destination)))
+        return directory != media_directory
+
+    @contextmanager
+    def publication(self, source, prepare=None, *, destination=None):
+        """Keep slow ownership and subtitle discovery outside the writer transaction."""
+        for _ in range(2):
+            self._loaded = False
+            self._owners = {}
+            self._prepared_paths = None
+            destination_setting = settings.general.subfolder, get_subtitle_destination_folder()
+            prepared = prepare() if prepare is not None else None
+            shared = self._needs_registry_guard(source, destination, destination_setting[1])
+            if shared and self._prepared_paths is None:
+                raise SourcePublicationOwnersChanged('The shared subtitle owners could not be verified')
+            # A scanner with the conflicting lock finishes outside this transaction.
+            # Retrying after rollback leaves it free to finish any remaining row writes.
+            for delay in (0, 0.025, 0.05, 0.10, 0.20, 0.40, 0.40):
+                if delay:
+                    sleep(delay)
+                publishing = False
+                try:
+                    with source_item_publication(source, shared=shared) as (current, connection):
+                        if destination_setting != (settings.general.subfolder, get_subtitle_destination_folder()):
+                            break
+                        if shared and current is not None and self._prepared_paths != self._source_owner_paths(connection):
+                            break
+                        if current is not None:
+                            state = repository.item_state(current.item_id, connection)
+                            if (state is None or not state.source_enabled or not state.library_enabled
+                                    or not os.path.isfile(current.path)):
+                                current = None
+                        publishing = True
+                        yield current, connection, prepared
+                        return
+                except sa.exc.OperationalError as error:
+                    sqlstate = getattr(error.orig, 'sqlstate', None) or getattr(error.orig, 'pgcode', None)
+                    if publishing or sqlstate != '55P03':
+                        raise
+            else:
+                raise SourcePublicationOwnersChanged('The shared subtitle owners are being updated')
+        raise SourcePublicationOwnersChanged('The shared subtitle owners changed while preparing publication')
+
 
 def list_external_subtitles(path, previous=None, ownership_index=None, *, publication=False, written_paths=()):
-    """``[[language, subtitle path, size], ...]`` for the subtitle files beside ``path``.
+    """List sidecars beside ``path``. An unrecovered cached language leaves the index incomplete.
 
     The caller holds the subtitle write locks. Publication checks fresh ownership before counting a sidecar.
     Previously indexed paths supply language guesses for files discovered in this scan.
@@ -121,8 +195,16 @@ def list_external_subtitles(path, previous=None, ownership_index=None, *, public
     media_directory, filename = os.path.split(path)
     target = get_target_folder(path, create=False) or media_directory
     directories = dict.fromkeys((media_directory, target))
-    excluded = {os.path.abspath(subtitle_path) for subtitle_path in written_paths}
-    indexed = {entry[1]: entry for entry in (previous or []) if len(entry) == 3 and entry[1]}
+    excluded = {os.path.normcase(os.path.abspath(subtitle_path)) for subtitle_path in written_paths}
+    indexed, rejected_paths = {}, set()
+    for entry in previous or []:
+        if len(entry) != 3 or not entry[1]:
+            continue
+        key = os.path.normcase(os.path.abspath(entry[1]))
+        if _can_borrow_language(entry[0]):
+            indexed[key] = entry
+        else:
+            rejected_paths.add(key)
     languages = get_language_set() if settings.general.single_language else None
     actual = {}
     for directory in directories:
@@ -135,7 +217,7 @@ def list_external_subtitles(path, previous=None, ownership_index=None, *, public
             continue
         for subtitle, language in found.items():
             subtitle_path = os.path.join(directory, subtitle)
-            path_key = os.path.abspath(subtitle_path)
+            path_key = os.path.normcase(os.path.abspath(subtitle_path))
             if path_key in actual or path_key in excluded:
                 continue
             version = regular_subtitle_version(subtitle_path)
@@ -147,7 +229,7 @@ def list_external_subtitles(path, previous=None, ownership_index=None, *, public
                 try:
                     read_sample = partial(read_regular_subtitle, expected_version=version,
                                           max_bytes=MAXIMUM_SUBTITLE_SIZE)
-                    previous_entry = indexed.get(subtitle_path)
+                    previous_entry = indexed.get(path_key)
                     language = guess_external_subtitles(
                         directory, {subtitle: language}, 'movie', (previous_entry,) if previous_entry else None,
                         path_reverse=os.fspath, read_bytes=read_sample)[subtitle]
@@ -160,6 +242,9 @@ def list_external_subtitles(path, previous=None, ownership_index=None, *, public
             entry = _external_subtitle_entry(subtitle, language, subtitle_path, version[2])
             if entry is not None:
                 actual[path_key] = entry
+            elif not publication and path_key in rejected_paths:
+                logging.warning('BAZARR unable to reclassify a cached subtitle for this file %s', path)
+                return None
     return list(actual.values())
 
 
@@ -298,6 +383,22 @@ def _file_signature(stat):
     return stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns
 
 
+def _can_borrow_language(key):
+    if not isinstance(key, str) or not key:
+        return False
+    modifiers = key.lower().split(':')[1:]
+    normalized = normalize_subtitle_language_variant(key).split(':')[1:]
+    if sorted(modifiers) != sorted(normalized) or any(
+            part.startswith('sync-') and part not in SYNC_ENGINE_LANGUAGE_MODIFIERS for part in modifiers):
+        return False
+    try:
+        # The shared classifier parses the full key and handles custom aliases differently from IETF codes.
+        language = _get_lang_from_str(key)
+        return language.alpha3 != 'und' and bool(alpha2_from_alpha3(language.alpha3))
+    except (LanguageError, ValueError):
+        return False
+
+
 def index_item(item_id, target=None, ownership_index=None, *, keep_index_on_probe_failure=False, expected_path=None,
                expected_source=None):
     """Analyze a source file and return its subtitle listing, or None if the index is unavailable."""
@@ -317,7 +418,7 @@ def index_item(item_id, target=None, ownership_index=None, *, keep_index_on_prob
         logging.debug("BAZARR this file doesn't seem to exist or isn't accessible: %s", item.path)
         return None
 
-    data, blob = probe_item(item, stat)
+    data, blob = probe_item(item, stat, target=target)
     destination = os.path.join(get_target_folder(item.path, create=False) or os.path.dirname(item.path), '.destination')
     with subtitle_write_locks(item.path, destination):
         if _file_signature(local_stat(item.path)) != _file_signature(stat):
@@ -341,6 +442,7 @@ def index_item(item_id, target=None, ownership_index=None, *, keep_index_on_prob
             logging.warning('BAZARR invalid stored subtitle listing for this file %s', item.path)
             return None
         if (keep_index_on_probe_failure and blob is None
+                and all(len(entry) != 3 or not entry[1] or _can_borrow_language(entry[0]) for entry in previous)
                 and latest.subtitles is not None and latest.missing_subtitles is not None
                 and index_matches_file(latest, stat, allow_external_only=True)):
             return previous
@@ -348,6 +450,8 @@ def index_item(item_id, target=None, ownership_index=None, *, keep_index_on_prob
             external = list_external_subtitles(item.path, previous, ownership_index)
         except (OSError, UnicodeDecodeError):
             logging.exception('BAZARR unable to index external subtitles for this file %s', item.path)
+            return None
+        if external is None:
             return None
         if _file_signature(local_stat(item.path)) != _file_signature(stat):
             logging.warning('BAZARR source file changed while reading its subtitles: %s', item.path)

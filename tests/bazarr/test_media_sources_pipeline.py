@@ -1,4 +1,5 @@
 """A source item through the shared subtitle pipeline: the seam, the pool, the blacklist, sync and history."""
+import ast
 import logging
 import re
 import sqlite3
@@ -336,7 +337,7 @@ def test_post_save_indexing_leaves_a_moved_items_new_path_untouched(world, monke
 
     service.search_source_item(context.item_id, job_id=3)
 
-    assert attempted_paths == [context.path, context.path]
+    assert attempted_paths == [context.path]
     assert saved.read_bytes() == CONTENT
     assert replacement_subtitle.read_bytes() == b"Replacement subtitle\n"
     item = repository.get_item(context.item_id)
@@ -415,6 +416,115 @@ def test_indexing_leaves_a_malformed_stored_listing_incomplete(world, stored):
     item = repository.get_item(context.item_id)
     assert (item.subtitles, item.missing_subtitles, item.indexed_at) == (
         initial.subtitles, initial.missing_subtitles, initial.indexed_at)
+
+
+@pytest.mark.parametrize(("cached_language", "guessed_language", "indexed_language"), [
+    ("en:hi:forced", "hu", "hu"),
+    ("en:hi:forced", None, None),
+    ("aaa", "hu", "hu"),
+    ("aaa", None, None),
+    ("pob", None, "pt-BR"),
+], ids=["content-fallback", "unclassified-fallback", "unsupported-content-fallback",
+        "unsupported-unclassified-fallback", "custom-alias"])
+def test_search_preserves_history_when_a_cached_language_needs_reclassification(
+        world, monkeypatch, cached_language, guessed_language, indexed_language):
+    from languages import get_languages
+    from media_sources import repository, service
+    from subtitles import download
+    from subtitles.indexer import utils
+
+    monkeypatch.setattr(get_languages, "languages_dict", get_languages.languages_dict + [
+        {"code2": "pt", "code3": "por", "name": "Portuguese", "code3b": "por"}])
+    monkeypatch.setattr(utils, "guess_language", lambda text: guessed_language)
+    context = _movie(world)
+    sidecar = Path(context.path).with_suffix(".srt")
+    sidecar.write_bytes(CONTENT)
+    saved = Path(context.path).with_suffix(".en.srt")
+    _download(monkeypatch)
+    best = download.download_best_subtitles
+    cached = []
+    jobs = []
+
+    def download_with_cached_language(*args, **kwargs):
+        # The search refreshes the index before downloading. Replace the cache afterwards,
+        # so the real post-save indexer encounters this entry without blocking the search.
+        repository.update_item(context.item_id, world.db,
+                               subtitles=repr([[cached_language, str(sidecar), len(CONTENT)]]))
+        cached.append(repository.get_item(context.item_id))
+        return best(*args, **kwargs)
+
+    monkeypatch.setattr(download, "download_best_subtitles", download_with_cached_language)
+    monkeypatch.setattr(service.jobs_queue, "update_job_progress", lambda **kwargs: jobs.append(kwargs))
+
+    service.search_source_item(context.item_id, job_id=3)
+
+    assert saved.read_bytes() == sidecar.read_bytes() == CONTENT
+    (row,) = world.db.execute(sa.select(repository.History)).all()
+    assert (row.item_id, row.subtitles_path, row.language) == (context.item_id, str(saved), "en")
+    assert jobs[-1]["progress_message"] == "1 subtitle(s) downloaded"
+    item = repository.get_item(context.item_id)
+    if indexed_language is not None:
+        listing = {path: language for language, path, _ in ast.literal_eval(item.subtitles)}
+        assert listing == {str(saved): "en", str(sidecar): indexed_language}
+        assert item.missing_subtitles == "[]"
+        assert cached_language not in item.subtitles
+    else:
+        (initial,) = cached
+        assert (item.subtitles, item.missing_subtitles, item.indexed_at) == (
+            initial.subtitles, initial.missing_subtitles, initial.indexed_at)
+
+
+@pytest.mark.parametrize(("cached_language", "indexed_language"), [
+    ("pob:forced", "pt-BR:forced"),
+    ("pob:hi", "pt-BR:hi"),
+], ids=["forced", "hearing-impaired"])
+def test_a_cached_custom_language_keeps_its_variant_across_index_passes(
+        world, monkeypatch, cached_language, indexed_language):
+    from languages import get_languages
+    from media_sources import indexer, repository
+    from subtitles.indexer import utils
+
+    monkeypatch.setattr(get_languages, "languages_dict", get_languages.languages_dict + [
+        {"code2": "pt", "code3": "por", "name": "Portuguese", "code3b": "por"}])
+    guess = Mock(return_value=None)
+    monkeypatch.setattr(utils, "guess_language", guess)
+    context = _movie(world)
+    sidecar = Path(context.path).with_suffix(".srt")
+    sidecar.write_bytes(CONTENT)
+    repository.update_item(context.item_id, world.db,
+                           subtitles=repr([[cached_language, str(sidecar), len(CONTENT)]]))
+    expected = [[indexed_language, str(sidecar), len(CONTENT)]]
+
+    for _ in range(2):
+        assert indexer.index_item(context.item_id) == expected
+        assert ast.literal_eval(repository.get_item(context.item_id).subtitles) == expected
+
+    guess.assert_not_called()
+
+
+@pytest.mark.parametrize(("locale", "suffix", "variant"), [
+    ("en", "", ""),
+    ("en", ".forced", ":forced"),
+    ("en", ".hi", ":hi"),
+    ("pt", "", ""),
+    ("pt", ".forced", ":forced"),
+    ("pt", ".hi", ":hi"),
+    ("pt", ".forced.hi", ":forced"),
+], ids=["en-normal", "en-forced", "en-hi", "pt-normal", "pt-forced", "pt-hi", "pt-both"])
+def test_sync_sidecar_variants_keep_movie_indexer_precedence_across_passes(world, monkeypatch, locale, suffix, variant):
+    from languages import get_languages
+    from media_sources import indexer, repository
+
+    monkeypatch.setattr(get_languages, "languages_dict", get_languages.languages_dict + [
+        {"code2": "pt", "code3": "por", "name": "Portuguese", "code3b": "por"}])
+    context = _movie(world)
+    sidecar = Path(context.path).with_suffix(f".{locale}{suffix}.ffsubsync.srt")
+    sidecar.write_bytes(CONTENT)
+    expected = [[f"{locale}{variant}:sync-ffsubsync", str(sidecar), len(CONTENT)]]
+
+    for _ in range(2):
+        assert indexer.index_item(context.item_id) == expected
+        assert ast.literal_eval(repository.get_item(context.item_id).subtitles) == expected
 
 
 @pytest.mark.parametrize("after_save", [False, True], ids=["ordinary-index", "post-save-index"])
@@ -950,7 +1060,7 @@ def test_an_item_deleted_between_the_search_and_the_finalize_logs_one_line_and_k
     with caplog.at_level(logging.INFO):
         result = process_subtitle(subtitle, "movie", "None", context.path, 100, source=context)
 
-    assert result is None
+    assert (result.path, result.subs_path, result.provider) == (context.path, subtitle.storage_path, "fake")
     lines = [record for record in caplog.records if record.levelno == logging.INFO
              and "was deleted while its subtitles were being fetched" in record.getMessage()]
     assert len(lines) == 1 and str(context.item_id) in lines[0].getMessage()
@@ -980,6 +1090,367 @@ def test_processing_a_source_subtitle_returns_the_result_without_mapping_or_arr_
         getattr(processing, name).assert_not_called()
     for name in ("_trigger_auto_translation", "_trigger_combine"):
         assert getattr(processing, name).call_args.kwargs["source"] == context
+
+
+@pytest.mark.parametrize("change", ["move", "delete-item", "delete-source"])
+def test_source_download_records_history_when_the_item_changes_after_save(world, monkeypatch, isolated_jobs, change):
+    from app import notifier
+    from media_sources import repository, service
+    from subtitles import download, processing
+
+    context = _movie(world)
+    saved = Path(context.path).with_suffix(".en.srt")
+    replacement = video(world.root / "Replacement.mkv")
+    notify = Mock()
+    monkeypatch.setattr(notifier, "send_notifications_source", notify)
+    _download(monkeypatch)
+
+    def process_after_change(**kwargs):
+        assert saved.read_bytes() == CONTENT
+        if change == "move":
+            repository.update_item(context.item_id, world.db, path=str(replacement), title="Replacement")
+        elif change == "delete-item":
+            repository.delete_items([context.item_id], world.db)
+        else:
+            repository.delete_source(context.source_id, world.db)
+        return processing.process_subtitle(**kwargs)
+
+    monkeypatch.setattr(download, "process_subtitle", process_after_change)
+    service.search_source_item(context.item_id, translation_gate=False)
+    assert isolated_jobs._run_job(isolated_jobs._reserve_next_job())
+
+    (result,) = world.db.execute(sa.select(repository.History)).all()
+    assert result.action == 1 and result.provider == "fake" and result.language == "en"
+    assert (result.video_path, result.subtitles_path, result.item_title, result.source_name) == (
+        context.path, str(saved), "Film", "Local")
+    assert result.item_id == (context.item_id if change == "move" else None)
+    assert result.source_id == (None if change == "delete-source" else context.source_id)
+    assert not replacement.with_suffix(".en.srt").exists()
+    notify.assert_not_called()
+
+
+def test_source_publication_holds_the_item_until_the_registry_writer_can_continue(world):
+    from concurrent.futures import ThreadPoolExecutor, TimeoutError
+    from threading import Event
+
+    from media_sources import repository
+    from media_sources.db import source_transaction
+    from media_sources.indexer import SourcePublicationOwnerIndex
+
+    context = _movie(world)
+    replacement = video(world.root / "Replacement.mkv")
+    started = Event()
+
+    def move():
+        started.set()
+        with source_transaction() as connection:
+            repository.update_item(context.item_id, connection, path=str(replacement))
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        with SourcePublicationOwnerIndex().publication(context) as (current, connection, _):
+            assert current == context and connection.in_transaction()
+            pending = pool.submit(move)
+            assert started.wait(5)
+            with pytest.raises(TimeoutError):
+                pending.result(timeout=0.25)
+            assert repository.get_item(context.item_id, connection).path == context.path
+        pending.result(timeout=5)
+
+    assert repository.get_item(context.item_id).path == str(replacement)
+
+
+@pytest.mark.parametrize("same_stem", [False, True], ids=["distinct-owner", "competing-owner"])
+def test_source_provider_rechecks_scanner_admission_after_content_detection(world, monkeypatch, isolated_jobs,
+                                                                         same_stem):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Event
+
+    from media_sources import repository, scanner, service
+    from subtitles import download
+    from subtitles.indexer import utils
+    from utilities import video_analyzer
+
+    monkeypatch.setattr(video_analyzer, "parse_video_metadata", lambda *args, **kwargs: {
+        "ffprobe": {"audio": [{"language": "eng"}]}, "mediainfo": {},
+    })
+    folder = _custom_folder(world, monkeypatch, world.tmp_path)
+    context = _movie(world)
+    media = Path(context.path)
+    other_source, other_library, other_root = add_source(world.db, world.tmp_path, name="Other", folder="Other")
+    other = video(other_root / (media.name if same_stem else "Unrelated.2001.mkv"))
+    admitted = Event()
+    index_item = scanner.index_item
+
+    def record_admitted(item_id, *args, **kwargs):
+        assert repository.get_item(item_id).path == str(other)
+        admitted.set()
+        return index_item(item_id, *args, **kwargs)
+
+    def fetch(videos, languages, **kwargs):
+        assert {str(language) for language in languages} == {"en"}
+        media.with_suffix(".srt").write_bytes(CONTENT)
+        return {next(iter(videos)): [FakeSubtitle()]}
+
+    monkeypatch.setattr(scanner, "index_item", record_admitted)
+    monkeypatch.setattr(download, "download_best_subtitles", fetch)
+    pending = []
+    detected_after_admission = []
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        def detect_language(text):
+            if not pending:
+                pending.append(pool.submit(scanner.run_scan, other_source, other_library))
+                # The scanner may still be waiting to index the new item while this video is locked.
+                detected_after_admission.append(admitted.wait(10))
+            return "fr"
+
+        monkeypatch.setattr(utils, "guess_language", detect_language)
+        service.search_source_item(context.item_id, translation_gate=False)
+        assert isolated_jobs._run_job(isolated_jobs._reserve_next_job())
+        (scan,) = pending[0].result(timeout=10)
+        assert scan.inserted == 1
+
+    assert detected_after_admission == [True]
+    assert repository.get_item_by_path(str(other)) is not None
+    saved = folder / media.with_suffix(".en.srt").name
+    assert saved.is_file() is not same_stem
+    assert len(world.db.execute(sa.select(repository.History)).all()) == (0 if same_stem else 1)
+
+
+def test_source_shared_publication_serializes_a_scanner_admission(world, monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor, TimeoutError
+    from threading import Event
+
+    from media_sources import repository, scanner
+    from media_sources.indexer import SourcePublicationOwnerIndex
+    from subtitles.tools.subsync_engines import sync_output_owner_is_unique
+    from utilities import video_analyzer
+
+    monkeypatch.setattr(video_analyzer, "parse_video_metadata", lambda *args, **kwargs: {
+        "ffprobe": {"audio": [{"language": "eng"}]}, "mediainfo": {},
+    })
+    folder = _custom_folder(world, monkeypatch, world.tmp_path)
+    context = _movie(world)
+    media = Path(context.path)
+    destination = folder / media.with_suffix(".en.srt").name
+    other_source, other_library, other_root = add_source(world.db, world.tmp_path, name="Other", folder="Other")
+    other = video(other_root / media.name)
+    admitting = Event()
+    insert_batch = scanner._insert_batch
+
+    def admit(*args, **kwargs):
+        admitting.set()
+        return insert_batch(*args, **kwargs)
+
+    monkeypatch.setattr(scanner, "_insert_batch", admit)
+    owners = SourcePublicationOwnerIndex()
+
+    def prepare():
+        assert sync_output_owner_is_unique(context.path, destination, ownership_index=owners)
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        with owners.publication(context, prepare, destination=destination) as (current, connection, _):
+            assert current == context
+            pending = pool.submit(scanner.run_scan, other_source, other_library)
+            assert admitting.wait(10)
+            with pytest.raises(TimeoutError):
+                pending.result(timeout=0.25)
+            assert repository.get_item_by_path(str(other), connection) is None
+        (result,) = pending.result(timeout=10)
+
+    assert result.inserted == 1 and repository.get_item_by_path(str(other)) is not None
+
+
+@pytest.mark.parametrize("layout", ["relative", "absolute"])
+def test_source_publication_survives_an_unrelated_scanner_writer(world, monkeypatch, layout):
+    from concurrent.futures import ThreadPoolExecutor, TimeoutError
+    from contextlib import contextmanager
+    from threading import Event
+
+    from app.config import settings
+    from media_sources import indexer, repository, scanner
+    from subtitles.download import _write_source_download
+    from utilities import video_analyzer
+
+    if world.db.get_bind().dialect.name != "postgresql":
+        pytest.skip("SQLite serializes writers independently of destination geometry")
+    monkeypatch.setattr(video_analyzer, "parse_video_metadata", lambda *args, **kwargs: {
+        "ffprobe": {"audio": [{"language": "eng"}]}, "mediainfo": {},
+    })
+    if layout == "relative":
+        monkeypatch.setattr(settings.general, "subfolder", "relative")
+        monkeypatch.setattr(settings.general, "subfolder_custom", "Subs")
+        folder = world.root / "Subs"
+        folder.mkdir()
+    else:
+        folder = _custom_folder(world, monkeypatch, world.tmp_path)
+    context = _movie(world)
+    destination = folder / Path(context.path).with_suffix(".en.srt").name
+    other_source, other_library, other_root = add_source(world.db, world.tmp_path, name="Other", folder="Other")
+    other = video(other_root / "Unrelated.2002.mkv")
+    inserted, release_scanner, attempted = Event(), Event(), Event()
+    insert_item = repository.insert_item
+    publication = indexer.source_item_publication
+
+    def pause_insert(*args, **kwargs):
+        item_id = insert_item(*args, **kwargs)
+        if kwargs["path"] == str(other):
+            inserted.set()
+            assert release_scanner.wait(10)
+        return item_id
+
+    @contextmanager
+    def observe_publication(source, *, shared=False):
+        assert shared
+        attempted.set()
+        with publication(source, shared=shared) as result:
+            yield result
+
+    monkeypatch.setattr(repository, "insert_item", pause_insert)
+    monkeypatch.setattr(indexer, "source_item_publication", observe_publication)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        scan = pool.submit(scanner.run_scan, other_source, other_library)
+        try:
+            assert inserted.wait(10)
+            save = pool.submit(_write_source_download, context.path, str(destination), CONTENT,
+                               source=context, language=Language("eng"), recheck_missing=True,
+                               is_upgrade=False, written_paths=[], on_publish=None)
+            assert attempted.wait(10)
+            with pytest.raises(TimeoutError):
+                save.result(timeout=0.10)
+            assert not destination.exists()
+        finally:
+            release_scanner.set()
+        assert scan.result(timeout=10)[0].inserted == 1
+        assert save.result(timeout=10)
+    assert destination.read_bytes() == CONTENT
+
+
+def test_source_shared_publication_yields_to_a_registry_row_writer(world, monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor, TimeoutError
+    from contextlib import contextmanager
+    from threading import Event
+
+    from media_sources import indexer, repository
+    from media_sources.db import source_transaction
+    from subtitles.download import _write_source_download
+
+    if world.db.get_bind().dialect.name != "postgresql":
+        pytest.skip("PostgreSQL row lock order")
+    folder = _custom_folder(world, monkeypatch, world.tmp_path)
+    context = _movie(world)
+    destination = folder / Path(context.path).with_suffix(".en.srt").name
+    held, can_update, attempted = Event(), Event(), Event()
+    publication = indexer.source_item_publication
+
+    def update():
+        with source_transaction() as connection:
+            assert repository.get_item(context.item_id, connection, for_update=True) is not None
+            held.set()
+            assert can_update.wait(10)
+            repository.update_item(context.item_id, connection, title="Updated")
+
+    @contextmanager
+    def observe_publication(source, *, shared=False):
+        assert shared
+        attempted.set()
+        with publication(source, shared=shared) as result:
+            yield result
+
+    monkeypatch.setattr(indexer, "source_item_publication", observe_publication)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        writer = pool.submit(update)
+        try:
+            assert held.wait(10)
+            save = pool.submit(_write_source_download, context.path, str(destination), CONTENT,
+                               source=context, language=Language("eng"), recheck_missing=True,
+                               is_upgrade=False, written_paths=[], on_publish=None)
+            assert attempted.wait(10)
+            with pytest.raises(TimeoutError):
+                save.result(timeout=0.10)
+        finally:
+            can_update.set()
+        writer.result(timeout=10)
+        assert save.result(timeout=10)
+    assert repository.get_item(context.item_id).title == "Updated"
+    assert destination.read_bytes() == CONTENT
+
+
+def test_source_translation_rechecks_library_enablement_after_preparation(world, monkeypatch):
+    from contextlib import contextmanager
+
+    from media_sources import indexer, repository
+    from subtitles.tools.subsync_engines import write_subtitle_file
+    from subtitles.tools.translate.core.translator_utils import (SourceTranslationChanged, translation_write_kwargs,
+                                                               translated_destination_path)
+
+    _custom_folder(world, monkeypatch, world.tmp_path)
+    context = _movie(world)
+    original = Path(context.path).with_suffix(".en.srt")
+    original.write_bytes(CONTENT)
+    destination = translated_destination_path(context.path, "hu", False, False)
+    publication = indexer.SourcePublicationOwnerIndex.publication
+
+    @contextmanager
+    def disable_after_preparation(self, source, prepare, **kwargs):
+        def disable():
+            prepared = prepare()
+            repository.update_library(context.library_id, world.db, enabled=0)
+            return prepared
+        with publication(self, source, disable, **kwargs) as result:
+            yield result
+
+    monkeypatch.setattr(indexer.SourcePublicationOwnerIndex, "publication", disable_after_preparation)
+    translator = SimpleNamespace(source=context, video_path=context.path, source_srt_file=str(original),
+                                 dest_srt_file=destination, from_lang="en", orig_to_lang="hu", forced=False, hi=False)
+    with pytest.raises(SourceTranslationChanged, match="disabled"):
+        write_subtitle_file(context.path, destination, CONTENT, **translation_write_kwargs(translator, None))
+
+    assert not Path(destination).exists()
+
+
+def test_source_combine_sweeps_stale_siblings_without_scanning_under_the_writer(world, monkeypatch):
+    import os
+    from contextlib import contextmanager
+
+    from media_sources import indexer
+    from subtitles.tools.combine import main as combine
+
+    folder = _custom_folder(world, monkeypatch, world.tmp_path)
+    context = _movie(world)
+    media = Path(context.path)
+    media.with_suffix(".en.srt").write_bytes(CONTENT)
+    media.with_suffix(".hu.srt").write_bytes(CONTENT)
+    superseded = folder / media.with_suffix(".en.combined-hu.ass").name
+    superseded.write_bytes(CONTENT)
+    publication = indexer.source_item_publication
+    scandir = os.scandir
+    locked_scans = []
+    writer_open = False
+
+    @contextmanager
+    def observe_writer(source, *, shared=False):
+        nonlocal writer_open
+        with publication(source, shared=shared) as result:
+            writer_open = True
+            try:
+                yield result
+            finally:
+                writer_open = False
+
+    def observe_scan(path):
+        if writer_open:
+            locked_scans.append(path)
+        return scandir(path)
+
+    monkeypatch.setattr(indexer, "source_item_publication", observe_writer)
+    monkeypatch.setattr(os, "scandir", observe_scan)
+    result = combine.try_combine_for_video(context.path, "movie", languages=["en", "hu"], format="srt", source=context)
+
+    assert result.status == "built" and Path(result.path).is_file()
+    assert not superseded.exists()
+    assert not locked_scans
 
 
 # Sync
@@ -2084,7 +2555,7 @@ def test_source_provider_fallback_uses_current_cutoff(world, monkeypatch, isolat
 
 @pytest.mark.parametrize("location", [
     "media", "configured", "untagged", "sync", "custom-hi", "custom-forced",
-    "regional-plain", "regional-hi", "regional-forced",
+    "regional-plain", "regional-hi", "regional-forced", "unknown-numeric",
 ])
 def test_source_provider_sees_cutoff_sidecar_before_index_refresh(world, monkeypatch, isolated_jobs, location):
     import json
@@ -2126,7 +2597,8 @@ def test_source_provider_sees_cutoff_sidecar_before_index_refresh(world, monkeyp
     folder.mkdir(exist_ok=True)
     suffix = {"untagged": ".srt", "sync": ".en.ffsubsync.srt", "custom-hi": ".pt-BR.hi.srt",
               "custom-forced": ".pt-BR.forced.srt", "regional-plain": ".es-419.srt",
-              "regional-hi": ".es-419.hi.srt", "regional-forced": ".es-419.forced.srt"}.get(location, ".en.srt")
+              "regional-hi": ".es-419.hi.srt", "regional-forced": ".es-419.forced.srt",
+              "unknown-numeric": ".en-123.srt"}.get(location, ".en.srt")
     name = media.with_suffix(suffix).name
     cutoff = folder / name
     content = CONTENT.replace(b"Downloaded", b"The children sat by the river while their mother read a story. "
@@ -2144,6 +2616,10 @@ def test_source_provider_sees_cutoff_sidecar_before_index_refresh(world, monkeyp
     assert isolated_jobs._run_job(isolated_jobs._reserve_next_job())
 
     assert cutoff.read_bytes() == content
+    if location == "unknown-numeric":
+        assert (folder / media.with_suffix(".hu.srt").name).is_file()
+        assert all(entry[1] != str(cutoff) for entry in index_item(context.item_id))
+        return
     assert not (folder / media.with_suffix(".hu.srt").name).exists()
     assert world.db.execute(sa.select(repository.History)).all() == []
     assert not world.published

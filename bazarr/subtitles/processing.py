@@ -365,6 +365,16 @@ def process_subtitle(subtitle, media_type, audio_language, path, max_score, is_u
     message = (f"{downloaded_language}{modifier_string}{ai_label} subtitles {action} from {downloaded_provider} with a score of "
                f"{percent_score}%.")
 
+    def processed_result(video_path, subtitles_path, *, source_indexed=False):
+        return ProcessSubtitlesResult(message=message, reversed_path=video_path,
+                                      downloaded_language_code2=downloaded_language_code2,
+                                      downloaded_provider=downloaded_provider, score=subtitle.score,
+                                      forced=subtitle.language.forced, subtitle_id=subtitle_id,
+                                      reversed_subtitles_path=subtitles_path, hearing_impaired=subtitle.language.hi,
+                                      matched=list(subtitle.matches or []), not_matched=_get_not_matched(subtitle, media_type),
+                                      ai_translated=getattr(subtitle, 'ai_translated', False) is True,
+                                      source_indexed=source_indexed)
+
     sync_checker = _defaul_sync_checker
     logging.debug("Sync checker: %s", sync_checker)
 
@@ -376,12 +386,12 @@ def process_subtitle(subtitle, media_type, audio_language, path, max_score, is_u
         except SourceItemGone:
             logging.info('BAZARR source item %s was deleted while its subtitles were being fetched; the file '
                          'was kept: %s', source.item_id, downloaded_path)
-            return
+            return processed_result(path, downloaded_path)
         if (not source.same_item(current_source) or current_source.path != path
-                or current_source.source_id != source.source_id):
+                or current_source.source_id != source.source_id or current_source.library_id != source.library_id):
             logging.info('BAZARR source item %s moved while its subtitles were being fetched; the file '
                          'was kept: %s', source.item_id, downloaded_path)
-            return
+            return processed_result(path, downloaded_path)
         if source.wanted_file_stamp is not None:
             current_source = replace(current_source, wanted_file_stamp=source.wanted_file_stamp)
         series_id = None
@@ -587,19 +597,7 @@ def process_subtitle(subtitle, media_type, audio_language, path, max_score, is_u
             **source_kwargs,
         )
 
-    return ProcessSubtitlesResult(message=message,
-                                  reversed_path=reversed_path,
-                                  downloaded_language_code2=downloaded_language_code2,
-                                  downloaded_provider=downloaded_provider,
-                                  score=subtitle.score,
-                                  forced=subtitle.language.forced,
-                                  subtitle_id=subtitle.id,
-                                  reversed_subtitles_path=reversed_subtitles_path,
-                                  hearing_impaired=subtitle.language.hi,
-                                  matched=list(subtitle.matches or []),
-                                  not_matched=_get_not_matched(subtitle, media_type),
-                                  ai_translated=getattr(subtitle, 'ai_translated', False) is True,
-                                  source_indexed=source_indexed)
+    return processed_result(reversed_path, reversed_subtitles_path, source_indexed=source_indexed)
 
 
 def _get_not_matched(subtitle, media_type):

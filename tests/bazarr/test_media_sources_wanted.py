@@ -427,17 +427,31 @@ def test_automatic_search_leaves_a_subtitle_that_arrived_during_provider_search(
     assert world.db.execute(sa.select(repository.History.c.id)).all() == []
 
 
-@pytest.mark.parametrize('change', ['file removed', 'video replaced', 'profile edited', 'arr claimed'])
+@pytest.mark.parametrize('change', ['file removed', 'video replaced', 'profile edited', 'arr claimed',
+                                   'arr claimed after preparation'])
 def test_provider_return_rechecks_file_profile_and_arr_claim(world, monkeypatch, change):
     from app.config import settings
     from app.database import TableArrInstances, TableLanguagesProfiles, TableMovies, update_profile_id_list
-    from media_sources import repository, wanted
+    from media_sources import indexer, repository, wanted
     from subtitles import download
 
     context = pipeline._movie(world)
     video_path = Path(context.path)
-    if change == 'arr claimed':
+    def claim_media():
         monkeypatch.setattr(settings.general, 'use_radarr', True)
+        world.db.execute(sa.insert(TableArrInstances).values(
+            id=42, kind='radarr', name='Cinema', stable_key='cinema', port=9800, enabled=1, path_mappings='[]'))
+        world.db.execute(sa.insert(TableMovies).values(
+            id=73, arr_instance_id=42, radarrId=9000, title='Film', path=context.path, tmdbId='73'))
+
+    if change == 'arr claimed after preparation':
+        publication = indexer.source_item_publication
+
+        def claim_at_registry_lock(source, **kwargs):
+            claim_media()
+            return publication(source, **kwargs)
+
+        monkeypatch.setattr(indexer, 'source_item_publication', claim_at_registry_lock)
 
     def download_best(videos, **kwargs):
         (found,) = videos
@@ -450,11 +464,8 @@ def test_provider_return_rechecks_file_profile_and_arr_claim(world, monkeypatch,
             profile = json.dumps([{'id': 1, 'language': 'hu', 'forced': 'False', 'hi': 'False'}])
             world.db.execute(sa.update(TableLanguagesProfiles).values(items=profile))
             update_profile_id_list.invalidate()
-        else:
-            world.db.execute(sa.insert(TableArrInstances).values(
-                id=42, kind='radarr', name='Cinema', stable_key='cinema', port=9800, enabled=1, path_mappings='[]'))
-            world.db.execute(sa.insert(TableMovies).values(
-                id=73, arr_instance_id=42, radarrId=9000, title='Film', path=context.path, tmdbId='73'))
+        elif change == 'arr claimed':
+            claim_media()
         return {found: [pipeline.FakeSubtitle()]}
 
     monkeypatch.setattr(download, 'download_best_subtitles', download_best)
@@ -463,7 +474,7 @@ def test_provider_return_rechecks_file_profile_and_arr_claim(world, monkeypatch,
     assert not video_path.with_suffix('.en.srt').exists()
     assert world.db.execute(sa.select(repository.History.c.id)).all() == []
     refreshed = repository.get_item(context.item_id)
-    assert bool(refreshed.arr_shadow) == (change == 'arr claimed')
+    assert bool(refreshed.arr_shadow) == change.startswith('arr claimed')
     if change != 'profile edited':
         assert refreshed.failed_attempts is None
 
@@ -519,13 +530,15 @@ def test_folder_only_badge_does_not_reuse_legacy_arr_count(client, arr_library, 
     assert client.get('/api/badges', headers=HEADERS).data == legacy.data
 
 
-def test_runtime_keeps_manual_and_wanted_translation_reservations_separate(world, isolated_jobs, monkeypatch):
+@pytest.mark.parametrize('after_prepare', [False, True], ids=['during-staging', 'after-preparation'])
+def test_runtime_keeps_manual_and_wanted_translation_reservations_separate(world, isolated_jobs, monkeypatch,
+                                                                         after_prepare):
     import pysubs2
 
     from app import database
     from app.config import settings
     from app.database import TableArrInstances, TableLanguagesProfiles, TableMovies, update_profile_id_list
-    from media_sources import repository, wanted
+    from media_sources import indexer, repository, wanted
     from subtitles.tools.translate import main, runtime
     from subtitles.tools.translate.runtime import gate, service as runtime_service
     from subtitles.tools.translate.runtime.jobs import TranslationJobs, target_key
@@ -570,17 +583,29 @@ def test_runtime_keeps_manual_and_wanted_translation_reservations_separate(world
         ledger = TranslationJobs(world.db)
         assert ledger.active_for(key, target).queue_job_id == automatic.job_id
 
-        save = pysubs2.SSAFile.save
-
-        def save_and_claim(subtitles, *args, **kwargs):
-            save(subtitles, *args, **kwargs)
+        def claim_media():
             monkeypatch.setattr(settings.general, 'use_radarr', True)
             world.db.execute(sa.insert(TableArrInstances).values(
                 id=42, kind='radarr', name='Cinema', stable_key='cinema', port=9800, enabled=1, path_mappings='[]'))
             world.db.execute(sa.insert(TableMovies).values(
                 id=73, arr_instance_id=42, radarrId=9000, title='Film', path=context.path, tmdbId='73'))
 
-        monkeypatch.setattr(pysubs2.SSAFile, 'save', save_and_claim)
+        if after_prepare:
+            publication = indexer.source_item_publication
+
+            def claim_at_registry_lock(source, **kwargs):
+                claim_media()
+                return publication(source, **kwargs)
+
+            monkeypatch.setattr(indexer, 'source_item_publication', claim_at_registry_lock)
+        else:
+            save = pysubs2.SSAFile.save
+
+            def save_and_claim(subtitles, *args, **kwargs):
+                save(subtitles, *args, **kwargs)
+                claim_media()
+
+            monkeypatch.setattr(pysubs2.SSAFile, 'save', save_and_claim)
         assert isolated_jobs._reserve_next_job() is automatic
         assert isolated_jobs._run_job(automatic)
         (worker_request,) = env.requests()
