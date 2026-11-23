@@ -4,7 +4,10 @@ import { http, HttpResponse } from "msw";
 import { expect, it } from "vitest";
 import BlacklistSportsView from "@/pages/Blacklist/Sports";
 import SportsHistoryView from "@/pages/History/Sports";
-import { sportarr } from "@/pages/Settings/Connections/__tests__/fixtures";
+import {
+  sportarr,
+  sportarrSibling,
+} from "@/pages/Settings/Connections/__tests__/fixtures";
 import WantedSportsView from "@/pages/Wanted/Sports";
 import { customRender, screen, waitFor, within } from "@/tests";
 import server from "@/tests/mocks/node";
@@ -112,5 +115,49 @@ it.each(pages)(
     });
     expect(query.get("sources")).toBe("1");
     expect(query.has("arr_instance_id")).toBe(false);
+  },
+);
+
+it.each(pages)(
+  "preserves legacy instance links and owner selection on Arr-only %s",
+  async (route, Page) => {
+    window.history.replaceState(null, "", "/?instance=42");
+    const user = userEvent.setup();
+    let query = new URLSearchParams();
+    server.use(
+      http.get("/api/system/settings", () =>
+        HttpResponse.json({ general: { use_sportarr: true } }),
+      ),
+      http.get("/api/system/status", () => HttpResponse.json({ data: {} })),
+      http.get("/api/system/arr-instances", () =>
+        HttpResponse.json([sportarr, sportarrSibling]),
+      ),
+      http.get(`/api/sports/${route}`, ({ request }) => {
+        query = new URL(request.url).searchParams;
+        const row =
+          query.get("arr_instance_id") === "43"
+            ? { ...arr, id: 8, arr_instance_id: 43, title: "Other Final" }
+            : arr;
+        return HttpResponse.json({ data: [row], total: 1 });
+      }),
+    );
+    customRender(<Page />);
+    expect(
+      await screen.findByRole("link", { name: "Arr Final" }),
+    ).toHaveAttribute("href", "/sports/17?instance=42");
+    expect(query.get("arr_instance_id")).toBe("42");
+    expect(query.getAll("source_key[]")).toEqual(["arr:42"]);
+
+    const instance = await screen.findByRole("combobox", { name: "Instance" });
+    await waitFor(() => expect(instance).toHaveValue(sportarr.name));
+    const listbox = await openSelect(user, "All instances");
+    await user.click(
+      within(listbox).getByRole("option", { name: sportarrSibling.name }),
+    );
+    expect(
+      await screen.findByRole("link", { name: "Other Final" }),
+    ).toHaveAttribute("href", "/sports/17?instance=43");
+    expect(query.get("arr_instance_id")).toBe("43");
+    expect(query.getAll("source_key[]")).toEqual(["arr:43"]);
   },
 );

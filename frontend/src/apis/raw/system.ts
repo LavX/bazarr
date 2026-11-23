@@ -1,6 +1,12 @@
 import BaseApi from "./base";
 import client from "./client";
 
+export const sourceSearchRoute = {
+  show: "series",
+  movie: "movies",
+  league: "sports",
+} as const;
+
 /**
  * Whether a 2xx body is the settings object at all.
  *
@@ -248,10 +254,10 @@ class SystemApi extends BaseApi {
     return response.data;
   }
 
-  async search(query: string) {
+  async search(query: string, includeSources = false) {
     const response = await this.get<ItemSearchResult[]>("/searches", {
       query,
-      sources: 1,
+      sources: includeSources ? 1 : undefined,
     });
     return response;
   }

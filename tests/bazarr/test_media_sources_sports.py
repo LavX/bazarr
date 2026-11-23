@@ -354,6 +354,60 @@ def test_sports_item_override_controls_provider_identity(client, arr_library, tm
         assert client.patch(f'/api/sources/items/{round_id}', headers=HEADERS, json=patch).status_code == 400
 
 
+def test_source_event_manual_download_upload_and_delete_keep_sports_owners_separate(
+        client, arr_library, writes, isolated_jobs, tmp_path, monkeypatch):
+    from io import BytesIO
+
+    import sqlalchemy as sa
+    from app.config import settings
+    from app.database import TableHistorySports
+    from media_sources import repository
+    from media_sources.context import resolve_item
+    from subtitles import manual
+
+    owner, _, dated, _ = _events(arr_library, tmp_path)
+    source = resolve_item(dated)
+    saved = Path(source.path).with_suffix('.en.srt')
+    base = f'/api/sources/items/{dated}'
+    native_url = '/api/sports/history'
+    native_history = client.get(native_url, headers=HEADERS).data
+    monkeypatch.setattr(settings.general, 'minimum_score_sports', 0)
+    payload, _ = manual_tests._search_for_download(client, monkeypatch, source)
+    monkeypatch.setattr(manual, 'download_subtitles', lambda *args, **kwargs: None)
+
+    def finish(response):
+        assert response.status_code == 202, response.get_json()
+        job = isolated_jobs._reserve_next_job()
+        assert job.job_id == response.get_json()['job_id']
+        assert isolated_jobs._run_job(job), job.error
+
+    def delete():
+        response = client.delete(f'{base}/subtitles', headers=HEADERS, json={
+            'subtitles_path': str(saved), 'language': 'en',
+        })
+        assert response.status_code == 204
+        assert not saved.exists()
+
+    finish(client.post(f'{base}/manual', headers=HEADERS, json=payload))
+    assert saved.read_bytes() == pipeline.CONTENT
+    delete()
+    finish(client.post(f'{base}/subtitles', headers=HEADERS, data={
+        'file': (BytesIO(pipeline.CONTENT), 'fixture.srt'), 'language': 'en', 'forced': 'False', 'hi': 'False',
+    }))
+    assert saved.is_file()
+    assert repository.get_item(dated).missing_subtitles == '[]'
+    delete()
+    assert 'en' in repository.get_item(dated).missing_subtitles
+
+    rows = arr_library.execute(sa.select(repository.History).order_by(repository.History.c.id)).all()
+    assert [(row.action, row.item_kind, row.item_id, row.source_id) for row in rows] == [
+        (action, 'sports_event', dated, owner) for action in (2, 0, 4, 0)]
+    assert [(event.media_type, event.operation, event.arr_instance_id, event.source_item_id) for event in writes] == [
+        ('sports', operation, None, dated) for operation in ('download', 'delete', 'upload', 'delete')]
+    assert arr_library.scalar(sa.select(sa.func.count()).select_from(TableHistorySports)) == 1
+    assert client.get(native_url, headers=HEADERS).data == native_history
+
+
 def test_scanned_events_reach_the_sports_threshold_and_publish_through_the_source_pool(
         source_db, tmp_path, monkeypatch, languages_loaded, isolated_jobs):
     from types import SimpleNamespace

@@ -22,6 +22,7 @@ import {
 } from "@/apis/hooks/discover";
 import { useSportsAvailability } from "@/apis/hooks/sports";
 import { useServerSearch } from "@/apis/hooks/system";
+import { sourceSearchRoute } from "@/apis/raw/system";
 import { useDiscover } from "@/contexts/Discover";
 import { useSearchSources } from "@/contexts/UniversalSearch";
 import MediaPoster from "@/pages/Discover/MediaPoster";
@@ -468,9 +469,7 @@ export default function UniversalSearch() {
                 {localMatches.map((item) => {
                   const kind =
                     item.origin === "source"
-                      ? item.source_kind === "show"
-                        ? "series"
-                        : "movies"
+                      ? sourceSearchRoute[item.source_kind]
                       : item.sportarrLeagueId != null
                         ? "sports"
                         : item.sonarrSeriesId != null

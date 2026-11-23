@@ -6,12 +6,14 @@ import pytest
 import sqlalchemy as sa
 
 from media_source_helpers import add_group, add_item, add_profile, add_source
+import test_media_sources_analysis as refresh_fixtures
 import test_media_sources_no_change as arr_fixtures
 
 HEADERS = arr_fixtures.HEADERS
 arr_library = arr_fixtures.arr_library
 client = arr_fixtures.client
 everything_uses_the_test_database = arr_fixtures.everything_uses_the_test_database
+refresh_queue = refresh_fixtures.refresh_queue
 
 
 @pytest.fixture
@@ -50,7 +52,8 @@ def source_library(arr_library, tmp_path):
     return SimpleNamespace(
         movie=movie, show=show, movie_source=movie_source, movie_library=movie_library,
         show_source=show_source, show_library=show_library, episode_one=episode_one, episode_two=episode_two,
-        other_show=other_show, extra_movie=extra_movie, movie_path=str(movies / 'Arr Movie.mkv'),
+        other_show=other_show, extra_movie=extra_movie, wrong_episode=wrong_episode,
+        movie_path=str(movies / 'Arr Movie.mkv'),
     )
 
 
@@ -104,6 +107,18 @@ def test_owner_filter_applies_on_arr_only_legacy_path(client):
     assert _get(client, '/api/movies?source_key[]=arr:2')['total'] == 1
     assert _get(client, '/api/movies?source_key[]=arr:1') == {'data': [], 'total': 0}
     assert _get(client, '/api/movies?sources=1&source_key[]=source:2') == {'data': [], 'total': 0}
+
+
+def test_series_missing_counts_exclude_current_arr_path_claims(client, source_library, arr_library):
+    from app.database import TableEpisodes
+    from media_sources import repository
+
+    item = repository.get_item(source_library.episode_one)
+    arr_library.execute(sa.update(TableEpisodes).where(TableEpisodes.id == 1).values(path=item.path))
+    series = _get(client, f'/api/series?sources=1&source_key[]=source:{source_library.show_source}')
+    show = next(row for row in series['data'] if row['id'] == source_library.show)
+    assert show['episodeFileCount'] == 2 and show['episodeMissingCount'] == 0
+    assert repository.get_item(item.id).arr_shadow == 0
 
 
 def test_mixed_scores_never_use_an_arr_score_for_a_source_with_the_same_id(client, source_library, monkeypatch):
@@ -204,3 +219,42 @@ def test_group_search_restricts_queued_work_to_eligible_episodes(client, source_
     assert found == [(source_library.episode_one, 17, group.id)]
     repository.update_library(group.library_id, enabled=0)
     assert client.post(endpoint, headers=HEADERS).status_code == 409
+
+
+@pytest.mark.parametrize('pending_full', [False, True])
+def test_queued_profile_refresh_keeps_group_ownership_and_notifies(
+    client, source_library, arr_library, refresh_queue, monkeypatch, pending_full,
+):
+    from media_sources import repository
+    from subtitles.indexer import missing_refresh
+
+    add_profile(arr_library, [('hu', 'False', 'False')], profile_id=2)
+    for item_id in (source_library.episode_one, source_library.wrong_episode):
+        repository.update_item(item_id, arr_library, subtitles='[]', missing_subtitles="['en']")
+    events = []
+    monkeypatch.setattr('app.event_handler.socketio',
+                        SimpleNamespace(server=object(), emit=lambda name, event: events.append((name, event))))
+    if pending_full:
+        assert missing_refresh.queue_missing_subtitles_recalculation()
+
+    response = client.patch(f'/api/sources/groups/{source_library.show}?kind=show',
+                            json={'profile_id': 2}, headers=HEADERS)
+    assert response.status_code == 200 and response.get_json()['effective_profile_id'] == 2
+    assert len(refresh_queue.jobs_pending_queue) == 1
+    expected_scope = None if pending_full else {'group_id': source_library.show}
+    assert refresh_fixtures.run_next_refresh(refresh_queue) == expected_scope
+    assert repository.get_item(source_library.episode_one).missing_subtitles == "['hu']"
+    assert repository.get_item(source_library.wrong_episode).missing_subtitles == "['en']"
+    payload = None if pending_full else source_library.show
+    assert ('data', {'type': 'source-group', 'action': 'update', 'payload': payload}) in events
+
+
+def test_settings_refresh_with_no_sources_emits_no_source_events(client, refresh_queue, monkeypatch):
+    from subtitles.indexer import missing_refresh
+
+    events = []
+    monkeypatch.setattr('app.event_handler.socketio',
+                        SimpleNamespace(server=object(), emit=lambda name, event: events.append((name, event))))
+    assert missing_refresh.queue_missing_subtitles_recalculation()
+    assert refresh_fixtures.run_next_refresh(refresh_queue) is None
+    assert events == []

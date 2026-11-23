@@ -15,6 +15,7 @@ import { faSearch } from "@fortawesome/free-solid-svg-icons";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import { useServerSearch } from "@/apis/hooks";
 import { useArrInstanceLabels } from "@/apis/hooks/arrInstances";
+import { sourceSearchRoute } from "@/apis/raw/system";
 import { InstanceBadge } from "@/components/bazarr";
 import { useDebouncedValue } from "@/utilities";
 
@@ -37,9 +38,7 @@ function useSearch(query: string) {
       data?.map((v) => {
         const { link, label, poster, type, value } = (() => {
           if (v.origin === "source") {
-            const kind = { show: "series", movie: "movies", league: "sports" }[
-              v.source_kind
-            ];
+            const kind = sourceSearchRoute[v.source_kind];
             return {
               poster: v.poster,
               link: `/${kind}/source/${v.id}`,

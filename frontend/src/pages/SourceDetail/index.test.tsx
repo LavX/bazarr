@@ -36,6 +36,7 @@ const movie = {
   season: null,
   episode: null,
   arr_shadow: false,
+  audio_language: ["English", "Japanese"],
   subtitles: [
     ["en:hi", "/media/movie.en.hi.srt", 60],
     ["de", null, null, "pgs"],
@@ -97,6 +98,7 @@ beforeEach(() => {
 it("groups source events by season and uses the source item action", async () => {
   const user = userEvent.setup();
   const search = vi.fn();
+  const identify = vi.fn();
   const events = [
     {
       ...movie,
@@ -140,6 +142,13 @@ it("groups source events by season and uses the source item action", async () =>
       search();
       return HttpResponse.json({ job_id: null });
     }),
+    http.patch("/api/sources/items/60", async ({ request }) => {
+      expect(new URL(request.url).searchParams.get("kind")).toBe(
+        "sports_event",
+      );
+      identify(await request.json());
+      return HttpResponse.json(events[0]);
+    }),
   );
   openPage("sports");
   expect(await screen.findByText("Season 2026")).toBeVisible();
@@ -160,7 +169,23 @@ it("groups source events by season and uses the source item action", async () =>
   await waitFor(() => expect(search).toHaveBeenCalledTimes(1));
   expect(dialog.getByRole("button", { name: "Manual Search" })).toBeEnabled();
   expect(dialog.getByRole("button", { name: "Upload" })).toBeEnabled();
-  expect(dialog.getByRole("button", { name: "Identity fix" })).toBeEnabled();
+  await user.click(dialog.getByRole("button", { name: "Identity fix" }));
+  const correction = within(
+    await screen.findByRole("dialog", { name: "Identity fix" }),
+  );
+  await user.clear(correction.getByLabelText("Part"));
+  await user.type(correction.getByLabelText("Part"), "Sprint");
+  await user.click(correction.getByRole("button", { name: "Save" }));
+  await waitFor(() =>
+    expect(identify).toHaveBeenCalledWith({
+      title: "Earlier race",
+      year: 2026,
+      event_date: "2026-02-03",
+      season: 2026,
+      round: 2,
+      part_name: "Sprint",
+    }),
+  );
 });
 
 it("reads the source movie despite a colliding Arr cache and normalizes its stored subtitle rows", async () => {
@@ -176,6 +201,8 @@ it("reads the source movie despite a colliding Arr cache and normalizes its stor
   ).toBeVisible();
   expect(screen.queryByText("Wrong Arr movie")).not.toBeInTheDocument();
   expect(screen.queryByText("Wrong source episode")).not.toBeInTheDocument();
+  expect(screen.getByText("English", { exact: true })).toBeVisible();
+  expect(screen.getByText("Japanese", { exact: true })).toBeVisible();
   expect(screen.getByText("movie.en.hi.srt")).toBeVisible();
   expect(screen.getByText("en:HI")).toBeVisible();
   expect(screen.getByText("hu:Forced")).toBeVisible();
@@ -187,6 +214,29 @@ it("reads the source movie despite a colliding Arr cache and normalizes its stor
     id: 7,
     title: "Folder movie",
   });
+});
+
+it("labels untagged source audio tracks while preserving named tracks", async () => {
+  server.use(
+    http.get("/api/sources/items/7", () =>
+      HttpResponse.json({
+        ...movie,
+        audio_language: ["English", null, "Japanese"],
+      }),
+    ),
+  );
+
+  openPage("movie");
+
+  expect(
+    await screen.findByRole("heading", { name: /Folder movie/ }),
+  ).toBeVisible();
+  expect(screen.getAllByLabelText("Audio Language")).toHaveLength(3);
+  expect(
+    screen
+      .getAllByLabelText("Audio Language")
+      .map((badge) => badge.textContent),
+  ).toEqual(["English", "Unknown", "Japanese"]);
 });
 
 it("sends search and scan to the source item and its owning library", async () => {

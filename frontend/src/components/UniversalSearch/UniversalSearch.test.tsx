@@ -4,12 +4,13 @@ import { createMemoryRouter, Outlet, RouterProvider } from "react-router";
 import userEvent from "@testing-library/user-event";
 import { http, HttpResponse } from "msw";
 import { beforeEach, expect, it, vi } from "vitest";
+import { mediaSourcesKey } from "@/apis/hooks/mediaSources";
 import queryClient from "@/apis/queries";
 import { DiscoverSetupReturn } from "@/contexts/Discover";
 import { useSearchSource } from "@/contexts/UniversalSearch";
 import { createSubtitleSearchSource } from "@/pages/SubtitleEditor/searchSource";
 import { AllProviders } from "@/providers";
-import { rawRender, screen, waitFor, within } from "@/tests";
+import { act, rawRender, screen, waitFor, within } from "@/tests";
 import server from "@/tests/mocks/node";
 import UniversalSearch from ".";
 
@@ -30,6 +31,9 @@ beforeEach(() => {
       HttpResponse.json({
         data: { status: "available", source: "tmdb", configured: true },
       }),
+    ),
+    http.get("/api/system/media-sources", () =>
+      HttpResponse.json({ data: [] }),
     ),
     http.get("/api/discover/metadata/search", () =>
       HttpResponse.json({
@@ -78,6 +82,7 @@ function mount(editor?: React.ReactNode) {
           { path: "/movies/source/:id", element: <p>Source movie</p> },
           { path: "/series/source/:id", element: <p>Source series</p> },
           { path: "/sports/:id", element: <p>Library league</p> },
+          { path: "/sports/source/:id", element: <p>Source league</p> },
           { path: "/discover", element: <p>Discover title</p> },
           { path: "/editor", element: editor },
         ],
@@ -127,6 +132,76 @@ it("uses canonical library IDs, retains the global query across navigation, and 
   expect(input).toHaveAttribute("aria-expanded", "false");
 });
 
+it("searches sources only while configured sources are known", async () => {
+  const pendingSources = Promise.withResolvers<void>();
+  const search = vi.fn();
+  server.use(
+    http.get("/api/system/media-sources", async () => {
+      await pendingSources.promise;
+      return HttpResponse.json({
+        data: [
+          {
+            id: 8,
+            name: "Archive",
+            kind: "folder",
+            enabled: true,
+            libraries: [],
+          },
+        ],
+      });
+    }),
+    http.get("/api/system/searches", ({ request }) => {
+      const { searchParams } = new URL(request.url);
+      const includeSources = searchParams.get("sources");
+      search(searchParams.get("query"), includeSources);
+      return HttpResponse.json([
+        { id: 901, radarrId: 7, title: "Arrival", year: "2016", poster: null },
+        ...(includeSources === "1"
+          ? [
+              {
+                id: 901,
+                origin: "source",
+                source_kind: "movie",
+                title: "Arrival archive",
+                year: "2016",
+                poster: null,
+              },
+            ]
+          : []),
+      ]);
+    }),
+  );
+  const { user } = mount();
+  const input = screen.getByLabelText("Search");
+  try {
+    await user.type(input, "Arrival");
+    await screen.findByRole("link", { name: /^Arrival \(2016\)/ });
+    expect(search).toHaveBeenLastCalledWith("Arrival", null);
+    expect(
+      screen.queryByRole("link", { name: /^Arrival archive/ }),
+    ).not.toBeInTheDocument();
+  } finally {
+    pendingSources.resolve();
+  }
+
+  expect(
+    await screen.findByRole("link", { name: /^Arrival archive/ }),
+  ).toBeVisible();
+  expect(search).toHaveBeenLastCalledWith("Arrival", "1");
+  act(() => {
+    queryClient.setQueryData(mediaSourcesKey, { data: [] });
+  });
+  await waitFor(() =>
+    expect(
+      screen.queryByRole("link", { name: /^Arrival archive/ }),
+    ).not.toBeInTheDocument(),
+  );
+  await user.type(input, " two");
+  await waitFor(() =>
+    expect(search).toHaveBeenLastCalledWith("Arrival two", null),
+  );
+});
+
 it.each([
   {
     selection: "click",
@@ -152,10 +227,35 @@ it.each([
     path: "/movies/source/901",
     index: 2,
   },
+  {
+    selection: "click",
+    title: "Source championship",
+    path: "/sports/source/901",
+    index: 3,
+  },
+  {
+    selection: "keyboard",
+    title: "Source championship",
+    path: "/sports/source/901",
+    index: 3,
+  },
 ])(
   "opens $title with $selection when IDs overlap",
   async ({ selection, title, path, index }) => {
     server.use(
+      http.get("/api/system/media-sources", () =>
+        HttpResponse.json({
+          data: [
+            {
+              id: 8,
+              name: "Archive",
+              kind: "folder",
+              enabled: true,
+              libraries: [],
+            },
+          ],
+        }),
+      ),
       http.get("/api/system/searches", ({ request }) => {
         expect(new URL(request.url).searchParams.get("sources")).toBe("1");
         return HttpResponse.json([
@@ -182,6 +282,14 @@ it.each([
             year: "2016",
             poster: null,
           },
+          {
+            id: 901,
+            origin: "source",
+            source_kind: "league",
+            title: "Source championship",
+            year: "2026",
+            poster: null,
+          },
         ]);
       }),
     );
@@ -194,8 +302,9 @@ it.each([
     const link = within(group).getByRole("link", {
       name: new RegExp(`^${title} `),
     });
-    expect(within(group).getAllByRole("link")).toHaveLength(3);
+    expect(within(group).getAllByRole("link")).toHaveLength(4);
     expect(link).toHaveAttribute("href", path);
+    if (index === 3) expect(link).toHaveTextContent("Sports");
     expect(
       within(group).getByRole("link", { name: /Source Arr film/ }),
     ).toHaveAttribute("href", "/movies/901");

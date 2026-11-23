@@ -44,7 +44,11 @@ function useLibraryScope(kind: LibraryKind) {
     [contentKind, sources?.data],
   );
   const arrEnabled = isArrMediaRouteEnabled(arrKind, settings, instances);
-  const sourceOnly = configuredSources.length > 0 && !arrEnabled;
+  const arrAvailabilityKnown =
+    settings !== undefined &&
+    (!settings.general[`use_${arrKind}`] || instances !== undefined);
+  const sourceOnly =
+    configuredSources.length > 0 && arrAvailabilityKnown && !arrEnabled;
   const selected = useMemo(() => {
     const values = params.getAll("source");
     const legacy = params.get("instance");

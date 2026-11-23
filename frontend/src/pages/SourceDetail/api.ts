@@ -45,7 +45,7 @@ export interface SourceItem extends Omit<SourceGroup, "kind"> {
   subtitles: Subtitle[];
   missing_subtitles: Language.Info[];
   arr_shadow: boolean;
-  audio_language?: Language.Info[];
+  audio_language?: (string | null)[];
   server_missing?: boolean;
 }
 
