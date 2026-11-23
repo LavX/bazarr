@@ -17,7 +17,7 @@ from subzero.language import Language
 from subliminal_patch.core import save_subtitles
 from subtitles.tools.subsync_engines import (
     SubtitleDestinationChanged, SubtitleSourceChanged, _report_subtitle_publication,
-    local_subtitle_ownership_is_current, plan_sync_output_cleanup, regular_subtitle_version, subtitle_mutation,
+    local_subtitle_owner_is_clear, plan_sync_output_cleanup, regular_subtitle_version, subtitle_mutation,
     subtitle_source_version, subtitle_write_locks, sync_output_owner_is_unique, write_subtitle_file,
 )
 from subliminal_patch.core_persistent import download_best_subtitles
@@ -33,6 +33,10 @@ from .mismatch import clear_mismatch_for_video, report_release_type_mismatch
 from .pool import update_pools, _get_pool
 from .utils import get_video, _get_lang_obj, _get_scores
 from .processing import process_subtitle
+
+
+class SourceMissingLanguagesUnavailable(OSError):
+    """The source publication cannot verify whether the target language is missing."""
 
 
 @update_pools
@@ -244,6 +248,10 @@ def generate_subtitles(path, languages, audio_language, sceneName, title, media_
                                                           previous_subtitles_to_delete)
                                 saved_subtitles = [saved for saved in saved_subtitles if saved.storage_path in written_paths]
 
+                        except SourceMissingLanguagesUnavailable:
+                            # The source job must fail rather than report a completed search
+                            # when its final missing-language check could not be performed.
+                            raise
                         except Exception as e:
                             logging.exception(
                                 f'BAZARR Error saving Subtitles file to disk for this file {path}: {repr(e)}')  # noqa: G004
@@ -463,7 +471,13 @@ def _write_source_download(video_path, destination, content, *, source, language
             proof = ownership_index.prepare_registered_ownership(video_path, (*paths, *(path for path, _ in outputs)))
             return paths, outputs, proof
         if wanted_stamp is None and recheck_missing:
-            return prepare_source_sidecars(source, ownership_index, written_paths)
+            try:
+                return prepare_source_sidecars(source, ownership_index, written_paths)
+            except OSError as error:
+                logging.warning('BAZARR could not verify missing languages for source item %s', source.item_id)
+                raise SourceMissingLanguagesUnavailable(
+                    'The source missing languages could not be verified. Try again when its subtitle files and '
+                    'folders can be read.') from error
         return None
 
     @contextmanager
@@ -484,7 +498,8 @@ def _write_source_download(video_path, destination, content, *, source, language
                     raise SubtitleDestinationChanged('The subtitle destination setting changed before publication')
                 paths, outputs, proof = prepared
                 output_paths = tuple(path for path, _ in outputs)
-                if not local_subtitle_ownership_is_current(video_path, (*paths, *output_paths), ownership_index):
+                if not all(local_subtitle_owner_is_clear(video_path, path, ownership_index)
+                           for path in (*paths, *output_paths)):
                     raise SubtitleDestinationChanged('Subtitle ownership in the source directory changed during search')
                 if not ownership_index.registered_ownership_is_current(proof):
                     raise SubtitleDestinationChanged('Registered subtitle ownership changed before publication')

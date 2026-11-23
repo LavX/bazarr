@@ -67,11 +67,15 @@ def subtitle_source_version(path):
         return None
 
 
-def regular_subtitle_version(path):
-    """Identify the directory entry only when it is an ordinary file."""
+def regular_subtitle_version(path, *, strict=False):
+    """Identify an ordinary file, optionally reporting metadata read failures."""
     try:
         entry = os.lstat(path)
+    except (FileNotFoundError, NotADirectoryError):
+        return None
     except OSError:
+        if strict:
+            raise
         return None
     return _subtitle_file_version(entry) if stat.S_ISREG(entry.st_mode) else None
 
@@ -391,6 +395,25 @@ def _normalized_media_stem(path):
     return unicodedata.normalize('NFC', os.path.splitext(os.path.basename(path))[0].lower())
 
 
+def _subtitle_owner_claims(path, canonical, destination, *, stems=None, resolve=None):
+    """Pair each media name with the sidecar destinations for its own parent."""
+    if resolve is None:
+        def resolve(folder):
+            return os.path.normcase(os.path.realpath(folder))
+
+    mode, custom = destination
+    for media_path in {os.fspath(path), canonical}:
+        stem = _normalized_media_stem(media_path)
+        if stems is not None and stem not in stems:
+            continue
+        parent = os.path.dirname(media_path)
+        folders = {parent}
+        if custom and mode in ('absolute', 'relative'):
+            folders.add(custom if mode == 'absolute' else os.path.join(parent, custom))
+        for folder in folders:
+            yield resolve(folder), stem, media_path
+
+
 class SyncOutputOwnerIndex:
     """Lazily map library owners once for one sequential subtitle scan.
 
@@ -446,57 +469,44 @@ class SyncOutputOwnerIndex:
 
     @staticmethod
     def _map_registry_rows(registry_rows, *, mappings=None, destination=None):
+        if destination is None:
+            destination = SyncOutputOwnerIndex.subtitle_destination()
         owners = {}
         for path in SyncOutputOwnerIndex._mapped_registry_paths(registry_rows, mappings):
-            SyncOutputOwnerIndex._add_owner_claims(owners, path, destination)
+            SyncOutputOwnerIndex._record_owner(owners, path, destination)
         return owners
 
     @staticmethod
-    def _add_owner_claims(owners, path, destination):
+    def _record_owner(owners, path, destination):
         canonical = os.path.normcase(os.path.realpath(path))
-        for key in SyncOutputOwnerIndex._owner_claim_keys(path, canonical, destination):
-            owners.setdefault(key, set()).add(canonical)
-
-    @staticmethod
-    def _owner_claim_keys(path, canonical, destination, *, stems=None, resolve=None):
-        from utilities.helper import get_target_folder
-
-        # A symlink's own name and the canonical video can each claim its subtitles.
-        # Keep mapped path components intact until the filesystem resolves the folders.
-        for name in {os.fspath(path), canonical}:
-            stem = _normalized_media_stem(name)
-            if stems is not None and stem not in stems:
-                continue
-            if destination is None:
-                folders = {os.path.dirname(name)}
-                custom_folder = get_target_folder(name, create=False)
-                if custom_folder:
-                    folders.add(custom_folder)
-            else:
-                folders = SyncOutputOwnerIndex._owner_folders(name, destination)
-            for folder in folders:
-                physical = resolve(folder) if resolve is not None else os.path.normcase(os.path.realpath(folder))
-                yield physical, stem
-
-    @staticmethod
-    def _owner_folders(path, destination):
-        mode, custom = destination
-        directory = os.path.dirname(path)
-        folders = {directory}
-        if custom and mode in ('absolute', 'relative'):
-            folder = custom if mode == 'absolute' else os.path.join(directory, custom)
-            folders.add(folder)
-        return folders
+        for directory, stem, _ in _subtitle_owner_claims(path, canonical, destination):
+            owners.setdefault((directory, stem), set()).add(canonical)
 
     @staticmethod
     def _load_owners():
         return SyncOutputOwnerIndex._map_registry_rows(SyncOutputOwnerIndex._registry_rows())
+
+    @staticmethod
+    def subtitle_destination():
+        from app.config import settings
+        from utilities.helper import get_subtitle_destination_folder
+
+        return settings.general.subfolder, get_subtitle_destination_folder()
 
     def folder_is_shared(self, directory):
         return False
 
     def conflicting_stems(self, video, subtitle_path):
         return {_normalized_media_stem(video), _normalized_media_stem(subtitle_path)}
+
+    def matching_stems(self, video_path, canonical, directory, subtitle_path, destination, *, resolve=None):
+        subtitle_stem = _normalized_media_stem(subtitle_path)
+        stems = set()
+        for folder, media_stem, media_path in _subtitle_owner_claims(
+                video_path, canonical, destination, resolve=resolve):
+            if folder == directory and (subtitle_stem == media_stem or subtitle_stem.startswith(media_stem + '.')):
+                stems.update(self.conflicting_stems(media_path, subtitle_path))
+        return stems
 
     def is_unique(self, video, directory, conflicting_stems):
         if not self._loaded:
@@ -515,75 +525,82 @@ class SyncOutputOwnerIndex:
         return owned
 
 
-def _local_video_ownership(video, conflicting_stems):
-    """Return whether the source is present and another local video claims the names."""
+def _media_parent_folders(video_path, canonical):
+    return {os.path.normcase(os.path.realpath(os.path.dirname(video_path))),
+            os.path.dirname(canonical)}
+
+
+def _local_video_stems_are_clear(video_path, video, directory, conflicting_stems, destination):
     from subliminal_patch.core import VIDEO_EXTENSIONS
 
-    present = False
-    with os.scandir(os.path.dirname(video)) as entries:
-        for entry in entries:
-            if not entry.name.lower().endswith(VIDEO_EXTENSIONS):
-                continue
-            stem = _normalized_media_stem(entry.name)
-            alias = entry.is_symlink()
-            if not alias and stem not in conflicting_stems:
-                continue
-            if not entry.is_file():
-                continue
-            path = os.path.realpath(entry.path) if alias else entry.path
-            canonical = os.path.normcase(path)
-            if canonical == video:
-                present = True
-            elif stem in conflicting_stems or _normalized_media_stem(canonical) in conflicting_stems:
-                return present, True
-    return present, False
+    for media_directory in _media_parent_folders(video_path, video):
+        with os.scandir(media_directory) as entries:
+            for entry in entries:
+                if not entry.name.lower().endswith(VIDEO_EXTENSIONS):
+                    continue
+                if entry.is_symlink():
+                    if entry.is_dir():
+                        continue
+                elif (_normalized_media_stem(entry.name) not in conflicting_stems
+                      or not entry.is_file(follow_symlinks=False)):
+                    continue
+                # A symlink's resolved name may match even when its own name does not.
+                other = os.path.normcase(os.path.realpath(entry.path))
+                if other != video and any(
+                        folder == directory and stem in conflicting_stems
+                        for folder, stem, _ in _subtitle_owner_claims(entry.path, other, destination)):
+                    return False
+    return True
 
 
-def local_subtitle_ownership_is_current(video_path, subtitle_paths, ownership_index):
-    """Recheck this media directory immediately before an upgrade changes its files."""
-    video = os.path.normcase(os.path.realpath(video_path))
-    stems = set().union(*(ownership_index.conflicting_stems(video, path) for path in subtitle_paths))
+def _clear_local_owner_stems(video_path, canonical, directory, subtitle_path, ownership_index):
+    destination = ownership_index.subtitle_destination()
+    stems = ownership_index.matching_stems(video_path, canonical, directory, subtitle_path, destination)
+    if stems and _local_video_stems_are_clear(video_path, canonical, directory, stems, destination):
+        return stems
+    return set()
+
+
+def local_subtitle_owner_is_clear(video_path, subtitle_path, ownership_index=None):
+    """Recheck relevant on-disk siblings with the same claims used by the registry."""
+    canonical = os.path.normcase(os.path.realpath(video_path))
+    directory = os.path.normcase(os.path.realpath(os.path.dirname(subtitle_path)))
     try:
-        present, conflict = _local_video_ownership(video, stems)
-        return present and not conflict
+        owners = ownership_index if ownership_index is not None else SyncOutputOwnerIndex()
+        return bool(_clear_local_owner_stems(video_path, canonical, directory, subtitle_path, owners))
     except OSError:
         return False
 
 
 def sync_output_owner_is_unique(video_path, source_path, ownership_index=None):
     """Prove ownership before moving or replacing an exact generated variant."""
+    from subliminal_patch.core import VIDEO_EXTENSIONS
+
     video = os.path.normcase(os.path.realpath(video_path))
     directory = os.path.normcase(os.path.realpath(os.path.dirname(source_path)))
-    media_directory = os.path.dirname(video)
-
-    stem = _normalized_media_stem
-    if stem(source_path) != stem(video) and not stem(source_path).startswith(stem(video) + '.'):
-        return False
-    conflicting_stems = (ownership_index.conflicting_stems(video, source_path) if ownership_index is not None
-                         else {stem(video), stem(source_path)})
+    owners = ownership_index if ownership_index is not None else SyncOutputOwnerIndex()
     try:
-        present, conflict = _local_video_ownership(video, conflicting_stems)
-        if conflict:
+        conflicting_stems = _clear_local_owner_stems(video_path, video, directory, source_path, owners)
+        if not conflicting_stems:
             return False
-        if directory == media_directory and (ownership_index is None or not ownership_index.folder_is_shared(
-                directory)):
-            return present
+        if directory in _media_parent_folders(video_path, video) and not owners.folder_is_shared(directory):
+            return str(video_path).lower().endswith(VIDEO_EXTENSIONS) and os.path.isfile(video)
 
         # Separate media directories can share a custom subtitle folder. Keep
         # all mapped owners, amortizing that lookup only within an explicit scan.
-        if ownership_index is None:
-            ownership_index = SyncOutputOwnerIndex()
-        return ownership_index.is_unique(video, directory, conflicting_stems)
+        return owners.is_unique(video, directory, conflicting_stems)
     except Exception as error:
-        if getattr(ownership_index, 'propagate_errors', False):
+        if getattr(owners, 'propagate_errors', False):
             raise
         if not isinstance(error, (OSError, ValueError)):
             logging.exception('BAZARR unable to verify generated subtitle ownership')
         return False
 
 
-def plan_sync_output_cleanup(video_path, source_path, ownership_index=None):
+def plan_sync_output_cleanup(video_path, source_path, ownership_index=None, *, include_combined=False):
     """Find and version the exact generated siblings while discovery is allowed."""
+    from subtitles.tools.combine.naming import parse_combined_filename
+
     if is_sync_engine_output(source_path):
         return ()
     candidates = {}
@@ -594,10 +611,22 @@ def plan_sync_output_cleanup(video_path, source_path, ownership_index=None):
     if not candidates or not sync_output_owner_is_unique(video_path, source_path, ownership_index=ownership_index):
         return ()
 
+    stem, extension = os.path.splitext(source_path)
+    if include_combined and parse_combined_filename(stem + '.ass' if extension.lower() == '.ssa' else source_path):
+        # These exact constructed variants are deliberately absent from the
+        # language index, which cannot represent both modifiers in one entry.
+        return tuple((output, version) for output, version in candidates.items()
+                     if sync_output_owner_is_unique(video_path, output, ownership_index=ownership_index))
+
     from subtitles.indexer.utils import add_sync_engine_outputs
 
     directory = os.path.dirname(source_path)
-    owned = add_sync_engine_outputs(directory, {}, video_path=video_path, ownership_index=ownership_index)
+    try:
+        owned = add_sync_engine_outputs(directory, {}, video_path=video_path, ownership_index=ownership_index)
+    except OSError:
+        # A write-only shared folder can still accept a proven primary write.
+        # Without a listing, do not move any of its existing files.
+        return ()
     return tuple((output, version) for output, version in candidates.items() if output.name in owned)
 
 
@@ -607,14 +636,17 @@ def quarantine_sync_outputs(video_path, source_path, ownership_index=None, *, pr
     with subtitle_write_lock(video_path, directory) as state:
         outputs = plan_sync_output_cleanup(video_path, source_path, ownership_index) if prepared is None else prepared
         for output, version in outputs:
-            if regular_subtitle_version(output) != version:
-                continue
             fd, quarantine = tempfile.mkstemp(prefix=f'.bazarr-sync-obsolete-{output.name[:40]}-', suffix='.bak', dir=directory)
             os.close(fd)
             try:
+                if (not local_subtitle_owner_is_clear(video_path, output, ownership_index)
+                        or regular_subtitle_version(output) != version):
+                    os.unlink(quarantine)
+                    continue
                 os.replace(output, quarantine)
             except BaseException:
-                os.unlink(quarantine)
+                if os.path.exists(quarantine):
+                    os.unlink(quarantine)
                 raise
             state.changed(output)
 
@@ -1049,7 +1081,7 @@ class SubsyncEngineRunner:
 
     def run(self, srt_path, output_mode, enabled_engines, execute_engine, force_sync=False,
             source_version=None, before_publish=None, publication_lock=None, after_publish=None,
-            on_publish=None, publication_guard=None):
+            on_publish=None, publication_guard=None, destination_guard=None):
         output_mode = normalize_output_mode(output_mode)
         result = self.result = SyncRunResult(source_path=srt_path, output_mode=output_mode)
 
@@ -1115,8 +1147,10 @@ class SubsyncEngineRunner:
 
                 generated_path = str(output_path)
                 final_output_path = output_path
+                destination = srt_path if output_mode == OUTPUT_MODE_OVERWRITE else final_engine_output_path
                 with publication_lock or nullcontext() as state:
-                    with publication_guard() if publication_guard is not None else nullcontext():
+                    with (publication_guard() if publication_guard is not None else nullcontext(),
+                          destination_guard(destination) if destination_guard is not None else nullcontext()):
                         if before_publish:
                             before_publish()
                         if source_version is not None and not source_is_unchanged(srt_path, source_version):
@@ -1163,7 +1197,8 @@ class SubsyncEngineRunner:
                     output_path.unlink()
                 result.results.append(SyncEngineResult(
                     engine=engine, status=RESULT_SKIPPED,
-                    reason=(REASON_DESTINATION_CHANGED if source_version.destination_owned(final_engine_output_path)
+                    reason=(REASON_DESTINATION_CHANGED if isinstance(source_version, SubtitlePublication)
+                            and source_version.destination_owned(final_engine_output_path)
                             else REASON_DESTINATION_AMBIGUOUS),
                     message='The synchronized subtitle destination changed or its owner is ambiguous.',
                 ))

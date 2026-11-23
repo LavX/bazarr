@@ -37,7 +37,9 @@ from subtitles.tools.combine.naming import parse_combined_filename
 from subtitles.tools.combine.rules import _dotted_custom_aliases
 from subtitles.tools.subsync_engines import (SYNC_ENGINE_LANGUAGE_MODIFIERS, SubtitleDestinationChanged,
                                              SubtitleSourceChanged, SyncOutputOwnerIndex, _normalized_media_stem,
-                                             plan_sync_output_cleanup, quarantine_sync_outputs_after_mutation,
+                                             _subtitle_owner_claims,
+                                             local_subtitle_owner_is_clear, plan_sync_output_cleanup,
+                                             quarantine_sync_outputs_after_mutation,
                                              read_regular_subtitle, regular_subtitle_version, subtitle_write_locks,
                                              sync_engine_from_output_path, sync_output_owner_is_unique)
 from utilities.helper import get_subtitle_destination_folder, get_target_folder
@@ -100,7 +102,7 @@ class SourceOutputOwnerIndex(SyncOutputOwnerIndex):
             destination = settings.general.subfolder, get_subtitle_destination_folder()
         owners = {}
         for path in paths:
-            SyncOutputOwnerIndex._add_owner_claims(owners, path, destination)
+            SyncOutputOwnerIndex._record_owner(owners, path, destination)
         return owners
 
 
@@ -179,12 +181,16 @@ class SourcePublicationOwnerIndex(SourceOutputOwnerIndex):
             return None
 
         resolve = cache(self._registered_owner_path)
+        destination = self.subtitle_destination()
         try:
             video = resolve(os.fspath(video_path))
             output_folders = {parent: resolve(parent) for parent in {os.path.dirname(path) for path in subtitle_paths}}
-            candidates = tuple({(output_folders[os.path.dirname(path)], stem)
-                                for stem in self.conflicting_stems(video, path)} for path in subtitle_paths)
-            return _RegisteredSubtitleClaims(video, output_folders, candidates)
+            candidates = []
+            for path in subtitle_paths:
+                directory = output_folders[os.path.dirname(path)]
+                stems = self.matching_stems(video_path, video, directory, path, destination, resolve=resolve)
+                candidates.append({(directory, stem) for stem in stems})
+            return _RegisteredSubtitleClaims(video, output_folders, tuple(candidates))
         except (OSError, ValueError) as error:
             raise SourcePublicationOwnersChanged('Registered subtitle ownership could not be prepared') from error
 
@@ -206,7 +212,9 @@ class SourcePublicationOwnerIndex(SourceOutputOwnerIndex):
             for path in paths:
                 # A regular path can become an alias to any stem within one timestamp tick.
                 canonical = resolve(path)
-                for key in self._owner_claim_keys(path, canonical, destination, stems=stems, resolve=resolve):
+                for directory, stem, _ in _subtitle_owner_claims(
+                        path, canonical, destination, stems=stems, resolve=resolve):
+                    key = directory, stem
                     if key in keys:
                         if canonical != proof.video:
                             return False
@@ -215,10 +223,14 @@ class SourcePublicationOwnerIndex(SourceOutputOwnerIndex):
         except (OSError, ValueError):
             return False
 
+    def subtitle_destination(self):
+        if self._publication_settings is not None:
+            return self._publication_settings[0]
+        return super().subtitle_destination()
+
     def folder_is_shared(self, directory):
         # A relative custom path can also resolve into another video's directory.
-        destination = self._publication_settings[0] if self._publication_settings else None
-        return bool(destination[1] if destination is not None else get_subtitle_destination_folder())
+        return bool(self.subtitle_destination()[1])
 
     @staticmethod
     def _needs_registry_guard(source, destination, custom_folder):
@@ -242,7 +254,8 @@ class SourcePublicationOwnerIndex(SourceOutputOwnerIndex):
             with self._settings_guard():
                 self._publication_settings = self._settings_snapshot()
             prepared = prepare() if prepare is not None else None
-            outputs = plan_sync_output_cleanup(source.path, destination, self) if cleanup_outputs else ()
+            outputs = (plan_sync_output_cleanup(source.path, destination, self, include_combined=True)
+                       if cleanup_outputs else ())
             shared = self._needs_registry_guard(source, destination, self._publication_settings[0][1])
             if shared and self._prepared_owners is None:
                 raise SourcePublicationOwnersChanged('The shared subtitle owners could not be verified')
@@ -263,6 +276,9 @@ class SourcePublicationOwnerIndex(SourceOutputOwnerIndex):
                             if (state is None or not state.source_enabled or not state.library_enabled
                                     or not os.path.isfile(current.path)):
                                 current = None
+                        if (current is not None and destination is not None
+                                and not local_subtitle_owner_is_clear(current.path, destination, self)):
+                            raise SourcePublicationOwnersChanged('Another video now owns the subtitle destination')
                         publishing = True
                         yield current, connection, prepared
                         if current is not None and outputs:
@@ -313,10 +329,10 @@ def list_external_subtitles(path, previous=None, ownership_index=None, *, public
             path_key = os.path.normcase(os.path.abspath(subtitle_path))
             if path_key in actual or path_key in excluded:
                 continue
-            version = regular_subtitle_version(subtitle_path)
-            if version is None:
-                continue
             if publication and not sync_output_owner_is_unique(path, subtitle_path, ownership_index=ownership_index):
+                continue
+            version = regular_subtitle_version(subtitle_path, strict=publication)
+            if version is None:
                 continue
             if version[2] <= MAXIMUM_SUBTITLE_SIZE:
                 try:
@@ -326,12 +342,14 @@ def list_external_subtitles(path, previous=None, ownership_index=None, *, public
                     language = guess_external_subtitles(
                         directory, {subtitle: language}, 'movie', (previous_entry,) if previous_entry else None,
                         path_reverse=os.fspath, read_bytes=read_sample)[subtitle]
-                except SubtitleSourceChanged:
+                except SubtitleSourceChanged as error:
+                    if publication:
+                        raise OSError('A candidate subtitle changed while verifying its language') from error
                     continue
-                except (OSError, UnicodeError):
-                    if not publication:
-                        raise
-                    continue
+                except UnicodeError as error:
+                    if publication:
+                        raise OSError('A candidate subtitle could not be decoded') from error
+                    raise
             entry = _external_subtitle_entry(subtitle, language, subtitle_path, version[2])
             if entry is not None:
                 actual[path_key] = entry

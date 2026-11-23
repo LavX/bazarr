@@ -140,17 +140,36 @@ def test_candidates_and_item_routes_share_current_source_history(client, arr_lib
     assert get_upgradable_source_subtitles([expected, history_ids['Unwanted']]) == {expected: None}
 
 
-@pytest.mark.parametrize('initial_variant', ['en', 'en:hi'])
-def test_scheduled_job_replaces_source_file_and_preserves_original_history(world, monkeypatch, initial_variant):
+@pytest.mark.parametrize(('initial_variant', 'alias_folder'), [
+    ('en', None), ('en:hi', None), ('en', 'relative'), ('en:hi', 'absolute'),
+])
+def test_scheduled_job_replaces_source_file_and_preserves_original_history(
+        world, monkeypatch, initial_variant, alias_folder):
     from app.config import settings
     from media_sources import repository
+    from media_sources.context import resolve_item
     from media_sources.history import get_upgradable_source_subtitles
     from media_sources.indexer import index_item
     from subtitles import upgrade
 
-    context = pipeline._movie(world)
-    target = Path(context.path).with_suffix('.en.srt')
-    original = target if initial_variant == 'en' else Path(context.path).with_suffix('.en.hi.srt')
+    if alias_folder is None:
+        context = pipeline._movie(world)
+        folder = Path(context.path).parent
+    else:
+        actual = video(world.tmp_path / 'recordings' / 'Canonical.mkv')
+        alias = world.root / 'Film.mkv'
+        alias.symlink_to(actual)
+        item_id = add_item(world.db, world.source_id, world.library_id, alias, title='Film')
+        context = resolve_item(item_id)
+        if alias_folder == 'relative':
+            folder = world.root / 'Subs'
+            folder.mkdir()
+            monkeypatch.setattr(settings.general, 'subfolder', 'relative')
+            monkeypatch.setattr(settings.general, 'subfolder_custom', 'Subs')
+        else:
+            folder = pipeline._custom_folder(world, monkeypatch, world.tmp_path)
+    target = folder / Path(context.path).with_suffix('.en.srt').name
+    original = target if initial_variant == 'en' else target.with_suffix('.hi.srt')
     original.write_bytes(b'Old subtitle')
     index_item(context.item_id)
     history_id = _history(world.db, world.source_id, context.item_id, Path(context.path), original,
@@ -173,6 +192,37 @@ def test_scheduled_job_replaces_source_file_and_preserves_original_history(world
     ]
     assert get_upgradable_source_subtitles() == {history_id + 1: history_id}
     assert repository.get_item(context.item_id).missing_subtitles == '[]'
+
+
+def test_concurrent_source_upgrade_skips_the_same_completed_history_entry(world, monkeypatch):
+    from media_sources.indexer import index_item
+    from subtitles import download, upgrade
+
+    source = pipeline._movie(world)
+    media = Path(source.path)
+    destination = media.with_suffix('.en.srt')
+    destination.write_bytes(b'Old subtitle')
+    index_item(source.item_id)
+    first = _history(world.db, world.source_id, source.item_id, media, destination)
+    monkeypatch.setattr(upgrade, 'get_providers', lambda: ['fake'])
+    monkeypatch.setattr(upgrade, 'jobs_queue', Mock())
+    asked = pipeline._download(monkeypatch)
+    choose = download.download_best_subtitles
+    attempts = []
+
+    def complete_another_search(videos, languages, min_score, **kwargs):
+        attempts.append(min_score)
+        monkeypatch.setattr(download, 'download_best_subtitles', choose)
+        upgrade.upgrade_source_subtitles(job_id=11)
+        return choose(videos, languages, min_score, **kwargs)
+
+    monkeypatch.setattr(download, 'download_best_subtitles', complete_another_search)
+    upgrade.upgrade_source_subtitles(job_id=10)
+
+    assert attempts == [61] and asked['min_score'] == 61
+    assert record_rows(world.db) == [(first, 1, None), (first + 1, 3, first)]
+    assert destination.read_bytes() == pipeline.CONTENT
+    assert [event.subtitle_path for event in world.published] == [str(destination)]
 
 
 def record_rows(db):
