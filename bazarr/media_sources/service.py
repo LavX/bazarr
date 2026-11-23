@@ -114,14 +114,19 @@ def _server_connection(instance_id, kind=None, session=None):
 
 
 def server_libraries(instance_id, session=None):
+    return _read_server_libraries(_server_connection(instance_id, session=session), session)
+
+
+def _read_server_libraries(saved, session, *, for_write=False):
     from media_servers.http import MediaServerError
 
     from .kinds.media_server import library_choices
 
-    connection = _server_connection(instance_id, session=session)
     try:
-        return library_choices(connection, target=session)
+        return library_choices(saved, target=session)
     except MediaServerError as error:
+        if for_write and saved.enabled and error.code == 'configuration_changed':
+            raise SourceError('The saved connection changed. Reload it and try again.', 409, 'connection_changed') from error
         raise SourceError('Could not list libraries from the saved media server connection', 502,
                           'server_unavailable') from error
 
@@ -154,12 +159,12 @@ def _checked_server_roots(roots, content_kind, session, library_id=None):
     return result
 
 
-def _server_library_fields(instance_id, library, session):
+def _server_library_fields(saved, library, session):
     _only(library, ('server_library_id', 'content_kind', 'profile_id', 'roots'), 'adding a server library')
     locator = library.get('server_library_id')
     if not isinstance(locator, str) or not locator:
         raise SourceError('server_library_id is required')
-    chosen = next((item for item in server_libraries(instance_id, session) if item['id'] == locator), None)
+    chosen = next((item for item in _read_server_libraries(saved, session, for_write=True) if item['id'] == locator), None)
     if chosen is None:
         raise SourceError('Library not found on the saved media server', 404, 'not_found')
     content_kind = library.get('content_kind') or chosen['content_kind']
@@ -176,15 +181,23 @@ def _insert_server_library(source_id, fields, connection):
                                      server_roots=roots, target=connection)
 
 
+def _lock_saved_connection(saved, connection, *, require_enabled=True):
+    from media_servers.http import MediaServerError
+
+    from .kinds.media_server import check_server_revision
+
+    try:
+        check_server_revision(saved.id, saved.kind, saved.revision, connection, lock=True,
+                              require_enabled=require_enabled)
+    except MediaServerError as error:
+        raise SourceError('The saved connection changed. Reload it and try again.', 409, 'connection_changed') from error
+
+
 def _create_server_source(payload, kind, session):
-    import sqlalchemy as sa
-
-    from app.database import TableMediaServerInstances
-
     from .kinds.folder import is_storable
 
     saved = _server_connection(payload.get('media_server_instance_id'), kind, session)
-    instance_id, revision = saved.id, saved.revision
+    instance_id = saved.id
     name = payload.get('name', saved.name)
     if not isinstance(name, str) or not name.strip() or '\x00' in name or not is_storable(name):
         raise SourceError('A name is required')
@@ -194,14 +207,10 @@ def _create_server_source(payload, kind, session):
     library = payload.get('library')
     if library is not None and not isinstance(library, dict):
         raise SourceError('library must be an object')
-    fields = _server_library_fields(instance_id, library, session) if library is not None else None
-    table = TableMediaServerInstances.__table__
+    fields = _server_library_fields(saved, library, session) if library is not None else None
     try:
         with _creation_lock, source_transaction(session) as connection:
-            current = connection.execute(sa.select(table.c.revision).where(
-                table.c.id == instance_id, table.c.kind == kind).with_for_update()).first()
-            if current is None or current.revision != revision:
-                raise SourceError('The saved connection changed. Reload it and try again.', 409, 'connection_changed')
+            _lock_saved_connection(saved, connection, require_enabled=fields is not None)
             if repository.source_for_server(instance_id, connection):
                 raise SourceError('This connection already has a media source', 409, 'source_exists')
             if repository.name_taken(name, connection):
@@ -334,11 +343,14 @@ def add_library(source_id, payload, session=None):
     if source is None:
         raise SourceError('No such media source', 404, 'not_found')
     if source.kind != 'folder':
-        fields = _server_library_fields(source.media_server_instance_id, payload, session)
+        saved = _server_connection(source.media_server_instance_id, source.kind, session)
+        fields = _server_library_fields(saved, payload, session)
         try:
             with _creation_lock, source_transaction(session) as connection:
-                current = repository.get_source(source.id, connection, lock_key=True)
-                if current is None or current.created_at != source.created_at:
+                _lock_saved_connection(saved, connection)
+                current = repository.get_source(source.id, connection, lock_config=True)
+                if (current is None or current.created_at != source.created_at or current.kind != saved.kind
+                        or current.media_server_instance_id != saved.id):
                     raise SourceError('The media source changed. Reload it and try again.', 409, 'source_changed')
                 library_id = _insert_server_library(source_id, fields, connection)
         except IntegrityError as error:
@@ -425,12 +437,13 @@ def preview_root_edit(library_id, local_paths, session=None):
     """Only existing files outside every retained local root are removed by a root edit."""
     roots = [os.path.normcase(repository.normalize_path(path)) for path in local_paths]
     return [row.id for row in repository.library_items(library_id, session)
-            if not any(repository._inside(os.path.normcase(row.path), root) for root in roots)
+            if os.path.isabs(row.path)
+            and not any(repository._inside(os.path.normcase(row.path), root) for root in roots)
             and os.path.isfile(row.path)]
 
 
-def _server_library_for_edit(source_id, library_id, session):
-    library = repository.get_library(library_id, session)
+def _server_library_for_edit(source_id, library_id, session, *, for_update=False):
+    library = repository.get_library(library_id, session, for_update=for_update)
     source = repository.get_source(source_id, session)
     if library is None or source is None or library.source_id != source_id:
         raise SourceError('No such library', 404, 'not_found')
@@ -455,7 +468,7 @@ def change_library_roots(source_id, library_id, roots, session=None, *, confirme
         raise SourceError('This library is scanning. Try again when its scan finishes.', 409, 'library_busy')
     try:
         with _creation_lock, source_transaction(session) as connection:
-            library = _server_library_for_edit(source_id, library_id, connection)
+            library = _server_library_for_edit(source_id, library_id, connection, for_update=True)
             cleaned = _checked_server_roots(roots, library.content_kind, connection, library_id)
             doomed = preview_root_edit(library_id, [local for _, local in cleaned], connection)
             if (confirmed_removed is not None or doomed) and (
@@ -578,6 +591,10 @@ def _search_source_item(item_id, job_id, *, translation_gate, expected_source):
     item = repository.get_item(item_id)
     if item is None or not context.same_item(item):
         raise JobFailed('The item no longer exists', reason='not_found')
+    if item.server_missing:
+        jobs_queue.update_job_progress(job_id=job_id, progress_value='max',
+                                       progress_message='The item is missing from its media server library')
+        return None
     stat = local_stat(item.path)
     if stat is None:
         raise JobFailed(f"The file is missing: {item.path}", reason='missing_file')

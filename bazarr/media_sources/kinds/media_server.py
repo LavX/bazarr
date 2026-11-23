@@ -7,6 +7,7 @@ from datetime import date
 from types import SimpleNamespace
 
 import requests
+from sqlalchemy import select
 
 from media_servers.http import MediaServerError, validate_server_url
 from media_servers.item_pages import item_id
@@ -23,26 +24,47 @@ _ITEM_TYPES = {'movie': ('Movie',), 'series': ('Episode',), 'sports': ('Movie', 
 
 
 def server_row(instance_id, kind=None, target=None):
-    row = MediaServerInstanceRepository(handle(target)).get(instance_id)
+    from app.database import TableMediaServerInstances
+
+    table = TableMediaServerInstances.__table__
+    row = handle(target).execute(select(table).where(table.c.id == instance_id)).first()
     if row is None or row.kind not in ('jellyfin', 'emby') or (kind is not None and row.kind != kind):
         raise MediaServerError('source_connection_missing')
     return row
 
 
+def check_server_revision(instance_id, kind, revision, target, *, lock=False, require_enabled=True):
+    """Fence a request or, inside a write transaction, the corresponding database changes."""
+    from app.database import TableMediaServerInstances
+
+    table = TableMediaServerInstances.__table__
+    query = select(table.c.revision, table.c.enabled).where(table.c.id == instance_id, table.c.kind == kind)
+    if lock:
+        query = query.with_for_update(key_share=True)
+    current = handle(target).execute(query).first()
+    if current is None or current.revision != revision or (require_enabled and not current.enabled):
+        raise MediaServerError('configuration_changed')
+
+
 @contextmanager
-def server_client(instance_id, kind, target=None):
+def server_client(instance_id, kind, target=None, *, expected_revision=None):
     """Read the saved address and its credential together. Recheck the revision before every request."""
     repo = MediaServerInstanceRepository(handle(target))
-    row = server_row(instance_id, kind, target)
+    try:
+        row = server_row(instance_id, kind, target)
+    except MediaServerError:
+        if expected_revision is not None:
+            raise MediaServerError('configuration_changed') from None
+        raise
+    if expected_revision is not None and (row.revision != expected_revision or not row.enabled):
+        raise MediaServerError('configuration_changed')
     revision, url, verify_ssl = row.revision, validate_server_url(row.url), bool(row.verify_ssl)
     key = repo.snapshot_api_key(row)
     if not row.enabled or not key:
         raise MediaServerError('source_connection_unavailable')
 
     def guard():
-        current = server_row(instance_id, kind, target)
-        if not current.enabled or current.revision != revision:
-            raise MediaServerError('configuration_changed')
+        check_server_revision(instance_id, kind, revision, target)
 
     if kind == 'jellyfin':
         from jellyfin.client import JellyfinClient
@@ -82,7 +104,8 @@ def library_choices(connection, *, target=None):
     from media_servers.instances import parse_options
 
     try:
-        with server_client(connection.id, connection.kind, target) as (client, _):
+        with server_client(connection.id, connection.kind, target,
+                           expected_revision=connection.revision) as (client, _):
             libraries = client.get_libraries()
     except (requests.RequestException, ValueError, RecursionError):
         raise MediaServerError('collection_request_failed') from None
@@ -162,14 +185,15 @@ class MediaServerKind:
         self.target = target
         self.series = {}
 
-    def validate_library(self, source, library):
+    def validate_library(self, source, library, *, roots=None):
         if source is None or source.media_server_instance_id is None:
             return [Problem('source_connection_missing', 'A saved media server connection is required.')]
         try:
             item_id(library.locator)
         except MediaServerError:
             return [Problem('invalid_library', 'A server library identifier is required.')]
-        roots = repository.get_roots(library.id, self.target)
+        if roots is None:
+            roots = repository.get_roots(library.id, self.target)
         if not roots:
             return [Problem('invalid_roots', 'Map at least one server root to a local folder.')]
         problems = []
@@ -188,20 +212,23 @@ class MediaServerKind:
             return SourceHealth(False, 'Could not read libraries from the saved media server connection.')
         return SourceHealth(True)
 
-    def enumerate(self, source, library, cancel=None):
+    def enumerate(self, source, library, cancel=None, *, roots=None, revision=None):
         listing = Listing(files=iter(()))
-        listing.files = self._scan(source, library, listing, cancel)
+        listing.files = self._scan(source, library, listing, cancel, roots, revision)
         return listing
 
-    def _scan(self, source, library, result, cancel):
-        roots = paths.ServerRoots(repository.get_roots(library.id, self.target))
+    def _scan(self, source, library, result, cancel, roots, revision):
+        roots = paths.ServerRoots(repository.get_roots(library.id, self.target) if roots is None else roots)
         self.series.clear()
         try:
-            with server_client(source.media_server_instance_id, self.kind, self.target) as (client, _):
+            with server_client(source.media_server_instance_id, self.kind, self.target,
+                               expected_revision=revision) as (client, _):
                 series = client.get_item_pages(library.locator, ('Series',), cancel=cancel) if (
                     library.content_kind == 'series') else None
                 media = client.get_item_pages(library.locator, _ITEM_TYPES[library.content_kind], cancel=cancel)
-        except MediaServerError:
+        except MediaServerError as error:
+            if revision is not None and error.code == 'configuration_changed':
+                raise
             result.problems.append('The media server connection became unavailable.')
             return
         pages = (media,) if series is None else (series, media)
@@ -252,8 +279,9 @@ class MediaServerKind:
             seen_files.add((stat.dev, stat.ino))
             yield DiscoveredFile(path, stat.size, stat.mtime_ns, stat.dev, stat.ino, group_key, _hints(row))
 
-    def lookup_item_ids(self, source, groups, cancel=None):
-        with server_client(source.media_server_instance_id, self.kind, self.target) as (client, guard):
+    def lookup_item_ids(self, source, groups, cancel=None, *, revision=None):
+        with server_client(source.media_server_instance_id, self.kind, self.target,
+                           expected_revision=revision) as (client, guard):
             for ids in groups:
                 if cancel is not None:
                     cancel()

@@ -9,7 +9,7 @@ from flask_restx import Namespace, Resource, inputs, reqparse
 from subliminal_patch.core import SUBTITLE_EXTENSIONS
 from werkzeug.datastructures import FileStorage
 
-from media_sources import identify, overrides, repository, service
+from media_sources import identify, identity, overrides, repository, service
 from media_sources.service import SourceError
 from media_sources.context import SourceItemGone, resolve_item, source_item_title
 from media_sources.manual import current_manual_source, queue_source_download, source_search_title
@@ -37,10 +37,11 @@ def _listing(text):
 
 
 def item_to_dict(item):
-    """One item as the API shows it. Paths are the Bazarr-visible ones, as stored."""
+    """One item as the API shows it, with its last mapped path if it no longer claims a file."""
     return {
         'id': item.id, 'source_id': item.source_id, 'library_id': item.library_id, 'group_id': item.group_id,
-        'kind': item.kind, 'path': item.path, 'title': item.title, 'parsed_title': item.parsed_title,
+        'kind': item.kind, 'path': identity.last_mapped_path(item.path), 'title': item.title,
+        'parsed_title': item.parsed_title,
         'year': item.year, 'season': item.season, 'episode': item.episode,
         'identity_source': item.identity_source, 'identity_state': item.identity_state,
         'identity_candidates': identify.candidates_from_json(item.identity_candidates),

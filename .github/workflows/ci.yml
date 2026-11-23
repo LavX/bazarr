@@ -1035,6 +1035,7 @@ jobs:
             tests/bazarr/test_media_sources_api.py \
             tests/bazarr/test_media_server_item_pages.py \
             tests/bazarr/test_media_server_sources.py \
+            tests/bazarr/test_media_source_search_eligibility.py \
             tests/bazarr/test_media_sources_no_change.py \
             tests/bazarr/test_postgres_driver_pin.py ; do
             echo "::group::$f"

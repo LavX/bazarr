@@ -11,13 +11,14 @@ import logging
 import os
 import threading
 from collections import Counter, defaultdict
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, field
 from datetime import datetime
 
 from sqlalchemy.exc import DataError, IntegrityError, OperationalError
 
 from app.jobs_queue import JobCancelled, JobFailed, jobs_queue
+from media_servers.http import MediaServerError
 
 from . import groups as group_rules
 from . import identify, identity, repository
@@ -50,6 +51,7 @@ class LibraryScan:
     skipped: int = 0
     deferred: int = 0
     item_ids: list = field(default_factory=list)
+    retry: bool = False
 
 
 def _root_snapshot(roots):
@@ -67,6 +69,14 @@ def _root_snapshot(roots):
 
 def _under(path, root):
     return path == root or path.startswith(root.rstrip(os.sep) + os.sep)
+
+
+def _server_path_is_gone(path, roots, snapshot):
+    """Only a mapped local root can vouch for the absence of the stored path."""
+    if not any(root.local_path in snapshot and _under(path, root.local_path)
+               and _under(os.path.realpath(path), os.path.realpath(root.local_path)) for root in roots):
+        return False
+    return identity.path_is_gone(path)
 
 
 def _chunks(values, size=None):
@@ -200,7 +210,7 @@ class _ForeignGuard:
         found_video = False
         for _ in listing:
             found_video = True
-        if (found_video and listing.complete and not listing.unstable
+        if (found_video and listing.complete and not listing.drifted and not listing.unstable
                 and _root_snapshot(roots) == before):
             return roots, before, listing.directory_states
         return None
@@ -246,23 +256,103 @@ def _admission_transaction(session, guard, outer_releases=None):
         outer_releases.extend(releases)
 
 
-def _server_scan_refusal(source, library, session):
-    """Reject a response for a deleted, recreated or disabled source or library."""
-    current_source = repository.get_source(source.id, session)
-    current_library = repository.get_library(library.id, session)
-    if (current_source is None or current_source.created_at != source.created_at
-            or current_library is None or current_library.created_at != library.created_at):
-        return 'unavailable', 'The media source or library was removed during the scan.'
-    if not current_source.enabled or not current_library.enabled:
-        return 'disabled', 'The media source or library was disabled during the scan.'
-    return None
+class _ServerScanChanged(Exception):
+    def __init__(self, status, message):
+        super().__init__(message)
+        self.status = status
+
+
+def _root_configuration(roots):
+    return [(row.id, row.local_path, row.server_path) for row in roots]
+
+
+@dataclass(frozen=True)
+class _ServerScan:
+    source: object
+    library: object
+    roots: list
+    revision: int
+
+    def check(self, target, *, lock=False):
+        from .kinds.media_server import check_server_revision
+
+        source, library = self.source, self.library
+        check_server_revision(source.media_server_instance_id, source.kind, self.revision, target, lock=lock)
+        current_source = repository.get_source(source.id, target, lock_config=lock)
+        current_library = repository.get_library(library.id, target, for_update=lock)
+        if (current_source is None or current_source.created_at != source.created_at
+                or current_library is None or current_library.created_at != library.created_at):
+            raise _ServerScanChanged('unavailable', 'The media source or library was removed during the scan.')
+        if not current_source.enabled or not current_library.enabled:
+            raise _ServerScanChanged('disabled', 'The media source or library was disabled during the scan.')
+        if ((current_source.kind, current_source.media_server_instance_id)
+                != (source.kind, source.media_server_instance_id)
+                or (current_library.source_id, current_library.locator, current_library.content_kind)
+                != (library.source_id, library.locator, library.content_kind)
+                or current_library.updated_at != library.updated_at
+                or _root_configuration(repository.get_roots(library.id, target)) != _root_configuration(self.roots)):
+            raise MediaServerError('configuration_changed')
+
+    @contextmanager
+    def write(self, session):
+        with source_transaction(session) as connection:
+            self.check(connection, lock=True)
+            yield connection
 
 
 def _scan_library(source, library, cancel, session, shadow_context) -> LibraryScan:
     result = LibraryScan(library_id=library.id)
     server = source.kind != 'folder'
-    kind = get_kind(source.kind, session) if server else get_kind(source.kind)
     roots = repository.get_roots(library.id, session)
+    scan = None
+    if server:
+        from .kinds.media_server import server_row
+
+        try:
+            saved = server_row(source.media_server_instance_id, source.kind, session)
+            if not saved.enabled:
+                raise MediaServerError('source_connection_unavailable')
+        except MediaServerError:
+            result.status = 'partial'
+            result.message = 'The saved media server connection is unavailable.'
+            repository.record_library_scan(library.id, result.status, result.message, session,
+                                           created_at=library.created_at)
+            return result
+        scan = _ServerScan(source, library, roots, saved.revision)
+    try:
+        return _scan_library_snapshot(source, library, roots, scan, result, cancel, session, shadow_context)
+    except _ServerScanChanged as error:
+        if error.status == 'root_missing':
+            result = LibraryScan(library.id, status=error.status, message=str(error))
+            repository.record_library_scan(library.id, result.status, result.message, session,
+                                           created_at=library.created_at)
+        else:
+            result.status, result.message = error.status, str(error)
+    except MediaServerError as error:
+        if scan is None or error.code != 'configuration_changed':
+            raise
+        current = repository.get_library(library.id, session)
+        current_source = repository.get_source(source.id, session)
+        if (current is None or current.created_at != library.created_at
+                or current_source is None or current_source.created_at != source.created_at):
+            result.status = 'unavailable'
+            result.message = 'The media source or library was removed during the scan.'
+            return result
+        if not current.enabled or not current_source.enabled:
+            result.status = 'disabled'
+            result.message = 'The media source or library was disabled during the scan.'
+            return result
+        result.status = 'partial'
+        result.message = 'The saved connection or library settings changed during the scan.'
+        result.retry = True
+        repository.record_library_scan(library.id, result.status, result.message, session,
+                                       created_at=library.created_at)
+    return result
+
+
+def _scan_library_snapshot(source, library, roots, scan, result, cancel, session, shadow_context):
+    server = scan is not None
+    kind = get_kind(source.kind, session) if server else get_kind(source.kind)
     rows = repository.library_items(library.id, session)
     grouped = library.content_kind != 'movie'
     groups = {row.id: row for row in repository.library_groups(library.id, session)} if grouped else {}
@@ -270,7 +360,11 @@ def _scan_library(source, library, cancel, session, shadow_context) -> LibrarySc
     def refuse(status, message):
         result.status = status
         result.message = message
-        repository.record_library_scan(library.id, status, message, session)
+        if server:
+            with scan.write(session) as connection:
+                repository.record_library_scan(library.id, status, message, connection)
+        else:
+            repository.record_library_scan(library.id, status, message, session)
         return result
 
     root_snapshot = _root_snapshot(roots)
@@ -279,17 +373,16 @@ def _scan_library(source, library, cancel, session, shadow_context) -> LibrarySc
 
     # The path was checked when the library was added; it is checked again, since a folder can become a link
     # into the configuration folder or a library can be changed in the database.
-    problems = kind.validate_library(source, library)
+    problems = (kind.validate_library(source, library, roots=roots) if server
+                else kind.validate_library(source, library))
     if problems:
         return refuse('error', ' '.join(problem.message for problem in problems) + ' Nothing was changed.')
 
-    listing = kind.enumerate(source, library, cancel)
+    listing = (kind.enumerate(source, library, cancel, roots=roots, revision=scan.revision) if server
+               else kind.enumerate(source, library, cancel))
     discovered = list(listing)
     if server:
-        refusal = _server_scan_refusal(source, library, session)
-        if refusal:
-            result.status, result.message = refusal
-            return result
+        scan.check(session)
     if listing.unstable or _root_snapshot(roots) != root_snapshot:
         return refuse('root_missing', 'A folder became unavailable or changed during the scan. Nothing was changed.')
 
@@ -317,7 +410,7 @@ def _scan_library(source, library, cancel, session, shadow_context) -> LibrarySc
     matching = identity.match_library(
         discovered, rows, ignore_dev=ignore_dev, library_content_kind=library.content_kind,
         foreign_lookup=lambda inodes, paths: repository.foreign_candidates(inodes, paths, library.id, session),
-        foreign_vouched=lambda holder, found: complete and foreign_guard.vouches(holder, found),
+        foreign_vouched=lambda holder, found: complete and not listing.drifted and foreign_guard.vouches(holder, found),
         by_server_id=server)
 
     # A remounted root has to vouch for what this library knows: a file it holds by identity, or, for a library
@@ -351,19 +444,60 @@ def _scan_library(source, library, cancel, session, shadow_context) -> LibrarySc
     else:
         group_for_dir = {row.group_key: row.id for row in groups.values()}
 
+    presence = {}
+    displaced = {}
+    if server:
+        scan.check(session)
+        presence, confirmed_missing = _server_presence(source, kind, rows, listing, result, cancel, scan.revision)
+        if complete and not listing.drifted:
+            local_destinations = {found.path for _, found in matching.moved}
+            displaced = {row.path: row for row in matching.displaced
+                         if row.id in confirmed_missing and row.path in local_destinations}
     decisions = _decide(matching, groups, plan, group_for_dir, grouped, follows_directories, complete, roots,
-                        foreign_guard, server=server)
-    if server and complete:
+                        foreign_guard, server=server, server_displaced=displaced)
+    if server and complete and not listing.drifted:
         decisions.disk_roots = (roots, root_snapshot)
         decisions.gone_on_disk = {row.id: row.path for row in matching.unmatched
-                                  if row.external_id not in listing.seen_external_ids and identity.path_is_gone(row.path)}
+                                  if row.external_id not in listing.seen_external_ids
+                                  and _server_path_is_gone(row.path, roots, root_snapshot)}
         decisions.delete_ids.extend(decisions.gone_on_disk)
     if _root_snapshot(roots) != root_snapshot:
         return refuse('root_missing', 'A folder became unavailable or changed during the scan. Nothing was changed.')
 
     result.deferred = decisions.deferred
     write_args = (library, decisions, plan, group_identities, group_for_dir, result, cancel)
-    if decisions.required_paths:
+    write = scan.write if server else source_transaction
+    if server:
+        try:
+            with write(session) as connection:
+                if _root_snapshot(roots) != root_snapshot:
+                    raise _ServerScanChanged('root_missing', 'A folder changed before the scan could write.')
+                if library.content_kind == 'series' or decisions.foreign_to_close:
+                    # The transaction holds item locks through all phases. Preserve show-before-episode
+                    # ordering even for unchanged episodes and foreign owners.
+                    shows = set(groups) if library.content_kind == 'series' else set()
+                    foreign = [holder for holder, _, handover in decisions.repathed if handover]
+                    foreign.extend(decisions.foreign_to_close.values())
+                    shows.update(holder.group_id for holder in foreign if holder.kind == 'episode')
+                    for batch in _chunks(sorted(shows - {None})):
+                        repository.lock_show_groups(connection, batch)
+                with _admission_transaction(connection, decisions.foreign_guard) as (target, releases):
+                    inserted = _write_library(*write_args, target, releases)
+                for root in roots:
+                    if root.local_path not in changed_roots or complete:
+                        repository.record_root_device(root.id, root_snapshot[root.local_path].dev, connection)
+                written = set(result.item_ids)
+                for item_id, change in presence.items():
+                    if item_id not in written:
+                        repository.update_item(item_id, connection, owner_library_id=library.id, **change)
+                if complete and groups:
+                    repository.delete_empty_groups(groups.keys(), connection, owner_library_id=library.id)
+                if _root_snapshot(roots) != root_snapshot:
+                    raise _ServerScanChanged('root_missing', 'A folder changed before the scan could commit.')
+        except (_GroupedAdmissionRefused, _ForeignClaimChanged):
+            result = LibraryScan(library.id)
+            return refuse('partial', 'An incoming file could not be written. No item or group changes were saved.')
+    elif decisions.required_paths:
         # These incoming files release rows whose groups give up their keys. A rejected write must also
         # roll back the group keys, so these scans keep the key changes and item writes together.
         try:
@@ -379,20 +513,14 @@ def _scan_library(source, library, cancel, session, shadow_context) -> LibrarySc
         for line in plan.log:
             logging.info(line)
 
-    for root in roots:
-        if root.local_path in changed_roots and not complete:
-            # Some rows still carry the old device number: the next scan must go on ignoring it.
-            continue
-        repository.record_root_device(root.id, root_snapshot[root.local_path].dev, session)
+    if not server:
+        for root in roots:
+            if root.local_path not in changed_roots or complete:
+                repository.record_root_device(root.id, root_snapshot[root.local_path].dev, session)
 
-    if server:
-        _reconcile_server_presence(source, kind, library, rows, listing, result, cancel, session)
-        if result.status in ('unavailable', 'disabled'):
-            return result
-        if complete and groups:
-            repository.delete_empty_groups(groups.keys(), session, owner_library_id=library.id)
-    _identify_pending(source, kind, library, decisions, cancel, session)
-    _refresh_shadows(library.id, decisions, inserted, set(result.item_ids), session, shadow_context)
+    _identify_pending(source, kind, library, decisions, cancel, session, scan.write if scan else None)
+    _refresh_shadows(library.id, decisions, inserted, set(result.item_ids), session, shadow_context,
+                     scan.write if scan else None)
 
     # The subtitle listing is rebuilt for every item on every scan, whether or not its video changed. One
     # ownership index serves the whole pass.
@@ -400,11 +528,12 @@ def _scan_library(source, library, cancel, session, shadow_context) -> LibrarySc
     for item_id in result.item_ids:
         if cancel is not None:
             cancel()
-        index_item(item_id, session, ownership_index)
+        if server:
+            index_item(item_id, session, ownership_index, write_transaction=write)
+        else:
+            index_item(item_id, session, ownership_index)
 
-    result.message = _summary(result, matching, listing)
-    repository.record_library_scan(library.id, result.status, result.message, session)
-    return result
+    return refuse(result.status, _summary(result, matching, listing))
 
 
 def _write_library(library, decisions, plan, group_identities, group_for_dir, result, cancel, session,
@@ -430,7 +559,8 @@ def _write_library(library, decisions, plan, group_identities, group_for_dir, re
                 roots, snapshot = decisions.disk_roots
                 if _root_snapshot(roots) != snapshot:
                     break
-                batch = [item_id for item_id in batch if identity.path_is_gone(decisions.gone_on_disk[item_id])]
+                batch = [item_id for item_id in batch
+                         if _server_path_is_gone(decisions.gone_on_disk[item_id], roots, snapshot)]
             result.deleted += repository.delete_items(batch, connection, owner_library_id=library.id)
 
     _write_unchanged(library, decisions, group_for_dir, grouped, result, session, cancel)
@@ -500,6 +630,7 @@ class _Decisions:
     server: bool = False
     disk_roots: tuple | None = None
     gone_on_disk: dict = field(default_factory=dict)
+    server_displaced: dict = field(default_factory=dict)
 
 
 def _own_directory(path, roots):
@@ -538,20 +669,22 @@ def _plan_groups(groups, matching, dev_changed, roots):
 
 
 def _decide(matching, groups, plan, group_for_dir, grouped, follows_directories, complete, roots, foreign_guard,
-            *, server=False):
+            *, server=False, server_displaced=None):
     """Turn the matching into writes. Nothing is deferred on a complete walk. On an incomplete one nothing that
     needs a group decision is done, and nothing is written to a path that a row which has to wait still holds:
     only a folder whose group has a file matched at home may take files, and only rows whose identity matched in
     this walk are touched."""
-    decisions = _Decisions(foreign_guard, server=server)
+    decisions = _Decisions(foreign_guard, server=server, server_displaced=server_displaced or {})
     decisions.foreign_to_close.update((found.path, holder) for holder, found in matching.closed_foreign)
     decisions.foreign_aliases.update(found.path for _, found, alias in matching.handovers if alias)
     # With no group yet (the first scan) nothing can be moving anywhere, so a fresh group is always safe.
     decisions.conservative = grouped and follows_directories and not complete and bool(groups)
     # Rows that would be deleted because their path was reused cannot be, on an incomplete walk: whatever wants
     # their path waits, and so does whatever wants the path of a row that waits.
-    # A server list never vacates a row whose path now holds a file. Defer the competing admission.
-    blocked = set() if complete and not server else {row.path for row in matching.displaced}
+    # A listing alone cannot vacate the path of an omitted server item. A confirmed missing item retains its
+    # identity and releases its path only as part of the competing move.
+    blocked = (set() if complete and not server else
+               {row.path for row in matching.displaced if row.path not in decisions.server_displaced})
 
     def trusted(found):
         return not (decisions.conservative and found.group_key not in group_for_dir)
@@ -794,6 +927,10 @@ def _write_repathed(library, decisions, group_for_dir, grouped, result, session,
         group_id = _group_of(found, group_for_dir) if grouped else None
         identified = _identified(library, found)
         prepared.append((row, found, handover, group_id, identified))
+    if decisions.server:
+        local = [entry for entry in prepared if not entry[2]]
+        _write_server_moves(library, local, grouped, decisions, result, session)
+        prepared = [entry for entry in prepared if entry[2]]
     for batch in _chunks([entry for entry in prepared if not entry[2]]):
         with source_transaction(session) as connection:
             for row, *_ in batch:
@@ -828,6 +965,37 @@ def _write_repathed(library, decisions, group_for_dir, grouped, result, session,
                 _count_repathed(entry, result, deleted)
         if cancel is not None:
             cancel()
+
+
+def _write_server_moves(library, moves, grouped, decisions, result, session):
+    if not moves:
+        return
+    try:
+        with source_transaction(session) as connection:
+            # Keep the staging paths inside one savepoint, including for swaps and chains of moves.
+            for row, found, *_ in moves:
+                holder = decisions.server_displaced.get(found.path)
+                if holder is not None:
+                    if identity.stat_file(found.path) != identity.FileStat(
+                            found.dev, found.ino, found.size, found.mtime_ns):
+                        raise _ForeignClaimChanged
+                    if not repository.update_item(
+                            holder.id, connection, owner_library_id=library.id,
+                            path=identity.displaced_item_path(holder.id, holder.path),
+                            file_dev=None, file_ino=None, file_size=None, file_mtime_ns=None, server_missing=1,
+                            **INVALIDATED_FILE_INDEX):
+                        raise _ForeignClaimChanged
+                if not repository.update_item(row.id, connection, owner_library_id=library.id,
+                                              path=f'pending:{row.id}'):
+                    raise _ForeignClaimChanged
+            for entry in moves:
+                if _write_final_path(library, entry, grouped, decisions, connection, []) is None:
+                    raise _ForeignClaimChanged
+    except (IntegrityError, _ForeignClaimChanged):
+        result.deferred += len(moves)
+        return
+    for entry in moves:
+        _count_repathed(entry, result, 0)
 
 
 class _ForeignClaimChanged(Exception):
@@ -1007,15 +1175,17 @@ def _insert_batch(batch, library, item_kind, group_for_dir, result, session, ins
     result.deleted += sum(deleted)
 
 
-def _reparse_episode(row, session):
+def _reparse_episode(row, session, write):
     values = identify.identify_item('series', row.path, row.group_key)
     values.pop('external_id', None)
-    with source_transaction(session) as connection:
+    with write(session) as connection:
         _update_scanned_item(row, connection, reparse=True, only_automatic=True, **values)
 
 
-def _identify_pending(source, kind, library, decisions, cancel, session):
+def _identify_pending(source, kind, library, decisions, cancel, session, write):
     """Apply new hints and confirm pending filename identities after the scanner commits its writes."""
+    write_direct = write or nullcontext
+    write_transaction = write or source_transaction
     # Hints can arrive or change while the file's size, name and mtime stay the same.
     for row, found in decisions.unchanged:
         if found.hints is None or row.identity_source == 'user':
@@ -1028,17 +1198,19 @@ def _identify_pending(source, kind, library, decisions, cancel, session):
         if row.kind == 'episode' and not _EPISODE_STATE_FIELDS.isdisjoint(values):
             current = repository.get_item(row.id, session)
             if current is not None and current.library_id == library.id and current.path == found.path:
-                with source_transaction(session) as connection:
+                with write_transaction(session) as connection:
                     _update_scanned_item(current, connection, only_automatic=True, **values)
         elif values:
-            _update_scanned_item(row, session, only_automatic=True, **values)
+            with write_direct(session) as connection:
+                _update_scanned_item(row, connection, only_automatic=True, **values)
 
     if library.content_kind == 'movie':
         for row in repository.pending_movies(library.id, session):
             if cancel is not None:
                 cancel()
             if row.identity_source == 'user':
-                repository.update_item(row.id, session, owner_library_id=library.id, identify_pending=0)
+                with write_direct(session) as connection:
+                    repository.update_item(row.id, connection, owner_library_id=library.id, identify_pending=0)
                 continue
             values = {}
             if (row.scene_name is None and row.identity_source == 'filename' and row.identity_state == 'unmatched'
@@ -1051,7 +1223,9 @@ def _identify_pending(source, kind, library, decisions, cancel, session):
             if row.parsed_title and row.title != row.parsed_title and 'title' not in values:
                 values.update(title=row.parsed_title, sort_title=row.parsed_title.lower())
             if values != {'identify_pending': 1}:
-                repository.update_item(row.id, session, owner_library_id=library.id, only_automatic=True, **values)
+                with write_direct(session) as connection:
+                    repository.update_item(row.id, connection, owner_library_id=library.id, only_automatic=True,
+                                           **values)
         return
     if library.content_kind != 'series':
         return
@@ -1059,7 +1233,7 @@ def _identify_pending(source, kind, library, decisions, cancel, session):
     for row in repository.pending_episode_parses(library.id, session):
         if cancel is not None:
             cancel()
-        _reparse_episode(row, session)
+        _reparse_episode(row, session, write_transaction)
 
     for group in repository.library_groups(library.id, session):
         if cancel is not None:
@@ -1085,59 +1259,51 @@ def _identify_pending(source, kind, library, decisions, cancel, session):
             values['external_id'] = hints.external_id
         changes = {key: value for key, value in values.items() if getattr(group, key) != value}
         if changes:
-            with source_transaction(session) as connection:
+            with write_transaction(session) as connection:
                 repository.update_show_identity(group.id, connection, owner_library_id=library.id,
                                                 only_automatic=True, **changes)
 
 
-def _reconcile_server_presence(source, kind, library, rows, listing, result, cancel, session):
-    """A listing can discover a file. Absence only schedules corroboration, never deletion."""
-    from media_servers.http import MediaServerError
+def _server_presence(source, kind, rows, listing, result, cancel, revision):
+    """Gather presence updates on the listing's connection before taking any write locks."""
     from media_servers.item_pages import LOOKUP_SIZE
 
-    written = set(result.item_ids)
     pending = defaultdict(list)
-    changes = []
+    changes = {}
+    confirmed_missing = set()
     for row in rows:
-        if row.id in written or row.external_id is None:
+        if row.external_id is None:
             continue
         if cancel is not None:
             cancel()
         if row.external_id in listing.seen_external_ids:
-            changes.append((row.id, dict(last_seen_at=datetime.now(), missing_scans=0, server_missing=0)))
-        elif listing.complete and os.path.isfile(row.path):
+            changes[row.id] = dict(last_seen_at=datetime.now(), missing_scans=0, server_missing=0)
+        elif listing.complete and os.path.isabs(row.path) and os.path.isfile(row.path):
             count = min(row.missing_scans + 1, 2_147_483_647)
-            changes.append((row.id, dict(missing_scans=count)))
+            changes[row.id] = dict(missing_scans=count)
             if count >= 2:
                 pending[row.external_id].append(row.id)
-    for batch in _chunks(changes):
-        with source_transaction(session) as connection:
-            refusal = _server_scan_refusal(source, library, connection)
-            if refusal:
-                result.status, result.message = refusal
-                return
-            for item_id, change in batch:
-                repository.update_item(item_id, connection, owner_library_id=library.id, **change)
     if pending:
         try:
-            for asked, found in kind.lookup_item_ids(source, _chunks(sorted(pending), LOOKUP_SIZE), cancel):
-                with source_transaction(session) as connection:
-                    refusal = _server_scan_refusal(source, library, connection)
-                    if refusal:
-                        result.status, result.message = refusal
-                        return
-                    for external_id in asked:
-                        values = (dict(missing_scans=0, server_missing=0) if external_id in found
-                                  else dict(server_missing=1))
-                        for item_id in pending[external_id]:
-                            repository.update_item(item_id, connection, owner_library_id=library.id, **values)
-        except MediaServerError:
+            for asked, found in kind.lookup_item_ids(source, _chunks(sorted(pending), LOOKUP_SIZE), cancel,
+                                                     revision=revision):
+                for external_id in asked:
+                    ids = pending[external_id]
+                    if external_id not in found:
+                        confirmed_missing.update(ids)
+                    values = (dict(missing_scans=0, server_missing=0) if external_id in found else dict(server_missing=1))
+                    for item_id in ids:
+                        changes[item_id].update(values)
+        except MediaServerError as error:
+            if error.code == 'configuration_changed':
+                raise
             result.status = 'partial'
             listing.problems.append('The media server item lookup stopped before all items were checked.')
             result.message = '; '.join(listing.problems[:3])
+    return changes, confirmed_missing
 
 
-def _refresh_shadows(library_id, decisions, inserted, written_ids, session, context):
+def _refresh_shadows(library_id, decisions, inserted, written_ids, session, context, write=None):
     """Shadows are fully recomputed on every scan, both stages, for the files this scan saw."""
     # ``{item id: (the path to match, its stat)}``. A row reached through an alias is matched by its own path.
     seen = {row.id: (found.path, identity.FileStat(found.dev, found.ino, found.size, found.mtime_ns))
@@ -1160,13 +1326,17 @@ def _refresh_shadows(library_id, decisions, inserted, written_ids, session, cont
                if row.library_id == library_id and row.path == seen[row.id][0]}
     if not index and not any(row.arr_shadow for row in current.values()):
         return
-    for item_id, (path, stat) in seen.items():
-        row = current.get(item_id)
-        if row is None:
-            continue
-        changes = identity.shadow_changes(row, index.match(path, stat))
-        if changes is not None:
-            repository.update_item(item_id, session, owner_library_id=row.library_id, **changes)
+    changes = {item_id: values for item_id, row in current.items()
+               if (values := identity.shadow_changes(row, index.match(*seen[item_id]))) is not None}
+    if not changes:
+        return
+    if write is None:
+        for item_id, values in changes.items():
+            repository.update_item(item_id, session, owner_library_id=library_id, **values)
+    else:
+        with write(session) as connection:
+            for item_id, values in changes.items():
+                repository.update_item(item_id, connection, owner_library_id=library_id, **values)
 
 
 def run_scan(source_id, library_id=None, *, cancel=None, session=None):
@@ -1210,7 +1380,7 @@ def run_scan(source_id, library_id=None, *, cancel=None, session=None):
     return results
 
 
-def scan_media_source(source_id, library_id=None, job_id=None):
+def scan_media_source(source_id, library_id=None, job_id=None, *, retry_on_configuration_change=True):
     """The scan as a job. Called without a job id it queues itself, so it shows in the Jobs drawer."""
     if not job_id:
         return jobs_queue.add_job_from_function(f"Scanning media source {_source_name(source_id)}",
@@ -1224,6 +1394,10 @@ def scan_media_source(source_id, library_id=None, job_id=None):
         results = run_scan(source_id, library_id, cancel=lambda: jobs_queue.raise_if_cancelled(job_id))
     except LookupError as error:
         raise JobFailed(str(error)) from error
+    if retry_on_configuration_change:
+        for result in results:
+            if result.retry:
+                scan_media_source(source_id, result.library_id, retry_on_configuration_change=False)
     jobs_queue.update_job_progress(
         job_id=job_id, progress_value='max',
         progress_message=', '.join(f"{result.message}" for result in results) or 'Nothing to scan')

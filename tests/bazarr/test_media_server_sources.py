@@ -66,7 +66,7 @@ def saved(request, everything_uses_the_test_database, isolated_jobs, tmp_path, m
         folders=[{'ItemId': 'movies', 'Name': 'Films', 'CollectionType': 'movies', 'Locations': ['/remote/Movie']},
                  {'ItemId': 'shows', 'Name': 'Shows', 'CollectionType': 'tvshows', 'Locations': ['/tv']},
                  {'ItemId': 'sports', 'Name': 'Sports', 'CollectionType': 'homevideos', 'Locations': ['/sports']}],
-        rows={}, pages={}, lookups=[], queried=[], lookup_results={}, fail_at=None, on_page=None)
+        rows={}, pages={}, lookups=[], queried=[], lookup_results={}, fail_at=None, on_page=None, on_lookup=None)
 
     def fetch(url, params=None, **kwargs):
         from media_servers.http import MediaServerError
@@ -78,6 +78,8 @@ def saved(request, everything_uses_the_test_database, isolated_jobs, tmp_path, m
         if 'Ids' in params:
             ids = params['Ids'].split(',')
             state.lookups.append(ids)
+            if state.on_lookup:
+                state.on_lookup()
             if any(item in state.lookup_results and state.lookup_results[item] is None for item in ids):
                 raise MediaServerError('timeout')
             return Response(_body([{'Id': item} for item in ids if state.lookup_results.get(item)]))
@@ -195,6 +197,9 @@ def test_scan_keeps_unseen_items_until_ids_confirm_and_restores_searchability(sa
     saved.fail_at = None
     saved.pages[('movies', 'Movie', 0)] = _body([items[10], items[20]], 5)
     assert _scan(saved, source['id'], lib)[0]['last_scan_status'] == 'partial'
+    assert '40' in _indexed(saved, lib)
+    saved.pages.clear()
+    assert _scan(saved, source['id'], lib)[0]['last_scan_status'] == 'ok'
     assert '40' not in _indexed(saved, lib)
 
 
@@ -246,11 +251,15 @@ def test_saved_connection_library_choices_and_root_edit_preview(saved, monkeypat
     assert preview.json == {'removed_items': 1}
     assert saved.client.patch(url, headers=HEADERS, json={'roots': changed_roots}).status_code == 409
     assert set(_indexed(saved, lib)) == {'10', '20'}
-    saved.rows[('movies', 'Movie')] = [_item(20, f'/mapped/{destination.name}')]
+    listed = video(saved.other / 'Listed.2002.mkv')
+    saved.rows[('movies', 'Movie')] = [_item(30, f'/mapped/{listed.name}')]
     response = saved.client.patch(url, headers=HEADERS, json={'roots': changed_roots, 'confirmed_removed': 1})
     assert response.status_code == 200 and response.json['removed_items'] == 1
     assert set(_indexed(saved, lib)) == {'20'}
     saved.jobs._run_job(saved.jobs._reserve_next_job())
+    assert _indexed(saved, lib)['20'].id == before['20'].id
+    saved.rows[('movies', 'Movie')].append(_item(20, f'/mapped/{destination.name}'))
+    _scan(saved, source['id'], lib)
     moved = _indexed(saved, lib)['20']
     assert (moved.id, moved.path) == (before['20'].id, str(destination))
     assert repository.get_item(moved.id, saved.db).title == 'Keep my selection'
@@ -282,6 +291,163 @@ def test_listing_received_after_library_disable_does_not_write_items(saved):
     saved.on_page = disable
     _scan(saved, source['id'], library)
     assert not _indexed(saved, library)
+
+
+def test_add_library_refuses_a_choice_from_an_old_connection(saved, monkeypatch):
+    from media_sources import service
+
+    source = _register(saved)
+    original = service._server_library_fields
+
+    def edit_after_response(*args, **kwargs):
+        fields = original(*args, **kwargs)
+        _change_connection(saved)
+        return fields
+
+    with monkeypatch.context() as patch:
+        patch.setattr(service, '_server_library_fields', edit_after_response)
+        response = saved.client.post(f"{SOURCES}/{source['id']}/libraries", headers=HEADERS, json=_library(saved))
+    assert response.status_code == 409, response.json
+    current = saved.client.get(f"{SOURCES}/{source['id']}", headers=HEADERS).json
+    assert current['libraries'] == []
+    assert saved.client.post(f"{SOURCES}/{source['id']}/libraries", headers=HEADERS, json=_library(saved)).status_code == 201
+
+
+def _change_connection(saved):
+    from app.database import TableMediaServerInstances
+
+    saved.db.execute(sa.update(TableMediaServerInstances).where(TableMediaServerInstances.id == saved.instance)
+                     .values(revision=TableMediaServerInstances.revision + 1))
+
+
+@pytest.mark.parametrize('change', [
+    'connection_after_listing', 'connection_during_lookup', 'connection_after_lookup', 'roots_during_lookup',
+])
+def test_scan_rejects_configuration_changes_before_writing(saved, monkeypatch, change):
+    from media_sources import identity, repository, scanner
+    from media_sources.db import source_transaction
+
+    source = _register(saved, library=_library(saved))
+    lib = source['libraries'][0]['id']
+    prior = video(saved.root / 'Prior.2000.mkv')
+    new = video(saved.root / 'New.2001.mkv')
+    saved.rows[('movies', 'Movie')] = [_item(10, f'/remote/Movie/{prior.name}')]
+    _scan(saved, source['id'], lib)
+    before = _indexed(saved, lib)['10']
+    repository.update_item(before.id, saved.db, missing_scans=1)
+    saved.rows[('movies', 'Movie')] = [_item(20, f'/remote/Movie/{new.name}')]
+
+    def replace_roots():
+        with source_transaction(saved.db) as connection:
+            repository.replace_roots(lib, [('/remote/Movie', str(saved.other))], connection)
+
+    with monkeypatch.context() as patch:
+        if change == 'connection_after_listing':
+            match = identity.match_library
+
+            def edit_after_listing(*args, **kwargs):
+                matching = match(*args, **kwargs)
+                _change_connection(saved)
+                return matching
+
+            patch.setattr(identity, 'match_library', edit_after_listing)
+        elif change == 'connection_after_lookup':
+            decide = scanner._decide
+
+            def edit_after_lookup(*args, **kwargs):
+                decisions = decide(*args, **kwargs)
+                _change_connection(saved)
+                return decisions
+
+            patch.setattr(scanner, '_decide', edit_after_lookup)
+        else:
+            saved.on_lookup = replace_roots if change.startswith('roots') else lambda: _change_connection(saved)
+        outcome = _scan(saved, source['id'], lib)[0]
+    saved.on_lookup = None
+    assert outcome['last_scan_status'] == 'partial'
+    assert saved.lookups == ([] if change == 'connection_after_listing' else [['10']])
+    after = _indexed(saved, lib)
+    assert set(after) == {'10'}
+    assert (after['10'].id, after['10'].missing_scans, after['10'].server_missing) == (before.id, 1, 0)
+
+    if change.startswith('roots'):
+        new.rename(saved.other / new.name)
+    retry = saved.jobs._reserve_next_job()
+    assert retry.kwargs['retry_on_configuration_change'] is False
+    assert saved.jobs._run_job(retry)
+    assert retry.status == 'completed', retry.error
+    status = saved.client.get(f"{SOURCES}/{source['id']}", headers=HEADERS).json['libraries'][0]
+    assert status['last_scan_status'] == 'ok'
+    assert '20' in _indexed(saved, lib)
+
+
+def test_scan_rechecks_revision_at_subtitle_index_write(saved, monkeypatch):
+    from media_sources import indexer, repository
+
+    source = _register(saved, library=_library(saved))
+    lib = source['libraries'][0]['id']
+    path = video(saved.root / 'Film.2001.mkv')
+    saved.rows[('movies', 'Movie')] = [_item(10, f'/remote/Movie/{path.name}')]
+    probe = indexer.probe_item
+
+    def probe_then_edit(*args, **kwargs):
+        result = probe(*args, **kwargs)
+        _change_connection(saved)
+        return result
+
+    with monkeypatch.context() as patch:
+        patch.setattr(indexer, 'probe_item', probe_then_edit)
+        assert _scan(saved, source['id'], lib)[0]['last_scan_status'] == 'partial'
+    old_item = repository.get_item(_indexed(saved, lib)['10'].id, saved.db)
+    assert old_item.indexed_at is None
+    retry = saved.jobs._reserve_next_job()
+    assert retry.kwargs['retry_on_configuration_change'] is False
+    assert saved.jobs._run_job(retry)
+    assert retry.status == 'completed', retry.error
+    assert repository.get_item(old_item.id, saved.db).indexed_at is not None
+
+
+def test_confirmed_displacement_preserves_both_server_identities(saved):
+    from media_sources import repository
+
+    source = _register(saved, library=_library(saved))
+    lib = source['libraries'][0]['id']
+    first = video(saved.root / 'First.2000.mkv')
+    second = video(saved.root / 'Second.2001.mkv', size=2222)
+    saved.rows[('movies', 'Movie')] = [_item(10, f'/remote/Movie/{first.name}'),
+                                     _item(20, f'/remote/Movie/{second.name}')]
+    _scan(saved, source['id'], lib)
+    before = _indexed(saved, lib)
+    repository.update_item(before['10'].id, saved.db, identity_source='user', title='Keep this identity')
+    history_id = repository.insert_history(saved.db, item_id=before['10'].id, source_id=source['id'],
+                                           item_kind='movie', action=1, description='fixture download')
+    second.replace(first)
+    saved.rows[('movies', 'Movie')] = [_item(20, f'/remote/Movie/{first.name}')]
+
+    _scan(saved, source['id'], lib)
+    assert _indexed(saved, lib)['20'].path == str(second)
+    saved.lookup_results['10'] = True
+    _scan(saved, source['id'], lib)
+    assert _indexed(saved, lib)['20'].path == str(second)
+    assert _indexed(saved, lib)['10'].missing_scans == 0
+    saved.lookup_results['10'] = False
+    _scan(saved, source['id'], lib)
+    _scan(saved, source['id'], lib)
+    moved = _indexed(saved, lib)
+    assert (moved['20'].id, moved['20'].path) == (before['20'].id, str(first))
+    assert (moved['10'].id, moved['10'].server_missing) == (before['10'].id, 1)
+    detail = saved.client.get(f"/api/sources/items/{before['10'].id}", headers=HEADERS)
+    assert detail.status_code == 200
+    assert (detail.json['path'], detail.json['server_missing']) == (str(first), True)
+    history = saved.db.execute(sa.select(repository.History).where(repository.History.c.id == history_id)).one()
+    assert history.item_id == before['10'].id
+
+    returned = video(saved.root / 'Returned.2000.mkv')
+    saved.rows[('movies', 'Movie')].append(_item(10, f'/remote/Movie/{returned.name}'))
+    _scan(saved, source['id'], lib)
+    restored = _indexed(saved, lib)['10']
+    assert (restored.id, restored.path, restored.server_missing) == (before['10'].id, str(returned), 0)
+    assert repository.get_item(restored.id, saved.db).title == 'Keep this identity'
 
 
 def test_each_library_maps_its_own_roots_and_server_ids(saved, tmp_path):

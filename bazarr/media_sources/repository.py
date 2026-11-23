@@ -50,10 +50,12 @@ def _insert(target, table, values):
 
 # Sources, libraries and roots
 
-def get_source(source_id, target=None, *, lock_key=False):
+def get_source(source_id, target=None, *, lock_key=False, lock_config=False):
     statement = sa.select(Sources).where(Sources.c.id == source_id)
     if lock_key:
         statement = statement.with_for_update(read=True, key_share=True)
+    elif lock_config:
+        statement = statement.with_for_update(read=True)
     return _target(target).execute(statement).first()
 
 
@@ -95,8 +97,11 @@ def create_library(*, source_id, content_kind, locator, name=None, profile_id=No
     return library_id
 
 
-def get_library(library_id, target=None):
-    return _target(target).execute(sa.select(Libraries).where(Libraries.c.id == library_id)).first()
+def get_library(library_id, target=None, *, for_update=False):
+    query = sa.select(Libraries).where(Libraries.c.id == library_id)
+    if for_update:
+        query = query.with_for_update(key_share=True)
+    return _target(target).execute(query).first()
 
 
 def list_libraries(source_id, target=None):
@@ -127,9 +132,12 @@ def enabled_item_roots(item_id, source_id, library_id, path, target=None):
     ).scalars().all()
 
 
-def record_library_scan(library_id, status, message=None, target=None):
-    _target(target).execute(sa.update(Libraries).where(Libraries.c.id == library_id).values(
-        last_scan_status=status, last_scan_message=message, updated_at=datetime.now()))
+def record_library_scan(library_id, status, message=None, target=None, *, created_at=None):
+    query = sa.update(Libraries).where(Libraries.c.id == library_id)
+    if created_at is not None:
+        query = query.where(Libraries.c.created_at == created_at)
+    _target(target).execute(query.values(last_scan_status=status, last_scan_message=message,
+                                        updated_at=datetime.now()))
 
 
 def record_source_scan(source_id, *, started=None, finished=None, status=None, target=None):
@@ -167,6 +175,7 @@ def delete_library(library_id, target=None):
 def replace_roots(library_id, roots, target=None):
     """Replace a library's roots with ``[(server_path, local_path)]``. A root whose local path is kept keeps its
     recorded device."""
+    update_library(library_id, target)
     kept = {row.local_path: row.last_dev for row in get_roots(library_id, target)}
     _target(target).execute(sa.delete(Roots).where(Roots.c.library_id == library_id))
     for server_path, local_path in roots:

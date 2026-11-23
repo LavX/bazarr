@@ -126,7 +126,7 @@ def missing_language_candidates(source, *, external_subtitles=None, target=None)
     if current is None or current.profile_id is None:
         return []
     item = repository.get_item(current.item_id, target)
-    if item is None or not current.same_item(item):
+    if item is None or not current.same_item(item) or item.server_missing:
         return []
     profile = get_profiles_list(profile_id=current.profile_id)
     return _language_candidates(_current_missing(item, current.profile_id, profile, external_subtitles=external_subtitles))

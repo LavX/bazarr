@@ -400,7 +400,7 @@ def _can_borrow_language(key):
 
 
 def index_item(item_id, target=None, ownership_index=None, *, keep_index_on_probe_failure=False, expected_path=None,
-               expected_source=None):
+               expected_source=None, write_transaction=None):
     """Analyze a source file and return its subtitle listing, or None if the index is unavailable."""
     item = repository.get_item(item_id, target)
     if item is None:
@@ -457,7 +457,7 @@ def index_item(item_id, target=None, ownership_index=None, *, keep_index_on_prob
             logging.warning('BAZARR source file changed while reading its subtitles: %s', item.path)
             return None
 
-        with source_transaction(target) as connection:
+        with (write_transaction or source_transaction)(target) as connection:
             current = repository.get_item(item_id, connection, for_update=True)
             if current is None or _file_version(current) != _file_version(item):
                 logging.warning('BAZARR source item %s changed during indexing', item_id)

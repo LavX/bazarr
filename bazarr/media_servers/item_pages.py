@@ -66,11 +66,15 @@ def collect_items(fetch, parent_id, item_types, cancel=None):
             # A repeated id leaves the first view of it in place for this scan.
             result.items.setdefault(row['Id'], row)
         offset += len(items)
+        if items and len(result.items) == previously_seen:
+            result.drifted = True
+            result.error = 'incomplete_listing'
+            return result
         if offset >= total:
             result.complete = True
             result.drifted |= len(result.items) != total or offset != total
             return result
-        if len(items) < PAGE_SIZE or len(result.items) == previously_seen:
+        if len(items) < PAGE_SIZE:
             result.error = 'incomplete_listing'
             return result
     result.error = 'page_limit'

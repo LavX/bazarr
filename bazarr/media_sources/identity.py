@@ -57,6 +57,20 @@ def path_is_gone(path):
     return False
 
 
+def displaced_item_path(item_id, path):
+    """Release a claimed path while keeping the missing item's last mapped path for display."""
+    return f'displaced:{item_id}:{path}'
+
+
+def last_mapped_path(path):
+    prefix, _, marker = path.partition(':')
+    if prefix == 'displaced':
+        _, _, original = marker.partition(':')
+        if os.path.isabs(original):
+            return original
+    return path
+
+
 def path_can_release(path, found):
     """A foreign path may release a file only if it is absent or holds a different physical file."""
     try:
@@ -192,7 +206,7 @@ def match_library(found_files, rows, *, ignore_dev, foreign_lookup, library_cont
                 continue
             if row.path == found.path:
                 matches = result.unchanged if identity_holds(row, found, ignore_dev(found)) else result.path_only
-            elif _holds_live(row.path, found):
+            elif os.path.isabs(row.path) and _holds_live(row.path, found):
                 matches = result.alias_unchanged
             else:
                 matches = result.moved

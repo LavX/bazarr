@@ -92,6 +92,39 @@ def test_changed_totals_and_repeated_ids_mark_the_finished_listing_partial(clien
     assert result.complete and result.drifted and list(result.items) == ['10', '20', '30', '50']
 
 
+@pytest.mark.parametrize('last_ids, totals', [
+    ([10, 20], (4, 4)),
+    ([20], (3, 3)),
+    ([20], (4, 2)),
+])
+def test_repeated_terminal_page_cannot_prove_absence(client, monkeypatch, last_ids, totals):
+    from media_servers import item_pages
+
+    browser, fetch, _ = client
+    monkeypatch.setattr(item_pages, 'PAGE_SIZE', 2)
+    fetch.side_effect = [_page([10, 20], totals[0]), _page(last_ids, totals[1])]
+    result = browser.get_item_pages('library-a', ('Movie',))
+    assert not result.complete and result.drifted and result.error == 'incomplete_listing'
+    assert list(result.items) == ['10', '20']
+    assert [call.args[1]['StartIndex'] for call in fetch.call_args_list] == [0, 2]
+
+
+@pytest.mark.parametrize('pages, expected_ids, drifted', [
+    (([],), [], False),
+    (([10, 20], []), ['10', '20'], True),
+])
+def test_empty_terminal_page_can_complete_the_reported_total(client, monkeypatch, pages, expected_ids, drifted):
+    from media_servers import item_pages
+
+    browser, fetch, _ = client
+    monkeypatch.setattr(item_pages, 'PAGE_SIZE', 2)
+    totals = (0,) if len(pages) == 1 else (3, 2)
+    fetch.side_effect = [_page(ids, total) for ids, total in zip(pages, totals)]
+    result = browser.get_item_pages('library-a', ('Movie',))
+    assert result.complete and result.error is None and result.drifted is drifted
+    assert list(result.items) == expected_ids
+
+
 def test_short_or_failed_second_page_retains_first_page_without_proving_absence(client, monkeypatch):
     from media_servers import item_pages
 
