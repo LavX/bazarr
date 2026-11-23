@@ -100,7 +100,7 @@ def _profile_original_format(profile_id):
 
 def manual_upload_subtitle(path, language, forced, hi, media_type, subtitle, filename, audio_language, job_id=None,
                            sonarrSeriesId=None, sonarrEpisodeId=None, radarrId=None, arr_instance_id=None,
-                           sportsEventId=None):
+                           sportsEventId=None, *, source=None):
     if not job_id:
         return jobs_queue.add_job_from_function(f"Uploading {filename}", is_progress=False)
 
@@ -114,10 +114,19 @@ def manual_upload_subtitle(path, language, forced, hi, media_type, subtitle, fil
     # BytesIO.close() releases the underlying buffer, which is what stops a
     # retained job from holding the bytes.
     try:
-        if media_type == 'sports':
+        if source is None and media_type == 'sports':
             from sportarr.upload import upload_sports_subtitle
             return upload_sports_subtitle(sportsEventId, arr_instance_id, language, forced, hi,
                                           subtitle, filename, job_id)
+
+        publication_options = {}
+        if source is not None:
+            from media_sources.indexer import SourcePublicationOwnerIndex
+            from media_sources.manual import current_manual_source
+            source = current_manual_source(source)
+            publication_options['ownership_index'] = SourcePublicationOwnerIndex()
+            path, audio_language = source.path, source.audio_language
+            media_type = source.media_type
 
         logging.debug(f'BAZARR Manually uploading subtitles: {filename}')  # noqa: G004
 
@@ -147,7 +156,9 @@ def manual_upload_subtitle(path, language, forced, hi, media_type, subtitle, fil
         if forced:
             lang_obj = Language.rebuild(lang_obj, forced=True)
 
-        if media_type == 'series':
+        if source is not None:
+            use_original_format = _profile_original_format(source.profile_id)
+        elif media_type == 'series':
             episode_metadata = database.execute(scoped(
                 select(TableEpisodes.sonarrSeriesId,
                        TableEpisodes.sonarrEpisodeId,
@@ -215,6 +226,13 @@ def manual_upload_subtitle(path, language, forced, hi, media_type, subtitle, fil
             subtitle_directory = get_target_folder(path)
             with subtitle_write_locks(path, os.path.join(subtitle_directory or os.path.dirname(path), '.destination')):
                 written_paths = []
+                on_publish = publication_callback(media_type, path, 'upload', arr_instance_id,
+                                                  **({'source': source} if source is not None else {}))
+                if source is None:
+                    writer = partial(write_subtitle_file, path, written_paths=written_paths, on_publish=on_publish)
+                else:
+                    from media_sources.manual import write_source_subtitle
+                    writer = partial(write_source_subtitle, source, written_paths=written_paths, on_publish=on_publish)
                 saved_subtitles = save_subtitles(path,
                                                 [sub],
                                                 single=single,
@@ -223,12 +241,11 @@ def manual_upload_subtitle(path, language, forced, hi, media_type, subtitle, fil
                                                 chmod=chmod,
                                                 formats=sub_format if use_original_format else ("srt",),
                                                 path_decoder=force_unicode,
-                                                write_subtitle=partial(
-                                                    write_subtitle_file, path, written_paths=written_paths,
-                                                    on_publish=publication_callback(media_type, path, 'upload', arr_instance_id)))
+                                                write_subtitle=writer)
                 saved_subtitles = [saved for saved in saved_subtitles if saved.storage_path in written_paths]
                 source_version = subtitle_source_version(saved_subtitles[0].storage_path) if saved_subtitles else None
-                source_publication = (SubtitlePublication(path, saved_subtitles[0].storage_path, source_version)
+                source_publication = (SubtitlePublication(path, saved_subtitles[0].storage_path, source_version,
+                                                           **publication_options)
                                       if source_version is not None else None)
         except Exception as e:
             logging.exception(f'BAZARR Error saving Subtitles file to disk for this file {path}: {repr(e)}')  # noqa: G004
@@ -246,10 +263,11 @@ def manual_upload_subtitle(path, language, forced, hi, media_type, subtitle, fil
 
         from .manual import clear_mismatch_after_manual_save
 
-        clear_mismatch_after_manual_save(
-            SimpleNamespace(sonarrEpisodeId=sonarrEpisodeId, radarrId=radarrId,
-                            original_path=path, arr_instance_id=arr_instance_id),
-            media_type, saved_subtitles, arr_instance_id)
+        if source is None:
+            clear_mismatch_after_manual_save(
+                SimpleNamespace(sonarrEpisodeId=sonarrEpisodeId, radarrId=radarrId,
+                                original_path=path, arr_instance_id=arr_instance_id),
+                media_type, saved_subtitles, arr_instance_id)
 
         subtitle_path = saved_subtitles[0].storage_path
 
@@ -281,12 +299,18 @@ def manual_upload_subtitle(path, language, forced, hi, media_type, subtitle, fil
             else:
                 with subtitle_write_locks(path, subtitle_path):
                     if subtitle_source_version(subtitle_path) == source_version:
-                        with observe_subtitle_change(media_type, path, subtitle_path, 'upload', arr_instance_id):
+                        with observe_subtitle_change(media_type, path, subtitle_path, 'upload', arr_instance_id,
+                                                     **({'source': source} if source is not None else {})):
                             postprocessing(command, path, subtitle_path=subtitle_path)
                             set_chmod(subtitles_path=subtitle_path)
                         source_version = subtitle_source_version(subtitle_path)
                         source_publication.release()
-                        source_publication = SubtitlePublication(path, subtitle_path, source_version)
+                        source_publication = SubtitlePublication(path, subtitle_path, source_version, **publication_options)
+
+        if source is not None:
+            _finish_source_upload(source, subtitle_path, uploaded_language, uploaded_language_code2, forced, hi,
+                                  source_publication)
+            return '', 204
 
         refresh_subtitles = partial(_refresh_uploaded_subtitles, path, subtitle_path, sonarr_series_id=sonarrSeriesId,
                                     sonarr_episode_id=sonarrEpisodeId, radarr_id=radarrId,
@@ -362,3 +386,29 @@ def manual_upload_subtitle(path, language, forced, hi, media_type, subtitle, fil
         return '', 204
     finally:
         subtitle.close()
+
+
+def _finish_source_upload(source, subtitle_path, language, language_code, forced, hi, publication):
+    from app.notifier import send_notifications_source
+    from media_sources.context import resolve_same_item
+    from media_sources.db import source_transaction
+    from media_sources.history import history_log_source
+    from media_sources.indexer import index_and_notify_item
+
+    result = ProcessSubtitlesResult(
+        message=f"{language} Subtitles manually uploaded.", reversed_path=source.path,
+        downloaded_language_code2=language_code, downloaded_provider=None, score=None, forced=forced,
+        subtitle_id=None, reversed_subtitles_path=subtitle_path, hearing_impaired=hi)
+    with source_transaction() as connection:
+        history_log_source(4, source, result, fake_provider='manual', fake_score=_upload_fake_score(source.media_type),
+                           target=connection)
+    current = resolve_same_item(source)
+    if current is None:
+        return
+    index_and_notify_item(current)
+    if not settings.general.dont_notify_manual_actions:
+        _notify_upload('user', send_notifications_source, current, result.message)
+    if publication is not None:
+        sync_subtitles(video_path=source.path, srt_path=subtitle_path, srt_lang=language_code, percent_score=100,
+                       forced=forced, hi=hi, source=current, source_version=publication,
+                       publication_operation='upload')

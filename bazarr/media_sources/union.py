@@ -55,9 +55,17 @@ def union_page(session, arr, source, *, sort, start, length):
     """
     columns = arr.selected_columns
     source_columns = source.selected_columns
+    def source_column(column):
+        expression = source_columns.get(column.key, sa.null())
+        # SQLite casts DATETIME text to its integer year. Matching datetime columns
+        # already have the common type and should keep their stored value.
+        if not (isinstance(column.type, sa.DateTime) and isinstance(expression.type, sa.DateTime)):
+            expression = sa.cast(expression, column.type)
+        return expression.label(column.key)
+
     arr_rows = arr.add_columns(sa.literal('arr', sa.Text).label('origin'))
     source_rows = source.with_only_columns(
-        *(sa.cast(source_columns.get(column.key, sa.null()), column.type).label(column.key) for column in columns),
+        *(source_column(column) for column in columns),
         sa.literal('source', sa.Text).label('origin'), maintain_column_froms=True)
     rows = sa.union_all(arr_rows, source_rows).subquery()
     source_key = sa.case(
