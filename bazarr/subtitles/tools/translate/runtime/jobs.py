@@ -27,6 +27,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -167,8 +168,8 @@ class JobsQueuePort:
     def status(self, queue_job_id: int) -> str | None:
         from app.jobs_queue import jobs_queue
 
-        found = jobs_queue.list_jobs_from_queue(job_id=queue_job_id)
-        return found[0].get("status") if found else None
+        found = jobs_queue.get_job_result(queue_job_id)
+        return found["status"] if found is not None else None
 
 
 # --------------------------------------------------------------------------- checkpoints
@@ -487,6 +488,41 @@ class TranslationJobs:
                                 error_message=_scrubbed(message), finished_at=self._clock(),
                                 _with=self.checkpoints._delete_source_stmt(job.source_path, job.target))
 
+    def retire_source_retries(self, source_path, scope, target, message):
+        """Cancel superseded reservations that have no remaining worker to end them."""
+        namespace, identity = scope
+        suffix = f":{identity}"
+        # Match literal paths in SQL, then ensure the intervening fields really identify a recording.
+        # File names can themselves contain colons and reservation-like fragments.
+        stamp = r"(?::-?[0-9]+){4}" if namespace == "source-wanted" else ""
+        prefix = re.compile(re.escape(namespace) + stamp + r"(?::video:-?[0-9]+(?:,-?[0-9]+){4})?")
+        rows = self._session.execute(select(TableTranslatorJob.id, TableTranslatorJob.source_path,
+                                            TableTranslatorJob.state, TableTranslatorJob.queue_job_id).where(
+            TableTranslatorJob.target == target, TableTranslatorJob.state.in_((QUEUED, AWAITING_RETRY)),
+            TableTranslatorJob.source_path != source_path,
+            TableTranslatorJob.source_path.startswith(f"{namespace}:", autoescape=True),
+            TableTranslatorJob.source_path.endswith(suffix, autoescape=True))).all()
+        retired = []
+        for job_id, stale_path, state, queue_job_id in rows:
+            if not prefix.fullmatch(stale_path.removesuffix(suffix)):
+                continue
+            if state == AWAITING_RETRY:
+                cancelled = self.cancel_source_retry(job_id, stale_path, target, message)
+            else:
+                cancelled = (queue_job_id is not None
+                             and self._queue.status(queue_job_id) not in ("pending", "running")
+                             and self.cancel_waiting(job_id, queue_job_id, message))
+            if cancelled:
+                retired.append(job_id)
+        return retired
+
+    def cancel_source_retry(self, job_id, source_path, target, message):
+        """End a detached source retry without changing a job that was requeued."""
+        return self._transition(job_id, (AWAITING_RETRY,), CANCELLED, _detached=True,
+                                retry_at=None, error_class="source_changed", error_message=_scrubbed(message),
+                                finished_at=self._clock(), _with=self.checkpoints._delete_source_stmt(source_path, target))
+
+
     def fail(self, job_id: int, error_class: str, message: str | None = None) -> bool:
         """A failure that will not be retried."""
         return self._end(job_id, FAILED, error_class=error_class, message=message)
@@ -557,7 +593,7 @@ class TranslationJobs:
 
     # ---------------------------------------------------------------- internals
     def _transition(self, job_id: int, from_states: Sequence[str], to_state: str | None, *, _with=None,
-                    _queue_job_id=None, **values) -> bool:
+                    _queue_job_id=None, _detached=False, **values) -> bool:
         """Change a job only while it is in one of ``from_states``. False when it was not.
 
         ``_with`` is a checkpoint statement that goes in the same transaction, run only when the job
@@ -569,7 +605,7 @@ class TranslationJobs:
             changes["state"] = to_state
         statement = update(TableTranslatorJob).where(
             TableTranslatorJob.id == job_id, TableTranslatorJob.state.in_(from_states))
-        if _queue_job_id is not None:
+        if _queue_job_id is not None or _detached:
             statement = statement.where(TableTranslatorJob.queue_job_id == _queue_job_id)
         with _write(self._session):
             changed = self._session.execute(statement.values(**changes)).rowcount

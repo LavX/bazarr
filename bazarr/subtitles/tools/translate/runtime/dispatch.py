@@ -49,6 +49,7 @@ from .jobs import (AWAITING_RETRY, DEADLINE_EXCEEDED, INACTIVITY_TIMEOUT, QUEUED
 from .output_checks import add_rtl_marks, check_line
 from .request import LanguageSpec, UnsupportedLanguage, normalize_request_languages
 from .store import CONNECTION, INSTANCE, Notice, TranslatorStore
+from .transaction import ledger_transaction
 from .usage import JOB_CAP_SPENT, MONTH_SPENT, RESERVED, WAIT, CostLimits, UsageLedger
 from .workers import WorkerPort, bound_port
 
@@ -95,6 +96,8 @@ class JobSpec:
     legacy: Callable[[Any, Any], "LegacyResult"] | None = None
     # Revalidates a library source after the plugin worker has been admitted.
     before_send: Callable[[], None] | None = None
+    # A source scan may requeue a recorded retry when setup failed before any engine invocation.
+    retry_setup_errors: bool = False
 
 
 @dataclass
@@ -264,6 +267,7 @@ class _Run:
     budget: Any = None
     # True once this dispatcher reserved the job's budget: only that one gives it back.
     budget_reserved: bool = False
+    engine_started: bool = False
     stop_reason: str | None = None
     declines: list[str] = field(default_factory=list)
     notices: list[Notice] = field(default_factory=list)
@@ -313,13 +317,12 @@ class Dispatcher:
         _maintain_when_due(self.session, self.clock, self.monotonic, self.limits)
         state = _Run(row.id, str(row.id), DeadlineWatch(clock=self.monotonic, **self.deadlines))
         try:
-            chain, state.notices = self._plan(spec)
-        except GateClosed as closed:
-            self._end_gate_closed(jobs, history, spec, state, closed)
-            raise
-        digest = line_digest(spec.lines)
-        try:
-            return self._run_chain(spec, chain, state, jobs, history, ledger, digest)
+            try:
+                chain, state.notices = self._plan(spec)
+            except GateClosed as closed:
+                self._end_gate_closed(jobs, history, spec, state, closed)
+                raise
+            return self._run_chain(spec, chain, state, jobs, history, ledger, line_digest(spec.lines))
         except SourceTranslationChanged as changed:
             jobs.cancel(state.job_id, fail.SOURCE_CHANGED, str(changed))
             self._finish_history(history, state, "cancelled", fail.SOURCE_CHANGED, str(changed))
@@ -333,8 +336,9 @@ class Dispatcher:
         except Exception as error:
             # A bug or a database fault: the job must not stay "running" for a worker that is no longer on it.
             logger.exception("A translation job failed unexpectedly")
-            jobs.await_retry(state.job_id, fail.INTERNAL, type(error).__name__)
-            self._finish_history(history, state, "awaiting_retry", fail.INTERNAL, type(error).__name__)
+            recorded = self._await_retry(jobs, history, state, fail.INTERNAL, type(error).__name__)
+            if recorded and spec.retry_setup_errors and not state.engine_started:
+                raise DispatchFailed(fail.INTERNAL, "The translation failed unexpectedly.", retry_later=True) from error
             raise
         finally:
             if state.budget_reserved:
@@ -454,7 +458,7 @@ class Dispatcher:
                 plugin_version=None if info is None else info.version, engine_instance_id=instance.id)
             try:
                 if legacy is not None:
-                    output = self._run_legacy(spec, legacy, instance)
+                    output = self._run_legacy(spec, legacy, instance, state)
                 else:
                     output = self._run_plugin(spec, choice, info, state, jobs, history, ledger)
             except EngineDeclined as declined:
@@ -507,10 +511,18 @@ class Dispatcher:
                                  fail.MESSAGES[fail.DESTINATION_CHANGED])
             return "failed"
         error_class = fail.SOURCE_CHANGED if isinstance(error, SubtitleSourceChanged) else fail.PUBLISH_FAILED
-        jobs.await_retry(state.job_id, error_class, fail.MESSAGES[error_class],
-                         retry_at=self.clock() + timedelta(seconds=DEFAULT_RETRY_SECONDS))
-        self._finish_history(history, state, "awaiting_retry", error_class, type(error).__name__)
+        self._await_retry(jobs, history, state, error_class, fail.MESSAGES[error_class],
+                          retry_at=self.clock() + timedelta(seconds=DEFAULT_RETRY_SECONDS), detail=type(error).__name__)
         return error_class
+
+    def _await_retry(self, jobs, history, state, error_class, message, *, retry_at=None, detail=None) -> bool:
+        # A replacement can cancel the retry as soon as the job state is visible.
+        with ledger_transaction(self.session):
+            recorded = jobs.await_retry(state.job_id, error_class, message, retry_at=retry_at)
+            if recorded and history.get_by_job(state.ledger_id) is not None:
+                history.finish_job(state.ledger_id, "awaiting_retry", error_class=error_class,
+                                   error_detail=detail or message)
+        return recorded
 
     def _finish_history(self, history, state, status, error_class=None, detail=None):
         try:
@@ -531,8 +543,7 @@ class Dispatcher:
         retry_at = None
         if retry_later:
             retry_at = self._retry_at(failure)
-            jobs.await_retry(state.job_id, failure.error_class, message, retry_at=retry_at)
-            self._finish_history(history, state, "awaiting_retry", failure.error_class, message)
+            self._await_retry(jobs, history, state, failure.error_class, message, retry_at=retry_at)
         else:
             jobs.fail(state.job_id, failure.error_class, message)
             self._finish_history(history, state, "failed", failure.error_class, message)
@@ -545,11 +556,12 @@ class Dispatcher:
         return now + timedelta(seconds=failure.retry_after or DEFAULT_RETRY_SECONDS)
 
     # ------------------------------------------------------------------------------------------- legacy
-    def _run_legacy(self, spec: JobSpec, legacy, instance) -> DispatchOutcome:
+    def _run_legacy(self, spec: JobSpec, legacy, instance, state: _Run) -> DispatchOutcome:
         from ..core.translator_utils import EmptySourceTranslation
 
         if spec.legacy is None:
             raise AttemptFailure(fail.WORKER_UNAVAILABLE, "This caller cannot run an engine served by Bazarr+.")
+        state.engine_started = True
         try:
             result = spec.legacy(legacy, instance)
         except LegacyDeclined as declined:
@@ -743,6 +755,7 @@ class Dispatcher:
                 except Exception:
                     logger.debug("A translation progress callback failed", exc_info=True)
 
+        state.engine_started = True
         try:
             handle = self.workers.submit(serving_id, request, secrets, context=context, on_progress=on_progress,
                                          **({"before_send": spec.before_send} if spec.before_send is not None else {}))

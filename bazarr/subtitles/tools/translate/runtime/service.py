@@ -219,7 +219,8 @@ class RuntimeTranslatorService:
                                  **({"source": self.source} if self.source is not None else {})),
             history_media=history_media,
             pin_from_job=True, check_cancel=self._check, progress=self._progress, legacy=self._legacy,
-            before_send=self._check_source_before_send if self.source is not None else None)
+            before_send=self._check_source_before_send if self.source is not None else None,
+            retry_setup_errors=self.source is not None)
         try:
             outcome = (self._dispatcher or Dispatcher()).run(spec)
         except DispatchFailed as failed:

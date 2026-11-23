@@ -467,6 +467,22 @@ def test_a_failure_the_dispatcher_recorded_reaches_the_queue_as_a_job_failure_wi
     assert (caught.value.reason, caught.value.retry_later) == ("rate_limited", True)
 
 
+def test_editor_backend_lookup_preserves_the_original_error(env, monkeypatch):
+    from subtitles.tools.translate.runtime import service
+    from subtitles.tools.translate.runtime.dispatch import Dispatcher
+
+    env.ai_engine()
+
+    def unavailable(*args, **kwargs):
+        raise RuntimeError("could not read the selected backend")
+
+    monkeypatch.setattr(Dispatcher, "_candidates", unavailable)
+    with pytest.raises(RuntimeError, match="could not read the selected backend"):
+        service.translate_lines(["Hello", "World"], "en", "hu", dispatcher=env.dispatcher())
+    assert env.last_job().state == "awaiting_retry"
+    assert not env.requests()
+
+
 def test_lingarr_publishes_through_its_own_service_and_the_runtime_writes_nothing(env, media, monkeypatch):
     from app.config import settings
     from subtitles.tools.translate.runtime import legacy_engines
