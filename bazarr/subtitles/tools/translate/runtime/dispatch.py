@@ -94,6 +94,8 @@ class JobSpec:
     progress: Callable[[int, int, str], None] | None = None
     # Runs the in-core service for an engine that has no worker: ``legacy(engine, instance) -> LegacyResult``.
     legacy: Callable[[Any, Any], "LegacyResult"] | None = None
+    # A source scan may requeue a recorded retry when setup failed before any engine invocation.
+    retry_setup_errors: bool = False
 
 
 @dataclass
@@ -328,7 +330,7 @@ class Dispatcher:
             # A bug or a database fault: the job must not stay "running" for a worker that is no longer on it.
             logger.exception("A translation job failed unexpectedly")
             recorded = self._await_retry(jobs, history, state, fail.INTERNAL, type(error).__name__)
-            if recorded and not state.engine_started:
+            if recorded and spec.retry_setup_errors and not state.engine_started:
                 raise DispatchFailed(fail.INTERNAL, "The translation failed unexpectedly.", retry_later=True) from error
             raise
         finally:
