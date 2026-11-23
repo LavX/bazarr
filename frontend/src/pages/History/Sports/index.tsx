@@ -53,6 +53,7 @@ export const SPORTS_HISTORY_ACTIONS: [string, string][] = [
   ["5", "Synced"],
   ["6", "Translated"],
   ["8", "Extracted"],
+  ["9", "Manual score"],
 ];
 
 // An exclusion deletes a file, so it asks first. Same wording the old combined
@@ -197,12 +198,22 @@ const SportsHistoryView: FunctionComponent = () => {
       {
         header: "Info",
         accessorKey: "description",
-        cell: ({ row: { original } }) =>
-          original.description ? (
-            <TextPopover text={original.description}>
+        cell: ({ row: { original } }) => {
+          const {
+            action,
+            description,
+            subtitles_path: subtitlesPath,
+          } = original;
+          const text =
+            action === 9 && subtitlesPath
+              ? [description, subtitlesPath].filter(Boolean).join(" ")
+              : description;
+          return text ? (
+            <TextPopover text={text}>
               <FontAwesomeIcon size="sm" icon={faInfoCircle} />
             </TextPopover>
-          ) : null,
+          ) : null;
+        },
       },
       {
         header: "Upgradable",

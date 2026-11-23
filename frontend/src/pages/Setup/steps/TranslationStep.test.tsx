@@ -788,9 +788,9 @@ describe("TranslationStep", () => {
       screen.queryByRole("button", { name: "Continue without translation" }),
     ).not.toBeInTheDocument();
 
-    // Set up earlier is an answer: nothing is passed, and nothing is sent.
+    // Keeping the configuration already present writes nothing.
     await user.click(screen.getByRole("button", { name: "Continue" }));
-    expect(onNext).toHaveBeenCalledWith();
+    expect(onNext).toHaveBeenCalledWith(NOTHING_WRITTEN);
     expect(calls).toEqual([]);
   });
 
@@ -826,6 +826,78 @@ describe("TranslationStep", () => {
     expect(screen.getAllByText("No back end is on").length).toBeGreaterThan(0);
   });
 
+  it("records a saved back end before follow-up reads fail and Continue writes nothing", async () => {
+    const initial = firstRun();
+    serve(initial);
+    let created = false;
+    const followup = Promise.withResolvers<void>();
+    const followupRead = vi.fn();
+    const onWritten = vi.fn();
+    server.use(
+      http.get("/api/translation/state", async () => {
+        if (!created) return HttpResponse.json(initial);
+        followupRead();
+        await followup.promise;
+        return new HttpResponse(null, { status: 500 });
+      }),
+      http.post(
+        "/api/translation/engines/:id/connections",
+        async ({ request }) => {
+          record("post", "connection", await request.json());
+          created = true;
+          return HttpResponse.json(
+            { connection: connection(3) },
+            { status: 201 },
+          );
+        },
+      ),
+    );
+    const user = userEvent.setup();
+    customRender(<TranslationStep onNext={onNext} onWritten={onWritten} />);
+
+    await user.type(await screen.findByLabelText("OpenRouter key"), SECRET);
+    await user.click(screen.getByRole("button", { name: "Start translating" }));
+
+    try {
+      await waitFor(() => expect(followupRead).toHaveBeenCalled());
+      // The create is confirmed even though none of its follow-up reads has answered.
+      expect(onWritten).toHaveBeenCalledOnce();
+      expect(onNext).not.toHaveBeenCalled();
+    } finally {
+      followup.resolve();
+    }
+
+    expect(
+      await screen.findByText(
+        /Your key is saved, but the engine could not be switched on/,
+      ),
+    ).toBeVisible();
+    expect(queryClient.getQueryData([QueryKeys.Translation, "state"])).toEqual(
+      initial,
+    );
+    const continueStep = screen.getByRole("button", {
+      name: "Continue without translation",
+    });
+    await waitFor(() => expect(continueStep).toBeEnabled());
+    expect(screen.getByLabelText("OpenRouter key")).toHaveValue("");
+    await user.click(continueStep);
+
+    expect(onNext).toHaveBeenCalledTimes(1);
+    expect(onNext).toHaveBeenCalledWith(NOTHING_WRITTEN);
+    expect(onWritten).toHaveBeenCalledOnce();
+    expect(calls).toEqual([
+      {
+        method: "post",
+        path: "connection",
+        body: {
+          backend_type: "openrouter",
+          values: { api_key: SECRET },
+          accept_destinations: [],
+        },
+      },
+    ]);
+  });
+
   it("keeps the key form and the reason when a start saved the back end and could not select the engine", async () => {
     // The back end exists after the first request, so the state says a back end is saved: the form still
     // has to stay up with what went wrong and the way to try again.
@@ -854,7 +926,8 @@ describe("TranslationStep", () => {
       ),
     );
     const user = userEvent.setup();
-    customRender(<TranslationStep onNext={onNext} />);
+    const onWritten = vi.fn();
+    customRender(<TranslationStep onNext={onNext} onWritten={onWritten} />);
 
     await user.type(await screen.findByLabelText("OpenRouter key"), SECRET);
     await user.click(screen.getByRole("button", { name: "Start translating" }));
@@ -865,9 +938,10 @@ describe("TranslationStep", () => {
       ),
     ).toBeVisible();
     expect(screen.queryByText("Translation is set up")).not.toBeInTheDocument();
-    // A back end was written, so leaving is an answer and not a walk past.
+    // The shell already recorded the confirmed create; Continue adds no write.
+    expect(onWritten).toHaveBeenCalledOnce();
     await user.click(screen.getByRole("button", { name: "Continue" }));
-    expect(onNext).toHaveBeenCalledWith();
+    expect(onNext).toHaveBeenCalledWith(NOTHING_WRITTEN);
     onNext.mockClear();
     // The key is stored; trying again only selects the engine.
     expect(
