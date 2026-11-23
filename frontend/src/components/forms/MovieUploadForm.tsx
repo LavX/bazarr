@@ -9,7 +9,6 @@ import {
   Button,
   Checkbox,
   Divider,
-  Group,
   MantineColor,
   Select,
   Stack,
@@ -339,7 +338,7 @@ export const SubtitleBatchUploadForm: FunctionComponent<BatchProps> = ({
         cell: ({ row: { original, index } }) => {
           if (independentFlags) {
             return (
-              <Group wrap="nowrap">
+              <Stack gap="xs">
                 <Checkbox
                   label="Hearing impaired"
                   checked={original.hi}
@@ -362,7 +361,7 @@ export const SubtitleBatchUploadForm: FunctionComponent<BatchProps> = ({
                     })
                   }
                 />
-              </Group>
+              </Stack>
             );
           }
           return (
