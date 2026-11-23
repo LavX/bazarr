@@ -198,6 +198,78 @@ def _fields_of(engine, release_id):
                                   {"id": release_id}).scalar()
 
 
+@pytest.mark.parametrize("store_first", [False, True], ids=["alembic", "first-write"])
+@pytest.mark.parametrize("evidence", ["v270", "cached-entry", "different-active", "replaced", "replaced-cache"])
+def test_community_release_slots_require_matching_legacy_catalog_evidence(
+        hub_store, hub_engine, monkeypatch, store_first, evidence):
+    from plugin_platform_helpers import provider_manifest_v1, write_state
+    from provider_hub import releases, service, state
+    from provider_hub.kinds.subtitle_provider import SUBTITLE_PROVIDER_KIND
+
+    plugin_id, source_id = "fixtureprovider", "community"
+    url = "https://github.com/example/community/blob/main/catalog.json"
+    other = "https://github.com/example/previous/blob/main/catalog.json"
+    manifests = [provider_manifest_v1(plugin_id, version) for version in ("1.0.0", "1.1.0")]
+    source = {"id": source_id, "name": source_id, "url": url, "last_checked_at": "2026-11-01T00:00:00Z",
+              "resolved_commit": "b" * 40, "enabled": True}
+    entries = {}
+    if evidence == "replaced-cache":
+        source["last_checked_at"] = None
+        source.pop("resolved_commit")
+    monkeypatch.setattr(state, "state_file", hub_store.legacy_state_path)
+    bundles, interpreters = [], []
+    for index, manifest in enumerate(manifests):
+        version = manifest["version"]
+        if evidence == "cached-entry":
+            entries[version] = {"source": source_id, "provider_id": plugin_id, "version": version,
+                                "resolved_commit": source["resolved_commit"],
+                                "manifest": {**manifest, "source": {**manifest["source"], "catalog_url": url}}}
+        else:
+            matches = evidence == "v270" or (evidence == "different-active" and index == 1)
+            manifest["source"]["catalog_url"] = url if matches else other
+        if evidence == "replaced-cache":
+            entries[version] = {"source": source_id, "provider_id": plugin_id, "version": version, "manifest": manifest}
+        bundle = state.provider_hub_dir() / "bundles" / plugin_id / version / manifest["source"]["commit"]
+        bundle.mkdir(parents=True)
+        (bundle / "provider.py").write_bytes(b"class ExampleProvider: pass\n")
+        interpreter = state.provider_hub_dir() / "envs" / plugin_id / version / "fixture" / "bin" / "python"
+        interpreter.parent.mkdir(parents=True)
+        interpreter.touch()
+        bundles.append(str(bundle))
+        interpreters.append(str(interpreter))
+
+    write_state(hub_store.legacy_state_path(), catalog_sources={source_id: source}, catalog_entries=entries,
+                installations={plugin_id: {
+                    "provider_id": plugin_id, "name": "Fixture", "state": "staged", "pending_restart": True,
+                    "origin": "catalog", "source_id": source_id, "trusted": False,
+                    **({"source_bound": True} if evidence != "v270" else {}),
+                    "active_version": "1.0.0", "active_path": bundles[0], "python_path": interpreters[0],
+                    "manifest": manifests[0], "staged_version": "1.1.0", "staged_path": bundles[1],
+                    "staged_python_path": interpreters[1], "staged_manifest": manifests[1],
+                }})
+    monkeypatch.setattr(SUBTITLE_PROVIDER_KIND, "smoke_test", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(SUBTITLE_PROVIDER_KIND, "on_activated", lambda *_args: None)
+    hub_store.ensure_ready()
+    if evidence == "replaced-cache":
+        assert state.load_state()["catalog_entries"] == {}
+    if store_first:
+        state.mutate_state(lambda document: None)
+    with hub_store.write_transaction(hub_engine) as connection:
+        assert _migration().move_state_into_releases(connection) == (0 if store_first else 2)
+    active, = hub_store.list_releases(plugin_id, states=(releases.ACTIVE,))
+    staged, = hub_store.list_releases(plugin_id, states=(releases.STAGED,))
+    known_active = evidence in ("v270", "cached-entry")
+    assert (active.source_id, active.catalog_registration) == ((source_id, "legacy") if known_active else (None, None))
+    assert staged.source_id == source_id
+    assert staged.catalog_registration == (None if evidence.startswith("replaced") else "legacy")
+    expected = [] if evidence.startswith("replaced") else [plugin_id]
+    assert service.activate_staged_installations() == expected
+    current, = hub_store.list_releases(plugin_id, states=(releases.ACTIVE,))
+    assert current.id == (staged.id if expected else active.id)
+    assert Path(active.bundle_path, "provider.py").is_file()
+    assert state.load_state()["installations"][plugin_id]["source_id"] == (source_id if expected else None)
+
+
 def test_a_second_upgrade_changes_nothing(hub_store, hub_engine):
     _before_the_release_tables(hub_store, hub_engine, _full_document())
     with hub_engine.connect() as connection:

@@ -1389,12 +1389,13 @@ def test_signed_build_refuses_an_unavailable_legacy_provider_wheel(tmp_path, mon
 
 
 @pytest.fixture
-def provider_sandbox_probes(monkeypatch, schema_session):
+def provider_sandbox_probes(monkeypatch, tmp_path):
     """Exercise the normal profile with an empty, migrated media root inventory."""
     from app import database as app_database
     from provider_hub import sandbox
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import scoped_session, sessionmaker
 
-    monkeypatch.setattr(app_database, "database", schema_session)
     host = sandbox.probe_sandbox()
     real_spawn = sandbox.spawn_worker
     confined = host.enforces(sandbox.PROVIDER_MIN_ABI)
@@ -1414,7 +1415,16 @@ def provider_sandbox_probes(monkeypatch, schema_session):
     monkeypatch.setattr(sandbox, "provider_profile_enabled", lambda: True)
     monkeypatch.setattr(sandbox, "probe_sandbox", probe)
     monkeypatch.setattr(sandbox, "spawn_worker", spawn)
-    return probes, launches, confined
+    # Connection checks query media roots from another thread.
+    engine = create_engine(f"sqlite:///{tmp_path / 'sandbox-inventory.db'}")
+    session = scoped_session(sessionmaker(bind=engine))
+    try:
+        app_database.Base.metadata.create_all(engine)
+        monkeypatch.setattr(app_database, "database", session)
+        yield probes, launches, confined
+    finally:
+        session.remove()
+        engine.dispose()
 
 
 def test_marketplace_installs_and_tests_a_signed_seeded_provider(
@@ -1842,18 +1852,25 @@ def test_seeded_translator_update_waits_for_previous_release_data_writers(
         database.setattr(releases, "apply_plan", reject_promotion)
         assert hub.activate_staged_installations() == []
     assert hub_store.list_releases(plugin_id, states=(releases.STAGED,)) == [staged_release]
-    assert smoke_calls == [("1.1.0", staged_data, "final write")]
+    (version, first_probe, content), = smoke_calls
+    assert (version, content) == ("1.1.0", "final write")
+    assert first_probe != staged_data and not first_probe.exists()
+    assert not staged_data.exists()
+    staged_data.mkdir()
     (staged_data / renamed.name).write_text("left by the interrupted attempt")
 
     assert hub.activate_staged_installations() == [plugin_id]
     active_release, = hub_store.list_releases(plugin_id, states=(releases.ACTIVE,))
     assert (active_release.id, active_release.created_at) == (staged_release.id, staged_release.created_at)
-    assert active_release.data_key == staged_release.data_key == staged["staged_data_key"]
+    assert staged_release.data_key == staged["staged_data_key"]
+    assert active_release.data_key != staged_release.data_key
+    assert active_release.catalog_registration == staged_release.catalog_registration
     active = hub.load_state()["installations"][plugin_id]
     assert active["active_version"] == "1.1.0" and Path(active["active_path"]).is_relative_to(new_image)
     current_data = datadir.release_path(root, plugin_id, active["active_data_key"])
-    assert current_data == staged_data
-    assert smoke_calls == [("1.1.0", current_data, "final write")] * 2
+    assert current_data != staged_data and not staged_data.exists()
+    assert [(version, content) for version, _, content in smoke_calls] == [("1.1.0", "final write")] * 2
+    assert smoke_calls[1][1] != first_probe and not smoke_calls[1][1].exists()
     assert (current_data / renamed.name).read_text() == "final write"
     assert store.pointers() == selection
 
@@ -1990,12 +2007,18 @@ def test_failed_seed_smoke_keeps_the_data_of_a_concurrently_staged_release(
     row["staged_data_key"] = "a" * 32
     kept = datadir.release_path(root, plugin_id, row["staged_data_key"])
     failed_folders = []
+    replacement_rows = []
 
     def fail(*args, data_dir, **kwargs):
         failed_folders.append(data_dir)
-        kept.mkdir()
-        (kept / "state.txt").write_text("concurrent install")
+        assert data_dir.is_dir() and not kept.parent.exists()
+        # A concurrent stage publishes its verified probe data before recording its slot.
+        with datadir.smoke_workspace(root) as replacement:
+            replacement.mkdir()
+            (replacement / "state.txt").write_text("concurrent install")
+            datadir.publish_probe_data(replacement, kept)
         hub.mutate_state(lambda state: state["installations"].update({plugin_id: row}))
+        replacement_rows.append(hub.load_state()["installations"][plugin_id])
         raise RuntimeError("seed smoke failed")
 
     monkeypatch.setattr(get_kind(release.manifest.kind), "smoke_test", fail)
@@ -2004,7 +2027,10 @@ def test_failed_seed_smoke_keeps_the_data_of_a_concurrently_staged_release(
                              ready_release=release, expected_installation=None)
     failed, = failed_folders
     assert not failed.exists()
-    assert hub.load_state()["installations"][plugin_id]["staged_data_key"] == kept.name
+    (replacement_row,) = replacement_rows
+    saved = hub.load_state()["installations"][plugin_id]
+    assert saved == replacement_row
+    assert saved["staged_data_key"] == kept.name
     assert (kept / "state.txt").read_text() == "concurrent install"
 
 

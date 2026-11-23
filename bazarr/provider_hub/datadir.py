@@ -11,6 +11,7 @@ import posixpath
 import re
 import shutil
 import stat
+import sys
 import tempfile
 import threading
 import time
@@ -21,6 +22,9 @@ from pathlib import Path, PurePosixPath, PureWindowsPath
 ARCHIVE_DIR = "plugin_data"
 OMISSIONS_ARCHIVE = "plugin_data_omitted.json"
 RESTORE_APPLIED_MARKER = ".applied"
+PROBE_DIRECTORY = ".probe"
+_PENDING_PROBE = ".probe"
+_FINISHED_PROBE = ".finished"
 QUIESCE_TIMEOUT = 15 * 60
 PROBE_COPY_MAX_ENTRIES = 4096
 PROBE_COPY_MAX_BYTES = 64 * 1024 * 1024
@@ -44,6 +48,10 @@ class SnapshotRefused(DataFolderError):
 
 class SnapshotBusy(SnapshotRefused):
     """Contention or a time or work limit deferred a snapshot."""
+
+
+class ProbeWorkerUnconfirmed(RuntimeError):
+    """The probe still owns its temporary files because its worker stop is unconfirmed."""
 
 
 class _ProbeCopyBudget:
@@ -398,6 +406,112 @@ def remove(path: Path) -> None:
         path.unlink()
 
 
+def _probe_root(root: Path) -> Path:
+    directory = root / PROBE_DIRECTORY
+    if directory.is_symlink() or directory.is_junction():
+        raise DataFolderError("The plugin probe directory is a link")
+    return directory
+
+
+def probe_workspace(root: Path) -> Path:
+    directory = _probe_root(root)
+    directory.mkdir(mode=0o700, exist_ok=True)
+    # The directory entry carries the owner boot as soon as it exists. There
+    # is no separate marker write that can be lost on a Bazarr restart.
+    owner = _probe_boot_id() or "unknown"
+    return Path(tempfile.mkdtemp(prefix=f"{_PENDING_PROBE}-{owner}.", dir=directory))
+
+
+def _probe_boot_id() -> str | None:
+    if sys.platform != "linux":
+        return None
+    from .sandbox.sweep import _boot_identity
+
+    return _boot_identity()
+
+
+def finish_probe_workspace(workspace: Path) -> None:
+    """Release a workspace after its owner has confirmed all workers stopped."""
+    finished = workspace.with_name(_FINISHED_PROBE + workspace.name.removeprefix(_PENDING_PROBE))
+    try:
+        # Record confirmation before recursive deletion. Startup can retry a
+        # partial deletion without relying on a process scan or a boot identity.
+        workspace.rename(finished)
+        remove(finished)
+    except OSError:
+        logger.warning("Could not finish cleaning a plugin probe workspace", exc_info=True)
+
+
+@contextlib.contextmanager
+def keep_unconfirmed_probe_files(files: contextlib.ExitStack):
+    try:
+        yield
+    except BaseException as error:
+        # A smoke hook finishes teardown before returning or raising an
+        # ordinary failure. An interruption gives no such guarantee.
+        if isinstance(error, ProbeWorkerUnconfirmed) or not isinstance(error, Exception):
+            files.pop_all()
+        raise
+
+
+@contextlib.contextmanager
+def smoke_workspace(root: Path):
+    """Own a synchronous smoke check's data and its sibling scratch space."""
+    workspace = probe_workspace(root)
+    with contextlib.ExitStack() as files, keep_unconfirmed_probe_files(files):
+        files.callback(finish_probe_workspace, workspace)
+        yield workspace / "data"
+
+
+def publish_probe_data(source: Path, target: Path) -> None:
+    """Install data from a smoke test whose worker has stopped."""
+    if not target.exists():
+        target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        try:
+            source.rename(target)
+            return
+        except OSError as error:
+            if error.errno != errno.EXDEV:
+                raise
+    copy_folder(source, target)
+
+
+def publish_activation_data(root: Path, source: Path, target: Path) -> None:
+    """Make a new data directory durable before promotion can refer to it."""
+    if target.exists() or target.is_symlink() or target.is_junction():
+        raise DataFolderError("The new release data folder already exists")
+    copy_folder(source, target)
+    sync_tree(target)
+    for directory in (target.parent, target.parent.parent, root):
+        sync_directory(directory)
+
+
+def cleanup_probe_workspaces(root: Path) -> None:
+    """Reclaim confirmed workspaces and pending workspaces from an earlier OS boot."""
+    from .sandbox.sweep import _BOOT_ID
+
+    directory = _probe_root(root)
+    if not directory.is_dir():
+        return
+    boot = _probe_boot_id()
+    for folder in directory.iterdir():
+        status, _, ownership = folder.name.partition("-")
+        if status not in (_PENDING_PROBE, _FINISHED_PROBE):
+            continue
+        previous_boot, separator, token = ownership.partition(".")
+        if not separator or not token or (previous_boot != "unknown" and not _BOOT_ID.fullmatch(previous_boot)):
+            continue
+        if folder.is_symlink() or folder.is_junction() or not folder.is_dir():
+            continue
+        try:
+            if status == _FINISHED_PROBE:
+                remove(folder)
+            elif boot is not None and previous_boot not in ("unknown", boot):
+                finish_probe_workspace(folder)
+        except OSError:
+            logger.warning("Could not clean a plugin probe workspace at startup", exc_info=True)
+
+
 def cleanup(root: Path, state) -> None:
     """Clear unreferenced release folders without touching a rollback, orphan, or kept copy."""
     data = root / "data"
@@ -581,7 +695,10 @@ def sync_tree(root: Path) -> None:
     for directory, _, files in os.walk(root, topdown=False, onerror=cannot_walk):
         path = Path(directory)
         for name in files:
-            sync_file(path / name)
+            entry = path / name
+            # A symlink is persisted with its parent directory entry.
+            if not entry.is_symlink():
+                sync_file(entry)
         sync_directory(path)
 
 

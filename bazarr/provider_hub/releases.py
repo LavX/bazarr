@@ -48,7 +48,7 @@ from __future__ import annotations
 import functools
 import json
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from typing import Any
 
@@ -95,6 +95,8 @@ PROMOTE_ROLLBACK = "promote_rollback"
 # ``split`` consumes it: that release is kept as failed, or as the previous release again when it came from there.
 # A staged release that leaves its slot for any other reason is forgotten, whatever error the row shows.
 FAIL_STAGED = "fail_staged"
+# The stage's old data key when activation publishes a fresh directory. None marks a keyless stage.
+PROMOTE_STAGED_DATA = "promote_staged_data"
 
 UNKNOWN_CATALOG_SOURCE_NOTE = (
     "No configured catalog source is known to have published this version, so it "
@@ -546,6 +548,8 @@ def split(data: dict[str, Any], rows: list[dict[str, Any]], *, now: str | None =
         drain = bool(installation.pop(DRAIN_PREVIOUS, False))
         failure = installation.pop(FAIL_STAGED, None)
         promote_rollback = installation.pop(PROMOTE_ROLLBACK, None)
+        promote_staged = PROMOTE_STAGED_DATA in installation
+        staged_data = installation.pop(PROMOTE_STAGED_DATA, None)
         active = _slot(installation, _ACTIVE_KEYS, True)
         staged = _slot(installation, _STAGED_KEYS, False)
         inline_source = installation.get("source_id")
@@ -565,8 +569,8 @@ def split(data: dict[str, Any], rows: list[dict[str, Any]], *, now: str | None =
                         if for_install and (
                                 (release.get("source_id"), release.get("origin"))
                                 != (row.get("source_id"), row.get("origin"))
-                                or not matches_catalog_registration(
-                                    data, row.get("source_id"), _field_value(release, _CATALOG_REGISTRATION))):
+                                or _field_value(release, _CATALOG_REGISTRATION)
+                                != catalog_registration(data, row.get("source_id"))):
                             continue
                         return release
             return None
@@ -649,6 +653,9 @@ def split(data: dict[str, Any], rows: list[dict[str, Any]], *, now: str | None =
                 active_release = find(active, (STAGED,), release_id=promote_rollback)
                 if active_release is None:
                     raise ReleaseTransitionError("the confirmed rollback release is no longer staged")
+            elif promote_staged and staged is None:
+                # Match the saved stage using its old key and write the active slot with the new key.
+                active_release = find(replace(active, data_key=staged_data), (STAGED,))
             else:
                 states = ((STAGED, ACTIVE, DRAINING, RETIRED) if getattr(data, "promoting_stage", None) == plugin_id
                           else (ACTIVE, STAGED, DRAINING, RETIRED))
