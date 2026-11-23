@@ -139,6 +139,8 @@ def translation_write_kwargs(translator, job_id):
                     owners.refresh_mapped_owners()
                     if not sync_output_owner_is_unique(translator.video_path, translator.source_srt_file, owners):
                         raise SourceTranslationInputAmbiguous('The translation input lost its unique media owner')
+                    if not sync_output_owner_is_unique(translator.video_path, translator.dest_srt_file, owners):
+                        raise SourceTranslationChanged('The translated subtitle destination lost its unique media owner')
                     if captured and not automatic_translation_is_current(
                             current, translator.source_srt_file, translator.from_lang, translator.orig_to_lang,
                             translator.forced, translator.hi, connection=connection):

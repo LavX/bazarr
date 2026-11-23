@@ -662,12 +662,13 @@ def test_runtime_keeps_manual_and_wanted_translation_reservations_separate(world
 
 @pytest.mark.parametrize('change', [
     'translator unavailable', 'arr claimed', 'arr claimed during translation', 'arr claimed after preparation',
-    'mapped input owner changed', 'published',
+    'mapped input owner changed', 'mapped destination owner changed', 'published',
 ])
 def test_translation_after_a_wanted_download_keeps_its_publication_scope(world, isolated_jobs, monkeypatch, change):
     from app.config import settings
     from app.database import TableArrInstances, TableLanguagesProfiles, TableMovies, update_profile_id_list
     from media_sources import indexer, repository, wanted
+    from subtitles.tools.subsync_engines import subtitle_source_version, sync_output_owner_is_unique
     from subtitles.tools.translate import main
 
     monkeypatch.setattr(wanted, 'jobs_queue', isolated_jobs)
@@ -681,7 +682,7 @@ def test_translation_after_a_wanted_download_keeps_its_publication_scope(world, 
     ]
     world.db.execute(sa.update(TableLanguagesProfiles).values(items=json.dumps(profile)))
     update_profile_id_list.invalidate()
-    mapped_owner = change == 'mapped input owner changed'
+    mapped_owner = change in ('mapped input owner changed', 'mapped destination owner changed')
     if mapped_owner:
         monkeypatch.setattr(settings.general, 'subfolder', 'relative')
         monkeypatch.setattr(settings.general, 'subfolder_custom', '../Subs')
@@ -709,6 +710,7 @@ def test_translation_after_a_wanted_download_keeps_its_publication_scope(world, 
     assert translation.func == 'translate_subtitles_file'
     assert translation.kwargs['source'].wanted_file_stamp is not None
     assert Path(translation.kwargs['source_srt_file']).resolve() == original
+    input_version = subtitle_source_version(original)
     generated = folder / 'Film.hu.ffsubsync.srt'
     generated.write_bytes(pipeline.CONTENT)
     cleanup = Mock(wraps=indexer.quarantine_sync_outputs_after_mutation)
@@ -751,10 +753,18 @@ def test_translation_after_a_wanted_download_keeps_its_publication_scope(world, 
                 arr_instance_id=owner, radarrId=9000, title='Other', path='/cinema/Alias.mkv', tmdbId='73'))
             monkeypatch.setattr(settings.general, 'use_radarr', True)
             publication = indexer.source_item_publication
+            registry = indexer.SourcePublicationOwnerIndex()._registry_snapshot()
 
             def change_alias_at_publication(source, **kwargs):
                 alias.unlink()
-                alias.symlink_to(video(world.tmp_path / 'Relocated' / 'Film.en.mkv'))
+                collision = 'Film.hu.mkv' if change == 'mapped destination owner changed' else 'Film.en.mkv'
+                alias.symlink_to(video(world.tmp_path / 'Relocated' / collision))
+                owners = indexer.SourcePublicationOwnerIndex()
+                assert owners._registry_snapshot() == registry
+                assert subtitle_source_version(original) == input_version
+                if change == 'mapped destination owner changed':
+                    assert sync_output_owner_is_unique(context.path, original, owners)
+                    assert not sync_output_owner_is_unique(context.path, destination, owners)
                 return publication(source, **kwargs)
 
             monkeypatch.setattr(indexer, 'source_item_publication', change_alias_at_publication)
@@ -786,6 +796,10 @@ def test_translation_after_a_wanted_download_keeps_its_publication_scope(world, 
         assert not isolated_jobs.jobs_pending_queue
     else:
         assert item.arr_shadow == 0
+        if change == 'mapped destination owner changed':
+            assert subtitle_source_version(original) == input_version
+            assert not isolated_jobs.jobs_pending_queue
+            return
         (fallback,) = isolated_jobs.jobs_pending_queue
         assert fallback.func == 'search_wanted_fallback'
         assert fallback.kwargs['target_language'] == 'hu'
