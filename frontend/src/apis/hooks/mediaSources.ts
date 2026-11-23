@@ -1,8 +1,17 @@
 import { useMemo } from "react";
 import { useSearchParams } from "react-router";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import {
+  QueryClient,
+  useMutation,
+  useQuery,
+  useQueryClient,
+} from "@tanstack/react-query";
 import { isAxiosError } from "axios";
 import { QueryKeys } from "@/apis/queries/keys";
+import {
+  invalidateSportsSource,
+  type SourceDetailScope,
+} from "@/apis/queries/sourceDetails";
 import api from "@/apis/raw";
 import { withInlineErrors } from "@/apis/raw/inlineWrites";
 import type {
@@ -49,13 +58,74 @@ export function useValidateLibraryPath(
   });
 }
 
-export function useWriteMediaSource() {
+function sourceOwnsSports(
+  client: QueryClient,
+  source: MediaSource,
+  includeUnknown = false,
+) {
+  if (source.libraries.some((library) => library.content_kind === "sports"))
+    return true;
+  const sports =
+    client.getQueryData<Awaited<ReturnType<typeof api.mediaSources.list>>>(
+      mediaSourcesKey,
+    )?.availability?.sports;
+  if (sports?.retained_source_ids)
+    return sports.retained_source_ids.includes(source.id);
+  return sports?.retained === false ? false : includeUnknown;
+}
+
+export function useWriteMediaSource({
+  source,
+  library,
+  contentKind,
+  refreshSports = true,
+}: {
+  source?: MediaSource;
+  library?: SourceLibrary;
+  contentKind?: SourceContentKind;
+  refreshSports?: boolean;
+} = {}) {
   const client = useQueryClient();
-  return useMutation({
-    mutationFn: (write: () => Promise<unknown>) => withInlineErrors(write),
-    onSuccess: () =>
-      client.invalidateQueries({ queryKey: mediaSourcesKey, exact: true }),
+  const mutation = useMutation({
+    mutationFn: ({
+      write,
+    }: {
+      write: () => Promise<unknown>;
+      sportsScope?: SourceDetailScope;
+    }) => withInlineErrors(write),
+    onSuccess: async (_, { sportsScope }) => {
+      await Promise.all([
+        client.invalidateQueries({ queryKey: mediaSourcesKey, exact: true }),
+        ...(sportsScope ? [invalidateSportsSource(client, sportsScope)] : []),
+      ]);
+    },
   });
+  // The form can change while a write is pending. Keep its submitted owner.
+  const variables = (write: () => Promise<unknown>) => {
+    const sportsSource =
+      source &&
+      (library || contentKind
+        ? (library?.content_kind ?? contentKind) === "sports"
+        : sourceOwnsSports(client, source));
+    return {
+      write,
+      sportsScope:
+        source && sportsSource && refreshSports
+          ? { sourceId: source.id, libraryId: library?.id }
+          : undefined,
+    };
+  };
+  return {
+    ...mutation,
+    mutate: (
+      write: () => Promise<unknown>,
+      options?: Parameters<typeof mutation.mutate>[1],
+    ) => mutation.mutate(variables(write), options),
+    mutateAsync: (
+      write: () => Promise<unknown>,
+      options?: Parameters<typeof mutation.mutateAsync>[1],
+    ) => mutation.mutateAsync(variables(write), options),
+  };
 }
 
 export function useRemoveMediaSource() {
@@ -73,13 +143,21 @@ export function useRemoveMediaSource() {
           ? api.mediaSources.removeLibrary(source.id, library.id)
           : api.mediaSources.remove(source.id),
       ),
-    onSuccess: async (_, { library }) => {
+    onSuccess: async (_, { source, library }) => {
       // A source can own retained activity after its last sports library is gone.
-      const refreshSports = !library || library.content_kind === "sports";
+      const refreshSports = library
+        ? library.content_kind === "sports"
+        : sourceOwnsSports(client, source, true);
       await Promise.all([
         client.invalidateQueries({ queryKey: mediaSourcesKey, exact: true }),
         ...(refreshSports
-          ? [client.invalidateQueries({ queryKey: [QueryKeys.Sports] })]
+          ? [
+              invalidateSportsSource(client, {
+                sourceId: source.id,
+                libraryId: library?.id,
+                removed: !library,
+              }),
+            ]
           : []),
       ]);
     },

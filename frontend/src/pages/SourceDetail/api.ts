@@ -4,6 +4,10 @@ import { isAxiosError } from "axios";
 import { refreshWhenJobFinishes } from "@/apis/hooks/jobWatch";
 import { useMediaSources } from "@/apis/hooks/mediaSources";
 import { QueryKeys } from "@/apis/queries/keys";
+import {
+  invalidateSourceDetails,
+  sourceDetailKeys,
+} from "@/apis/queries/sourceDetails";
 import BaseApi from "@/apis/raw/base";
 import { withInlineErrors } from "@/apis/raw/inlineWrites";
 import mediaSources from "@/apis/raw/mediaSources";
@@ -112,14 +116,7 @@ export type IdentityCorrection =
       part_name?: string | null;
     };
 
-export const sourceDetailKeys = {
-  root: ["source-detail"] as const,
-  group: (id: number, kind: SourceGroup["kind"] = "show") =>
-    ["source-detail", "groups", kind, id] as const,
-  item: (id: number, kind: SourceItem["kind"] = "movie") =>
-    ["source-detail", "items", kind, id] as const,
-  episodes: (id: number) => ["source-detail", "groups", id, "items"] as const,
-};
+export { sourceDetailKeys };
 
 class SourceDetailApi extends BaseApi {
   constructor() {
@@ -299,7 +296,7 @@ export function useSourceItem(id: number, kind: SourceItem["kind"] = "movie") {
 
 export function useSourceLeagueEvents(id: number) {
   return useQuery({
-    queryKey: [...sourceDetailKeys.group(id, "league"), "items"],
+    queryKey: sourceDetailKeys.leagueEvents(id),
     queryFn: ({ signal }) =>
       withInlineErrors(() => sourceDetailApi.leagueEvents(id, signal)),
     enabled: Number.isSafeInteger(id) && id > 0,
@@ -324,7 +321,7 @@ export function useRefreshSourceDetails() {
   const client = useQueryClient();
   return async () => {
     await Promise.all([
-      client.invalidateQueries({ queryKey: sourceDetailKeys.root }),
+      invalidateSourceDetails(client),
       client.invalidateQueries({ queryKey: [QueryKeys.Series, "library"] }),
       client.invalidateQueries({ queryKey: [QueryKeys.Movies, "library"] }),
       client.invalidateQueries({ queryKey: [QueryKeys.Sports] }),
