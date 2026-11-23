@@ -8,8 +8,8 @@ import rarfile
 
 from dogpile.cache.region import register_backend as register_cache_backend
 
-from app.config import (settings, configure_captcha_func, log_startup_notices, remove_settings_section,
-                        write_config)
+from app.config import (settings, configure_captcha_func, finish_backup_restore_startup, log_startup_notices,
+                        open_database_after_backup_restore, remove_settings_section, write_config)
 from app.get_args import args
 from app.logger import configure_logging
 from utilities.binaries import get_binary, BinaryNotFound
@@ -75,7 +75,9 @@ except Exception:
 # on (pg_restore failing partway, or the restored configuration not going in)
 # stops the start from inside, and so does a dump parked by an earlier failure.
 if not restore_from_backup():
+    open_database_after_backup_restore()
     apply_pending_plugin_restore()
+    finish_backup_restore_startup()
 
 
 # change default base_url to ''

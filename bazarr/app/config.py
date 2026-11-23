@@ -23,7 +23,7 @@ from provider_hub.endpoints import FLARESOLVERR_SETTING_PATH, normalize_endpoint
 from utilities.binaries import BinaryNotFound, get_binary
 from literals import (EXIT_VALIDATION_ERROR, LOG_BACKUP_COUNT_DEFAULT, LOG_BACKUP_COUNT_MAX, LOG_BACKUP_COUNT_MIN,
                       LOG_MAX_FILE_SIZE_MB_DEFAULT, LOG_MAX_FILE_SIZE_MB_MAX, LOG_MAX_FILE_SIZE_MB_MIN)
-from utilities.central import stop_bazarr
+from utilities.central import backup_restore_pending, stop_bazarr
 from subliminal.cache import region
 from dynaconf import Dynaconf, Validator as OriginalValidator
 from dynaconf.loaders.yaml_loader import write
@@ -1067,6 +1067,8 @@ migrate_legacy_plex_encryption(settings)
 # cannot be opened until the credentials below are decrypted (its own password
 # is one of them), so until then the state is read from its state.json copy.
 from provider_hub.state import hold_database, release_database  # noqa: E402
+
+_defer_backup_startup = backup_restore_pending(args.config_dir)
 hold_database()
 try:
     try:
@@ -1089,7 +1091,8 @@ try:
 
     decrypt_settings_in_place(settings)
 finally:
-    release_database()
+    if not _defer_backup_startup:
+        release_database()
 
 # A stored API key that will not decrypt is the one failure Bazarr can and
 # must repair itself: the key is Bazarr's own, the SPA sends it on every
@@ -1384,8 +1387,6 @@ if not write_config():
 # still readable in the clear.
 from secret_store.registry import migrate_installation_config_secrets  # noqa: E402
 
-migrate_installation_config_secrets()
-
 # Register the live credential values before anything can log, store or serve
 # them, and rewrite what an earlier version already left in state.json. The
 # scrub runs after the migration above for the same reason the migration runs
@@ -1393,8 +1394,28 @@ migrate_installation_config_secrets()
 # scrub cannot mistake a stored credential for a leaked one.
 from secret_store.scrub import refresh_secret_values, scrub_persisted_secrets  # noqa: E402
 
-refresh_secret_values(settings)
-scrub_persisted_secrets()
+def _finish_database_secret_startup():
+    migrate_installation_config_secrets()
+    refresh_secret_values(settings)
+    scrub_persisted_secrets()
+
+
+def open_database_after_backup_restore():
+    """Allow inventory reads once the boot restore can no longer replace the database."""
+    if _defer_backup_startup:
+        release_database()
+
+
+def finish_backup_restore_startup():
+    global _defer_backup_startup
+    if _defer_backup_startup:
+        open_database_after_backup_restore()
+        _defer_backup_startup = False
+        _finish_database_secret_startup()
+
+
+if not _defer_backup_startup:
+    _finish_database_secret_startup()
 
 
 # What the settings read shows in place of a stored login password, and what a

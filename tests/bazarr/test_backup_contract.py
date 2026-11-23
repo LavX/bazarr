@@ -12,6 +12,7 @@ leaving the new configuration sitting beside the old database.
 import os
 import sqlite3
 import stat
+import subprocess
 import sys
 import zipfile
 
@@ -337,14 +338,78 @@ def test_postgres_restore_aborts_before_the_restart_when_pg_restore_fails(backup
         'general:\n  port: 6767\n'
 
 
+@pytest.mark.parametrize('plugin_data', [False, True])
+@pytest.mark.parametrize('process_failure', ['output unavailable', 'process interrupted'])
+def test_pg_restore_keeps_inputs_after_an_uncertain_process_failure(
+        backup_env, monkeypatch, plugin_data, process_failure):
+    _enable_postgresql(backup_env, monkeypatch)
+    _write_fake_tool(str(backup_env.tools_dir), 'pg_restore')
+    _stage_restore(backup_env, 'bazarr_postgres.dump')
+    module = backup_env.module
+    if plugin_data:
+        (backup_env.restore_dir / module.datadir.ARCHIVE_DIR).mkdir()
+
+    def communicate():
+        if process_failure == 'output unavailable':
+            raise OSError('process output unavailable')
+        return '', ''
+
+    launched = []
+
+    def start(command, **kwargs):
+        launched.append(command[0])
+        return SimpleNamespace(communicate=communicate, stdout=None, stderr=None, returncode=-9)
+
+    monkeypatch.setattr(module.subprocess, 'Popen', start)
+    for _ in range(2):
+        assert not module.restore_from_backup()
+    assert len(launched) == 1
+    assert backup_env.stops == [module.EXIT_RESTORE_ERROR] * 2
+    assert backup_env.restarts == []
+    dump = 'bazarr_postgres.dump' if plugin_data else 'bazarr_postgres.dump.failed'
+    assert (backup_env.restore_dir / dump).is_file()
+    assert (backup_env.restore_dir / 'config.yaml').is_file()
+    assert (backup_env.config_dir / 'config' / 'config.yaml.restore').is_file()
+
+
+def test_plugin_restore_preserves_the_current_database_password_under_the_archived_key(
+        backup_env, monkeypatch):
+    from secret_store.crypto import decrypt_secret, encrypt_secret
+
+    _enable_postgresql(backup_env, monkeypatch)
+    source = backup_env.restore_dir / 'config.yaml'
+    archived_key = 'fixture archive key'
+    source.write_text(yaml.safe_dump({
+        'general': {'secrets_encryption_key': archived_key},
+        'opensubtitlescom': {'password': encrypt_secret('archived provider', master_key=archived_key)},
+        'postgresql': {'url': 'postgresql://other/old', 'enabled': False},
+    }), encoding='utf-8')
+    destination = backup_env.config_dir / 'config' / 'config.yaml.restore'
+    destination.touch()
+
+    backup_env.module._prepare_restored_configuration(str(source), str(destination), preserve_database=True)
+
+    prepared = yaml.safe_load(destination.read_text(encoding='utf-8'))
+    assert prepared['general']['secrets_encryption_key'] == archived_key
+    assert prepared['postgresql']['enabled'] is True
+    assert prepared['postgresql']['database'] == 'bazarr'
+    password = prepared['postgresql']['password']
+    assert password != backup_env.settings.postgresql.password
+    assert decrypt_secret(password, master_key=archived_key) == backup_env.settings.postgresql.password
+    assert prepared['opensubtitlescom'] == yaml.safe_load(source.read_text(encoding='utf-8'))['opensubtitlescom']
+
+
 def test_sqlite_restore_aborts_before_the_restart_when_the_database_copy_fails(backup_env, monkeypatch):
     monkeypatch.setattr(backup_env.settings.postgresql, 'enabled', False)
     _stage_restore(backup_env, 'bazarr.db')
+    database = backup_env.config_dir / 'db' / 'bazarr.db'
+    original = database.read_bytes()
 
     real_copy = backup_env.module.shutil.copy
 
     def failing_copy(source, destination):
         if os.path.basename(str(source)) == 'bazarr.db':
+            Path(destination).write_bytes(b'partial copy')
             raise OSError('no space left on device')
         return real_copy(source, destination)
 
@@ -355,8 +420,42 @@ def test_sqlite_restore_aborts_before_the_restart_when_the_database_copy_fails(b
     assert backup_env.restarts == []
     assert (backup_env.config_dir / 'config' / 'config.yaml').read_text(encoding='utf-8') == \
         'general:\n  port: 6767\n'
-    assert _read_marker_database(backup_env.config_dir / 'db' / 'bazarr.db') == 'live'
+    assert database.read_bytes() == original
+    assert not list(database.parent.glob('.bazarr.db-restore-*'))
     assert not os.path.isfile(str(backup_env.config_dir / 'config' / 'config.yaml.restore'))
+
+
+def test_staged_sqlite_restore_runs_on_fresh_boot_before_opening_an_unreadable_database(backup_env):
+    _stage_restore(backup_env, 'bazarr.db')
+    database = backup_env.config_dir / 'db' / 'bazarr.db'
+    database.write_bytes(b'unreadable backing database fixture')
+    repo = Path(__file__).resolve().parents[2]
+    environment = {key: value for key, value in os.environ.items()
+                   if not key.startswith(('POSTGRES_', 'PG')) and key != 'BAZARR_PROVIDER_HUB_STATE'}
+    environment.update(BAZARR_CONFIG_DIR=str(backup_env.config_dir), NO_CLI='true', BAZARR_VERSION='test',
+                       PATH=backup_env.original_path, POSTGRES_ENABLED='false', PYTHONDONTWRITEBYTECODE='1',
+                       PYTHONPATH=os.pathsep.join(str(repo / name) for name in ('bazarr', 'custom_libs')))
+    program = '''
+import os, sys
+from types import SimpleNamespace
+from app import config
+from utilities import backup
+sys.modules['app.server'] = SimpleNamespace(webserver=None)
+backup.restart_bazarr = lambda: os._exit(41)
+finish = config.finish_backup_restore_startup
+def finish_and_exit():
+    finish()
+    assert config.settings.general.port == 7000
+    os._exit(0)
+config.finish_backup_restore_startup = finish_and_exit
+import init
+raise AssertionError('The restore startup should have reached its exit hook')
+'''
+    for expected in (41, 0):
+        child = subprocess.run([sys.executable, '-c', program], env=environment, capture_output=True, text=True,
+                               timeout=45)
+        assert child.returncode == expected, child.stdout + child.stderr
+    assert _read_marker_database(database) == 'restored'
 
 
 def test_sqlite_restore_replaces_config_and_database(backup_env, monkeypatch):

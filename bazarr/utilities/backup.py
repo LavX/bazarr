@@ -8,10 +8,11 @@ import shutil
 import subprocess
 import logging
 import re
+import secrets
 import tempfile
 import yaml
 
-from contextlib import closing
+from contextlib import closing, suppress
 from datetime import datetime, timedelta, timezone
 from zipfile import ZipFile, BadZipFile, ZIP_DEFLATED
 from glob import glob
@@ -25,7 +26,7 @@ from app.postgres_url import postgres_engine_url
 from app.event_handler import event_stream
 from app.jobs_queue import jobs_queue
 from literals import EXIT_RESTORE_ERROR
-from utilities.central import restart_bazarr, stop_bazarr
+from utilities.central import (BACKUP_STAGE_DIR, OLD_RESTORE_STATE, PLUGIN_RESTORE_PHASE, restart_bazarr, stop_bazarr)
 
 _BACKUP_FILENAME_RE = re.compile(r'^bazarr_backup_v[\w.\-]+\.zip$')
 
@@ -43,14 +44,14 @@ POSTGRES_FAILED_ARCHIVE_NAME = f'{POSTGRES_ARCHIVE_NAME}.failed'
 _CONFIG_ARCHIVE_NAMES = ('config.yaml', 'config.ini')
 _DATABASE_ARCHIVE_NAMES = (SQLITE_ARCHIVE_NAME, POSTGRES_ARCHIVE_NAME, POSTGRES_FAILED_ARCHIVE_NAME)
 _PLUGIN_ARCHIVE_NAMES = (datadir.ARCHIVE_DIR, datadir.OMISSIONS_ARCHIVE, secret_paths.HISTORY_ARCHIVE)
-_BACKUP_STAGE = '.backup-staged'
+_BACKUP_STAGE = BACKUP_STAGE_DIR
 _RETIRED_RESTORE = '.backup-consumed'
 _RETIRED_FOLDERS = '.applied_plugin_data'
-_PLUGIN_RESTORE_PHASE = '.plugin-restore-phase'
+_PLUGIN_RESTORE_PHASE = PLUGIN_RESTORE_PHASE
 _DATABASE_STARTED = 'database-started'
 _DATABASE_COMPLETE = 'database-complete'
 _DATA_READY = 'data-ready'
-_OLD_RESTORE_STATE = ('.restore-journal.json', '.database_restore_complete', 'pending_plugin_data')
+_OLD_RESTORE_STATE = OLD_RESTORE_STATE
 
 # pg_restore keeps going past an error and reports how many it ignored, and it
 # exits non-zero when it did. One error class is benign: a dump written by a
@@ -93,6 +94,10 @@ class PostgresUnreachableError(BackupError):
     answers, so the staged files are kept for the next start.
     """
     pass
+
+
+class DatabaseRestoreUncertainError(BackupError):
+    """The database may have changed without a confirmed restore result."""
 
 
 def _postgres_enabled():
@@ -236,11 +241,26 @@ def _run_postgres_tool(tool_name, command, connection, ran_error=BackupError):
         environment.pop('PGPASSWORD', None)
 
     try:
-        result = subprocess.run(command, env=environment, capture_output=True, text=True, check=False)
+        process = subprocess.Popen(command, env=environment, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                   text=True)
     except OSError as error:
-        # The process never started, so nothing it would have done happened.
         raise BackupError(f'Unable to run {tool_name}: {error}') from error
 
+    restores_database = ran_error is PostgresRestoreStartedError
+    try:
+        stdout, stderr = process.communicate()
+    except (OSError, UnicodeError, subprocess.SubprocessError) as error:
+        # A communication failure gives no evidence about the child or the database.
+        for stream in (process.stdout, process.stderr):
+            if stream is not None:
+                with suppress(OSError):
+                    stream.close()
+        failure = DatabaseRestoreUncertainError if restores_database else BackupError
+        raise failure(f'Unable to read the result of {tool_name}') from error
+
+    result = subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
+    if restores_database and (result.returncode < 0 or (os.name == 'nt' and result.returncode > 255)):
+        raise DatabaseRestoreUncertainError(f'{tool_name} was interrupted (exit status {result.returncode})')
     if result.returncode != 0:
         raise ran_error(f'{tool_name} exited with code {result.returncode}: '
                         f'{result.stderr.strip() or "no output"}')
@@ -365,7 +385,7 @@ def _restore_postgres_database(dump_path):
     logging.debug('Restoring PostgreSQL database %s from %s', connection['database'], dump_path)
     try:
         _run_postgres_tool('pg_restore', command, connection, ran_error=PostgresRestoreStartedError)
-    except BackupError as error:
+    except PostgresRestoreStartedError as error:
         if not _errors_are_only_unknown_parameters(str(error)):
             raise
         logging.warning('pg_restore reported only unknown server parameters, which a dump written by a '
@@ -620,23 +640,33 @@ def _restore_database(restore_database_path, dest_database_path):
         _restore_postgres_database(restore_database_path)
         return
 
+    destination = Path(dest_database_path)
+    fd, temporary = tempfile.mkstemp(prefix=f'.{destination.name}-restore-', dir=destination.parent)
+    os.close(fd)
     try:
-        shutil.copy(restore_database_path, dest_database_path)
+        shutil.copy(restore_database_path, temporary)
+        datadir.sync_file(Path(temporary))
+        os.replace(temporary, destination)
     except (OSError, shutil.Error) as error:
         raise BackupError(f'Unable to restore the database to {dest_database_path}: {error}') from error
+    finally:
+        _delete_file(temporary)
 
     # The restored file is a complete database, so the write-ahead log and
     # shared-memory files sitting next to it describe one that no longer exists.
-    for suffix in ('-shm', '-wal'):
-        _delete_file(f'{dest_database_path}{suffix}')
+    try:
+        for suffix in ('-shm', '-wal'):
+            Path(f'{dest_database_path}{suffix}').unlink(missing_ok=True)
+        datadir.sync_directory(destination.parent)
+    except OSError as error:
+        raise DatabaseRestoreUncertainError('Unable to finish installing the SQLite database') from error
 
 
 def _refuse_start_after_failed_restore(failed_dump_path, journal):
     """Stop the start while a dump that pg_restore failed on is still parked.
 
-    That file is the only sign left that the database may be half restored:
-    the configuration beside it is gone, so without this check the next start
-    finds nothing to restore and runs on the damaged database.
+    The parked dump means the database may be half restored. Without this
+    check the next start could run on the damaged database.
     """
     if journal.is_file():
         logging.critical('An earlier PostgreSQL restore failed partway. Bazarr will not start on this '
@@ -655,7 +685,7 @@ def _refuse_start_after_failed_restore(failed_dump_path, journal):
     stop_bazarr(EXIT_RESTORE_ERROR)
 
 
-def _prepare_restored_configuration(source_path, staged_path):
+def _prepare_restored_configuration(source_path, staged_path, *, preserve_database=False):
     """Stage a restored config with a generation no existing cookie can carry.
 
     The Flask signing key stays as archived: named API tokens are HMACed with
@@ -690,7 +720,7 @@ def _prepare_restored_configuration(source_path, staged_path):
     def existing_key(mapping, wanted):
         matches = [key for key in mapping if isinstance(key, str) and key.lower() == wanted]
         if len(matches) > 1:
-            raise BackupError('The backup authentication settings are ambiguous')
+            raise BackupError(f'The backup has ambiguous settings for {wanted}')
         return matches[0] if matches else wanted
 
     auth_key = existing_key(restored, 'auth')
@@ -704,6 +734,24 @@ def _prepare_restored_configuration(source_path, staged_path):
 
     from app.auth.generation import generation_for_restore
     auth[generation_key] = generation_for_restore(archived_generation)
+
+    if preserve_database:
+        # The dump went to the currently configured database. The next boot
+        # must read its plugin inventory through the same connection settings.
+        database = dict(settings.postgresql)
+        if database.get('password'):
+            from secret_store.crypto import encrypt_secret
+
+            general = restored.setdefault(existing_key(restored, 'general'), {})
+            if not isinstance(general, dict):
+                raise BackupError('The backup general settings are invalid')
+            key = existing_key(general, 'secrets_encryption_key')
+            master_key = general.get(key) or secrets.token_urlsafe(32)
+            if not isinstance(master_key, str):
+                raise BackupError('The backup encryption key is invalid')
+            general[key] = master_key
+            database['password'] = encrypt_secret(database['password'], master_key=master_key)
+        restored[existing_key(restored, 'postgresql')] = database
 
     prepared_path = f'{staged_path}.prepared'
     try:
@@ -813,7 +861,7 @@ def _restore_from_archive(stage, payload):
     # cannot leave a new configuration beside the old database.
     try:
         shutil.copy(restore_config_path, staged_config_path)
-        _prepare_restored_configuration(restore_config_path, staged_config_path)
+        _prepare_restored_configuration(restore_config_path, staged_config_path, preserve_database=has_plugins)
     except (BackupError, OSError, shutil.Error):
         logging.error('Restoring the backup configuration failed. Bazarr will not restart, and the '
                       'files staged for the restore have been discarded. The backup archive is untouched.')
@@ -828,6 +876,16 @@ def _restore_from_archive(stage, payload):
     try:
         _restore_database(restore_database_path, dest_database_path)
     except (BackupError, OSError, shutil.Error) as error:
+        if isinstance(error, DatabaseRestoreUncertainError):
+            if not has_plugins and _postgres_enabled():
+                # Keep the original and staged configuration alongside the dump.
+                os.replace(restore_database_path, failed_dump_path)
+                datadir.sync_directory(payload)
+            logging.exception('The database restore outcome could not be confirmed. Bazarr is stopping. '
+                              'Keep the extracted backup in %s and the staged configuration for recovery.',
+                              payload)
+            stop_bazarr(EXIT_RESTORE_ERROR)
+            return False
         if isinstance(error, PostgresUnreachableError):
             # Kept rather than cleared: the database is exactly as it was, and
             # this restore can still go through once it answers.
@@ -903,10 +961,6 @@ def _restore_from_archive(stage, payload):
         return False
 
     if has_plugins:
-        if not _postgres_enabled():
-            database = Path(dest_database_path)
-            datadir.sync_file(database)
-            datadir.sync_directory(database.parent)
         _write_plugin_restore_phase(journal, _DATABASE_COMPLETE)
         return _finish_plugin_database_restore(payload, journal, staged_config_path, dest_config_path)
 

@@ -412,6 +412,7 @@ import json, os, sys
 from pathlib import Path
 from types import SimpleNamespace
 from sqlalchemy import text
+from app import config
 from app.database import engine
 from plugin_platform_helpers import provider_manifest_v2
 from provider_hub import datadir, state
@@ -436,6 +437,7 @@ backup._run_postgres_tool = count
 
 action, argument = sys.argv[1:]
 if action == 'seed':
+    config.open_database_after_backup_restore()
     document = state.load_state_strict()
     document['installations']['examplehub'] = {
         'state': 'active', 'kind': 'subtitle_provider', 'active_version': '1.0.0',
@@ -449,6 +451,7 @@ elif action == 'backup':
 elif action == 'prepare':
     assert backup.prepare_restore(argument)
 elif action == 'check':
+    config.open_database_after_backup_restore()
     with engine.connect() as connection:
         database, schema = connection.execute(text('SELECT current_database(), current_schema()')).one()
     print(json.dumps({'database': database, 'schema': schema,
@@ -467,8 +470,13 @@ else:
         def refuse_folders(*args, **kwargs):
             raise OSError('injected folder apply failure')
         datadir.restore_backup = refuse_folders
-    backup.restore_from_backup()
-    backup.apply_pending_plugin_restore()
+    finish = config.finish_backup_restore_startup
+    def finish_and_exit():
+        finish()
+        os._exit(0)
+    config.finish_backup_restore_startup = finish_and_exit
+    import init
+    raise AssertionError('The restore startup should have reached its exit hook')
 """
 
 
@@ -529,7 +537,7 @@ def postgres_restore_instance(tmp_path):
                 parser["bazarr_restore"] = {"host": host, "port": str(port), "user": user, "dbname": database}
                 service_file = tmp_path / "pg_service.conf"
                 with service_file.open("w", encoding="utf-8") as stream:
-                    parser.write(stream)
+                    parser.write(stream, space_around_delimiters=False)
                 environment["PGSERVICEFILE"] = str(service_file)
                 connection_url = sa.URL.create(url.drivername, query={"service": "bazarr_restore"})
                 assert connection_url.database is None and "dbname" not in connection_url.query
@@ -583,13 +591,27 @@ def test_postgres_restore_uses_libpq_and_retries_folders_without_replaying_datab
         postgres_restore_instance, connection_mode):
     """The published pg_restore path works with the connection forms libpq supports."""
     from literals import EXIT_RESTORE_ERROR
+    import yaml
+    from zipfile import ZipFile
 
     instance = postgres_restore_instance
     instance.configure(connection_mode)
     archive = instance.archive()
     instance.child("seed", "changed row")
     instance.sample.write_text("changed plugin files", encoding="utf-8")
-    instance.child("prepare", archive.name)
+    # A backup can originate on another installation. The archived settings
+    # must not move the next boot to a different DB, search path or engine.
+    edited_archive = archive.with_name("bazarr_backup_vedited.zip")
+    with ZipFile(archive) as original, ZipFile(edited_archive, "w") as edited:
+        for name in original.namelist():
+            value = original.read(name)
+            if name == "config.yaml":
+                settings = yaml.safe_load(value)
+                settings["general"]["port"] = 7100
+                settings["postgresql"] = {"enabled": False, "url": "postgresql://unused/different"}
+                value = yaml.safe_dump(settings)
+            edited.writestr(name, value)
+    instance.child("prepare", edited_archive.name)
     payload = instance.stage / "payload"
     phase = instance.stage / ".plugin-restore-phase"
     assert (payload / "bazarr_postgres.dump").is_file()
@@ -614,6 +636,7 @@ def test_postgres_restore_uses_libpq_and_retries_folders_without_replaying_datab
     assert instance.sample.read_text(encoding="utf-8") == "changed plugin files"
     instance.child("boot")
     assert instance.sample.read_text(encoding="utf-8") == "archived plugin files"
+    assert yaml.safe_load(instance.config.read_text(encoding="utf-8"))["general"]["port"] == 7100
     assert json.loads(instance.child("check"))["name"] == "written after database restore"
     assert instance.tool_runs.read_text(encoding="utf-8").splitlines() == ["pg_dump", "pg_restore"]
     assert not instance.stage.exists()
@@ -662,7 +685,16 @@ def test_postgres_restore_accepts_a_legacy_archive_without_plugin_metadata(postg
     instance.child("seed", "changed row")
     instance.sample.write_text("changed plugin files", encoding="utf-8")
     instance.child("prepare", legacy.name)
+    # The prior inventory is unreadable to the app. Startup must reach the
+    # ordinary restore before trying to migrate or scrub that inventory.
+    engine = sa.create_engine(instance.direct_url, isolation_level="AUTOCOMMIT", hide_parameters=True)
+    try:
+        with engine.connect() as connection:
+            connection.exec_driver_sql("ALTER TABLE provider_hub_state RENAME COLUMN document TO unreadable")
+    finally:
+        engine.dispose()
     instance.child("boot", expected=41)
+    instance.child("boot")
     assert json.loads(instance.child("check"))["name"] == "archived row"
     assert instance.sample.read_text(encoding="utf-8") == "changed plugin files"
     assert instance.tool_runs.read_text(encoding="utf-8").splitlines() == ["pg_dump", "pg_restore"]
