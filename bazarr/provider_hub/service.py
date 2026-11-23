@@ -5136,11 +5136,10 @@ def _prepare_activation_data(plugin_id, row, active_data, testing: Path) -> tupl
             raise datadir.DataFolderError("The previous release data folder is missing")
         return recorded_key, None
 
-    key = recorded_key or uuid.uuid4().hex
-    path = datadir.release_path(root, plugin_id, key)
-    if path.is_symlink() or path.is_junction():
+    path = datadir.release_path(root, plugin_id, recorded_key) if recorded_key else None
+    if path is not None and (path.is_symlink() or path.is_junction()):
         raise datadir.DataFolderError("The staged release data folder is unsafe")
-    if not path.exists():
+    if path is None or not path.exists():
         # An older staged release or one restored from backup has no staged data folder.
         carry_active = row.get("staged_data_from_active", True) and not row.get("delete_release_data")
         source = active_data if carry_active else None
@@ -5149,7 +5148,8 @@ def _prepare_activation_data(plugin_id, row, active_data, testing: Path) -> tupl
     else:
         source = path
     datadir.copy_folder(source, testing)
-    return key, path
+    key = uuid.uuid4().hex
+    return key, datadir.release_path(root, plugin_id, key)
 
 
 @datadir.serialized
@@ -5206,7 +5206,8 @@ def activate_release(provider_id: str, *, at_boot: bool = False) -> Activation:
                     message = _wait_for_data_activation(provider_id, installation)
                     job.update(message=message)
                     return Activation(provider_id, ACTIVATION_WAITING, target_version, previous_version, message)
-            workspace = (datadir.smoke_workspace(provider_hub_dir())
+            root = provider_hub_dir()
+            workspace = (datadir.smoke_workspace(root)
                          if datadir.declared(installation.get("staged_manifest")) else contextlib.nullcontext())
             with workspace as probe_data:
                 data_key, target = (None, None) if probe_data is None else _prepare_activation_data(
@@ -5214,7 +5215,9 @@ def activate_release(provider_id: str, *, at_boot: bool = False) -> Activation:
                 manifest = _verified_staged_release(provider_id, installation, _revocations(state),
                                                     **({"data_path": probe_data} if probe_data is not None else {}))
                 if target is not None:
-                    datadir.publish_probe_data(probe_data, target)
+                    # A restart before promotion can still use the saved stage. Startup cleanup
+                    # removes whichever data directory the committed release no longer refers to.
+                    datadir.publish_activation_data(root, probe_data, target)
             # The kind's step runs before the release is written, as it always has: a plugin whose saved
             # settings cannot be brought up to date is active and says so, never half switched.
             try:
@@ -5257,6 +5260,8 @@ def activate_release(provider_id: str, *, at_boot: bool = False) -> Activation:
                 row["active_data_key"] = data_key
             else:
                 row.pop("active_data_key", None)
+            if target is not None and row.get("staged_data_key"):
+                row[releases.PROMOTE_STAGED_DATA] = row["staged_data_key"]
             _clear_staged_data(row)
             row.pop("delete_release_data", None)
             row.pop("data_worker_cleanup_pending", None)

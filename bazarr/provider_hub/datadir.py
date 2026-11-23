@@ -476,6 +476,16 @@ def publish_probe_data(source: Path, target: Path) -> None:
     copy_folder(source, target)
 
 
+def publish_activation_data(root: Path, source: Path, target: Path) -> None:
+    """Make a new data directory durable before promotion can refer to it."""
+    if target.exists() or target.is_symlink() or target.is_junction():
+        raise DataFolderError("The new release data folder already exists")
+    copy_folder(source, target)
+    sync_tree(target)
+    for directory in (target.parent, target.parent.parent, root):
+        sync_directory(directory)
+
+
 def cleanup_probe_workspaces(root: Path) -> None:
     """Reclaim confirmed workspaces and pending workspaces from an earlier OS boot."""
     from .sandbox.sweep import _BOOT_ID
@@ -685,7 +695,10 @@ def sync_tree(root: Path) -> None:
     for directory, _, files in os.walk(root, topdown=False, onerror=cannot_walk):
         path = Path(directory)
         for name in files:
-            sync_file(path / name)
+            entry = path / name
+            # A symlink is persisted with its parent directory entry.
+            if not entry.is_symlink():
+                sync_file(entry)
         sync_directory(path)
 
 

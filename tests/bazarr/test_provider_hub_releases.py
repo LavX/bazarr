@@ -2910,10 +2910,14 @@ def test_public_release_activation_owns_smoke_data_until_worker_stop_is_confirme
     assert (active / "settings").read_text() == "active release kept working"
     if outcome == "confirmed":
         assert row["active_version"] == target_version
-        assert row["active_data_key"] == target_key
+        current = datadir.release_path(provider_hub_dir(), "exampleservice", row["active_data_key"])
+        if operation == "rollback":
+            assert current == target
+        else:
+            assert current != target
         assert not row.get("staged_version")
         assert not folder.parent.exists()
-        assert (target / "settings").read_text() == ("from v1" if operation == "rollback" else "smoke output")
+        assert (current / "settings").read_text() == ("from v1" if operation == "rollback" else "smoke output")
         assert ("exampleservice", target_version, "active") in _releases_in(hub)
     else:
         assert row["active_version"] == before["active_version"]
@@ -2928,6 +2932,68 @@ def test_public_release_activation_owns_smoke_data_until_worker_stop_is_confirme
         assert (folder / "settings").read_text() == "smoke output"
         _check_pending_probe_cleanup(datadir, provider_hub_dir(), folder.parent, monkeypatch)
         assert (active / "settings").read_text() == "active release kept working"
+
+
+@pytest.mark.parametrize("boundary", ["rename", "commit"])
+def test_boot_retries_interrupted_data_publication_from_the_saved_stage(
+        catalog_data_release, service_kind, hub, monkeypatch, boundary):
+    from provider_hub import datadir, releases, state_store
+    from provider_hub.state import load_state_strict, provider_hub_dir
+
+    plugin_id = "exampleservice"
+    service, manifest, active = catalog_data_release
+    service.stage_install(manifest, source_id="official")
+    root = provider_hub_dir()
+    before = load_state_strict()["installations"][plugin_id]
+    saved = datadir.release_path(root, plugin_id, before["staged_data_key"])
+    (saved / "settings").write_bytes(b"saved stage\x00\xff")
+    (saved / "stage-only").write_bytes(b"staging output")
+    fingerprint = datadir.fingerprint(saved)
+    [staged_release] = state_store.list_releases(plugin_id, states=(releases.STAGED,))
+    checked = []
+
+    def smoke(validated, bundle, interpreter, *, data_dir, timeout=None):
+        checked.append(datadir.fingerprint(data_dir))
+        (data_dir / "settings").write_bytes(b"verified data")
+
+    monkeypatch.setattr(service_kind, "smoke_test", smoke)
+    rename = Path.rename
+    apply_plan = releases.apply_plan
+
+    def interrupt_rename(source, target):
+        moved = rename(source, target)
+        # Interrupt either the old stage moving aside or the new copy arriving.
+        if source == saved or (moved.parent == saved.parent and len(moved.name) == 32):
+            raise _ProbeHostCrash()
+        return moved
+
+    def interrupt_commit(connection, plan):
+        apply_plan(connection, plan)
+        if any(fields.get("state") == releases.ACTIVE for _, fields, _ in plan.updates) or any(
+                fields.get("state") == releases.ACTIVE for fields, _ in plan.inserts):
+            raise _ProbeHostCrash()
+
+    with monkeypatch.context() as fault:
+        if boundary == "rename":
+            fault.setattr(Path, "rename", interrupt_rename)
+        else:
+            fault.setattr(releases, "apply_plan", interrupt_commit)
+        with pytest.raises(_ProbeHostCrash):
+            service.activate_staged_installations()
+
+    assert load_state_strict()["installations"][plugin_id] == before
+    assert datadir.fingerprint(saved) == fingerprint
+    assert (active / "settings").read_text() == "from v1"
+
+    assert service.activate_staged_installations() == [plugin_id]
+    assert checked == [fingerprint, fingerprint]
+    [activated] = state_store.list_releases(plugin_id, states=(releases.ACTIVE,))
+    assert activated.id == staged_release.id
+    current = datadir.release_path(root, plugin_id, activated.data_key)
+    assert current != saved
+    assert (current / "settings").read_bytes() == b"verified data"
+    assert (current / "stage-only").read_bytes() == b"staging output"
+    assert set(saved.parent.iterdir()) == {active, current}
 
 
 def test_staging_uses_private_data_and_switch_refreshes_work_done_since_staging(data_release, service_kind, monkeypatch):
