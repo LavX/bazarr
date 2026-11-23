@@ -233,7 +233,8 @@ class SourcePublicationOwnerIndex(SourceOutputOwnerIndex):
                         options['native_owners'] = True
                     settings_guard = self._settings_guard() if pin_settings else nullcontext()
                     with (settings_guard,
-                          source_item_publication(source, shared=shared or guard_registry, **options) as (current, connection),
+                          source_item_publication(source, shared=shared or guard_registry, **options) as (
+                              current, connection),
                           self._keyed_settings_guard(not pin_settings)):
                         if shared and current is not None and self._prepared_owners != self._registry_snapshot(connection):
                             break
