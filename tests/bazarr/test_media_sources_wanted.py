@@ -359,6 +359,46 @@ def test_adaptive_search_and_provider_throttle_use_existing_attempts(world, monk
     assert repository.get_item(available.item_id).failed_attempts is None
 
 
+@pytest.mark.parametrize('expired,waiting,ready', [
+    ('en', 'en:hi', 'en:forced'),
+    ('en:hi', 'en:forced', 'en'),
+    ('en:forced', 'en', 'en:hi'),
+])
+def test_wanted_adaptive_attempts_keep_subtitle_variants_independent(world, monkeypatch, expired, waiting, ready):
+    from app.config import settings
+    from media_sources import indexer, repository, wanted
+    from subtitles import download
+
+    now = datetime.now()
+    attempts = [
+        [expired, (now - timedelta(days=60)).timestamp()], [expired, now.timestamp()],
+        [waiting, (now - timedelta(days=14)).timestamp()], [waiting, now.timestamp()],
+    ]
+    monkeypatch.setattr(settings.general, 'adaptive_searching', True)
+    monkeypatch.setattr(settings.general, 'adaptive_searching_max_age', '4w')
+    monkeypatch.setattr(settings.general, 'adaptive_searching_delay', '1w')
+    monkeypatch.setattr(settings.general, 'adaptive_searching_delta', '1w')
+    profile = add_profile(world.db, [
+        ('en', 'False', 'False'), ('en', 'False', 'True'), ('en', 'True', 'False'),
+    ], profile_id=2)
+    item = pipeline._movie(world)
+    repository.update_item(item.item_id, world.db, profile_id=profile, failed_attempts=str(attempts))
+    indexer.recalculate_missing_subtitles(library_id=world.library_id)
+    assert set(ast.literal_eval(repository.get_item(item.item_id).missing_subtitles)) == {waiting, ready}
+
+    providers = Mock(return_value=[])
+    monkeypatch.setattr(download, 'generate_subtitles', providers)
+    wanted.wanted_search_missing_subtitles_sources(kind='movie', job_id=1)
+    providers.assert_called_once()
+    languages = {
+        'en': ('en', 'False', 'False'), 'en:hi': ('en', 'True', 'False'), 'en:forced': ('en', 'False', 'True'),
+    }
+    assert providers.call_args.args[1] == [languages[ready]]
+    recorded = ast.literal_eval(repository.get_item(item.item_id).failed_attempts)
+    assert [row for row in recorded if row[0] != ready] == sorted(attempts, key=lambda row: row[0])
+    assert sum(code == ready for code, _ in recorded) == 1
+
+
 def test_search_all_queues_both_jobs_and_source_job_saves_through_shared_pipeline(
         client, arr_library, isolated_jobs, tmp_path, monkeypatch):
     from app.config import settings
