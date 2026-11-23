@@ -141,8 +141,9 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     postgresql-client \
     unar \
     bash \
-    gosu \
+    util-linux \
     curl \
+    && test -x /usr/bin/setpriv \
     && mkdir -p /config /defaults \
     && groupadd -g 1000 bazarr \
     && useradd -u 1000 -g bazarr -d /config -s /bin/bash bazarr

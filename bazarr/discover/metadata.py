@@ -24,6 +24,7 @@ API_ROOT = "https://api.themoviedb.org/3"
 MAX_RESPONSE_BYTES = 1024 * 1024
 FRESH_SECONDS = 300
 STALE_SECONDS = 3600
+IDENTIFICATION_PAGE_LIMIT = 5
 CONFIG_LOCK = threading.RLock()
 _cache = make_region().configure("dogpile.cache.memory", expiration_time=STALE_SECONDS,
                                 arguments={"cache_dict": LockedLRU(maxsize=256)})
@@ -415,8 +416,11 @@ def _movie(raw, images):
     imdb = raw.get("imdb_id")
     imdb = imdb if isinstance(imdb, str) and re.fullmatch(r"tt\d{7,10}", imdb) else None
     overview = raw.get("overview")
+    original = raw.get("original_title")
     return {"source": SOURCE, "source_id": f"tmdb:movie:{raw['id']}", "id": raw["id"],
-            "media_type": "movie", "title": title[:500], "year": year, "imdb_id": imdb,
+            "media_type": "movie", "title": title[:500],
+            "original_title": original[:500] if isinstance(original, str) and original.strip() else None,
+            "year": year, "imdb_id": imdb,
             "mapping_status": "resolved" if imdb else "unresolved",
             "poster_url": _image(images, raw.get("poster_path"), "poster"),
             "backdrop_url": _image(images, raw.get("backdrop_path"), "backdrop"),
@@ -452,25 +456,40 @@ def _browse(operation, loader, empty):
     return _browse_with_validity(operation, loader, empty)[0]
 
 
-def search_movies(query):
+def _search_rows(config, path, query, for_identification):
+    params = {"query": query, "language": config.locale, "include_adult": "false", "page": 1}
+    result = _request(config, path, params)
+    rows = result.get("results")
+    if not isinstance(rows, list):
+        raise UpstreamFailure()
+    if not for_identification:
+        return rows[:12], {}
+
+    # A source scan needs to know that a candidate is unique. Discover only
+    # displays the first few results. If the bounded search cannot cover all
+    # pages, leave the parse in place unless ambiguity is already established.
+    pages = result.get("total_pages")
+    if type(pages) is not int or pages < 0:
+        raise UpstreamFailure()
+    rows = list(rows)
+    for page in range(2, min(pages, IDENTIFICATION_PAGE_LIMIT) + 1):
+        additional = _request(config, path, {**params, "page": page}).get("results")
+        if not isinstance(additional, list):
+            raise UpstreamFailure()
+        rows.extend(additional)
+    return rows, {"truncated": pages > IDENTIFICATION_PAGE_LIMIT}
+
+
+def search_movies(query, *, for_identification=False):
     query = normalize_query(query)
 
     def load(config):
-        result = _request(config, "/search/movie", {"query": query, "language": config.locale,
-                                                   "include_adult": "false", "page": 1})
-        rows = result.get("results")
-        if not isinstance(rows, list):
-            raise UpstreamFailure()
-        rows = rows[:12]
-        images = {}
-        if any(isinstance(row, dict) and row.get("poster_path") for row in rows):
-            try:
-                images = _image_config(config)
-            except UpstreamFailure:
-                pass
-        return {"items": [_movie(row, images) for row in rows]}
+        rows, flags = _search_rows(config, "/search/movie", query, for_identification)
+        images = _artwork(config, {"poster_path": any(isinstance(row, dict) and row.get("poster_path") for row in rows)})
+        return {"items": [_movie(row, images) for row in rows], **flags}
 
-    return _browse(("search", query), load, {"items": []})
+    operation = ("identify", "movie", query) if for_identification else ("search", query)
+    return _browse(operation, load, {"items": []})
 
 
 def movie_details(movie_id):
@@ -543,6 +562,9 @@ def _show(raw, images, external=None):
     result.update(media_type="show", source_id=f"tmdb:show:{result['id']}",
                   tvdb_id=external.get("tvdb_id") if _positive_id(external.get("tvdb_id")) else None)
     result["title"] = result["title"][:300]
+    result.pop("original_title")
+    original = raw.get("original_name")
+    result["original_name"] = original[:300] if isinstance(original, str) and original.strip() else None
     if "seasons" in raw:
         seasons = raw["seasons"]
         if not isinstance(seasons, list) or len(seasons) > 1000:
@@ -573,20 +595,16 @@ def _artwork(config, raw):
     return {}
 
 
-def search_shows(query):
+def search_shows(query, *, for_identification=False):
     query = normalize_query(query)
 
     def load(config):
-        result = _request(config, "/search/tv", {"query": query, "language": config.locale,
-                                                "include_adult": "false", "page": 1})
-        rows = result.get("results")
-        if not isinstance(rows, list):
-            raise UpstreamFailure()
-        rows = rows[:12]
+        rows, flags = _search_rows(config, "/search/tv", query, for_identification)
         images = _artwork(config, {"poster_path": any(isinstance(row, dict) and row.get("poster_path") for row in rows)})
-        return {"items": [_show(row, images) for row in rows]}
+        return {"items": [_show(row, images) for row in rows], **flags}
 
-    return _browse(("search", "show", query), load, {"items": []})
+    operation = ("identify", "show", query) if for_identification else ("search", "show", query)
+    return _browse(operation, load, {"items": []})
 
 
 def _show_details_with_validity(show_id):

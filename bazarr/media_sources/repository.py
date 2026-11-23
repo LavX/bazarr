@@ -96,6 +96,24 @@ def get_roots(library_id, target=None):
         sa.select(Roots).where(Roots.c.library_id == library_id).order_by(Roots.c.id)).all()
 
 
+def configured_library_root_paths(target=None):
+    """All configured local paths, including disabled libraries."""
+    return _target(target).execute(sa.select(Roots.c.local_path).distinct()).scalars().all()
+
+
+def enabled_item_roots(item_id, source_id, library_id, path, target=None):
+    """Current local roots for a request whose item, path and owners still match."""
+    return _target(target).execute(
+        sa.select(Roots.c.local_path)
+        .select_from(Items.join(Libraries, sa.and_(Items.c.library_id == Libraries.c.id,
+                                                 Items.c.source_id == Libraries.c.source_id))
+                     .join(Sources, Libraries.c.source_id == Sources.c.id)
+                     .join(Roots, Libraries.c.id == Roots.c.library_id))
+        .where(Items.c.id == item_id, Items.c.source_id == source_id, Items.c.library_id == library_id,
+               Items.c.path == path, Libraries.c.enabled == 1, Sources.c.enabled == 1)
+    ).scalars().all()
+
+
 def record_library_scan(library_id, status, message=None, target=None):
     _target(target).execute(sa.update(Libraries).where(Libraries.c.id == library_id).values(
         last_scan_status=status, last_scan_message=message, updated_at=datetime.now()))
@@ -151,8 +169,11 @@ def delete_source(source_id, target=None):
 
 # Groups
 
-def get_group(group_id, target=None):
-    return _target(target).execute(sa.select(Groups).where(Groups.c.id == group_id)).first()
+def get_group(group_id, target=None, *, for_update=False):
+    statement = sa.select(Groups).where(Groups.c.id == group_id)
+    if for_update:
+        statement = statement.with_for_update(key_share=True)
+    return _target(target).execute(statement).first()
 
 
 def library_groups(library_id, target=None):
@@ -160,12 +181,23 @@ def library_groups(library_id, target=None):
         sa.select(Groups).where(Groups.c.library_id == library_id).order_by(Groups.c.id)).all()
 
 
-def update_group(group_id, target=None, *, owner_library_id=None, **values):
+def update_group(group_id, target=None, *, owner_library_id=None, only_automatic=False,
+                 protect_user=(), **values):
     values['updated_at'] = datetime.now()
     statement = sa.update(Groups).where(Groups.c.id == group_id)
     if owner_library_id is not None:
         statement = statement.where(Groups.c.library_id == owner_library_id)
-    return _target(target).execute(statement.values(**values)).rowcount
+    if only_automatic:
+        statement = statement.where(Groups.c.identity_source != 'user')
+    return _target(target).execute(statement.values(**_protect_user(Groups, values, protect_user))).rowcount
+
+
+def _protect_user(table, values, fields):
+    # A manual edit may have been saved after the scan read this row. Keep its
+    # identity while still applying file and group bookkeeping from the scan.
+    for field in fields:
+        values[field] = sa.case((table.c.identity_source == 'user', table.c[field]), else_=values[field])
+    return values
 
 
 def delete_empty_groups(group_ids, target=None, *, owner_library_id=None):
@@ -191,8 +223,11 @@ def create_group(*, source_id, library_id, kind, group_key, title, identity_sour
 
 # Items
 
-def get_item(item_id, target=None):
-    return _target(target).execute(sa.select(Items).where(Items.c.id == item_id)).first()
+def get_item(item_id, target=None, *, for_update=False):
+    statement = sa.select(Items).where(Items.c.id == item_id)
+    if for_update:
+        statement = statement.with_for_update()
+    return _target(target).execute(statement).first()
 
 
 def get_item_by_path(path, target=None):
@@ -253,17 +288,79 @@ def foreign_candidates(inodes, paths, library_id, target=None):
     return list(seen.values())
 
 
-def pending_items(library_id, target=None):
-    """The items of a library whose last identification could not be answered."""
+def pending_movies(library_id, target=None):
     return _target(target).execute(
-        sa.select(Items.c.id, Items.c.path, Items.c.group_id, Items.c.identity_source)
-        .where(Items.c.library_id == library_id, Items.c.identify_pending == 1)).all()
+        sa.select(Items.c.id, Items.c.identity_source, Items.c.parsed_title, Items.c.title, Items.c.year,
+                  Items.c.path, Items.c.scene_name, Items.c.identity_state)
+        .where(Items.c.library_id == library_id, Items.c.kind == 'movie', Items.c.identify_pending == 1)).all()
 
 
-def pending_groups(library_id, target=None):
+def _episode_needs_reparse():
+    return sa.and_(Items.c.identity_source == 'filename', Items.c.identity_state == 'unmatched',
+                   Items.c.scene_name.is_(None), Items.c.identify_pending == 1)
+
+
+def pending_episode_parses(library_id, target=None):
     return _target(target).execute(
-        sa.select(Groups.c.id, Groups.c.group_key, Groups.c.identity_source)
-        .where(Groups.c.library_id == library_id, Groups.c.identify_pending == 1)).all()
+        sa.select(Items.c.id, Items.c.path, Items.c.kind, Items.c.library_id, Items.c.group_id, Groups.c.group_key)
+        .select_from(Items.join(Groups, Items.c.group_id == Groups.c.id))
+        .where(Items.c.library_id == library_id, Items.c.kind == 'episode', _episode_needs_reparse())).all()
+
+
+def group_episode_paths(group_id, target=None):
+    return _target(target).execute(
+        sa.select(Items.c.path).where(Items.c.group_id == group_id, Items.c.kind == 'episode')).scalars().all()
+
+
+def lock_show_groups(connection, group_ids):
+    """Lock shows before writing or removing any of their episodes."""
+    statement = sa.select(Groups.c.id, Groups.c.group_key).where(Groups.c.id.in_(group_ids))
+    return dict(connection.execute(statement.order_by(Groups.c.id).with_for_update(key_share=True)).all())
+
+
+def write_episode_identity(connection, group_id, save, *, previous_group_id=None, group_key=None):
+    """Lock the affected shows, then save and refresh the episode before commit."""
+    group_ids = {group_id}
+    if previous_group_id is not None:
+        group_ids.add(previous_group_id)
+    shows = lock_show_groups(connection, group_ids)
+    if group_id not in shows or (group_key is not None and shows[group_id] != group_key):
+        return None
+    item_id = save()
+    if item_id is not None:
+        sync_episode_identities(connection, item_id=item_id)
+    return item_id
+
+
+def update_show_identity(group_id, connection, **values):
+    """Write the show identity and its dependent episode states in one transaction."""
+    updated = update_group(group_id, connection, **values)
+    if updated:
+        sync_episode_identities(connection, group_id=group_id)
+    return updated
+
+
+def sync_episode_identities(connection, *, group_id=None, item_id=None):
+    """Refresh episode state with the parent locked by the caller."""
+    group = sa.select(Groups).where(Groups.c.id == Items.c.group_id)
+    group_state = group.with_only_columns(Groups.c.identity_state).scalar_subquery()
+    # Keep unlocated legacy rows queued until their filenames have been parsed,
+    # including when someone corrects the show before its next scan.
+    pending = sa.case((Items.c.identity_source == 'user', 0), (_episode_needs_reparse(), 1),
+                      else_=group.with_only_columns(Groups.c.identify_pending).scalar_subquery())
+    state = sa.case(
+        (sa.or_(Items.c.season.is_(None), Items.c.episode.is_(None), group_state == 'unmatched'), 'unmatched'),
+        (group_state == 'ambiguous', 'ambiguous'),
+        (Items.c.identity_source.in_(('media_server', 'user')), 'identified'),
+        else_='parsed',
+    )
+    statement = sa.update(Items).where(Items.c.kind == 'episode',
+                                       sa.or_(Items.c.identity_state != state, Items.c.identify_pending != pending))
+    if group_id is not None:
+        statement = statement.where(Items.c.group_id == group_id)
+    if item_id is not None:
+        statement = statement.where(Items.c.id == item_id)
+    connection.execute(statement.values(identity_state=state, identify_pending=pending, updated_at=datetime.now()))
 
 
 def shadow_state(item_ids, target=None):
@@ -304,12 +401,17 @@ def insert_item(target=None, **values):
     return _insert(target, Items, values)
 
 
-def update_item(item_id, target=None, *, owner_library_id=None, **values):
+def update_item(item_id, target=None, *, owner_library_id=None, only_automatic=False,
+                protect_user=(), previous_group_id=None, **values):
     values['updated_at'] = datetime.now()
     statement = sa.update(Items).where(Items.c.id == item_id)
     if owner_library_id is not None:
         statement = statement.where(Items.c.library_id == owner_library_id)
-    return _target(target).execute(statement.values(**values)).rowcount
+    if previous_group_id is not None:
+        statement = statement.where(Items.c.group_id == previous_group_id)
+    if only_automatic:
+        statement = statement.where(Items.c.identity_source != 'user')
+    return _target(target).execute(statement.values(**_protect_user(Items, values, protect_user))).rowcount
 
 
 def delete_items(item_ids, target=None, *, owner_library_id=None):

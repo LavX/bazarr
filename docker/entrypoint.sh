@@ -29,12 +29,12 @@ Repository: https://github.com/LavX/bazarr
 '
 
 # Started non-root (Compose `user:`, docker run --user): there is nothing to
-# drop. gosu would fail with "operation not permitted" because setgroups needs
-# root, even when the ids already match. Changing the bazarr user or group and
+# drop. Changing groups would fail because setgroups needs root, even when the
+# ids already match. Changing the bazarr user or group and
 # taking ownership of /config are root-only too, and the PUID and PGID
 # variables have no meaning here, so skip all of it and run the app as this
 # user. /config has to be writable by it already. Same tini flags and HOME as
-# the root path at the end of this file, minus gosu.
+# the root path at the end of this file, minus the privilege drop.
 if [ "$(id -u)" != "0" ]; then
     uidgid="$(id -u):$(id -g)"
     echo "Started as non-root $uidgid; PUID/PGID are ignored and /config must already be writable by this user."
@@ -107,9 +107,27 @@ chown -R "$PUID:$PGID" /config/log 2>/dev/null || true
 # Deep permission fix runs in background (large config dirs can take minutes)
 (chown -R "$PUID:$PGID" /config 2>/dev/null &)
 
-# Run as the requested user using gosu. HOME is set explicitly because gosu
-# takes it from the passwd entry, which is the thing usermod may not have been
-# allowed to update.
+# Preserve runtime-supplied supplementary groups, except root's primary group
+# and group 0. Read the kernel group list, not id -G, which includes the primary
+# group. Do not infer access from files or sockets in the container.
+startup_gid=$(id -g)
+supplementary_groups=
+while read -r field groups; do
+    if [ "$field" = 'Groups:' ]; then
+        for group in $groups; do
+            if [ "$group" != 0 ] && [ "$group" != "$startup_gid" ]; then
+                supplementary_groups="${supplementary_groups:+$supplementary_groups,}$group"
+            fi
+        done
+        break
+    fi
+done < /proc/self/status
+group_option=(--clear-groups)
+if [ -n "$supplementary_groups" ]; then
+    group_option=(--groups "$supplementary_groups")
+fi
+# Use numeric IDs even if the passwd and group files could not be updated.
+# Set HOME explicitly for the application.
 #
 # tini becomes PID 1 here (every step is an exec, so the PID never changes) and
 # runs as the requested user, after the drop. It reaps orphaned processes and
@@ -119,4 +137,4 @@ chown -R "$PUID:$PGID" /config/log 2>/dev/null || true
 # reaping working when a runtime already put an init above this script, as
 # docker run --init does.
 echo "Starting Bazarr..."
-exec gosu "$PUID:$PGID" /usr/bin/tini -s -- env HOME=/config "$@"
+exec setpriv --reuid "$PUID" --regid "$PGID" "${group_option[@]}" /usr/bin/tini -s -- env HOME=/config "$@"

@@ -8,8 +8,9 @@ never drives an automatic search.
 import os
 from dataclasses import dataclass
 from typing import Optional
+from urllib.parse import unquote
 
-from guessit import guessit
+from subliminal_patch.core import guessit
 
 
 @dataclass(frozen=True)
@@ -27,13 +28,32 @@ def _first(value):
     return value
 
 
+def _guess(name, kind):
+    try:
+        return guessit(name, options={'type': kind})
+    except Exception:
+        return {}
+
+
+def _decoded_name(name):
+    if '%' not in name:
+        return None
+    decoded = unquote(name)
+    if (decoded != name and '\0' not in decoded and decoded.count('/') == name.count('/')
+            and decoded.count('\\') == name.count('\\')):
+        return decoded
+    return None
+
+
 def parse_movie_file(path) -> MovieParse:
     name = os.path.basename(path)
     stem = os.path.splitext(name)[0]
-    try:
-        guessed = guessit(name, options={'type': 'movie'})
-    except Exception:
-        guessed = {}
+    guessed = _guess(name, 'movie')
+    if not guessed.get('title') or not guessed.get('year'):
+        decoded = _decoded_name(name)
+        decoded_guess = _guess(decoded, 'movie') if decoded else {}
+        if decoded_guess.get('title') and decoded_guess.get('year'):
+            guessed = decoded_guess
     parsed_title = _first(guessed.get('title'))
     year = _first(guessed.get('year'))
     year = year if isinstance(year, int) and 1800 <= year <= 2200 else None
@@ -49,6 +69,7 @@ class EpisodeParse:
     title: str                   # the display title: the episode's own title, else the file stem
     parsed_title: Optional[str]  # the show title the file name carries, if any
     episode_title: Optional[str]
+    year: Optional[int]
     season: Optional[int]
     episode: Optional[int]
     scene_name: str
@@ -84,21 +105,25 @@ def parse_episode_file(path, group_directory=None) -> EpisodeParse:
         below = os.path.relpath(path, group_directory)
         if not below.startswith('..'):
             relative = below.replace(os.sep, '/')
-    try:
-        guessed = guessit(relative, options={'type': 'episode'})
-    except Exception:
-        guessed = {}
+    guessed = _guess(relative, 'episode')
+    if guessed.get('season') is None or guessed.get('episode') is None:
+        decoded = _decoded_name(relative)
+        decoded_guess = _guess(decoded, 'episode') if decoded else {}
+        if decoded_guess.get('season') is not None and decoded_guess.get('episode') is not None:
+            guessed = decoded_guess
     parsed_title = _first(guessed.get('title'))
     parsed_title = str(parsed_title).strip() if parsed_title else None
     episode_title = _first(guessed.get('episode_title'))
     episode_title = str(episode_title).strip() if episode_title else None
+    year = _first(guessed.get('year'))
+    year = year if isinstance(year, int) and 1800 <= year <= 2200 else None
     episodes = guessed.get('episode')
     multi = isinstance(episodes, (list, tuple)) and len(episodes) > 1
     seasons = guessed.get('season')
     if isinstance(seasons, (list, tuple)):
         multi = multi or len(seasons) > 1
     return EpisodeParse(title=episode_title or stem, parsed_title=parsed_title, episode_title=episode_title,
-                        season=_number(_first(seasons)), episode=_number(_first(episodes)), scene_name=stem,
+                        year=year, season=_number(_first(seasons)), episode=_number(_first(episodes)), scene_name=stem,
                         multi_episode=multi)
 
 
@@ -106,10 +131,7 @@ def parse_show_directory(name) -> GroupParse:
     """The show a first-level directory names. A title read from a directory name is a guess like any other:
     the group is ``parsed`` when one was found, ``unmatched`` when the name gives none (a bare year)."""
     name = os.path.basename(name.rstrip('/\\')) or name
-    try:
-        guessed = guessit(name, options={'type': 'episode'})
-    except Exception:
-        guessed = {}
+    guessed = _guess(name, 'episode')
     parsed_title = _first(guessed.get('title'))
     parsed_title = str(parsed_title).strip() if parsed_title else None
     year = _first(guessed.get('year'))
