@@ -45,7 +45,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from . import capabilities, landlock, seccomp
+from . import activity, capabilities, landlock, seccomp
 from .policy import (
     PolicyError,
     RuntimeSpec,
@@ -832,18 +832,30 @@ _ANCHOR_SCRIPT = (
     "    os.killpg(os.getpgrp(), 9)\n"
 )
 
+# The group is already set when Popen returns. Run plugin code only once
+# the host confirms that handoff. EOF means the host exited during launch.
+_ANCHORED_WORKER_SCRIPT = (
+    "import os, sys\n"
+    "fd = int(sys.argv[1])\n"
+    "ready = os.read(fd, 1)\n"
+    "os.close(fd)\n"
+    "if ready == b'1' and os.getppid() == int(sys.argv[2]):\n"
+    "    os.execvpe(sys.argv[3], sys.argv[3:], os.environ)\n"
+)
 
-def _finish_anchor(anchor: "subprocess.Popen") -> None:
+
+def _finish_anchor(anchor: "subprocess.Popen", *, lifeline_only=False) -> None:
     """Reap the anchor after its group was killed. Only now may its pid be reused."""
     try:
         if anchor.stdin is not None:
             anchor.stdin.close()
     except OSError:
         pass
-    try:
-        anchor.kill()
-    except OSError:
-        pass
+    if not lifeline_only:
+        try:
+            anchor.kill()
+        except OSError:
+            pass
     try:
         anchor.wait(timeout=5)
     except subprocess.TimeoutExpired:
@@ -900,18 +912,40 @@ def _start_plain(command: list, **kwargs: Any) -> "WorkerProcess":
     """
     anchor = _start_anchor()
     try:
+        if anchor is not None and activity.registry_enabled():
+            return _start_registered_group(command, anchor, **kwargs)
         if anchor is not None:
-            process = WorkerProcess(command, process_group=anchor.pid, **kwargs)
+            process = activity.start_worker(
+                lambda argv: WorkerProcess(argv, process_group=anchor.pid, **kwargs), command, group=anchor.pid)
+            process._anchor = anchor
+            process._anchor_mark = _start_mark(anchor.pid)
         else:
-            process = WorkerProcess(command, start_new_session=True, **kwargs)
+            process = activity.start_worker(lambda argv: WorkerProcess(argv, start_new_session=True, **kwargs), command)
+        return process
     except BaseException:
         if anchor is not None:
-            _finish_anchor(anchor)
+            # Let the anchor end the group before collecting it. An error
+            # can land after the worker received its launch acknowledgement.
+            _finish_anchor(anchor, lifeline_only=True)
         raise
-    process._anchor = anchor
-    if anchor is not None:
-        process._anchor_mark = _start_mark(anchor.pid)
-    return process
+
+
+def _start_registered_group(command, anchor, **kwargs):
+    group = anchor.pid
+    read_fd, write_fd = os.pipe()
+    try:
+        launcher = [sys.executable, "-I", "-S", "-B", "-c", _ANCHORED_WORKER_SCRIPT,
+                    str(read_fd), str(os.getpid()), *command]
+        pass_fds = (*kwargs.pop("pass_fds", ()), read_fd)
+        process = activity.start_worker(
+            lambda argv: WorkerProcess(argv, process_group=group, pass_fds=pass_fds, **kwargs), launcher, group=group)
+        process._anchor = anchor
+        process._anchor_mark = _start_mark(group)
+        os.write(write_fd, b"1")
+        return process
+    finally:
+        os.close(read_fd)
+        os.close(write_fd)
 
 
 def _stat_fields(pid: int) -> "tuple[str, str]":
@@ -1378,6 +1412,16 @@ class WorkerProcess(subprocess.Popen):
         group number may belong to someone else, so nothing can be said of what
         the worker left behind.
         """
+        job = getattr(self, "activity_job", None)
+        if job is not None:
+            try:
+                self._terminate_and_wait(grace)
+                if not job.empty():
+                    job.terminate()
+            except OSError:
+                return False
+            self._reap_quietly()
+            return activity.tree_gone(self, 5)
         killpg = getattr(os, "killpg", None)
         if killpg is None:
             # No process groups on this platform: the reap is all there is to end.
@@ -1697,8 +1741,11 @@ def _start(
         # Plain Popen, no preexec_fn. The launcher gets an empty environment:
         # nothing from the host's reaches it, and so nothing reaches the worker
         # except what the spec lists (the owner marker among it).
+        command = [python, "-I", "-S", "-B", str(LAUNCHER_PATH), str(spec_fd), str(life_r), str(status_w)]
+        if marker is not None:
+            command.append("--owner=" + marker)
         process = LauncherProcess(
-            [python, "-I", "-S", "-B", str(LAUNCHER_PATH), str(spec_fd), str(life_r), str(status_w)],
+            command,
             lifeline=life_w,
             status=status_r,
             env={},

@@ -8,14 +8,14 @@ import rarfile
 
 from dogpile.cache.region import register_backend as register_cache_backend
 
-from app.config import (settings, configure_captcha_func, log_startup_notices, remove_settings_section,
-                        write_config)
+from app.config import (settings, configure_captcha_func, finish_backup_restore_startup, log_startup_notices,
+                        open_database_after_backup_restore, remove_settings_section, write_config)
 from app.get_args import args
 from app.logger import configure_logging
 from utilities.binaries import get_binary, BinaryNotFound
 from utilities.package import package_info_path, read_package_info
 from utilities.path_mappings import path_mappings
-from utilities.backup import restore_from_backup
+from utilities.backup import apply_pending_plugin_restore, restore_from_backup
 
 from app.database import init_db
 
@@ -64,10 +64,20 @@ log_cpu_check()
 # What reading the configuration changed in what was stored. It was found before there was a log to say it in.
 log_startup_notices()
 
+# Mark workers started during initialization as well as those started after it.
+try:
+    from provider_hub.sandbox import sweep as sandbox_sweep
+    sandbox_sweep.configure_owner(args.config_dir)
+except Exception:
+    logging.exception("BAZARR cannot mark this run's plugin workers")
+
 # restore backup if required. A restore that leaves the database unfit to run
 # on (pg_restore failing partway, or the restored configuration not going in)
 # stops the start from inside, and so does a dump parked by an earlier failure.
-restore_from_backup()
+if not restore_from_backup():
+    open_database_after_backup_restore()
+    apply_pending_plugin_restore()
+    finish_backup_restore_startup()
 
 
 # change default base_url to ''
@@ -152,6 +162,13 @@ from subliminal_patch.extensions import provider_registry  # noqa: E402
 from languages.extra import register_extra_languages  # noqa: E402
 register_extra_languages()
 provider_hub_registration_ok = True
+try:
+    from provider_hub.datadir import cleanup_probe_workspaces
+    from provider_hub.state import provider_hub_dir
+
+    cleanup_probe_workspaces(provider_hub_dir())
+except (OSError, ValueError):  # pragma: no cover - temporary files must not prevent startup
+    logging.warning("Unable to clear abandoned Provider Hub probe folders", exc_info=True)
 # Auto-install official-catalog versions of enabled built-in providers so the
 # catalog becomes the canonical provider source. Staged here so the
 # activate_staged_installations() + register_active_provider_classes() calls

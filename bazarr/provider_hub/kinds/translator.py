@@ -139,6 +139,17 @@ class TranslatorKind(Kind):
         except Exception:
             logger.warning("Could not clear what translator %s left in its folders", plugin_id, exc_info=True)
 
+    def smoke_test(self, validated, bundle_path, python_path, timeout=None, *, data_dir=None) -> None:
+        if data_dir is not None:
+            from subtitles.tools.translate.runtime.worker_binding import TranslatorWorkers
+
+            TranslatorWorkers().smoke(validated, bundle_path, python_path, data_dir, timeout)
+
+    def settle_data(self, plugin_id: str, timeout: float) -> bool:
+        from subtitles.tools.translate.runtime.worker_binding import settle_plugin_data
+
+        return settle_plugin_data(plugin_id, timeout)
+
     def on_activated(self, plugin_id: str, previous_manifest, manifest) -> str | None:
         """Bring the plugin's saved engines and back ends in line with the release that just became active."""
         from subtitles.tools.translate.runtime.plugin_update import bring_up_to_date
