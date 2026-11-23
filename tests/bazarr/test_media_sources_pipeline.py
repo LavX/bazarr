@@ -387,14 +387,40 @@ def test_download_keeps_a_provider_result_from_reaching_a_replaced_video(world, 
     assert not world.published
 
 
+def _replace_and_scan_movie(world, context):
+    from media_sources import repository, scanner
+
+    path = Path(context.path)
+    previous_inode = path.stat().st_ino
+    replacement = path.with_suffix(".incoming")
+    replacement.write_bytes(b"another media file")
+    replacement.replace(path)
+    scanner.run_scan(world.source_id, world.library_id)
+    updated = repository.get_item(context.item_id)
+    assert updated.created_at == context.created_at
+    assert int(updated.file_ino) == path.stat().st_ino != previous_inode
+
+
 # The whole flow
 
-def test_a_search_saves_a_subtitle_next_to_the_file_and_writes_history_and_the_index(world, monkeypatch):
+@pytest.mark.parametrize("socket_failure", [False, True])
+def test_a_search_saves_a_subtitle_next_to_the_file_and_writes_history_and_the_index(
+        world, monkeypatch, caplog, socket_failure):
+    from app import event_handler
     from media_sources import repository, service
     from media_sources.context import SourceItemContext
 
     context = _movie(world)
     asked = _download(monkeypatch)
+    emit = event_handler.socketio.emit
+
+    def emit_source_item(event, payload):
+        if payload.get("type") == "source-item":
+            raise RuntimeError("Fixture Socket.IO emission failed")
+        emit(event, payload)
+
+    if socket_failure:
+        monkeypatch.setattr(event_handler.socketio, "emit", emit_source_item)
     jobs = []
     monkeypatch.setattr(service.jobs_queue, "update_job_progress", lambda **kwargs: jobs.append(kwargs))
     assert repository.get_item(context.item_id).missing_subtitles == "['en']"
@@ -419,6 +445,8 @@ def test_a_search_saves_a_subtitle_next_to_the_file_and_writes_history_and_the_i
     assert [(event.media_type, event.operation, event.arr_instance_id) for event in world.published] == [
         ("movie", "download", None)]
     assert world.published[0].video_path == context.path
+    if socket_failure:
+        assert "Fixture Socket.IO emission failed" in caplog.text
 
 
 def test_source_download_saves_in_absolute_folder_after_server_displacement(world, monkeypatch):
@@ -1911,7 +1939,10 @@ def test_source_shared_publication_yields_to_a_registry_row_writer(world, monkey
     assert destination.read_bytes() == CONTENT
 
 
-def test_source_translation_rechecks_library_enablement_after_preparation(world, monkeypatch):
+@pytest.mark.parametrize(("change", "message"), [
+    ("disabled", "disabled"), ("sibling", "input.*owner"),
+])
+def test_source_translation_rechecks_eligibility_after_preparation(world, monkeypatch, change, message):
     from contextlib import contextmanager
 
     from media_sources import indexer, repository
@@ -1927,18 +1958,21 @@ def test_source_translation_rechecks_library_enablement_after_preparation(world,
     publication = indexer.SourcePublicationOwnerIndex.publication
 
     @contextmanager
-    def disable_after_preparation(self, source, prepare, **kwargs):
-        def disable():
+    def change_after_preparation(self, source, prepare, **kwargs):
+        def change_source():
             prepared = prepare()
-            repository.update_library(context.library_id, world.db, enabled=0)
+            if change == "disabled":
+                repository.update_library(context.library_id, world.db, enabled=0)
+            else:
+                video(Path(context.path).with_suffix(".en.mkv"))
             return prepared
-        with publication(self, source, disable, **kwargs) as result:
+        with publication(self, source, change_source, **kwargs) as result:
             yield result
 
-    monkeypatch.setattr(indexer.SourcePublicationOwnerIndex, "publication", disable_after_preparation)
+    monkeypatch.setattr(indexer.SourcePublicationOwnerIndex, "publication", change_after_preparation)
     translator = SimpleNamespace(source=context, video_path=context.path, source_srt_file=str(original),
                                  dest_srt_file=destination, from_lang="en", orig_to_lang="hu", forced=False, hi=False)
-    with pytest.raises(SourceTranslationChanged, match="disabled"):
+    with pytest.raises(SourceTranslationChanged, match=message):
         write_subtitle_file(context.path, destination, CONTENT, **translation_write_kwargs(translator, None))
 
     assert not Path(destination).exists()
@@ -2614,6 +2648,77 @@ def test_episode_download_dispatches_runtime_and_indexes_translation_and_combine
     assert [(event.media_type, event.operation, event.source_item_id) for event in world.published] == [
         ("episode", operation, context.item_id) for operation in ("download", "translate", "combine")
     ]
+
+
+@pytest.mark.parametrize("engine", ["legacy", "runtime", "runtime-legacy"])
+def test_source_translation_keeps_engine_result_from_reaching_replaced_video(world, monkeypatch, engine):
+    from app import database
+    from app.config import settings
+    from media_sources import repository
+    from subtitles.tools.translate import main, runtime
+    from subtitles.tools.translate.runtime import legacy_engines, service as runtime_service
+    from subtitles.tools.translate.services.lingarr_translator import LingarrTranslatorService
+    from translator_dispatch_helpers import Env
+
+    context = _movie(world)
+    original = Path(context.path).with_suffix(".en.srt")
+    original.write_bytes(CONTENT)
+    translated = Path(context.path).with_suffix(".hu.srt")
+    monkeypatch.setattr(main.jobs_queue, "update_job_progress", lambda **_: None)
+    monkeypatch.setattr(main.jobs_queue, "update_job_name", lambda **_: None)
+    monkeypatch.setattr(settings.translator, "runtime_v2", engine != "legacy")
+    monkeypatch.setattr(settings.translator, "translator_type", "lingarr")
+
+    env = Env(world.db, world.tmp_path) if engine != "legacy" else None
+    completed = []
+
+    def legacy_result(service, lines, job_id):
+        assert lines == ["Downloaded"]
+        if engine == "legacy":
+            _replace_and_scan_movie(world, context)
+        completed.append(True)
+        return [{"position": 0, "line": "Translated"}]
+
+    try:
+        monkeypatch.setattr(LingarrTranslatorService, "_translate_content", legacy_result)
+        if env is not None:
+            monkeypatch.setattr(database, "engine", world.db.get_bind())
+            monkeypatch.setattr(runtime, "_tables_present", False)
+            monkeypatch.setattr(runtime, "_absent_until", 0.0)
+            if engine == "runtime-legacy":
+                monkeypatch.setattr(settings.translator, "lingarr_url", "http://lingarr.example.test:9876")
+                instance = env.store.create_instance(legacy_engines.LINGARR_PLUGIN_ID,
+                                                     settings={legacy_engines.SAVED_FLAG: True})
+                env.pointers.engine = instance.id
+            else:
+                env.ai_engine()
+            dispatcher = env.dispatcher()
+            run = dispatcher.run
+
+            def translate_with_replacement(spec):
+                if engine == "runtime-legacy":
+                    # The runtime already captured the file, before turning the write over to the legacy engine.
+                    _replace_and_scan_movie(world, context)
+                    return run(spec)
+                outcome = run(spec)
+                assert "[hu] Downloaded" in outcome.lines[0]
+                _replace_and_scan_movie(world, context)
+                completed.append(True)
+                return outcome
+
+            monkeypatch.setattr(dispatcher, "run", translate_with_replacement)
+            monkeypatch.setattr(runtime_service, "Dispatcher", lambda: dispatcher)
+
+        main.translate_subtitles_file(context.path, str(original), "en", "hu", False, False, "movies",
+                                      None, None, None, None, source=context, job_id=42)
+    finally:
+        if env is not None:
+            env.close()
+
+    assert completed == [True]
+    assert original.read_bytes() == CONTENT and not translated.exists()
+    assert world.db.execute(sa.select(repository.History)).all() == []
+    assert not world.published
 
 
 def test_completed_source_translation_keeps_history_during_owner_removal(world, monkeypatch):
@@ -3412,6 +3517,32 @@ def test_source_combine_requires_ordinary_inputs(world, monkeypatch, file_mode):
                                                source=context)
     assert result.status == "skipped" and "input" in result.reason
     assert not media.with_suffix(".en.combined-hu.srt").exists()
+
+
+def test_source_combine_keeps_composed_result_from_reaching_replaced_video(world, monkeypatch):
+    from subtitles.tools.combine import main as combine
+
+    context = _movie(world)
+    media = Path(context.path)
+    primary = media.with_suffix(".en.srt")
+    secondary = media.with_suffix(".hu.srt")
+    primary.write_bytes(CONTENT)
+    secondary.write_bytes(CONTENT)
+    compose = combine.compose
+
+    def compose_then_replace(**kwargs):
+        content = compose(**kwargs)
+        assert b"Downloaded" in content
+        _replace_and_scan_movie(world, context)
+        return content
+
+    monkeypatch.setattr(combine, "compose", compose_then_replace)
+    result = combine.try_combine_for_video(context.path, "movie", languages=["en", "hu"], format="srt",
+                                           source=context)
+    assert result.status == "failed" and "media file changed" in result.error
+    assert primary.read_bytes() == secondary.read_bytes() == CONTENT
+    assert not media.with_suffix(".en.combined-hu.srt").exists()
+    assert not world.published
 
 
 def test_source_combine_rechecks_input_ownership_at_publication(world, monkeypatch):
