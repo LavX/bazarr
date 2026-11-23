@@ -1,11 +1,12 @@
 """History scope, paging, upgrades and retained events through the real list routes."""
 
+import os
 from datetime import datetime, timedelta
 
 import pytest
 import sqlalchemy as sa
 
-from media_source_helpers import add_group, add_item, add_source, video
+from media_source_helpers import Lib, add_group, add_item, add_source, stamped_video, video
 import test_media_sources_no_change as legacy
 from test_media_sources_no_change import HEADERS
 
@@ -94,6 +95,10 @@ def test_history_pages_union_keep_orders_owner_filters_and_origins(client, arr_l
     assert not arr['blacklisted']
     assert arr['upgradable'] and arr['upgradedFromId'] is None
     assert better['upgradedFromId'] == better['original_id'] == original
+    assert better['original'] == {
+        'origin': 'source', 'source_key': f'source:{source_id}', 'history_id': original,
+        'timestamp_iso': now.isoformat(), 'action': 1, 'provider': 'fake', 'description': 'Source downloaded',
+    }
     assert better['upgradable'] and not before['upgradable']
     assert better['score'] == '66.67%'
     assert better['language']['code2'] == 'en'
@@ -125,10 +130,11 @@ def test_history_pages_union_keep_orders_owner_filters_and_origins(client, arr_l
     assert filtered['total'] == 2
     assert all(row['origin'] == 'source' and not row['upgradable'] for row in filtered['data'])
     assert _get(client, endpoint, [('sources', 1), ('source_key[]', arr_key), ('source_key[]', source_key)]) == page
-    assert _get(client, endpoint, {'source_key[]': source_key}) == {'data': [], 'total': 0}
-    assert _get(client, endpoint, {'source_key[]': arr_key}) == _get(client, endpoint)
+    for ignored in (source_key, 'source:removed', 'arr:123', 'bad'):
+        assert client.get(endpoint, headers=HEADERS, query_string={'source_key[]': ignored}).data == legacy
+        assert client.get(endpoint, headers=HEADERS, query_string={'sources': 0, 'source_key[]': ignored}).data == legacy
     assert _get(client, endpoint, {'sources': 1, 'id': item_id})['total'] == 1
-    assert client.get(endpoint, headers=HEADERS, query_string={'source_key[]': 'bad'}).status_code == 400
+    assert client.get(endpoint, headers=HEADERS, query_string={'sources': 1, 'source_key[]': 'bad'}).status_code == 400
 
 
 def test_history_keeps_deleted_item_and_removed_source_snapshots(client, arr_library, tmp_path, history_kind):
@@ -150,7 +156,7 @@ def test_history_keeps_deleted_item_and_removed_source_snapshots(client, arr_lib
     assert row['id'] is row['item_id'] is None
     assert row[title_key] == 'Recorded Item'
     assert row['video_path'] == str(media)
-    assert row['source_name'] == 'Local'
+    assert row['source_name'] == 'Recorded folder'
     if kind == 'episode':
         assert row['series_id'] is None
         assert row['seriesTitle'] == 'Recorded Group'
@@ -190,4 +196,96 @@ def test_source_item_history_has_its_own_scope_sort_and_paging(client, arr_libra
     page = _get(client, endpoint, {'length': 1, 'start': 1, 'include_embedded': 'true'})
     assert page['total'] == 3
     assert page['data'][0]['history_id'] == second
+    assert page['data'][0]['original'] == full['data'][0]['original']
+    assert page['data'][0]['original']['history_id'] == first
     assert _get(client, endpoint, {'include_embedded': 'true'})['data'][0]['history_id'] == embedded
+
+
+def test_history_keeps_previous_owner_snapshot_after_scanner_handover(
+        client, arr_library, tmp_path, history_kind, monkeypatch):
+    from media_sources import repository
+
+    monkeypatch.setattr('media_sources.indexer.probe_item', lambda *args, **kwargs: ({}, None))
+    kind, endpoint, _, title_key = history_kind
+    content_kind = 'series' if kind == 'episode' else 'movie'
+    first = Lib(arr_library, tmp_path, name='First', folder='First', content_kind=content_kind)
+    second = Lib(arr_library, tmp_path, name='Second', folder='Second', content_kind=content_kind)
+    relative = 'Show/Show - S01E01.mkv' if kind == 'episode' else 'Movie.2026.mkv'
+    media = stamped_video(first.root / relative)
+    assert first.scan().inserted == 1
+    item = first.items()[str(media)]
+    assert item.id == 1  # The Arr fixture has the same local ID.
+    now = datetime.now()
+    previous = _event(arr_library, kind, first.source_id, item.id, media, media.with_suffix('.en.srt'), now)
+    assert _get(client, f'/api/sources/items/{item.id}/history')['total'] == 1
+
+    arr_library.execute(sa.update(repository.Sources).where(repository.Sources.c.id == first.source_id)
+                        .values(enabled=0, name='Renamed First'))
+    adopted_path = second.root / relative
+    adopted_path.parent.mkdir(parents=True, exist_ok=True)
+    os.link(media, adopted_path)
+    assert second.scan().handed_over == 1
+    adopted = second.items()[str(adopted_path)]
+    assert (adopted.id, adopted.source_id) == (item.id, second.source_id)
+    repository.update_item(item.id, arr_library, identity_state='identified', shadow_owner='New owner shadow',
+                           monitored=0, season=9, episode=4)
+    current = _event(arr_library, kind, second.source_id, item.id, adopted_path, adopted_path.with_suffix('.en.srt'),
+                     now + timedelta(minutes=1), action=3, upgradedFromId=previous)
+    assert previous == 1  # A source upgrade must not resolve the Arr history event at the same ID.
+
+    item_history = _get(client, f'/api/sources/items/{item.id}/history')
+    assert item_history['total'] == 1
+    [live] = item_history['data']
+    assert live['history_id'] == current
+    assert live['item_id'] == item.id
+    assert live['identity_state'] == 'identified'
+    assert live['shadowed_by'] == 'New owner shadow'
+    assert live['monitored'] is False
+    assert live['original'] is live['upgradedFromId'] is None
+    if kind == 'episode':
+        assert live['series_id'] == adopted.group_id
+        assert live['episode_number'] == '9x4'
+
+    for owner_key in (f'source:{first.source_id}', 'source:removed'):
+        if owner_key == 'source:removed':
+            repository.delete_source(first.source_id, arr_library)
+            assert repository.get_item(item.id, arr_library).source_id == second.source_id
+        page = _get(client, endpoint, {'sources': 1, 'source_key[]': owner_key})
+        assert page['total'] == 1
+        [old] = page['data']
+        assert old['history_id'] == previous
+        assert old['source_key'] == owner_key
+        assert old['source_name'] == 'Recorded folder'
+        assert old[title_key] == 'Recorded Item'
+        assert old['video_path'] == str(media)
+        for key in ('id', 'item_id', 'identity_state', 'shadowed_by', 'monitored', 'source_kind'):
+            assert old[key] is None
+        assert old['upgradable'] is False
+        if kind == 'episode':
+            assert old['seriesTitle'] == 'Recorded Group'
+            assert old['series_id'] is old['episode_number'] is None
+        assert _get(client, f'/api/sources/items/{item.id}/history') == item_history
+
+
+def test_arr_history_hydrates_only_a_matching_original_off_page(client, arr_library, tmp_path, history_kind):
+    from app.database import TableHistory, TableHistoryMovie
+
+    kind, endpoint, owner, _ = history_kind
+    history = TableHistory if kind == 'episode' else TableHistoryMovie
+    source_id, item_id, _, media, subtitle = _source_item(arr_library, tmp_path, kind)
+    now = datetime.now()
+    source_original = _event(arr_library, kind, source_id, item_id, media, subtitle, now - timedelta(minutes=1))
+    assert source_original == 1
+    values = arr_library.execute(sa.select(history.__table__).where(history.id == 1)).mappings().one()
+    arr_library.execute(sa.insert(history).values(
+        {**values, 'id': 2, 'timestamp': now, 'action': 3, 'upgradedFromId': 1}))
+    args = {'sources': 1, 'length': 1, 'include_upgradable': 'false'}
+    [upgrade] = _get(client, endpoint, args)['data']
+    assert upgrade['original'] == {
+        'origin': 'arr', 'source_key': f'arr:{owner}', 'history_id': 1,
+        'timestamp_iso': values['timestamp'].isoformat(), 'action': 1, 'provider': 'alpha', 'description': 'downloaded',
+    }
+
+    arr_library.execute(sa.update(history).where(history.id == 1).values(arr_instance_id=99))
+    [upgrade] = _get(client, endpoint, args)['data']
+    assert upgrade['original'] is upgrade['upgradedFromId'] is None

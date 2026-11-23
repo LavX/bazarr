@@ -5,6 +5,8 @@ import re
 from dataclasses import dataclass
 
 import sqlalchemy as sa
+from flask_restx import reqparse
+from werkzeug.datastructures import MultiDict
 
 
 def _source_key(value):
@@ -16,10 +18,18 @@ def _source_key(value):
     raise ValueError('Expected arr:<id>, source:<id> or source:removed')
 
 
-def add_source_arguments(parser):
+class _OptedInSourceKey(reqparse.Argument):
+    def source(self, request):
+        if request.args.get('sources') != '1':
+            return MultiDict()
+        return super().source(request)
+
+
+def add_source_arguments(parser, *, require_opt_in=False):
     parser.add_argument('sources', location='args', help='Set to 1 to include media sources')
-    parser.add_argument('source_key[]', type=_source_key, location='args', action='append',
-                        help='Filter by arr:<id>, source:<id> or source:removed')
+    argument = _OptedInSourceKey if require_opt_in else parser.argument_class
+    parser.add_argument(argument('source_key[]', type=_source_key, location='args', action='append',
+                                 help='Filter by arr:<id>, source:<id> or source:removed'))
 
 
 @dataclass(frozen=True)

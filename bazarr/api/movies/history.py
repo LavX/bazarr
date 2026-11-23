@@ -34,7 +34,7 @@ class MoviesHistory(Resource):
     get_request_parser.add_argument('include_upgradable', type=inputs.boolean, required=False, default=True,
                                     help='Include the upgradable computation (default includes it)')
 
-    add_source_arguments(get_request_parser)
+    add_source_arguments(get_request_parser, require_opt_in=True)
 
     get_language_model = api_ns_movies_history.model('subtitles_language_model', subtitles_language_model)
 
@@ -97,7 +97,9 @@ class MoviesHistory(Resource):
                                        TableBlacklistMovie.arr_instance_id) \
             .subquery()
 
-        query_conditions = [TableMovies.title.is_not(None), source_filter.arr(TableHistoryMovie.arr_instance_id)]
+        query_conditions = [TableMovies.title.is_not(None)]
+        if source_filter.keys:
+            query_conditions.append(source_filter.arr(TableHistoryMovie.arr_instance_id))
         if not include_embedded:
             # "Treat Embedded Subtitles as Downloaded" writes one action=7 row
             # per episode/language combination; a large library carries six
@@ -234,6 +236,7 @@ class MoviesHistory(Resource):
 
         if mixed:
             data, source_keys = merge_history_rows(database, timeline, movie_history, 'movie',
+                                                   arr_item_column=TableHistoryMovie.__table__.c.movie_id,
                                                    include_upgradable=include_upgradable)
             return marshal({'data': data, 'total': count, 'source_keys': source_keys}, self.mixed_response_model)
 
