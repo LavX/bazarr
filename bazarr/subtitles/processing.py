@@ -28,7 +28,7 @@ from .post_processing import postprocessing
 from .utils import _get_scores
 from .language_profiles import profile_item_language_code
 from .tools.combine.main import try_combine_for_video
-from .tools.subsync_engines import subtitle_write_locks
+from .tools.subsync_engines import regular_subtitle_version, subtitle_write_locks
 from .tools.translate.availability import translation_available
 
 
@@ -356,7 +356,7 @@ def describe_subtitle_download(subtitle, media_type, video_path, subtitles_path,
 def process_subtitle(subtitle, media_type, audio_language, path, max_score, is_upgrade=False, is_manual=False,
                      job_id=None, arr_instance_id=None, *,
                      context=None, validate=None, cancel=None, publication_guard=None, auto_translate=True,
-                     source=None) -> ProcessSubtitlesResult | None:
+                     source=None, source_upgrade_history_id=None) -> ProcessSubtitlesResult | None:
     if media_type == 'sports' and (context is None or validate is None or publication_guard is None):
         raise ValueError('Sports processing requires its owned publication guard')
     if context is not None and media_type != 'sports':
@@ -514,7 +514,14 @@ def process_subtitle(subtitle, media_type, audio_language, path, max_score, is_u
                     with observe_subtitle_change(publication_type, path, downloaded_path, 'download',
                                                  owner_instance_id,
                                                  **({'source': current_source} if source is not None else {})):
+                        previous = regular_subtitle_version(downloaded_path) if source_upgrade_history_id else None
                         postprocessing(command, path, subtitle_path=downloaded_path, lock_paths=lock_paths)
+                        if previous is not None:
+                            current = regular_subtitle_version(downloaded_path)
+                            if current is not None and current != previous:
+                                from media_sources.history import refresh_source_upgrade_history
+
+                                refresh_source_upgrade_history(current_source, downloaded_path, source_upgrade_history_id)
                         set_chmod(subtitles_path=downloaded_path)
         elif command is not None:
             logging.debug(f"BAZARR post-processing skipped because subtitles score isn't below this "  # noqa: G004

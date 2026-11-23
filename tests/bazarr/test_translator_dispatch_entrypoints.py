@@ -619,15 +619,85 @@ def test_an_editor_planner_cannot_release_another_queue_jobs_claim(
     assert env.last_job().state == "completed"
 
 
-@pytest.mark.parametrize("attachment", ["own", "competing"])
+def test_an_editor_planner_cannot_cancel_a_newer_retry(env, monkeypatch, editor_runtime_queue):
+    from threading import Event, Thread, current_thread
+
+    from subtitles.tools.translate import editor
+    from subtitles.tools.translate.runtime.dispatch import Dispatcher
+
+    queue = editor_runtime_queue
+    entered, retry_ready, release = Event(), Event(), Event()
+    original_plan = Dispatcher._plan
+    original_run_plugin = Dispatcher._run_plugin
+
+    def plan(dispatcher, spec):
+        if current_thread() is stale_worker:
+            entered.set()
+            assert retry_ready.wait(8)
+            raise GateClosed("the previous plan is unavailable", "engine_missing")
+        if current_thread() is retry_worker:
+            retry_ready.set()
+            assert release.wait(8)
+        return original_plan(dispatcher, spec)
+
+    def run_plugin(dispatcher, *args, **kwargs):
+        if current_thread() is not retry_worker:
+            raise RuntimeError("the earlier translation failed")
+        return original_run_plugin(dispatcher, *args, **kwargs)
+
+    def pending(position):
+        job_id = editor.enqueue_editor_translation([{"position": position, "line": "Hello"}], "en", "hu")
+        job = queue._reserve_next_job()
+        assert job.job_id == job_id
+        return job
+
+    def execute(job):
+        try:
+            queue._run_job(job)
+        finally:
+            env.session.remove()
+
+    monkeypatch.setattr(Dispatcher, "_plan", plan)
+    monkeypatch.setattr(Dispatcher, "_run_plugin", run_plugin)
+    retry_worker = None
+    stale = pending(0)
+    stale_worker = Thread(target=execute, args=(stale,), daemon=True)
+    stale_worker.start()
+    try:
+        assert entered.wait(8)
+        failed = pending(1)
+        queue._run_job(failed)
+        row = env.last_job()
+        assert failed.status == "failed" and row.state == "awaiting_retry"
+        retry = pending(2)
+        retry_worker = Thread(target=execute, args=(retry,), daemon=True)
+        retry_worker.start()
+        assert retry_ready.wait(8)
+        stale_worker.join(8)
+        assert stale.error["reason"] == "skipped"
+        assert (env.last_job().state, env.last_job().queue_job_id) == ("queued", retry.job_id)
+    finally:
+        release.set()
+        stale_worker.join(8)
+        if retry_worker is not None:
+            retry_worker.join(8)
+    assert retry.status == "completed"
+    assert editor.editor_translation_state(retry.job_id)["lines"] == [{"position": 2, "line": "[hu] Hello"}]
+    fresh = env.last_job()
+    assert (fresh.id, fresh.state, env.history(fresh)["status"]) == (row.id, "completed", "completed")
+
+
+@pytest.mark.parametrize("attachment", ["own", "competing", "due-retry", "late-original"])
 def test_native_dispatch_preserves_its_claim_when_attachment_arrives_late(
         env, media, monkeypatch, editor_runtime_queue, attachment):
-    from threading import Event, Thread
+    from threading import Event, Thread, current_thread
 
     from subtitles.tools.translate import main
     from subtitles.tools.translate.runtime import service
     from subtitles.tools.translate.runtime.dispatch import Dispatcher
+    from subtitles.tools.translate.runtime.failure import AttemptFailure
 
+    env.clock.now = datetime.now()
     queue = editor_runtime_queue
     monkeypatch.setattr(main, "jobs_queue", queue)
     monkeypatch.setattr(service, "jobs_queue", queue)
@@ -640,6 +710,12 @@ def test_native_dispatch_preserves_its_claim_when_attachment_arrives_late(
     attachments = []
     monkeypatch.setattr(main, "_runtime_attach", lambda *args, **kwargs: attachments.append((args, kwargs)))
 
+    if attachment == "due-retry":
+        jobs = jobs_of(env)
+        old_id = jobs.request(str(media.source), target_key("fr")).job_id
+        assert jobs.start(old_id, source_digest="earlier", engine_instance_id=1, settings_revision=1)
+        assert jobs.await_retry(old_id, "rate_limited", "later", retry_at=datetime.now() - timedelta(seconds=1))
+
     first = _request(main, video_path=str(media.video), source_srt_file=str(media.source))
     if attachment == "competing":
         second = _request(main, video_path=str(media.video), source_srt_file=str(media.source),
@@ -650,6 +726,7 @@ def test_native_dispatch_preserves_its_claim_when_attachment_arrives_late(
     ready, release = Event(), Event()
     original_plan = Dispatcher._plan
     original_run_plugin = Dispatcher._run_plugin
+    original_requeue = TranslationJobs.requeue
 
     def plan(dispatcher, spec):
         ready.set()
@@ -659,9 +736,19 @@ def test_native_dispatch_preserves_its_claim_when_attachment_arrives_late(
     def fail_owner(dispatcher, *args, **kwargs):
         ready.set()
         assert release.wait(8)
+        if attachment == "late-original":
+            raise AttemptFailure("rate_limited", "Try again later", retry_after=60)
         raise RuntimeError("the running owner failed")
 
-    if attachment == "own":
+    def requeue(jobs, job_id, *args, **kwargs):
+        if current_thread() is worker:
+            ready.set()
+            assert release.wait(8)
+        return original_requeue(jobs, job_id, *args, **kwargs)
+
+    if attachment == "due-retry":
+        monkeypatch.setattr(TranslationJobs, "requeue", requeue)
+    elif attachment == "own":
         monkeypatch.setattr(Dispatcher, "_plan", plan)
     else:
         monkeypatch.setattr(Dispatcher, "_run_plugin", fail_owner)
@@ -677,19 +764,30 @@ def test_native_dispatch_preserves_its_claim_when_attachment_arrives_late(
     try:
         assert ready.wait(8)
         args, kwargs = attachments[-1]
-        attach(*args, **kwargs)
-        row = env.last_job()
-        assert row.queue_job_id == first
-        assert row.state == ("queued" if attachment == "own" else "running")
+        if attachment != "late-original":
+            attach(*args, **kwargs)
+            row = env.last_job()
+            assert row.queue_job_id == first
+            assert row.state == ("running" if attachment == "competing" else "queued")
     finally:
         release.set()
-        worker.join(8)
+        worker.join(25)
 
-    if attachment == "own":
+    if attachment == "late-original":
+        assert job.status == "failed"
+        row = env.last_job()
+        retry_at = row.retry_at
+        assert row.state == "awaiting_retry" and retry_at > datetime.now()
+        attach(*args, **kwargs)
+        row = env.last_job()
+        assert (row.state, row.queue_job_id, row.retry_at) == ("awaiting_retry", None, retry_at)
+    elif attachment != "competing":
         assert job.status == "completed"
         assert "[fr] One" in media.dest.read_text()
         assert len(media.logged) == 1 and media.logged[0]["action"] == 6
         assert env.last_job().state == "completed"
+        if attachment == "due-retry":
+            assert env.last_job().id == old_id
     else:
         assert job.status == "failed"
         row = env.last_job()

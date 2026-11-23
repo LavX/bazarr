@@ -385,8 +385,9 @@ class Dispatcher:
             if hold:
                 # The editor asks again with the pick it already had, and the engine asked to be left alone.
                 raise DispatchFailed(row.error_class or fail.INTERNAL, hold, retry_later=True, retry_at=row.retry_at)
-            if not jobs.requeue(row.id):
-                return None
+            # The enqueue thread may already have made this retry ready with our queue ID.
+            # Keep the retry bound to its worker and check the fresh owner before dispatch.
+            jobs.requeue(row.id, spec.queue_job_id)
             row = jobs.get(row.id)
         if row is None or row.state != QUEUED:
             return None

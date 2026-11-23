@@ -3,7 +3,7 @@ import json
 import os
 import unicodedata
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from datetime import datetime, timedelta
 from pathlib import Path
 from threading import Event
@@ -194,6 +194,49 @@ def test_scheduled_job_replaces_source_file_and_preserves_original_history(
     assert repository.get_item(context.item_id).missing_subtitles == '[]'
 
 
+def test_scheduled_upgrade_keeps_its_score_after_postprocessing(world, monkeypatch):
+    from app.config import settings
+    from media_sources import repository
+    from media_sources.indexer import index_item
+    from media_sources.translation import _source_hold
+    from subtitles import processing, upgrade
+
+    context = pipeline._movie(world)
+    media = Path(context.path)
+    subtitle = media.with_suffix('.en.srt')
+    subtitle.write_bytes(b'Old subtitle')
+    index_item(context.item_id)
+    history_id = _history(world.db, world.source_id, context.item_id, media, subtitle,
+                          timestamp=datetime.now() - timedelta(days=1))
+    monkeypatch.setattr(settings.general, 'use_postprocessing', True)
+    monkeypatch.setattr(settings.general, 'postprocessing_cmd', 'rewrite-fixture')
+    monkeypatch.setattr(settings.general, 'use_postprocessing_threshold_movie', False)
+    monkeypatch.setattr(settings.translator, 'min_source_score', 100)
+    monkeypatch.setattr(settings.translator, 'min_source_wait_minutes', 0)
+    monkeypatch.setattr(upgrade, 'get_providers', lambda: ['fake'])
+    monkeypatch.setattr(upgrade, 'jobs_queue', Mock())
+    pipeline._download(monkeypatch)
+
+    def rewrite(command, path, *, subtitle_path, **kwargs):
+        assert command == ['rewrite-fixture'] and path == str(media)
+        assert subtitle_path == str(subtitle)
+        when = datetime.now()
+        # Emulate a command finishing several seconds after the publication transaction.
+        world.db.execute(sa.update(repository.History).where(repository.History.c.action == 3).values(
+            timestamp=when - timedelta(seconds=10)))
+        subtitle.write_bytes(pipeline.CONTENT + b'\n')
+        written = (when - timedelta(seconds=1)).timestamp()
+        os.utime(subtitle, (written, written))
+        assert _source_hold(context, str(subtitle), target=world.db) is None
+
+    monkeypatch.setattr(processing, 'postprocessing', rewrite)
+    upgrade.upgrade_source_subtitles(job_id=10)
+
+    assert subtitle.read_bytes() == pipeline.CONTENT + b'\n'
+    assert record_rows(world.db) == [(history_id, 1, None), (history_id + 1, 3, history_id)]
+    assert _source_hold(context, str(subtitle), target=world.db) == 'score'
+
+
 def test_concurrent_source_upgrade_skips_the_same_completed_history_entry(world, monkeypatch):
     from media_sources.indexer import index_item
     from subtitles import download, upgrade
@@ -333,7 +376,10 @@ def test_failed_source_replacement_leaves_upgrade_retryable(world, monkeypatch, 
         elif failure_step == 'insert history':
             sa.event.listen(engine, 'before_cursor_execute', fail_history_insert)
         try:
-            upgrade.upgrade_source_subtitles(job_id=10)
+            expected = (pytest.raises(download.SourceUpgradeHistoryFailed, match='Unable to .* the upgraded subtitle')
+                        if failure_step in ('insert history', 'commit guard') else nullcontext())
+            with expected:
+                upgrade.upgrade_source_subtitles(job_id=10)
         finally:
             if failure_step == 'commit guard':
                 sa.event.remove(engine, 'commit', fail_guard_commit)
@@ -363,6 +409,53 @@ def test_failed_source_replacement_leaves_upgrade_retryable(world, monkeypatch, 
         assert not original.exists()
     assert all(not path.exists() for path in siblings)
     assert sorted(path.read_bytes() for path in media.parent.glob('.bazarr-sync-obsolete-*')) == sorted(siblings.values())
+
+
+def test_postgres_upgrade_keeps_replacement_after_a_lost_commit_acknowledgement(world, backend, monkeypatch):
+    if backend != 'postgresql':
+        pytest.skip('PostgreSQL commit acknowledgement is under test')
+
+    from media_sources import repository
+    from media_sources.indexer import index_item
+    from subtitles import upgrade
+
+    context = pipeline._movie(world)
+    media = Path(context.path)
+    original = media.with_suffix('.en.hi.srt')
+    destination = media.with_suffix('.en.srt')
+    original.write_bytes(b'Old subtitle')
+    index_item(context.item_id)
+    first = _history(world.db, world.source_id, context.item_id, media, original, language='en:hi')
+    monkeypatch.setattr(upgrade, 'get_providers', lambda: ['fake'])
+    monkeypatch.setattr(upgrade, 'jobs_queue', Mock())
+    pipeline._download(monkeypatch)
+    commits = []
+
+    def lose_acknowledgement(connection):
+        if commits or not destination.exists():
+            return
+        row_id = connection.scalar(sa.select(repository.History.c.id).where(repository.History.c.action == 3))
+        if row_id is None:
+            return
+        # Commit the real database transaction, then surface a disconnect to the application's caller.
+        connection.connection.dbapi_connection.commit()
+        commits.append(row_id)
+        connection.invalidate()
+        raise sa.exc.OperationalError('COMMIT', None, OSError('Lost commit acknowledgement'),
+                                      connection_invalidated=True)
+
+    engine = world.db.get_bind()
+    sa.event.listen(engine, 'commit', lose_acknowledgement)
+    try:
+        upgrade.upgrade_source_subtitles(job_id=10)
+    finally:
+        sa.event.remove(engine, 'commit', lose_acknowledgement)
+
+    assert len(commits) == 1
+    assert record_rows(world.db) == [(first, 1, None), (commits[0], 3, first)]
+    assert not original.exists()
+    assert destination.read_bytes() == pipeline.CONTENT
+    assert [event.subtitle_path for event in world.published] == [str(destination), str(original)]
 
 
 def test_postgres_shared_upgrade_blocks_normal_arr_insert_through_publication(world, backend, monkeypatch):
