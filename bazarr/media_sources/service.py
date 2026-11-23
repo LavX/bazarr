@@ -17,7 +17,7 @@ from app.jobs_queue import JobFailed, jobs_queue
 from subtitles.indexer.missing_refresh import queue_missing_subtitles_recalculation
 
 from . import identity, paths, repository
-from .analysis import index_matches_file, local_content_stamp, local_stat, source_search_probes
+from .analysis import indexed_local_content_stamp, index_matches_file, local_content_stamp, local_stat, source_search_probes
 from .context import SourceItemGone, resolve_item, resolve_same_item
 from .db import source_transaction
 from .history import history_log_source
@@ -522,7 +522,7 @@ def search_wanted_item(item_id, created_at, job_id, *, translation_gate=True, ex
     item = session.execute(wanted_items(*items.c).where(*same_row)).first()
     if item is None:
         return
-    stamp = local_content_stamp(item.path)
+    stamp = indexed_local_content_stamp(item)
     if stamp is None or (expected_source is not None and (
             expected_source.item_id, expected_source.path, expected_source.source_id,
             expected_source.library_id, expected_source.wanted_file_stamp
@@ -552,6 +552,8 @@ def search_wanted_item(item_id, created_at, job_id, *, translation_gate=True, ex
     # Settings, indexing and scanning can change eligibility while the translation gate runs.
     current = session.execute(wanted_items(*items.c, profile_id=context.profile_id).where(*same_row)).first()
     if current is None or current.path != context.path or current.library_id != context.library_id:
+        return
+    if indexed_local_content_stamp(current) != stamp:
         return
     languages = [entry for entry in languages if entry in stored_missing_language_candidates(current)]
     if not languages:

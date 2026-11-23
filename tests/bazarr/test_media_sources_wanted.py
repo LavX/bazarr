@@ -364,14 +364,16 @@ def test_adaptive_search_and_provider_throttle_use_existing_attempts(world, monk
     ('en:hi', 'en:forced', 'en'),
     ('en:forced', 'en', 'en:hi'),
 ])
-def test_wanted_adaptive_attempts_keep_subtitle_variants_independent(world, monkeypatch, expired, waiting, ready):
+@pytest.mark.parametrize('recalculate', [True, False])
+def test_wanted_adaptive_attempts_keep_subtitle_variants_independent(
+        world, monkeypatch, expired, waiting, ready, recalculate):
     from app.config import settings
     from media_sources import indexer, repository, wanted
     from subtitles import download
 
     now = datetime.now()
     attempts = [
-        [expired, (now - timedelta(days=60)).timestamp()], [expired, now.timestamp()],
+        [expired, (now - timedelta(days=60)).timestamp()], [expired, (now - timedelta(days=9)).timestamp()],
         [waiting, (now - timedelta(days=14)).timestamp()], [waiting, now.timestamp()],
     ]
     monkeypatch.setattr(settings.general, 'adaptive_searching', True)
@@ -382,9 +384,13 @@ def test_wanted_adaptive_attempts_keep_subtitle_variants_independent(world, monk
         ('en', 'False', 'False'), ('en', 'False', 'True'), ('en', 'True', 'False'),
     ], profile_id=2)
     item = pipeline._movie(world)
-    repository.update_item(item.item_id, world.db, profile_id=profile, failed_attempts=str(attempts))
+    repository.update_item(item.item_id, world.db, profile_id=profile)
     indexer.recalculate_missing_subtitles(library_id=world.library_id)
-    assert set(ast.literal_eval(repository.get_item(item.item_id).missing_subtitles)) == {waiting, ready}
+    repository.update_item(item.item_id, world.db, failed_attempts=str(attempts))
+    if recalculate:
+        indexer.recalculate_missing_subtitles(library_id=world.library_id)
+    stored = {waiting, ready} if recalculate else {waiting, ready, expired}
+    assert set(ast.literal_eval(repository.get_item(item.item_id).missing_subtitles)) == stored
 
     providers = Mock(return_value=[])
     monkeypatch.setattr(download, 'generate_subtitles', providers)
@@ -397,6 +403,67 @@ def test_wanted_adaptive_attempts_keep_subtitle_variants_independent(world, monk
     recorded = ast.literal_eval(repository.get_item(item.item_id).failed_attempts)
     assert [row for row in recorded if row[0] != ready] == sorted(attempts, key=lambda row: row[0])
     assert sum(code == ready for code, _ in recorded) == 1
+
+
+def test_wanted_waits_for_the_index_of_a_replaced_recording(world, monkeypatch):
+    from media_sources import indexer, wanted
+    from subtitles import download
+
+    item = pipeline._movie(world)
+    path = Path(item.path)
+    replacement = path.with_name('Replacement.mkv')
+    replacement.write_bytes(path.read_bytes() + b'new recording')
+    replacement.replace(path)
+    providers = Mock(return_value=[])
+    monkeypatch.setattr(download, 'generate_subtitles', providers)
+
+    wanted.wanted_search_missing_subtitles_sources(kind='movie', job_id=1)
+    providers.assert_not_called()
+
+    assert indexer.index_item(item.item_id) is not None
+    wanted.wanted_search_missing_subtitles_sources(kind='movie', job_id=2)
+    providers.assert_called_once()
+
+
+def test_wanted_adjacent_subtitle_publication_blocks_arr_admission(world, monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor, TimeoutError
+    from threading import Event
+
+    from media_sources import wanted
+    from media_sources.db import source_transaction
+    from subtitles import download
+
+    if world.db.get_bind().dialect.name != 'postgresql':
+        pytest.skip('SQLite already serializes registry writers')
+    item = pipeline._movie(world)
+    pipeline._download(monkeypatch)
+    insertion = pipeline._legacy_owner_insert(world, 'radarr', Path(item.path))
+    started = Event()
+    writes = []
+    can_publish = download._wanted_source_can_publish
+
+    def admit():
+        started.set()
+        with source_transaction() as connection:
+            connection.exec_driver_sql("SET LOCAL lock_timeout = '3s'")
+            connection.execute(insertion)
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        def check(*args, target=None, **kwargs):
+            allowed = can_publish(*args, target=target, **kwargs)
+            if allowed and target is not None:
+                writes.append(pool.submit(admit))
+                assert started.wait(2)
+                with pytest.raises(TimeoutError):
+                    writes[-1].result(timeout=0.15)
+            return allowed
+
+        monkeypatch.setattr(download, '_wanted_source_can_publish', check)
+        wanted.wanted_search_missing_subtitles_sources(kind='movie', job_id=1)
+        (writer,) = writes
+        writer.result(timeout=4)
+
+    assert Path(item.path).with_suffix('.en.srt').read_bytes() == pipeline.CONTENT
 
 
 def test_search_all_queues_both_jobs_and_source_job_saves_through_shared_pipeline(
