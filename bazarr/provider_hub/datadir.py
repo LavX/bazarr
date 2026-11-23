@@ -14,6 +14,7 @@ import stat
 import tempfile
 import threading
 import time
+from concurrent.futures import Future, wait
 from functools import wraps
 from pathlib import Path, PurePosixPath, PureWindowsPath
 
@@ -31,6 +32,10 @@ logger = logging.getLogger(__name__)
 
 class DataFolderError(ValueError):
     """A data tree could not be safely copied or read."""
+
+
+class SnapshotRefused(DataFolderError):
+    """A release snapshot could not be taken safely at this time."""
 
 
 def declared(manifest) -> bool:
@@ -230,20 +235,61 @@ def dispatch(plugin_id: str):
             _gate.notify_all()
 
 
+def _resume_dispatch(plugin_id: str) -> None:
+    with _gate:
+        _paused.discard(plugin_id)
+        _gate.notify_all()
+
+
+def _settle_async(plugin_id: str, settle, deadline: float) -> Future:
+    result = Future()
+
+    def run() -> None:
+        try:
+            remaining = deadline - time.monotonic()
+            result.set_result(remaining > 0 and settle(plugin_id, remaining))
+        except BaseException as error:
+            result.set_exception(error)
+
+    threading.Thread(target=run, name="plugin-data-settle", daemon=True).start()
+    return result
+
+
 @contextlib.contextmanager
-def quiesced(plugin_id: str, settle, timeout: float):
+def quiesced(plugin_id: str, settle, timeout: float, *, bounded: bool = False):
     """Close admission, let dispatches enter their pools, then wait for workers to end."""
     deadline = time.monotonic() + timeout
     with _gate:
-        _paused.add(plugin_id)
+        acquired = plugin_id not in _paused
+        if acquired:
+            _paused.add(plugin_id)
+    # Some callers already hold release_lock. They must not wait for a fence
+    # owner that may need that lock to take its snapshot.
+    if not acquired:
+        yield False
+        return
+    release_pause = True
     try:
         with _gate:
-            ready = _gate.wait_for(lambda: plugin_id not in _entering, timeout=timeout)
-        yield ready and settle(plugin_id, max(0.0, deadline - time.monotonic()))
+            ready = _gate.wait_for(lambda: plugin_id not in _entering,
+                                   timeout=max(0.0, deadline - time.monotonic()))
+        remaining = deadline - time.monotonic()
+        if not ready or remaining <= 0:
+            yield False
+        elif bounded:
+            # A launcher's shutdown can outlast the wait for its proof. Keep
+            # admission closed until that shutdown step has finished.
+            result = _settle_async(plugin_id, settle, deadline)
+            done, _ = wait([result], timeout=max(0.0, deadline - time.monotonic()))
+            if not done:
+                release_pause = False
+                result.add_done_callback(lambda _: _resume_dispatch(plugin_id))
+            yield bool(done) and result.result()
+        else:
+            yield settle(plugin_id, remaining)
     finally:
-        with _gate:
-            _paused.discard(plugin_id)
-            _gate.notify_all()
+        if release_pause:
+            _resume_dispatch(plugin_id)
 
 
 def serialized(function):

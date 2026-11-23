@@ -595,9 +595,10 @@ def _wait_exited(held: "list[_Held]", timeout: float) -> "list[_Held]":
     deadline = time.monotonic() + timeout
     while True:
         left = [item for item in held if not _exited(item.fd)]
-        if not left or time.monotonic() >= deadline:
+        remaining = deadline - time.monotonic()
+        if not left or remaining <= 0:
             return left
-        time.sleep(POLL_SECONDS)
+        time.sleep(min(POLL_SECONDS, remaining))
 
 
 def _end(item: _Session, result: SweepResult, term_wait: float) -> None:
@@ -646,6 +647,7 @@ def sweep_leftovers(
     instance: "str | None" = None,
     term_wait: float = TERM_WAIT_SECONDS,
     verify_writers: bool = False,
+    deadline: float | None = None,
 ) -> SweepResult:
     """End the processes a previous run of this install left behind. Never raises.
 
@@ -675,8 +677,10 @@ def sweep_leftovers(
             result.reason = "no pidfd_open and pidfd_send_signal: a process cannot be pinned before it is signalled"
             logger.debug("Provider Hub: leftover process sweep skipped: %s", result.reason)
             return result
-        deadline = time.monotonic() + SCAN_BUDGET_SECONDS
-        found, _ = _scan(instance, deadline, result)
+        scan_deadline = time.monotonic() + SCAN_BUDGET_SECONDS
+        if deadline is not None:
+            scan_deadline = min(scan_deadline, deadline)
+        found, _ = _scan(instance, scan_deadline, result)
         if result.truncated:
             result.reason = "the /proc scan was partial, so nothing was signalled"
             logger.warning("Provider Hub: %s", result.reason)
@@ -691,6 +695,12 @@ def sweep_leftovers(
                 routine = refusal.startswith(("it is this process's", "it holds this process's", "it holds a child", "its owner is still"))
                 logger.log(logging.DEBUG if routine else logging.INFO, "Provider Hub: leftover plugin session %d left alone: %s", number, refusal)
                 continue
+            # A short check may refuse a surviving session. Give the normal
+            # sweep its full grace to clean descendants before escalating.
+            if deadline is not None and deadline - time.monotonic() < term_wait + KILL_WAIT_SECONDS:
+                result.truncated = True
+                result.reason = "not enough time to confirm leftover worker shutdown"
+                break
             _end(item, result, term_wait)
         if result.ended:
             logger.warning("Provider Hub: ended %d plugin session(s) left by a previous run", result.ended)
@@ -701,15 +711,17 @@ def sweep_leftovers(
     return result
 
 
-def previous_workers_stopped(config_dir) -> bool:
+def previous_workers_stopped(config_dir, *, deadline: float | None = None) -> bool:
     """Check that no writer from the previous host still owns plugin data."""
     if sys.platform != "linux":
-        return activity.previous_workers_stopped(config_dir)
-    result = sweep_leftovers(config_dir, verify_writers=True)
+        return activity.previous_workers_stopped(config_dir, deadline=deadline)
+    result = sweep_leftovers(config_dir, verify_writers=True, deadline=deadline)
     if (not result.supported or result.truncated or result.unreadable
             or any(session.outcome != "ended" for session in result.sessions)):
         return False
-    deadline = time.monotonic() + spawn.LAUNCHER_CLEANUP_SECONDS
+    launcher_deadline = time.monotonic() + spawn.LAUNCHER_CLEANUP_SECONDS
+    if deadline is not None:
+        launcher_deadline = min(launcher_deadline, deadline)
     for pid, started in result.launchers.items():
         while True:
             try:
@@ -720,10 +732,11 @@ def previous_workers_stopped(config_dir) -> bool:
                 return False
             if current != started or state in {"Z", "X"}:
                 break
-            if time.monotonic() >= deadline:
+            remaining = launcher_deadline - time.monotonic()
+            if remaining <= 0:
                 return False
-            time.sleep(POLL_SECONDS)
-    return True
+            time.sleep(min(POLL_SECONDS, remaining))
+    return deadline is None or time.monotonic() < deadline
 
 
 _sweep_thread: "threading.Thread | None" = None
