@@ -9,7 +9,7 @@ from contextlib import nullcontext
 from datetime import datetime, timedelta
 from media_servers.events import publication_callback
 
-from flask import make_response, jsonify, request
+from flask import current_app, make_response, jsonify, request
 from flask_restx import Resource, Namespace
 from werkzeug.utils import secure_filename
 
@@ -28,7 +28,7 @@ from subtitles.new_subtitle import (SubtitleFileExists, write_new_subtitle,
                                     apply_subtitle_chmod as _apply_subtitle_chmod,
                                     write_bytes_atomically as _write_bytes_atomically)
 from subtitles.tools.subsync_engines import (SubtitleDestinationChanged, SubtitleSourceChanged,
-                                             subtitle_mutation, subtitle_write_locks)
+                                             regular_subtitle_version, subtitle_mutation, subtitle_write_locks)
 from utilities.helper import get_target_folder
 from utilities.path_mappings import path_mappings
 
@@ -588,6 +588,17 @@ def _source_metadata(source):
 
 def _source_etag(source, version):
     return hashlib.sha256(repr((source.item_id, source.created_at, version)).encode()).hexdigest()
+
+
+def _matches_source_etag(if_match, etag):
+    # The editor sends a bare tag. Other clients can send the quoted GET ETag.
+    if if_match in (etag, f'"{etag}"'):
+        return True
+    # Flask-Compress 1.25 appends the configured gzip coding to strong GET ETags.
+    if current_app.config.get('COMPRESS_ALGORITHM') == 'gzip':
+        gzip_etag = f'{etag}:gzip'
+        return if_match in (gzip_etag, f'"{gzip_etag}"')
+    return False
 
 
 def read_subtitle_file(path):
@@ -1192,10 +1203,14 @@ def _save_source_subtitle(operation, encoded):
 
     source, subtitle = operation.source, operation.sidecar
     if_match = request.headers.get('If-Match')
-    if if_match and if_match.strip('"') != _source_etag(source, subtitle.version):
-        return 'Subtitle file has been modified since last read', 412
     try:
-        new_etag = _source_etag(source, operation.write(encoded, 'edit'))
+        with subtitle_write_locks(source.path, subtitle.path):
+            if if_match is not None and (
+                not _matches_source_etag(if_match, _source_etag(source, subtitle.version))
+                or regular_subtitle_version(subtitle.path) != subtitle.version
+            ):
+                return 'Subtitle file has been modified since last read', 412
+            new_etag = _source_etag(source, operation.write(encoded, 'edit'))
     except (FileNotFoundError, SubtitleSourceChanged, SubtitleDestinationChanged):
         return 'The source subtitle changed. Open it again before saving.', 409
     except PermissionError:

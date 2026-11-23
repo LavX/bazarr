@@ -1,5 +1,7 @@
 """Use the public subtitle toolbox and editor on source items on SQLite and PostgreSQL."""
 import ast
+import gzip
+import json
 import os
 import re
 from datetime import datetime
@@ -10,6 +12,8 @@ from unittest.mock import Mock
 import pytest
 import sqlalchemy as sa
 from flask import Flask
+from flask_compress import Compress
+from requests.utils import DEFAULT_ACCEPT_ENCODING
 
 from media_source_helpers import ARR_AND_SPORTS_TABLES, table_counts, video
 import test_media_sources_pipeline as pipeline
@@ -176,6 +180,80 @@ def test_source_tools_write_files_history_and_index_for_each_media_kind(toolbox,
     assert {entry[0] for entry in ast.literal_eval(repository.get_item(context.item_id).subtitles)} == {'en', 'de', 'hu'}
     status = toolbox.client.get(f'/api/sources/items/{context.item_id}/subtitles/en/sync-status', headers=HEADERS)
     assert status.status_code == 200 and status.json['synced'] is True
+
+
+@pytest.mark.parametrize('quoted', [True, False])
+def test_source_editor_saves_with_compressed_get_etag(toolbox, quoted):
+    app = toolbox.client.application
+    app.config['COMPRESS_ALGORITHM'] = 'gzip'
+    Compress(app)
+    toolbox.client.environ_base['HTTP_ACCEPT_ENCODING'] = DEFAULT_ACCEPT_ENCODING
+
+    context = pipeline._movie(toolbox.world)
+    path, _ = _sidecars(toolbox, context)
+    document = '\n'.join(
+        f'{index + 1}\n00:{index // 60:02}:{index % 60:02},000 --> 00:{index // 60:02}:{index % 60:02},900\n'
+        f'Original dialogue for cue {index + 1}.\n' for index in range(300)
+    )
+    path.write_text(document)
+    url = f'/api/sources/items/{context.item_id}/subtitles/en/content'
+    opened = toolbox.client.get(url, headers=HEADERS)
+    assert opened.status_code == 200
+    assert opened.headers['Content-Encoding'] == 'gzip'
+    assert json.loads(gzip.decompress(opened.data))['content'] == document
+    read_etag = opened.headers['ETag']
+    assert read_etag.endswith(':gzip"')
+
+    cached = toolbox.client.get(url, headers={**HEADERS, 'If-None-Match': read_etag})
+    assert cached.status_code == 304
+    assert cached.headers['ETag'] == read_etag
+    assert 'Accept-Encoding' in cached.vary
+    assert not cached.data
+
+    for invalid_etag in (f'W/{read_etag}', f'"{read_etag}"', f'{read_etag[:-1]}:gzip"',
+                         read_etag.replace(':gzip', ':br'), '*'):
+        refused = toolbox.client.put(url, headers={**HEADERS, 'If-Match': invalid_etag},
+                                     json={'content': 'must not replace'})
+        assert refused.status_code == 412
+        assert path.read_text() == document
+
+    write_etag = read_etag if quoted else read_etag[1:-1]
+    saved = toolbox.client.put(url, headers={**HEADERS, 'If-Match': write_etag},
+                               json={'content': document})
+    assert saved.status_code == 204
+    assert path.read_text() == document
+
+    stale = toolbox.client.put(url, headers={**HEADERS, 'If-Match': write_etag},
+                               json={'content': 'competing edit'})
+    assert stale.status_code == 412
+    assert path.read_text() == document
+
+    reopened = toolbox.client.get(url, headers={**HEADERS, 'If-None-Match': read_etag})
+    assert reopened.status_code == 200
+    assert reopened.headers['ETag'] != read_etag
+    assert reopened.headers['ETag'] == f'{saved.headers["ETag"][:-1]}:gzip"'
+
+
+def test_source_editor_rejects_an_edit_after_capturing_the_sidecar(toolbox, monkeypatch):
+    from media_sources.subtitle_tools import SourceSubtitleTool
+
+    context = pipeline._movie(toolbox.world)
+    path, _ = _sidecars(toolbox, context)
+    url = f'/api/sources/items/{context.item_id}/subtitles/en/content'
+    opened = toolbox.client.get(url, headers=HEADERS)
+    assert opened.status_code == 200
+    capture = SourceSubtitleTool.capture
+
+    def capture_then_edit(*args):
+        operation = capture(*args)
+        operation.write(SYNCED.encode(), 'edit')
+        return operation
+
+    monkeypatch.setattr(SourceSubtitleTool, 'capture', capture_then_edit)
+    stale = toolbox.client.put(url, headers={**HEADERS, 'If-Match': opened.headers['ETag']},
+                               json={'content': 'must not replace'})
+    assert stale.status_code == 412
+    assert path.read_text() == SYNCED
 
 
 def test_source_sync_status_uses_edit_history_within_mtime_tolerance(toolbox):
