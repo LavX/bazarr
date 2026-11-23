@@ -168,8 +168,8 @@ class JobsQueuePort:
     def status(self, queue_job_id: int) -> str | None:
         from app.jobs_queue import jobs_queue
 
-        found = jobs_queue.list_jobs_from_queue(job_id=queue_job_id)
-        return found[0].get("status") if found else None
+        found = jobs_queue.get_job_result(queue_job_id)
+        return found["status"] if found is not None else None
 
 
 # --------------------------------------------------------------------------- checkpoints

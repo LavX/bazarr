@@ -507,7 +507,8 @@ class Dispatcher:
     def _await_retry(self, jobs, history, state, error_class, message, *, retry_at=None, detail=None):
         # A replacement can cancel the retry as soon as the job state is visible.
         with ledger_transaction(self.session):
-            if jobs.await_retry(state.job_id, error_class, message, retry_at=retry_at):
+            if (jobs.await_retry(state.job_id, error_class, message, retry_at=retry_at)
+                    and history.get_by_job(state.ledger_id) is not None):
                 history.finish_job(state.ledger_id, "awaiting_retry", error_class=error_class,
                                    error_detail=detail or message)
 

@@ -715,16 +715,28 @@ def test_an_answer_that_fails_the_checks_is_refused_and_never_fails_over(env, co
     assert env.history(env.last_job())["status"] == "failed"
 
 
-def test_a_bug_in_the_dispatcher_leaves_the_job_awaiting_a_retry_and_not_running(env, monkeypatch):
+@pytest.mark.parametrize("history_opened", [True, False], ids=["opened", "failed-to-open"])
+def test_a_bug_in_the_dispatcher_leaves_the_job_awaiting_a_retry_and_not_running(env, monkeypatch, history_opened):
     from subtitles.tools.translate.runtime.dispatch import Dispatcher
+    from subtitles.tools.translate.runtime.history import HistoryStore
 
     env.ai_engine()
-    monkeypatch.setattr(Dispatcher, "_compose", lambda *args: (_ for _ in ()).throw(RuntimeError("a bug")))
-    with pytest.raises(RuntimeError):
+
+    def fail_dispatch(*args, **kwargs):
+        raise RuntimeError("a bug")
+
+    if history_opened:
+        monkeypatch.setattr(Dispatcher, "_compose", fail_dispatch)
+    else:
+        monkeypatch.setattr(HistoryStore, "open_job", fail_dispatch)
+    with pytest.raises(RuntimeError, match="a bug"):
         env.dispatcher().run(make_spec())
     job = env.last_job()
     assert (job.state, job.error_class) == ("awaiting_retry", "internal")
-    assert env.history(job)["status"] == "awaiting_retry"
+    if history_opened:
+        assert env.history(job)["status"] == "awaiting_retry"
+    else:
+        assert env.history(job) is None
     assert UsageLedger(env.session, clock=env.clock).job_hold(str(job.id)) == 0
 
 
