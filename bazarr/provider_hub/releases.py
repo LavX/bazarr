@@ -47,7 +47,7 @@ from __future__ import annotations
 
 import functools
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from typing import Any
 
@@ -91,6 +91,8 @@ DRAIN_PREVIOUS = "drain_previous"
 # ``split`` consumes it: that release is kept as failed, or as the previous release again when it came from there.
 # A staged release that leaves its slot for any other reason is forgotten, whatever error the row shows.
 FAIL_STAGED = "fail_staged"
+# The old data key when activation promotes a stage with a freshly verified data directory.
+PROMOTE_STAGED_DATA = "promote_staged_data"
 
 metadata = sa.MetaData()
 
@@ -384,7 +386,7 @@ def split(data: dict[str, Any], rows: list[dict[str, Any]], *, now: str | None =
     """The document to store, and the release-table changes that go with it.
 
     ``data`` is the full dict a caller works with. It is not changed (except that
-    the ``DRAIN_PREVIOUS`` and ``FAIL_STAGED`` marks are consumed from its rows):
+    the transient release marks are consumed from its rows):
     the returned document is a copy without the release fields of the rows whose
     slots became releases. ``rows`` are the stored releases at the moment of the
     write, with their bindings, and with ``manifest`` for the ones in a slot.
@@ -416,6 +418,7 @@ def split(data: dict[str, Any], rows: list[dict[str, Any]], *, now: str | None =
             continue
         drain = bool(installation.pop(DRAIN_PREVIOUS, False))
         failure = installation.pop(FAIL_STAGED, None)
+        staged_data = installation.pop(PROMOTE_STAGED_DATA, None)
         row = dict(installation)
         active = _slot(row, _ACTIVE_KEYS, True)
         staged = _slot(row, _STAGED_KEYS, False)
@@ -457,7 +460,9 @@ def split(data: dict[str, Any], rows: list[dict[str, Any]], *, now: str | None =
         if staged is not None:
             settle(staged, find(staged, (STAGED, RETIRED)), STAGED)
         if active is not None:
-            settle(active, find(active, (ACTIVE, STAGED, DRAINING, RETIRED)), ACTIVE)
+            promoted = (find(replace(active, data_key=staged_data), (STAGED,))
+                        if staged_data is not None and staged is None else None)
+            settle(active, promoted or find(active, (ACTIVE, STAGED, DRAINING, RETIRED)), ACTIVE)
         # What the slots no longer name.
         for release in existing:
             if release["id"] in claimed:
