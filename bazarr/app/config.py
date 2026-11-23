@@ -1842,7 +1842,7 @@ def restore_persisted_settings():
 _native_settings_save_lock = threading.RLock()
 _subtitle_settings_condition = threading.Condition()
 _subtitle_settings_readers = 0
-_subtitle_settings_saving = False
+_subtitle_settings_writer = None
 
 
 @contextlib.contextmanager
@@ -1850,7 +1850,7 @@ def pin_subtitle_settings():
     """Allow concurrent subtitle publications while keeping destination settings stable."""
     global _subtitle_settings_readers
     with _subtitle_settings_condition:
-        pinned = not _subtitle_settings_saving
+        pinned = _subtitle_settings_writer is None
         if pinned:
             _subtitle_settings_readers += 1
     try:
@@ -1865,18 +1865,23 @@ def pin_subtitle_settings():
 @contextlib.contextmanager
 def _subtitle_settings_write_guard():
     """Drain publication readers before taking the configuration write locks."""
-    global _subtitle_settings_saving
+    global _subtitle_settings_writer
+    writer = threading.get_ident()
     with _subtitle_settings_condition:
-        _subtitle_settings_condition.wait_for(lambda: not _subtitle_settings_saving)
-        _subtitle_settings_saving = True
+        _subtitle_settings_condition.wait_for(
+            lambda: _subtitle_settings_writer is None or _subtitle_settings_writer == writer)
+        outermost = _subtitle_settings_writer is None
+        _subtitle_settings_writer = writer
     try:
-        with _subtitle_settings_condition:
-            _subtitle_settings_condition.wait_for(lambda: not _subtitle_settings_readers)
+        if outermost:
+            with _subtitle_settings_condition:
+                _subtitle_settings_condition.wait_for(lambda: not _subtitle_settings_readers)
         yield
     finally:
-        with _subtitle_settings_condition:
-            _subtitle_settings_saving = False
-            _subtitle_settings_condition.notify_all()
+        if outermost:
+            with _subtitle_settings_condition:
+                _subtitle_settings_writer = None
+                _subtitle_settings_condition.notify_all()
 
 # What a written save could not finish for the provider logins it changed: the
 # cached logins still to clear, and whether the credential throttles still need

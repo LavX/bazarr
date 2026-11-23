@@ -1058,6 +1058,9 @@ def test_a_secret_stored_while_a_save_moves_the_address_is_caught_under_the_lock
                 entered.append(True)
                 config.save_settings(
                     [(f"settings-{provider_id}-captcha_solver_token", ["late-token"])])
+                # Returning from the inner save must leave the outer publication guard held.
+                with config.pin_subtitle_settings() as pinned:
+                    assert not pinned
             return real_lock.__enter__()
 
         def __exit__(self, *_exception):
@@ -1072,6 +1075,8 @@ def test_a_secret_stored_while_a_save_moves_the_address_is_caught_under_the_lock
         assert "Re-enter the key to use a different address" in str(refusal.value)
         assert config.settings[provider_id]["captcha_solver_url"] == "https://old.example:8191"
         assert config.settings[provider_id]["captcha_solver_token"] == "late-token"
+        with config.pin_subtitle_settings() as pinned:
+            assert pinned
     finally:
         config.settings.unset(provider_id.upper(), force=True)
 
