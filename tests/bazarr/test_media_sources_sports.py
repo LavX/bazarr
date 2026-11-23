@@ -420,6 +420,116 @@ def test_source_sports_history_exclusion_preserves_a_replacement_subtitle(client
     assert {(row['origin'], row['subs_id']) for row in mixed} == {('arr', 'sp1'), ('source', 'first-release')}
 
 
+@pytest.mark.parametrize('same_release', [True, False], ids=['same-release', 'different-release'])
+def test_sports_history_exclusion_orders_publication_across_source_events(
+        client, arr_library, writes, isolated_jobs, tmp_path, monkeypatch, same_release):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Event, get_ident
+    from time import monotonic, sleep
+
+    import sqlalchemy as sa
+    from app.config import settings
+    from media_sources import manual as source_manual, repository
+    from media_sources.context import resolve_item
+    from subtitles import manual
+
+    monkeypatch.setattr(settings.general, 'subfolder', 'current')
+    monkeypatch.setattr(settings.general, 'minimum_score_sports', 0)
+    _, _, download_id, _ = _events(arr_library, tmp_path, name='Downloading Sports')
+    owner, _, exclude_id, _ = _events(arr_library, tmp_path, name='Excluded Sports')
+    downloading, excluding = resolve_item(download_id), resolve_item(exclude_id)
+    assert downloading.source_id != excluding.source_id
+    download_path = Path(downloading.path).with_suffix('.en.srt')
+    exclude_path = Path(excluding.path).with_suffix('.en.srt')
+    exclude_path.write_bytes(pipeline.CONTENT)
+
+    payload, release = manual_tests._search_for_download(client, monkeypatch, downloading)
+    excluded_release = release if same_release else f'{release}-other'
+    history_id = repository.insert_history(
+        arr_library, item_id=exclude_id, source_id=owner, item_kind='sports_event', action=1,
+        description='Downloaded', provider=payload['provider'], language='en', subs_id=excluded_release,
+        video_path=excluding.path, subtitles_path=str(exclude_path), item_title='Recorded title')
+    native_history = client.get('/api/sports/history', headers=HEADERS).data
+    monkeypatch.setattr(manual, 'download_subtitles', lambda *args, **kwargs: None)
+    submitted = client.post(f'/api/sources/items/{download_id}/manual', headers=HEADERS, json=payload)
+    assert submitted.status_code == 202
+    job = isolated_jobs._reserve_next_job()
+    assert job.job_id == submitted.get_json()['job_id']
+
+    engine = arr_library.get_bind()
+    postgres = engine.dialect.name == 'postgresql'
+    checked, allow_write, sqlite_attempt = Event(), Event(), Event()
+    publication_pids, exclusion_threads = [], []
+    original_blacklist = source_manual.get_blacklist_source
+
+    def hold_after_check(kind, target=None):
+        pairs = original_blacklist(kind, target)
+        if isinstance(target, sa.engine.Connection):
+            if postgres:
+                publication_pids.append(target.scalar(sa.text('SELECT pg_backend_pid()')))
+            checked.set()
+            assert allow_write.wait(15), 'Timed out waiting for the History exclusion'
+        return pairs
+
+    def record_sqlite_writer(connection, cursor, statement, parameters, context, executemany):
+        if get_ident() in exclusion_threads and statement == 'BEGIN IMMEDIATE':
+            sqlite_attempt.set()
+
+    monkeypatch.setattr(source_manual, 'get_blacklist_source', hold_after_check)
+    exclusion_client = client.application.test_client()
+
+    def exclude():
+        exclusion_threads.append(get_ident())
+        return exclusion_client.post(
+            f'/api/sports/history/{history_id}/blacklist', headers=HEADERS,
+            query_string={'sources': 1, 'origin': 'source'}, json={
+                'source_id': owner, 'source_item_id': exclude_id, 'language': 'en',
+                'provider': payload['provider'], 'subs_id': excluded_release,
+            })
+
+    if not postgres:
+        sa.event.listen(engine, 'before_cursor_execute', record_sqlite_writer)
+    try:
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            publication = executor.submit(isolated_jobs._run_job, job)
+            try:
+                assert checked.wait(12), job.error
+                exclusion = executor.submit(exclude)
+                if postgres and same_release:
+                    waiting = sa.text("""SELECT EXISTS (
+                        SELECT 1 FROM pg_locks WHERE locktype = 'advisory' AND NOT granted
+                        AND :publisher = ANY(pg_blocking_pids(pid)))""")
+                    until = monotonic() + 5
+                    while not exclusion.done() and monotonic() < until:
+                        if arr_library.scalar(waiting, {'publisher': publication_pids[0]}):
+                            break
+                        sleep(0.02)
+                    assert not exclusion.done(), 'Sports History excluded the release before publication committed'
+                    assert arr_library.scalar(waiting, {'publisher': publication_pids[0]})
+                elif postgres:
+                    assert exclusion.result(timeout=7).status_code == 204
+                else:
+                    assert sqlite_attempt.wait(5)
+                    with pytest.raises(TimeoutError):
+                        exclusion.result(timeout=0.2)
+                assert not download_path.exists()
+                assert exclude_path.read_bytes() == pipeline.CONTENT
+            finally:
+                allow_write.set()
+            assert publication.result(timeout=12), job.error
+            assert exclusion.result(timeout=12).status_code == 204
+    finally:
+        if not postgres:
+            sa.event.remove(engine, 'before_cursor_execute', record_sqlite_writer)
+
+    assert download_path.read_bytes() == exclude_path.read_bytes() == pipeline.CONTENT
+    (entry,) = arr_library.execute(sa.select(repository.Blacklist)).all()
+    assert (entry.source_id, entry.item_id, entry.subs_id, entry.item_title) == (
+        owner, exclude_id, excluded_release, 'Recorded title')
+    assert [event.operation for event in writes] == ['download']
+    assert client.get('/api/sports/history', headers=HEADERS).data == native_history
+
+
 @pytest.mark.parametrize('topology', ['library', 'retained_owner', 'removed_owner'])
 def test_unfiltered_sports_bulk_can_clear_arr_when_a_source_has_no_exclusions(
         client, arr_library, tmp_path, monkeypatch, topology):

@@ -9,7 +9,7 @@ from sportarr import history, library, workflows
 from sportarr.pagination import validate_page
 
 from . import repository
-from .db import source_transaction
+from .db import lock_source_release, source_transaction
 from .history import get_blacklist_source
 from .union import includes_sources, union_page
 from .wanted import wanted_list_items
@@ -218,6 +218,7 @@ def exclude_history_release(session, history_id, source_id, item_id, provider, s
     """Exclude the historical release without assuming its subtitle path still names that artifact."""
     table = repository.History
     with source_transaction(session) as connection:
+        lock_source_release(connection, (_KIND, provider, subs_id))
         # The source and item locks precede the history lock used by writers and cascades.
         if repository.get_source(source_id, connection, lock_key=True) is None:
             return False
