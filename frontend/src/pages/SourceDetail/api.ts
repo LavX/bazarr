@@ -6,6 +6,7 @@ import { refreshWhenJobFinishes } from "@/apis/hooks/jobWatch";
 import { mediaSourcesKey, useMediaSources } from "@/apis/hooks/mediaSources";
 import queryClient from "@/apis/queries";
 import { QueryKeys } from "@/apis/queries/keys";
+import { expireSourceSubtitleDocument } from "@/apis/queries/sourceSubtitleDocument";
 import BaseApi from "@/apis/raw/base";
 import { withInlineErrors } from "@/apis/raw/inlineWrites";
 import mediaSources from "@/apis/raw/mediaSources";
@@ -289,14 +290,19 @@ class SourceDetailApi extends BaseApi {
     return data;
   }
 
-  removeSubtitle(id: number, subtitle: Subtitle) {
-    return withInlineErrors(() =>
+  async removeSubtitle(id: number, subtitle: Subtitle) {
+    await withInlineErrors(() =>
       this.delete(`/items/${id}/subtitles`, {
         subtitles_path: subtitle.path,
         language: subtitle.code2,
         hi: subtitle.hi,
         forced: subtitle.forced,
       }),
+    );
+    void expireSourceSubtitleDocument(
+      queryClient,
+      id,
+      buildSubtitleLanguageKey(subtitle),
     );
   }
 }

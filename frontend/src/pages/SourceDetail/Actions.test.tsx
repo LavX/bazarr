@@ -1,16 +1,25 @@
 /* eslint-disable camelcase */
+import { ReactElement } from "react";
 import { createMemoryRouter, RouterProvider } from "react-router";
 import userEvent from "@testing-library/user-event";
 import { http, HttpResponse } from "msw";
 import { vi } from "vitest";
 import queryClient from "@/apis/queries";
 import { QueryKeys } from "@/apis/queries/keys";
+import SubtitleViewer from "@/pages/SubtitleEditor";
+import type { Cue } from "@/pages/SubtitleEditor/types";
 import { AllProviders } from "@/providers";
-import { rawRender, screen, waitFor, within } from "@/tests";
+import { act, rawRender, screen, waitFor, within } from "@/tests";
 import server from "@/tests/mocks/node";
 import * as files from "@/utilities/files";
 import { sourceDetailKeys, SourceItem } from "./api";
 import { SourceMovieDetailView, SourceSeriesDetailView } from ".";
+
+// The viewer virtualizes these rows, and jsdom has no viewport to lay out.
+vi.mock("@/pages/SubtitleEditor/CueTable", () => ({
+  default: ({ cues }: { cues: Cue[] }) =>
+    cues.map((cue) => <p key={cue.id}>{cue.text}</p>),
+}));
 
 type Kind = "movie" | "episode";
 type User = ReturnType<typeof userEvent.setup>;
@@ -78,7 +87,11 @@ function fixture(kind: Kind): SourceItem {
   };
 }
 
-function openPage(kind: Kind, changes: Partial<SourceItem> = {}) {
+function openPage(
+  kind: Kind,
+  changes: Partial<SourceItem> = {},
+  activeDocument?: ReactElement,
+) {
   const item = { ...fixture(kind), ...changes };
   const state: { current: SourceItem | null; reads: (string | null)[] } = {
     current: item,
@@ -135,6 +148,7 @@ function openPage(kind: Kind, changes: Partial<SourceItem> = {}) {
   rawRender(
     <AllProviders>
       <RouterProvider router={router} />
+      {activeDocument}
     </AllProviders>,
   );
   return { item, state, router };
@@ -237,6 +251,17 @@ describe.each<Kind>(["movie", "episode"])(
       async (action) => {
         const user = userEvent.setup();
         const { item, router } = openPage(kind);
+        const cachedDocument = [
+          QueryKeys.Subtitles,
+          "content",
+          "source",
+          item.id,
+          "en:hi",
+          undefined,
+          null,
+          null,
+        ];
+        queryClient.setQueryData(cachedDocument, "previous document");
         await openItem(user, item);
         await openMenu(user, item);
         await user.click(await screen.findByRole("menuitem", { name: action }));
@@ -248,6 +273,7 @@ describe.each<Kind>(["movie", "episode"])(
         expect(
           await screen.findByText("Source subtitle destination"),
         ).toBeVisible();
+        expect(queryClient.getQueryData(cachedDocument)).toBeUndefined();
         await waitFor(() =>
           expect(
             screen.queryByRole("dialog", { name: item.title }),
@@ -474,50 +500,122 @@ describe.each<Kind>(["movie", "episode"])(
   },
 );
 
-it("combines downloaded languages from the ordinary source movie control", async () => {
+it.each([false, true])(
+  "pins selected indexed variants in Combine (selected input removed: %s)",
+  async (removed) => {
+    const user = userEvent.setup();
+    const { subtitles } = fixture("movie");
+    const { item, state } = openPage("movie", {
+      subtitles: [
+        ...subtitles,
+        { ...subtitles[0], hi: false, path: "/media/movie.en.srt" },
+      ],
+    });
+    const combined: unknown[] = [];
+    server.use(
+      http.post(
+        "/api/sources/items/7/subtitles/combine",
+        async ({ request }) => {
+          combined.push(await request.json());
+          return HttpResponse.json({
+            status: "built",
+            path: "/media/movie.en.combined-fr.srt",
+          });
+        },
+      ),
+    );
+    await openItem(user, item);
+    const button = await screen.findByRole("button", {
+      name: "Combine Subtitles",
+    });
+    await waitFor(() => expect(button).toBeEnabled());
+    await user.click(button);
+    const dialog = await screen.findByRole("dialog", {
+      name: "Combine subtitles",
+    });
+    for (const language of ["FR", "EN (movie.en.hi.srt)"]) {
+      const input = within(dialog).getByPlaceholderText("Add language");
+      await user.click(input);
+      const listbox = await waitFor(() => {
+        const id = input.getAttribute("aria-controls");
+        const value = screen
+          .getAllByRole("listbox", { hidden: true })
+          .find((element) => element.id === id);
+        if (!value) throw new Error("The language selector did not open");
+        return value;
+      });
+      await user.click(
+        within(listbox).getByRole("option", { name: language, hidden: true }),
+      );
+    }
+    if (removed) {
+      state.current = { ...item, subtitles: item.subtitles.slice(1) };
+    }
+    await user.click(within(dialog).getByRole("button", { name: "Generate" }));
+    if (removed) {
+      expect(await screen.findByText(/no longer listed/)).toBeVisible();
+      expect(dialog).toBeVisible();
+      expect(combined).toEqual([]);
+    } else {
+      expect(
+        await screen.findByText("Combined subtitle generated"),
+      ).toBeVisible();
+      expect(combined).toEqual([
+        {
+          languages: ["fr", "en"],
+          format: "srt",
+          inputs: [
+            { path: "/media/movie.fr.srt", language: "fr" },
+            { path: "/media/movie.en.hi.srt", language: "en:hi" },
+          ],
+        },
+      ]);
+    }
+    expect(state.reads.length).toBeGreaterThanOrEqual(2);
+    expect(writes).toEqual([]);
+  },
+);
+
+it("rebuilds the selected source combined output with its format, order and indexed inputs", async () => {
   const user = userEvent.setup();
-  const { item, state } = openPage("movie");
+  const { subtitles } = fixture("movie");
+  const { item } = openPage("movie", {
+    subtitles: [
+      ...subtitles,
+      {
+        ...subtitles[1],
+        language: "fr:combined-en",
+        path: "/media/movie.fr.combined-en.ass",
+      },
+    ],
+  });
   const combined: unknown[] = [];
   server.use(
     http.post("/api/sources/items/7/subtitles/combine", async ({ request }) => {
       combined.push(await request.json());
       return HttpResponse.json({
         status: "built",
-        path: "/media/movie.en.combined-fr.srt",
+        path: "/media/movie.fr.combined-en.ass",
       });
     }),
   );
   await openItem(user, item);
-  const button = await screen.findByRole("button", {
-    name: "Combine Subtitles",
+  const row = await screen.findByRole("row", {
+    name: /movie.fr.combined-en.ass/,
   });
-  await waitFor(() => expect(button).toBeEnabled());
-  await user.click(button);
-  const dialog = await screen.findByRole("dialog", {
-    name: "Combine subtitles",
-  });
-  for (const language of ["EN", "FR"]) {
-    const input = within(dialog).getByPlaceholderText("Add language");
-    await user.click(input);
-    const listbox = await waitFor(() => {
-      const id = input.getAttribute("aria-controls");
-      const value = screen
-        .getAllByRole("listbox", { hidden: true })
-        .find((element) => element.id === id);
-      if (!value) throw new Error("The language selector did not open");
-      return value;
-    });
-    await user.click(
-      within(listbox).getByRole("option", { name: language, hidden: true }),
-    );
-  }
-  await user.click(within(dialog).getByRole("button", { name: "Generate" }));
-  await waitFor(() =>
-    expect(combined).toEqual([{ languages: ["en", "fr"], format: "srt" }]),
-  );
+  await user.click(within(row).getByLabelText("Actions"));
+  await user.click(await screen.findByRole("menuitem", { name: "Rebuild" }));
   expect(await screen.findByText("Combined subtitle generated")).toBeVisible();
-  expect(state.reads.length).toBeGreaterThanOrEqual(2);
-  expect(writes).toEqual([]);
+  expect(combined).toEqual([
+    {
+      languages: ["fr", "en"],
+      format: "ass",
+      inputs: [
+        { path: "/media/movie.fr.srt", language: "fr" },
+        { path: "/media/movie.en.hi.srt", language: "en:hi" },
+      ],
+    },
+  ]);
 });
 
 it("excludes a current provider release from its physical source episode row", async () => {
@@ -565,6 +663,7 @@ it("excludes a current provider release from its physical source episode row", a
   await waitFor(() =>
     expect(excluded).toEqual([
       {
+        history_id: "81",
         provider: "fixture-provider",
         subs_id: "source-release-81",
         subtitles_path: "/media/episode.en.hi.srt",
@@ -575,4 +674,152 @@ it("excludes a current provider release from its physical source episode row", a
     ]),
   );
   expect(writes).toEqual([]);
+});
+
+it("refreshes an open source viewer after a same-language upload and removes the document on deletion", async () => {
+  const user = userEvent.setup();
+  const activeDocument = createMemoryRouter(
+    [
+      {
+        path: "/subtitles/preview/:mediaType/:mediaId/:language",
+        element: <SubtitleViewer />,
+      },
+    ],
+    { initialEntries: ["/subtitles/preview/source/7/en%3Ahi"] },
+  );
+  const { item, state } = openPage(
+    "movie",
+    {},
+    <section aria-label="Open source viewer">
+      <RouterProvider router={activeDocument} />
+    </section>,
+  );
+  const viewer = within(
+    screen.getByRole("region", { name: "Open source viewer" }),
+  );
+  let cue: string | null = "Original source cue";
+  const posted = vi.fn();
+  const untouchedKey = [
+    QueryKeys.Subtitles,
+    "content",
+    "source",
+    item.id,
+    "en",
+  ];
+  queryClient.setQueryData(untouchedKey, "plain variant");
+  server.use(
+    http.get("/api/system/languages", () =>
+      HttpResponse.json([{ code2: "en", name: "English", enabled: true }]),
+    ),
+    http.get(
+      "/api/sources/items/7/subtitles/:language/content",
+      ({ params }) => {
+        if (!cue)
+          return HttpResponse.json(
+            { message: "Subtitle file no longer exists" },
+            { status: 404 },
+          );
+        return HttpResponse.json(
+          {
+            content: `1\n00:00:01,000 --> 00:00:02,000\n${cue}\n`,
+            encoding: "utf-8",
+            format: "srt",
+            language: params.language,
+            size: 80,
+            mediaId: 7,
+          },
+          { headers: { ETag: `"${cue}"` } },
+        );
+      },
+    ),
+    http.post("/api/sources/items/7/subtitles", ({ request }) => {
+      posted(request.headers.get("Content-Type"));
+      return HttpResponse.json(
+        { job_id: 71, session: "upload-run" },
+        { status: 202 },
+      );
+    }),
+    http.delete("/api/sources/items/7/subtitles", () => {
+      cue = null;
+      state.current = { ...item, subtitles: item.subtitles.slice(1) };
+      return new HttpResponse(null, { status: 204 });
+    }),
+  );
+  await openItem(user, item);
+  expect(await screen.findByText("Original source cue")).toBeVisible();
+  const open = await screen.findByRole("button", { name: "Upload" });
+  await waitFor(() => expect(open).toBeEnabled());
+  await user.click(open);
+  const upload = await screen.findByRole("dialog", {
+    name: "Upload Subtitles",
+  });
+  await user.upload(
+    within(upload).getByLabelText("Subtitle file"),
+    new File(["replacement"], "movie.en.hi.srt"),
+  );
+  await user.click(within(upload).getByRole("combobox", { name: "Language" }));
+  await user.click(await screen.findByRole("option", { name: "English" }));
+  await user.click(
+    within(upload).getByRole("checkbox", { name: "Hearing impaired" }),
+  );
+  await user.click(within(upload).getByRole("button", { name: "Upload" }));
+  await waitFor(() =>
+    expect(posted).toHaveBeenCalledWith(
+      expect.stringContaining("multipart/form-data"),
+    ),
+  );
+  expect(screen.getByText("Original source cue")).toBeVisible();
+  cue = "Replacement source cue";
+  act(() => {
+    queryClient.setQueryData(
+      [QueryKeys.System, QueryKeys.Jobs],
+      [{ job_id: 71, session: "upload-run", status: "completed" }],
+    );
+  });
+  expect(await screen.findByText("Replacement source cue")).toBeVisible();
+  expect(screen.queryByText("Original source cue")).not.toBeInTheDocument();
+
+  await openMenu(user, item);
+  await user.click(await screen.findByRole("menuitem", { name: "Delete..." }));
+  const confirm = await screen.findByRole("dialog", {
+    name: /deleted|Delete Subtitle/,
+  });
+  await user.click(within(confirm).getByRole("button", { name: "Delete" }));
+  await waitFor(() => {
+    expect(
+      screen.queryByText("Replacement source cue"),
+    ).not.toBeInTheDocument();
+    expect(
+      viewer.getByText(/status code 404|Subtitle file no longer exists/),
+    ).toBeVisible();
+  });
+  expect(queryClient.getQueryData(untouchedKey)).toBe("plain variant");
+});
+
+it("keeps file actions available for a forced source subtitle without offering automatic Sync", async () => {
+  const user = userEvent.setup();
+  const { subtitles } = fixture("movie");
+  const { item } = openPage("movie", {
+    subtitles: [
+      {
+        ...subtitles[0],
+        hi: false,
+        forced: true,
+        path: "/media/movie.en.forced.srt",
+      },
+      ...subtitles.slice(1),
+    ],
+  });
+  await openItem(user, item);
+  const forced = await screen.findByRole("row", {
+    name: /movie.en.forced.srt/,
+  });
+  await user.click(within(forced).getByLabelText("Actions"));
+  const edit = await screen.findByRole("menuitem", { name: "Edit" });
+  await waitFor(() => expect(edit).toBeVisible());
+  expect(
+    within(screen.getByRole("menu")).queryByRole("menuitem", {
+      name: "Sync...",
+    }),
+  ).not.toBeInTheDocument();
 });

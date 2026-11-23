@@ -245,7 +245,7 @@ it("excludes the current source release with its language flags and refreshes it
           {
             ...row,
             history_id: 18,
-            action: 10,
+            action: 9,
             provider: null,
             subs_id: null,
             upgradable: false,
@@ -274,6 +274,7 @@ it("excludes the current source release with its language flags and refreshes it
   ).toBeVisible();
   expect(writes).toEqual([
     {
+      history_id: "17",
       provider: "source-provider",
       subs_id: "source-release",
       subtitles_path: subtitle.path,
@@ -414,14 +415,16 @@ it("never reuses release metadata from a colliding item or a different language 
       subtitle,
     ),
   ).toBeUndefined();
-  expect(
-    sourceReleaseForSubtitle(
-      [
-        { ...row, action: 5, history_id: 19, provider: null, subs_id: null },
-        row,
-      ],
-      item,
-      subtitle,
-    ),
-  ).toBe(row);
+  for (const action of [5, 10]) {
+    expect(
+      sourceReleaseForSubtitle(
+        [
+          { ...row, action, history_id: 19, provider: null, subs_id: null },
+          row,
+        ],
+        item,
+        subtitle,
+      ),
+    ).toBeUndefined();
+  }
 });

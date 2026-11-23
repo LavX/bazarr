@@ -8,6 +8,11 @@ import {
 } from "@fortawesome/free-solid-svg-icons";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ColumnDef } from "@tanstack/react-table";
+import queryClient from "@/apis/queries";
+import {
+  expireSourceSubtitleDocument,
+  sourceSubtitleVariant,
+} from "@/apis/queries/sourceSubtitleDocument";
 import BaseApi from "@/apis/raw/base";
 import { withInlineErrors } from "@/apis/raw/inlineWrites";
 import { Action, Toolbox } from "@/components";
@@ -78,7 +83,7 @@ export function sourceReleaseForSubtitle(
     (row) =>
       ownsHistory(row, item) &&
       row.subtitles_path === subtitle.path &&
-      ![5, 9, 10].includes(row.action),
+      ![7, 9].includes(row.action),
   );
   if (
     release &&
@@ -118,6 +123,7 @@ class SourceHistoryApi extends BaseApi {
 
   async exclude(id: number, row: SourceHistoryRow) {
     await this.post(`/${id}/blacklist`, {
+      history_id: row.history_id,
       provider: row.provider,
       subs_id: row.subs_id,
       subtitles_path: row.subtitles_path,
@@ -125,6 +131,14 @@ class SourceHistoryApi extends BaseApi {
       hi: !!row.language?.hi,
       forced: !!row.language?.forced,
     });
+    if (row.language) {
+      const { code2, hi, forced } = row.language;
+      void expireSourceSubtitleDocument(
+        queryClient,
+        id,
+        sourceSubtitleVariant(code2, hi, forced),
+      );
+    }
   }
 }
 

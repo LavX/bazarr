@@ -623,6 +623,7 @@ declare namespace Api {
   interface CombineRequest {
     languages?: string[];
     format?: "srt" | "ass";
+    inputs?: { path: string; language: string }[];
   }
 
   interface CombineResult {

@@ -8,6 +8,8 @@ import {
 } from "@fortawesome/free-solid-svg-icons";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import { useCombineSubtitles } from "@/apis/hooks/combine";
+import queryClient from "@/apis/queries";
+import { expireSourceSubtitleDocument } from "@/apis/queries/sourceSubtitleDocument";
 import api from "@/apis/raw";
 import { withInlineErrors } from "@/apis/raw/inlineWrites";
 import { Action, Toolbox } from "@/components";
@@ -75,12 +77,17 @@ export function sourceSubtitleSelection(
   };
 }
 
+export function canSynchronizeSourceSubtitle(subtitle: Subtitle) {
+  return !subtitle.forced && canSynchronizeSubtitle(subtitle);
+}
+
 function combineInputs(item: SourceItem) {
-  return item.subtitles.filter(
-    (row) =>
-      row.path?.endsWith(".srt") &&
-      !isSyncOutputSubtitle(row) &&
-      !isCombinedOutputSubtitle(row),
+  return item.subtitles.flatMap((row) =>
+    row.path?.toLowerCase().endsWith(".srt") &&
+    !isSyncOutputSubtitle(row) &&
+    !isCombinedOutputSubtitle(row)
+      ? [{ path: row.path, language: buildSubtitleLanguageKey(row) }]
+      : [],
   );
 }
 
@@ -90,20 +97,16 @@ function combineScope(item: SourceItem, output?: Subtitle) {
     itemId: item.id,
     validate: async (body: Api.CombineRequest) => {
       const current = await sourceDetailApi.requireCurrentItem(item, output);
-      const before = combineInputs(item);
-      const after = combineInputs(current);
+      const available = combineInputs(current);
       if (
-        body.languages?.some(
-          (language) =>
-            !before.some(
+        !body.inputs ||
+        body.inputs.length !== body.languages?.length ||
+        body.inputs.some(
+          (input, index) =>
+            input.language.split(":")[0] !== body.languages?.[index] ||
+            !available.some(
               (row) =>
-                row.code2 === language &&
-                after.some(
-                  (candidate) =>
-                    candidate.path === row.path &&
-                    buildSubtitleLanguageKey(candidate) ===
-                      buildSubtitleLanguageKey(row),
-                ),
+                row.path === input.path && row.language === input.language,
             ),
         )
       ) {
@@ -115,10 +118,29 @@ function combineScope(item: SourceItem, output?: Subtitle) {
   };
 }
 
+function rebuildInputs(item: SourceItem, languages: string[]) {
+  const rank = (language: string) => {
+    const fields = language.split(":");
+    if (fields.includes("forced")) return 2;
+    return fields.includes("hi") ? 1 : 0;
+  };
+  const candidates = combineInputs(item).sort(
+    (a, b) =>
+      rank(a.language) - rank(b.language) || a.path.localeCompare(b.path),
+  );
+  return languages.flatMap((language) => {
+    const candidate = candidates.find(
+      (row) => row.language.split(":")[0] === language,
+    );
+    return candidate ? [candidate] : [];
+  });
+}
+
 function useSourceCombineAction(item: SourceItem) {
   const modals = useModals();
+  const sourceInputs = combineInputs(item);
   const availableLanguages = [
-    ...new Set(combineInputs(item).map((row) => row.code2)),
+    ...new Set(sourceInputs.map((row) => row.language.split(":")[0])),
   ];
   return {
     canCombine: availableLanguages.length >= 2,
@@ -126,6 +148,7 @@ function useSourceCombineAction(item: SourceItem) {
       modals.openContextModal(CombineModal, {
         scope: combineScope(item),
         availableLanguages,
+        sourceInputs,
       }),
   };
 }
@@ -188,6 +211,7 @@ export function SourceSubtitleMenu({
         );
         return;
       }
+      await expireSourceSubtitleDocument(queryClient, item.id, language);
       modals.closeAll();
       openEditor(
         subtitleEditorUrl(
@@ -207,7 +231,7 @@ export function SourceSubtitleMenu({
       <SubtitleToolsMenu
         selections={[sourceSubtitleSelection(item, subtitle)]}
         menu={{ onChange: setOpened }}
-        canSync={canSynchronizeSubtitle(subtitle)}
+        canSync={canSynchronizeSourceSubtitle(subtitle)}
         isCombinedOutput={combined}
         onAction={(action) => {
           if (action === "view" || action === "edit" || action === "download") {
@@ -221,7 +245,10 @@ export function SourceSubtitleMenu({
             const body = combineRequestForSubtitle(subtitle);
             if (!body) return;
             rebuild.mutate(
-              { scope: combineScope(item, subtitle), body },
+              {
+                scope: combineScope(item, subtitle),
+                body: { ...body, inputs: rebuildInputs(item, body.languages) },
+              },
               {
                 onSuccess: (result) => {
                   if (result.status === "built" && !result.error) {

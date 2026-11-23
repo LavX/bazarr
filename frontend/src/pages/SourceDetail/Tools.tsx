@@ -18,7 +18,6 @@ import { withModal } from "@/modules/modals";
 import { basename } from "@/utilities/files";
 import {
   buildSubtitleLanguageKey,
-  canSynchronizeSubtitle,
   isCombinedOutputSubtitle,
 } from "@/utilities/subtitles";
 import {
@@ -32,6 +31,7 @@ import {
 } from "./api";
 import { SourceHistoryButton, SourceUpgradeButton } from "./History";
 import {
+  canSynchronizeSourceSubtitle,
   OpenSourceEditor,
   SourceCombineButton,
   SourceSubtitleMenu,
@@ -153,7 +153,7 @@ function SourceToolsView({
             )}
             fileActions={false}
             canSync={chosen.every(({ subtitle }) =>
-              canSynchronizeSubtitle(subtitle),
+              canSynchronizeSourceSubtitle(subtitle),
             )}
             canTranslate={chosen.every(
               ({ subtitle }) => !isCombinedOutputSubtitle(subtitle),

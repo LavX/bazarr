@@ -12,16 +12,19 @@ import { showNotification } from "@mantine/notifications";
 import { CombineScope, useCombineSubtitles } from "@/apis/hooks/combine";
 import { useModals, withModal } from "@/modules/modals";
 import { notification } from "@/modules/notification";
+import { basename } from "@/utilities/files";
 
 interface Props {
   scope: CombineScope;
   availableLanguages: string[];
+  sourceInputs?: NonNullable<Api.CombineRequest["inputs"]>;
   onSubmit?: () => void;
 }
 
 const CombineForm: FunctionComponent<Props> = ({
   scope,
   availableLanguages,
+  sourceInputs,
   onSubmit,
 }) => {
   const [selected, setSelected] = useState<string[]>([]);
@@ -29,9 +32,41 @@ const CombineForm: FunctionComponent<Props> = ({
   const { mutateAsync, isPending } = useCombineSubtitles();
   const modals = useModals();
 
-  const addLang = (code: string | null) => {
-    if (code && selected.length < 3 && !selected.includes(code)) {
-      setSelected([...selected, code]);
+  const options = sourceInputs
+    ? sourceInputs.map((input, index) => {
+        const code = input.language.split(":")[0];
+        const multipleFiles =
+          sourceInputs.filter((row) => row.language.split(":")[0] === code)
+            .length > 1;
+        return {
+          value: String(index),
+          code,
+          label: multipleFiles
+            ? `${code.toUpperCase()} (${basename(input.path)})`
+            : code.toUpperCase(),
+        };
+      })
+    : availableLanguages.map((code) => ({
+        value: code,
+        code,
+        label: code.toUpperCase(),
+      }));
+  const languageFor = (value: string) =>
+    sourceInputs ? sourceInputs[Number(value)].language.split(":")[0] : value;
+  const languages = selected.map(languageFor);
+  const choicesFor = (index?: number) =>
+    options.filter(
+      (option) =>
+        !languages.some((code, i) => i !== index && code === option.code),
+    );
+
+  const addLang = (value: string | null) => {
+    if (
+      value &&
+      selected.length < 3 &&
+      !languages.includes(languageFor(value))
+    ) {
+      setSelected([...selected, value]);
     }
   };
 
@@ -47,7 +82,13 @@ const CombineForm: FunctionComponent<Props> = ({
     try {
       const result = await mutateAsync({
         scope,
-        body: { languages: selected, format },
+        body: {
+          languages,
+          format,
+          ...(sourceInputs && {
+            inputs: selected.map((value) => sourceInputs[Number(value)]),
+          }),
+        },
       });
       if (result.status === "built" && result.error) {
         // Published, but a follow-up step did not complete. Reporting this as
@@ -93,10 +134,7 @@ const CombineForm: FunctionComponent<Props> = ({
         {selected.map((code, idx) => (
           <Group key={`${code}-${idx}`}>
             <Select
-              data={availableLanguages.map((c) => ({
-                value: c,
-                label: c.toUpperCase(),
-              }))}
+              data={choicesFor(idx)}
               value={code}
               onChange={(next) => {
                 if (next) {
@@ -115,9 +153,7 @@ const CombineForm: FunctionComponent<Props> = ({
         {selected.length < 3 && (
           <Select
             placeholder="Add language"
-            data={availableLanguages
-              .filter((c) => !selected.includes(c))
-              .map((c) => ({ value: c, label: c.toUpperCase() }))}
+            data={choicesFor()}
             onChange={addLang}
             style={{ width: 160 }}
           />

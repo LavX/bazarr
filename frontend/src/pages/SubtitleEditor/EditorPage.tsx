@@ -238,13 +238,18 @@ export default function EditorPage() {
   // Load cues into document state when data arrives. Placeholder data is the
   // subtitle the editor just left, shown until the new one answers; it is
   // never loaded as the new one.
+  const serverEtag = queryResult?.etag?.replace(/^"|"$/g, "");
   useEffect(() => {
-    if (parseResult && !loadedRef.current && !isPlaceholderData) {
+    if (!parseResult || isPlaceholderData) return;
+    const sourceReplaced =
+      mediaType === "source" && serverEtag && serverEtag !== etagRef.current;
+    if (!loadedRef.current || (sourceReplaced && !docState.dirty)) {
       dispatch({ type: "LOAD", cues: parseResult.cues });
       loadedRef.current = true;
       setLoaded(true);
+      if (mediaType === "source") etagRef.current = serverEtag ?? "";
     }
-  }, [parseResult, isPlaceholderData]);
+  }, [parseResult, isPlaceholderData, mediaType, serverEtag, docState.dirty]);
 
   // Auto-save to localStorage on every change (debounced 2s)
   const autoSaveKey = buildEditorAutosaveKey(
@@ -348,10 +353,8 @@ export default function EditorPage() {
   // refetch after POST create, etc.). Backend sends ETag with quotes,
   // e.g. '"abc123"'. Strip them so the If-Match header works correctly.
   useEffect(() => {
-    if (queryResult?.etag) {
-      etagRef.current = queryResult.etag.replace(/^"|"$/g, "");
-    }
-  }, [queryResult?.etag]);
+    if (mediaType !== "source" && serverEtag) etagRef.current = serverEtag;
+  }, [mediaType, serverEtag]);
 
   // Selection state
   const [selectedIndex, setSelectedIndex] = useState(0);
@@ -624,7 +627,14 @@ export default function EditorPage() {
   const handleSave = useCallback(() => {
     // Until the subtitle this URL names has loaded, the document is the one
     // the editor just left, and saving it here would write it under this name.
-    if (!mediaType || !mediaId || !language || isPlaceholderData) return;
+    if (
+      !mediaType ||
+      !mediaId ||
+      !language ||
+      isPlaceholderData ||
+      (mediaType === "source" && !serverEtag)
+    )
+      return;
 
     // Commit any uncommitted text from the detail pane textarea before
     // serializing. This handles the case where the user typed text and
@@ -733,6 +743,14 @@ export default function EditorPage() {
             // eslint-disable-next-line @typescript-eslint/no-explicit-any
             const status = (err as any)?.response?.status;
             if (status === 412) {
+              if (mediaType === "source") {
+                showNotification({
+                  title: "Subtitle changed",
+                  message: "The source file changed while you were editing.",
+                  color: "red",
+                });
+                return;
+              }
               // ETag mismatch: file was modified externally.
               // Force save by retrying without ETag (skip conflict check).
               saveMutation.mutate(
@@ -798,6 +816,7 @@ export default function EditorPage() {
     encoding,
     isNewSubtitle,
     isPlaceholderData,
+    serverEtag,
     saveMutation,
     createMutation,
     autoSaveKey,

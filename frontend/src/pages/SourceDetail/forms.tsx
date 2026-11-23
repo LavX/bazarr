@@ -13,6 +13,10 @@ import {
   TextInput,
 } from "@mantine/core";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
+import {
+  expireSourceSubtitleDocument,
+  sourceSubtitleVariant,
+} from "@/apis/queries/sourceSubtitleDocument";
 import { withInlineErrors } from "@/apis/raw/inlineWrites";
 import { ManualSearchView } from "@/components/modals/ManualSearchModal";
 import { useModals, withModal } from "@/modules/modals";
@@ -238,7 +242,15 @@ function SourceUploadForm({ item }: { item: SourceItemTarget }) {
             const job = await withInlineErrors(() =>
               sourceDetailApi.upload(item.id, file, language, hi, forced),
             );
-            await waitForJob(client, job.job_id, job.session);
+            try {
+              await waitForJob(client, job.job_id, job.session);
+            } finally {
+              void expireSourceSubtitleDocument(
+                client,
+                item.id,
+                sourceSubtitleVariant(language, hi, forced),
+              );
+            }
           })
           .then(() => modals.closeSelf())
           .catch(() => undefined);

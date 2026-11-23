@@ -15,11 +15,13 @@ import { createMemoryRouter, RouterProvider } from "react-router";
 import userEvent from "@testing-library/user-event";
 import { http, HttpResponse } from "msw";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import queryClient from "@/apis/queries";
+import { expireSourceSubtitleDocument } from "@/apis/queries/sourceSubtitleDocument";
 import SubtitleViewer from "@/pages/SubtitleEditor";
 import EditorPage from "@/pages/SubtitleEditor/EditorPage";
 import { buildEditorAutosaveKey } from "@/pages/SubtitleEditor/editorScope";
 import { AllProviders } from "@/providers";
-import { rawRender, screen, waitFor } from "@/tests";
+import { act, rawRender, screen, waitFor } from "@/tests";
 import server from "@/tests/mocks/node";
 
 vi.mock("@/pages/SubtitleEditor/VideoPreview", () => ({ default: () => null }));
@@ -490,4 +492,55 @@ describe("the viewer on an embedded track", () => {
     expect(asked).toEqual(["embedded"]);
     expect(codecs).toEqual(["subrip"]);
   });
+});
+
+it("loads a replaced source document into the open editor and saves only with its current version", async () => {
+  const user = userEvent.setup();
+  const put = vi.fn();
+  let content = FILE;
+  let revision = "old";
+  server.use(
+    ...pageHandlers,
+    http.get("/api/sources/items/30/subtitles/:language/content", () =>
+      HttpResponse.json(
+        {
+          content,
+          encoding: "utf-8",
+          format: "srt",
+          language: "en:hi",
+          size: content.length,
+          mediaId: 30,
+        },
+        { headers: { ETag: `"${revision}"` } },
+      ),
+    ),
+    http.put(
+      "/api/sources/items/30/subtitles/:language/content",
+      async ({ request }) => {
+        const received = request.headers.get("If-Match");
+        put(received, await request.json());
+        return new HttpResponse(null, { status: 412 });
+      },
+    ),
+  );
+  openAt("/subtitles/edit/source/30/en%3Ahi");
+  expect(
+    (await screen.findAllByText("From the file on disk")).length,
+  ).toBeGreaterThan(0);
+
+  content = TRACK;
+  revision = "replacement";
+  await act(() => expireSourceSubtitleDocument(queryClient, 30, "en:hi"));
+  expect(
+    (await screen.findAllByText("From the container")).length,
+  ).toBeGreaterThan(0);
+  expect(screen.queryByText("From the file on disk")).not.toBeInTheDocument();
+  await user.click(screen.getByRole("button", { name: "Save" }));
+  expect(
+    await screen.findByText("The source file changed while you were editing."),
+  ).toBeVisible();
+  expect(put).toHaveBeenCalledExactlyOnceWith(
+    "replacement",
+    expect.objectContaining({ content: SAVED }),
+  );
 });

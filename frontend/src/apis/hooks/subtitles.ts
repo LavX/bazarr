@@ -704,6 +704,7 @@ export function useSubtitleContent(
     },
     enabled: !!mediaType && mediaId !== undefined && !!language,
     staleTime: mediaType === "source" && validateSource ? 0 : 5 * 60 * 1000,
+    ...(mediaType === "source" && { placeholderData: () => undefined }),
     retry: (failureCount, error) => {
       if (
         mediaType === "source" &&
