@@ -46,15 +46,15 @@ def _source_paths(item, language):
                 yield entry[1]
 
 
-def _source_ready(source, subtitle_path, *, new_download=False, score=None):
+def _source_hold(source, subtitle_path, *, new_download=False, score=None):
     wait_minutes = settings.translator.min_source_wait_minutes
     min_score = settings.translator.min_source_score
     if new_download and wait_minutes:
-        return False
+        return 'wait'
     if score is not None and score < min_score:
-        return False
+        return 'score'
     if not (wait_minutes or (min_score and score is None)):
-        return True
+        return None
     history = repository.History.c
     rows = handle().execute(select(history.subtitles_path, history.action, history.timestamp,
                                   history.score, history.score_out_of).where(
@@ -63,12 +63,13 @@ def _source_ready(source, subtitle_path, *, new_download=False, score=None):
     ).order_by(history.timestamp.desc(), history.id.desc())).all()
     written_at, hand_upload = source_history_for_wait(rows, subtitle_path, lambda path: (path,))
     if wait_minutes and not (hand_upload or source_wait_elapsed(subtitle_path, written_at)):
-        return False
+        return 'wait'
     if min_score and score is None and written_at is not None and not hand_upload:
         row = next((row for row in rows if row.action != 5), None)
-        if row is not None and row.score is not None and row.score_out_of:
-            return row.score * 100 / row.score_out_of >= min_score
-    return True
+        if (row is not None and row.score is not None and row.score_out_of
+                and row.score * 100 / row.score_out_of < min_score):
+            return 'score'
+    return None
 
 
 def _target_code(to_lang, forced, hi):
@@ -84,10 +85,19 @@ def automatic_translation_is_current(source, subtitle_path, from_lang, to_lang, 
     missing = ast.literal_eval(item.missing_subtitles or '[]')
     rule = build_translate_from_map(get_profiles_list(profile_id=source.profile_id)).get(target)
     return (target in missing and rule is not None and rule['from'] == from_lang
-            and subtitle_path in _source_paths(item, from_lang) and _source_ready(source, subtitle_path))
+            and subtitle_path in _source_paths(item, from_lang) and _source_hold(source, subtitle_path) is None)
 
 
-def queue_missing_translations(source, *, downloaded_path=None, downloaded_language=None, score=None):
+def _already_translated(source, target):
+    history = repository.History.c
+    path = handle().scalar(select(history.subtitles_path).where(
+        history.item_id == source.item_id, history.language == target, history.action == 6
+    ).order_by(history.timestamp.desc(), history.id.desc()).limit(1))
+    return bool(path and os.path.isfile(path))
+
+
+def queue_missing_translations(source, *, downloaded_path=None, downloaded_language=None, score=None,
+                               hold_waiting=False):
     """Queue eligible source translations and return the target codes their jobs cover.
 
     The source wanted caller can pass those codes over when forming its provider search. A just downloaded
@@ -117,6 +127,9 @@ def queue_missing_translations(source, *, downloaded_path=None, downloaded_langu
         forced, hi = rule['forced'], rule['hi']
         if target not in missing or to_lang == from_lang:
             continue
+        if _already_translated(source, target):
+            covered.add(target)
+            continue
         if downloaded_path is not None:
             if from_lang != downloaded_language or downloaded_path not in _source_paths(item, from_lang):
                 continue
@@ -126,7 +139,10 @@ def queue_missing_translations(source, *, downloaded_path=None, downloaded_langu
         if not subtitle_path or translation_recently_failed(
                 None, 'source', source.item_id, from_lang, to_lang, forced, hi, source_created_at=source.created_at):
             continue
-        if not _source_ready(source, subtitle_path, new_download=downloaded_path is not None, score=score):
+        hold = _source_hold(source, subtitle_path, new_download=downloaded_path is not None, score=score)
+        if hold is not None:
+            if hold_waiting and hold == 'wait':
+                covered.add(target)
             continue
         destination = translated_destination_path(source.path, to_lang, forced, hi)
         owners = SourcePublicationOwnerIndex()

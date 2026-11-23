@@ -478,27 +478,90 @@ def _search_source_item(item_id, job_id, translation_gate, expected_source):
                 or refreshed.path != context.path or item.path != context.path):
             raise JobFailed('The source file moved while the search was starting. Try again.', reason='conflict')
         context = refreshed
-    languages = _missing_languages(item)
-    covered = set()
-    if translation_gate and languages:
-        from .translation import queue_missing_translations
-
-        try:
-            covered = queue_missing_translations(context)
-        except Exception:
-            logging.exception('BAZARR could not queue a translation for source item %s', item_id)
-        else:
-            languages = [entry for entry in languages if _language_code(*entry) not in covered]
+    languages = _search_languages(context, item, translation_gate=translation_gate)
     jobs_queue.update_job_progress(job_id=job_id, progress_max=len(languages), progress_message=context.title)
     if not languages:
-        jobs_queue.update_job_progress(job_id=job_id, progress_value='max',
-                                       progress_message='Subtitles found or queued' if covered else 'Nothing is missing')
+        jobs_queue.update_job_progress(job_id=job_id, progress_value='max', progress_message='Nothing to search')
         return None
     if not get_providers():
         logging.info("BAZARR All providers are throttled")
         jobs_queue.update_job_progress(job_id=job_id, progress_value='max', progress_message='All providers throttled')
         return None
 
+    downloaded = _download_source_subtitles(context, item, languages, job_id, translation_gate=translation_gate)
+    jobs_queue.update_job_progress(
+        job_id=job_id, progress_value='max',
+        progress_message=f"{len(downloaded)} subtitle(s) downloaded" if downloaded else 'No subtitles found')
+    return None
+
+
+def _search_languages(context, item, *, translation_gate, automatic=False):
+    languages = _missing_languages(item)
+    if translation_gate and languages:
+        from .translation import queue_missing_translations
+
+        try:
+            covered = queue_missing_translations(context, **({'hold_waiting': True} if automatic else {}))
+        except Exception:
+            logging.exception('BAZARR could not queue a translation for source item %s', context.item_id)
+        else:
+            languages = [entry for entry in languages if _language_code(*entry) not in covered]
+    return languages
+
+
+def search_wanted_item(item_id, created_at, job_id):
+    """Search only stored missing languages, after rechecking eligibility and the current Arr path."""
+    from .shadows import path_stage_shadow
+    from .wanted import notify_wanted_changes, wanted_items
+    from .db import handle
+    from subtitles.adaptive_searching import is_search_active, updateFailedAttempts
+
+    items = repository.Items
+    query = wanted_items(*items.c).where(items.c.id == item_id, items.c.created_at == created_at)
+    item = handle().execute(query).first()
+    if item is None or local_stat(item.path) is None:
+        return
+    if path_stage_shadow(item_id):
+        notify_wanted_changes(item.kind)
+        return
+    try:
+        context = resolve_item(item_id)
+    except SourceItemGone:
+        return
+    if not context.same_item(item) or context.path != item.path or not context.profile_id:
+        return
+
+    languages = [
+        entry for entry in _search_languages(context, item, translation_gate=True, automatic=True)
+        if is_search_active(_language_code(*entry), item.failed_attempts or '[]')
+    ]
+    if not languages or not get_providers():
+        return
+
+    # Settings, indexing and scanning can change eligibility while the translation gate runs.
+    current = handle().execute(query).first()
+    if current is None or current.path != context.path or current.library_id != context.library_id:
+        return
+    languages = [entry for entry in languages if entry in _missing_languages(current)]
+    if not languages:
+        return
+    with source_search_probes(item_id):
+        downloaded = _download_source_subtitles(context, current, languages, job_id, automatic=True)
+    failed = {_language_code(*entry) for entry in languages} - set(downloaded)
+    if failed:
+        with source_transaction() as connection:
+            current = repository.get_item(item_id, connection, for_update=True)
+            if current is None or not context.same_item(current) or current.path != context.path:
+                return
+            failed &= {_language_code(*entry) for entry in _missing_languages(current)}
+            if failed:
+                attempts = current.failed_attempts or '[]'
+                for language in sorted(failed):
+                    attempts = updateFailedAttempts(language, attempts)
+                repository.set_failed_attempts(item_id, attempts, connection)
+
+
+def _download_source_subtitles(context, item, languages, job_id, *, translation_gate=True, automatic=False):
     audio_languages = get_audio_profile_languages(item.audio_language)
     audio_language = audio_languages[0]['name'] if audio_languages else 'None'
     # For an episode the title the providers get is the show's.
@@ -507,23 +570,21 @@ def _search_source_item(item_id, job_id, translation_gate, expected_source):
     from subtitles.download import generate_subtitles
     from app.notifier import send_notifications_source
 
-    downloaded = 0
+    downloaded = []
     try:
         for result in generate_subtitles(context.path, languages, audio_language, str(context.scene_name), title,
                                          context.media_type, context.profile_id, check_if_still_required=True,
                                          job_id=job_id, source=context,
+                                         **({'source_wanted': True} if automatic else {}),
                                          **({} if translation_gate else {'auto_translate': False})):
             if not result:
                 continue
             history_log_source(1, context, result)
-            downloaded += 1
+            downloaded.append(result.language_code)
             try:
                 send_notifications_source(context, result.message)
             except Exception:
-                logging.exception('BAZARR could not send a notification for source item %s', item_id)
+                logging.exception('BAZARR could not send a notification for source item %s', context.item_id)
     except OSError as error:
         raise JobFailed(f'Unable to save the subtitles file: {error}', reason='save_failed') from error
-    jobs_queue.update_job_progress(
-        job_id=job_id, progress_value='max',
-        progress_message=f"{downloaded} subtitle(s) downloaded" if downloaded else 'No subtitles found')
-    return None
+    return downloaded

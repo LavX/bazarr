@@ -95,11 +95,18 @@ export function useMovieAction() {
   });
 }
 
-export function useMovieWantedPagination(fetchAll = false) {
+export function useMovieWantedPagination(
+  fetchAll = false,
+  sourceKeys: MediaSourceKey[] = [],
+) {
   return usePaginationQuery(
-    [QueryKeys.Movies, QueryKeys.Wanted],
-    (param) => api.movies.wanted(param),
-    true,
+    [QueryKeys.Movies, QueryKeys.Wanted, sourceKeys],
+    (param) =>
+      api.movies.wanted({
+        ...param,
+        sourceKeys: sourceKeys.length ? sourceKeys : undefined,
+      }),
+    false,
     fetchAll,
   );
 }

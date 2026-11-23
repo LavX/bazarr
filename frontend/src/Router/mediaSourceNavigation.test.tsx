@@ -501,3 +501,80 @@ describe.each([
     );
   },
 );
+
+it.each([
+  ["series", "sonarr", "/api/episodes/wanted", "seriesTitle"],
+  ["movies", "radarr", "/api/movies/wanted", "title"],
+] as const)(
+  "shows folder-only Wanted %s with a badge count and no Arr actions",
+  async (kind, arr, path, titleKey) => {
+    const requests = vi.fn();
+    server.use(
+      http.get("/api/system/settings", () =>
+        HttpResponse.json({
+          general: { [`use_${arr}`]: false },
+          media_sources: { visible: true },
+        }),
+      ),
+      http.get("/api/system/arr-instances", () => HttpResponse.json([])),
+      http.get("/api/system/status", () => HttpResponse.json({ data: {} })),
+      http.get("/api/system/languages/audio", () => HttpResponse.json([])),
+      http.get("/api/system/media-sources", () =>
+        HttpResponse.json({
+          data: [
+            {
+              id: 8,
+              enabled: true,
+              name: "Archive",
+              kind: "folder",
+              libraries: [
+                {
+                  enabled: true,
+                  content_kind: kind === "series" ? "series" : "movie",
+                },
+              ],
+            },
+          ],
+          availability: {
+            series: kind === "series" ? ENABLED : ABSENT,
+            movie: kind === "movies" ? ENABLED : ABSENT,
+            sports: ABSENT,
+          },
+        }),
+      ),
+      http.get("/api/badges", () =>
+        HttpResponse.json({ episodes: 2, movies: 2 }),
+      ),
+      http.get(path, ({ request }) => {
+        const params = new URL(request.url).searchParams;
+        requests(params.get("sources"), params.get("source_key[]"));
+        return HttpResponse.json({
+          data: [
+            {
+              id: 9,
+              [titleKey]: "Archive title",
+              origin: "source",
+              source_key: "source:8",
+              missing_subtitles: [],
+            },
+          ],
+          total: 1,
+        });
+      }),
+    );
+
+    customRender(<MediaPage group="wanted" path={kind} />);
+    expect(await screen.findByText("Archive title")).toBeInTheDocument();
+    expect(requests).toHaveBeenCalledWith("1", "source:8");
+    expect(screen.getByRole("button", { name: "Search All" })).toBeEnabled();
+    expect(
+      screen.queryByRole("button", { name: "Scan All" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("combobox", { name: "Source" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("columnheader", { name: "Source" }),
+    ).not.toBeInTheDocument();
+  },
+);

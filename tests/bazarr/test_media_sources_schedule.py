@@ -90,6 +90,10 @@ def test_the_task_registers_while_an_enabled_source_exists_and_unregisters_when_
     function, trigger, kwargs = jobs[schedule.JOB_ID]
     assert function is schedule.scan_due_media_sources and trigger == "interval" and kwargs["hours"] == 1
     assert kwargs["replace_existing"] is True and kwargs["max_instances"] == 1
+    wanted, trigger, options = jobs[schedule.WANTED_JOB_ID]
+    assert wanted is schedule.wanted_search_missing_subtitles_sources
+    assert trigger == "interval" and options["hours"] == 6
+    assert options["kwargs"] == {"wait_for_completion": True}
 
     _set(source, enabled=0)
     schedule.configure_source_jobs(aps, source.session)
@@ -100,7 +104,7 @@ def test_the_task_registers_while_an_enabled_source_exists_and_unregisters_when_
 
     _set(source, enabled=1)
     schedule.configure_source_jobs(aps, source.session)
-    assert schedule.JOB_ID in jobs
+    assert schedule.JOB_ID in jobs and schedule.WANTED_JOB_ID in jobs
     repository.delete_source(source.id, source.session)
     schedule.configure_source_jobs(aps, source.session)
     assert jobs == {}
@@ -146,7 +150,7 @@ def test_a_failure_configuring_the_scan_task_never_stops_the_rest_of_the_schedul
 
     monkeypatch.setattr(schedule, "configure_source_jobs", broken)
     scheduler.update_configurable_tasks()
-    assert "could not configure the media source scan task" in caplog.text
+    assert "could not configure the media source tasks" in caplog.text
     assert "provider_hub_update_check" in jobs
 
 

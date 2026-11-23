@@ -6,7 +6,7 @@ class BadgesApi extends BaseApi {
   }
 
   async all() {
-    const response = await this.get<Badge>("");
+    const response = await this.get<Badge>("", { sources: 1 });
     return response;
   }
 }

@@ -1029,6 +1029,7 @@ jobs:
             tests/bazarr/test_media_sources_schema.py \
             tests/bazarr/test_media_sources_pipeline.py \
             tests/bazarr/test_media_sources_analysis.py \
+            tests/bazarr/test_media_sources_wanted.py \
             tests/bazarr/test_media_sources_api.py \
             tests/bazarr/test_media_sources_no_change.py \
             tests/bazarr/test_postgres_driver_pin.py ; do

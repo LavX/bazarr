@@ -83,6 +83,8 @@ export function useRoutes(): CustomRouteObject[] {
     series,
     movies,
     sports,
+    folderSeries,
+    folderMovies,
     seriesActivity,
     movieActivity,
     sportsActivity,
@@ -230,9 +232,11 @@ export function useRoutes(): CustomRouteObject[] {
               {
                 name: "Episodes",
                 path: "series",
-                badge: sonarr ? data?.episodes : undefined,
+                badge: sonarr || folderSeries ? data?.episodes : undefined,
                 hidden: !seriesActivity,
-                element: (
+                element: folderSeries ? (
+                  <WantedSeriesView />
+                ) : (
                   <ArrMediaRoute kind="sonarr">
                     <WantedSeriesView />
                   </ArrMediaRoute>
@@ -241,9 +245,11 @@ export function useRoutes(): CustomRouteObject[] {
               {
                 name: "Movies",
                 path: "movies",
-                badge: radarr ? data?.movies : undefined,
+                badge: radarr || folderMovies ? data?.movies : undefined,
                 hidden: !movieActivity,
-                element: (
+                element: folderMovies ? (
+                  <WantedMoviesView />
+                ) : (
                   <ArrMediaRoute kind="radarr">
                     <WantedMoviesView />
                   </ArrMediaRoute>
@@ -538,6 +544,8 @@ export function useRoutes(): CustomRouteObject[] {
       series,
       movies,
       sports,
+      folderSeries,
+      folderMovies,
       seriesActivity,
       movieActivity,
       sportsActivity,

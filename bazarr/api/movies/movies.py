@@ -279,7 +279,14 @@ class Movies(Resource):
             else:
                 return '', 204
         elif action == "search-wanted":
-            wanted_search_missing_subtitles_movies()
+            from media_sources.wanted import arr_wanted_condition, queue_wanted_search
+
+            source_job = queue_wanted_search('movie')
+            if not source_job:
+                wanted_search_missing_subtitles_movies()
+            elif database.scalar(select(select(TableMovies.id).where(
+                    arr_wanted_condition('radarr', TableMovies.arr_instance_id)).exists())):
+                wanted_search_missing_subtitles_movies(active_owners_only=True)
             return '', 204
         elif action == "scan-wanted":
             wanted_scan_subtitles_movies()

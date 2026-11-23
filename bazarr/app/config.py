@@ -468,6 +468,7 @@ validators = [
 
     # The folder source screens are opt-in while source pages are being added.
     Validator('media_sources.visible', must_exist=True, default=False, is_type_of=bool),
+    Validator('media_sources.wanted_search_frequency', must_exist=True, default=6, is_type_of=int, gte=1),
 
     # translating section
     Validator('translator.min_source_score', must_exist=True, default=90, is_type_of=int, gte=0, lte=100),
@@ -3218,7 +3219,7 @@ def _save_settings(settings_items, native_configuration=None, *, strict_metadata
                    'settings-sportarr-full_update', 'settings-sportarr-full_update_day',
                    'settings-sportarr-full_update_hour',
                    'settings-general-wanted_search_frequency', 'settings-general-wanted_search_frequency_movie',
-                   'settings-general-wanted_search_frequency_sports',
+                   'settings-general-wanted_search_frequency_sports', 'settings-media_sources-wanted_search_frequency',
                    'settings-general-upgrade_frequency', 'settings-backup-frequency', 'settings-backup-day',
                    'settings-backup-hour']:
             update_schedule = True

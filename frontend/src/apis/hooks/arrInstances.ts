@@ -95,6 +95,9 @@ export function useArrInstanceLabels(kind: ArrKind) {
       // are shown as a dim dash so only 2nd-instance items stand out.
       defaultId: ofKind.find((i) => i.is_default)?.id ?? null,
       options: ofKind.map((i) => ({ value: String(i.id), label: i.name })),
+      enabledOptions: ofKind
+        .filter((i) => i.enabled)
+        .map((i) => ({ value: i.id, label: i.name })),
     };
   }, [data, kind]);
 }

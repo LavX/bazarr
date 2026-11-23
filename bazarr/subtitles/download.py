@@ -32,7 +32,7 @@ from .processing import process_subtitle
 def generate_subtitles(path, languages, audio_language, sceneName, title, media_type, profile_id,
                        forced_minimum_score=None, is_upgrade=False, check_if_still_required=False,
                        previous_subtitles_to_delete=None, job_id=None, fallback_allowed=False,
-                       arr_instance_id=None, source=None, auto_translate=True):
+                       arr_instance_id=None, source=None, auto_translate=True, source_wanted=False):
     if not languages:
         return None
 
@@ -192,6 +192,10 @@ def generate_subtitles(path, languages, audio_language, sceneName, title, media_
                             with subtitle_write_locks(path, os.path.join(fld or os.path.dirname(path), '.destination'),
                                                       previous_subtitles_to_delete or path):
                                 written_paths = []
+                                write = partial(write_subtitle_file, path, written_paths=written_paths,
+                                                on_publish=publish, **owner_kwargs)
+                                if source_wanted and source is not None:
+                                    write = partial(_write_wanted_source_subtitle, source, language, write)
                                 saved_subtitles = save_subtitles(video.original_path, subtitles,
                                                                  single=settings.general.single_language,
                                                                  tags=None,  # fixme
@@ -199,10 +203,7 @@ def generate_subtitles(path, languages, audio_language, sceneName, title, media_
                                                                  chmod=chmod,
                                                                  formats=subtitle_formats,
                                                                  path_decoder=force_unicode,
-                                                                 write_subtitle=partial(
-                                                                     write_subtitle_file, path, written_paths=written_paths,
-                                                                     on_publish=publish, **owner_kwargs)
-                                                                 )
+                                                                 write_subtitle=write)
                                 if is_upgrade and previous_subtitles_to_delete and written_paths and (
                                         os.path.normcase(os.path.realpath(previous_subtitles_to_delete)) not in
                                         {os.path.normcase(os.path.realpath(written)) for written in written_paths}):
@@ -294,6 +295,22 @@ def _get_language_obj(languages):
         language_set.add(lang_obj)
 
     return language_set
+
+
+def _write_wanted_source_subtitle(source, language, write, destination, content):
+    """Recheck the item and destination after the provider, under the subtitle write lock."""
+    from media_sources import repository
+    from media_sources.db import handle
+    from media_sources.wanted import wanted_items
+
+    if os.path.lexists(destination):
+        return
+    items = repository.Items.c
+    live = handle().execute(wanted_items(items.id, kind=source.kind).where(
+        items.id == source.item_id, items.created_at == source.created_at, items.path == source.path,
+        items.source_id == source.source_id, items.library_id == source.library_id)).first()
+    if live is not None and language in check_missing_languages_source(source):
+        write(destination, content)
 
 
 def check_missing_languages_source(source):

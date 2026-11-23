@@ -229,7 +229,7 @@ def _missing(item, listing, audio_language, target):
 
 
 def _embedded_listing(data):
-    if not settings.general.use_embedded_subs:
+    if not data or not settings.general.use_embedded_subs:
         return []
     ignored = {
         'pgs': settings.general.ignore_pgs_subs,

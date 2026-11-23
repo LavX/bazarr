@@ -223,7 +223,25 @@ declare namespace Item {
   };
 }
 
+type MediaSourceKey = `arr:${number}` | `source:${number}` | "source:removed";
+
 declare namespace Wanted {
+  type ArrRow = {
+    origin?: "arr";
+    source_key?: MediaSourceKey | null;
+    arr_instance_id?: number;
+  };
+  type SourceRow = {
+    origin: "source";
+    source_key: MediaSourceKey;
+    arr_instance_id: null;
+    source_id: number;
+    source_name: string | null;
+    source_kind: "folder" | "jellyfin" | "emby";
+    identity_state: "identified" | "parsed" | "ambiguous" | "unmatched";
+  };
+  type RowOwner = ArrRow | SourceRow;
+  type Range = Parameter.Range & { sourceKeys?: MediaSourceKey[] };
   type Base = MonitoredType &
     TagType &
     SceneNameType & {
@@ -244,9 +262,25 @@ declare namespace Wanted {
 
   type Movie = Base & MovieIdType & TitleType & AudioLanguageType;
 
+  type EpisodeRow =
+    | (Episode & ArrRow)
+    | (Omit<
+        Episode,
+        "sonarrEpisodeId" | "sonarrSeriesId" | "arr_instance_id" | "seriesType"
+      > &
+        SourceRow & {
+          sonarrEpisodeId: null;
+          sonarrSeriesId: null;
+          seriesType: null;
+        });
+  type MovieRow =
+    | (Movie & ArrRow)
+    | (Omit<Movie, "radarrId" | "arr_instance_id"> &
+        SourceRow & { radarrId: null });
+
   // The wanted episodes page. `forced_pending` counts episodes with a pending
   // duplicate search; they are not in `data` unless something is also missing.
-  type EpisodePage = DataWrapperWithTotal<Episode> & {
+  type EpisodePage<Row = Episode> = DataWrapperWithTotal<Row> & {
     forced_pending?: number;
   };
 }

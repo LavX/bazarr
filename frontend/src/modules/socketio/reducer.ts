@@ -334,6 +334,18 @@ export function createDefaultReducer(): SocketIO.Reducer[] {
       },
     },
     {
+      key: "source-item",
+      any: () => {
+        void queryClient.invalidateQueries({
+          queryKey: [QueryKeys.Series, QueryKeys.Wanted],
+        });
+        void queryClient.invalidateQueries({
+          queryKey: [QueryKeys.Movies, QueryKeys.Wanted],
+        });
+        void queryClient.invalidateQueries({ queryKey: [QueryKeys.Badges] });
+      },
+    },
+    {
       key: "reset-episode-wanted",
       any: () => {
         void queryClient.invalidateQueries({

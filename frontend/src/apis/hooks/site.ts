@@ -21,6 +21,8 @@ export function useMediaNavigation() {
     series,
     movies,
     sports,
+    folderSeries: availability?.series.browsable === true,
+    folderMovies: availability?.movie.browsable === true,
     seriesActivity: series || availability?.series.retained === true,
     movieActivity: movies || availability?.movie.retained === true,
     sportsActivity: sports || availability?.sports.retained === true,

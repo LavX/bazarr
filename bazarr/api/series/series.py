@@ -363,7 +363,14 @@ class Series(Resource):
             else:
                 return queued_job_response(job_id or None), 202
         elif action == "search-wanted":
-            wanted_search_missing_subtitles_series()
+            from media_sources.wanted import arr_wanted_condition, queue_wanted_search
+
+            source_job = queue_wanted_search('episode')
+            if not source_job:
+                wanted_search_missing_subtitles_series()
+            elif database.scalar(select(select(TableEpisodes.id).where(
+                    arr_wanted_condition('sonarr', TableEpisodes.arr_instance_id)).exists())):
+                wanted_search_missing_subtitles_series(active_owners_only=True)
             return '', 204
         elif action == "scan-wanted":
             wanted_scan_subtitles_series()

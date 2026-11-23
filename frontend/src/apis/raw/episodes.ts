@@ -22,9 +22,19 @@ class EpisodeApi extends BaseApi {
     return response.data;
   }
 
-  async wanted(params: Parameter.Range) {
-    const response = await this.get<Wanted.EpisodePage>("/wanted", params);
-    return response;
+  async wanted(
+    params: Wanted.Range,
+  ): Promise<Wanted.EpisodePage<Wanted.EpisodeRow>>;
+  async wanted(
+    params: Parameter.Range,
+    includeSources: false,
+  ): Promise<Wanted.EpisodePage>;
+  async wanted({ sourceKeys, ...params }: Wanted.Range, includeSources = true) {
+    return this.get<Wanted.EpisodePage<Wanted.EpisodeRow>>("/wanted", {
+      ...params,
+      sources: includeSources ? 1 : undefined,
+      source_key: sourceKeys,
+    });
   }
 
   async wantedBy(episodeid: number[]) {
