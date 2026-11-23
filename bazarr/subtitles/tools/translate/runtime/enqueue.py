@@ -130,8 +130,8 @@ def attach_for(queue_job_id, source_key: str, to_lang: str, forced: bool = False
         return
     if row.state == AWAITING_RETRY:
         jobs.requeue(row.id, queue_job_id)
-    else:
-        jobs.attach_queue_job(row.id, queue_job_id)
+    elif row.state == QUEUED and (row.queue_job_id in (None, queue_job_id) or not _live(row)):
+        jobs.attach_queue_job(row.id, queue_job_id, expected_queue_job_id=row.queue_job_id)
 
 
 
