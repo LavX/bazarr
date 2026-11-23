@@ -483,6 +483,109 @@ def test_editor_backend_lookup_preserves_the_original_error(env, monkeypatch):
     assert not env.requests()
 
 
+@pytest.mark.parametrize("operation", ["get_by_job", "finish_job"])
+def test_history_database_failure_keeps_a_dispatch_retry_recoverable(env, monkeypatch, operation):
+    import sqlalchemy as sa
+
+    from subtitles.tools.translate.runtime import service
+    from subtitles.tools.translate.runtime.dispatch import Dispatcher
+    from subtitles.tools.translate.runtime.history import HistoryStore
+
+    env.ai_engine()
+
+    def unavailable(*args, **kwargs):
+        raise RuntimeError("could not read the selected backend")
+
+    def history_error(self, *args, **kwargs):
+        self._session.execute(sa.text("SELECT * FROM missing_test_history_table"))
+
+    with monkeypatch.context() as failure:
+        failure.setattr(Dispatcher, "_candidates", unavailable)
+        failure.setattr(HistoryStore, operation, history_error)
+        with pytest.raises(RuntimeError, match="could not read the selected backend"):
+            service.translate_lines(["Hello"], "en", "hu", dispatcher=env.dispatcher())
+
+    job = env.last_job()
+    assert (job.state, job.error_class) == ("awaiting_retry", "internal")
+    assert job.queue_job_id is None and not env.requests()
+    result = service.translate_lines(["Hello"], "en", "hu", dispatcher=env.dispatcher())
+    assert result.lines == ["[hu] Hello"]
+    assert (env.last_job().id, env.last_job().state) == (job.id, "completed")
+    assert env.history(job)["status"] == "completed"
+
+
+def test_an_editor_planner_cannot_release_another_queue_jobs_claim(env, monkeypatch):
+    from threading import Event, Thread, current_thread
+
+    from app import jobs_queue as queue_module
+    from subtitles.tools.translate import availability, editor
+    from subtitles.tools.translate.runtime import service
+    from subtitles.tools.translate.runtime.dispatch import Dispatcher
+    from utilities import job_dedupe
+
+    env.ai_engine()
+    monkeypatch.setattr(queue_module.JobsQueue, "_flush_progress_loop", lambda self: None)
+    monkeypatch.setattr(queue_module, "_job_event", lambda *args, **kwargs: None)
+    queue = queue_module.JobsQueue()
+    monkeypatch.setattr(editor, "_results", type(editor._results)())
+    monkeypatch.setattr(editor, "_followers", type(editor._followers)())
+    for module in (queue_module, editor, job_dedupe, service):
+        monkeypatch.setattr(module, "jobs_queue", queue)
+    monkeypatch.setattr(queue, "_has_capacity_for", lambda job: True)
+    monkeypatch.setattr(queue, "_lane_has_room", lambda job: True)
+    monkeypatch.setattr(availability, "runtime_active", lambda: True)
+    monkeypatch.setattr(service, "Dispatcher", env.dispatcher)
+
+    failing_id = editor.enqueue_editor_translation([{"position": 0, "line": "Hello"}], "en", "hu")
+    winning_id = editor.enqueue_editor_translation([{"position": 9, "line": "Hello"}], "en", "hu")
+    assert failing_id != winning_id
+    failing_job, winning_job = queue._reserve_next_job(), queue._reserve_next_job()
+    assert (failing_job.job_id, winning_job.job_id) == (failing_id, winning_id)
+
+    entered, claimed, release = Event(), Event(), Event()
+    original_plan, original_run_plugin = Dispatcher._plan, Dispatcher._run_plugin
+
+    def plan(dispatcher, spec):
+        if current_thread() is failing_worker:
+            entered.set()
+            assert claimed.wait(8)
+            raise RuntimeError("could not read the selected engine")
+        return original_plan(dispatcher, spec)
+
+    def run_plugin(dispatcher, *args, **kwargs):
+        claimed.set()
+        assert release.wait(8)
+        return original_run_plugin(dispatcher, *args, **kwargs)
+
+    def execute(job):
+        try:
+            queue._run_job(job)
+        finally:
+            env.session.remove()
+
+    monkeypatch.setattr(Dispatcher, "_plan", plan)
+    monkeypatch.setattr(Dispatcher, "_run_plugin", run_plugin)
+    failing_worker = Thread(target=execute, args=(failing_job,), daemon=True)
+    winning_worker = Thread(target=execute, args=(winning_job,), daemon=True)
+    failing_worker.start()
+    try:
+        assert entered.wait(8)
+        winning_worker.start()
+        assert claimed.wait(8)
+        failing_worker.join(8)
+        assert failing_job.status == "failed"
+        row = env.last_job()
+        assert (row.state, row.queue_job_id) == ("running", winning_id)
+    finally:
+        release.set()
+        failing_worker.join(8)
+        if winning_worker.ident is not None:
+            winning_worker.join(8)
+    assert winning_job.status == "completed"
+    assert editor.editor_translation_state(winning_id)["lines"] == [{"position": 9, "line": "[hu] Hello"}]
+    assert env.last_job().state == "completed"
+
+
 def test_lingarr_publishes_through_its_own_service_and_the_runtime_writes_nothing(env, media, monkeypatch):
     from app.config import settings
     from subtitles.tools.translate.runtime import legacy_engines
