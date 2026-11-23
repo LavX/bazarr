@@ -4,11 +4,13 @@ import logging
 import os
 import srt
 import datetime
+from contextlib import contextmanager
 
 from typing import Union
 from types import SimpleNamespace
 
 from app.config import settings
+from app.jobs_queue import JobCancelled, JobFailed
 from subzero.language import Language
 from subliminal_patch.core import get_subtitle_path
 from subliminal_patch.score import MAX_SCORES
@@ -105,12 +107,79 @@ def translation_write_kwargs(translator, job_id):
 
         return dict(sports_write_kwargs(translator, job_id))
     captured = getattr(translator, 'expected_destination_versions', ())
-    return {'expected_versions': captured} if captured else {}
+    kwargs = {'expected_versions': captured} if captured else {}
+    source = getattr(translator, 'source', None)
+    if source is not None:
+        from media_sources.indexer import SourcePublicationOwnerIndex
+
+        owners = SourcePublicationOwnerIndex()
+
+        @contextmanager
+        def publication():
+            validate_source_translation(source, translator.video_path, translator.source_srt_file,
+                                        translator.dest_srt_file, translator.from_lang, translator.orig_to_lang,
+                                        translator.forced, translator.hi, captured, owners)
+            yield
+        kwargs.update(publication_guard=publication, ownership_index=owners)
+    return kwargs
 
 
-def create_process_result(message, video_path, orig_to_lang, forced, hi, dest_srt_file, media_type, sports_context=None):
+class SourceTranslationChanged(JobCancelled):
+    """The source item or its translation request ceased to be current."""
+
+
+def validate_source_translation(source, video_path, subtitle_path, destination, from_lang, to_lang, forced, hi,
+                                captured=(), owners=None):
+    """Validate the queued source item, profile and write destination."""
+    from media_sources.indexer import SourcePublicationOwnerIndex
+    from media_sources.translation import automatic_translation_is_current, live_source
+    from subtitles.tools.subsync_engines import sync_output_owner_is_unique
+
+    current = live_source(source)
+    if current is None or current.path != video_path:
+        raise SourceTranslationChanged('The source item moved, was removed, or was disabled')
+    if destination != translated_destination_path(video_path, to_lang, forced, hi):
+        raise SourceTranslationChanged('The configured subtitle destination changed')
+    if captured and (str(captured[0].path) != destination or not automatic_translation_is_current(
+            current, subtitle_path, from_lang, to_lang, forced, hi)):
+        raise SourceTranslationChanged('The source profile or translation eligibility changed')
+    if owners is None:
+        owners = SourcePublicationOwnerIndex()
+    if not sync_output_owner_is_unique(video_path, destination, ownership_index=owners):
+        raise SourceTranslationChanged('The translated subtitle destination does not have one media owner')
+    if not sync_output_owner_is_unique(video_path, subtitle_path, ownership_index=owners):
+        raise SourceTranslationChanged('The translation input does not have one media owner')
+    return current
+
+
+def require_source_translation(source, original, translated):
+    """Stop before publication if none of the subtitle cues was translated."""
+    if source is not None and not any(
+        isinstance(new, str) and old.strip() and new.strip() and new.strip() != old.strip()
+        for old, new in zip(original, translated)
+    ):
+        raise JobFailed('The translator returned no translated cues', reason='empty_translation', retryable=False)
+
+
+def record_source_translation(source, result):
+    """Record an action-6 row when the translation belongs to a source item."""
+    if source is None:
+        return False
+    from media_sources.history import history_log_source
+
+    history_log_source(6, source, result)
+    return True
+
+
+def create_process_result(message, video_path, orig_to_lang, forced, hi, dest_srt_file, media_type,
+                          sports_context=None, source=None):
     """Create a ProcessSubtitlesResult object with common parameters."""
-    if sports_context is not None:
+    if source is not None:
+        def prr(path):
+            return path
+        score_type = 'episode' if source.kind == 'episode' else 'movie'
+        score = int((settings.translator.default_score / 100) * MAX_SCORES[score_type])
+    elif sports_context is not None:
         from sportarr.subtitles import reverse_path
         def prr(path):
             return reverse_path(sports_context, path)
@@ -195,7 +264,11 @@ def _scope(statement, table, arr_instance_id):
     return statement.where(table.arr_instance_id == arr_instance_id)
 
 
-def get_description(media_type, radarr_id, sonarr_series_id, arr_instance_id=None, sports_context=None):
+def get_description(media_type, radarr_id, sonarr_series_id, arr_instance_id=None, sports_context=None,
+                    source=None):
+    if source is not None:
+        from media_sources.context import source_item_title
+        return source_item_title(source)
     if sports_context is not None:
         from sportarr.profile_hooks import metadata
         return metadata(sports_context)[1]
@@ -240,8 +313,12 @@ def get_title(
         sonarr_series_id: Union[int, None] = None,
         sonarr_episode_id: Union[int, None] = None,
         arr_instance_id: Union[int, None] = None,
-        sports_context=None
+        sports_context=None,
+        source=None
 ) -> str:
+    if source is not None:
+        from media_sources.context import source_item_title
+        return source_item_title(source)
     if sports_context is not None:
         from sportarr.profile_hooks import metadata
         return metadata(sports_context)[0]

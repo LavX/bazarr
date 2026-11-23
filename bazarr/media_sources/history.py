@@ -18,7 +18,7 @@ def _snapshot(context: SourceItemContext, target=None):
     source = repository.get_source(context.source_id, target)
     return dict(
         video_path=context.path,
-        item_title=item.title if item is not None else context.title,
+        item_title=item.title if item is not None and context.same_item(item) else context.title,
         group_title=context.group_title,
         source_name=source.name if source is not None else None,
     )
@@ -26,7 +26,8 @@ def _snapshot(context: SourceItemContext, target=None):
 
 def _links(context, target):
     """The links to store: an item or source deleted since the context was built is stored as NULL."""
-    item_id = context.item_id if repository.get_item(context.item_id, target) is not None else None
+    item = repository.get_item(context.item_id, target)
+    item_id = context.item_id if item is not None and context.same_item(item) else None
     source_id = context.source_id if repository.get_source(context.source_id, target) is not None else None
     return item_id, source_id
 

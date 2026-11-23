@@ -490,6 +490,10 @@ class Dispatcher:
             jobs.cancel(state.job_id)
             self._finish_history(history, state, "cancelled")
             return "cancelled"
+        if getattr(error, "reason", None) == "empty_translation":
+            jobs.fail(state.job_id, "empty_translation", str(error))
+            self._finish_history(history, state, "failed", "empty_translation", str(error))
+            return "failed"
         if isinstance(error, SubtitleDestinationChanged):
             jobs.fail(state.job_id, fail.DESTINATION_CHANGED, fail.MESSAGES[fail.DESTINATION_CHANGED])
             self._finish_history(history, state, "failed", fail.DESTINATION_CHANGED,

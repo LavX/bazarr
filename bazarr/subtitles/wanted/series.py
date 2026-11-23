@@ -275,7 +275,7 @@ def _wanted_episode(episode, providers_list, job_id=None, translation_gate=True)
                                 module='subtitles.tools.translate.main',
                                 func='translate_subtitles_file',
                                 args=[],
-                                kwargs=translate_kwargs,
+                                kwargs={**translate_kwargs, 'source': None},
                             ):
                                 continue
                             logging.info(

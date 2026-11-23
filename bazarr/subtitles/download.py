@@ -32,7 +32,7 @@ from .processing import process_subtitle
 def generate_subtitles(path, languages, audio_language, sceneName, title, media_type, profile_id,
                        forced_minimum_score=None, is_upgrade=False, check_if_still_required=False,
                        previous_subtitles_to_delete=None, job_id=None, fallback_allowed=False,
-                       arr_instance_id=None, source=None):
+                       arr_instance_id=None, source=None, auto_translate=True):
     if not languages:
         return None
 
@@ -110,8 +110,8 @@ def generate_subtitles(path, languages, audio_language, sceneName, title, media_
             for language in language_set:
                 # confirm if language is still missing or if cutoff has been reached
                 if check_if_still_required and language not in (
-                        check_missing_languages(path, media_type, arr_instance_id) if source is None
-                        else check_missing_languages_source(source)):
+                        check_missing_languages(path, media_type, arr_instance_id,
+                                                **({'source': source} if source is not None else {}))):
                     # cutoff has been reached
                     logging.debug(f"BAZARR this language ({parse_language_object(language)}) is ignored because cutoff "  # noqa: G004
                                   f"has been reached during this search.")
@@ -183,6 +183,12 @@ def generate_subtitles(path, languages, audio_language, sceneName, title, media_
                             fld = get_target_folder(path)
                             chmod = int(settings.general.chmod, 8) if not sys.platform.startswith(
                                 'win') and settings.general.chmod_enabled else None
+                            owner_kwargs = {}
+                            if source is not None:
+                                from media_sources.indexer import SourceOutputOwnerIndex
+                                owner_kwargs['ownership_index'] = SourceOutputOwnerIndex()
+                            publish = publication_callback(publication_type, path, 'download', arr_instance_id,
+                                                           **({'source': source} if source is not None else {}))
                             with subtitle_write_locks(path, os.path.join(fld or os.path.dirname(path), '.destination'),
                                                       previous_subtitles_to_delete or path):
                                 written_paths = []
@@ -195,18 +201,15 @@ def generate_subtitles(path, languages, audio_language, sceneName, title, media_
                                                                  path_decoder=force_unicode,
                                                                  write_subtitle=partial(
                                                                      write_subtitle_file, path, written_paths=written_paths,
-                                                                     on_publish=publication_callback(
-                                                                         publication_type, path, 'download',
-                                                                         arr_instance_id))
+                                                                     on_publish=publish, **owner_kwargs)
                                                                  )
                                 if is_upgrade and previous_subtitles_to_delete and written_paths and (
                                         os.path.normcase(os.path.realpath(previous_subtitles_to_delete)) not in
                                         {os.path.normcase(os.path.realpath(written)) for written in written_paths}):
                                     try:
-                                        with subtitle_mutation(path, previous_subtitles_to_delete):
+                                        with subtitle_mutation(path, previous_subtitles_to_delete, **owner_kwargs):
                                             os.remove(previous_subtitles_to_delete)
-                                            publication_callback(publication_type, path, 'download',
-                                                                 arr_instance_id)(previous_subtitles_to_delete)
+                                            publish(previous_subtitles_to_delete)
                                     except OSError:
                                         logging.exception('BAZARR unable to remove superseded subtitle: %s',
                                                           previous_subtitles_to_delete)
@@ -250,7 +253,8 @@ def generate_subtitles(path, languages, audio_language, sceneName, title, media_
                                                                       is_upgrade=is_upgrade, is_manual=False,
                                                                       path=path, max_score=max_score, job_id=job_id,
                                                                       arr_instance_id=arr_instance_id,
-                                                                      **({} if source is None else {'source': source}))
+                                                                      **({} if source is None else {'source': source}),
+                                                                      **({} if auto_translate else {'auto_translate': False}))
                                 if not processed_subtitle:
                                     logging.debug(f"BAZARR unable to process this subtitles: {subtitle}")  # noqa: G004
                                     continue
@@ -317,7 +321,9 @@ def parse_language_object(language):
         return language
 
 
-def check_missing_languages(path, media_type, arr_instance_id=None):
+def check_missing_languages(path, media_type, arr_instance_id=None, source=None):
+    if source is not None:
+        return check_missing_languages_source(source)
     # confirm if language is still missing or if cutoff has been reached
     reversed_path = path_mappings.path_replace_reverse_instance(path, arr_instance_id, media_type)
     if media_type == 'series':

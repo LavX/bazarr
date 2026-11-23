@@ -33,7 +33,7 @@ class CombineResult:
 def try_combine_for_video(video_path, media_type, sonarr_series_id=None,
                             sonarr_episode_id=None, radarr_id=None,
                             languages=None, format=None, arr_instance_id=None,
-                            sports_operation=None, cancel=None):
+                            sports_operation=None, cancel=None, source=None):
     """Single entry point: build (or rebuild) a combined subtitle file
     for the given video. Best-effort, never raises.
 
@@ -41,7 +41,14 @@ def try_combine_for_video(video_path, media_type, sonarr_series_id=None,
     Otherwise read the profile's combine rule.
     """
     try:
-        if media_type == 'sports':
+        owner_kwargs = {}
+        if source is not None:
+            from media_sources.indexer import SourcePublicationOwnerIndex
+            if sports_operation is not None or arr_instance_id is not None:
+                raise ValueError('A source composition requires source media metadata')
+            owner_kwargs['ownership_index'] = SourcePublicationOwnerIndex()
+
+        if media_type == 'sports' and source is None:
             if sports_operation is None or video_path != sports_operation.context.mapped_path:
                 raise ValueError('Sports composition requires its captured profile operation')
             if languages is not None or format is not None:
@@ -53,6 +60,7 @@ def try_combine_for_video(video_path, media_type, sonarr_series_id=None,
                 media_type, sonarr_series_id, sonarr_episode_id, radarr_id,
                 override_languages=languages, override_format=format,
                 video_path=video_path, arr_instance_id=arr_instance_id,
+                **({'source': source} if source is not None else {}),
             )
         if rule is None:
             return CombineResult(status="skipped", reason="no rule")
@@ -103,7 +111,7 @@ def try_combine_for_video(video_path, media_type, sonarr_series_id=None,
         # inside this video's external-subtitles directory. Re-assert it here so a
         # crafted code can never steer makedirs/open/remove outside that folder.
         safe_root = os.path.realpath(external_subtitles_dir(video_path))
-        if os.path.islink(out_path) or not sync_output_owner_is_unique(video_path, out_path):
+        if os.path.islink(out_path) or not sync_output_owner_is_unique(video_path, out_path, **owner_kwargs):
             return CombineResult(status="skipped", reason="combined output has no unique regular-file owner")
         out_path = os.path.realpath(out_path)
         if os.path.commonpath([safe_root, out_path]) != safe_root:
@@ -116,7 +124,9 @@ def try_combine_for_video(video_path, media_type, sonarr_series_id=None,
             out_dir = os.path.dirname(out_path)
             if out_dir:
                 os.makedirs(out_dir, exist_ok=True)
-            sports_kwargs = {}
+            write_kwargs = {}
+            notify = publication_callback(media_type, video_path, 'combine', arr_instance_id,
+                                          **({'source': source} if source is not None else {}))
             published_versions = ()
             if sports_operation is not None:
                 from sportarr.profile_hooks import finalize
@@ -126,7 +136,7 @@ def try_combine_for_video(video_path, media_type, sonarr_series_id=None,
                     extra_destinations=tuple(os.path.splitext(out_path)[0] + ext
                                              for ext in _COMBINED_OUTPUT_EXTS
                                              if ext != os.path.splitext(out_path)[1]))
-                sports_kwargs = dict(publication_guard=lambda: sports_operation.publication(cancel),
+                write_kwargs = dict(publication_guard=lambda: sports_operation.publication(cancel),
                                      expected_versions=sports_operation.versions, cancel=cancel,
                                      after_write=lambda: capture_published())
 
@@ -134,12 +144,22 @@ def try_combine_for_video(video_path, media_type, sonarr_series_id=None,
                 # The media-server notification belongs on the sibling sweep too:
                 # removing a stale combined file changes what the server should
                 # see, exactly as publishing the new one does.
-                notify = publication_callback(media_type, video_path, 'combine', arr_instance_id)
                 if sports_operation is not None:
                     _remove_stale_combined_siblings(out_path, video_path, on_publish=notify,
                                                     ownership_verified=True)
                 else:
-                    _remove_stale_combined_siblings(out_path, video_path, on_publish=notify)
+                    _remove_stale_combined_siblings(out_path, video_path, on_publish=notify, **owner_kwargs)
+
+            if source is not None:
+                owner_kwargs['ownership_index'] = SourcePublicationOwnerIndex()
+
+                def validate_source():
+                    if _metadata_for(video_path, media_type, None, None, None, source=source) is None:
+                        raise ValueError('The source item moved or was removed during composition')
+                    if not sync_output_owner_is_unique(video_path, out_path, **owner_kwargs):
+                        raise ValueError('The combined output lost its unique owner during composition')
+
+                write_kwargs['before_publish'] = validate_source
 
             def capture_published():
                 nonlocal published_versions
@@ -147,8 +167,8 @@ def try_combine_for_video(video_path, media_type, sonarr_series_id=None,
 
             with staged_subtitle_write(
                     video_path, out_path, source_paths=(sources.primary, *sources.secondaries),
-                    on_publish=publication_callback(media_type, video_path, 'combine', arr_instance_id),
-                    after_publish=after_publish, **sports_kwargs) as temporary:
+                    on_publish=notify,
+                    after_publish=after_publish, **owner_kwargs, **write_kwargs) as temporary:
                 check_cancelled(cancel)
                 content = compose(primary_path=sources.primary, secondary_paths=sources.secondaries,
                                   format=rule["format"])
@@ -172,7 +192,8 @@ def try_combine_for_video(video_path, media_type, sonarr_series_id=None,
                 return CombineResult(status='built', path=out_path, alignment='ok', error=str(exc))
         else:
             _post_write(out_path, video_path, media_type,
-                         sonarr_episode_id, radarr_id, arr_instance_id=arr_instance_id)
+                         sonarr_episode_id, radarr_id, arr_instance_id=arr_instance_id,
+                         **({'source': source} if source is not None else {}))
 
         logging.info(
             "BAZARR combine built %s for %s", out_path, video_path,
@@ -216,7 +237,8 @@ def _normalize_language_codes(languages):
 _COMBINED_OUTPUT_EXTS = (".srt", ".ass", ".ssa")
 
 
-def _remove_stale_combined_siblings(out_path, video_path, on_publish=None, ownership_verified=False):
+def _remove_stale_combined_siblings(out_path, video_path, on_publish=None, ownership_verified=False,
+                                    **owner_kwargs):
     """Remove combined-output siblings that share this output's stem but use a
     different subtitle extension (e.g. a stale `.ass` left next to a freshly
     written `.srt`). Best-effort: never raises.
@@ -226,7 +248,7 @@ def _remove_stale_combined_siblings(out_path, video_path, on_publish=None, owner
     safe_dir = os.path.realpath(external_subtitles_dir(video_path))
     out_real = os.path.realpath(out_path)
     if (os.path.dirname(out_real) != safe_dir
-            or (not ownership_verified and not sync_output_owner_is_unique(video_path, out_path))):
+            or (not ownership_verified and not sync_output_owner_is_unique(video_path, out_path, **owner_kwargs))):
         return
     root, _ext = os.path.splitext(out_real)
     for ext in _COMBINED_OUTPUT_EXTS:
@@ -237,7 +259,7 @@ def _remove_stale_combined_siblings(out_path, video_path, on_publish=None, owner
             if os.path.commonpath([safe_dir, sibling]) != safe_dir:
                 continue
             if stat.S_ISREG(os.lstat(sibling).st_mode):
-                with subtitle_mutation(video_path, sibling):
+                with subtitle_mutation(video_path, sibling, **owner_kwargs):
                     os.remove(sibling)
                     if on_publish:
                         on_publish(sibling)
@@ -250,26 +272,34 @@ def _remove_stale_combined_siblings(out_path, video_path, on_publish=None, owner
 
 
 def _resolve_rule(media_type, sonarr_series_id, sonarr_episode_id, radarr_id,
-                   override_languages, override_format, video_path=None, arr_instance_id=None):
+                   override_languages, override_format, video_path=None, arr_instance_id=None, source=None):
     if override_languages and override_format:
         return {"languages": list(override_languages), "format": override_format}
     profile = _profile_for(
         media_type, sonarr_series_id, sonarr_episode_id, radarr_id,
         video_path=video_path, arr_instance_id=arr_instance_id,
+        **({'source': source} if source is not None else {}),
     )
     return get_combine_rule(profile) if profile else None
 
 
 def _profile_for(media_type, sonarr_series_id, sonarr_episode_id, radarr_id,
-                 video_path=None, arr_instance_id=None):
+                 video_path=None, arr_instance_id=None, source=None):
     from app.database import get_profiles_list
-    metadata = _metadata_for(video_path, media_type, sonarr_episode_id, radarr_id, arr_instance_id)
-    if metadata is None or not metadata.profileId:
+    metadata = _metadata_for(video_path, media_type, sonarr_episode_id, radarr_id, arr_instance_id,
+                             **({'source': source} if source is not None else {}))
+    if metadata is None:
         return None
-    return get_profiles_list(profile_id=metadata.profileId)
+    profile_id = metadata.profile_id if source is not None else metadata.profileId
+    return get_profiles_list(profile_id=profile_id) if profile_id else None
 
 
-def _metadata_for(video_path, media_type, sonarr_episode_id, radarr_id, arr_instance_id):
+def _metadata_for(video_path, media_type, sonarr_episode_id, radarr_id, arr_instance_id, source=None):
+    if source is not None:
+        from media_sources.context import resolve_same_item
+
+        return resolve_same_item(source) if source.path == video_path else None
+
     from app.database import TableEpisodes, TableShows, TableMovies, database, select
     from arr_instances.resolution import scoped
     from utilities.path_mappings import path_mappings
@@ -296,7 +326,8 @@ def _metadata_for(video_path, media_type, sonarr_episode_id, radarr_id, arr_inst
     return matches[0] if len(matches) == 1 else None
 
 
-def _post_write(out_path, video_path, media_type, sonarr_episode_id, radarr_id, arr_instance_id=None):
+def _post_write(out_path, video_path, media_type, sonarr_episode_id, radarr_id, arr_instance_id=None,
+                source=None):
     """Hook into the same postprocess chain a downloaded subtitle uses.
 
     postprocess_subtitles uses the 'episode'/'movie' media-type convention and
@@ -307,6 +338,12 @@ def _post_write(out_path, video_path, media_type, sonarr_episode_id, radarr_id, 
     endpoint does instead of passing None."""
     try:
         from api.subtitles.subtitles import postprocess_subtitles
+        if source is not None:
+            current = _metadata_for(video_path, media_type, None, None, None, source=source)
+            if current is not None:
+                postprocess_subtitles(out_path, video_path, current.publication_type, None, current.item_id,
+                                      source=current)
+            return
         is_movie = media_type in ("movies", "movie")
         metadata = _metadata_for(video_path, media_type, sonarr_episode_id, radarr_id, arr_instance_id)
         if metadata is not None:

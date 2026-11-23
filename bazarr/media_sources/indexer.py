@@ -59,6 +59,21 @@ class SourceOutputOwnerIndex(SyncOutputOwnerIndex):
         return owners
 
 
+class SourcePublicationOwnerIndex(SourceOutputOwnerIndex):
+    """Source writes in shared subtitle folders must account for all media stored there."""
+
+    @staticmethod
+    def _load_owners():
+        owners = SourceOutputOwnerIndex._load_owners()
+        for key, paths in SyncOutputOwnerIndex._load_owners().items():
+            owners.setdefault(key, set()).update(paths)
+        return owners
+
+    def folder_is_shared(self, directory):
+        # A relative custom path can also resolve into another video's directory.
+        return bool(get_subtitle_destination_folder())
+
+
 def list_external_subtitles(path, previous=None, ownership_index=None):
     """``[[language, subtitle path, size], ...]`` for the subtitle files beside ``path``.
 
@@ -327,3 +342,16 @@ def recalculate_missing_subtitles(*, library_id=None, group_id=None, cancel=None
             missing = str(_missing(item, listing, item.audio_language, connection))
             if (subtitles, missing) != (item.subtitles, item.missing_subtitles):
                 repository.write_item_index(item_id, subtitles, missing, connection, indexed=False)
+
+
+def index_and_notify_item(source):
+    """Refresh a source item's subtitles and the views that show it."""
+    from app.event_handler import event_stream
+
+    item = repository.get_item(source.item_id)
+    if item is None or not source.same_item(item) or item.path != source.path or item.source_id != source.source_id:
+        return
+    if index_item(source.item_id) is not None:
+        event_stream(type='source-item', payload=source.item_id)
+        if source.group_id is not None:
+            event_stream(type='source-group', payload=source.group_id)

@@ -18,7 +18,7 @@ from subtitles.indexer.missing_refresh import queue_missing_subtitles_recalculat
 
 from . import identity, paths, repository
 from .analysis import index_matches_file, local_stat, source_search_probes
-from .context import SourceItemGone, resolve_item
+from .context import SourceItemGone, resolve_item, resolve_same_item
 from .db import source_transaction
 from .history import history_log_source
 from .indexer import index_item
@@ -394,7 +394,12 @@ def queue_search(item_id):
     reason = item_disabled_reason(item_id)
     if reason:
         raise SourceError(reason, 409, 'disabled')
-    return search_source_item(item_id)
+    try:
+        return search_source_item(item_id)
+    except JobFailed as error:
+        if error.reason == 'not_found':
+            raise SourceError(str(error), 404, 'not_found') from error
+        raise
 
 
 def _missing_languages(item):
@@ -407,24 +412,39 @@ def _missing_languages(item):
     return languages
 
 
+def _language_code(language, hi, forced):
+    return language + (':hi' if hi == 'True' else ':forced' if forced == 'True' else '')
+
+
 def _label(item_id):
     item = repository.get_item(item_id)
     return item.title if item is not None else str(item_id)
 
 
-def search_source_item(item_id, job_id=None):
+def search_source_item(item_id, job_id=None, *, translation_gate=True, expected_source=None):
     """Search the missing subtitles of one source item. Called without a job id it queues itself."""
     if not job_id:
+        if expected_source is None:
+            try:
+                expected_source = resolve_item(item_id)
+            except SourceItemGone as error:
+                raise JobFailed('The item no longer exists', reason='not_found') from error
         return jobs_queue.add_job_from_function(f"Searching subtitles for {_label(item_id)}", is_progress=True)
     with source_search_probes(item_id):
-        return _search_source_item(item_id, job_id)
+        return _search_source_item(item_id, job_id, translation_gate, expected_source)
 
 
-def _search_source_item(item_id, job_id):
-    try:
-        context = resolve_item(item_id)
-    except SourceItemGone as error:
-        raise JobFailed('The item no longer exists', reason='not_found') from error
+
+def _search_source_item(item_id, job_id, translation_gate, expected_source):
+    if expected_source is not None:
+        context = resolve_same_item(expected_source)
+        if context is None or context.item_id != item_id:
+            return None
+    else:
+        try:
+            context = resolve_item(item_id)
+        except SourceItemGone as error:
+            raise JobFailed('The item no longer exists', reason='not_found') from error
     reason = item_disabled_reason(item_id)
     if reason:
         # Disabled after the search was queued: nothing is searched, and nothing is an error.
@@ -435,7 +455,7 @@ def _search_source_item(item_id, job_id):
                                        progress_message='No language profile: nothing to search for')
         return None
     item = repository.get_item(item_id)
-    if item is None:
+    if item is None or not context.same_item(item):
         raise JobFailed('The item no longer exists', reason='not_found')
     stat = local_stat(item.path)
     if stat is None:
@@ -454,13 +474,25 @@ def _search_source_item(item_id, job_id):
             refreshed = resolve_item(item_id)
         except SourceItemGone as error:
             raise JobFailed('The item no longer exists', reason='not_found') from error
-        if refreshed.path != context.path or item.path != context.path:
+        if (not context.same_item(refreshed) or not context.same_item(item)
+                or refreshed.path != context.path or item.path != context.path):
             raise JobFailed('The source file moved while the search was starting. Try again.', reason='conflict')
         context = refreshed
     languages = _missing_languages(item)
+    covered = set()
+    if translation_gate and languages:
+        from .translation import queue_missing_translations
+
+        try:
+            covered = queue_missing_translations(context)
+        except Exception:
+            logging.exception('BAZARR could not queue a translation for source item %s', item_id)
+        else:
+            languages = [entry for entry in languages if _language_code(*entry) not in covered]
     jobs_queue.update_job_progress(job_id=job_id, progress_max=len(languages), progress_message=context.title)
     if not languages:
-        jobs_queue.update_job_progress(job_id=job_id, progress_value='max', progress_message='Nothing is missing')
+        jobs_queue.update_job_progress(job_id=job_id, progress_value='max',
+                                       progress_message='Subtitles found or queued' if covered else 'Nothing is missing')
         return None
     if not get_providers():
         logging.info("BAZARR All providers are throttled")
@@ -473,16 +505,22 @@ def _search_source_item(item_id, job_id):
     title = context.group_title if context.kind == 'episode' and context.group_title else context.title
 
     from subtitles.download import generate_subtitles
+    from app.notifier import send_notifications_source
+
     downloaded = 0
     try:
         for result in generate_subtitles(context.path, languages, audio_language, str(context.scene_name), title,
                                          context.media_type, context.profile_id, check_if_still_required=True,
-                                         job_id=job_id, source=context):
+                                         job_id=job_id, source=context,
+                                         **({} if translation_gate else {'auto_translate': False})):
             if not result:
                 continue
-            index_item(item_id)
             history_log_source(1, context, result)
             downloaded += 1
+            try:
+                send_notifications_source(context, result.message)
+            except Exception:
+                logging.exception('BAZARR could not send a notification for source item %s', item_id)
     except OSError as error:
         raise JobFailed(f'Unable to save the subtitles file: {error}', reason='save_failed') from error
     jobs_queue.update_job_progress(
