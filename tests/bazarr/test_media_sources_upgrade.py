@@ -411,13 +411,15 @@ def test_failed_source_replacement_leaves_upgrade_retryable(world, monkeypatch, 
     assert sorted(path.read_bytes() for path in media.parent.glob('.bazarr-sync-obsolete-*')) == sorted(siblings.values())
 
 
-def test_postgres_upgrade_keeps_replacement_after_a_lost_commit_acknowledgement(world, backend, monkeypatch):
+@pytest.mark.parametrize('lock_history', [False, True])
+def test_postgres_upgrade_keeps_replacement_after_a_lost_commit_acknowledgement(world, backend, monkeypatch,
+                                                                             lock_history):
     if backend != 'postgresql':
         pytest.skip('PostgreSQL commit acknowledgement is under test')
 
     from media_sources import repository
     from media_sources.indexer import index_item
-    from subtitles import upgrade
+    from subtitles import download, upgrade
 
     context = pipeline._movie(world)
     media = Path(context.path)
@@ -431,8 +433,11 @@ def test_postgres_upgrade_keeps_replacement_after_a_lost_commit_acknowledgement(
     pipeline._download(monkeypatch)
     commits = []
     recoveries = []
+    blocker = None
+    engine = world.db.get_bind()
 
     def lose_acknowledgement(connection):
+        nonlocal blocker
         if commits or not destination.exists():
             return
         row_id = connection.scalar(sa.select(repository.History.c.id).where(repository.History.c.action == 3))
@@ -441,6 +446,10 @@ def test_postgres_upgrade_keeps_replacement_after_a_lost_commit_acknowledgement(
         # Commit the real database transaction, then surface a disconnect to the application's caller.
         connection.connection.dbapi_connection.commit()
         commits.append(row_id)
+        if lock_history:
+            blocker = engine.connect().execution_options(isolation_level='READ COMMITTED')
+            blocker.exec_driver_sql("SET LOCAL lock_timeout = '2s'")
+            blocker.exec_driver_sql(f'LOCK TABLE {repository.History.name} IN ACCESS EXCLUSIVE MODE')
         connection.invalidate()
         raise sa.exc.OperationalError('COMMIT', None, OSError('Lost commit acknowledgement'),
                                       connection_invalidated=True)
@@ -451,14 +460,20 @@ def test_postgres_upgrade_keeps_replacement_after_a_lost_commit_acknowledgement(
             assert [path.read_bytes() for path in media.parent.glob('.bazarr-replaced-*')] == [b'Old subtitle']
             recoveries.append(connection)
 
-    engine = world.db.get_bind()
     sa.event.listen(engine, 'commit', lose_acknowledgement)
     sa.event.listen(engine, 'before_cursor_execute', observe_recovery)
     try:
-        upgrade.upgrade_source_subtitles(job_id=10)
+        expected = (pytest.raises(download.SourceUpgradeHistoryFailed, match='could not be confirmed')
+                    if lock_history else nullcontext())
+        with expected as failure:
+            upgrade.upgrade_source_subtitles(job_id=10)
+        if lock_history:
+            assert failure.value.reason == 'history_unverified' and failure.value.retryable is False
     finally:
         sa.event.remove(engine, 'commit', lose_acknowledgement)
         sa.event.remove(engine, 'before_cursor_execute', observe_recovery)
+        if blocker is not None:
+            blocker.close()
 
     assert len(commits) == 1
     assert len(recoveries) == 1
@@ -466,6 +481,8 @@ def test_postgres_upgrade_keeps_replacement_after_a_lost_commit_acknowledgement(
     assert not original.exists()
     assert destination.read_bytes() == pipeline.CONTENT
     assert [event.subtitle_path for event in world.published] == [str(destination), str(original)]
+    backups = [path.read_bytes() for path in media.parent.glob('.bazarr-replaced-*')]
+    assert backups == ([b'Old subtitle'] if lock_history else [])
 
 
 def test_postgres_upgrade_history_recovery_has_a_statement_deadline(world, backend):
