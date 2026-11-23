@@ -1,5 +1,7 @@
 """Review notices and retained plugin data persist on SQLite and PostgreSQL."""
 import json
+import subprocess
+import sys
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -90,7 +92,7 @@ def _stage_row(plugin_id, **row):
 def test_kept_data_goes_back_only_to_the_same_plugin_from_the_same_source_and_kind(
         hub_store, hub_engine, monkeypatch, tmp_path, plugin_kind, incoming_kind, source, reclaims):
     from compat import service as compat_service
-    from provider_hub import consent, datadir, detach, kinds, leases, registry, service
+    from provider_hub import catalog_feed, consent, datadir, detach, kinds, leases, registry, service
     from provider_hub.kinds import subtitle_provider, translator
     from provider_hub.kinds.service import SERVICE_KIND_API, ServiceKind
     from provider_hub.state import load_state, mutate_state
@@ -125,6 +127,7 @@ def test_kept_data_goes_back_only_to_the_same_plugin_from_the_same_source_and_ki
         monkeypatch.setitem(kinds._KINDS, name, hook)
     kind = hooks[plugin_kind]
     monkeypatch.setattr(service, "provider_hub_dir", lambda: tmp_path)
+    monkeypatch.setattr(catalog_feed, "counter_file", lambda: tmp_path / "plugins" / catalog_feed.COUNTER_FILE_NAME)
     manifest = {"schema_version": 2, "kind": plugin_kind, "permissions": ["data_dir"], "version": "1.0.0"}
     active = datadir.release_path(tmp_path, "engine", "a" * 32)
     active.mkdir(parents=True)
@@ -156,7 +159,26 @@ def test_kept_data_goes_back_only_to_the_same_plugin_from_the_same_source_and_ki
     interpreter.touch()
     monkeypatch.setattr(service.PluginEnvironment, "install", lambda *args, **kwargs: env_path)
     monkeypatch.setattr(service, "_smoke_validate_worker", lambda *args, **kwargs: None)
-    monkeypatch.setattr(worker_binding.TranslatorWorkers, "smoke", lambda *args, **kwargs: None)
+    loaded_entries = []
+
+    def load_translator_fixture(self, validated, bundle, interpreter, data, timeout):
+        manifest = validated.raw
+        entry = f"{manifest['entry_module']}:{manifest['entry_class']}"
+        assert validated.provider_id == "engine" and entry == "translator_fixture:FixtureTranslator"
+        check = subprocess.run([sys.executable, "-I", "-B", "-c", """
+import sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+from bazarr_plugin_sdk.runner import load_plugin
+plugin, _ = load_plugin(sys.argv[3], [sys.argv[2]])
+module = sys.modules[type(plugin).__module__]
+assert Path(module.__file__).resolve().parent == Path(sys.argv[2]).resolve()
+assert plugin.describe() == {"backend_types": ["fixture"]}
+""", str(worker_binding._sdk_root()), str(bundle), entry], capture_output=True, text=True, timeout=10)
+        assert check.returncode == 0, check.stderr
+        loaded_entries.append(entry)
+
+    monkeypatch.setattr(worker_binding.TranslatorWorkers, "smoke", load_translator_fixture)
     monkeypatch.setattr(consent, "sandbox_status", lambda: {})
 
     version = "2.0.0"
@@ -164,11 +186,21 @@ def test_kept_data_goes_back_only_to_the_same_plugin_from_the_same_source_and_ki
         files = {"provider.py": b"class ExampleProvider: pass\n"}
         incoming = provider_manifest_v2("engine", version, permissions=["data_dir"], file_payloads=files)
     else:
-        files = {"service.py": b"class Service: pass\n"}
-        contract = (
-            {"kind_api": translator.TRANSLATOR_KIND_API, "settings_version": 1, "settings": {"fields": []}}
-            if incoming_kind == "translator" else {"kind_api": SERVICE_KIND_API, "provides": ["engine.v1"]}
-        )
+        if incoming_kind == "translator":
+            files = {"translator_fixture.py": b"""from bazarr_plugin_sdk.translator.v1 import TranslatorPlugin
+
+class FixtureTranslator(TranslatorPlugin):
+    def describe(self):
+        return {"backend_types": ["fixture"]}
+
+    async def translate(self, request, ctx):
+        return {"lines": request["lines"]}
+"""}
+            contract = {"kind_api": translator.TRANSLATOR_KIND_API, "settings_version": 1, "settings": {"fields": []},
+                        "entry_module": "translator_fixture", "entry_class": "FixtureTranslator"}
+        else:
+            files = {"service.py": b"class Service: pass\n"}
+            contract = {"kind_api": SERVICE_KIND_API, "provides": ["engine.v1"]}
         incoming = service_manifest("engine", version, kind=incoming_kind, permissions=["data_dir"],
                                     file_payloads=files, **contract)
 
@@ -198,6 +230,7 @@ def test_kept_data_goes_back_only_to_the_same_plugin_from_the_same_source_and_ki
     assert result["state"] == staged["state"] == "staged"
     assert staged["staged_version"] == version
     assert staged["kind"] == incoming_kind
+    assert loaded_entries == (["translator_fixture:FixtureTranslator"] if incoming_kind == "translator" else [])
     assert staged["origin"] == ("local" if source is None else "catalog")
     assert staged["source_id"] == source
     staged_dir = datadir.release_path(tmp_path, "engine", staged["staged_data_key"])
