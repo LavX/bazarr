@@ -2,10 +2,10 @@ import type { Cue, ParseResult } from "@/pages/SubtitleEditor/types";
 import type { SubtitleParser } from "./index";
 import { cueId } from "./uuid";
 
-function parseTimestamp(raw: string): number {
+function parseTimestamp(raw: string): number | null {
   // H:MM:SS.cc (centiseconds)
   const match = raw.trim().match(/^(\d+):(\d+):(\d+)\.(\d+)$/);
-  if (!match) return 0;
+  if (!match) return null;
   const [, h, m, s, cs] = match;
   return (
     parseInt(h, 10) * 3600000 +
@@ -28,7 +28,7 @@ function assTextToDisplay(text: string): string {
 }
 
 export const assParser: SubtitleParser = {
-  parse(content: string): ParseResult {
+  parse(content, { strict } = {}): ParseResult {
     const text = content.replace(/^\uFEFF/, "").replace(/\r\n/g, "\n");
 
     if (!text.trim()) {
@@ -122,10 +122,15 @@ export const assParser: SubtitleParser = {
       const endStr =
         endColIdx >= 0 && endColIdx < parts.length ? parts[endColIdx] : "";
 
+      const startMs = parseTimestamp(startStr);
+      const endMs = parseTimestamp(endStr);
+      if (strict && (startMs === null || endMs === null)) {
+        throw new Error("Invalid ASS cue timing");
+      }
       cues.push({
         id: cueId(),
-        startMs: parseTimestamp(startStr),
-        endMs: parseTimestamp(endStr),
+        startMs: startMs ?? 0,
+        endMs: endMs ?? 0,
         text: assTextToDisplay(rawCueText),
         rawText: line,
       });

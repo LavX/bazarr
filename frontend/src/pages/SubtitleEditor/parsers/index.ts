@@ -8,7 +8,7 @@ import { txtParser } from "./txt";
 import { vttParser } from "./vtt";
 
 export interface SubtitleParser {
-  parse(content: string): ParseResult;
+  parse(content: string, options?: { strict?: boolean }): ParseResult;
 }
 
 const parsers: Record<SubtitleFormat, SubtitleParser> = {

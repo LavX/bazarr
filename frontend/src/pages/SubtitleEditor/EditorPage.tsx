@@ -102,9 +102,14 @@ function escapeRegExp(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
-function parseSubtitleContent(data: { format: string; content: string }) {
+function parseSubtitleContent(
+  data: { format: string; content: string },
+  strict = false,
+) {
   try {
-    return getParser(data.format as SubtitleFormat).parse(data.content);
+    return getParser(data.format as SubtitleFormat).parse(data.content, {
+      strict,
+    });
   } catch {
     return null;
   }
@@ -464,9 +469,9 @@ export default function EditorPage() {
   const [lineTranslationJobs, setLineTranslationJobs] = useState<
     LineTranslationJob[]
   >([]);
-  const [translatingLineIdx, setTranslatingLineIdx] = useState<number | null>(
-    null,
-  );
+  const [translatingLineCueId, setTranslatingLineCueId] = useState<
+    string | null
+  >();
   const refFileInputRef = useRef<HTMLInputElement>(null);
 
   // Audio track selection
@@ -919,7 +924,7 @@ export default function EditorPage() {
     try {
       const { data: latest } = await refetchSubtitle({ throwOnError: true });
       if (currentSyncDocumentRef.current?.subtitleKey !== subtitleKey) return;
-      const parsed = latest && parseSubtitleContent(latest.data);
+      const parsed = latest && parseSubtitleContent(latest.data, true);
       if (
         !latest ||
         !parsed ||
@@ -935,7 +940,7 @@ export default function EditorPage() {
       setSelectedIndex(0);
       setMultiSelect(new Set());
       setLineTranslationJobs([]);
-      setTranslatingLineIdx(null);
+      setTranslatingLineCueId(undefined);
       setTranslating(false);
       setSaveConflictKey(null);
       setRecoveryAvailable(null);
@@ -1675,31 +1680,27 @@ export default function EditorPage() {
     // overlaps the reference, otherwise a new cue at the reference timing.
     // The new cue is only added once a job is actually queued, so a refused
     // or failed attempt leaves the subtitle unchanged.
-    let targetIdx = selectedIndex;
-    let insertion: { idx: number; cue: Cue } | null = null;
+    let insertion: Cue | null = null;
     if (refMatches.length > 0) {
       const refStartMs = Math.min(...refMatches.map((r) => r.startMs));
       const refEndMs = Math.max(...refMatches.map((r) => r.endMs));
       const overlaps = cue && cue.startMs < refEndMs && cue.endMs > refStartMs;
       if (!overlaps) {
-        const newCue: Cue = {
+        insertion = {
           id: cueId(),
           startMs: refStartMs,
           endMs: refEndMs,
           text: "",
         };
-        let insertIdx = docState.cues.findIndex((c) => c.startMs > refStartMs);
-        if (insertIdx === -1) insertIdx = docState.cues.length;
-        insertion = { idx: insertIdx, cue: newCue };
-        targetIdx = insertIdx;
       }
     }
 
-    // The hold sits on the initiating cue while the queue decides: the
-    // insertion index belongs to a cue that does not exist yet, and a hold
-    // parked there leaves the initiating cue's button free for a second
-    // click to queue a second job.
-    setTranslatingLineIdx(selectedIndex);
+    const targetCueId = insertion?.id ?? cue?.id;
+    if (!targetCueId) return;
+
+    // Hold the initiating cue until the queue accepts the job, even when the
+    // translated line will go into a cue that does not exist yet.
+    setTranslatingLineCueId(cue?.id ?? null);
     const reloadVersion = reloadVersionRef.current;
     try {
       const queued = await queueEditorTranslation({
@@ -1712,31 +1713,33 @@ export default function EditorPage() {
       if (reloadVersion !== reloadVersionRef.current) return;
       if (queued.jobId) {
         if (insertion) {
+          const currentCues =
+            currentSyncDocumentRef.current?.cues ?? docState.cues;
+          const nextIndex = currentCues.findIndex(
+            (c) => c.startMs > insertion.startMs,
+          );
+          const insertIndex = nextIndex === -1 ? currentCues.length : nextIndex;
           dispatch({
             type: "APPLY_OP",
-            op: createAddCue(insertion.idx - 1, insertion.cue),
+            op: createAddCue(insertIndex - 1, insertion),
           });
-          // The selection and the hold move to the inserted cue together,
-          // where the queued result lands.
-          setSelectedIndex(insertion.idx);
+          setSelectedIndex(insertIndex);
         }
         // From here the job is what marks the cue as translating, and the hold
         // on the initiating cue is let go, so the next line can be started.
         setLineTranslationJobs((jobs) => [
           ...jobs,
-          { jobId: queued.jobId, session: queued.session, targetIdx },
+          { jobId: queued.jobId, session: queued.session, cueId: targetCueId },
         ]);
-        setTranslatingLineIdx(null);
-      } else {
-        setTranslatingLineIdx(null);
       }
+      setTranslatingLineCueId(undefined);
     } catch (error) {
       if (reloadVersion !== reloadVersionRef.current) return;
       // A stale status can leave the line translate clickable while the
       // gate is closed: a 409 shows the server's reason, and every other
       // failure keeps the shared client's own toast.
       showTranslationRefusal(error);
-      setTranslatingLineIdx(null);
+      setTranslatingLineCueId(undefined);
     }
   }, [
     selectedIndex,
@@ -1753,13 +1756,15 @@ export default function EditorPage() {
   // Each single-line translation is a queued job like the panel's. Its end
   // arrives through the jobs cache, and only then is the result read.
   const applyTranslatedLine = useCallback(
-    (targetIdx: number, line: string) => {
+    (cueId: string, line: string) => {
       if (
         sourceRevision !== undefined &&
         sourceRevision !== reloadVersionRef.current
       )
         return;
-      dispatch({ type: "APPLY_OP", op: createEditText(targetIdx, line) });
+      if (!currentSyncDocumentRef.current?.cues.some((cue) => cue.id === cueId))
+        return;
+      dispatch({ type: "APPLY_OP", op: createEditText(cueId, line) });
     },
     [sourceRevision],
   );
@@ -2790,8 +2795,8 @@ export default function EditorPage() {
             onUseReference={selectedRefText ? handleUseReference : undefined}
             onTranslateLine={handleTranslateLine}
             translatingLine={
-              translatingLineIdx === selectedIndex ||
-              lineTranslationJobs.some((job) => job.targetIdx === selectedIndex)
+              translatingLineCueId === (selectedCue?.id ?? null) ||
+              lineTranslationJobs.some((job) => job.cueId === selectedCue?.id)
             }
             currentTimeMs={playbackTimeMs}
           />

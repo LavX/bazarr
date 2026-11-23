@@ -2,10 +2,10 @@ import type { ParseResult } from "@/pages/SubtitleEditor/types";
 import type { SubtitleParser } from "./index";
 import { cueId } from "./uuid";
 
-function parseTimestamp(raw: string): number {
+function parseTimestamp(raw: string): number | null {
   // HH:MM:SS,mmm or HH:MM:SS.mmm
   const match = raw.trim().match(/^(\d+):(\d+):(\d+)[,.](\d+)$/);
-  if (!match) return 0;
+  if (!match) return null;
   const [, h, m, s, ms] = match;
   return (
     parseInt(h, 10) * 3600000 +
@@ -16,7 +16,7 @@ function parseTimestamp(raw: string): number {
 }
 
 export const srtParser: SubtitleParser = {
-  parse(content: string): ParseResult {
+  parse(content, { strict } = {}): ParseResult {
     // Normalize: strip BOM, normalize line endings
     const text = content.replace(/^\uFEFF/, "").replace(/\r\n/g, "\n");
 
@@ -29,7 +29,6 @@ export const srtParser: SubtitleParser = {
 
     for (const block of blocks) {
       const lines = block.trim().split("\n");
-      if (lines.length < 2) continue;
 
       // Find the timestamp line. It could be line 0 (missing sequence number)
       // or line 1 (normal case).
@@ -40,19 +39,26 @@ export const srtParser: SubtitleParser = {
           break;
         }
       }
-      if (tsLineIdx === -1) continue;
+      if (tsLineIdx === -1 || lines.length < 2) {
+        if (strict) throw new Error("Missing SRT cue timing");
+        continue;
+      }
 
       const tsParts = lines[tsLineIdx].split("-->");
-      if (tsParts.length < 2) continue;
-
       const startMs = parseTimestamp(tsParts[0]);
       const endMs = parseTimestamp(tsParts[1].trim().split(/\s/)[0]);
+      if (
+        strict &&
+        (tsParts.length !== 2 || startMs === null || endMs === null)
+      ) {
+        throw new Error("Invalid SRT cue timing");
+      }
       const cueText = lines.slice(tsLineIdx + 1).join("\n");
 
       cues.push({
         id: cueId(),
-        startMs,
-        endMs,
+        startMs: startMs ?? 0,
+        endMs: endMs ?? 0,
         text: cueText,
       });
     }

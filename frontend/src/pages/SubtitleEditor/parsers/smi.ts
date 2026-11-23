@@ -15,7 +15,7 @@ function stripHtml(html: string): string {
 }
 
 export const smiParser: SubtitleParser = {
-  parse(content: string): ParseResult {
+  parse(content, { strict } = {}): ParseResult {
     const text = content.replace(/^\uFEFF/, "").replace(/\r\n/g, "\n");
 
     if (!text.trim()) {
@@ -23,11 +23,15 @@ export const smiParser: SubtitleParser = {
     }
 
     // Find all SYNC tags with their start times and collect text between them
-    const syncPattern = /<SYNC\s+Start\s*=\s*(\d+)\s*>/gi;
+    const syncPattern = /<SYNC\b(?:\s+Start\s*=\s*(\d+)\s*>)?/gi;
     const syncs: { startMs: number; index: number }[] = [];
     let match: RegExpExecArray | null;
 
     while ((match = syncPattern.exec(text)) !== null) {
+      if (match[1] === undefined) {
+        if (strict) throw new Error("Invalid SAMI cue timing");
+        continue;
+      }
       syncs.push({
         startMs: parseInt(match[1], 10),
         index: match.index + match[0].length,

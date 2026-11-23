@@ -4,6 +4,7 @@ import userEvent from "@testing-library/user-event";
 import { http, HttpResponse } from "msw";
 import { afterEach, expect, it, vi } from "vitest";
 import { latestWhatsNewVersion } from "@/data/whatsNew";
+import * as editorJobs from "@/pages/SubtitleEditor/editorJobs";
 import { buildEditorAutosaveKey } from "@/pages/SubtitleEditor/editorScope";
 import { AllProviders } from "@/providers";
 import { Router } from "@/Router";
@@ -58,6 +59,7 @@ const refreshedEtag = `${"b".repeat(64)}:gzip`;
 const sourceDraftKey = buildEditorAutosaveKey("source", "42", "en")!;
 
 afterEach(() => {
+  vi.restoreAllMocks();
   window.history.replaceState(null, "", "/");
   localStorage.removeItem(WHATS_NEW_SEEN_KEY);
   localStorage.removeItem(sourceDraftKey);
@@ -67,6 +69,7 @@ afterEach(() => {
 async function openEditor(
   mediaType: "source" | "movie",
   format: "srt" | "ass" = "srt",
+  extraCues = "",
 ) {
   const user = userEvent.setup();
   const base = mediaType === "source" ? "sources/items" : "movies";
@@ -81,6 +84,9 @@ async function openEditor(
       }),
     ),
     http.get("/api/badges", () => HttpResponse.json({})),
+    http.get("/api/discover/metadata/status", () =>
+      HttpResponse.json({ data: { available: false } }),
+    ),
     http.get("/api/system/searches", () => HttpResponse.json([])),
     http.get("/api/editor/subtitles", () =>
       HttpResponse.json({
@@ -97,9 +103,10 @@ async function openEditor(
       reads();
       return HttpResponse.json(
         {
-          content: (format === "ass" ? assContent : subtitleContent)(
-            writes.length === 0 ? "Original subtitle" : "Changed on disk",
-          ),
+          content:
+            (format === "ass" ? assContent : subtitleContent)(
+              writes.length === 0 ? "Original subtitle" : "Changed on disk",
+            ) + extraCues,
           format,
           encoding: "utf-8",
           language: "en",
@@ -213,17 +220,48 @@ it("keeps source edits after a rejected conditional save until explicitly reload
   });
 });
 
-it("keeps the conflict and unsaved edits when reloading fails", async () => {
+it.each([
+  {
+    reason: "a read failure",
+    respond: () =>
+      HttpResponse.json("The subtitle is unavailable", { status: 404 }),
+  },
+  {
+    reason: "invalid SRT timing",
+    respond: () => subtitleResponse("1\nbad --> bad\nUnreadable cue"),
+  },
+  {
+    reason: "invalid ASS timing",
+    respond: () =>
+      subtitleResponse(
+        assContent("Unreadable cue").replace("0:00:01.00", "bad"),
+        "ass",
+      ),
+  },
+  {
+    reason: "invalid WebVTT timing",
+    respond: () =>
+      subtitleResponse("WEBVTT\n\nbad --> bad\nUnreadable cue", "vtt"),
+  },
+  {
+    reason: "an invalid SAMI marker",
+    respond: () =>
+      subtitleResponse(
+        "<SAMI><BODY><SYNC Start=bad>Unreadable cue</BODY></SAMI>",
+        "smi",
+      ),
+  },
+])("keeps the conflict and saved draft after $reason", async ({ respond }) => {
   const { user, editor, writes, contentPath } = await openEditor("source");
   fireEvent.change(editor, { target: { value: "Local edit" } });
   await user.click(screen.getByRole("button", { name: "Save" }));
   await screen.findByText("Subtitle changed on disk");
-
-  server.use(
-    http.get(contentPath, () =>
-      HttpResponse.json("The subtitle is unavailable", { status: 404 }),
-    ),
+  await waitFor(
+    () => expect(localStorage.getItem(sourceDraftKey)).toContain("Local edit"),
+    { timeout: 3500 },
   );
+
+  server.use(http.get(contentPath, respond));
   await user.click(
     screen.getByRole("button", { name: "Discard edits and reload" }),
   );
@@ -231,12 +269,35 @@ it("keeps the conflict and unsaved edits when reloading fails", async () => {
   await screen.findByText("Could not reload the subtitle");
   expect(screen.getByText("Subtitle changed on disk")).toBeInTheDocument();
   expect(screen.getByDisplayValue("Local edit")).toBeInTheDocument();
+  expect(localStorage.getItem(sourceDraftKey)).toContain("Local edit");
   expect(
     within(screen.getByRole("status", { name: "Editor status" })).getByText(
       "Unsaved",
     ),
   ).toBeInTheDocument();
   expect(writes).toHaveLength(1);
+});
+
+it("accepts a valid SRT cue starting at zero during reload", async () => {
+  const { user, editor, contentPath } = await openEditor("source");
+  fireEvent.change(editor, { target: { value: "Local edit" } });
+  await user.click(screen.getByRole("button", { name: "Save" }));
+  await screen.findByText("Subtitle changed on disk");
+
+  server.use(
+    http.get(contentPath, () =>
+      subtitleResponse("1\n00:00:00,000 --> 00:00:01,000\nStarts at zero"),
+    ),
+  );
+  await user.click(
+    screen.getByRole("button", { name: "Discard edits and reload" }),
+  );
+
+  expect(await screen.findByDisplayValue("Starts at zero")).toBeInTheDocument();
+  expect(screen.getByTitle("Start time")).toHaveValue("00:00:00.000");
+  expect(
+    screen.queryByText("Subtitle changed on disk"),
+  ).not.toBeInTheDocument();
 });
 
 it("adopts reloaded ASS text, timing, styles and encoding together before saving", async () => {
@@ -320,6 +381,7 @@ it.each([
   ["vtt", "WEBVTT\n\n\n\nNOTE Subtitle is intentionally empty"],
   ["ass", "[Script Info]\nScriptType: v4.00+\n\n[Events]"],
   ["smi", "<SAMI>\n<BODY>\n</BODY>\n</SAMI>"],
+  ["smi", "<SAMI><BODY><SYNC Start=0><P Class=ENCC>&nbsp;</BODY></SAMI>"],
 ])("can reload a valid empty %s document", async (format, content) => {
   const { user, editor, contentPath } = await openEditor("source");
   fireEvent.change(editor, { target: { value: "Discarded draft" } });
@@ -391,10 +453,19 @@ it("keeps an already dispatched file import when conflict reload fails", async (
   }
 });
 
-it.each(["queue", "result"])(
-  "keeps a line translation whose %s arrives during a failed reload",
-  async (heldStage) => {
-    const { user, editor, contentPath } = await openEditor("source");
+it.each([
+  { heldStage: "queue", reloadSucceeds: false },
+  { heldStage: "result", reloadSucceeds: false },
+  { heldStage: "result", reloadSucceeds: true },
+])(
+  "keeps translation tied to its cue with $heldStage held and reload success $reloadSucceeds",
+  async ({ heldStage, reloadSucceeds }) => {
+    const sibling = "\n\n2\n00:00:03,000 --> 00:00:04,000\nSibling cue";
+    const { user, editor, contentPath } = await openEditor(
+      "source",
+      "srt",
+      sibling,
+    );
     fireEvent.change(editor, { target: { value: "Local edit" } });
     await user.click(screen.getByRole("button", { name: "Save" }));
     await screen.findByText("Subtitle changed on disk");
@@ -403,6 +474,7 @@ it.each(["queue", "result"])(
       Promise.withResolvers<void>();
     const queueRequested = vi.fn();
     const resultRequested = vi.fn();
+    const readTranslation = vi.spyOn(editorJobs, "readEditorTranslation");
     server.use(
       http.get("/api/sources/items/42/subtitles/hu/content", () =>
         subtitleResponse(subtitleContent("Hungarian reference")),
@@ -442,20 +514,54 @@ it.each(["queue", "result"])(
     const { promise: reloadResponse, resolve: finishReload } =
       Promise.withResolvers<Response>();
     server.use(http.get(contentPath, () => reloadResponse));
-    await user.click(
+    const end = screen.getByTitle("End time");
+    act(() => end.focus());
+    fireEvent.change(end, { target: { value: "00:00:06.000" } });
+    const start = screen.getByTitle("Start time");
+    act(() => start.focus());
+    fireEvent.change(start, { target: { value: "00:00:05.000" } });
+    expect(start).toHaveFocus();
+
+    fireEvent.click(
       screen.getByRole("button", { name: "Discard edits and reload" }),
     );
     expect(documentControlsAreInert(editor)).toBe(true);
 
+    if (reloadSucceeds) {
+      finishReload(subtitleResponse(subtitleContent("Replacement cue")));
+      await screen.findByDisplayValue("Replacement cue");
+      expect(readTranslation).toHaveBeenCalledWith(7);
+      await act(async () => {
+        releaseTranslation();
+        await readTranslation.mock.results[0].value;
+      });
+      expect(screen.getByDisplayValue("Replacement cue")).toBeInTheDocument();
+      expect(
+        screen.queryByText("Translated while waiting"),
+      ).not.toBeInTheDocument();
+      return;
+    }
+
     releaseTranslation();
-    await screen.findByDisplayValue("Translated while waiting");
+    await waitFor(() => expect(readTranslation).toHaveBeenCalledWith(7));
+    await act(async () => {
+      await readTranslation.mock.results[0].value;
+    });
     finishReload(
       HttpResponse.json("The subtitle is unavailable", { status: 404 }),
     );
     await screen.findByText("Could not reload the subtitle");
-    expect(
-      screen.getByDisplayValue("Translated while waiting"),
-    ).toBeInTheDocument();
+    const expectedDraft = [
+      "1\n00:00:03,000 --> 00:00:04,000\nSibling cue",
+      "2\n00:00:05,000 --> 00:00:06,000\nTranslated while waiting",
+    ].join("\n\n");
+    await waitFor(
+      () =>
+        expect(
+          JSON.parse(localStorage.getItem(sourceDraftKey) ?? "{}").content,
+        ).toBe(expectedDraft),
+      { timeout: 3500 },
+    );
     expect(screen.getByText("Subtitle changed on disk")).toBeInTheDocument();
   },
 );

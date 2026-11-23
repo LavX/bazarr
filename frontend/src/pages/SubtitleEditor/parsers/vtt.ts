@@ -2,10 +2,10 @@ import type { ParseResult } from "@/pages/SubtitleEditor/types";
 import type { SubtitleParser } from "./index";
 import { cueId } from "./uuid";
 
-function parseTimestamp(raw: string): number {
+function parseTimestamp(raw: string): number | null {
   // HH:MM:SS.mmm or MM:SS.mmm
   const match = raw.trim().match(/^(?:(\d+):)?(\d+):(\d+)\.(\d+)$/);
-  if (!match) return 0;
+  if (!match) return null;
   const [, h, m, s, ms] = match;
   return (
     parseInt(h ?? "0", 10) * 3600000 +
@@ -16,7 +16,7 @@ function parseTimestamp(raw: string): number {
 }
 
 export const vttParser: SubtitleParser = {
-  parse(content: string): ParseResult {
+  parse(content, { strict } = {}): ParseResult {
     const text = content.replace(/^\uFEFF/, "").replace(/\r\n/g, "\n");
 
     if (!text.trim()) {
@@ -96,12 +96,16 @@ export const vttParser: SubtitleParser = {
       const endMs = parseTimestamp(rightTs);
       const cueText = blockLines.slice(tsLineIdx + 1).join("\n");
 
-      if (!cueText.trim() && startMs === 0 && endMs === 0) continue;
+      if (strict && (startMs === null || endMs === null)) {
+        throw new Error("Invalid WebVTT cue timing");
+      }
+      if (!cueText.trim() && (startMs ?? 0) === 0 && (endMs ?? 0) === 0)
+        continue;
 
       cues.push({
         id: cueId(),
-        startMs,
-        endMs,
+        startMs: startMs ?? 0,
+        endMs: endMs ?? 0,
         text: cueText,
       });
     }
