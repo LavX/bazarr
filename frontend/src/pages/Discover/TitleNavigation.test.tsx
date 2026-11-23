@@ -201,6 +201,44 @@ it("opens a series from a movie page", async () => {
   await waitFor(() => expect(url(router)).toBe("/discover?show=100&season=2"));
 });
 
+it("starts a fresh manual IMDb search after viewing a movie with a source copy", async () => {
+  const copyRequests: (string | null)[] = [];
+  const copy = {
+    copy_id: "c1.movie.44.s7",
+    local_id: 44,
+    source_id: 7,
+    source_name: "Fixture folder",
+    filename: "Eastern.Front.mkv",
+    selectable: true,
+  };
+  server.use(
+    http.get("/api/discover/metadata/movies/11", () =>
+      HttpResponse.json({
+        data: { ...envelope, item: { ...movie, copies: [copy] } },
+      }),
+    ),
+    http.get("/api/discover/copies", ({ request }) => {
+      copyRequests.push(new URL(request.url).searchParams.get("imdb_id"));
+      return HttpResponse.json({ items: [copy], owning_titles: 1 });
+    }),
+  );
+  const { router, user } = browse("/discover?movie=11");
+  const libraryCopy = "Match a copy in your library";
+  expect(await screen.findByText(libraryCopy)).toBeInTheDocument();
+  expect(copyRequests).toContain(movie.imdb_id);
+
+  await user.type(screen.getByLabelText("Search"), "No matching movie");
+  await user.click(
+    await screen.findByRole("button", { name: "Search subtitles by IMDb ID" }),
+  );
+
+  await waitFor(() => expect(url(router)).toBe("/discover?mode=title"));
+  expect(screen.getByLabelText("IMDb ID")).toHaveValue("");
+  await waitFor(() => expect(queryClient.isFetching()).toBe(0));
+  expect(copyRequests).not.toContain(null);
+  expect(screen.queryByText(libraryCopy)).not.toBeInTheDocument();
+});
+
 it("stays on the same series when it is picked again", async () => {
   const { router, user } = browse("/discover?show=100&season=2");
   expect(
