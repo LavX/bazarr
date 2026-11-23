@@ -314,6 +314,7 @@ export default function UniversalSearch() {
       imdbId: /^tt\d{7,10}$/.test(browsing.query.trim())
         ? browsing.query.trim()
         : "",
+      copyTmdbId: undefined,
       mediaType: shows ? "episode" : "movie",
       title: undefined,
       year: undefined,

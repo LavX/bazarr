@@ -118,6 +118,52 @@ def test_tmdb_movie_has_a_source_copy_through_details_offer_and_selection(
     assert conflict.json["reason"] == "copy_unavailable"
 
 
+def test_selected_source_copy_passes_its_file_grant_to_provider_hub(
+    authenticated_client, copy_database, providers, monkeypatch, tmp_path,
+):
+    from types import SimpleNamespace
+
+    from app.database import TableMediaSourceLibraryRoots, TableSourceItems
+    from plugin_platform_helpers import provider_manifest_v2
+    from provider_hub import capabilities, registry
+    from provider_hub.manifest import validate_manifest
+    from subliminal_patch.extensions import provider_registry
+
+    _, session = copy_database
+    owner = add_source(session, "movie")
+    path = tmp_path / "Night.Film.mkv"
+    path.write_bytes(b"movie file")
+    session.add(TableMediaSourceLibraryRoots(library_id=owner[1], local_path=str(tmp_path)))
+    add_title(session, owner, TableSourceItems, kind="movie", title="Night Film", path=str(path), tmdb_id="42")
+    session.commit()
+
+    source_grants = []
+
+    def request(operation, payload, timeout, *, admit=None, source_media=None):
+        assert operation == "search"
+        assert admit is None or admit()
+        source_grants.append(source_media)
+        return SimpleNamespace(payload={"candidates": []})
+
+    name = providers.add("discover_source")
+    cls = provider_registry[name]
+    raw = provider_manifest_v2(name, permissions=["media_read"])
+    monkeypatch.setattr(cls, "manifest", validate_manifest(raw), raising=False)
+    monkeypatch.setattr(cls, "list_subtitles", registry.HubProxyProvider.list_subtitles)
+    monkeypatch.setattr(cls, "worker_client", SimpleNamespace(request=request), raising=False)
+    monkeypatch.setattr(capabilities, "live_row", lambda provider: {"enabled": True, "manifest": raw})
+
+    target = {"media_type": "movie", "tmdb_id": 42}
+    [copy] = copies_fixtures.copies(authenticated_client, **target).json["items"]
+    response = copies_fixtures.post(authenticated_client, {**target, "copy_id": copy["copy_id"], "language": "eng"})
+    assert response.status_code == 200
+    [source_media] = source_grants
+    assert source_media is not None
+    grant = source_media()
+    assert grant.path == path.resolve()
+    assert grant.identity == (path.stat().st_dev, path.stat().st_ino)
+
+
 def test_show_copy_uses_the_groups_identity_and_exact_episode(
     authenticated_client, copy_database, catalog_details, tmp_path,
 ):

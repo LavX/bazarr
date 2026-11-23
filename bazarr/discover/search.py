@@ -26,7 +26,7 @@ from subliminal_patch.extensions import provider_registry
 from subliminal_patch.score import ComputeScore, MAX_SCORES
 
 from .handles import mint_result, renew_result, resolve_result
-from .library import CopyUnavailable, require_copy_revision
+from .library import CopyUnavailable, require_copy_revision, source_context_for_copy
 
 _IMDB = re.compile(r"tt[0-9]{7,10}\Z")
 _LANGUAGE = re.compile(r"[a-z]{2,3}(?:-[A-Za-z]{2,4})?\Z")
@@ -577,6 +577,8 @@ def search(request: SearchRequest, on_progress=None, *, observed: bool = True) -
             # Only the explicitly chosen copy contributes a file name, size,
             # hash and release description. Confirmed identity is untouched.
             service.refine_video_with_copy(video, request.copy)
+            if request.copy.get("source_id") is not None:
+                video.source_context = source_context_for_copy(request.copy)
             if context.get("tmdb_id"):
                 if context["media_type"] == "episode":
                     video.series_tmdb_id = context["tmdb_id"]

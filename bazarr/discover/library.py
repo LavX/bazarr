@@ -825,6 +825,20 @@ def require_copy_revision(context):
             raise CopyUnavailable(_RECOVERY)
 
 
+def source_context_for_copy(facts):
+    """Resolve a provider context only for the exact source row already selected."""
+    from media_sources.context import SourceItemGone, resolve_item
+
+    try:
+        item = resolve_item(facts["local_id"])
+    except SourceItemGone:
+        raise CopyUnavailable(_RECOVERY, "copy_missing") from None
+    if (item.item_id, item.kind, item.source_id, item.library_id, item.path) != (
+            facts["local_id"], facts["media_type"], facts["source_id"], facts["file_id"], facts["path"]):
+        raise CopyUnavailable(_RECOVERY)
+    return item
+
+
 COPY_CONTEXT_FIELDS = ("copy_id", "media_type", "local_id", "arr_instance_id", "instance_name",
                        "series_local_id", "title", "episode_title", "release", "filename",
                        "source", "resolution", "video_codec", "audio_codec", "file_size",
