@@ -178,8 +178,8 @@ def load_translation_input(translator, loader):
         if source_tool is not None:
             raw = source_tool.sidecar.read()
         else:
-            raw = read_regular_subtitle(path, runtime_versions[0].version)
-            validate_subtitle_versions(runtime_versions[:1])
+            raw = read_regular_subtitle(path, runtime_versions[0].version, strict_metadata=True)
+            validate_subtitle_versions(runtime_versions[:1], strict_metadata=True)
         content, _ = decode_subtitle_bytes(raw)
         return pysubs2.SSAFile.from_file(StringIO(content, newline=None))
     except (OSError, SubtitleSourceChanged) as error:

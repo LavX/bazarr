@@ -81,16 +81,16 @@ def regular_subtitle_version(path, *, strict=False):
     return _subtitle_file_version(entry) if stat.S_ISREG(entry.st_mode) else None
 
 
-def read_regular_subtitle(path, expected_version, *, max_bytes=None):
+def read_regular_subtitle(path, expected_version, *, max_bytes=None, strict_metadata=False):
     """Read the same ordinary file the caller approved, without waiting on a stream."""
-    if expected_version is None or regular_subtitle_version(path) != expected_version:
+    if expected_version is None or regular_subtitle_version(path, strict=strict_metadata) != expected_version:
         raise SubtitleSourceChanged('The subtitle input is no longer an approved regular file')
     flags = os.O_RDONLY | getattr(os, 'O_BINARY', 0) | getattr(os, 'O_NONBLOCK', 0) | getattr(os, 'O_NOFOLLOW', 0)
     descriptor = os.open(path, flags)
     try:
         opened = os.fstat(descriptor)
         if (not stat.S_ISREG(opened.st_mode) or _subtitle_file_version(opened) != expected_version
-                or regular_subtitle_version(path) != expected_version):
+                or regular_subtitle_version(path, strict=strict_metadata) != expected_version):
             raise SubtitleSourceChanged('The subtitle input changed before it was opened')
         with open(descriptor, 'rb', closefd=False) as handle:
             return handle.read() if max_bytes is None else handle.read(max_bytes)
@@ -293,11 +293,12 @@ def capture_subtitle_versions(video_path, paths, cancel=None):
         ) for path in paths)
 
 
-def validate_subtitle_versions(snapshots):
+def validate_subtitle_versions(snapshots, *, strict_metadata=False):
     for snapshot in snapshots:
         if (os.path.islink(snapshot.path)
                 or snapshot.state.revision(snapshot.path) != snapshot.revision
-                or subtitle_source_version(snapshot.path) != snapshot.version):
+                or (regular_subtitle_version(snapshot.path, strict=True) if strict_metadata
+                    else subtitle_source_version(snapshot.path)) != snapshot.version):
             raise SubtitleSourceChanged('Queued subtitle input or destination changed')
 
 
