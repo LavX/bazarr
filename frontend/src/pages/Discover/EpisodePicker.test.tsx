@@ -841,56 +841,126 @@ it("uses corrected catalog evidence for a manually numbered episode", async () =
   });
 });
 
-it("blocks a delayed conflict for the episode confirmed by its link numbers", async () => {
-  localStorage.setItem("bazarr.discover.subtitle-language", "eng");
-  let finishDetails: () => void = () => undefined;
-  const pending = new Promise<void>((resolve) => {
-    finishDetails = resolve;
-  });
-  server.use(
-    http.get(
-      "/api/discover/metadata/shows/100/seasons/2/episodes/1",
-      async () => {
-        await pending;
-        return HttpResponse.json({
-          data: {
-            ...envelope,
-            episode: {
-              ...episode,
-              identity_status: "conflict",
-              target_season: null,
-              target_episode: null,
-              numbering: null,
-            },
-          },
-        });
-      },
-    ),
-  );
-  const { user } = browse("/discover?show=100&season=2&episode=1");
-  try {
-    await openSearchOptions(user);
-    await user.click(
-      await screen.findByRole("button", {
-        name: "Enter episode numbers manually",
+const conflictingEpisode = {
+  ...episode,
+  identity_status: "conflict",
+  target_season: null,
+  target_episode: null,
+  numbering: null,
+};
+
+it.each([
+  {
+    name: "an episode with a stale parent TVDB ID",
+    details: { ...episode, show_tvdb_id: 999 },
+    manualNumber: "1",
+    keepsSearch: true,
+    blocksSearch: false,
+  },
+  {
+    name: "a conflict for another episode",
+    details: conflictingEpisode,
+    manualNumber: "5",
+    keepsSearch: true,
+    blocksSearch: false,
+  },
+  {
+    name: "a conflict for the confirmed episode",
+    details: conflictingEpisode,
+    manualNumber: "1",
+    keepsSearch: false,
+    blocksSearch: true,
+  },
+  {
+    name: "verified details for the confirmed episode",
+    details: episode,
+    manualNumber: "1",
+    keepsSearch: false,
+    blocksSearch: false,
+  },
+])(
+  "reconciles an active manual search after receiving $name",
+  async ({ details, manualNumber, keepsSearch, blocksSearch }) => {
+    localStorage.setItem("bazarr.discover.subtitle-language", "eng");
+    const detailsPending = Promise.withResolvers<void>();
+    const searchPending = Promise.withResolvers<void>();
+    server.use(
+      http.get(
+        "/api/discover/metadata/shows/100/seasons/2/episodes/1",
+        async () => {
+          await detailsPending.promise;
+          return HttpResponse.json({ data: { ...envelope, episode: details } });
+        },
+      ),
+      discoverSearchJob(async ({ request }) => {
+        const context = await request.json();
+        requests.push(context);
+        await searchPending.promise;
+        return HttpResponse.json(episodeSnapshot(context));
       }),
     );
-    await user.click(
-      screen.getByRole("checkbox", { name: /I confirm this series IMDb ID/ }),
-    );
-    expect(
-      screen.getByRole("button", { name: "Find subtitles" }),
-    ).toBeEnabled();
-    finishDetails();
-    await screen.findByRole("button", { name: "Refresh episode" });
-    expect(
-      screen.getByRole("button", { name: "Find subtitles" }),
-    ).toBeDisabled();
-    expect(requests).toEqual([]);
-  } finally {
-    finishDetails();
-  }
-});
+    const { user } = browse("/discover?show=100&season=2&episode=1");
+    try {
+      await openSearchOptions(user);
+      await user.click(
+        await screen.findByRole("button", {
+          name: "Enter episode numbers manually",
+        }),
+      );
+      const number = screen.getByRole("textbox", { name: "Episode" });
+      if (manualNumber !== "1") {
+        await user.clear(number);
+        await user.type(number, manualNumber);
+      }
+      await user.click(
+        screen.getByRole("checkbox", { name: /I confirm this series IMDb ID/ }),
+      );
+      await user.click(screen.getByRole("button", { name: "Find subtitles" }));
+      await waitFor(() => expect(requests).toHaveLength(1));
+      expect(requests[0]).toEqual({
+        media_type: "episode",
+        imdb_id: "tt1234567",
+        show_id: 100,
+        season: 2,
+        episode: Number(manualNumber),
+        title: "Northern Light",
+        year: 2020,
+        language: "eng",
+        manual_confirmed: true,
+        refresh: false,
+      });
+
+      detailsPending.resolve();
+      await waitFor(() =>
+        expect(
+          screen.queryByText("Loading episode details…"),
+        ).not.toBeInTheDocument(),
+      );
+      if (keepsSearch) {
+        expect(
+          screen.getByRole("button", { name: "Finding subtitles" }),
+        ).toBeVisible();
+        searchPending.resolve();
+        expect(
+          await screen.findByRole("heading", {
+            name: "accepted episode subtitle",
+          }),
+        ).toBeInTheDocument();
+      } else {
+        const find = screen.getByRole("button", { name: "Find subtitles" });
+        if (blocksSearch) expect(find).toBeDisabled();
+        else expect(find).toBeEnabled();
+        await act(async () => searchPending.resolve());
+        expect(
+          screen.queryByRole("heading", { name: "accepted episode subtitle" }),
+        ).not.toBeInTheDocument();
+      }
+    } finally {
+      detailsPending.resolve();
+      searchPending.resolve();
+    }
+  },
+);
 
 it("explains numbering that cannot be verified instead of calling it stale", async () => {
   const unverified = {

@@ -361,6 +361,15 @@ export function discoverContextKey(draft: DiscoverDraft): string {
       (draft.query ?? "").trim(),
       draft.language,
     ]);
+  if (draft.mediaType === "episode" && draft.manualConfirmed) {
+    const selection = searchSelection(draft);
+    if (selection) {
+      // A late episode response changes the revision only if it changes the
+      // request or makes the selection invalid.
+      const { episode_identity: identity, ...request } = selection;
+      return JSON.stringify([request, episodeIdentityKey(identity)]);
+    }
+  }
   return JSON.stringify([
     draft.mediaType,
     draft.imdbId.trim().toLowerCase(),
