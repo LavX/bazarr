@@ -73,7 +73,8 @@ const Cell: FunctionComponent<{ items: ReactNode[]; none?: string }> = ({
 export const UpdateDelta: FunctionComponent<{
   delta: PluginUpdateDelta;
   before: InstalledFacts | null;
-}> = ({ delta, before }) => {
+  action?: "update" | "roll back";
+}> = ({ delta, before, action = "update" }) => {
   const { added } = delta;
   const beforeBinaries = before?.binaries.map(binaryText) ?? [];
   return (
@@ -82,7 +83,7 @@ export const UpdateDelta: FunctionComponent<{
         <div className={styles.sideBySide}>
           <span className={styles.corner} />
           <span className={styles.columnHead}>Installed now</span>
-          <span className={styles.columnHead}>This update adds</span>
+          <span className={styles.columnHead}>This {action} adds</span>
 
           <span className={styles.rowLabel}>Version</span>
           <span>{delta.plugin.from_version ?? "Unknown"}</span>
@@ -109,7 +110,7 @@ export const UpdateDelta: FunctionComponent<{
         </div>
         {before === null && (
           <p className={styles.quiet}>
-            The installed release could not be read, so only what the update
+            The installed release could not be read, so only what the {action}{" "}
             adds is listed.
           </p>
         )}
@@ -163,7 +164,7 @@ export const UpdateDelta: FunctionComponent<{
       )}
       {!delta.needs_consent && (
         <p className={styles.quiet}>
-          This update adds no new destination, permission, program or plugin.
+          This {action} adds no new destination, permission, program or plugin.
         </p>
       )}
     </>

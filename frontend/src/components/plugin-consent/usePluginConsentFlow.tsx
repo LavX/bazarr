@@ -13,7 +13,8 @@ import { needsPassword, reasonOf } from "./refusal";
 
 export interface PluginConsentFlow {
   /**
-   * Start an install or an update. The dialog opens for an install, except for a subtitle provider
+   * Start an install, an update or a roll back. A roll back always opens the dialog.
+   * The dialog opens for an install, except for a subtitle provider
    * whose closure adds no plugin of another kind and whose replacement adds no access. An update opens it
    * only when the server says it adds a destination, a permission, a program or a plugin, and
    * otherwise goes ahead on its own, with the digest the server gave.
@@ -78,6 +79,10 @@ export function usePluginConsentFlow({
       setUpdating(next.pluginId);
       const label = next.name ?? next.pluginId;
       try {
+        if (next.action === "rollback") {
+          setTarget(next);
+          return;
+        }
         if (next.action === "install") {
           if (next.kind === SUBTITLE_PROVIDER_KIND) {
             const summary = await withInlineErrors(() =>

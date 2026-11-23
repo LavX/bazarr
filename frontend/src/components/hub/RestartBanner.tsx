@@ -27,7 +27,7 @@ export const RestartBanner: FunctionComponent<{ count: number }> = ({
             : `${count} plugin changes are waiting for a restart.`}
         </div>
         <div className={styles.bannerSubtitle}>
-          Installs, updates and removals of these plugins finish when Bazarr+
+          Installs, updates, rollbacks and removals finish when Bazarr+
           restarts.
         </div>
       </div>

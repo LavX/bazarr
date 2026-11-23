@@ -51,7 +51,9 @@ def _with_runtime(installation, state=None):
     state = state if state is not None else service.load_state()
     decorated = {**installation,
                  "dependents": service.installed_dependents(plugin_id, state=state),
-                 "enabled_dependents": service.installed_dependents(plugin_id, enabled_only=True, state=state)}
+                 "enabled_dependents": service.installed_dependents(plugin_id, enabled_only=True, state=state),
+                 "rollback": service.rollback_preview(
+                     plugin_id, state=state, verify_files=False, include_consent=False)}
     # Subtitle providers run in the provider workers, not the translator pool, so there is nothing to ask for them.
     runtime = None if kind_of(installation) == "subtitle_provider" else workers.runtime_of(plugin_id)
     return decorated if runtime is None else {**decorated, "runtime": runtime}
@@ -270,6 +272,54 @@ class PluginsInstallationRepair(Resource):
         if not installation:
             return 'Plugin not found', 404
         return {"job_id": hub_jobs.queue_repair(plugin_id, installation.get("name"))}, 202
+
+
+@api_ns_plugins.route('plugins/installations/<string:plugin_id>/rollback')
+class PluginsInstallationRollback(Resource):
+    @authenticate
+    @api_ns_plugins.response(200, 'The previous release, any refusal, and what restoring it adds')
+    @api_ns_plugins.response(401, 'Not Authenticated')
+    @api_ns_plugins.response(404, 'Plugin not found')
+    def get(self, plugin_id):
+        if not _installation(plugin_id):
+            return 'Plugin not found', 404
+        return service.rollback_preview(plugin_id)
+
+    @authenticate
+    @require_password_confirmation
+    @api_ns_plugins.response(200, 'The previous release was activated or is waiting for a restart')
+    @api_ns_plugins.response(400, 'Invalid request or the previous release cannot be restored')
+    @api_ns_plugins.response(401, 'Not Authenticated')
+    @api_ns_plugins.response(403, 'Password confirmation required')
+    @api_ns_plugins.response(404, 'Plugin not found')
+    @api_ns_plugins.response(409, 'The previous release or its consent changed; review it again')
+    def post(self, plugin_id):
+        from provider_hub.compatibility import refusal_text
+
+        payload = request.get_json(silent=True)
+        if payload is None:
+            payload = {}
+        if not isinstance(payload, dict):
+            return 'a JSON object is required', 400
+        version = payload.get("version")
+        if not isinstance(version, str) or not version.strip():
+            return 'version is required', 400
+        digest = payload.get("consent")
+        if digest is not None and not isinstance(digest, str):
+            return 'consent must be the digest of the consent summary', 400
+        if not _installation(plugin_id):
+            return 'Plugin not found', 404
+        try:
+            result = service.rollback_release(plugin_id, consent_digest=digest, expected_version=version)
+        except ProviderHubConsentError as error:
+            return refusal_text(error), 409 if error.changed or digest is not None else 400
+        except service.ProviderHubInstallError as error:
+            return refusal_text(error), 400
+        if result.outcome in (service.ACTIVATED, service.ACTIVATION_WAITING):
+            return {"status": result.outcome, "version": result.version}
+        if result.outcome == service.ACTIVATION_SKIPPED:
+            return 'The installation changed; review the rollback again', 409
+        return refusal_text(result.error or 'The previous release could not be activated'), 400
 
 
 @api_ns_plugins.route('plugins/installations/<string:plugin_id>/log')

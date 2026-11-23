@@ -140,11 +140,18 @@ const PluginHubView: FunctionComponent = () => {
       entry.source === OFFICIAL_SOURCE_ID,
   );
   const costCaps = useCostCaps(hasAiEngine);
+  const consentTrigger = useRef<HTMLElement | null>(null);
   const flow = usePluginConsentFlow({
     costCaps,
     // A finished install replaces the button that opened the dialog, and focus would fall to the
     // page. It goes to the tab in use instead, so the next keypress starts from a known place.
     onClosed: () => {
+      const trigger = consentTrigger.current;
+      consentTrigger.current = null;
+      if (trigger && document.body.contains(trigger)) {
+        trigger.focus();
+        return;
+      }
       if (
         document.activeElement === document.body ||
         document.activeElement === null
@@ -282,6 +289,21 @@ const PluginHubView: FunctionComponent = () => {
   };
   const update = (row: PluginRow) =>
     void flow.begin({ action: "update", pluginId: row.id, name: row.name });
+  const rollback = (row: PluginRow) => {
+    const version = row.installation?.rollback?.previous_version;
+    if (!version) {
+      return;
+    }
+    consentTrigger.current = document.querySelector<HTMLElement>(
+      `[data-plugin-actions="${CSS.escape(row.id)}"]`,
+    );
+    void flow.begin({
+      action: "rollback",
+      pluginId: row.id,
+      name: row.name,
+      version,
+    });
+  };
   /** One request that starts code, behind the password question, asked again once if the server still wanted it. */
   const gated = async (send: () => Promise<unknown>, label: string) => {
     try {
@@ -401,6 +423,7 @@ const PluginHubView: FunctionComponent = () => {
       : null,
     onToggle: toggle,
     onRepair: doRepair,
+    onRollback: rollback,
     onLog: showLog,
     onRemove: askRemove,
     onDismissReview: (row: PluginRow) => dismissReview.mutate(row.id),

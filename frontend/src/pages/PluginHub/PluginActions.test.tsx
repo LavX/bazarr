@@ -3,7 +3,12 @@ import userEvent from "@testing-library/user-event";
 import { http, HttpResponse } from "msw";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import queryClient from "@/apis/queries";
-import type { PluginInstallation, PluginJob } from "@/apis/raw/plugins";
+import type {
+  PluginInstallation,
+  PluginJob,
+  PluginUpdateDelta,
+} from "@/apis/raw/plugins";
+import { updateDelta } from "@/components/plugin-consent/fixtures";
 import { forgetPasswordConfirmation } from "@/modules/passwordConfirm";
 import { customRender, screen, waitFor, within } from "@/tests";
 import server from "@/tests/mocks/node";
@@ -205,6 +210,267 @@ describe("the actions of an installed plugin", () => {
     await user.click(await screen.findByRole("menuitem", { name: "View log" }));
     await shown(await screen.findByText(/No output yet/));
   });
+});
+
+describe("rolling back a plugin from its card", () => {
+  const name = "Opencode back end";
+  const activeVersion = "1.0.0";
+  const previousVersion = "0.9.0";
+  const rollbackPath = "/api/plugins/installations/opencode_backend/rollback";
+  const delta: PluginUpdateDelta = {
+    ...updateDelta,
+    plugin: {
+      id: "opencode_backend",
+      name,
+      from_version: activeVersion,
+      to_version: previousVersion,
+      kind: "translator_backend",
+    },
+    digest: "sha256:rollback",
+  };
+  const dependency =
+    "Example translator needs a capability this release would drop.";
+  const availability = {
+    previous_version: previousVersion,
+    blocked_reason: null,
+  };
+
+  const present = (
+    rollback: {
+      previous_version: string | null;
+      blocked_reason: string | null;
+    } = availability,
+  ) => {
+    installed = [{ ...installedBackend, rollback }];
+    server.use(
+      http.get("/api/plugins/installations/opencode_backend", () =>
+        HttpResponse.json(installed[0]),
+      ),
+      http.get(rollbackPath, () => {
+        record("get", "rollback");
+        return HttpResponse.json({ ...availability, consent: null });
+      }),
+    );
+    showPage();
+  };
+
+  const openRollback = async () => {
+    const user = await menuOf(name);
+    const item = await screen.findByRole("menuitem", { name: /Roll back/ });
+    expect(item).toHaveTextContent(previousVersion);
+    await user.click(item);
+    const dialog = await screen.findByRole("dialog", {
+      name: /Roll back Opencode back end/,
+    });
+    await shown(dialog);
+    const confirm = within(dialog).getByRole("button", { name: "Roll back" });
+    await waitFor(() => expect(confirm).toBeEnabled());
+    return { user, dialog, confirm };
+  };
+
+  it.each([
+    [null, "No previous release is available."],
+    [previousVersion, dependency],
+  ])(
+    "disables rollback when the card reports %s with a refusal",
+    async (version, reason) => {
+      present({ previous_version: version, blocked_reason: reason });
+      const user = await menuOf(name);
+      const item = await screen.findByRole("menuitem", { name: /Roll back/ });
+      expect(item).toHaveAttribute("aria-disabled", "true");
+      expect(item).toHaveTextContent(reason);
+      await user.click(item);
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+      expect(calls).toEqual([]);
+    },
+  );
+
+  it("names the retained release and explains plugin data before the user confirms", async () => {
+    present();
+    const { user, dialog } = await openRollback();
+    expect(
+      within(dialog).getByText(/current.*data and settings/i),
+    ).toBeVisible();
+    expect(calls).toEqual([{ method: "get", path: "rollback", body: null }]);
+    await user.click(within(dialog).getByRole("button", { name: "Cancel" }));
+    await waitFor(() =>
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument(),
+    );
+    expect(calls).toHaveLength(1);
+    await waitFor(() =>
+      expect(
+        screen.getByRole("button", { name: `${name} actions` }),
+      ).toHaveFocus(),
+    );
+  });
+
+  it("asks the user to review a different release when the card is stale", async () => {
+    present();
+    const freshVersion = "0.8.0";
+    server.use(
+      http.get(rollbackPath, () =>
+        HttpResponse.json({
+          ...availability,
+          previous_version: freshVersion,
+          consent: null,
+        }),
+      ),
+      http.post(rollbackPath, async ({ request }) => {
+        record("post", "rollback", await request.json());
+        return HttpResponse.json({
+          status: "activated",
+          version: freshVersion,
+        });
+      }),
+    );
+    const user = await menuOf(name);
+    await user.click(
+      await screen.findByRole("menuitem", { name: /Roll back/ }),
+    );
+    const dialog = await screen.findByRole("dialog", {
+      name: /Roll back Opencode back end/,
+    });
+    await shown(await within(dialog).findByText(/previous release.*changed/i));
+    expect(calls).toEqual([]);
+    await user.click(within(dialog).getByRole("button", { name: "Roll back" }));
+    await waitFor(() =>
+      expect(calls).toEqual([
+        { method: "post", path: "rollback", body: { version: freshVersion } },
+      ]),
+    );
+  });
+
+  it("requires another confirmation after a stale digest and sends the new digest", async () => {
+    present();
+    let current = delta;
+    server.use(
+      http.get(rollbackPath, () => {
+        record("get", "rollback");
+        return HttpResponse.json({ ...availability, consent: current });
+      }),
+      http.post(rollbackPath, async ({ request }) => {
+        const body = (await request.json()) as { consent: string };
+        record("post", "rollback", body);
+        if (body.consent === delta.digest) {
+          current = { ...delta, digest: "sha256:new-rollback" };
+          return HttpResponse.json(
+            "The permissions changed. Review them again.",
+            {
+              status: 409,
+            },
+          );
+        }
+        return HttpResponse.json({
+          status: "activated",
+          version: previousVersion,
+        });
+      }),
+    );
+    const { user, dialog, confirm } = await openRollback();
+    expect(
+      within(
+        await within(dialog).findByRole("group", { name: "New permissions" }),
+      ).getByText("Read your media folders"),
+    ).toBeVisible();
+    expect(calls.map(({ method }) => method)).toEqual(["get"]);
+    await user.click(confirm);
+    expect(
+      await within(dialog).findByText(/permissions changed/),
+    ).toBeVisible();
+    await waitFor(() =>
+      expect(calls.map(({ method }) => method)).toEqual(["get", "post", "get"]),
+    );
+    await waitFor(() => expect(confirm).toBeEnabled());
+    expect(calls[1].body).toEqual({
+      version: previousVersion,
+      consent: delta.digest,
+    });
+    await user.click(confirm);
+    await waitFor(() =>
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument(),
+    );
+    expect(calls.at(-1)).toEqual({
+      method: "post",
+      path: "rollback",
+      body: { version: previousVersion, consent: "sha256:new-rollback" },
+    });
+  });
+
+  it("keeps the active release when a dependency starts to block rollback", async () => {
+    present();
+    server.use(
+      http.post(rollbackPath, () =>
+        HttpResponse.json(dependency, { status: 400 }),
+      ),
+    );
+    const { user, dialog, confirm } = await openRollback();
+    await user.click(confirm);
+    expect(await within(dialog).findByText(dependency)).toBeVisible();
+    expect(screen.getByText(/v1\.0\.0 from Official/)).toBeVisible();
+  });
+
+  it.each(["activated", "waiting"] as const)(
+    "renders the server's %s result without calling restart",
+    async (status) => {
+      present();
+      server.use(
+        http.get(rollbackPath, () => {
+          record("get", "rollback");
+          return HttpResponse.json({ ...availability, consent: delta });
+        }),
+        http.post(rollbackPath, async ({ request }) => {
+          record("post", "rollback", await request.json());
+          installed =
+            status === "activated"
+              ? [{ ...installedBackend, active_version: previousVersion }]
+              : [
+                  {
+                    ...installedBackend,
+                    state: "staged",
+                    staged_version: previousVersion,
+                    needs_restart: true,
+                    rollback: {
+                      ...availability,
+                      blocked_reason: "A release is already waiting.",
+                    },
+                  },
+                ];
+          return HttpResponse.json({ status, version: previousVersion });
+        }),
+        http.post("/api/system", () => {
+          record("post", "system");
+          return HttpResponse.json({});
+        }),
+      );
+      const { user, confirm } = await openRollback();
+      expect(screen.getByText(/v1\.0\.0 from Official/)).toBeVisible();
+      await user.click(confirm);
+      await waitFor(() =>
+        expect(screen.queryByRole("dialog")).not.toBeInTheDocument(),
+      );
+      if (status === "waiting") {
+        expect(
+          await screen.findByText("1 plugin change is waiting for a restart."),
+        ).toBeVisible();
+        expect(screen.getByText(/v1\.0\.0 from Official/)).toBeVisible();
+        expect(screen.getAllByText("Awaiting restart").length).toBeGreaterThan(
+          0,
+        );
+      } else {
+        expect(await screen.findByText(/v0\.9\.0 from Official/)).toBeVisible();
+        expect(
+          screen.queryByRole("button", { name: "Restart Bazarr now" }),
+        ).not.toBeInTheDocument();
+      }
+      expect(calls.filter(({ method }) => method === "post")).toEqual([
+        {
+          method: "post",
+          path: "rollback",
+          body: { version: previousVersion, consent: delta.digest },
+        },
+      ]);
+    },
+  );
 });
 
 describe("removing a plugin", () => {
@@ -576,6 +842,7 @@ describe("one change at a time", () => {
         elsewhere
         onToggle={none}
         onRepair={none}
+        onRollback={none}
         onLog={none}
         onRemove={none}
       />,
@@ -671,6 +938,7 @@ describe("an update and a removal while something else is going on", () => {
         elsewhere={false}
         onToggle={none}
         onRepair={none}
+        onRollback={none}
         onLog={none}
         onRemove={none}
       />,

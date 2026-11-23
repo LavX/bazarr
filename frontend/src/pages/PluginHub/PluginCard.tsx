@@ -55,6 +55,7 @@ export interface PluginCardProps {
   needsConsent: boolean;
   onToggle: (row: PluginRow) => void;
   onRepair: (row: PluginRow) => void;
+  onRollback: (row: PluginRow) => void;
   onLog: (row: PluginRow) => void;
   onRemove: (row: PluginRow) => void;
   onDismissReview: (row: PluginRow) => void;
@@ -210,10 +211,11 @@ export const PluginCard: FunctionComponent<PluginCardProps> = (props) => {
           <PluginMenu
             row={row}
             enabledDependents={row.enabledDependents}
-            busy={busy}
-            elsewhere={props.elsewhere}
+            busy={busy || props.updating}
+            elsewhere={props.elsewhere || props.blocked === true}
             onToggle={props.onToggle}
             onRepair={props.onRepair}
+            onRollback={props.onRollback}
             onLog={props.onLog}
             onRemove={props.onRemove}
           />

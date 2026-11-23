@@ -10,6 +10,7 @@ import api from "@/apis/raw";
 import { inlineWhen, withInlineErrors } from "@/apis/raw/inlineWrites";
 import type {
   PluginInstallRequest,
+  PluginRollbackRequest,
   PluginUpdateApplyRequest,
 } from "@/apis/raw/plugins";
 import { waitForJob } from "@/utilities/jobs";
@@ -138,6 +139,21 @@ export function usePluginUpdateConsent(id: string | null) {
   });
 }
 
+/** A fresh rollback target and its access changes, kept stable until the person confirms or retries. */
+export function usePluginRollbackPreview(id: string | null) {
+  return useQuery({
+    queryKey: [...pluginsKey, CONSENT, "rollback", id],
+    queryFn: () => withInlineErrors(() => api.plugins.rollbackPreview(id!)),
+    enabled: id !== null,
+    staleTime: 0,
+    gcTime: 0,
+    placeholderData: undefined,
+    retry: false,
+    refetchOnWindowFocus: false,
+    refetchOnReconnect: false,
+  });
+}
+
 /**
  * Which of these plugins have an update that is held for the person's agreement: the server's own
  * summary of what the update adds says it needs consent. Read once per plugin and read again after any
@@ -234,6 +250,18 @@ export function usePluginSetEnabled() {
     mutationKey: [...pluginsKey, QueryKeys.Actions, "set-enabled"],
     mutationFn: ({ id, enabled }: { id: string; enabled: boolean }) =>
       withInlineErrors(() => api.plugins.setEnabled(id, enabled)),
+    onSettled: refresh,
+  });
+}
+
+/** Restore the exact previous release the person reviewed, through the normal activation path. */
+export function usePluginRollback() {
+  const refresh = useRefreshAfterChange();
+  return useMutation({
+    mutationKey: [...pluginsKey, QueryKeys.Actions, "rollback"],
+    mutationFn: ({ id, ...request }: PluginRollbackRequest & { id: string }) =>
+      withInlineErrors(() => api.plugins.rollback(id, request)),
+    retry: false,
     onSettled: refresh,
   });
 }

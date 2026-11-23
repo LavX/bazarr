@@ -1,5 +1,6 @@
 import { FunctionComponent, useRef, useState } from "react";
 import { Alert, Button, Group, Modal, Skeleton, Stack } from "@mantine/core";
+import { showNotification } from "@mantine/notifications";
 import { useQueryClient } from "@tanstack/react-query";
 import {
   CONSENT,
@@ -7,10 +8,14 @@ import {
   usePluginInstall,
   usePluginInstallation,
   usePluginInstallConsent,
+  usePluginRollback,
+  usePluginRollbackPreview,
   usePluginUpdateConsent,
 } from "@/apis/hooks/plugins";
 import { QueryKeys } from "@/apis/queries/keys";
+import type { PluginRollbackResult } from "@/apis/raw/plugins";
 import { useGatedAction } from "@/components/modals/PasswordConfirmModal";
+import { notification } from "@/modules/notification";
 import { InstallSummary, PluginCostCaps } from "./InstallSummary";
 import { consentChanged, needsPassword, reasonOf } from "./refusal";
 import { installedFacts, UpdateDelta } from "./UpdateDelta";
@@ -35,7 +40,14 @@ export type PluginConsentTarget =
        */
       wording?: "install" | "update";
     }
-  | { action: "update"; pluginId: string; name?: string };
+  | { action: "update"; pluginId: string; name?: string }
+  | {
+      action: "rollback";
+      pluginId: string;
+      name?: string;
+      /** The previous version the card offered. The fresh preview may change it. */
+      version: string;
+    };
 
 export interface PluginConsentProps {
   /** What is being asked, or null while nothing is. */
@@ -50,8 +62,14 @@ export interface PluginConsentProps {
 }
 
 /** How a target is worded to the person: its own action, unless the caller said otherwise. */
-export function wordingOf(target: PluginConsentTarget): "install" | "update" {
-  return target.action === "install" ? (target.wording ?? "install") : "update";
+export function wordingOf(
+  target: PluginConsentTarget,
+): "install" | "update" | "roll back" {
+  return target.action === "install"
+    ? (target.wording ?? "install")
+    : target.action === "rollback"
+      ? "roll back"
+      : "update";
 }
 
 const FAILED = {
@@ -59,6 +77,8 @@ const FAILED = {
     "The install did not finish. Check the Activity tab of the Plugin Hub for the reason.",
   update:
     "The update did not finish. Check the Activity tab of the Plugin Hub for the reason.",
+  "roll back":
+    "The roll back did not finish. Try again or check the plugin log.",
 } as const;
 
 /**
@@ -79,6 +99,7 @@ const PluginConsent: FunctionComponent<PluginConsentProps> = ({
   const runGated = useGatedAction();
   const install = usePluginInstall({ inlineErrors: true });
   const applyUpdate = usePluginApplyUpdate({ inlineErrors: true });
+  const rollback = usePluginRollback();
   // The dialog keeps showing what it was asked about while it fades out.
   const shown = useRef(target);
   if (target) {
@@ -87,6 +108,7 @@ const PluginConsent: FunctionComponent<PluginConsentProps> = ({
   const current = target ?? shown.current;
   const installing = target?.action === "install" ? target : null;
   const updating = target?.action === "update" ? target : null;
+  const rollingBack = target?.action === "rollback" ? target : null;
   const summaryQuery = usePluginInstallConsent(
     installing
       ? {
@@ -97,8 +119,15 @@ const PluginConsent: FunctionComponent<PluginConsentProps> = ({
       : null,
   );
   const deltaQuery = usePluginUpdateConsent(updating?.pluginId ?? null);
-  const installedQuery = usePluginInstallation(updating?.pluginId ?? null);
-  const query = installing ? summaryQuery : deltaQuery;
+  const rollbackQuery = usePluginRollbackPreview(rollingBack?.pluginId ?? null);
+  const installedQuery = usePluginInstallation(
+    updating?.pluginId ?? rollingBack?.pluginId ?? null,
+  );
+  const query = installing
+    ? summaryQuery
+    : rollingBack
+      ? rollbackQuery
+      : deltaQuery;
 
   const [problem, setProblem] = useState("");
   // One flag for the whole run: the password question and the job. Until it is over the buttons stay
@@ -113,19 +142,39 @@ const PluginConsent: FunctionComponent<PluginConsentProps> = ({
 
   const digest = installing
     ? summaryQuery.data?.digest
-    : deltaQuery.data?.digest;
+    : rollingBack
+      ? rollbackQuery.data?.consent?.digest
+      : deltaQuery.data?.digest;
   // What the person confirms is what is on screen: the set is shown only once everything it is drawn
   // from has arrived, and the buttons that agree to it wait for the same moment.
-  const complete = !query.isPending && !(updating && installedQuery.isPending);
-  const ready = digest !== undefined && !query.isFetching && complete;
+  const complete =
+    !query.isPending &&
+    !((updating || rollingBack) && installedQuery.isPending) &&
+    !(rollingBack && installedQuery.isFetching);
+  const rollbackPreview = rollbackQuery.data;
+  const ready =
+    !query.isError &&
+    !query.isFetching &&
+    complete &&
+    (rollingBack
+      ? Boolean(
+          rollbackPreview?.previous_version &&
+          !rollbackPreview.blocked_reason &&
+          (!rollbackPreview.consent ||
+            (digest &&
+              rollbackPreview.consent.plugin.to_version ===
+                rollbackPreview.previous_version)),
+        )
+      : Boolean(digest));
 
   const run = async () => {
-    if (!target || !digest || running.current) {
+    if (!target || !ready || running.current) {
       return;
     }
     running.current = true;
     setBusy(true);
     setProblem("");
+    let rollbackResult: PluginRollbackResult | undefined;
     const send = async () => {
       if (target.action === "install") {
         await install.mutateAsync({
@@ -133,6 +182,12 @@ const PluginConsent: FunctionComponent<PluginConsentProps> = ({
           id: target.pluginId,
           version: target.version,
           consent: digest,
+        });
+      } else if (target.action === "rollback") {
+        rollbackResult = await rollback.mutateAsync({
+          id: target.pluginId,
+          version: rollbackPreview!.previous_version!,
+          ...(digest ? { consent: digest } : {}),
         });
       } else {
         await applyUpdate.mutateAsync({ id: target.pluginId, consent: digest });
@@ -156,6 +211,19 @@ const PluginConsent: FunctionComponent<PluginConsentProps> = ({
       if (!confirmed) {
         return;
       }
+      if (rollbackResult) {
+        const name = target.name ?? target.pluginId;
+        showNotification(
+          notification.info(
+            rollbackResult.status === "activated"
+              ? "Rolled back"
+              : "Roll back awaiting restart",
+            rollbackResult.status === "activated"
+              ? `${name} v${rollbackResult.version} is now active.`
+              : `${name} v${rollbackResult.version} is staged. Restart Bazarr+ when you are ready to activate it.`,
+          ),
+        );
+      }
       onDone?.(target);
       close();
     } catch (error) {
@@ -169,7 +237,9 @@ const PluginConsent: FunctionComponent<PluginConsentProps> = ({
       if (consentChanged(error)) {
         setProblem(
           reasonOf(error) ||
-            "What this would add has changed since it was shown to you. Review it again before you agree.",
+            (rollingBack
+              ? "The previous release or its access has changed. Review it again before confirming."
+              : "What this would add has changed since it was shown to you. Review it again before you agree."),
         );
         return;
       }
@@ -181,11 +251,13 @@ const PluginConsent: FunctionComponent<PluginConsentProps> = ({
   };
 
   const name = current?.name ?? current?.pluginId ?? "";
-  const title = current
-    ? `${wordingOf(current) === "install" ? "Install" : "Update"} ${name}?`
-    : "";
   const verb =
-    current && wordingOf(current) === "update" ? "Update" : "Install";
+    current?.action === "rollback"
+      ? "Roll back"
+      : current && wordingOf(current) === "update"
+        ? "Update"
+        : "Install";
+  const title = current ? `${verb} ${name}?` : "";
 
   return (
     <Modal
@@ -211,7 +283,11 @@ const PluginConsent: FunctionComponent<PluginConsentProps> = ({
             <div
               role="status"
               aria-busy="true"
-              aria-label="Loading what this would add"
+              aria-label={
+                rollingBack
+                  ? "Loading the previous release"
+                  : "Loading what this would add"
+              }
               className={styles.body}
             >
               <Skeleton height={14} width="60%" />
@@ -221,7 +297,9 @@ const PluginConsent: FunctionComponent<PluginConsentProps> = ({
           ) : query.isError ? (
             <Alert color="red" role="alert">
               {reasonOf(query.error) ||
-                "What this would add could not be loaded, so it cannot be agreed to yet."}
+                (rollingBack
+                  ? "The previous release could not be loaded, so this roll back cannot be confirmed yet."
+                  : "What this would add could not be loaded, so it cannot be agreed to yet.")}
             </Alert>
           ) : (
             <div className={styles.body}>
@@ -236,6 +314,58 @@ const PluginConsent: FunctionComponent<PluginConsentProps> = ({
                   delta={deltaQuery.data}
                   before={installedFacts(installedQuery.data)}
                 />
+              )}
+              {rollingBack && rollbackPreview && (
+                <>
+                  {rollbackPreview.previous_version && (
+                    <p>
+                      Previous release: v{rollbackPreview.previous_version}.
+                    </p>
+                  )}
+                  {rollbackPreview.previous_version &&
+                    rollbackPreview.previous_version !==
+                      rollingBack.version && (
+                      <Alert color="yellow" role="alert">
+                        The previous release changed from v{rollingBack.version}{" "}
+                        to v{rollbackPreview.previous_version}. Review this
+                        release before confirming.
+                      </Alert>
+                    )}
+                  {rollbackPreview.blocked_reason ||
+                  !rollbackPreview.previous_version ? (
+                    <Alert color="red" role="alert">
+                      {rollbackPreview.blocked_reason ||
+                        "No previous release is available."}
+                    </Alert>
+                  ) : (
+                    <>
+                      <p>
+                        This returns the plugin code to the previous release and
+                        uses your current plugin data and settings, including
+                        changes made since the update. No backup of data or
+                        settings is restored. Activation may remove settings
+                        this release does not support or turn incompatible saved
+                        instances off for review.
+                      </p>
+                      <p className={styles.quiet}>
+                        The release becomes active now if this plugin supports
+                        it. Otherwise it waits until you restart Bazarr+.
+                      </p>
+                      {rollbackPreview.consent ? (
+                        <UpdateDelta
+                          delta={rollbackPreview.consent}
+                          before={installedFacts(installedQuery.data)}
+                          action="roll back"
+                        />
+                      ) : (
+                        <p className={styles.quiet}>
+                          This roll back adds no new destination, permission,
+                          program or plugin.
+                        </p>
+                      )}
+                    </>
+                  )}
+                </>
               )}
             </div>
           )}

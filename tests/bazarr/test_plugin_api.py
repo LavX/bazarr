@@ -2,6 +2,7 @@
 """The kind-neutral plugin routes, and the provider-hub routes as the
 Subtitle Hub's view of the subtitle provider kind."""
 import time
+from pathlib import Path
 
 import pytest
 from flask import Flask
@@ -13,6 +14,7 @@ from plugin_platform_helpers import (
     verified_official_source,
     write_state,
 )
+from provider_hub_state_engines import hub_engine, hub_store  # noqa: F401
 
 API_KEY = "plugin-api-test-key"  # pragma: allowlist secret
 
@@ -624,3 +626,366 @@ def test_a_staged_change_reports_whether_it_needs_a_restart(client):
     hub = {item["provider_id"]: item for item in _get(client, "/api/provider-hub/providers").json["data"]}
     assert hub["providerhub"]["needs_restart"] is True
     assert _get(client, "/api/plugins/installations/exampleservice").json["needs_restart"] is False
+
+
+@pytest.fixture
+def rollback_store(client, hub_store, tmp_path, monkeypatch):  # noqa: F811
+    """Real retained releases and verified bundle files, isolated from the application's database."""
+    from provider_hub import state
+
+    root = tmp_path / "provider_hub"
+    monkeypatch.setattr(state, "state_file", lambda: root / "state.json")
+    monkeypatch.setattr("provider_hub.consent.sandbox_status", lambda: {})
+
+    def seed(plugin_id="exampleservice", *, previous=None, current=None, previous_supplied_by=None,
+             previous_payloads=None, draining_previous=False):
+        factory = provider_manifest_v1 if plugin_id == "providerhub" else service_manifest
+        previous = previous or factory(plugin_id, "1.0.0")
+        current = current or factory(plugin_id, "2.0.0")
+        row = {"provider_id": plugin_id, "name": plugin_id.title(), "kind": previous.get("kind", "subtitle_provider"),
+               "state": "active", "pending_restart": False, "trusted": True, "origin": "catalog",
+               "source_id": "official", "source_bound": True, "enabled": True, "config": {"region": "eu"}}
+        for manifest in (previous, current):
+            bundle = root / "bundles" / plugin_id / manifest["version"]
+            bundle.mkdir(parents=True, exist_ok=True)
+            filename = "provider.py" if plugin_id == "providerhub" else "service.py"
+            content = b"class ExampleProvider: pass\n" if plugin_id == "providerhub" else b"class Service: pass\n"
+            payloads = previous_payloads if manifest is previous and previous_payloads is not None else {filename: content}
+            for filename, content in payloads.items():
+                (bundle / filename).write_bytes(content)
+            interpreter = root / "envs" / plugin_id / manifest["version"] / "bin" / "python"
+            interpreter.parent.mkdir(parents=True, exist_ok=True)
+            interpreter.write_text("", encoding="utf-8")
+            row.update(active_version=manifest["version"], active_path=str(bundle), python_path=str(interpreter),
+                       manifest=manifest, supplied_by=previous_supplied_by if manifest is previous else {})
+            if manifest is current and draining_previous:
+                from provider_hub.releases import DRAIN_PREVIOUS
+                row[DRAIN_PREVIOUS] = True
+            document = state.load_state()
+            document["installations"][plugin_id] = dict(row)
+            document["catalog_sources"] = {"official": verified_official_source()}
+            state.save_state(document)
+        return row
+
+    return seed
+
+
+def _rollback(client, plugin_id="exampleservice", **payload):
+    return client.post(f"/api/plugins/installations/{plugin_id}/rollback", json={"version": "1.0.0", **payload},
+                       headers={"X-API-KEY": API_KEY})
+
+
+def test_rollback_preview_needs_authentication_and_post_also_needs_password_confirmation(client, monkeypatch):
+    from app.config import settings
+    from api.plugins.plugins import PluginsInstallationRollback
+    from provider_hub import service
+
+    monkeypatch.setattr(settings.auth, "type", "form")
+    monkeypatch.setattr(service, "rollback_release", lambda *a, **k: pytest.fail("the gate must refuse first"))
+    path = "/api/plugins/installations/exampleservice/rollback"
+    assert client.get(path).status_code in (401, 403)
+    assert client.post(path, json={"version": "1.0.0"}).status_code in (401, 403)
+    assert _get(client, path).status_code == 200
+    refused = _rollback(client)
+    assert refused.status_code == 403 and refused.json["code"] == "confirm_password"
+    assert _decorator_names(PluginsInstallationRollback.post) == ["authenticate", "password_confirmation"]
+    assert _decorator_names(PluginsInstallationRollback.get) == ["authenticate"]
+
+
+@pytest.mark.parametrize("body", [None, {}, [], [1], 0, False, "", {"version": False}, {"version": " "},
+                                  {"version": "1.0.0", "consent": []}])
+def test_rollback_refuses_malformed_json_without_starting_code(client, monkeypatch, body):
+    from provider_hub import service
+
+    monkeypatch.setattr(service, "rollback_release", lambda *a, **k: pytest.fail("invalid requests cannot run code"))
+    response = client.post("/api/plugins/installations/exampleservice/rollback", json=body,
+                           headers={"X-API-KEY": API_KEY})
+    assert response.status_code == 400
+
+
+@pytest.mark.parametrize("plugin_id", ["missing", "ghost_plugin"])
+def test_rollback_hides_missing_plugins_and_undefined_kinds(client, tmp_path, plugin_id):
+    write_state(tmp_path / "state.json", installations={"ghost_plugin": _undefined_kind_installation()})
+    assert _get(client, f"/api/plugins/installations/{plugin_id}/rollback").status_code == 404
+    assert _rollback(client, plugin_id).status_code == 404
+
+
+def test_a_plugin_without_a_previous_release_reports_why_rollback_is_unavailable(client):
+    row = _get(client, "/api/plugins/installations/exampleservice").json
+    preview = _get(client, "/api/plugins/installations/exampleservice/rollback").json
+
+    assert row["rollback"]["previous_version"] is None
+    assert "no previous release" in row["rollback"]["blocked_reason"]
+    assert preview == {**row["rollback"], "consent": None}
+    assert _rollback(client).status_code == 409
+
+
+@pytest.mark.parametrize("plugin_id,status", [("exampleservice", "activated"), ("providerhub", "waiting")])
+def test_rollback_uses_the_kinds_existing_activation_policy_and_preserves_data(
+        client, rollback_store, monkeypatch, tmp_path, plugin_id, status):
+    from app.config import settings
+    from provider_hub import service, state
+
+    original = rollback_store(plugin_id)
+    data = tmp_path / "provider_hub" / "data" / plugin_id / "kept.txt"
+    data.parent.mkdir(parents=True)
+    data.write_text("saved data", encoding="utf-8")
+    monkeypatch.setattr(settings.auth, "type", "form")
+    _prime(client)
+    before = state.load_state()
+
+    preview = _get(client, f"/api/plugins/installations/{plugin_id}/rollback")
+
+    assert preview.status_code == 200
+    assert preview.json["previous_version"] == "1.0.0" and preview.json["blocked_reason"] is None
+    assert state.load_state() == before
+    response = _rollback(client, plugin_id)
+    assert response.status_code == 200 and response.json == {"status": status, "version": "1.0.0"}
+    row = state.load_state()["installations"][plugin_id]
+    assert row["config"] == original["config"] and data.read_text() == "saved data"
+    assert row["active_version"] == ("1.0.0" if status == service.ACTIVATED else "2.0.0")
+    assert row["pending_restart"] is (status == service.ACTIVATION_WAITING)
+    if status == service.ACTIVATION_WAITING:
+        assert row["staged_version"] == "1.0.0"
+
+
+def test_the_rollback_listing_is_lightweight_but_preview_and_submit_verify_the_retained_bundle(
+        client, rollback_store, monkeypatch):
+    from provider_hub import service, state
+
+    rollback_store()
+    before = state.load_state()
+    real_verify = service.verify_bundle_tree
+    calls = []
+
+    def verify(manifest, bundle):
+        calls.append(manifest.version)
+        return real_verify(manifest, bundle)
+
+    monkeypatch.setattr(service, "verify_bundle_tree", verify)
+    listed = _get(client, "/api/plugins/installations").json["data"]
+    assert listed[0]["rollback"] == {"previous_version": "1.0.0", "blocked_reason": None}
+    assert calls == []
+    previous = service._previous_release("exampleservice")
+    (Path(previous.bundle_path) / "service.py").write_text("changed", encoding="utf-8")
+    preview = _get(client, "/api/plugins/installations/exampleservice/rollback")
+    refused = _rollback(client)
+    assert "no longer matches" in preview.json["blocked_reason"]
+    assert refused.status_code == 400 and "no longer matches" in refused.json
+    assert calls == ["1.0.0", "1.0.0"] and state.load_state() == before
+
+
+@pytest.mark.parametrize("reason", ["staged", "source", "revoked", "files", "dependent", "supplier"])
+def test_rollback_preview_and_submit_reuse_the_service_refusals_without_mutating_state(
+        client, rollback_store, monkeypatch, reason):
+    from provider_hub import revocation, service, state
+
+    previous = service_manifest("exampleservice", "1.0.0", **({"requires": ["helper.v1"]} if reason == "supplier" else {}))
+    current = service_manifest("exampleservice", "2.0.0", **({"provides": ["example.v1"]} if reason == "dependent" else {}))
+    rollback_store(previous=previous, current=current,
+                   previous_supplied_by={"helper.v1": "removed-helper"} if reason == "supplier" else None)
+
+    def change(document):
+        row = document["installations"]["exampleservice"]
+        if reason == "staged":
+            row.update(staged_version="3.0.0", staged_manifest=service_manifest("exampleservice", "3.0.0"),
+                       state="staged", pending_restart=True)
+        if reason == "source":
+            row["source_id"] = "another"
+        if reason == "dependent":
+            document["installations"]["dependent"] = _service_row(
+                "dependent", extends={"id": "exampleservice", "capability": "example.v1"})
+
+    state.mutate_state(change)
+    if reason == "revoked":
+        monkeypatch.setattr(service, "_revocations", lambda document: (
+            revocation.Revocation(plugin_id="exampleservice", version="1.0.0", reason="withdrawn"),))
+    if reason == "files":
+        (Path(service._previous_release("exampleservice").bundle_path) / "service.py").unlink()
+    before = state.load_state()
+    releases_before = service._previous_release("exampleservice")
+    preview = _get(client, "/api/plugins/installations/exampleservice/rollback")
+    refused = _rollback(client)
+    assert preview.status_code == 200 and preview.json["blocked_reason"]
+    assert refused.status_code == 400 and refused.json == preview.json["blocked_reason"]
+    assert state.load_state() == before and service._previous_release("exampleservice") == releases_before
+
+
+def test_rollback_consent_is_for_the_retained_manifest_and_a_stale_digest_does_not_change_state(
+        client, rollback_store):
+    from provider_hub import service, state
+
+    rollback_store(previous=service_manifest("exampleservice", "1.0.0", permissions=["network"]))
+    before = state.load_state()
+    preview = _get(client, "/api/plugins/installations/exampleservice/rollback").json
+    assert preview["consent"] == service.rollback_consent("exampleservice")
+    assert preview["consent"]["needs_consent"] is True
+    missing = _rollback(client)
+    stale = _rollback(client, consent="0" * len(preview["consent"]["digest"]))
+    assert missing.status_code == 400 and stale.status_code == 409
+    assert state.load_state() == before
+    accepted = _rollback(client, consent=preview["consent"]["digest"])
+    assert accepted.status_code == 200 and accepted.json == {"status": "activated", "version": "1.0.0"}
+
+
+def test_rollback_never_selects_the_version_or_paths_supplied_by_the_caller(client, rollback_store):
+    from provider_hub import state
+
+    rollback_store()
+    before = state.load_state()
+    refused = _rollback(client, version="0.5.0", path="/tmp/untrusted", manifest={"version": "0.5.0"})
+    assert refused.status_code == 409 and "previous release changed" in refused.json
+    assert state.load_state() == before
+    accepted = _rollback(client, path="/tmp/untrusted", manifest={"version": "0.5.0"})
+    assert accepted.status_code == 200 and accepted.json["version"] == "1.0.0"
+
+
+@pytest.mark.parametrize("plugin_id", ["exampleservice", "providerhub"])
+@pytest.mark.parametrize("digest", ["outdated", ""])
+def test_rollback_refuses_a_supplied_stale_digest_even_when_no_new_consent_is_required(
+        client, rollback_store, plugin_id, digest):
+    from provider_hub import state
+
+    rollback_store(plugin_id)
+    before = state.load_state()
+    preview = _get(client, f"/api/plugins/installations/{plugin_id}/rollback").json
+    assert preview["consent"] is None or preview["consent"]["needs_consent"] is False
+    response = _rollback(client, plugin_id, consent=digest)
+    assert response.status_code == 409 and "consent changed" in response.json
+    assert state.load_state() == before
+
+
+def test_rollback_consent_binds_the_bundle_identity_even_when_the_previous_version_stays_the_same(
+        client, rollback_store):
+    from provider_hub import state
+
+    rollback_store()
+    old_digest = _get(client, "/api/plugins/installations/exampleservice/rollback").json["consent"]["digest"]
+    payloads = {"service.py": b"class RepackedService: pass\n"}
+    rollback_store(previous=service_manifest("exampleservice", "1.0.0", file_payloads=payloads),
+                   previous_payloads=payloads)
+    before = state.load_state()
+    response = _rollback(client, consent=old_digest)
+    assert response.status_code == 409 and state.load_state() == before
+    preview = _get(client, "/api/plugins/installations/exampleservice/rollback").json
+    assert preview["previous_version"] == "1.0.0" and preview["consent"]["digest"] != old_digest
+    assert _rollback(client, consent=preview["consent"]["digest"]).status_code == 200
+
+
+@pytest.mark.parametrize("outcome,status", [("failed", 400), ("skipped", 409)])
+def test_rollback_does_not_report_unsuccessful_activation_as_success(client, monkeypatch, outcome, status):
+    from provider_hub import service
+
+    monkeypatch.setattr(service, "rollback_release", lambda *a, **k: service.Activation(
+        "exampleservice", outcome, "1.0.0", "2.0.0", error="activation was refused"))
+    response = _rollback(client)
+    assert response.status_code == status
+    assert isinstance(response.json, str)
+
+
+@pytest.mark.parametrize("field,value", [("source_id", "another"), ("origin", "local"),
+                                       ("manifest", service_manifest("exampleservice", "2.0.0", permissions=["network"]))])
+def test_rollback_refuses_an_active_identity_changed_after_the_consent_check(
+        client, rollback_store, monkeypatch, field, value):
+    from provider_hub import service, state
+
+    rollback_store()
+    real_consent = service.rollback_consent
+
+    def change_after_consent(*args, **kwargs):
+        delta = real_consent(*args, **kwargs)
+        state.mutate_state(lambda document: document["installations"]["exampleservice"].update({field: value}))
+        return delta
+
+    monkeypatch.setattr(service, "rollback_consent", change_after_consent)
+    response = _rollback(client)
+    row = state.load_state()["installations"]["exampleservice"]
+    assert response.status_code == 409
+    assert row[field] == value and row["active_version"] == "2.0.0" and not row.get("staged_version")
+
+
+@pytest.mark.parametrize("same_version", [False, True])
+def test_rollback_cannot_activate_a_release_replaced_between_staging_and_activation(
+        client, rollback_store, monkeypatch, same_version):
+    from provider_hub import service, state
+
+    rollback_store()
+    real_activate = service.activate_release
+    replacement = service_manifest("exampleservice", "1.0.0" if same_version else "3.0.0", permissions=["network"])
+
+    def replace_before_activation(plugin_id, **kwargs):
+        state.mutate_state(lambda document: document["installations"][plugin_id].update(
+            staged_version=replacement["version"], staged_manifest=replacement))
+        return real_activate(plugin_id, **kwargs)
+
+    monkeypatch.setattr(service, "activate_release", replace_before_activation)
+    monkeypatch.setattr(service, "_verified_staged_release",
+                        lambda *a, **k: pytest.fail("the replaced release must not start"))
+    response = _rollback(client)
+    row = state.load_state()["installations"]["exampleservice"]
+    assert response.status_code == 409
+    assert row["active_version"] == "2.0.0" and row["staged_manifest"] == replacement
+
+
+def test_rollback_does_not_abandon_a_different_release_replaced_during_validation(
+        client, rollback_store, monkeypatch):
+    from provider_hub import service, state
+
+    rollback_store()
+    replacement = service_manifest("exampleservice", "1.0.0", permissions=["network"])
+
+    def replace_then_fail(*args):
+        state.mutate_state(lambda document: document["installations"]["exampleservice"].update(
+            staged_manifest=replacement))
+        raise service.ProviderHubInstallError("the reviewed release could not start")
+
+    monkeypatch.setattr(service, "_verified_staged_release", replace_then_fail)
+    response = _rollback(client)
+    row = state.load_state()["installations"]["exampleservice"]
+    assert response.status_code == 400
+    assert row["active_version"] == "2.0.0" and row["staged_manifest"] == replacement
+
+
+def test_rollback_does_not_promote_across_a_source_change_during_activation(
+        client, rollback_store, monkeypatch, service_kind):
+    from provider_hub import state
+
+    rollback_store()
+
+    def change_source(*args):
+        state.mutate_state(lambda document: document["installations"]["exampleservice"].update(source_id="another"))
+
+    monkeypatch.setattr(service_kind, "on_activated", change_source)
+    response = _rollback(client)
+    row = state.load_state()["installations"]["exampleservice"]
+    assert response.status_code == 409
+    assert row["source_id"] == "another" and row["active_version"] == "2.0.0" and row["staged_version"] == "1.0.0"
+
+
+@pytest.mark.parametrize("retire_during_consent", [True, False])
+def test_rollback_checks_the_retained_snapshot_and_accepts_an_unchanged_set_of_multiple_retired_releases(
+        client, rollback_store, monkeypatch, retire_during_consent):
+    from provider_hub import releases, service, state, state_store
+
+    rollback_store(previous=service_manifest("exampleservice", "0.5.0"),
+                   current=service_manifest("exampleservice", "1.0.0"))
+    rollback_store(draining_previous=True)
+    draining = state_store.list_releases("exampleservice", states=(releases.DRAINING,))[0]
+    if retire_during_consent:
+        real_consent = service.rollback_consent
+
+        def retire_after_consent(*args, **kwargs):
+            delta = real_consent(*args, **kwargs)
+            assert state_store.transition_release(draining.id, releases.RETIRED)
+            return delta
+
+        monkeypatch.setattr(service, "rollback_consent", retire_after_consent)
+    else:
+        assert state_store.transition_release(draining.id, releases.RETIRED)
+    response = _rollback(client, version="0.5.0" if retire_during_consent else "1.0.0")
+    row = state.load_state()["installations"]["exampleservice"]
+    if retire_during_consent:
+        assert response.status_code == 409
+        assert row["active_version"] == "2.0.0" and not row.get("staged_version")
+    else:
+        assert response.status_code == 200 and row["active_version"] == "1.0.0"
