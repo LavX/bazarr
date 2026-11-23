@@ -2601,7 +2601,7 @@ def test_automatic_source_translation_checks_queued_video_version(world, monkeyp
 @pytest.mark.parametrize(
     "old_state", ["queued", "legacy-unsigned", "legacy-pinned", "legacy-current", "awaiting-retry", "legacy-recovered",
                   "retry-during-replacement", "legacy-removed", "planning-retry", "backend-setup-retry",
-                  "engine-failure-hold"])
+                  "engine-failure-hold", "repeat-during-retry"])
 def test_runtime_queues_a_new_source_translation_for_a_replacement_recording(
         world, monkeypatch, isolated_jobs, old_state):
     import json
@@ -2655,6 +2655,82 @@ def test_runtime_queues_a_new_source_translation_for_a_replacement_recording(
         if old_state in ("legacy-pinned", "legacy-current"):
             assert queue_missing_translations(source) == {"hu"}
             assert world.db.execute(sa.select(TableTranslatorJob.id)).scalars().all() == [older_id]
+        if old_state == "repeat-during-retry":
+            from threading import Event, Thread
+
+            from app import jobs_queue as queue_module
+            from subtitles.tools.translate.runtime.dispatch import Dispatcher
+
+            retry_recorded, release = Event(), Event()
+            record_retry = Dispatcher._await_retry
+
+            def fail_planning(*args, **kwargs):
+                raise RuntimeError("could not read the selected engine")
+
+            def record_before_job_finishes(dispatcher, *args, **kwargs):
+                result = record_retry(dispatcher, *args, **kwargs)
+                retry_recorded.set()
+                assert release.wait(10)
+                return result
+
+            def run_job(job):
+                try:
+                    isolated_jobs._run_job(job)
+                finally:
+                    world.db.remove()
+
+            with monkeypatch.context() as broken_runtime:
+                broken_runtime.setattr(Dispatcher, "_plan", fail_planning)
+                broken_runtime.setattr(Dispatcher, "_await_retry", record_before_job_finishes)
+                assert isolated_jobs._reserve_next_job() is older
+                worker = Thread(target=run_job, args=(older,), daemon=True)
+                worker.start()
+                try:
+                    assert retry_recorded.wait(10) and older.status == "running"
+                    row = TranslationJobs(world.db).get(older_id)
+                    assert (row.state, row.queue_job_id, row.retry_at) == ("awaiting_retry", None, None)
+                    assert queue_missing_translations(source) == {"hu"}
+                    row = TranslationJobs(world.db).get(older_id)
+                    assert (row.state, row.queue_job_id, row.retry_at) == ("awaiting_retry", None, None)
+                finally:
+                    release.set()
+                    worker.join(25)
+            assert older.status == "failed" and older.retryable
+
+            started = Event()
+            new_workers = []
+            attachments = []
+            attach = main._runtime_attach
+
+            def start_before_attachment(_event, payload):
+                if payload.get('status') == 'pending':
+                    job = isolated_jobs._reserve_next_job()
+                    worker = Thread(target=run_job, args=(job,), daemon=True)
+                    new_workers.append((job, worker))
+                    worker.start()
+                    assert started.wait(10)
+                elif payload.get('status') == 'running':
+                    started.set()
+
+            def observe_attachment(*args, **kwargs):
+                attach(*args, **kwargs)
+                row = TranslationJobs(world.db).get(older_id)
+                attachments.append((row.state, row.queue_job_id))
+
+            with monkeypatch.context() as timing:
+                timing.setattr(queue_module, '_job_event', start_before_attachment)
+                timing.setattr(main, '_runtime_attach', observe_attachment)
+                try:
+                    assert queue_missing_translations(source) == {"hu"}
+                finally:
+                    for _job, worker in new_workers:
+                        worker.join(25)
+            (retry, _worker), = new_workers
+            assert retry.job_id != older.job_id and retry.status == "completed"
+            assert attachments == [("queued", retry.job_id)]
+            assert "[hu] Downloaded" in result.read_text()
+            assert TranslationJobs(world.db).get(older_id).state == "completed"
+            return
         if old_state == "engine-failure-hold":
             from requests import HTTPError
             from subtitles.tools.translate.failure_record import clear_failed_translation, translation_recently_failed

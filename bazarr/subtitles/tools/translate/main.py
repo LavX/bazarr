@@ -206,7 +206,7 @@ def _runtime_follow(video_path, source_srt_file, to_lang, forced, hi, embedded_s
 
 
 def _runtime_attach(queue_job_id, video_path, source_srt_file, to_lang, forced, hi, embedded_source, source=None,
-                    source_video_version=None, source_tool=None, from_lang=None):
+                    source_video_version=None, source_tool=None, from_lang=None, *, created=False):
     """Tell the runtime which queue job carries the job it made or joined for this request."""
     if not queue_job_id or not _runtime_active():
         return
@@ -214,7 +214,8 @@ def _runtime_attach(queue_job_id, video_path, source_srt_file, to_lang, forced, 
     try:
         key = _job_source_key(video_path, source_srt_file, embedded_source, source, source_video_version,
                               source_tool, from_lang)
-        enqueue.attach_for(queue_job_id, key, to_lang, forced, hi, worker_waits_for_attachment=source is not None)
+        enqueue.attach_for(queue_job_id, key, to_lang, forced, hi,
+                           worker_waits_for_attachment=source is not None and created)
     except Exception:
         logging.exception('BAZARR could not attach a queued translation to its job in the translation runtime')
 
@@ -337,10 +338,13 @@ def translate_subtitles_file(video_path, source_srt_file, from_lang, to_lang, fo
                                   arr_instance_id,
                                   **({'sports_context': sports_operation.context} if sports_operation else {}),
                                   **({'source': source} if source is not None else {}))),
-                    is_progress=True, return_existing=True)
+                    is_progress=True, return_existing=True, **({'return_created': True} if source is not None else {}))
+                if source is not None:
+                    job_id, created = job_id
                 _runtime_attach(
                     job_id, video_path, source_srt_file, to_lang, forced, hi, embedded_source,
-                    **({'source': source, 'source_video_version': source_video_version} if source is not None else {}),
+                    **({'source': source, 'source_video_version': source_video_version, 'created': created}
+                       if source is not None else {}),
                     **({'source_tool': source_tool, 'from_lang': from_lang}
                        if source is not None and source_tool is not None else {}))
                 # The queue job carries the pick the request noted, if it noted one.
