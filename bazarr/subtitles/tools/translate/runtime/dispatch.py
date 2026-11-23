@@ -263,6 +263,7 @@ class _Run:
     budget: Any = None
     # True once this dispatcher reserved the job's budget: only that one gives it back.
     budget_reserved: bool = False
+    engine_started: bool = False
     stop_reason: str | None = None
     declines: list[str] = field(default_factory=list)
     notices: list[Notice] = field(default_factory=list)
@@ -326,7 +327,8 @@ class Dispatcher:
         except Exception as error:
             # A bug or a database fault: the job must not stay "running" for a worker that is no longer on it.
             logger.exception("A translation job failed unexpectedly")
-            if self._await_retry(jobs, history, state, fail.INTERNAL, type(error).__name__):
+            recorded = self._await_retry(jobs, history, state, fail.INTERNAL, type(error).__name__)
+            if recorded and not state.engine_started:
                 raise DispatchFailed(fail.INTERNAL, "The translation failed unexpectedly.", retry_later=True) from error
             raise
         finally:
@@ -445,6 +447,7 @@ class Dispatcher:
                 state.ledger_id, **{key: value for key, value in spec.history_media.items() if value is not None},
                 source_language=spec.source_language, target_language=spec.target_language, plugin_id=plugin_id,
                 plugin_version=None if info is None else info.version, engine_instance_id=instance.id)
+            state.engine_started = True
             try:
                 if legacy is not None:
                     output = self._run_legacy(spec, legacy, instance)
