@@ -104,10 +104,14 @@ class SportsWanted(Resource):
         try:
             body = _body()
             owner = body.get("arr_instance_id")
+            scope = _source_scope()
             if request.args.get('sources') == '1' and owner is None:
-                scope = _source_scope()
-                return _queued(queue_wanted_search('sports_event') if scope.includes('source') else None)
+                selected = {key for origin, key in scope.keys if origin == 'source' and key is not None}
+                source_ids = tuple(sorted(selected)) if scope.keys else None
+                return _queued(queue_wanted_search('sports_event', source_ids=source_ids))
             owner = _owner(owner)
+            if scope.keys and ('arr', owner) not in scope.keys:
+                return _queued(None)
             require_sportarr(database, owner)
             return _queued(workflows.wanted_search_missing_subtitles_sports(arr_instance_id=owner))
         except SportsNotFound as exc:

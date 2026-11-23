@@ -450,6 +450,7 @@ def test_the_folder_kind_refuses_paths_it_cannot_use(tmp_path):
     assert "config_directory" in problems(args.config_dir)
     assert "config_directory" in problems(os.path.dirname(args.config_dir))
     assert problems(str(tmp_path), "series") == set()
+    assert problems(str(tmp_path), "sports") == set()
     assert "content_kind" in problems(str(tmp_path), "music")
     with pytest.raises(UnknownSourceKind):
         get_kind("plex")

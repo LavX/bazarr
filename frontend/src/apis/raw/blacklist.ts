@@ -16,6 +16,8 @@ export function blacklistRemovalRequest(removal: Blacklist.Removal) {
         sources: 1,
         // eslint-disable-next-line camelcase
         source_blacklist_id: removal.sourceBlacklistId,
+        // eslint-disable-next-line camelcase
+        source_blacklist_key: removal.sourceBlacklistKey,
       },
       form: undefined,
     };

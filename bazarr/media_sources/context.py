@@ -5,10 +5,10 @@ from dataclasses import dataclass, replace
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import text
+from sqlalchemy import select, text
 
 from . import repository
-from .db import source_transaction
+from .db import lock_source_release, source_transaction
 
 
 class SourceItemGone(LookupError):
@@ -46,6 +46,7 @@ class SourceItemContext:
     source_created_at: Optional[datetime] = None
     source_name: Optional[str] = None
     wanted_file_stamp: Optional[tuple] = None
+    pinned_file_identity: Optional[tuple[int, int]] = None  # device and inode from an explicit Discover copy
 
     def same_item(self, current):
         """SQLite may reuse the integer id of a deleted item."""
@@ -139,18 +140,28 @@ def _same_context(source, current):
     if not source.same_item(current) or (source.source_id, source.library_id, source.path, source.kind) != (
             current.source_id, current.library_id, current.path, current.kind):
         return None
-    return replace(current, wanted_file_stamp=source.wanted_file_stamp) if source.wanted_file_stamp else current
+    return replace(current, wanted_file_stamp=source.wanted_file_stamp,
+                   pinned_file_identity=source.pinned_file_identity)
 
 
 @contextmanager
-def source_item_publication(source, *, shared=False):
+def source_item_publication(source, *, shared=False, release=None):
     """Keep the captured item stable through an atomic subtitle publication."""
     with source_transaction() as connection:
-        shared_postgres = shared and connection.dialect.name == 'postgresql'
+        if release is not None:
+            lock_source_release(connection, release)
+        postgres = connection.dialect.name == 'postgresql'
+        shared_postgres = shared and postgres
         item = repository.get_item(source.item_id, connection, for_update=True, nowait=shared_postgres)
         if item is not None and shared_postgres:
-            # The item row lock alone cannot see an owner the scanner is about to insert.
-            # Take it first, as the scanner may need to upgrade from its row lock to UPDATE.
-            connection.execute(text('LOCK TABLE table_source_items IN SHARE MODE NOWAIT'))
+            # The row lock alone cannot prevent a source, Arr or Sportarr
+            # writer from admitting another owner in the shared folder.
+            # Take the item lock first and leave any busy writer free to finish.
+            connection.execute(text('LOCK TABLE table_source_items, table_episodes, table_movies, '
+                                    'table_sports_events, arr_instances IN SHARE MODE NOWAIT'))
+        if item is not None and postgres:
+            # Keep the enabled owner and library stable through the final eligibility check and file writes.
+            for table, row_id in ((repository.Sources, item.source_id), (repository.Libraries, item.library_id)):
+                connection.execute(select(table.c.id).where(table.c.id == row_id).with_for_update(read=True, nowait=True))
         current = _same_context(source, _context_for_item(item, connection)) if item is not None else None
         yield current, connection

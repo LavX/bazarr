@@ -782,6 +782,17 @@ def test_shows_get_series_ids_and_sports_use_the_local_league(saved):
     assert (league.title, sport.title, sport.event_date, sport.episode, sport.part_name) == (
         'Formula 1', 'Monaco Grand Prix', '2025-05-25', 3, 'Race')
 
+    group = saved.client.get(f'/api/sources/groups/{league.id}', headers=HEADERS)
+    assert group.status_code == 200
+    assert (group.json['kind'], group.json['title']) == ('league', 'Formula 1')
+    detail = saved.client.get(f'/api/sources/items/{sport.id}', headers=HEADERS)
+    assert detail.status_code == 200
+    assert (detail.json['group_id'], detail.json['event_date']) == (league.id, '2025-05-25')
+    wanted = saved.client.get('/api/sports/wanted', headers=HEADERS,
+                              query_string={'sources': 1, 'source_key[]': f"source:{source['id']}"})
+    assert wanted.status_code == 200
+    assert [(row['id'], row['origin']) for row in wanted.json['data']] == [(sport.id, 'source')]
+
 
 def test_id_lookup_batches_stop_on_first_error_and_keep_previous_flags(saved, monkeypatch):
     from media_servers import item_pages

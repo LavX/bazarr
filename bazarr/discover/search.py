@@ -26,6 +26,7 @@ from subliminal_patch.extensions import provider_registry
 from subliminal_patch.score import ComputeScore, MAX_SCORES
 
 from .handles import mint_result, renew_result, resolve_result
+from .library import CopyUnavailable, require_copy_revision, source_context_for_copy
 
 _IMDB = re.compile(r"tt[0-9]{7,10}\Z")
 _LANGUAGE = re.compile(r"[a-z]{2,3}(?:-[A-Za-z]{2,4})?\Z")
@@ -115,6 +116,7 @@ class SearchAdmissionExpired(ValueError):
 
 def _admit_provider_search(request):
     from . import metadata
+    require_copy_revision(request.context)
     try:
         metadata._require_dependency_validity(request.metadata_valid_until)
     except metadata.UpstreamFailure:
@@ -145,15 +147,19 @@ def validate_context(payload) -> SearchRequest:
     if mode not in ("title", "release"):
         raise ValueError("Choose an identified title or an advanced release-name search.")
     allowed = ({"mode", "query", "language", "refresh"} if mode == "release" else
-               {"mode", "media_type", "imdb_id", "language", "season", "episode", "title", "year", "refresh", "episode_identity", "manual_confirmed", "show_id", "copy_id"})
+               {"mode", "media_type", "imdb_id", "tmdb_id", "language", "season", "episode", "title", "year", "refresh", "episode_identity", "manual_confirmed", "show_id", "copy_id"})
     if set(payload) - allowed:
         raise ValueError("Unsupported search context. Choose a title and subtitle language.")
     media_type = payload.get("media_type")
     imdb_id = payload.get("imdb_id")
+    tmdb_id = payload.get("tmdb_id")
     language = payload.get("language")
     if mode == "title" and media_type not in ("movie", "episode"):
         raise ValueError("Choose a movie or an exact episode.")
-    if mode == "title" and (not isinstance(imdb_id, str) or not _IMDB.fullmatch(imdb_id.strip().lower())):
+    if tmdb_id is not None and (type(tmdb_id) is not int or not 0 < tmdb_id < 10**13 or not payload.get("copy_id")):
+        raise ValueError("Choose a library copy for this TMDB title.")
+    if mode == "title" and not (imdb_id is None and tmdb_id is not None) and (
+            not isinstance(imdb_id, str) or not _IMDB.fullmatch(imdb_id.strip().lower())):
         raise ValueError("Enter a valid IMDb ID, for example tt0133093.")
     if not isinstance(language, str) or not _LANGUAGE.fullmatch(language):
         raise ValueError("Choose one subtitle language.")
@@ -175,8 +181,10 @@ def validate_context(payload) -> SearchRequest:
         service._build_release_query_video(query.strip())
         return SearchRequest({"mode": "release", "query": query.strip(), "language": canonical,
                               "matching_mode": "release"}, refresh)
-    context = {"media_type": media_type, "imdb_id": imdb_id.strip().lower(),
+    context = {"media_type": media_type, "imdb_id": imdb_id.strip().lower() if imdb_id is not None else None,
                "language": canonical, "matching_mode": "title"}
+    if tmdb_id is not None:
+        context["tmdb_id"] = tmdb_id
     if media_type == "episode":
         for key, minimum in (("season", 0), ("episode", 1)):
             value = payload.get(key)
@@ -220,7 +228,22 @@ def _reconcile_copy(payload, context):
         return None
     if not isinstance(chosen, str) or len(chosen) > 64:
         raise ValueError("Choose a library copy from the offered list.")
+    if "tmdb_id" in context and context.get("show_id") not in (None, context["tmdb_id"]):
+        raise ValueError("Conflicting show identity. Choose the episode again.")
     facts = resolve_copy(chosen, context)
+    if "tmdb_id" in context:
+        if facts.get("source_id") is None:
+            context.pop("tmdb_id")
+        elif facts.get("tmdb_id") not in (None, context["tmdb_id"]):
+            raise ValueError("Choose a library copy that matches this TMDB title.")
+        elif facts.get("tmdb_id") is None:
+            context.pop("tmdb_id")
+        if context["imdb_id"] is None:
+            context["title"] = facts["title"]
+            if facts["year"] is not None and 1870 <= facts["year"] <= 2200:
+                context["year"] = facts["year"]
+            else:
+                context.pop("year", None)
     context["copy_id"] = facts["copy_id"]
     context["file_revision"] = facts["file_revision"]
     context["copy"] = copy_context(facts)
@@ -437,8 +460,36 @@ def _copy_compatibility(video, sub, parsed):
     return result
 
 
-def _result(sub, video, context, search_id, checked_at, ttl, parsed=None):
-    result_id, expires = mint_result(sub, context, search_id, ttl)
+def _source_archive_context(context, facts):
+    if context.get("media_type") != "episode" or not facts or facts.get("source_id") is None:
+        return None
+    source_numbers = (facts.get("source_season"), facts.get("source_episode"))
+    target = (context["season"], context["episode"])
+    identity = None if context.get("manual_confirmed") else context.get("episode_identity")
+    if facts["identity_source"] == "user":
+        from media_sources.parse import parse_episode_file
+        group = facts.get("source_group_key")
+        parsed = parse_episode_file(facts["path"], group if group and os.path.isabs(group) else None)
+        filename_numbers = (parsed.season, parsed.episode)
+        if parsed.multi_episode or any(actual is not None and actual != expected
+                                       for actual, expected in zip(filename_numbers, source_numbers)):
+            # Search follows the saved correction. An archive name cannot say
+            # whether it follows that correction or the file's old numbering.
+            return {"season": None, "episode": None, "strict_numbering": True}
+    if identity and source_numbers == target == (identity["season"], identity["episode"]):
+        return None
+    # The provider still searches its canonical episode. A downloaded
+    # archive must select the numbering on the file the reader chose.
+    return {"season": source_numbers[0], "episode": source_numbers[1],
+            "absolute_episode": None, "strict_numbering": True}
+
+
+def _result(sub, video, context, search_id, checked_at, ttl, parsed=None, archive_context=None):
+    stored = sub
+    if archive_context and hasattr(sub, "_requested_archive_context"):
+        stored = copy.copy(sub)
+        stored._requested_archive_context = archive_context
+    result_id, expires = mint_result(stored, context, search_id, ttl)
     language = sub.language
     matches = None
     if context.get("mode") != "release":
@@ -526,6 +577,13 @@ def search(request: SearchRequest, on_progress=None, *, observed: bool = True) -
             # Only the explicitly chosen copy contributes a file name, size,
             # hash and release description. Confirmed identity is untouched.
             service.refine_video_with_copy(video, request.copy)
+            if request.copy.get("source_id") is not None:
+                video.source_context = source_context_for_copy(request.copy)
+            if context.get("tmdb_id"):
+                if context["media_type"] == "episode":
+                    video.series_tmdb_id = context["tmdb_id"]
+                else:
+                    video.tmdb_id = context["tmdb_id"]
 
         # Rows the fanout has already produced, published while the search is
         # still running so a reader can act on them without waiting for the
@@ -537,6 +595,7 @@ def search(request: SearchRequest, on_progress=None, *, observed: bool = True) -
         parsed = {}
         built = {}
         live_rows = []
+        archive_context = _source_archive_context(context, request.copy)
         # Building a row costs match evidence and a compatibility score. That
         # cost is paid once either way, but paying it here spends the fanout's
         # own wall clock, which the remaining providers are still living on.
@@ -589,7 +648,7 @@ def search(request: SearchRequest, on_progress=None, *, observed: bool = True) -
                 if live_budget <= 0:
                     return
                 started = time.monotonic()
-                row = _result(sub, video, context, search_id, checked, live_ttl, parsed)
+                row = _result(sub, video, context, search_id, checked, live_ttl, parsed, archive_context)
                 built[id(sub)] = (sub, row)
                 live_rows.append(row)
                 live_budget -= time.monotonic() - started
@@ -645,7 +704,7 @@ def search(request: SearchRequest, on_progress=None, *, observed: bool = True) -
             renewed = (renew_result(existing[1]["id"], ttl, shorten=True)
                        if existing is not None and existing[0] is sub else None)
             rows.append({**existing[1], "expires_at": _iso(renewed)} if renewed is not None
-                        else _result(sub, video, context, search_id, checked, ttl, parsed))
+                        else _result(sub, video, context, search_id, checked, ttl, parsed, archive_context))
         # Failed refreshes retain usable rows only for providers that failed.
         # Successful empty searches replace their earlier results. A retained
         # handle is renewed like a live one: this snapshot offers it for its
@@ -689,8 +748,10 @@ def search(request: SearchRequest, on_progress=None, *, observed: bool = True) -
         key, create, expiration_time=0 if refresh else expiration,
     ))
     snapshot.pop("_eligibility", None)
-    if not created and snapshot["cache_status"] != "stale":
-        snapshot["cache_status"] = "cached"
+    if not created:
+        require_copy_revision(context)
+        if snapshot["cache_status"] != "stale":
+            snapshot["cache_status"] = "cached"
     return snapshot
 
 
@@ -763,6 +824,8 @@ def run_search_job(request: SearchRequest, job_id=None):
     except SearchAdmissionExpired as error:
         logging.warning("Discover search failed: reason=metadata_expired: %s", error)
         raise JobFailed(str(error), reason="metadata_expired", retryable=False) from None
+    except CopyUnavailable as error:
+        raise JobFailed(str(error), reason="copy_unavailable", retryable=False) from None
     # Raises JobCancelled if Stop was pressed at any point during the search.
     jobs_queue.update_job_progress(job_id=job_id)
     jobs_queue.publish_job_result(job_id, {"phase": "finished", "providers": snapshot["coverage"]["providers"],

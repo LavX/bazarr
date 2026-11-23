@@ -144,7 +144,13 @@ def _manual_search(path, profile_id, providers, sceneName, title, media_type, *,
     if context is not None:
         video_args['cancel'] = cancel
 
-    if context is not None:
+    signature = None
+    if source is not None:
+        from media_sources.analysis import local_content_stamp
+        signature = local_content_stamp(source.path)
+        if signature is None:
+            return []
+    elif context is not None:
         from sportarr.subtitles import candidate_signature
         signature = candidate_signature(context)
     if language_set is None:
@@ -258,7 +264,7 @@ def _manual_search(path, profile_id, providers, sceneName, title, media_type, *,
                          language=str(s.language.basename),
                          hearing_impaired=str(s.hearing_impaired),
                          provider=s.provider_name,
-                         subtitle=_cache_search_result(s, context, signature if context is not None else None, source),
+                         subtitle=_cache_search_result(s, context, signature, source),
                          url=s.page_link,
                          original_format=s.use_original_format,
                          matches=list(matches),
@@ -358,11 +364,13 @@ def manual_download_subtitle(path, audio_language, hi, forced, subtitle, provide
     from media_sources.manual import SourceCandidate
     from sportarr.subtitles import SportsCandidate, validate_candidate
 
+    source_candidate = None
     if source is not None:
         from copy import deepcopy
         from media_sources.manual import validate_source_candidate
 
-        subtitle = deepcopy(validate_source_candidate(subtitle, source, provider))
+        source_candidate = subtitle
+        subtitle = deepcopy(validate_source_candidate(source_candidate, source, provider))
         # Provider download errors need the source owner before the call, including
         # cached candidates whose provider never attached it during listing.
         subtitle.source_context = source
@@ -439,8 +447,10 @@ def manual_download_subtitle(path, audio_language, hi, forced, subtitle, provide
                     video, subtitle, path,
                     on_publish=publication_callback(media_type, path, 'download', arr_instance_id,
                                                     **({'source': source} if source is not None else {})),
-                    **({'source': source} if source is not None else {}))
+                    **({'source': source, 'source_candidate': source_candidate} if source is not None else {}))
 
+        except JobFailed:
+            raise
         except Exception as e:
             logging.exception(f'BAZARR Error saving Subtitles file to disk for this file {path}: {repr(e)}')  # noqa: G004
             raise JobFailed(f'Saving the subtitle to disk failed: {e}') from e
@@ -658,7 +668,7 @@ def clear_mismatch_after_manual_save(video, media_type, saved_subtitles, arr_ins
 def _cache_search_result(subtitle, context=None, signature=None, source=None):
     if source is not None:
         from media_sources.manual import SourceCandidate
-        subtitle = SourceCandidate(source, subtitle)
+        subtitle = SourceCandidate(source, subtitle, signature)
     elif context is not None:
         from sportarr.subtitles import bind_candidate
         subtitle = bind_candidate(context, subtitle, signature)
@@ -666,7 +676,7 @@ def _cache_search_result(subtitle, context=None, signature=None, source=None):
 
 
 def _save_downloaded_subtitles(video, subtitle, path, validate=None, publication_guard=None,
-                               written_paths=None, on_publish=None, source=None):
+                               written_paths=None, on_publish=None, source=None, source_candidate=None):
     """Publish provider bytes using the common format, naming and atomic writer."""
     chmod = int(settings.general.chmod, 8) if not sys.platform.startswith('win') and settings.general.chmod_enabled else None
     written_paths = [] if written_paths is None else written_paths
@@ -676,7 +686,7 @@ def _save_downloaded_subtitles(video, subtitle, path, validate=None, publication
         if source is not None:
             from media_sources.manual import write_source_subtitle
             return write_source_subtitle(source, destination, content, written_paths=written_paths,
-                                         on_publish=on_publish)
+                                         on_publish=on_publish, candidate=source_candidate)
         return write_subtitle_file(path, destination, content, written_paths=written_paths,
                                    on_publish=on_publish,
                                    **({'publication_guard': publication_guard} if publication_guard is not None else {}))

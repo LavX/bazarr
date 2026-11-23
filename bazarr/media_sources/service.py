@@ -544,6 +544,8 @@ def queue_search(item_id):
     except JobFailed as error:
         if error.reason == 'not_found':
             raise SourceError(str(error), 404, 'not_found') from error
+        if error.reason == 'incomplete_identity':
+            raise SourceError(str(error), 409, error.reason) from error
         raise
 
 
@@ -551,9 +553,18 @@ def _language_code(language, hi, forced):
     return language + (':hi' if hi == 'True' else ':forced' if forced == 'True' else '')
 
 
-def _label(item_id):
+def _require_sports_identity(item):
+    if item.kind == 'sports_event' and item.identity_state not in ('parsed', 'identified'):
+        raise JobFailed('Complete the sports event identity before automatic search, or use manual search.',
+                        reason='incomplete_identity')
+
+
+def _search_label(item_id):
     item = repository.get_item(item_id)
-    return item.title if item is not None else str(item_id)
+    if item is None:
+        raise JobFailed('The item no longer exists', reason='not_found')
+    _require_sports_identity(item)
+    return item.title
 
 
 def search_source_item(item_id, job_id=None, *, translation_gate=True, expected_source=None):
@@ -564,7 +575,7 @@ def search_source_item(item_id, job_id=None, *, translation_gate=True, expected_
                 expected_source = resolve_item(item_id)
             except SourceItemGone as error:
                 raise JobFailed('The item no longer exists', reason='not_found') from error
-        return jobs_queue.add_job_from_function(f"Searching subtitles for {_label(item_id)}", is_progress=True)
+        return jobs_queue.add_job_from_function(f"Searching subtitles for {_search_label(item_id)}", is_progress=True)
     with source_search_probes(item_id):
         return _search_source_item(item_id, job_id, translation_gate=translation_gate, expected_source=expected_source)
 
@@ -595,6 +606,7 @@ def _search_source_item(item_id, job_id, *, translation_gate, expected_source):
         jobs_queue.update_job_progress(job_id=job_id, progress_value='max',
                                        progress_message='The item is missing from its media server library')
         return None
+    _require_sports_identity(item)
     stat = local_stat(item.path)
     if stat is None:
         raise JobFailed(f"The file is missing: {item.path}", reason='missing_file')
@@ -613,6 +625,7 @@ def _search_source_item(item_id, job_id, *, translation_gate, expected_source):
         if refreshed is None or item.path != context.path:
             raise JobFailed('The source file moved while the search was starting. Try again.', reason='conflict')
         context = refreshed
+        _require_sports_identity(item)
     from .translation import missing_language_candidates
 
     candidates = missing_language_candidates(context)
@@ -657,7 +670,7 @@ def search_wanted_fallback(source, target_language, job_id=None):
 
 
 def search_wanted_item(item_id, created_at, job_id, *, translation_gate=True, expected_source=None,
-                       target_language=None):
+                       target_language=None, expected_source_id=None):
     """Search only stored missing languages, after rechecking eligibility and the current Arr path."""
     from .shadows import path_stage_shadow
     from .translation import stored_missing_language_candidates
@@ -667,6 +680,8 @@ def search_wanted_item(item_id, created_at, job_id, *, translation_gate=True, ex
 
     items = repository.Items
     same_row = (items.c.id == item_id, items.c.created_at == created_at)
+    if expected_source_id is not None:
+        same_row += (items.c.source_id == expected_source_id,)
     session = handle()
     item = session.execute(wanted_items(*items.c).where(*same_row)).first()
     if item is None:

@@ -225,7 +225,8 @@ def _delete_source_subtitle(source, subtitle_path, language_code, language_name,
             raise SubtitleDeletionError('The source item moved or was removed.', 409)
         require_indexed(item)
         try:
-            with manual_source_publication(source, subtitle_path, ownership_index) as (
+            release = (source.kind, *blacklist) if blacklist is not None else None
+            with manual_source_publication(source, subtitle_path, ownership_index, release=release) as (
                     current, connection):
                 require_indexed(repository.get_item(current.item_id, connection))
                 removed = _delete_subtitle_file(

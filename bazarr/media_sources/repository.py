@@ -504,7 +504,8 @@ def retained_activity_by_kind(target=None):
 def item_state(item_id, target=None):
     """The availability and owner details of an item, or None."""
     row = _target(target).execute(
-        sa.select(Items.c.id, Items.c.title, Items.c.server_missing, Libraries.c.enabled.label('library_enabled'),
+        sa.select(Items.c.id, Items.c.title, Items.c.server_missing, Items.c.file_dev, Items.c.file_ino,
+                  Libraries.c.enabled.label('library_enabled'),
                   Sources.c.enabled.label('source_enabled'), Sources.c.name.label('source_name'))
         .select_from(Items.join(Libraries, Items.c.library_id == Libraries.c.id)
                      .join(Sources, Items.c.source_id == Sources.c.id))
