@@ -220,6 +220,66 @@ def test_show_copy_uses_the_groups_identity_and_exact_episode(
     assert response.json["owning_titles"] == 0
 
 
+@pytest.mark.parametrize("kind", ["movie", "show"])
+@pytest.mark.parametrize("source_tmdb", [84, 99], ids=["agreeing", "contradictory"])
+def test_catalog_ownership_keeps_contradictory_partial_source_groups_separate(
+    authenticated_client, copy_database, monkeypatch, tmp_path, kind, source_tmdb,
+):
+    from app.database import TableSourceGroups, TableSourceItems
+    from discover import metadata
+
+    _, session = copy_database
+    owner = add_source(session, "movie" if kind == "movie" else "series")
+    ids = []
+    episode_ids = []
+    imdb = "tt0000084"
+    for season, tmdb_id in enumerate((None, f"00{source_tmdb}"), 1):
+        path = tmp_path / f"Moon.{season}.mkv"
+        path.write_bytes(b"fixture media")
+        title = {"kind": kind, "title": f"Moon {season}", "imdb_id": imdb, "tmdb_id": tmdb_id}
+        if kind == "movie":
+            ids.append(add_title(session, owner, TableSourceItems, **title, path=str(path)))
+        else:
+            group_id = add_title(session, owner, TableSourceGroups, **title, group_key=f"moon-{season}")
+            ids.append(group_id)
+            episode_ids.append(add_title(session, owner, TableSourceItems, kind="episode", title="Moon",
+                                         group_id=group_id, season=season, episode=1, path=str(path)))
+    session.commit()
+
+    catalog_id = f"tmdb:{kind}:84"
+    catalog = {"source": "tmdb", "source_id": catalog_id, "id": 84, "media_type": kind,
+               "imdb_id": imdb, "title": "Moon Catalog"}
+    plural = "movies" if kind == "movie" else "shows"
+    monkeypatch.setattr(metadata, f"{kind}_details", lambda _: {"data": {"item": dict(catalog)}})
+    monkeypatch.setattr(metadata, f"search_{plural}", lambda _: {
+        "data": {"status": "available", "items": [dict(catalog)]},
+    })
+
+    response = authenticated_client.get(f"/api/discover/metadata/{plural}/84?source=tmdb", headers=HEADERS)
+    assert response.status_code == 200
+    item = response.json["data"]["item"]
+    assert {copy["local_id"] for copy in item["copies"]} == (set(ids) if source_tmdb == 84 else set())
+    response = authenticated_client.get(f"/api/discover/metadata/search?q=Moon&type={kind}&source=all", headers=HEADERS)
+    assert response.status_code == 200
+    items = response.json["data"]["items"]
+    expected = {catalog_id: set(ids)} if source_tmdb == 84 else {
+        catalog_id: set(), **{f"source:{kind}:{identity}": {identity} for identity in ids},
+    }
+    assert {item["source_id"]: {copy["local_id"] for copy in item["copies"]} for item in items} == expected
+    if kind == "show":
+        for title in [item, *items]:
+            seasons = [season for season, identity in enumerate(ids, 1) if identity in expected[title["source_id"]]]
+            assert title["ownership"]["seasons_owned"] == seasons
+            assert title["ownership"]["episode_count"] == len(seasons)
+        target = {"media_type": "episode", "imdb_id": imdb, "season": 2, "episode": 1}
+        for tmdb_id in {84, source_tmdb}:
+            choices = copies_fixtures.copies(authenticated_client, **target, tmdb_id=tmdb_id)
+            assert choices.status_code == 200
+            assert [copy["local_id"] for copy in choices.json["items"]] == (
+                [episode_ids[1]] if tmdb_id == source_tmdb else []
+            )
+
+
 @pytest.mark.parametrize("archive_mode", ["source", "sibling", "ambiguous", "pinned_sibling", "worker_sibling"])
 def test_remapped_episode_uses_only_the_selected_source_archive_member(
     authenticated_client, copy_database, providers, monkeypatch, tmp_path, archive_mode,

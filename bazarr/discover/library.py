@@ -25,7 +25,11 @@ def _positive(value):
 
 
 def _identity(item):
-    return {key: value for key in ("imdb_id", "tmdb_id", "tvdb_id") if (value := item.get(key)) is not None}
+    tmdb = item.get("id") if item.get("source") == "tmdb" else item.get("tmdb_id")
+    if type(tmdb) is not int or not 0 < tmdb < 2**53:
+        tmdb = _positive(tmdb)
+    ids = {"imdb_id": item.get("imdb_id"), "tmdb_id": tmdb, "tvdb_id": item.get("tvdb_id")}
+    return {key: value for key, value in ids.items() if value is not None}
 
 
 def matches(left, right):
@@ -33,13 +37,9 @@ def matches(left, right):
     if left["media_type"] != right["media_type"]:
         return False
     a, b = _identity(left), _identity(right)
-    if _is_source_title(left) or _is_source_title(right):
-        for item, identity in ((left, a), (right, b)):
-            if tmdb := _source_tmdb(item):
-                identity["tmdb_id"] = tmdb
-        if not {"tmdb_id", "imdb_id"} & a.keys() & b.keys():
-            return False
     common = a.keys() & b.keys()
+    if (_is_source_title(left) or _is_source_title(right)) and not {"tmdb_id", "imdb_id"} & common:
+        return False
     return bool(common) and all(a[key] == b[key] for key in common)
 
 
@@ -145,10 +145,6 @@ def source_titles(kind, *columns):
 
 def _is_source_title(item):
     return str(item.get("source_id", "")).startswith("source:")
-
-
-def _source_tmdb(item):
-    return _positive(item.get("id") if item.get("source") == "tmdb" else item.get("tmdb_id"))
 
 
 def _source_id_columns(table):
@@ -299,8 +295,8 @@ def _expand(connection, items, *, merge=False):
         table = _model(kind)
         predicates = [predicate for item in selected for predicate in _identity_predicates(item, table)]
         source_table = _source_model(kind)
-        source_predicates = [_source_identity_predicate(source_table, item.get("imdb_id"), _source_tmdb(item))
-                             for item in selected if item.get("imdb_id") or _source_tmdb(item)]
+        source_predicates = [_source_identity_predicate(source_table, identity.get("imdb_id"), identity.get("tmdb_id"))
+                             for identity in map(_identity, selected) if {"imdb_id", "tmdb_id"} & identity.keys()]
         if not predicates and not source_predicates:
             candidate_groups.extend([i] for i in selected_indices)
             continue

@@ -190,6 +190,18 @@ def test_merge_does_not_use_cross_kind_or_title_only_identity():
     assert len(merge_candidates(items)) == 4
 
 
+def test_legacy_tvdb_matches_do_not_supply_a_strong_source_identity():
+    from discover.library import matches
+
+    catalog = {"media_type": "show", "source": "tmdb", "id": 84, "tvdb_id": 42}
+    legacy = {"media_type": "show", "source_id": "local:show:1", "tvdb_id": 42}
+    source = {"media_type": "show", "source_id": "source:show:1", "tvdb_id": 42, "tmdb_id": 99}
+    assert matches(catalog, legacy)
+    assert not matches(source, legacy)
+    assert not matches(source, catalog)
+    assert matches({**source, "tmdb_id": "0084"}, catalog)
+
+
 @pytest.mark.parametrize("kind", ["movie", "show"])
 @pytest.mark.parametrize("ordering", [(41, 42, None, 41), (None, 42, 41, 41), (41, None, 41, 42)])
 def test_partial_conflict_preserves_seeds_and_order_independent_copy_groups(library_database, kind, ordering):
