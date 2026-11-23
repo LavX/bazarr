@@ -5183,14 +5183,38 @@ def _archive_active_manifest(provider_id: str, manifest: dict) -> None:
         logging.getLogger(__name__).warning("Could not retain the active manifest of %s", provider_id, exc_info=True)
 
 
-def _abandon_if_still_staged(provider_id: str, version: Any, message: str) -> None:
+def _same_staged_release(row: Any, expected: dict[str, Any]) -> bool:
+    return (isinstance(row, dict) and row.get("state") == "staged" and row.get("pending_restart")
+            and all(row.get(key) == expected.get(key) for key in (
+                "staged_version", "staged_path", "staged_python_path", "staged_manifest", "staged_data_key",
+                "staged_supplied_by", "staged_data_rollback", "kind", "source_id", "origin", "catalog_list",
+                "trusted")))
+
+
+def _abandon_if_still_staged(provider_id: str, installation: dict[str, Any], message: str) -> None:
     """Drop the staged release a failed activation looked at, unless another one has replaced it meanwhile."""
     def drop(state: dict[str, Any]) -> None:
         row = (state.get("installations") or {}).get(provider_id)
-        if isinstance(row, dict) and row.get("staged_version") == version and row.get("state") == "staged":
+        if _same_staged_release(row, installation):
             _abandon_staged_release(row, message)
 
     mutate_state(drop)
+
+
+def _reserve_staged_data_key(provider_id: str, installation: dict[str, Any]) -> str | None:
+    """Give a stage from before per-release data a stable key before activation can copy or run it."""
+    key = uuid.uuid4().hex
+
+    def reserve(state):
+        row = (state.get("installations") or {}).get(provider_id)
+        if not _same_staged_release(row, installation):
+            return None
+        row["staged_data_key"] = key
+        if isinstance(state, releases.StateDocument):
+            state.adopting_staged_data_for = provider_id
+        return key
+
+    return mutate_state(reserve)
 
 
 def _wait_for_data_activation(provider_id: str, installation, *, previous_run: bool = False) -> str:
@@ -5228,21 +5252,16 @@ def _prepare_activation_data(plugin_id, row, active_data, files) -> tuple[str | 
             raise datadir.DataFolderError("The previous release data folder is missing")
         return recorded_key, testing
 
-    key = recorded_key or uuid.uuid4().hex
-    path = datadir.release_path(root, plugin_id, key)
+    path = datadir.release_path(root, plugin_id, recorded_key)
     if path.is_symlink() or path.is_junction():
         raise datadir.DataFolderError("The staged release data folder is unsafe")
-    if not path.exists():
-        # Boot can stage a seed before it is safe to copy its data. An older
-        # staged release or one restored from backup can also lack the folder.
+    if not path.exists() or "staged_data_fingerprint" not in row:
+        # A deferred seed or an older stage has no fingerprint. Recopy on retry even if it made the folder.
         carry_active = row.get("staged_data_from_active", True) and not row.get("delete_release_data")
         datadir.copy_folder(active_data if carry_active else None, path)
-    elif row.get("staged_data_from_active") and (
-            "staged_data_fingerprint" not in row
-            or datadir.fingerprint(active_data) != row["staged_data_fingerprint"]):
-        # A deferred stage has no fingerprint. Recopy on retry even if the previous attempt made the folder.
+    elif row.get("staged_data_from_active") and datadir.fingerprint(active_data) != row["staged_data_fingerprint"]:
         datadir.copy_folder(active_data, path)
-    return key, path
+    return recorded_key, path
 
 
 @datadir.serialized
@@ -5278,6 +5297,12 @@ def activate_release(provider_id: str, *, at_boot: bool = False) -> Activation:
             and _has_removable_data(provider_id, installation) and not _previous_workers_stopped()):
         message = _wait_for_data_activation(provider_id, installation)
         return Activation(provider_id, ACTIVATION_WAITING, target_version, previous_version, message)
+    if (datadir.declared(installation.get("staged_manifest")) and not installation.get("staged_data_key")
+            and not installation.get("staged_data_rollback")):
+        key = _reserve_staged_data_key(provider_id, installation)
+        if key is None:
+            return Activation(provider_id, ACTIVATION_SKIPPED, target_version, previous_version)
+        installation["staged_data_key"] = key
 
     with record_job(
         "activate",
@@ -5309,7 +5334,7 @@ def activate_release(provider_id: str, *, at_boot: bool = False) -> Activation:
                 attention = "Its saved settings could not be brought up to date with this version."
         except Exception as error:
             message = refusal_text(error)
-            _abandon_if_still_staged(provider_id, target_version, message)
+            _abandon_if_still_staged(provider_id, installation, message)
             job.data["state"] = "failed"
             job.update(
                 error=str(error) or error.__class__.__name__,
@@ -5319,12 +5344,7 @@ def activate_release(provider_id: str, *, at_boot: bool = False) -> Activation:
 
         def promote(state: dict[str, Any]) -> bool:
             row = (state.get("installations") or {}).get(provider_id)
-            if (not isinstance(row, dict) or row.get("state") != "staged"
-                    or row.get("staged_version") != target_version
-                    or row.get("staged_path") != installation.get("staged_path")
-                    or row.get("staged_data_key") != installation.get("staged_data_key")
-                    or (row.get("staged_manifest") or {}).get("bundle_sha256")
-                    != (installation.get("staged_manifest") or {}).get("bundle_sha256")
+            if (not _same_staged_release(row, installation)
                     or revocation.lookup(_revocations(state), provider_id, target_version) is not None):
                 # Replaced, removed, revoked or finished by someone else while it was being checked: theirs
                 # stands, and a revoked release is dropped by the next refresh.

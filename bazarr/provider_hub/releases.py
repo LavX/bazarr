@@ -294,13 +294,10 @@ def _digest(manifest: dict[str, Any] | None) -> str | None:
 
 
 class StateDocument(dict):
-    """The state as the callers see it: a plain dict that also knows which retired and draining releases exist.
-
-    The extra is not part of the document and is never stored or written to state.json. What cleans up files
-    reads it, so the bundle and environment of the release a rollback would go back to are not taken away.
-    """
+    """The composed state with release metadata that is never stored in the document or state.json."""
 
     retained_releases: tuple[dict[str, Any], ...] = ()
+    adopting_staged_data_for: str | None = None
 
 
 def compose(data: dict[str, Any], rows: list[dict[str, Any]]) -> "StateDocument":
@@ -455,7 +452,23 @@ def split(data: dict[str, Any], rows: list[dict[str, Any]], *, now: str | None =
                 plan.updates.append((release["id"], changed, None if bindings is None else dict(bindings)))
 
         if staged is not None:
-            settle(staged, find(staged, (STAGED, RETIRED)), STAGED)
+            if getattr(data, "adopting_staged_data_for", None) == plugin_id:
+                # Adopt only into the existing staged slot. A retired release with the same code is unrelated.
+                staged_release = next((release for release in existing if release["state"] == STAGED), None)
+                # A removed catalog or a trust demotion clears the installation's binding. The release
+                # keeps its original source in that case.
+                source_id = row.get("source_id")
+                if staged_release is not None and (
+                        _data_key(staged_release) is not None or staged_release["version"] != staged.version
+                        or staged_release.get("bundle_path") != staged.bundle_path
+                        or staged_release.get("python_path") != staged.python_path
+                        or _loads(staged_release.get("manifest")) != staged.manifest
+                        or (source_id is not None and staged_release.get("source_id") != source_id)
+                        or staged_release.get("origin") != row.get("origin")):
+                    raise ReleaseTransitionError("the staged release changed before its data key could be recorded")
+            else:
+                staged_release = find(staged, (STAGED, RETIRED))
+            settle(staged, staged_release, STAGED)
         if active is not None:
             settle(active, find(active, (ACTIVE, STAGED, DRAINING, RETIRED)), ACTIVE)
         # What the slots no longer name.

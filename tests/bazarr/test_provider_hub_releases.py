@@ -1612,6 +1612,116 @@ def test_data_identity_moves_with_its_release_even_for_the_same_bundle(hub):
     assert after == {"active": (before["staged"], "b" * 32), "retired": (before["active"], "a" * 32)}
 
 
+@pytest.mark.parametrize("origin", ["catalog", "local", "detached-catalog"])
+def test_pre_key_provider_stage_reserves_data_identity_before_retry(hub, monkeypatch, origin):
+    from plugin_platform_helpers import provider_manifest_v2
+    from provider_hub import datadir, releases, service, state_store
+    from provider_hub.kinds import SUBTITLE_PROVIDER, get_kind
+    from provider_hub.state import load_state, mutate_state, provider_hub_dir
+
+    plugin_id = "examplehub"
+    old = provider_manifest_v2(plugin_id, "1.0.0", permissions=["data_dir"])
+    new = provider_manifest_v2(plugin_id, "1.1.0", permissions=["data_dir"])
+    # Development builds before per-release data keys could persist this stage through
+    # either the catalogue or local upload, without any deferred-copy metadata.
+    _seed(examplehub=_row(
+        plugin_id, active="1.0.0", staged="1.1.0", manifest=old, staged_manifest=new,
+        origin="local" if origin == "local" else "catalog", source_bound=origin != "local",
+        source_id=None if origin == "local" else "official", trusted=origin != "local"))
+    staged, = state_store.list_releases(plugin_id, states=(releases.STAGED,))
+    if origin == "detached-catalog":
+        def detach_source(state):
+            state["installations"][plugin_id].update(source_id=None, source_bound=False)
+
+        mutate_state(detach_source)
+    row = load_state()["installations"][plugin_id]
+    assert staged.data_key is None
+    assert "staged_data_from_active" not in row
+    legacy = datadir.legacy_data_path(provider_hub_dir(), plugin_id)
+    legacy.mkdir(parents=True)
+    (legacy / "settings").write_text("last legacy write")
+
+    monkeypatch.setattr(service, "verify_bundle_tree", lambda manifest, root: None)
+    monkeypatch.setattr(service, "validated_bundle_path", lambda root, path: Path(path))
+    monkeypatch.setattr(service, "validated_interpreter", lambda root, path: Path(path))
+    kind = get_kind(SUBTITLE_PROVIDER)
+    monkeypatch.setattr(kind, "on_activated", lambda *args: None)
+    checked = []
+
+    def smoke(manifest, bundle, interpreter, *, data_dir, timeout=None):
+        checked.append((data_dir, (data_dir / "settings").read_text()))
+        (data_dir / "settings").write_text("smoke migration")
+
+    monkeypatch.setattr(kind, "smoke_test", smoke)
+    monkeypatch.setattr(service, "_previous_workers_stopped", lambda: False)
+    assert service.activate_staged_installations() == []
+    assert not checked
+    assert not datadir.plugin_root(provider_hub_dir(), plugin_id).exists()
+
+    monkeypatch.setattr(service, "_previous_workers_stopped", lambda: True)
+    monkeypatch.setattr(releases, "now_text", lambda: "2099-01-01T00:00:00Z")
+    apply_plan = releases.apply_plan
+
+    def interrupt_promotion(connection, plan):
+        apply_plan(connection, plan)
+        promoting = any(fields.get("state") == releases.ACTIVE and row_id == staged.id
+                        for row_id, fields, _ in plan.updates)
+        replacing = any(fields.get("state") == releases.ACTIVE and fields.get("plugin_id") == plugin_id
+                        and fields.get("version") == "1.1.0" for fields, _ in plan.inserts)
+        if promoting or replacing:
+            raise RuntimeError("fixture interrupted the promotion")
+
+    with monkeypatch.context() as database:
+        database.setattr(releases, "apply_plan", interrupt_promotion)
+        assert service.activate_staged_installations() == []
+    reserved, = state_store.list_releases(plugin_id, states=(releases.STAGED,))
+    assert (reserved.id, reserved.created_at) == (staged.id, staged.created_at)
+    assert reserved.source_id == staged.source_id
+    assert reserved.data_key
+    reserved_data = datadir.release_path(provider_hub_dir(), plugin_id, reserved.data_key)
+    assert checked == [(reserved_data, "last legacy write")]
+    (legacy / "settings").write_text("final legacy write")
+
+    assert service.activate_staged_installations() == [plugin_id]
+    active, = state_store.list_releases(plugin_id, states=(releases.ACTIVE,))
+    assert (active.id, active.created_at, active.data_key) == (staged.id, staged.created_at, reserved.data_key)
+    assert active.source_id == staged.source_id
+    assert checked == [(reserved_data, "last legacy write"), (reserved_data, "final legacy write")]
+    assert (legacy / "settings").read_text() == "final legacy write"
+
+
+def test_reserving_data_does_not_activate_a_stage_replaced_by_another_catalogue(hub, monkeypatch):
+    from plugin_platform_helpers import provider_manifest_v2
+    from provider_hub import datadir, service
+    from provider_hub.state import load_state, mutate_state
+
+    plugin_id = "examplehub"
+    manifest = provider_manifest_v2(plugin_id, "1.1.0", permissions=["data_dir"])
+    _seed(examplehub=_row(plugin_id, staged="1.1.0", staged_manifest=manifest, catalog_list="plugins"))
+    reserve = service._reserve_staged_data_key
+
+    def replace_before_reservation(provider_id, installation):
+        def replace(state):
+            row = state["installations"][provider_id]
+            row.update(source_id="another-source", catalog_list="providers")
+
+        mutate_state(replace)
+        return reserve(provider_id, installation)
+
+    monkeypatch.setattr(service, "_reserve_staged_data_key", replace_before_reservation)
+    monkeypatch.setattr(datadir, "copy_folder", lambda *args: pytest.fail("copied the replacement stage"))
+    monkeypatch.setattr(service, "_verified_staged_release", lambda *args, **kwargs: pytest.fail(
+        "checked the replacement stage"))
+
+    result = service.activate_release(plugin_id, at_boot=True)
+
+    assert result.outcome == service.ACTIVATION_SKIPPED
+    row = load_state()["installations"][plugin_id]
+    assert row["state"] == "staged" and row["staged_version"] == "1.1.0"
+    assert row["source_id"] == "another-source" and row["catalog_list"] == "providers"
+    assert not row.get("staged_data_key")
+
+
 def test_release_data_copy_preserves_local_links_and_rejects_external_files(tmp_path):
     from provider_hub import datadir
 
