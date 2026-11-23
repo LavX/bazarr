@@ -1,3 +1,8 @@
+import {
+  ASS_EVENT_COLUMNS,
+  type AssEventMetadata,
+  assTextToDisplay,
+} from "@/pages/SubtitleEditor/parsers/ass";
 import type { ParseResult } from "@/pages/SubtitleEditor/types";
 import type { SubtitleSerializer } from "./index";
 
@@ -8,9 +13,6 @@ Title: Untitled
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
 Style: Default,Arial,20,&H00FFFFFF,&H000000FF,&H00000000,&H00000000,0,0,0,0,100,100,0,0,1,2,2,2,10,10,10,1`;
-
-const EVENTS_FORMAT =
-  "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text";
 
 function formatAssTimestamp(ms: number): string {
   const clamped = Math.max(0, ms);
@@ -73,7 +75,34 @@ export const assSerializer: SubtitleSerializer = {
 
     const header = metadata.rawHeader ?? MINIMAL_HEADER;
 
-    const dialogueLines = cues.map((cue) => {
+    const fields = cues.map(
+      (cue) => (cue.formatMetadata as AssEventMetadata | undefined)?.assFields,
+    );
+    const marked = fields.some((event) => event?.marked !== undefined);
+    const columns = [
+      marked ? "Marked" : ASS_EVENT_COLUMNS[0],
+      ...ASS_EVENT_COLUMNS.slice(1),
+    ];
+    const marker = marked ? "Marked=0" : "0";
+    const dialogueLines = cues.map((cue, index) => {
+      const event = fields[index];
+      if (event) {
+        const raw = event.text;
+        const edited = cue.text !== assTextToDisplay(raw);
+        const values = [
+          event.marked ?? event.layer ?? marker,
+          formatAssTimestamp(cue.startMs),
+          formatAssTimestamp(cue.endMs),
+          event.style ?? "Default",
+          event.name ?? "",
+          event.marginl ?? "0",
+          event.marginr ?? "0",
+          event.marginv ?? "0",
+          event.effect ?? "",
+          edited ? cue.text.replace(/\n/g, "\\N") : raw,
+        ];
+        return `Dialogue: ${values.join(",")}`;
+      }
       if (cue.rawText) {
         // Patch the raw line with any user edits to timing/text
         return patchDialogueLine(cue.rawText, cue.startMs, cue.endMs, cue.text);
@@ -82,11 +111,15 @@ export const assSerializer: SubtitleSerializer = {
       const start = formatAssTimestamp(cue.startMs);
       const end = formatAssTimestamp(cue.endMs);
       const text = cue.text.replace(/\n/g, "\\N");
-      return `Dialogue: 0,${start},${end},Default,,0,0,0,,${text}`;
+      return `Dialogue: ${marker},${start},${end},Default,,0,0,0,,${text}`;
     });
 
     return (
-      header + "\n[Events]\n" + EVENTS_FORMAT + "\n" + dialogueLines.join("\n")
+      header +
+      "\n[Events]\nFormat: " +
+      columns.join(", ") +
+      "\n" +
+      dialogueLines.join("\n")
     );
   },
 };

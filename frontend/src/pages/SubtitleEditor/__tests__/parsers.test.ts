@@ -1232,6 +1232,74 @@ describe("parseReplacementSubtitle", () => {
         },
       );
 
+      it("honors alternating field order across declarations and Events sections", () => {
+        const content = [
+          header,
+          `Format: ${firstField}, Start, End, Style, Text`,
+          `Dialogue: ${firstValue},0:00:00.00,0:00:01.00,Default,One, first`,
+          `  format: End, Style, ${firstField}, Start, Text`,
+          `  dialogue: 0:00:04.00,Emphasis,${firstValue},0:00:02.00,  Two, second`,
+          "[Events]",
+          `Format: Style, Start, ${firstField}, End, Text`,
+          `Dialogue: Last,0:00:05.00,${firstValue},0:00:06.00,`,
+        ].join("\n");
+        const parsed = parseReplacementSubtitle(format, content);
+
+        expect(parsed.cues).toMatchObject([
+          { startMs: 0, endMs: 1000, text: "One, first" },
+          { startMs: 2000, endMs: 4000, text: "  Two, second" },
+          { startMs: 5000, endMs: 6000, text: "" },
+        ]);
+        parsed.cues[1].text = "Edited, second";
+        const serialized = getSerializer(format).serialize(parsed);
+        expect(serialized).toContain(`Format: ${firstField}, Start, End`);
+        expect(serialized).toContain(
+          `Dialogue: ${firstValue},0:00:02.00,0:00:04.00,Emphasis,,0,0,0,,Edited, second`,
+        );
+        expect(getParser(format).parse(serialized).cues).toMatchObject([
+          { startMs: 0, endMs: 1000, text: "One, first" },
+          { startMs: 2000, endMs: 4000, text: "Edited, second" },
+          { startMs: 5000, endMs: 6000, text: "" },
+        ]);
+      });
+
+      it.each([
+        [
+          "Format: Start, End, Text, Style",
+          "0:00:02.00,0:00:03.00,Text,Styled",
+        ],
+        ["Format Start, End, Text", "0:00:02.00,0:00:03.00,Text"],
+        ["Format: Start, End, , Text", "0:00:02.00,0:00:03.00,,Text"],
+        [
+          "Format: Start, End, Name, Name, Text",
+          "0:00:02.00,0:00:03.00,A,B,Text",
+        ],
+        ["Format: Start, End, MarginT, Text", "0:00:02.00,0:00:03.00,8,Text"],
+      ])("refuses a later unsupported declaration %s", (declaration, row) => {
+        const content = `${header}\nFormat: Start, End, Text\nDialogue: 0:00:00.00,0:00:01.00,First\n${declaration}\nDialogue: ${row}`;
+
+        expect(getParser(format).parse(content).cues).toHaveLength(2);
+        expect(() => parseReplacementSubtitle(format, content)).toThrow();
+      });
+
+      it("rejects an invalid first Events section even when the last one is valid", () => {
+        const content = `${header}\nFormat: Start, End, Text, Style\nDialogue: 0:00:00.00,0:00:01.00,First,Styled\n[Events]\nFormat: Start, End, Text\nDialogue: 0:00:02.00,0:00:03.00,Second`;
+
+        expect(getParser(format).parse(content).cues).toMatchObject([
+          { text: "Second" },
+        ]);
+        expect(() => parseReplacementSubtitle(format, content)).toThrow();
+      });
+
+      it("requires a new declaration before dialogue in each Events section", () => {
+        const content = `${header}\nFormat: Start, End, Text\nDialogue: 0:00:00.00,0:00:01.00,First\n[Events]\nDialogue: 0:00:02.00,0:00:03.00,Second\nFormat: Start, End, Text`;
+
+        expect(getParser(format).parse(content).cues).toMatchObject([
+          { text: "Second" },
+        ]);
+        expect(() => parseReplacementSubtitle(format, content)).toThrow();
+      });
+
       it("reloads comma-bearing and empty cues from the serializer", () => {
         const cues = [
           { id: "first", startMs: 0, endMs: 1000, text: "Hello, world\nAgain" },
