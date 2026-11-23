@@ -368,7 +368,8 @@ def sync_subtitles(video_path,
                    cancel=None,
                    publication_guard=None,
                    return_job_id=False,
-                   source=None):
+                   source=None,
+                   *, expected_source_version=None, on_overwrite_version=None):
     """Synchronize a subtitle. For keep-all output without a media owner, pass an indexing callback."""
     if source is not None and context is not None:
         raise ValueError('A source item cannot be combined with a sports context')
@@ -493,6 +494,9 @@ def sync_subtitles(video_path,
             }
             if source is not None:
                 sync_kwargs['source'] = source
+            if expected_source_version is not None:
+                sync_kwargs.update(expected_source_version=expected_source_version,
+                                   on_overwrite_version=on_overwrite_version)
             if context is not None:
                 from sportarr.subtitles import candidate_signature
                 sports_signature = candidate_signature(context)

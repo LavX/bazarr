@@ -206,6 +206,7 @@ def generate_subtitles(path, languages, audio_language, sceneName, title, media_
                             with subtitle_write_locks(path, os.path.join(fld or os.path.dirname(path), '.destination'),
                                                       previous_subtitles_to_delete or path):
                                 written_paths = []
+                                published_versions = {}
                                 writer = partial(write_subtitle_file, path, written_paths=written_paths,
                                                  on_publish=publish)
                                 writer_arg = 'write_subtitle'
@@ -215,9 +216,9 @@ def generate_subtitles(path, languages, audio_language, sceneName, title, media_
                                                      language=source_language, recheck_missing=check_if_still_required,
                                                      is_upgrade=is_upgrade, written_paths=written_paths,
                                                      on_publish=publish, wanted_stamp=source_wanted_stamp,
-                                                     wanted_profile=wanted_profile, video_version=video_version)
-                                    if source.kind == 'sports_event' and source_wanted_stamp is not None:
-                                        writer_arg = 'write_selected_subtitle'
+                                                     wanted_profile=wanted_profile, video_version=video_version,
+                                                     published_versions=published_versions, mode=chmod or None)
+                                    writer_arg = 'write_selected_subtitle'
                                     if is_upgrade:
                                         from media_sources.indexer import SourcePublicationOwnerIndex
 
@@ -226,7 +227,7 @@ def generate_subtitles(path, languages, audio_language, sceneName, title, media_
                                                                  single=settings.general.single_language,
                                                                  tags=None,  # fixme
                                                                  directory=fld,
-                                                                 chmod=chmod,
+                                                                 chmod=chmod if source is None else None,
                                                                  formats=subtitle_formats,
                                                                  path_decoder=force_unicode,
                                                                  **{writer_arg: writer})
@@ -284,7 +285,11 @@ def generate_subtitles(path, languages, audio_language, sceneName, title, media_
                                                                       is_upgrade=is_upgrade, is_manual=False,
                                                                       path=path, max_score=max_score, job_id=job_id,
                                                                       arr_instance_id=arr_instance_id,
-                                                                      **({} if source is None else {'source': source}),
+                                                                      **({} if source is None else {
+                                                                          'source': source,
+                                                                          'published_file_version': published_versions.get(
+                                                                              subtitle.storage_path),
+                                                                      }),
                                                                       **({} if auto_translate else {'auto_translate': False}))
                                 if not processed_subtitle:
                                     logging.debug(f"BAZARR unable to process this subtitles: {subtitle}")  # noqa: G004
@@ -362,7 +367,7 @@ def check_missing_languages_source(source, *, stored=False, external_subtitles=N
 
 def _write_source_download(video_path, destination, content, *, source, language, recheck_missing, is_upgrade,
                            written_paths, on_publish, wanted_stamp=None, wanted_profile=None, video_version=None,
-                           selected_subtitle=None):
+                           published_versions=None, mode=None, selected_subtitle=None):
     """Publish the actual provider-selected file only while its destination is still eligible."""
     from media_sources import repository
     from media_sources.indexer import SourcePublicationOwnerIndex
@@ -378,7 +383,7 @@ def _write_source_download(video_path, destination, content, *, source, language
             raise SubtitleDestinationChanged('Wanted source eligibility changed during search')
         if not sync_output_owner_is_unique(video_path, destination, ownership_index=ownership_index):
             raise SubtitleDestinationChanged('The source subtitle destination does not have one media owner')
-        if wanted_stamp is None and recheck_missing:
+        if recheck_missing or wanted_stamp is not None:
             try:
                 return prepare_source_sidecars(source, ownership_index, written_paths)
             except OSError as error:
@@ -399,22 +404,25 @@ def _write_source_download(video_path, destination, content, *, source, language
                 raise SubtitleDestinationChanged('The media file changed while searching for subtitles')
             if os.path.lexists(destination) and (not is_upgrade or regular_subtitle_version(destination) is None):
                 raise SubtitleDestinationChanged('The source subtitle destination is already occupied')
+            if release is not None and repository.is_release_blacklisted(release, connection):
+                raise SubtitleDestinationChanged('The source subtitle release has been excluded')
             if wanted_stamp is not None:
                 if not _wanted_source_can_publish(current, language, wanted_stamp, wanted_profile, target=connection):
                     raise SubtitleDestinationChanged('Wanted source eligibility changed during search')
-                if release is not None and repository.is_release_blacklisted(release, connection):
-                    raise SubtitleDestinationChanged('The selected release was excluded during search')
-            elif recheck_missing and language not in check_missing_languages_source(
+            if (recheck_missing or wanted_stamp is not None) and language not in check_missing_languages_source(
                     current, external_subtitles=external_subtitles, target=connection):
                 raise SubtitleDestinationChanged('The source language is no longer missing')
             yield
 
     try:
-        write_subtitle_file(video_path, destination, content, written_paths=written_paths, on_publish=on_publish,
-                            publication_guard=publication, invalidate_outputs=False)
+        version = write_subtitle_file(video_path, destination, content, written_paths=written_paths,
+                                      on_publish=on_publish, publication_guard=publication, invalidate_outputs=False,
+                                      mode=mode, capture_version=published_versions is not None)
     except SubtitleDestinationChanged as error:
         logging.info('BAZARR skipped saving a subtitle for source item %s: %s', source.item_id, error)
         return False
+    if published_versions is not None:
+        published_versions[destination] = version
     return True
 
 

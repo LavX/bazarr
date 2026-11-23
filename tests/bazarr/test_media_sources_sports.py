@@ -380,6 +380,80 @@ def test_scanned_events_reach_the_sports_threshold_and_publish_through_the_sourc
         ('sports_event', 1, str(path)) for path in (paths[0], paths[2])}
 
 
+def test_sports_wanted_pins_beside_video_destination_through_publication(
+        client, arr_library, tmp_path, monkeypatch, isolated_jobs):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Event
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+
+    import sqlalchemy as sa
+    from app import config
+    from media_sources import indexer, repository, service, wanted
+    from subtitles import download, processing
+    from subtitles.tools import subsync_engines
+
+    settings = config.settings
+    for integration in ('use_sonarr', 'use_radarr', 'use_sportarr'):
+        monkeypatch.setattr(settings.general, integration, False)
+    monkeypatch.setattr(settings.general, 'subfolder', 'current')
+    monkeypatch.setattr(settings.general, 'adaptive_searching', False)
+    monkeypatch.setattr(indexer, 'probe_item', lambda *args, **kwargs: ({}, None))
+    monkeypatch.setattr(service, 'get_providers', lambda: ['fake'])
+    monkeypatch.setattr(wanted, 'jobs_queue', isolated_jobs)
+    monkeypatch.setattr(download, '_get_pool', lambda *args, **kwargs: SimpleNamespace(
+        providers=['fake'], discarded_providers=[]))
+    monkeypatch.setattr(download.subliminal, 'region', Mock())
+    monkeypatch.setattr(processing, '_defaul_sync_checker', lambda *args: False)
+    monkeypatch.setattr(processing, 'call_external_webhook', Mock())
+    pipeline._download(monkeypatch)
+
+    owner, _, target_id, other_event = _events(arr_library, tmp_path, name='Target Sports')
+    _, _, competing_id, _ = _events(arr_library, tmp_path, name='Competing Sports')
+    repository.update_item(other_event, arr_library, monitored=0)
+    target = Path(repository.get_item(target_id).path)
+    competing = Path(repository.get_item(competing_id).path)
+    assert competing.name == target.name and competing.parent != target.parent
+    monkeypatch.setattr(settings.general, 'subfolder_custom', str(target.parent))
+    assert indexer.index_item(target_id) is not None
+    destination = target.with_suffix('.en.srt')
+    replace_file = subsync_engines.os.replace
+    changed = Event()
+    replacements = []
+
+    def save_settings():
+        with config._subtitle_settings_write_guard():
+            settings.general.subfolder = 'absolute'
+            changed.set()
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        def replace(staged, installed):
+            if Path(installed) == destination:
+                replacements.append(pool.submit(save_settings))
+                with config._subtitle_settings_condition:
+                    assert config._subtitle_settings_condition.wait_for(
+                        lambda: config._subtitle_settings_saving or changed.is_set(), timeout=2)
+                assert not changed.is_set(), 'Settings changed before the keyed file replacement'
+            return replace_file(staged, installed)
+
+        monkeypatch.setattr(subsync_engines.os, 'replace', replace)
+        response = client.post('/api/sports/wanted', headers=HEADERS, json={}, query_string={
+            'sources': 1, 'source_key[]': f'source:{owner}',
+        })
+        assert response.status_code == 202
+        job = isolated_jobs._reserve_next_job()
+        assert job.job_id == response.json['job_id']
+        assert isolated_jobs._run_job(job), job.error
+        (save,) = replacements
+        save.result(timeout=2)
+
+    assert changed.is_set() and settings.general.subfolder == 'absolute'
+    assert destination.read_bytes() == pipeline.CONTENT
+    assert not competing.with_suffix('.en.srt').exists()
+    rows = arr_library.execute(sa.select(repository.History.c.item_id, repository.History.c.action)).all()
+    assert rows == [(target_id, 1)]
+
+
 def test_source_and_sportarr_videos_share_the_sports_fields_but_keep_separate_pools(
         arr_library, tmp_path, monkeypatch):
     import sqlalchemy as sa

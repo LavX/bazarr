@@ -22,6 +22,7 @@ from subliminal_patch import core
 from app.config import pin_subtitle_settings, settings
 from app.database import get_audio_profile_languages, get_profile_cutoff, get_profiles_list
 from constants import MAXIMUM_SUBTITLE_SIZE
+from languages import get_languages
 from languages.custom_lang import CustomLanguage
 from languages.get_languages import alpha2_from_alpha3, get_language_set
 from subtitles.adaptive_searching import is_search_given_up
@@ -140,8 +141,8 @@ class SourcePublicationOwnerIndex(SourceOutputOwnerIndex):
 
     @staticmethod
     @contextmanager
-    def _keyed_settings_guard(shared):
-        if not shared:
+    def _keyed_settings_guard(pin):
+        if not pin:
             yield
             return
         with pin_subtitle_settings() as pinned:
@@ -191,7 +192,7 @@ class SourcePublicationOwnerIndex(SourceOutputOwnerIndex):
             self._prepared_owners = None
             self._publication_settings = self._settings_snapshot()
             shared = self._needs_registry_guard(source, destination, self._publication_settings[0][1])
-            # Keyed mutations wait on their release before pinning shared-folder settings.
+            # Keyed mutations wait on their release before pinning destination settings.
             pin_settings = release is None
             if pin_settings:
                 with self._settings_guard():
@@ -213,7 +214,7 @@ class SourcePublicationOwnerIndex(SourceOutputOwnerIndex):
                     settings_guard = self._settings_guard() if pin_settings else nullcontext()
                     with (settings_guard,
                           source_item_publication(source, shared=shared, **options) as (current, connection),
-                          self._keyed_settings_guard(shared and not pin_settings)):
+                          self._keyed_settings_guard(not pin_settings)):
                         if shared and current is not None and self._prepared_owners != self._registry_snapshot(connection):
                             break
                         if self._publication_settings != self._settings_snapshot():
@@ -244,7 +245,8 @@ def list_external_subtitles(path, previous=None, ownership_index=None, *, public
     """List sidecars beside ``path``. An unrecovered cached language leaves the index incomplete.
 
     The caller holds the subtitle write locks. Publication checks fresh ownership before counting a sidecar.
-    Previously indexed paths supply language guesses for files discovered in this scan.
+    Previously indexed paths supply language guesses. A bare upload can also carry the exact version
+    of the file whose language and role the user supplied.
     """
     if ownership_index is None:
         ownership_index = SourceOutputOwnerIndex()
@@ -254,10 +256,12 @@ def list_external_subtitles(path, previous=None, ownership_index=None, *, public
     excluded = {os.path.normcase(os.path.abspath(subtitle_path)) for subtitle_path in written_paths}
     indexed, rejected_paths = {}, set()
     for entry in previous or []:
-        if len(entry) != 3 or not entry[1]:
+        if len(entry) not in (3, 4) or not entry[1]:
             continue
         key = os.path.normcase(os.path.abspath(entry[1]))
-        if _can_borrow_language(entry[0]):
+        valid_language = (_is_configured_upload_variant(entry[0]) if len(entry) == 4
+                          else _can_borrow_language(entry[0]))
+        if valid_language:
             indexed[key] = entry
         else:
             rejected_paths.add(key)
@@ -281,11 +285,17 @@ def list_external_subtitles(path, previous=None, ownership_index=None, *, public
             version = regular_subtitle_version(subtitle_path, strict=publication)
             if version is None:
                 continue
+            previous_entry = indexed.get(path_key)
+            if previous_entry and len(previous_entry) == 4:
+                # A bare upload has an explicit role, even when its contents are too large to guess.
+                if previous_entry[3] == version:
+                    actual[path_key] = previous_entry
+                    continue
+                previous_entry = None
             if version[2] <= MAXIMUM_SUBTITLE_SIZE:
                 try:
                     read_sample = partial(read_regular_subtitle, expected_version=version,
                                           max_bytes=MAXIMUM_SUBTITLE_SIZE)
-                    previous_entry = indexed.get(path_key)
                     language = guess_external_subtitles(
                         directory, {subtitle: language}, 'movie', (previous_entry,) if previous_entry else None,
                         path_reverse=os.fspath, read_bytes=read_sample)[subtitle]
@@ -382,14 +392,13 @@ def compute_missing_subtitles(profile, cutoff_items, subtitles, failed_attempts=
 
     result = []
     for item in missing:
-        if is_search_given_up(item['language'], failed_attempts):
-            continue
         code = item['language']
         if item['forced'] == 'True':
             code += ':forced'
         elif item['hi'] == 'True':
             code += ':hi'
-        result.append(code)
+        if not is_search_given_up(code, failed_attempts):
+            result.append(code)
     return result
 
 
@@ -441,6 +450,15 @@ def _file_signature(stat):
     return stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns
 
 
+def _is_configured_upload_variant(key):
+    """An upload records Bazarr's configured language code and an optional role."""
+    if not isinstance(key, str) or not key:
+        return False
+    code, separator, role = key.partition(':')
+    return (not separator or role in ('forced', 'hi')) and any(
+        row['code2'] == code for row in get_languages.languages_dict)
+
+
 def _can_borrow_language(key):
     if not isinstance(key, str) or not key:
         return False
@@ -458,7 +476,7 @@ def _can_borrow_language(key):
 
 
 def index_item(item_id, target=None, ownership_index=None, *, keep_index_on_probe_failure=False, expected_path=None,
-               expected_source=None):
+               expected_source=None, uploaded_entry=None):
     """Analyze a source file and return its subtitle listing, or None if the index is unavailable."""
     item = repository.get_item(item_id, target)
     if item is None:
@@ -494,16 +512,19 @@ def index_item(item_id, target=None, ownership_index=None, *, keep_index_on_prob
             return None
         if not isinstance(previous, (list, tuple)) or any(
                 not isinstance(entry, (list, tuple))
-                or (len(entry) == 3 and (entry[0] is not None and not isinstance(entry[0], str)
+                or (len(entry) in (3, 4) and (entry[0] is not None and not isinstance(entry[0], str)
                                          or entry[1] is not None and not isinstance(entry[1], str)))
                 for entry in previous):
             logging.warning('BAZARR invalid stored subtitle listing for this file %s', item.path)
             return None
-        if (keep_index_on_probe_failure and blob is None
-                and all(len(entry) != 3 or not entry[1] or _can_borrow_language(entry[0]) for entry in previous)
+        if (keep_index_on_probe_failure and blob is None and uploaded_entry is None
+                and all(len(entry) < 2 or not entry[1] or (len(entry) == 3 and _can_borrow_language(entry[0]))
+                        for entry in previous)
                 and latest.subtitles is not None and latest.missing_subtitles is not None
                 and index_matches_file(latest, stat, allow_external_only=True)):
             return previous
+        if uploaded_entry is not None and regular_subtitle_version(uploaded_entry[1]) == uploaded_entry[3]:
+            previous = (*previous, uploaded_entry)
         try:
             external = list_external_subtitles(item.path, previous, ownership_index)
         except (OSError, UnicodeDecodeError):
@@ -541,6 +562,28 @@ def index_item(item_id, target=None, ownership_index=None, *, keep_index_on_prob
     return None
 
 
+def remember_single_language_upload(source, entry):
+    """Preserve the language and variant omitted by a single-language filename."""
+    _, path, _, version = entry
+    with source_transaction() as connection:
+        item = repository.get_item(source.item_id, connection, for_update=True)
+        if (item is None or not source.same_item(item)
+                or (item.path, item.source_id, item.library_id, item.kind) != (
+                    source.path, source.source_id, source.library_id, source.kind)
+                or regular_subtitle_version(path) != version):
+            return
+        try:
+            listing = ast.literal_eval(item.subtitles or '[]')
+        except (SyntaxError, ValueError):
+            logging.warning('BAZARR could not retain upload language for source item %s', source.item_id)
+            return
+        if not isinstance(listing, (list, tuple)) or any(not isinstance(entry, (list, tuple)) for entry in listing):
+            return
+        listing = [existing for existing in listing if len(existing) < 2 or existing[1] != path]
+        listing.append(entry)
+        repository.write_item_index(item.id, str(listing), item.missing_subtitles, connection, indexed=False)
+
+
 def _recoverable_index_database_error(error):
     """Recognize operational failures without hiding SQL defects reported as OperationalError by SQLite."""
     if isinstance(error, (sa.exc.ProgrammingError, sa.exc.IntegrityError)):
@@ -567,14 +610,15 @@ def _recoverable_index_database_error(error):
     return error.connection_invalidated
 
 
-def index_saved_subtitle(item_id, *, expected_path, expected_source=None):
+def index_saved_subtitle(item_id, *, expected_path, expected_source=None, uploaded_entry=None):
     """Index after a save without letting recoverable failures discard the saved result or its history."""
     try:
         # Keep repository and ownership reads in the same isolated session. The index write has
         # its own transaction, which rolls back before a failure reaches this boundary.
         with Session(bind=handle().get_bind()) as session:
             listing = index_item(item_id, target=session, ownership_index=SourceOutputOwnerIndex(session),
-                                 expected_path=expected_path, expected_source=expected_source)
+                                 expected_path=expected_path, expected_source=expected_source,
+                                 uploaded_entry=uploaded_entry)
     except (sa.exc.DBAPIError, OSError) as error:
         if isinstance(error, sa.exc.DBAPIError):
             if not _recoverable_index_database_error(error):
@@ -591,16 +635,21 @@ def index_saved_subtitle(item_id, *, expected_path, expected_source=None):
     return listing is not None
 
 
-def index_and_notify_item(source):
+def index_and_notify_item(source, *, uploaded_entry=None):
     """Refresh a source item's subtitles and the views that show it after a save."""
     from app.event_handler import event_stream
 
-    indexed = index_saved_subtitle(source.item_id, expected_path=source.path, expected_source=source)
+    indexed = index_saved_subtitle(source.item_id, expected_path=source.path, expected_source=source,
+                                   uploaded_entry=uploaded_entry)
     current = resolve_same_item(source) if indexed else None
     if current is not None:
-        event_stream(type='source-item', payload=current.item_id)
-        if current.group_id is not None:
-            event_stream(type='source-group', payload=current.group_id)
+        for event_type, row_id in (('source-item', current.item_id), ('source-group', current.group_id)):
+            if row_id is not None:
+                try:
+                    event_stream(type=event_type, payload=row_id)
+                except Exception:
+                    logging.exception('BAZARR could not notify %s %s after indexing a saved subtitle',
+                                      event_type, row_id)
     return indexed
 
 
