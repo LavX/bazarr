@@ -229,7 +229,7 @@ def _group_running(group):
     return True
 
 
-def previous_workers_stopped(config_dir) -> bool:
+def previous_workers_stopped(config_dir, *, deadline: float | None = None) -> bool:
     folder = _directory(config_dir)
     try:
         entries = list(folder.iterdir())
@@ -238,6 +238,8 @@ def previous_workers_stopped(config_dir) -> bool:
     except OSError:
         return False
     for path in entries:
+        if deadline is not None and time.monotonic() >= deadline:
+            return False
         if path.suffix != ".json":
             continue
         try:
@@ -251,7 +253,7 @@ def previous_workers_stopped(config_dir) -> bool:
             path.unlink(missing_ok=True)
         except (OSError, ValueError, KeyError, TypeError):
             return False
-    return True
+    return deadline is None or time.monotonic() < deadline
 
 
 def _attach_windows_job(name):

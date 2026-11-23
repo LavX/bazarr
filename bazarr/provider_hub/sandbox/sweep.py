@@ -93,6 +93,26 @@ TERM_WAIT_SECONDS = spawn.LAUNCHER_CLEANUP_SECONDS + 5.0
 POLL_SECONDS = 0.1
 KILL_WAIT_SECONDS = 3.0
 
+# A former host's private launcher status socket is unavailable to this host.
+# Neither a launcher exit nor ending the members of one /proc scan recovers its
+# trusted tree-cleanup reply. Remember that missing proof across later scans.
+_previous_worker_uncertainty: set[str] = set()
+_previous_worker_lock = threading.Lock()
+
+
+def _remember_unproven_tree(instance: str) -> None:
+    with _previous_worker_lock:
+        if instance in _previous_worker_uncertainty:
+            return
+        _previous_worker_uncertainty.add(instance)
+    logger.warning("Provider Hub: a previous worker tree has no trusted cleanup confirmation. "
+                   "Plugin data snapshots remain refused.")
+
+
+def _has_unproven_tree(instance: str) -> bool:
+    with _previous_worker_lock:
+        return instance in _previous_worker_uncertainty
+
 
 @dataclass(frozen=True)
 class _Proc:
@@ -401,15 +421,14 @@ def _scan(instance: str, deadline: float, result: SweepResult) -> "tuple[dict[in
         if not _ours(pid, my_euid):
             continue
         if not _same_pid_namespace(pid):
-            if result.verify_writers:
-                _track_writer_launcher(entry, instance, result)
+            _track_writer_launcher(entry, instance, result)
             continue
         unreadable = False
         try:
             value = _bound_marker(entry)
         except PermissionError:
             unreadable, value = True, None
-        if result.verify_writers and value is None and _track_writer_launcher(entry, instance, result):
+        if value is None and _track_writer_launcher(entry, instance, result):
             continue
         if unreadable:
             result.unreadable += 1
@@ -419,6 +438,7 @@ def _scan(instance: str, deadline: float, result: SweepResult) -> "tuple[dict[in
         parsed = _parse_marker(value)
         if parsed is None or parsed[0] != instance:
             continue
+        _remember_unproven_tree(instance)
         sessions.setdefault(entry.session, _Session(entry.session)).marked[pid] = value
     if time.monotonic() > deadline:
         result.truncated = True
@@ -454,6 +474,7 @@ def _track_writer_launcher(entry: _Proc, instance: str, result: SweepResult) -> 
     parsed = _parse_marker(owner) if owner is not None else None
     if owner is None or (owner != spawn.owner_marker() and (parsed is None or parsed[0] == instance)):
         result.launchers[entry.pid] = entry.start
+        _remember_unproven_tree(instance)
     return True
 
 
@@ -595,9 +616,10 @@ def _wait_exited(held: "list[_Held]", timeout: float) -> "list[_Held]":
     deadline = time.monotonic() + timeout
     while True:
         left = [item for item in held if not _exited(item.fd)]
-        if not left or time.monotonic() >= deadline:
+        remaining = deadline - time.monotonic()
+        if not left or remaining <= 0:
             return left
-        time.sleep(POLL_SECONDS)
+        time.sleep(min(POLL_SECONDS, remaining))
 
 
 def _end(item: _Session, result: SweepResult, term_wait: float) -> None:
@@ -646,6 +668,7 @@ def sweep_leftovers(
     instance: "str | None" = None,
     term_wait: float = TERM_WAIT_SECONDS,
     verify_writers: bool = False,
+    deadline: float | None = None,
 ) -> SweepResult:
     """End the processes a previous run of this install left behind. Never raises.
 
@@ -675,8 +698,10 @@ def sweep_leftovers(
             result.reason = "no pidfd_open and pidfd_send_signal: a process cannot be pinned before it is signalled"
             logger.debug("Provider Hub: leftover process sweep skipped: %s", result.reason)
             return result
-        deadline = time.monotonic() + SCAN_BUDGET_SECONDS
-        found, _ = _scan(instance, deadline, result)
+        scan_deadline = time.monotonic() + SCAN_BUDGET_SECONDS
+        if deadline is not None:
+            scan_deadline = min(scan_deadline, deadline)
+        found, _ = _scan(instance, scan_deadline, result)
         if result.truncated:
             result.reason = "the /proc scan was partial, so nothing was signalled"
             logger.warning("Provider Hub: %s", result.reason)
@@ -691,6 +716,12 @@ def sweep_leftovers(
                 routine = refusal.startswith(("it is this process's", "it holds this process's", "it holds a child", "its owner is still"))
                 logger.log(logging.DEBUG if routine else logging.INFO, "Provider Hub: leftover plugin session %d left alone: %s", number, refusal)
                 continue
+            # A short check may refuse a surviving session. Give the normal
+            # sweep its full grace to clean descendants before escalating.
+            if deadline is not None and deadline - time.monotonic() < term_wait + KILL_WAIT_SECONDS:
+                result.truncated = True
+                result.reason = "not enough time to confirm leftover worker shutdown"
+                break
             _end(item, result, term_wait)
         if result.ended:
             logger.warning("Provider Hub: ended %d plugin session(s) left by a previous run", result.ended)
@@ -701,29 +732,26 @@ def sweep_leftovers(
     return result
 
 
-def previous_workers_stopped(config_dir) -> bool:
-    """Check that no writer from the previous host still owns plugin data."""
+def previous_workers_stopped(config_dir, *, deadline: float | None = None) -> bool:
+    """Refuse former trees whose trusted supervisor cleanup reply is unavailable.
+
+    Current workers have their own LauncherProcess and private status socket;
+    their normal stop path can consume ``launcher_cleanup()``. A previous
+    host's reply cannot be recovered from a PID, including an exited launcher.
+    Once a former tree is observed, later empty scans cannot supply that proof.
+    """
     if sys.platform != "linux":
-        return activity.previous_workers_stopped(config_dir)
-    result = sweep_leftovers(config_dir, verify_writers=True)
-    if (not result.supported or result.truncated or result.unreadable
-            or any(session.outcome != "ended" for session in result.sessions)):
+        return activity.previous_workers_stopped(config_dir, deadline=deadline)
+    instance = instance_key(config_dir)
+    if _has_unproven_tree(instance):
         return False
-    deadline = time.monotonic() + spawn.LAUNCHER_CLEANUP_SECONDS
-    for pid, started in result.launchers.items():
-        while True:
-            try:
-                state, current = spawn._stat_fields(pid)
-            except FileNotFoundError:
-                break
-            except (OSError, ValueError, IndexError):
-                return False
-            if current != started or state in {"Z", "X"}:
-                break
-            if time.monotonic() >= deadline:
-                return False
-            time.sleep(POLL_SECONDS)
-    return True
+    result = sweep_leftovers(config_dir, verify_writers=True, deadline=deadline)
+    if result.launchers or result.sessions:
+        _remember_unproven_tree(instance)
+    if (not result.supported or result.truncated or result.unreadable
+            or _has_unproven_tree(instance)):
+        return False
+    return deadline is None or time.monotonic() < deadline
 
 
 _sweep_thread: "threading.Thread | None" = None
