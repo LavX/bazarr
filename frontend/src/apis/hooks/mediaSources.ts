@@ -177,7 +177,10 @@ export async function refreshMediaSources(
   ]);
 }
 
-function refreshAfterSourceScan(client: QueryClient, jobId: number | null) {
+export function refreshAfterSourceScan(
+  client: QueryClient,
+  jobId: number | null,
+) {
   // The scan can take over a file from another source. Its job status does
   // not report the previous owner, so refresh all standalone Sports owners.
   return refreshWhenJobFinishes(client, jobId, () =>

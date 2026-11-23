@@ -166,7 +166,8 @@ def test_manual_scan_follows_the_existing_job(saved, whole_source, running):
     assert saved.jobs.get_job_status(job_id) == 'completed'
 
 
-def test_root_edit_follows_pending_scan_and_removes_sports_item(saved):
+@pytest.mark.parametrize('scan_finished', [False, True], ids=['pending', 'before-job-completion'])
+def test_root_edit_scans_new_mappings_and_removes_sports_item(saved, monkeypatch, scan_finished):
     from media_sources import scanner
 
     source = _register(saved, library=_library(saved, 'sports', '/sports', content_kind='sports'))
@@ -179,19 +180,48 @@ def test_root_edit_follows_pending_scan_and_removes_sports_item(saved):
     assert saved.client.get(f'/api/sources/items/{prior_id}', headers=HEADERS).status_code == 200
     job_id = scanner.scan_media_source(source['id'], library_id)
     replacement = video(saved.other / 'Formula 1' / '2025' / 'Round 4.mkv')
-    saved.rows['sports', 'Movie,Episode,Video'] = [
-        _item('replacement', f'/mapped/{replacement.relative_to(saved.other)}', Type='Video')]
+    url = f"{SOURCES}/{source['id']}/libraries/{library_id}"
 
-    response = saved.client.patch(f"{SOURCES}/{source['id']}/libraries/{library_id}", headers=HEADERS, json={
-        'roots': [{'server_path': '/mapped', 'local_path': str(saved.other)}], 'confirmed_removed': 1})
+    def change_roots():
+        saved.rows['sports', 'Movie,Episode,Video'] = [
+            _item('replacement', f'/mapped/{replacement.relative_to(saved.other)}', Type='Video')]
+        response = saved.client.patch(url, headers=HEADERS, json={
+            'roots': [{'server_path': '/mapped', 'local_path': str(saved.other)}], 'confirmed_removed': 1})
+        assert response.status_code == 200, response.json
+        assert response.json['removed_items'] == 1
+        manual = saved.client.post(f'{url}/scan', headers=HEADERS)
+        assert manual.status_code == 202, manual.json
+        assert manual.json['job_id'] == response.json['job_id']
+        return response.json['job_id']
 
-    assert response.status_code == 200, response.json
-    assert response.json['removed_items'] == 1
-    assert response.json['job_id'] == job_id
+    if scan_finished:
+        updated_jobs = []
+        update_progress = saved.jobs.update_job_progress
+
+        def edit_after_scan(**progress):
+            if progress['job_id'] == job_id and progress.get('progress_value') == 'max':
+                assert saved.jobs.get_job_status(job_id) == 'running'
+                unchanged = saved.client.patch(url, headers=HEADERS, json={'roots': [
+                    {'server_path': '/sports', 'local_path': str(saved.root)}]})
+                assert unchanged.status_code == 200, unchanged.json
+                assert unchanged.json['job_id'] == job_id
+                updated_jobs.append(change_roots())
+            return update_progress(**progress)
+
+        monkeypatch.setattr(saved.jobs, 'update_job_progress', edit_after_scan)
+        job = saved.jobs._reserve_next_job()
+        assert job.job_id == job_id
+        assert saved.jobs._run_job(job), job.error
+        new_job_id, = updated_jobs
+        assert new_job_id != job_id
+    else:
+        new_job_id = change_roots()
+        assert new_job_id == job_id
+
     assert saved.client.get(f'/api/sources/items/{prior_id}', headers=HEADERS).status_code == 404
     assert prior.exists()
     job = saved.jobs._reserve_next_job()
-    assert job.job_id == job_id
+    assert job.job_id == new_job_id
     assert saved.jobs._reserve_next_job() is None
     assert saved.jobs._run_job(job)
     assert job.status == 'completed', job.error

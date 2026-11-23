@@ -7,7 +7,10 @@ import {
 } from "@tanstack/react-query";
 import { isAxiosError } from "axios";
 import { refreshWhenJobFinishes } from "@/apis/hooks/jobWatch";
-import { useMediaSources } from "@/apis/hooks/mediaSources";
+import {
+  refreshAfterSourceScan,
+  useMediaSources,
+} from "@/apis/hooks/mediaSources";
 import { QueryKeys } from "@/apis/queries/keys";
 import {
   invalidateSourceDetails,
@@ -428,11 +431,16 @@ export function useSourceScan() {
   const client = useQueryClient();
   const refresh = useRefreshSourceDetails();
   return useMutation({
-    mutationFn: (item: Pick<SourceGroup, "source_id" | "library_id">) =>
+    mutationFn: (
+      item: Pick<SourceGroup | SourceItem, "source_id" | "library_id" | "kind">,
+    ) =>
       withInlineErrors(() =>
         sourceDetailApi.scanLibrary(item.source_id, item.library_id),
       ),
-    onSuccess: (job) => refreshWhenJobFinishes(client, job.job_id, refresh),
+    onSuccess: (job, item) =>
+      item.kind === "league" || item.kind === "sports_event"
+        ? refreshAfterSourceScan(client, job.job_id)
+        : refreshWhenJobFinishes(client, job.job_id, refresh),
   });
 }
 

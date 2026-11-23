@@ -500,11 +500,12 @@ def change_library_roots(source_id, library_id, roots, session=None, *, confirme
 
 def _change_library_roots(source_id, library_id, roots, session=None, *, confirmed_removed=None):
     """Replace mappings, remove confirmed items and return the resulting scan job."""
-    from .scanner import library_lock
+    from .scanner import finish_library_root_edit, library_lock
 
     lock = library_lock(library_id)
     if not lock.acquire(blocking=False):
         raise SourceError('This library is scanning. Try again when its scan finishes.', 409, 'library_busy')
+    changed = False
     try:
         with _creation_lock, source_transaction(session) as connection:
             library = _server_library_for_edit(source_id, library_id, connection, for_update=True)
@@ -514,10 +515,13 @@ def _change_library_roots(source_id, library_id, roots, session=None, *, confirm
                     type(confirmed_removed) is not int or confirmed_removed != len(doomed)):
                 raise SourceError(f'This change removes {len(doomed)} items. Preview the change and confirm that count.',
                                   409, 'root_change_confirmation')
-            repository.replace_roots(library_id, cleaned, connection)
+            current = [(root.server_path, root.local_path) for root in repository.get_roots(library_id, connection)]
+            if current != cleaned:
+                repository.replace_roots(library_id, cleaned, connection)
             deleted = repository.delete_items(doomed, connection, owner_library_id=library_id)
+        changed = current != cleaned
     finally:
-        lock.release()
+        finish_library_root_edit(source_id, library_id, lock, changed=changed)
     try:
         job_id = queue_scan(source_id, library_id)
     except SourceError as error:

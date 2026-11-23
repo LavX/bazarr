@@ -397,7 +397,7 @@ def test_the_scan_that_the_revalidation_queues_is_a_real_library_scan_job(movies
 
     queued = []
     monkeypatch.setattr(scanner.jobs_queue, "add_job_from_function",
-                        lambda name, is_progress: queued.append(name) or 9)
+                        lambda name, is_progress, return_existing=False: queued.append(name) or 9)
     shadows._queue_library_scan(SimpleNamespace(id=1, source_id=movies.source_id, library_id=movies.library_id))
     assert queued == ["Scanning media source Local"]
 

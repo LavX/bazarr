@@ -331,7 +331,7 @@ def test_the_scan_job_queues_itself_and_runs_the_scan(library, monkeypatch):
     video(root / "Film.2001.mkv")
     queued = []
     monkeypatch.setattr(scanner.jobs_queue, "add_job_from_function",
-                        lambda name, is_progress: queued.append(name) or 41)
+                        lambda name, is_progress, return_existing=False: queued.append(name) or 41)
     assert scanner.scan_media_source(source_id) == 41
     assert queued == ["Scanning media source Local"]
 

@@ -21,7 +21,7 @@ def api(source_db, monkeypatch, tmp_path, languages_loaded):
     queued = []
     for module in (scanner, service):
         monkeypatch.setattr(module.jobs_queue, "add_job_from_function",
-                            lambda name, is_progress, queued=queued: queued.append(name) or 33)
+                            lambda name, is_progress, return_existing=False, queued=queued: queued.append(name) or 33)
     # The scheduled tasks are rebuilt after every change that alters what is enabled; here that is only counted.
     refreshes = []
     monkeypatch.setattr(service, "refresh_tasks", lambda: refreshes.append(True))

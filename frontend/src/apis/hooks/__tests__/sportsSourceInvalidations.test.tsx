@@ -28,6 +28,7 @@ import {
   sourceDetailKeys,
   useSourceItem,
   useSourceLeagueEvents,
+  useSourceScan,
 } from "@/pages/SourceDetail/api";
 import server from "@/tests/mocks/node";
 
@@ -43,6 +44,9 @@ const sourceScope: SportsFilters = {
 const nativeScope: SportsFilters = { owner: sportarr.id };
 const explicitNativeScope: SportsFilters = {
   owner: sportarr.id,
+  includeSources: true,
+};
+const arrOnlyScope: SportsFilters = {
   includeSources: true,
   sourceKeys: [`arr:${sportarr.id}`],
 };
@@ -249,6 +253,11 @@ function primeSportsLists(client: QueryClient) {
     ]),
   );
   const untouched = [
+    ...[explicitNativeScope, arrOnlyScope].map((filters) => [
+      QueryKeys.Sports,
+      "history",
+      filters,
+    ]),
     [
       QueryKeys.Sports,
       "wanted",
@@ -589,7 +598,7 @@ it.each(["refresh decision", "library owner"] as const)(
   },
 );
 
-it.each(["scan", "roots"] as const)(
+it.each(["scan", "event-modal scan", "roots"] as const)(
   "keeps mounted Sports current when an existing queued vendor %s job completes",
   async (operation) => {
     const { client, wrapper, source } = setup();
@@ -645,6 +654,9 @@ it.each(["scan", "roots"] as const)(
           { status: 202 },
         ),
       ),
+      http.post("/api/system/media-sources/8/libraries/9/scan", () =>
+        HttpResponse.json({ job_id: 31 }, { status: 202 }),
+      ),
       http.patch(
         "/api/system/media-sources/8/libraries/9",
         async ({ request }) => {
@@ -671,6 +683,7 @@ it.each(["scan", "roots"] as const)(
         history: useSportsHistoryPagination(sourceScope),
         all: useSportsHistoryPagination({ includeSources: true }),
         scan: useScanMediaSource(),
+        eventScan: useSourceScan(),
         roots: useUpdateServerSourceRoots(),
       }),
       { wrapper },
@@ -689,6 +702,12 @@ it.each(["scan", "roots"] as const)(
     await act(async () => {
       if (operation === "scan") {
         await result.current.scan.mutateAsync(vendor);
+      } else if (operation === "event-modal scan") {
+        await result.current.eventScan.mutateAsync({
+          source_id: vendor.id,
+          library_id: 9,
+          kind: "sports_event",
+        });
       } else {
         await result.current.roots.mutateAsync({
           sourceId: vendor.id,
@@ -974,6 +993,7 @@ it.each([
 
 it.each([
   ["scan", 80, 89],
+  ["event-modal scan", 80, 89],
   ["roots", 80, 89],
 ] as const)(
   "vendor %s completion refreshes a recording moved from source %s library %s",
@@ -1060,6 +1080,9 @@ it.each([
           { status: 202 },
         ),
       ),
+      http.post("/api/system/media-sources/8/libraries/9/scan", () =>
+        HttpResponse.json({ job_id: 31 }, { status: 202 }),
+      ),
       http.patch("/api/system/media-sources/8/libraries/9", () =>
         HttpResponse.json({
           ...source.libraries[0],
@@ -1081,6 +1104,7 @@ it.each([
         all: useSportsWantedPagination({ includeSources: true }),
         native: useSportsWantedPagination(explicitNativeScope),
         scan: useScanMediaSource(),
+        eventScan: useSourceScan(),
         roots: useUpdateServerSourceRoots(),
       }),
       { wrapper },
@@ -1096,7 +1120,13 @@ it.each([
     await waitFor(() => expect(result.current.old.data?.total).toBe(1));
     await act(async () => {
       if (operation === "scan") await result.current.scan.mutateAsync(vendor);
-      else {
+      else if (operation === "event-modal scan") {
+        await result.current.eventScan.mutateAsync({
+          source_id: 8,
+          library_id: 9,
+          kind: "sports_event",
+        });
+      } else {
         const updated = await result.current.roots.mutateAsync({
           sourceId: 8,
           libraryId: 9,

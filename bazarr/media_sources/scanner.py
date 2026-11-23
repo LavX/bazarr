@@ -100,6 +100,20 @@ def library_lock(library_id):
         return _library_locks.setdefault(library_id, threading.Lock())
 
 
+def finish_library_root_edit(source_id, library_id, lock, *, changed):
+    # A reserved job may have finished reading the old roots. Pending jobs still read the new mappings.
+    # Serialize this handoff with scan requests and library lock lookup so a new job can use the new roots.
+    with _library_locks_guard:
+        try:
+            if changed:
+                jobs_queue.invalidate_running_job_matches(
+                    __name__, scan_media_source.__name__,
+                    lambda kwargs: kwargs.get('source_id') == source_id
+                    and kwargs.get('library_id') in (None, library_id))
+        finally:
+            lock.release()
+
+
 class ShadowContext:
     """The arr rows a scan run checks source files against, read once per run however many libraries it scans."""
 
@@ -1496,8 +1510,9 @@ def run_scan(source_id, library_id=None, *, cancel=None, session=None):
 def scan_media_source(source_id, library_id=None, job_id=None, *, retry_on_configuration_change=True):
     """The scan as a job. Called without a job id it queues itself, so it shows in the Jobs drawer."""
     if not job_id:
-        return jobs_queue.add_job_from_function(f"Scanning media source {_source_name(source_id)}",
-                                                is_progress=True, return_existing=True)
+        with _library_locks_guard:
+            return jobs_queue.add_job_from_function(f"Scanning media source {_source_name(source_id)}",
+                                                    is_progress=True, return_existing=True)
     reason = disabled_reason(source_id, library_id)
     if reason:
         jobs_queue.update_job_progress(job_id=job_id, progress_value='max', progress_message=reason)
