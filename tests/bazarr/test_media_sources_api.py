@@ -46,18 +46,20 @@ def test_every_route_needs_the_api_key(api):
     assert api.client.post(ITEMS + "/1/search").status_code == 401
 
 
-def test_a_source_is_created_with_its_library_and_root(api):
+@pytest.mark.parametrize("content_kind", ["movie", "sports"])
+def test_a_source_is_created_with_its_library_and_root(api, content_kind):
     profile = add_profile(api.db, [("en", "False", "False")])
-    response = _create(api, library={"path": str(api.movies), "content_kind": "movie", "profile_id": profile},
+    response = _create(api, name=f"Local {content_kind}",
+                       library={"path": str(api.movies), "content_kind": content_kind, "profile_id": profile},
                        scan_frequency_hours=0)
 
     assert response.status_code == 201
     body = response.json
-    assert (body["kind"], body["name"], body["enabled"], body["scan_frequency_hours"]) == ("folder", "Local movies",
-                                                                                           True, 0)
+    assert (body["kind"], body["name"], body["enabled"], body["scan_frequency_hours"]) == (
+        "folder", f"Local {content_kind}", True, 0)
     (library,) = body["libraries"]
-    assert (library["content_kind"], library["locator"], library["profile_id"]) == ("movie", str(api.movies),
-                                                                                     profile)
+    assert (library["content_kind"], library["locator"], library["profile_id"]) == (
+        content_kind, str(api.movies), profile)
     assert [root["local_path"] for root in library["roots"]] == [str(api.movies)]
     assert library["roots"][0]["server_path"] is None
 
@@ -71,7 +73,6 @@ def test_a_source_is_created_with_its_library_and_root(api):
     ({"library": {"path": "relative", "content_kind": "movie"}}, "must be absolute"),
     ({"library": {"path": "/definitely/not/there", "content_kind": "movie"}}, "does not exist"),
     ({"library": {"path": "{movies}", "content_kind": "music"}}, "content_kind must be one of"),
-    ({"library": {"path": "{movies}", "content_kind": "sports"}}, "Only movie and series libraries"),
     ({"library": {"path": "{movies}", "content_kind": "movie", "profile_id": 99}}, "profile does not exist"),
     ({"scan_frequency_hours": -1}, "scan_frequency_hours"),
     ({"scan_frequency_hours": "6"}, "scan_frequency_hours"),
@@ -418,8 +419,11 @@ def test_navigation_availability_keeps_browsing_and_searching_separate(api, cont
     from app.config import get_settings
     from media_sources import repository
 
-    assert get_settings()["media_sources"]["visible"] is False
+    assert "visible" not in get_settings()["media_sources"]
     hidden = {"browsable": False, "searchable": False, "retained": False}
+    retired = {**hidden, "retained": True}
+    if content_kind == "sports":
+        retired["removed"] = True
 
     def availability():
         response = api.client.get(SOURCES + "?availability=1", headers=HEADERS)
@@ -449,10 +453,10 @@ def test_navigation_availability_keeps_browsing_and_searching_separate(api, cont
         source_id=source_id, item_kind=item_kind, action=1, description="Downloaded"))
     api.db.execute(sa.insert(repository.Blacklist).values(source_id=source_id, item_kind=item_kind))
     assert api.client.delete(source_url, headers=HEADERS).status_code == 204
-    assert availability() == {**hidden, "retained": True}
+    assert availability() == retired
 
     api.db.execute(sa.delete(repository.History))
-    assert availability() == {**hidden, "retained": True}
+    assert availability() == retired
     api.db.execute(sa.delete(repository.Blacklist))
     assert availability() == hidden
 

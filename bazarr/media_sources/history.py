@@ -205,9 +205,12 @@ class SourceSubtitleUpgrade:
 
 
 def _snapshot(context: SourceItemContext, item, source):
+    title = context.title
+    if context.kind != 'sports_event' and item is not None and item.path == context.path:
+        title = item.title
     return dict(
         video_path=context.path,
-        item_title=item.title if item is not None and item.path == context.path else context.title,
+        item_title=title,
         group_title=context.group_title,
         source_name=source.name if source is not None else context.source_name,
     )

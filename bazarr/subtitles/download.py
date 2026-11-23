@@ -36,7 +36,7 @@ from .processing import process_subtitle
 
 
 class SourceMissingLanguagesUnavailable(OSError):
-    """The scheduled publication cannot prove whether the source language is missing."""
+    """The source publication cannot verify whether the target language is missing."""
 
 
 @update_pools

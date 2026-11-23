@@ -77,6 +77,20 @@ beforeEach(() => {
         auth: { type: "form" },
       }),
     ),
+    http.get("/api/system/arr-instances", () =>
+      HttpResponse.json([
+        {
+          id: 42,
+          kind: "sportarr",
+          name: "Main Sportarr",
+          enabled,
+          is_default: true,
+        },
+      ]),
+    ),
+    http.get("/api/discover/metadata/status", () =>
+      HttpResponse.json({ data: {} }),
+    ),
     http.get("/api/badges", () =>
       HttpResponse.json({ sportarr_sse: "LIVE", sports: 2 }),
     ),

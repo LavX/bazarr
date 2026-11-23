@@ -1,6 +1,12 @@
 import BaseApi from "./base";
 import client from "./client";
 
+export const sourceSearchRoute = {
+  show: "series",
+  movie: "movies",
+  league: "sports",
+} as const;
+
 /**
  * Whether a 2xx body is the settings object at all.
  *

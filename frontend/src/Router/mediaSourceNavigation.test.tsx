@@ -188,7 +188,7 @@ it.each([
       );
       expect(wanted()).toHaveAttribute("aria-description", initialCounts);
       expect(list).toHaveBeenCalledOnce();
-      if (!visible) expect(sources).not.toHaveBeenCalled();
+      expect(sources).toHaveBeenCalled();
 
       await user.click(toggle());
       await waitFor(() =>
@@ -219,7 +219,7 @@ it.each([
       expect(
         await screen.findByRole("switch", { name: "Enable instance" }),
       ).not.toBeChecked();
-      if (visible) {
+      {
         await waitFor(() => expect(badgeRefreshStarted).toHaveBeenCalledOnce());
         expect(wanted()).toHaveAttribute(
           "aria-description",
@@ -267,9 +267,7 @@ it.each([
       await waitFor(expectBadges);
       await user.click(screen.getByRole("button", { name: "Excluded" }));
       await user.click(await screen.findByRole("menuitem", { name: "Movies" }));
-      await waitFor(() =>
-        expect(excluded).toHaveBeenCalledWith("GET", visible ? "1" : null),
-      );
+      await waitFor(() => expect(excluded).toHaveBeenCalledWith("GET", "1"));
       await screen.findByRole("button", { name: "Remove All" });
 
       const expectExcluded = () => {
@@ -292,7 +290,7 @@ it.each([
       );
       expectBadges();
       expectExcluded();
-      if (!visible) expect(sources).not.toHaveBeenCalled();
+      expect(sources).toHaveBeenCalled();
     } finally {
       patch.resolve();
       refresh.resolve();
@@ -321,7 +319,8 @@ it.each([true, false])(
         }),
       ),
       http.get("/api/system/arr-instances", async () => {
-        if (recovered) return HttpResponse.json([makeInstance()]);
+        if (recovered)
+          return HttpResponse.json([makeInstance({ kind: "radarr" })]);
         await list.promise;
         return new HttpResponse(null, { status: 503 });
       }),
@@ -331,6 +330,7 @@ it.each([true, false])(
           availability: { movie: ABSENT, series: ABSENT, sports: ABSENT },
         }),
       ),
+      http.get("/api/system/status", () => HttpResponse.json({ data: {} })),
       http.get("/api/badges", () =>
         HttpResponse.json({ movies: 9, radarr_signalr: "DOWN" }),
       ),
@@ -350,12 +350,8 @@ it.each([true, false])(
       );
     };
     const expectCold = async () => {
-      if (visible) {
-        expect(screen.queryByText("My movies")).not.toBeInTheDocument();
-        expect(screen.queryByText("Missing / Movies")).not.toBeInTheDocument();
-      } else {
-        await expectBadges();
-      }
+      expect(screen.queryByText("My movies")).not.toBeInTheDocument();
+      expect(screen.queryByText("Missing / Movies")).not.toBeInTheDocument();
     };
     try {
       await waitFor(() =>
@@ -483,16 +479,11 @@ it.each([
       expect(screen.getByText(`History / ${activity}`)).toBeInTheDocument();
 
     await refresh(ENABLED, false, false);
-    await waitFor(() =>
-      expect(
-        screen.queryByText(`Missing / ${activity}`),
-      ).not.toBeInTheDocument(),
-    );
-    expect(screen.queryByText(title, { exact: true })).not.toBeInTheDocument();
-    expect(
-      screen.queryByText(`Excluded / ${activity}`),
-    ).not.toBeInTheDocument();
-    expect(screen.queryByText(`History / ${activity}`)).not.toBeInTheDocument();
+    expect(await screen.findByText(title, { exact: true })).toBeInTheDocument();
+    expect(screen.getByText(`Missing / ${activity}`)).toBeInTheDocument();
+    expect(screen.getByText(`Excluded / ${activity}`)).toBeInTheDocument();
+    if (kind === "sports")
+      expect(screen.getByText(`History / ${activity}`)).toBeInTheDocument();
 
     await refresh(RETAINED, true, false);
     expect(await screen.findByText(title, { exact: true })).toBeInTheDocument();
@@ -637,6 +628,7 @@ it.each([
   "opens %s %s for folders without calling inactive %s",
   async (group, path, arr, endpoint) => {
     const requests = vi.fn();
+    const sports = arr === "sportarr";
     server.use(
       http.get("/api/system/settings", () =>
         HttpResponse.json({
@@ -648,10 +640,21 @@ it.each([
         HttpResponse.json([makeInstance({ kind: arr, enabled: true })]),
       ),
       http.get("/api/system/status", () => HttpResponse.json({ data: {} })),
+      http.get("/api/system/jobs", () => HttpResponse.json({ data: [] })),
       http.get("/api/system/media-sources", () => {
         const state = path ? RETAINED : ENABLED;
         return HttpResponse.json({
-          data: [],
+          data: sports
+            ? [
+                {
+                  id: 8,
+                  name: "Local sports",
+                  kind: "folder",
+                  enabled: true,
+                  libraries: [{ id: 9, enabled: true, content_kind: "sports" }],
+                },
+              ]
+            : [],
           availability: {
             series: group === "blacklist" && path === "series" ? ABSENT : state,
             movie: group === "blacklist" && path === "movies" ? ABSENT : state,
@@ -671,6 +674,15 @@ it.each([
         return HttpResponse.json([]);
       }),
       http.all(endpoint, ({ request }) => {
+        if (sports) {
+          const params = new URL(request.url).searchParams;
+          requests(
+            "source sports",
+            params.get("sources"),
+            params.get("arr_instance_id"),
+          );
+          return HttpResponse.json({ data: [], total: 0 });
+        }
         requests(request.method);
         return HttpResponse.json({
           data: [{ id: 72, title: "Inactive Arr title" }],
@@ -679,6 +691,16 @@ it.each([
       }),
     );
     customRender(<MediaPage group={group} path={path} />);
+    if (sports) {
+      await waitFor(() =>
+        expect(requests).toHaveBeenCalledWith("source sports", "1", null),
+      );
+      expect(screen.queryByText("Inactive Arr title")).not.toBeInTheDocument();
+      expect(
+        screen.queryByRole("button", { name: "Sync Leagues" }),
+      ).not.toBeInTheDocument();
+      return;
+    }
     expect(
       await screen.findByRole("link", { name: "Connections" }),
     ).toHaveAttribute("href", "/settings/connections#folders");
@@ -814,11 +836,11 @@ describe.each([
         accessible: true,
       },
       {
-        mode: "hidden folder feature",
+        mode: "old setting without an owner",
         record: null,
         legacy: false,
         visible: false,
-        accessible: true,
+        accessible: false,
       },
     ])(
       "handles $mode without granting folder sources Arr privileges",
@@ -924,10 +946,7 @@ describe.each([
           ).not.toBeInTheDocument();
           expect(requestExcluded).not.toHaveBeenCalled();
         }
-        if (!visible) {
-          expect(requestExcluded).toHaveBeenCalledWith("GET", null);
-          expect(requestSources).not.toHaveBeenCalled();
-        }
+        expect(requestSources).toHaveBeenCalled();
       },
     );
   },
@@ -1019,7 +1038,7 @@ it.each([
   ["series", "sonarr", "/api/episodes/wanted", "/api/series", "seriesTitle"],
   ["movies", "radarr", "/api/movies/wanted", "/api/movies", "title"],
 ] as const)(
-  "keeps hidden folder data out of the %s Wanted UI",
+  "keeps the Arr-only %s Wanted controls with an old config",
   async (kind, arr, wanted, action, titleKey) => {
     const user = userEvent.setup();
     const reads = vi.fn();
@@ -1030,6 +1049,9 @@ it.each([
           general: { [`use_${arr}`]: true },
           media_sources: { visible: false },
         }),
+      ),
+      http.get("/api/system/arr-instances", () =>
+        HttpResponse.json([makeInstance({ kind: arr })]),
       ),
       http.get("/api/system/status", () => HttpResponse.json({ data: {} })),
       http.get("/api/system/media-sources", () => {
@@ -1052,7 +1074,7 @@ it.each([
             {
               id: 42,
               series_id: 42,
-              [titleKey]: sources ? "Hidden folder title" : "Arr title",
+              [titleKey]: "Arr title",
               missing_subtitles: [],
             },
           ],
@@ -1071,20 +1093,19 @@ it.each([
     expect(
       screen.queryByRole("combobox", { name: "Source" }),
     ).not.toBeInTheDocument();
-    expect(reads).toHaveBeenCalledWith("wanted", null);
-    expect(reads).toHaveBeenCalledWith("badges", null);
-    expect(reads).toHaveBeenCalledWith("audio", null);
-    expect(reads).not.toHaveBeenCalledWith("folder API");
+    expect(reads).toHaveBeenCalledWith("wanted", "1");
+    expect(reads).toHaveBeenCalledWith("badges", "1");
+    expect(reads).toHaveBeenCalledWith("audio", "1");
+    expect(reads).toHaveBeenCalledWith("folder API");
     await user.click(screen.getByRole("button", { name: "Search All" }));
     await waitFor(() =>
-      expect(writes).toHaveBeenCalledWith("search-wanted", null),
+      expect(writes).toHaveBeenCalledWith("search-wanted", "1"),
     );
   },
 );
 
-it("drops mixed badge counts while the Arr-only badge is pending", async () => {
-  let visible = true;
-  const legacy = Promise.withResolvers<void>();
+it("continues to request source-aware badges with an old config", async () => {
+  const requested = vi.fn();
   function MovieBadge() {
     return <output>{useBadges().data?.movies ?? "No count"}</output>;
   }
@@ -1092,30 +1113,15 @@ it("drops mixed badge counts while the Arr-only badge is pending", async () => {
     http.get("/api/system/settings", () =>
       HttpResponse.json({
         general: { use_radarr: true },
-        media_sources: { visible },
+        media_sources: { visible: false },
       }),
     ),
-    http.get("/api/badges", async ({ request }) => {
-      const sources = new URL(request.url).searchParams.get("sources");
-      if (sources === "1") return HttpResponse.json({ movies: 7 });
-      await legacy.promise;
-      return HttpResponse.json({ movies: 1 });
+    http.get("/api/badges", ({ request }) => {
+      requested(new URL(request.url).searchParams.get("sources"));
+      return HttpResponse.json({ movies: 7 });
     }),
   );
-
-  try {
-    customRender(<MovieBadge />);
-    expect(await screen.findByText("7")).toBeInTheDocument();
-    visible = false;
-    await act(async () => {
-      await queryClient.invalidateQueries({
-        queryKey: [QueryKeys.System, QueryKeys.Settings],
-      });
-    });
-    expect(await screen.findByText("No count")).toBeInTheDocument();
-    expect(screen.queryByText("7")).not.toBeInTheDocument();
-  } finally {
-    legacy.resolve();
-  }
-  expect(await screen.findByText("1")).toBeInTheDocument();
+  customRender(<MovieBadge />);
+  expect(await screen.findByText("7")).toBeInTheDocument();
+  expect(requested).toHaveBeenCalledWith("1");
 });

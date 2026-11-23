@@ -2,7 +2,11 @@ import { useQuery } from "@tanstack/react-query";
 import { QueryKeys } from "@/apis/queries/keys";
 import api from "@/apis/raw";
 
-export function useLanguages(history = false, includeSources = false) {
+export function useLanguages(
+  history = false,
+  includeSources = false,
+  enabled = true,
+) {
   return useQuery({
     queryKey: [
       QueryKeys.System,
@@ -12,6 +16,7 @@ export function useLanguages(history = false, includeSources = false) {
     ],
     queryFn: () => api.system.languages(history, includeSources),
     staleTime: Infinity,
+    enabled,
   });
 }
 

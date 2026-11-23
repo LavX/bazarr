@@ -187,11 +187,7 @@ export function useSourceHistory(item: SourceItem, enabled = true) {
     queryKey: sourceHistoryKey(item),
     queryFn: ({ signal }) =>
       withInlineErrors(() => sourceHistoryApi.history(item.id, signal)),
-    enabled:
-      enabled &&
-      Number.isSafeInteger(item.id) &&
-      item.id > 0 &&
-      item.kind !== "sports",
+    enabled: enabled && Number.isSafeInteger(item.id) && item.id > 0,
     retry: false,
     placeholderData: undefined,
   });
@@ -245,13 +241,10 @@ export function useSourceReleaseExclusion(item: SourceItem) {
 }
 
 function useCurrentSourceItem(item: SourceItem) {
-  const current = useSourceItem(
-    item.id,
-    item.kind === "episode" ? "episode" : "movie",
-  );
+  const current = useSourceItem(item.id, item.kind);
   const available = useSourceOwnerAvailable(current.data ?? item);
   const value = current.data;
-  const sameItem = value !== undefined && sameSourceItem(item, value);
+  const sameItem = value != null && sameSourceItem(item, value);
   const allowed =
     sameItem &&
     !current.isError &&
@@ -270,7 +263,7 @@ export function useSourceUpgrade(item: SourceItem, disabled = false) {
   const allowed =
     available &&
     sourceItemHasFile(item) &&
-    item.kind !== "sports" &&
+    item.kind !== "sports_event" &&
     ["identified", "parsed"].includes(item.identity_state) &&
     (item.effective_profile_id !== undefined
       ? item.effective_profile_id

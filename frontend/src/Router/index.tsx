@@ -52,6 +52,7 @@ import SettingsTranslatorView from "@/pages/Settings/Translator";
 import SettingsUIView from "@/pages/Settings/UI";
 import OnboardingWizardView from "@/pages/Setup/OnboardingWizard";
 import {
+  SourceLeagueDetailView,
   SourceMovieDetailView,
   SourceSeriesDetailView,
 } from "@/pages/SourceDetail";
@@ -99,6 +100,7 @@ export function useRoutes(): CustomRouteObject[] {
     sportarrBadges,
     folderSeriesSearchable,
     folderMoviesSearchable,
+    folderSportsSearchable,
   } = useMediaNavigation();
   // The Translation page exists only while the v2 translation runtime is on.
   const translationRuntime = useTranslationRuntime();
@@ -189,6 +191,7 @@ export function useRoutes(): CustomRouteObject[] {
             hidden: !sports,
             children: [
               { index: true, element: <Sports /> },
+              { path: "source/:id", element: <SourceLeagueDetailView /> },
               { path: ":id", element: <SportsEvents /> },
             ],
           },
@@ -242,7 +245,10 @@ export function useRoutes(): CustomRouteObject[] {
                 path: "sports",
                 name: "Sports",
                 hidden: !sportsActivity,
-                badge: sportarrBadges ? data?.sports : undefined,
+                badge:
+                  sportarrBadges || folderSportsSearchable
+                    ? data?.sports
+                    : undefined,
                 element: <WantedSportsView></WantedSportsView>,
               },
               {
@@ -586,6 +592,7 @@ export function useRoutes(): CustomRouteObject[] {
       sportarrBadges,
       folderSeriesSearchable,
       folderMoviesSearchable,
+      folderSportsSearchable,
       translationRuntime,
     ],
   );

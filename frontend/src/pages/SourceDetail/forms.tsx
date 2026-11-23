@@ -53,21 +53,19 @@ function IdentityForm({
     "episode" in item ? (item.episode ?? "") : "",
   );
   const isEpisode = item.kind === "episode";
+  const isSport = item.kind === "sports_event";
+  const [date, setDate] = useState(
+    "event_date" in item ? (item.event_date ?? "") : "",
+  );
+  const [part, setPart] = useState(
+    "part_name" in item ? (item.part_name ?? "") : "",
+  );
   const save = async (
     correction: Parameters<typeof sourceDetailApi.identify>[2],
   ) => {
     try {
       await write.mutateAsync(() =>
-        sourceDetailApi.identify(
-          kind,
-          item.id,
-          correction,
-          item.kind === "show"
-            ? "show"
-            : item.kind === "episode"
-              ? "episode"
-              : "movie",
-        ),
+        sourceDetailApi.identify(kind, item.id, correction, item.kind),
       );
       modals.closeSelf();
     } catch {
@@ -98,6 +96,14 @@ function IdentityForm({
             ...(isEpisode
               ? { season: Number(season), episode: Number(episode) }
               : {}),
+            ...(isSport
+              ? {
+                  ...(date ? { event_date: date } : {}),
+                  ...(typeof season === "number" ? { season } : {}),
+                  ...(typeof episode === "number" ? { round: episode } : {}),
+                  part_name: part.trim() || null,
+                }
+              : {}),
           });
         }}
       >
@@ -118,7 +124,22 @@ function IdentityForm({
             allowDecimal={false}
             required={item.kind === "movie"}
           />
-          {isEpisode && (
+          {isSport && (
+            <Group grow>
+              <TextInput
+                type="date"
+                label="Date"
+                value={date}
+                onChange={(event) => setDate(event.currentTarget.value)}
+              />
+              <TextInput
+                label="Part"
+                value={part}
+                onChange={(event) => setPart(event.currentTarget.value)}
+              />
+            </Group>
+          )}
+          {(isEpisode || isSport) && (
             <Group grow>
               <NumberInput
                 label="Season"
@@ -126,15 +147,15 @@ function IdentityForm({
                 onChange={setSeason}
                 min={0}
                 allowDecimal={false}
-                required
+                required={isEpisode}
               />
               <NumberInput
-                label="Episode"
+                label={isSport ? "Round" : "Episode"}
                 value={episode}
                 onChange={setEpisode}
                 min={0}
                 allowDecimal={false}
-                required
+                required={isEpisode}
               />
             </Group>
           )}
@@ -174,10 +195,11 @@ function SourceSearchForm({
         item.id,
         item.source_id,
         item.library_id,
+        item.group_id,
         item.path,
       ],
       queryFn: async () => {
-        await sourceDetailApi.requireCurrentItem(item);
+        await sourceDetailApi.requireCurrentManualItem(item);
         return searchAsJob<{
           data: SearchResultType[];
           providers?: System.ProviderSearchOutcome[];
@@ -204,7 +226,7 @@ function SourceSearchForm({
       query={useSearch}
       preventRepeatDownload
       download={async (_, result) => {
-        await sourceDetailApi.requireCurrentItem(item);
+        await sourceDetailApi.requireCurrentManualItem(item);
         const job = await sourceDetailApi.download(item.id, result);
         try {
           await waitForJob(client, job.job_id, job.session);
@@ -238,7 +260,7 @@ function SourceUploadForm({ item }: { item: SourceItemTarget }) {
         if (!file || !language) return;
         void write
           .mutateAsync(async () => {
-            await sourceDetailApi.requireCurrentItem(item);
+            await sourceDetailApi.requireCurrentManualItem(item);
             const job = await withInlineErrors(() =>
               sourceDetailApi.upload(item.id, file, language, hi, forced),
             );

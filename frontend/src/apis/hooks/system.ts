@@ -8,6 +8,7 @@ import {
 } from "@tanstack/react-query";
 import { isAxiosError } from "axios";
 import { mediaServerLinksKey } from "@/apis/hooks/mediaServerLinks";
+import { useMediaSources } from "@/apis/hooks/mediaSources";
 import { QueryKeys } from "@/apis/queries/keys";
 import api from "@/apis/raw";
 import { inlineWhen } from "@/apis/raw/inlineWrites";
@@ -17,11 +18,9 @@ import { setAuthenticated } from "@/utilities/event";
 import { JobFailedError, JobStoppedError, waitForJob } from "@/utilities/jobs";
 
 export function useBadges() {
-  const { data: settings } = useSystemSettings();
-  const includeSources = settings?.media_sources?.visible === true;
   return useQuery<Partial<Badge>>({
-    queryKey: [QueryKeys.System, QueryKeys.Badges, includeSources],
-    queryFn: () => api.badges.all(includeSources),
+    queryKey: [QueryKeys.System, QueryKeys.Badges, true],
+    queryFn: () => api.badges.all(true),
     placeholderData: undefined,
     refetchOnWindowFocus: "always",
     refetchInterval: 1000 * 60,
@@ -234,8 +233,8 @@ function arrSearchResults(results: ItemSearchResult[]): ItemSearchResult[] {
 }
 
 export function useServerSearch(query: string, enabled: boolean) {
-  const { data: settings } = useSystemSettings();
-  const includeSources = settings?.media_sources?.visible === true;
+  const { data: sources } = useMediaSources();
+  const includeSources = Boolean(sources?.data.length);
   return useQuery({
     queryKey: [QueryKeys.System, QueryKeys.Search, query, includeSources],
     queryFn: () => api.system.search(query, includeSources),

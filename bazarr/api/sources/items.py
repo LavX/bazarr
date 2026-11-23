@@ -64,6 +64,8 @@ def item_to_dict(item):
         'file_size': item.file_size, 'scene_name': item.scene_name,
         'subtitles': _listing(item.subtitles), 'missing_subtitles': _listing(item.missing_subtitles),
         'indexed_at': item.indexed_at.isoformat() if item.indexed_at else None,
+        **({'event_date': item.event_date, 'round': item.episode, 'part_number': item.part_number or None,
+            'part_name': item.part_name} if item.kind == 'sports_event' else {}),
     }
 
 
@@ -253,6 +255,8 @@ def _delete_item_subtitle(item_id, args, blacklist=None):
     source, refusal = _manual_target(item_id)
     if refusal:
         return refusal
+    if args.get('source_id') is not None and args['source_id'] != source.source_id:
+        return {'message': 'The source item no longer belongs to this source.'}, 409
     try:
         removed = delete_subtitles(source.media_type, args['language'], args['forced'], args['hi'],
                                    source.path, args['subtitles_path'], source=source, blacklist=blacklist)
@@ -401,6 +405,7 @@ class SourceItemBlacklist(Resource):
     post_request_parser.add_argument('provider', type=str, required=True, nullable=False)
     post_request_parser.add_argument('subs_id', type=str, required=True, nullable=False)
     post_request_parser.add_argument('history_id', type=inputs.positive, required=True, nullable=False)
+    post_request_parser.add_argument('source_id', type=int, nullable=False)
 
     @authenticate
     @api_ns_sources_items.doc(parser=post_request_parser)
@@ -418,6 +423,8 @@ class SourceItemBlacklist(Resource):
             source = resolve_item(item_id)
         except SourceItemGone:
             return {'error': 'not_found'}, 404
+        if args['source_id'] is not None and args['source_id'] != source.source_id:
+            return {'message': 'The source item belongs to another media source.'}, 409
         if not exclude_source_history_release(source, *release):
             return {'message': 'This item no longer has the selected provider release in its history.'}, 409
         return '', 204

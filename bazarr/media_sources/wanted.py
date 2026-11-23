@@ -70,7 +70,7 @@ def arr_claim_blocks_wanted(source, *, target=None):
     return False
 
 
-def wanted_search_missing_subtitles_sources(kind=None, job_id=None, wait_for_completion=False):
+def wanted_search_missing_subtitles_sources(kind=None, job_id=None, wait_for_completion=False, *, source_ids=None):
     """Queue a Wanted search, or run it within its JobsQueue job."""
     if not job_id:
         return jobs_queue.add_job_from_function('Search for Missing Source Subtitles', is_progress=True,
@@ -84,7 +84,9 @@ def wanted_search_missing_subtitles_sources(kind=None, job_id=None, wait_for_com
         if refreshed['cleared'] or refreshed['refreshed']:
             notify_wanted_changes()
         items = repository.Items
-        query = wanted_items(items.c.id, items.c.created_at, items.c.title, kind=kind)
+        query = wanted_items(items.c.id, items.c.created_at, items.c.title, items.c.source_id, kind=kind)
+        if source_ids is not None:
+            query = query.where(items.c.source_id.in_(source_ids))
         session = handle()
         last_id = 0
         while True:
@@ -92,25 +94,31 @@ def wanted_search_missing_subtitles_sources(kind=None, job_id=None, wait_for_com
             if not page:
                 break
             last_id = page[-1].id
-            for item_id, created_at, title in page:
+            for item_id, created_at, title, source_id in page:
                 jobs_queue.raise_if_cancelled(job_id)
                 jobs_queue.update_job_progress(job_id=job_id, progress_message=title)
                 try:
-                    search_wanted_item(item_id, created_at, job_id)
+                    search_wanted_item(item_id, created_at, job_id, **(
+                        {'expected_source_id': source_id} if source_ids is not None else {}))
                 except JobFailed as error:
                     logging.info('BAZARR source item %s could not be searched: %s', item_id, error)
         jobs_queue.update_job_progress(job_id=job_id, progress_value='max', progress_message='Search completed')
 
 
 
-def queue_wanted_search(kind):
+def queue_wanted_search(kind, *, source_ids=None):
     """Queue Search All only for a kind with at least one enabled library."""
     sources, libraries = repository.Sources, repository.Libraries
-    content_kind = 'series' if kind == 'episode' else kind
+    content_kind = {'episode': 'series', 'sports_event': 'sports'}.get(kind, kind)
     enabled = sa.select(libraries.c.id).join(sources, libraries.c.source_id == sources.c.id).where(
         libraries.c.content_kind == content_kind, libraries.c.enabled == 1, sources.c.enabled == 1)
+    if source_ids is not None:
+        if not source_ids:
+            return None
+        enabled = enabled.where(sources.c.id.in_(source_ids))
     if handle().scalar(sa.select(enabled.exists())):
-        return wanted_search_missing_subtitles_sources(kind=kind)
+        return wanted_search_missing_subtitles_sources(
+            kind=kind, **({'source_ids': source_ids} if source_ids is not None else {}))
     return None
 
 

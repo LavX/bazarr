@@ -1,11 +1,20 @@
 /* eslint-disable camelcase */
 import { showNotification } from "@mantine/notifications";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import {
+  type QueryFunctionContext,
+  useMutation,
+  useQuery,
+  useQueryClient,
+} from "@tanstack/react-query";
 import { isAxiosError } from "axios";
 import { refreshWhenJobFinishes } from "@/apis/hooks/jobWatch";
 import { mediaSourcesKey, useMediaSources } from "@/apis/hooks/mediaSources";
 import queryClient from "@/apis/queries";
 import { QueryKeys } from "@/apis/queries/keys";
+import {
+  invalidateSourceDetails,
+  sourceDetailKeys,
+} from "@/apis/queries/sourceDetails";
 import { expireSourceSubtitleDocument } from "@/apis/queries/sourceSubtitleDocument";
 import BaseApi from "@/apis/raw/base";
 import { withInlineErrors } from "@/apis/raw/inlineWrites";
@@ -39,15 +48,18 @@ export interface SourceGroup {
 }
 
 export interface SourceItem extends Omit<SourceGroup, "kind"> {
-  kind: "movie" | "episode" | "sports";
+  kind: "movie" | "episode" | "sports_event";
   group_id: number | null;
   path: string;
   scene_name: string | null;
   season: number | null;
   episode: number | null;
+  event_date?: string | null;
+  part_name?: string | null;
   subtitles: Subtitle[];
   missing_subtitles: Language.Info[];
   arr_shadow: boolean;
+  shadowed_by?: string | null;
   audio_language?: (string | null)[];
   server_missing?: boolean;
   upgradable?: boolean;
@@ -117,33 +129,44 @@ export function normalizeSourceItem(item: RawSourceItem): SourceItem {
 
 export type IdentityCorrection =
   | { candidate_id: number }
-  | { title: string; year?: number; season?: number; episode?: number };
+  | {
+      title: string;
+      year?: number;
+      season?: number;
+      episode?: number;
+      round?: number;
+      event_date?: string;
+      part_name?: string | null;
+    };
 
-export const sourceDetailKeys = {
-  root: ["source-detail"] as const,
-  group: (id: number) => ["source-detail", "groups", id] as const,
-  item: (id: number, kind: "movie" | "episode" = "movie") =>
-    ["source-detail", "items", kind, id] as const,
-  episodes: (id: number) => ["source-detail", "groups", id, "items"] as const,
-};
+export { sourceDetailKeys };
 
 class SourceDetailApi extends BaseApi {
   constructor() {
     super("/sources");
   }
 
-  group(id: number, signal?: AbortSignal) {
-    return this.get<SourceGroup>(`/groups/${id}`, { kind: "show" }, signal);
+  group(id: number, signal?: AbortSignal, kind: SourceGroup["kind"] = "show") {
+    return this.get<SourceGroup>(`/groups/${id}`, { kind }, signal);
   }
 
   async item(
     id: number,
     signal?: AbortSignal,
-    kind: "movie" | "episode" = "movie",
+    kind: SourceItem["kind"] = "movie",
   ) {
     return normalizeSourceItem(
       await this.get<RawSourceItem>(`/items/${id}`, { kind }, signal),
     );
+  }
+
+  async leagueEvents(id: number, signal?: AbortSignal) {
+    const result = await this.get<{ data: RawSourceItem[]; total: number }>(
+      `/groups/${id}/items`,
+      undefined,
+      signal,
+    );
+    return result.data.map(normalizeSourceItem);
   }
 
   async episodes(
@@ -167,18 +190,21 @@ class SourceDetailApi extends BaseApi {
     return { ...page, data: page.data.map(normalizeSourceItem) };
   }
 
-  async requireCurrentItem(item: SourceItemTarget, subtitle?: Subtitle) {
-    if (item.kind === "sports" || !sourceItemHasFile(item)) {
+  async requireCurrentItem(
+    item: SourceItemTarget,
+    subtitle?: Subtitle,
+    allowShadow = false,
+  ) {
+    if (!sourceItemHasFile(item, allowShadow)) {
       throw new Error("The source item is no longer available.");
     }
     const current = await withInlineErrors(() =>
-      this.item(
-        item.id,
-        undefined,
-        item.kind === "episode" ? "episode" : "movie",
-      ),
+      this.item(item.id, undefined, item.kind),
     );
-    if (!sourceItemHasFile(current) || !sameSourceItem(item, current)) {
+    if (
+      !sourceItemHasFile(current, allowShadow) ||
+      !sameSourceItem(item, current)
+    ) {
       throw new Error("The source item moved or is no longer available.");
     }
     if (
@@ -204,11 +230,19 @@ class SourceDetailApi extends BaseApi {
     return current;
   }
 
+  requireCurrentManualItem(item: SourceItemTarget) {
+    return this.requireCurrentItem(
+      item,
+      undefined,
+      item.kind === "sports_event",
+    );
+  }
+
   async updateProfile(
     kind: "groups" | "items",
     id: number,
     profileId: number | null,
-    expectedKind: "show" | "movie" | "episode" = kind === "groups"
+    expectedKind: SourceGroup["kind"] | SourceItem["kind"] = kind === "groups"
       ? "show"
       : "movie",
   ) {
@@ -224,7 +258,7 @@ class SourceDetailApi extends BaseApi {
     kind: "groups" | "items",
     id: number,
     correction: IdentityCorrection,
-    expectedKind: "show" | "movie" | "episode" = kind === "groups"
+    expectedKind: SourceGroup["kind"] | SourceItem["kind"] = kind === "groups"
       ? "show"
       : "movie",
   ) {
@@ -322,8 +356,50 @@ export function sameSourceItem(item: SourceItemTarget, current: SourceItem) {
 
 export function sourceItemHasFile(
   item: Pick<SourceItemTarget, "path" | "server_missing" | "arr_shadow">,
+  allowShadow = false,
 ) {
-  return Boolean(item.path && !item.server_missing && !item.arr_shadow);
+  return Boolean(
+    item.path && !item.server_missing && (allowShadow || !item.arr_shadow),
+  );
+}
+
+type SourceOwner = Pick<SourceGroup, "source_id" | "library_id">;
+type UnavailableSportsDetail = Partial<SourceOwner> & { unavailable: true };
+type SportsDetail<T> = T | UnavailableSportsDetail;
+
+async function readSportsDetail<T extends SourceOwner | SourceOwner[]>(
+  { client, queryKey }: QueryFunctionContext,
+  call: () => Promise<T>,
+): Promise<SportsDetail<T>> {
+  try {
+    return await withInlineErrors(call);
+  } catch (error) {
+    if (!isAxiosError(error) || error.response?.status !== 404) throw error;
+    // Keep only the owner so invalidation stays scoped after removal.
+    const cached =
+      client.getQueryData<SportsDetail<SourceOwner | SourceOwner[]>>(queryKey);
+    const owner = Array.isArray(cached) ? cached[0] : cached;
+    return owner?.source_id === undefined
+      ? { unavailable: true }
+      : {
+          unavailable: true,
+          source_id: owner.source_id,
+          library_id: owner.library_id,
+        };
+  }
+}
+
+function sportsDetailOptions<T extends SourceOwner | SourceOwner[]>() {
+  return {
+    select: (data: SportsDetail<T>): T | null =>
+      "unavailable" in data ? null : data,
+    refetchOnMount: ({
+      state,
+    }: {
+      state: { data: SportsDetail<T> | undefined };
+    }): true | "always" =>
+      state.data && "unavailable" in state.data ? "always" : true,
+  };
 }
 
 export function useSourceOwnerAvailable(
@@ -349,22 +425,46 @@ export function sourceOwnerAvailable(
   );
 }
 
-export function useSourceGroup(id: number) {
+export function useSourceGroup(id: number, kind: SourceGroup["kind"] = "show") {
   return useQuery({
-    queryKey: sourceDetailKeys.group(id),
-    queryFn: ({ signal }) =>
-      withInlineErrors(() => sourceDetailApi.group(id, signal)),
+    ...sportsDetailOptions<SourceGroup>(),
+    queryKey: sourceDetailKeys.group(id, kind),
+    queryFn: (context) => {
+      const read = () => sourceDetailApi.group(id, context.signal, kind);
+      return kind === "league"
+        ? readSportsDetail(context, read)
+        : withInlineErrors(read);
+    },
     enabled: Number.isSafeInteger(id) && id > 0,
     placeholderData: undefined,
     retry: false,
   });
 }
 
-export function useSourceItem(id: number, kind: "movie" | "episode" = "movie") {
+export function useSourceItem(id: number, kind: SourceItem["kind"] = "movie") {
   return useQuery({
+    ...sportsDetailOptions<SourceItem>(),
     queryKey: sourceDetailKeys.item(id, kind),
-    queryFn: ({ signal }) =>
-      withInlineErrors(() => sourceDetailApi.item(id, signal, kind)),
+    queryFn: (context) => {
+      const read = () => sourceDetailApi.item(id, context.signal, kind);
+      return kind === "sports_event"
+        ? readSportsDetail(context, read)
+        : withInlineErrors(read);
+    },
+    enabled: Number.isSafeInteger(id) && id > 0,
+    placeholderData: undefined,
+    retry: false,
+  });
+}
+
+export function useSourceLeagueEvents(id: number) {
+  return useQuery({
+    ...sportsDetailOptions<SourceItem[]>(),
+    queryKey: sourceDetailKeys.leagueEvents(id),
+    queryFn: (context) =>
+      readSportsDetail(context, () =>
+        sourceDetailApi.leagueEvents(id, context.signal),
+      ),
     enabled: Number.isSafeInteger(id) && id > 0,
     placeholderData: undefined,
     retry: false,
@@ -388,7 +488,10 @@ export function useRefreshSourceDetails() {
   const client = useQueryClient();
   return async () => {
     await Promise.all([
-      client.invalidateQueries({ queryKey: sourceDetailKeys.root }),
+      invalidateSourceDetails(client),
+      client.invalidateQueries({ queryKey: [QueryKeys.Series, "library"] }),
+      client.invalidateQueries({ queryKey: [QueryKeys.Movies, "library"] }),
+      client.invalidateQueries({ queryKey: [QueryKeys.Sports] }),
       client.invalidateQueries({
         queryKey: [QueryKeys.System, QueryKeys.Badges],
       }),

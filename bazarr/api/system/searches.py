@@ -36,8 +36,10 @@ def _poster_url(media, path, arr_instance_id):
 
 def _source_search_results(query):
     groups, items = repository.Groups.c, repository.Items.c
+    routes = {'show': 'series', 'movie': 'movies', 'league': 'sports'}
     media = sa.union_all(
-        select(groups.id, groups.title, groups.year, groups.poster, groups.kind).where(groups.kind == 'show'),
+        select(groups.id, groups.title, groups.year, groups.poster, groups.kind).where(
+            groups.kind.in_(('show', 'league'))),
         select(items.id, items.title, items.year, items.poster, items.kind).where(items.kind == 'movie'),
     ).subquery()
     rows = database.execute(select(media).order_by(media.c.title, media.c.kind, media.c.id))
@@ -45,7 +47,7 @@ def _source_search_results(query):
         {
             'id': row.id, 'title': row.title, 'year': row.year, 'poster': row.poster,
             'origin': 'source', 'source_kind': row.kind,
-            'detail_url': f"/{'series' if row.kind == 'show' else 'movies'}/source/{row.id}",
+            'detail_url': f"/{routes[row.kind]}/source/{row.id}",
         }
         for row in rows if query in unidecode(row.title).lower()
     ]

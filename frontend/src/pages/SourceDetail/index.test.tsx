@@ -5,12 +5,17 @@ import { http, HttpResponse } from "msw";
 import { vi } from "vitest";
 import queryClient from "@/apis/queries";
 import { QueryKeys } from "@/apis/queries/keys";
+import { invalidateSourceDetails } from "@/apis/queries/sourceDetails";
 import client from "@/apis/raw/client";
 import { AllProviders } from "@/providers";
-import { rawRender, screen, waitFor, within } from "@/tests";
+import { act, rawRender, screen, waitFor, within } from "@/tests";
 import server from "@/tests/mocks/node";
 import { sourceDetailApi, sourceDetailKeys } from "./api";
-import { SourceMovieDetailView, SourceSeriesDetailView } from ".";
+import {
+  SourceLeagueDetailView,
+  SourceMovieDetailView,
+  SourceSeriesDetailView,
+} from ".";
 
 const movie = {
   id: 7,
@@ -40,31 +45,38 @@ const movie = {
   missing_subtitles: ["hu:forced"],
 };
 
-function openPage(kind: "movie" | "series") {
-  const route = kind === "movie" ? "/movies/source/:id" : "/series/source/:id";
+function openPage(kind: "movie" | "series" | "sports") {
+  const route = `/${kind === "movie" ? "movies" : kind}/source`;
   const router = createMemoryRouter(
     [
       {
-        path: route,
+        path: `${route}/:id`,
         element:
           kind === "movie" ? (
             <SourceMovieDetailView />
-          ) : (
+          ) : kind === "series" ? (
             <SourceSeriesDetailView />
+          ) : (
+            <SourceLeagueDetailView />
           ),
+      },
+      {
+        path: "/subtitles/edit/:type/:id/:language",
+        element: <div>Source subtitle editor route</div>,
       },
     ],
     {
-      initialEntries: [
-        kind === "movie" ? "/movies/source/7" : "/series/source/7",
-      ],
+      initialEntries: [`${route}/7`],
     },
   );
-  return rawRender(
-    <AllProviders>
-      <RouterProvider router={router} />
-    </AllProviders>,
-  );
+  return {
+    ...rawRender(
+      <AllProviders>
+        <RouterProvider router={router} />
+      </AllProviders>,
+    ),
+    router,
+  };
 }
 
 beforeEach(() => {
@@ -93,6 +105,456 @@ beforeEach(() => {
     ),
   );
 });
+
+it("groups source events by season and uses the source item action", async () => {
+  const user = userEvent.setup();
+  const search = vi.fn();
+  const identify = vi.fn();
+  const events = [
+    {
+      ...movie,
+      kind: "sports_event",
+      id: 60,
+      title: "Earlier race",
+      season: 2026,
+      episode: 2,
+      event_date: "2026-02-03",
+      part_name: "Qualifying",
+    },
+    {
+      ...movie,
+      kind: "sports_event",
+      id: 61,
+      title: "Later race",
+      season: 2026,
+      event_date: "2026-04-04",
+    },
+    { ...movie, kind: "sports_event", id: 62, title: "Friendly" },
+  ];
+  server.use(
+    http.get("/api/sources/groups/7", ({ request }) => {
+      expect(new URL(request.url).searchParams.get("kind")).toBe("league");
+      return HttpResponse.json({
+        ...movie,
+        kind: "league",
+        title: "Folder league",
+      });
+    }),
+    http.get("/api/sources/groups/7/items", () =>
+      HttpResponse.json({ data: events, total: events.length }),
+    ),
+    http.get("/api/sources/items/60", ({ request }) => {
+      expect(new URL(request.url).searchParams.get("kind")).toBe(
+        "sports_event",
+      );
+      return HttpResponse.json(events[0]);
+    }),
+    http.post("/api/sources/items/60/search", () => {
+      search();
+      return HttpResponse.json({ job_id: null });
+    }),
+    http.patch("/api/sources/items/60", async ({ request }) => {
+      expect(new URL(request.url).searchParams.get("kind")).toBe(
+        "sports_event",
+      );
+      identify(await request.json());
+      return HttpResponse.json(events[0]);
+    }),
+  );
+  openPage("sports");
+  expect(await screen.findByText("Season 2026")).toBeVisible();
+  expect(screen.getByText("Unknown season")).toBeVisible();
+  expect(
+    screen
+      .getAllByRole("row")
+      .filter((row) => /race/i.test(row.textContent ?? ""))
+      .map((row) => row.textContent),
+  ).toEqual([
+    expect.stringContaining("Earlier race"),
+    expect.stringContaining("Later race"),
+  ]);
+  expect(screen.getByText("2026-02-03")).toBeVisible();
+  await user.click(screen.getByRole("button", { name: "Earlier race" }));
+  const dialog = within(await screen.findByRole("dialog"));
+  await user.click(await dialog.findByRole("button", { name: /^Search$/ }));
+  await waitFor(() => expect(search).toHaveBeenCalledTimes(1));
+  expect(dialog.getByRole("button", { name: "Manual Search" })).toBeEnabled();
+  expect(dialog.getByRole("button", { name: "Upload" })).toBeEnabled();
+  await user.click(dialog.getByRole("button", { name: "Identity fix" }));
+  const correction = within(
+    await screen.findByRole("dialog", { name: "Identity fix" }),
+  );
+  await user.clear(correction.getByLabelText("Part"));
+  await user.type(correction.getByLabelText("Part"), "Sprint");
+  await user.click(correction.getByRole("button", { name: "Save" }));
+  await waitFor(() =>
+    expect(identify).toHaveBeenCalledWith({
+      title: "Earlier race",
+      year: 2026,
+      event_date: "2026-02-03",
+      season: 2026,
+      round: 2,
+      part_name: "Sprint",
+    }),
+  );
+});
+
+it("keeps manual search and upload available for an unprofiled, shadowed recording", async () => {
+  const user = userEvent.setup();
+  const event = {
+    ...movie,
+    id: 60,
+    kind: "sports_event",
+    title: "Unprofiled recording",
+    identity_state: "unmatched",
+    profile_id: null,
+    effective_profile_id: null,
+    arr_shadow: true,
+    shadowed_by: "Race archive",
+  };
+  server.use(
+    http.get("/api/sources/groups/7", () =>
+      HttpResponse.json({ ...movie, kind: "league", title: "Folder league" }),
+    ),
+    http.get("/api/sources/groups/7/items", () =>
+      HttpResponse.json({ data: [event], total: 1 }),
+    ),
+    http.get("/api/sources/items/60", () => HttpResponse.json(event)),
+  );
+  openPage("sports");
+  expect(await screen.findByText("Managed by Race archive")).toBeVisible();
+  await user.click(await screen.findByRole("button", { name: event.title }));
+  const dialog = within(
+    await screen.findByRole("dialog", { name: event.title }),
+  );
+  expect(dialog.getByRole("button", { name: "Search" })).toBeDisabled();
+  expect(dialog.getByRole("button", { name: "Manual Search" })).toBeEnabled();
+  expect(dialog.getByRole("button", { name: "Upload" })).toBeEnabled();
+  expect(dialog.queryByRole("button", { name: "Actions" })).toBeNull();
+  expect(dialog.getByRole("button", { name: "Subtitle Tools" })).toBeDisabled();
+  await user.click(dialog.getByRole("button", { name: "Manual Search" }));
+  expect(
+    await screen.findByRole("dialog", { name: "Search Subtitles" }),
+  ).toBeVisible();
+});
+
+const toolEvent = {
+  ...movie,
+  id: 60,
+  kind: "sports_event",
+  group_id: 7,
+  title: "Wet race recording",
+  path: "/media/race.mkv",
+  subtitles: [
+    ["en:hi", "/media/race.en.hi.srt", 60],
+    ["de", null, null, "pgs"],
+  ],
+};
+
+function serveToolEvent(current: () => object = () => toolEvent) {
+  server.use(
+    http.get("/api/sources/groups/7", () =>
+      HttpResponse.json({ ...movie, kind: "league", title: "Folder league" }),
+    ),
+    http.get("/api/sources/groups/7/items", () =>
+      HttpResponse.json({ data: [toolEvent], total: 1 }),
+    ),
+    http.get("/api/sources/items/60", ({ request }) => {
+      expect(new URL(request.url).searchParams.get("kind")).toBe(
+        "sports_event",
+      );
+      return HttpResponse.json(current());
+    }),
+  );
+}
+
+it("opens subtitle tools for the selected Sports recording and uses its source file for mods, Sync and Edit", async () => {
+  const user = userEvent.setup();
+  const writes = vi.fn();
+  const references = vi.fn();
+  serveToolEvent();
+  server.use(
+    http.get("/api/subtitles", ({ request }) => {
+      references(Object.fromEntries(new URL(request.url).searchParams));
+      return HttpResponse.json({
+        data: {
+          audio_tracks: [{ stream: "a:0", name: "Race audio", language: "en" }],
+          embedded_subtitles_tracks: [],
+          external_subtitles_tracks: [],
+        },
+      });
+    }),
+    http.patch("/api/subtitles", async ({ request }) => {
+      writes(
+        new URL(request.url).searchParams.get("action"),
+        Object.fromEntries(await request.formData()),
+      );
+      return new HttpResponse(null, { status: 204 });
+    }),
+  );
+  const { router } = openPage("sports");
+  await user.click(
+    await screen.findByRole("button", { name: toolEvent.title }),
+  );
+  const event = within(
+    await screen.findByRole("dialog", { name: toolEvent.title }),
+  );
+  await user.click(
+    await event.findByRole("button", { name: "Subtitle Tools" }),
+  );
+  const tools = within(
+    await screen.findByRole("dialog", { name: "Subtitle Tools" }),
+  );
+  expect(
+    await tools.findByRole("checkbox", { name: /race\.en\.hi\.srt/ }),
+  ).toBeEnabled();
+  expect(tools.queryByRole("checkbox", { name: /pgs/ })).toBeNull();
+
+  await user.click(tools.getByRole("button", { name: "Actions" }));
+  expect(
+    screen.queryByRole("menuitem", { name: /OCR to text|Extract to file/i }),
+  ).toBeNull();
+  await user.click(
+    await screen.findByRole("menuitem", { name: "Remove Style Tags" }),
+  );
+  await waitFor(() =>
+    expect(writes).toHaveBeenNthCalledWith(1, "remove_tags", {
+      id: "60",
+      type: "source",
+      path: "/media/race.en.hi.srt",
+      language: "en",
+      hi: "True",
+      forced: "False",
+    }),
+  );
+
+  await user.click(tools.getByRole("button", { name: "Actions" }));
+  await user.click(await screen.findByRole("menuitem", { name: "Sync..." }));
+  const sync = within(
+    await screen.findByRole("dialog", { name: "Sync Subtitle Options" }),
+  );
+  await waitFor(() =>
+    expect(references).toHaveBeenCalledWith({
+      sourceItemId: "60",
+      subtitlesPath: "/media/race.en.hi.srt",
+    }),
+  );
+  await user.click(sync.getByRole("button", { name: "Sync" }));
+  await waitFor(() =>
+    expect(writes).toHaveBeenNthCalledWith(
+      2,
+      "sync",
+      expect.objectContaining({
+        id: "60",
+        type: "source",
+        path: "/media/race.en.hi.srt",
+      }),
+    ),
+  );
+  expect(writes.mock.calls[1][1]).not.toHaveProperty("arr_instance_id");
+  await waitFor(() =>
+    expect(
+      screen.queryByRole("dialog", { name: "Sync Subtitle Options" }),
+    ).toBeNull(),
+  );
+
+  await user.click(tools.getByRole("button", { name: "Actions" }));
+  await user.click(await screen.findByRole("menuitem", { name: "Edit" }));
+  expect(await screen.findByText("Source subtitle editor route")).toBeVisible();
+  expect(router.state.location.pathname).toBe(
+    "/subtitles/edit/source/60/en%3Ahi",
+  );
+});
+
+it("withholds event actions after its numeric ID resolves under a different source owner", async () => {
+  const user = userEvent.setup();
+  const write = vi.fn();
+  serveToolEvent(() => ({ ...toolEvent, source_id: 4, title: "Foreign race" }));
+  server.use(
+    http.patch("/api/subtitles", () => {
+      write();
+      return new HttpResponse(null, { status: 204 });
+    }),
+  );
+  openPage("sports");
+  await user.click(
+    await screen.findByRole("button", { name: toolEvent.title }),
+  );
+  const dialog = within(
+    await screen.findByRole("dialog", { name: "Event unavailable" }),
+  );
+  expect(dialog.getByRole("alert")).toHaveTextContent(
+    "This event is no longer available.",
+  );
+  expect(dialog.queryByRole("button", { name: "Actions" })).toBeNull();
+  expect(dialog.queryByRole("button", { name: "Subtitle Tools" })).toBeNull();
+  expect(dialog.queryByText("Foreign race")).toBeNull();
+  expect(write).not.toHaveBeenCalled();
+});
+
+it.each(["league", "event list", "event dialog"] as const)(
+  "keeps confirmed %s absence through a failed revisit and restores it on success",
+  async (removed) => {
+    const user = userEvent.setup();
+    const league = { ...movie, kind: "league", title: "Cached league" };
+    const event = {
+      ...movie,
+      id: 60,
+      group_id: league.id,
+      kind: "sports_event",
+      title: "Cached race",
+      season: 2026,
+    };
+    const restoredLeague = { ...league, title: "Restored league" };
+    const restoredEvent = { ...event, title: "Restored race" };
+    let status = 200;
+    let restored = false;
+    const readDetail = vi.fn();
+    function respond(resource: typeof removed, data: object) {
+      if (resource === removed) {
+        readDetail(status);
+        if (status !== 200)
+          return HttpResponse.json({ error: "request_failed" }, { status });
+      }
+      return HttpResponse.json(data);
+    }
+    server.use(
+      http.get("/api/sources/groups/7", () =>
+        respond("league", restored ? restoredLeague : league),
+      ),
+      http.get("/api/sources/groups/7/items", () =>
+        respond("event list", {
+          data: [restored && removed === "event list" ? restoredEvent : event],
+          total: 1,
+        }),
+      ),
+      http.get("/api/sources/items/60", () =>
+        respond("event dialog", restored ? restoredEvent : event),
+      ),
+    );
+    const { unmount } = openPage("sports");
+    const race = await screen.findByRole("button", { name: event.title });
+    if (removed === "event dialog") {
+      await user.click(race);
+      const dialog = within(
+        await screen.findByRole("dialog", { name: event.title }),
+      );
+      await waitFor(() =>
+        expect(
+          queryClient.getQueryState(sourceDetailKeys.item(60, "sports_event"))
+            ?.status,
+        ).toBe("success"),
+      );
+      expect(
+        dialog.getByRole("button", { name: "Manual Search" }),
+      ).toBeVisible();
+      expect(dialog.getByText("movie.en.hi.srt")).toBeVisible();
+    }
+
+    const key =
+      removed === "league"
+        ? sourceDetailKeys.group(7, "league")
+        : removed === "event list"
+          ? sourceDetailKeys.leagueEvents(7)
+          : sourceDetailKeys.item(60, "sports_event");
+    const unavailableMessage = {
+      league: "This league is no longer available.",
+      "event list": "These events are no longer available.",
+      "event dialog": "This event is no longer available.",
+    }[removed];
+    status = 404;
+    await act(async () => {
+      await invalidateSourceDetails(queryClient, {
+        sourceId: 3,
+        libraryId: 11,
+      });
+    });
+    expect(await screen.findByText(unavailableMessage)).toBeVisible();
+    readDetail.mockClear();
+    await act(async () => {
+      await invalidateSourceDetails(queryClient, {
+        sourceId: 3,
+        libraryId: 12,
+      });
+    });
+    expect(readDetail).not.toHaveBeenCalled();
+
+    status = 503;
+    if (removed === "event dialog") {
+      await user.keyboard("{Escape}");
+      await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+      await user.click(
+        await screen.findByRole("button", { name: event.title }),
+      );
+    } else {
+      unmount();
+      openPage("sports");
+    }
+    await waitFor(() =>
+      expect(queryClient.getQueryState(key)?.error).toMatchObject({
+        response: { status: 503 },
+      }),
+    );
+    expect(screen.getByText(unavailableMessage)).toBeVisible();
+
+    if (removed === "event dialog") {
+      const dialog = within(
+        screen.getByRole("dialog", { name: "Event unavailable" }),
+      );
+      expect(
+        dialog.queryByRole("button", { name: "Change Profile" }),
+      ).not.toBeInTheDocument();
+      expect(
+        dialog.queryByRole("button", { name: "Identity fix" }),
+      ).not.toBeInTheDocument();
+      expect(dialog.queryByText("movie.en.hi.srt")).not.toBeInTheDocument();
+    } else {
+      expect(
+        screen.queryByRole("button", { name: event.title }),
+      ).not.toBeInTheDocument();
+      if (removed === "league") {
+        expect(
+          screen.queryByText(league.title, { exact: true }),
+        ).not.toBeInTheDocument();
+      } else {
+        expect(
+          screen.getByRole("heading", { name: league.title }),
+        ).toBeVisible();
+      }
+      expect(screen.getByRole("alert")).toBeVisible();
+    }
+
+    restored = true;
+    status = 200;
+    await act(async () => {
+      await queryClient.invalidateQueries({ queryKey: key, exact: true });
+    });
+    if (removed === "event dialog") {
+      const dialog = within(
+        await screen.findByRole("dialog", { name: restoredEvent.title }),
+      );
+      expect(
+        dialog.getByRole("button", { name: "Change Profile" }),
+      ).toBeVisible();
+      expect(
+        dialog.getByRole("button", { name: "Identity fix" }),
+      ).toBeVisible();
+      expect(dialog.getByText("movie.en.hi.srt")).toBeVisible();
+    } else if (removed === "league") {
+      expect(
+        await screen.findByRole("heading", { name: restoredLeague.title }),
+      ).toBeVisible();
+      expect(
+        await screen.findByRole("button", { name: event.title }),
+      ).toBeVisible();
+    } else {
+      expect(
+        await screen.findByRole("button", { name: restoredEvent.title }),
+      ).toBeVisible();
+    }
+    expect(screen.queryByText(unavailableMessage)).not.toBeInTheDocument();
+  },
+);
 
 it("reads the source movie despite a colliding Arr cache and normalizes its stored subtitle rows", async () => {
   queryClient.setQueryData([QueryKeys.Movies, 7], { title: "Wrong Arr movie" });
@@ -251,9 +713,11 @@ it("pages episodes by group and opens only source episode actions", async () => 
     await screen.findByRole("button", { name: "Folder episode" }),
   );
   const dialog = await screen.findByRole("dialog", { name: "Folder episode" });
-  expect(
-    within(dialog).getByRole("button", { name: "Manual Search" }),
-  ).toBeVisible();
+  await waitFor(() =>
+    expect(
+      within(dialog).getByRole("button", { name: "Manual Search" }),
+    ).toBeVisible(),
+  );
   expect(list).toHaveBeenCalledWith({
     group_id: "7",
     kind: "episode",

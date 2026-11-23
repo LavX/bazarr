@@ -24,7 +24,13 @@ export interface MediaSource {
 
 export type SourceAvailability = Record<
   SourceContentKind,
-  { browsable: boolean; searchable: boolean; retained: boolean }
+  {
+    browsable: boolean;
+    searchable: boolean;
+    retained: boolean;
+    removed?: boolean;
+    retained_source_ids?: number[];
+  }
 >;
 
 interface MediaSourceList {

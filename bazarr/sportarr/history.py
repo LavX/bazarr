@@ -71,8 +71,20 @@ def list_records(
     provider=None,
     action=None,
     include_embedded=False,
+    *,
+    owner_filter=None,
 ):
     limit = validate_page(start, length)
+    table, query = records_query(
+        session, kind, arr_instance_id=arr_instance_id, event_id=event_id, league_id=league_id, language=language,
+        provider=provider, action=action, include_embedded=include_embedded, owner_filter=owner_filter)
+    total = session.execute(select(func.count()).select_from(query.subquery())).scalar_one()
+    page = query.order_by(table.timestamp.desc(), table.id.desc()).offset(start).limit(limit)
+    return {"data": serialize_records_page(session, kind, page), "total": total}
+
+
+def records_query(session, kind, *, arr_instance_id=None, event_id=None, league_id=None, language=None,
+                  provider=None, action=None, include_embedded=False, owner_filter=None):
     table = TableHistorySports if kind == "history" else TableBlacklistSports
     query = (
         select(
@@ -83,6 +95,7 @@ def list_records(
             TableSportsEvents.partNumber,
             TableSportsEvents.partName,
         )
+        .select_from(table)
         .join(
             TableSportsEvents,
             (table.event_id == TableSportsEvents.id)
@@ -115,38 +128,27 @@ def list_records(
         # and stay out of the listing and its total unless the caller asks,
         # exactly as the episodes and movies history endpoints behave.
         query = query.where(table.action != 7)
-    total = session.execute(
-        select(func.count()).select_from(query.subquery())
-    ).scalar_one()
+    if owner_filter is not None:
+        query = query.where(owner_filter)
+    return table, query
+
+
+def format_activity(item, timestamp):
+    item.pop("artifact", None)
+    item["matches"] = _parse_criteria(item.pop("matched", None))
+    item["dont_matches"] = _parse_criteria(item.pop("not_matched", None))
+    item["timestamp"] = pretty_date(timestamp) if timestamp else None
+    item["parsed_timestamp"] = timestamp.strftime("%x %X") if timestamp else None
+    return item
+
+
+def serialize_records_page(session, kind, query):
     data = []
-    for row, title, season, episode, part_number, part_name in session.execute(
-        query.order_by(table.timestamp.desc(), table.id.desc())
-        .offset(start)
-        .limit(limit)
-    ):
+    for row, title, season, episode, part_number, part_name in session.execute(query):
         item = row.to_dict()
         if kind == "history":
             item["ai_translated"] = row.ai_translated is True
-        item.pop("artifact", None)
-        # The parsed criteria lists, in the shape the episodes and movies
-        # history endpoints send. The raw stored repr strings used to go out
-        # under their column names, so the shared Match cell could never read
-        # them.
-        item["matches"] = _parse_criteria(item.pop("matched", None))
-        item["dont_matches"] = _parse_criteria(item.pop("not_matched", None))
-        # The same pair the episodes and movies history endpoints send: a
-        # relative form for the column and the exact date for its popover. The
-        # raw ISO string went out under both names, so the sports table printed
-        # a machine timestamp where the other two read "2 hours ago".
-        if row.timestamp:
-            item["timestamp"] = pretty_date(row.timestamp)
-            item["parsed_timestamp"] = row.timestamp.strftime("%x %X")
-        else:
-            item["timestamp"] = None
-            item["parsed_timestamp"] = None
-        # The event's season, episode and part, under the same names the event
-        # listing sends. The blacklist page shows them beside the title, so two
-        # parts of one event are distinguishable; the history page ignores them.
+        format_activity(item, row.timestamp)
         data.append(item | {
             "title": title,
             "season": season,
@@ -156,7 +158,7 @@ def list_records(
         })
     if kind == "history":
         _mark_history_flags(session, data)
-    return {"data": data, "total": total}
+    return data
 
 
 def _mark_history_flags(session, data):

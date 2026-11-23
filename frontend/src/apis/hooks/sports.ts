@@ -1,4 +1,7 @@
+import { useSearchParams } from "react-router";
+import { showNotification } from "@mantine/notifications";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { isAxiosError } from "axios";
 import { usePaginationQuery } from "@/apis/queries/hooks";
 import { QueryKeys } from "@/apis/queries/keys";
 import sports, {
@@ -8,10 +11,16 @@ import sports, {
   SportsJobStatus,
   SportsLeague,
   SportsRecord,
+  SportsSourceFields,
 } from "@/apis/raw/sports";
 import { isSameRun } from "@/utilities/jobs";
 import { useArrKindAvailability } from "./arrInstances";
-import { useSourceAvailability } from "./mediaSources";
+import { refreshWhenJobFinishes } from "./jobWatch";
+import {
+  mediaSourcesKey,
+  useSourceAvailability,
+  useSourceFilter,
+} from "./mediaSources";
 import { useSystemJobs } from "./system";
 
 export function useSportsAvailability() {
@@ -23,10 +32,55 @@ export function useSportsAvailability() {
     arrEnabled: arr.enabled,
     instances: arr.enabled ? arr.instances : [],
     enabled,
+    sourceBrowsable: sources?.browsable === true,
+    sourceSearchable: sources?.searchable === true,
+    sourceActivity: sources?.browsable === true || sources?.retained === true,
     activity: enabled || sources?.retained === true,
     searchable: arr.enabled || sources?.searchable === true,
     isLoading: arr.isLoading || (!arr.enabled && isLoading),
   };
+}
+
+export function useSportsActivityScope(includeRetainedSources = false) {
+  const [params] = useSearchParams();
+  const scope = useSourceFilter("sports", "sportarr", {
+    includeDisabledSources: true,
+    includeRetainedSources,
+    clearOnChange: ["event_id", "league"],
+  });
+  const legacy = params.get("instance");
+  const owner = legacy
+    ? Number(legacy)
+    : scope.selected?.startsWith("arr:")
+      ? Number(scope.selected.slice(4))
+      : undefined;
+  return { ...scope, owner };
+}
+
+export function sportsRowOwner(
+  row: SportsSourceFields & { arr_instance_id: number | null },
+): ArrRowOwner | MediaSourceOwner {
+  return row.origin === "source" && row.source_key
+    ? {
+        origin: "source",
+        source_key: row.source_key,
+        source_name: row.source_name ?? null,
+        source_kind: row.source_kind,
+      }
+    : { arr_instance_id: row.arr_instance_id ?? undefined };
+}
+
+export function sportsActivityLink(
+  row: SportsSourceFields & {
+    arr_instance_id: number | null;
+    league_id: number;
+  },
+) {
+  return row.origin === "source"
+    ? row.source_group_id
+      ? `/sports/source/${row.source_group_id}`
+      : undefined
+    : `/sports/${row.league_id}?instance=${row.arr_instance_id}`;
 }
 // A league in the shape the shared ItemView table expects, so Sports renders
 // through the same component as Series and Movies instead of a bespoke grid.
@@ -68,17 +122,24 @@ export function toSportsLeagueRow(
 export function useSportsLeaguesPagination(
   fetchAll = false,
   nameToCode: ReadonlyMap<string, string> = EMPTY_AUDIO_LANGUAGE_MAP,
+  filters: SportsFilters = {},
 ) {
-  const { instances, arrEnabled } = useSportsAvailability();
+  const { instances, enabled } = useSportsAvailability();
   return usePaginationQuery(
     [
       QueryKeys.Sports,
       "leagues",
+      filters,
       instances.map((instance) => instance.id),
       Array.from(nameToCode.entries()).sort(([a], [b]) => a.localeCompare(b)),
     ],
     async (param) => {
-      const response = await sports.list(undefined, param.start, param.length);
+      const response = await sports.list(
+        undefined,
+        param.start,
+        param.length,
+        filters,
+      );
       return {
         data: response.data.map((league) =>
           toSportsLeagueRow(league, nameToCode),
@@ -92,7 +153,7 @@ export function useSportsLeaguesPagination(
     // searched one page, exactly as the Series and Movies pages would if they
     // did not request every row while a filter is active.
     fetchAll,
-    arrEnabled,
+    enabled,
   );
 }
 
@@ -211,7 +272,8 @@ export function useIndexSportsSubtitles() {
 // Wanted.Base carries Subtitle objects, so the gap is closed here rather than by
 // widening the shared type for one caller.
 export type SportsWantedRow = Wanted.Base &
-  SportsEventReference & {
+  Omit<SportsEventReference, "origin" | "arr_instance_id"> &
+  (Wanted.SourceRow | (ArrRowOwner & { arr_instance_id: number })) & {
     title: string;
     // Carried so a row can open the manual search, which offers languages from
     // the event's profile.
@@ -243,23 +305,49 @@ function toSubtitle(key: string): Subtitle {
 }
 
 export function toSportsWantedRow(
-  event: SportsEvent,
+  event: Omit<
+    SportsEvent,
+    "missing_subtitles" | "audio_language" | "arr_instance_id"
+  > & {
+    missing_subtitles: (string | Subtitle)[];
+    audio_language: (string | Language.Info)[];
+    arr_instance_id: number | null;
+  },
   nameToCode: ReadonlyMap<string, string> = EMPTY_AUDIO_LANGUAGE_MAP,
 ): SportsWantedRow {
-  return {
+  const common = {
     ...event,
     title: event.title,
     monitored: true,
     tags: event.tags ?? [],
     sceneName: event.sceneName ?? undefined,
     hearing_impaired: false,
-    missing_subtitles: (event.missing_subtitles ?? []).map(toSubtitle),
-    audio_language: (event.audio_language ?? []).map(
-      (name) => nameToCode.get(name) ?? name,
+    missing_subtitles: (event.missing_subtitles ?? []).map((key) =>
+      typeof key === "string" ? toSubtitle(key) : { ...key, path: null },
     ),
-    release_mismatch: (event as SportsEvent & { release_mismatch?: boolean })
+    audio_language: (event.audio_language ?? []).map((name) =>
+      typeof name === "string" ? (nameToCode.get(name) ?? name) : name.code2,
+    ),
+    release_mismatch: (event as typeof event & { release_mismatch?: boolean })
       .release_mismatch,
   };
+  if (event.origin === "source") {
+    if (!event.source_key || !event.source_id || !event.source_kind)
+      throw new Error("Sports source ownership is missing");
+    return {
+      ...common,
+      origin: "source",
+      arr_instance_id: null,
+      source_key: event.source_key,
+      source_id: event.source_id,
+      source_kind: event.source_kind,
+      source_name: event.source_name ?? null,
+      identity_state: event.identity_state ?? "unmatched",
+    };
+  }
+  if (event.arr_instance_id === null)
+    throw new Error("Sportarr ownership is missing");
+  return { ...common, origin: "arr", arr_instance_id: event.arr_instance_id };
 }
 
 // A sports history or exclusion record in the shape the shared HistoryView and
@@ -326,7 +414,7 @@ function useSportsActivityPagination<T extends object>(
   fetchAll = false,
   keySignatures: unknown[] = [],
 ) {
-  const { arrEnabled, instances } = useSportsAvailability();
+  const { arrEnabled, activity, instances } = useSportsAvailability();
   const ownerKnown =
     filters.owner === undefined ||
     instances.some((instance) => instance.id === filters.owner);
@@ -352,7 +440,7 @@ function useSportsActivityPagination<T extends object>(
     },
     false,
     fetchAll,
-    arrEnabled && ownerKnown,
+    ownerKnown && (arrEnabled || Boolean(filters.includeSources && activity)),
   );
 }
 
@@ -415,12 +503,56 @@ export function useSportsAction() {
 }
 export function useRemoveSportsExclusion() {
   const client = useQueryClient();
+  const refresh = () =>
+    Promise.all([
+      client.invalidateQueries({ queryKey: [QueryKeys.Sports] }),
+      client.invalidateQueries({ queryKey: mediaSourcesKey, exact: true }),
+    ]);
   return useMutation({
-    mutationFn: ({ owner, id }: { owner: number; id?: number }) =>
-      sports.removeExclusion(owner, id),
+    mutationFn: (
+      scope:
+        | { owner: number; id?: number }
+        | { origin: "source"; id: number; removalKey: string }
+        | { origin: "source"; sourceKey: MediaSourceKey }
+        | { origin: "source"; all: true },
+    ) =>
+      "origin" in scope
+        ? sports.removeSourceExclusion(scope)
+        : sports.removeExclusion(scope.owner, scope.id),
     onSuccess: () => {
-      void client.invalidateQueries({ queryKey: [QueryKeys.Sports] });
+      void refresh();
     },
+    onError: (error, scope) => {
+      if (
+        "removalKey" in scope &&
+        isAxiosError(error) &&
+        error.response?.status === 409
+      ) {
+        showNotification({
+          color: "yellow",
+          message:
+            "This exclusion changed or was removed. Check the list before trying again.",
+        });
+        return refresh();
+      }
+    },
+  });
+}
+
+export function useSportsSourceWanted() {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: (sourceKeys: MediaSourceKey[]) =>
+      sports.sourceWanted(sourceKeys),
+    onSuccess: (job) =>
+      refreshWhenJobFinishes(client, job.job_id, async () => {
+        await Promise.all([
+          client.invalidateQueries({ queryKey: [QueryKeys.Sports] }),
+          client.invalidateQueries({
+            queryKey: [QueryKeys.System, QueryKeys.Badges],
+          }),
+        ]);
+      }),
   });
 }
 

@@ -6,6 +6,8 @@ interface Props {
   onChange: (value: string | null) => void;
   includeSources?: boolean;
   showSingleSource?: boolean;
+  showSingleOwner?: boolean;
+  showLabel?: boolean;
 }
 
 export default function SourceFilter({
@@ -14,14 +16,18 @@ export default function SourceFilter({
   onChange,
   includeSources = true,
   showSingleSource = false,
+  showSingleOwner = false,
+  showLabel = false,
 }: Props) {
   const hasSource =
     showSingleSource &&
     [...labels.keys()].some((key) => key.startsWith("source:"));
-  if (labels.size <= 1 && !value && !hasSource) return null;
+  if (labels.size <= 1 && !value && !hasSource && !showSingleOwner) return null;
+  const label = includeSources ? "Source" : "Instance";
   return (
     <Select
-      aria-label={includeSources ? "Source" : "Instance"}
+      aria-label={label}
+      label={showLabel ? label : undefined}
       placeholder={includeSources ? "All sources" : "All instances"}
       data={Array.from(labels, ([value, label]) => ({ value, label }))}
       value={value}
@@ -29,6 +35,10 @@ export default function SourceFilter({
       allowDeselect
       searchable
       clearable
+      clearButtonProps={{
+        "aria-label": `Clear ${label.toLowerCase()} filter`,
+        "aria-hidden": false,
+      }}
       size="sm"
       w={156}
     />

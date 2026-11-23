@@ -6,6 +6,7 @@ import os
 from contextlib import contextmanager
 from dataclasses import dataclass
 
+from app.config import settings
 from app.database import get_audio_profile_languages
 from app.jobs_queue import JobFailed, jobs_queue
 from subtitles.tools.subsync_engines import (SubtitleDestinationChanged, regular_subtitle_version,
@@ -37,6 +38,16 @@ def validate_source_candidate(candidate, source, provider, *, target=None):
         raise JobFailed('The source video changed since the search. Search again.')
     if (provider, str(candidate.subtitle.id)) in get_blacklist_source(source.kind, target):
         raise JobFailed('This release has been excluded. Search again.')
+    if source.kind == 'sports_event':
+        from subtitles.utils import _get_scores
+
+        identity = ('title', 'year', 'group_title', 'event_date', 'season', 'episode')
+        if any(getattr(candidate.source, field) != getattr(source, field) for field in identity):
+            raise JobFailed('The sports event identity has changed. Search again.', reason='identity_changed')
+        minimum, _, _ = _get_scores('movie', settings.general.minimum_score_sports)
+        if candidate.subtitle.score is None or candidate.subtitle.score < int(minimum):
+            raise JobFailed('This release is below the current sports minimum score. Search again.',
+                            reason='below_minimum_score')
     return candidate.subtitle
 
 
@@ -67,7 +78,6 @@ def queue_source_download(source, provider, subtitle, hi, forced, original_forma
 
 
 def download_source_subtitle(source, provider, subtitle, hi, forced, original_format, job_id=None):
-    from app.config import settings
     from app.notifier import send_notifications_source
     from subtitles.manual import manual_download_subtitle
 
@@ -88,7 +98,7 @@ def download_source_subtitle(source, provider, subtitle, hi, forced, original_fo
 
 
 @contextmanager
-def manual_source_publication(source, destination, ownership_index, *, release=None):
+def manual_source_publication(source, destination, ownership_index, *, release=None, cleanup_outputs=False):
     def prepare():
         video_directory = os.path.dirname(source.path)
         custom_directory = get_target_folder(source.path, create=False)
@@ -99,7 +109,8 @@ def manual_source_publication(source, destination, ownership_index, *, release=N
         if not sync_output_owner_is_unique(source.path, destination, ownership_index=ownership_index):
             raise SubtitleDestinationChanged('The subtitle destination does not have one media owner')
 
-    with ownership_index.publication(source, prepare, destination=destination, release=release) as (
+    with ownership_index.publication(source, prepare, destination=destination, release=release,
+                                     cleanup_outputs=cleanup_outputs) as (
             current, connection, _):
         state = repository.item_state(current.item_id, connection) if current is not None else None
         if state is None or state.server_missing:
@@ -119,12 +130,13 @@ def write_source_subtitle(source, destination, content, *, written_paths, on_pub
 
     @contextmanager
     def publication():
-        with manual_source_publication(source, destination, ownership_index, release=release) as (current, connection):
+        with manual_source_publication(source, destination, ownership_index, release=release,
+                                       cleanup_outputs=True) as (current, connection):
             if candidate is not None:
                 # Read after any exclusion of this release, including one from a different item.
                 validate_source_candidate(candidate, current, candidate.subtitle.provider_name, target=connection)
             yield
 
     return write_subtitle_file(source.path, destination, content, written_paths=written_paths, on_publish=on_publish,
-                               publication_guard=publication, ownership_index=ownership_index,
+                               publication_guard=publication, invalidate_outputs=False,
                                mode=mode, capture_version=True)

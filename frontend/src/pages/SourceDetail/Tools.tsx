@@ -24,6 +24,7 @@ import {
   sourceDetailApi,
   sourceDetailKeys,
   sourceError,
+  type SourceItem,
   sourceItemHasFile,
   sourceOwnerAvailable,
   useRefreshSourceDetails,
@@ -39,10 +40,11 @@ import {
 } from "./SubtitleActions";
 
 export interface SourceToolsTarget {
-  kind: "show" | "movie" | "episode";
+  kind: "show" | SourceItem["kind"];
   id: number;
   source_id: number | null;
   library_id: number;
+  group_id?: number | null;
   path?: string | null;
 }
 
@@ -52,7 +54,12 @@ async function readTarget(target: SourceToolsTarget, signal: AbortSignal) {
     item.library_id === target.library_id;
   if (target.kind !== "show") {
     const item = await sourceDetailApi.item(target.id, signal, target.kind);
-    if (!ownsItem(item) || (target.path && item.path !== target.path)) {
+    if (
+      !ownsItem(item) ||
+      item.kind !== target.kind ||
+      (target.group_id !== undefined && item.group_id !== target.group_id) ||
+      (target.path && item.path !== target.path)
+    ) {
       throw new Error("The selected item moved or is no longer available.");
     }
     return [item];
@@ -90,6 +97,7 @@ function SourceToolsView({
         target.id,
         target.source_id,
         target.library_id,
+        target.group_id,
         target.path,
       ],
       queryFn: ({ signal }: { signal: AbortSignal }) =>

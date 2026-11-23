@@ -34,33 +34,33 @@ function useLibraryScope(kind: LibraryKind) {
   const { data: instances } = useArrInstances();
   const arr = useArrInstanceLabels(arrKind);
   const { data: sources } = useMediaSources();
-  const includeSources = settings?.media_sources?.visible === true;
   const configuredSources = useMemo(
     () =>
-      includeSources
-        ? (sources?.data ?? []).filter((source) =>
-            source.libraries.some(
-              (library) => library.content_kind === contentKind,
-            ),
-          )
-        : [],
-    [contentKind, includeSources, sources?.data],
+      (sources?.data ?? []).filter((source) =>
+        source.libraries.some(
+          (library) => library.content_kind === contentKind,
+        ),
+      ),
+    [contentKind, sources?.data],
   );
   const arrEnabled = isArrMediaRouteEnabled(arrKind, settings, instances);
-  const sourceOnly = configuredSources.length > 0 && !arrEnabled;
+  const arrAvailabilityKnown =
+    settings !== undefined &&
+    (!settings.general[`use_${arrKind}`] || instances !== undefined);
+  const sourceOnly =
+    configuredSources.length > 0 && arrAvailabilityKnown && !arrEnabled;
   const selected = useMemo(() => {
     const values = params.getAll("source");
     const legacy = params.get("instance");
     if (values.length === 0 && legacy) values.push(`arr:${legacy}`);
-    return [...new Set(values.filter(isOwnerKey))].filter((key) =>
-      key.startsWith("arr:") ? !sourceOnly : includeSources,
+    return [...new Set(values.filter(isOwnerKey))].filter(
+      (key) => key.startsWith("source:") || !sourceOnly,
     );
-  }, [includeSources, params, sourceOnly]);
-  const needsAttention =
-    includeSources && params.get("needs_attention") === "1";
+  }, [params, sourceOnly]);
+  const needsAttention = params.get("needs_attention") === "1";
   const scope = useMemo<LibraryScope>(
     () => ({
-      includeSources,
+      includeSources: true,
       sourceKeys:
         selected.length > 0
           ? [...selected].sort()
@@ -71,7 +71,7 @@ function useLibraryScope(kind: LibraryKind) {
             : [],
       needsAttention,
     }),
-    [includeSources, selected, sourceOnly, configuredSources, needsAttention],
+    [selected, sourceOnly, configuredSources, needsAttention],
   );
 
   const update = (keys: string[], attention: boolean) => {

@@ -139,7 +139,8 @@ describe.each([
             ...(!onlyAttention && (!keys.length || keys.includes("arr:5"))
               ? [arrRow]
               : []),
-            ...(params.get("sources") === "1" &&
+            ...(visible &&
+            params.get("sources") === "1" &&
             (!onlyAttention || attention) &&
             (!keys.length || keys.includes(`source:${sourceId}`))
               ? [sourceRow]
@@ -229,16 +230,17 @@ describe.each([
       const { list } = setup();
       const user = userEvent.setup();
       renderLibrary(`/${kind}`);
-      expect(
-        await screen.findByRole("link", { name: "Archive title" }),
-      ).toBeInTheDocument();
+      await waitFor(() => {
+        expect(
+          screen.getByRole("link", { name: "Archive title" }),
+        ).toBeVisible();
+        expect(screen.getByRole("link", { name: "Arr title" })).toBeVisible();
+        expect(list).toHaveBeenLastCalledWith("1", [], null);
+      });
       await user.click(screen.getByRole("button", { name: "Toggle filters" }));
       const ownerFilter = await openSelect(user, "Filter by source...");
       await user.click(
-        within(ownerFilter).getByRole("option", {
-          name: "Archive",
-          hidden: true,
-        }),
+        await within(ownerFilter).findByRole("option", { name: "Archive" }),
       );
       await waitFor(() =>
         expect(list).toHaveBeenLastCalledWith(
@@ -295,8 +297,16 @@ describe.each([
       });
       const user = userEvent.setup();
       renderLibrary(`/${kind}`);
+      await waitFor(() => {
+        expect(
+          screen.getByRole("checkbox", { name: "Select Arr title" }),
+        ).toBeEnabled();
+        expect(
+          screen.getByRole("checkbox", { name: "Select Archive title" }),
+        ).toBeEnabled();
+      });
       await user.click(
-        await screen.findByRole("checkbox", { name: "Select Archive title" }),
+        screen.getByRole("checkbox", { name: "Select Archive title" }),
       );
       await user.click(
         screen.getByRole("checkbox", { name: "Select Arr title" }),
@@ -450,7 +460,7 @@ describe.each([
       await waitFor(() => expect(scanSource).toHaveBeenCalledOnce());
     });
 
-    it("preserves the Arr-only list and keeps source filters out when sources are hidden", async () => {
+    it("preserves the Arr-only list and keeps source filters out with no sources", async () => {
       const { list } = setup({ visible: false });
       const user = userEvent.setup();
       renderLibrary(`/${kind}`);
@@ -463,7 +473,7 @@ describe.each([
       expect(
         screen.queryByRole("columnheader", { name: "Source" }),
       ).not.toBeInTheDocument();
-      expect(list).toHaveBeenCalledWith(null, [], null);
+      expect(list).toHaveBeenCalledWith("1", [], null);
       await user.click(screen.getByRole("button", { name: "Toggle filters" }));
       expect(
         screen.queryByRole("checkbox", { name: "Needs attention" }),

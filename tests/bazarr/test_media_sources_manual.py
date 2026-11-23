@@ -357,6 +357,76 @@ def test_episode_upload_and_plain_delete(client, arr_library, writes, isolated_j
     assert arr_library.scalar(sa.select(sa.func.count()).select_from(repository.Blacklist)) == 0
 
 
+@pytest.mark.parametrize('action', ['download', 'upload'])
+def test_manual_generated_sibling_cleanup_holds_refreshed_ownership(
+        client, arr_library, writes, isolated_jobs, tmp_path, monkeypatch, action):
+    from app.config import settings
+    from media_sources import indexer
+    from subtitles import manual
+    from subtitles.tools import subsync_engines
+
+    folder = tmp_path / 'Sidecars'
+    folder.mkdir()
+    monkeypatch.setattr(settings.general, 'subfolder', 'absolute')
+    monkeypatch.setattr(settings.general, 'subfolder_custom', str(folder))
+    source = _item(arr_library, tmp_path, 'movie')
+    other_source, other_library, other_root = add_source(arr_library, tmp_path, name='Other', folder='other')
+    saved = folder / Path(source.path).with_suffix('.en.srt').name
+    obsolete = saved.with_suffix('.alass.srt')
+    obsolete.write_bytes(pipeline.CONTENT)
+    protected = saved.with_suffix('.ffsubsync.srt')
+    protected.write_bytes(pipeline.CONTENT)
+    other = video(other_root / protected.with_suffix('.mkv').name)
+
+    snapshots = indexer.SourcePublicationOwnerIndex._registry_snapshot
+    publication = indexer.source_item_publication
+    cleanup = subsync_engines.quarantine_sync_outputs_after_mutation
+    admitted, active_connections, cleanup_guarded = [], [], []
+
+    def snapshot_then_admit(owners, target=None):
+        snapshot = snapshots(owners, target)
+        if target is None and not admitted:
+            admitted.append(add_item(arr_library, other_source, other_library, other))
+        return snapshot
+
+    @contextmanager
+    def observe_publication(*args, **kwargs):
+        with publication(*args, **kwargs) as (current, connection):
+            active_connections.append(connection)
+            try:
+                yield current, connection
+            finally:
+                active_connections.pop()
+
+    def observe_cleanup(video_path, source_path, ownership_index=None, **kwargs):
+        if str(source_path) == str(saved):
+            cleanup_guarded.append(bool(active_connections) and active_connections[-1].in_transaction())
+        return cleanup(video_path, source_path, ownership_index, **kwargs)
+
+    monkeypatch.setattr(indexer.SourcePublicationOwnerIndex, '_registry_snapshot', snapshot_then_admit)
+    monkeypatch.setattr(indexer, 'source_item_publication', observe_publication)
+    monkeypatch.setattr(indexer, 'quarantine_sync_outputs_after_mutation', observe_cleanup)
+    monkeypatch.setattr(subsync_engines, 'quarantine_sync_outputs_after_mutation', observe_cleanup)
+    url = f'/api/sources/items/{source.item_id}'
+    if action == 'download':
+        monkeypatch.setattr(manual, 'download_subtitles', lambda *args, **kwargs: None)
+        payload, _ = _search_for_download(client, monkeypatch, source)
+        response = client.post(f'{url}/manual', headers=HEADERS, json=payload)
+    else:
+        response = client.post(f'{url}/subtitles', headers=HEADERS, data={
+            'file': (BytesIO(pipeline.CONTENT), 'fixture.srt'), 'language': 'en', 'forced': 'False', 'hi': 'False',
+        })
+    assert response.status_code == 202
+    job = isolated_jobs._reserve_next_job()
+    assert job.job_id == response.get_json()['job_id']
+    assert isolated_jobs._run_job(job), job.error
+    assert len(admitted) == 1
+    assert cleanup_guarded == [True]
+    assert not obsolete.exists()
+    assert protected.read_bytes() == saved.read_bytes() == pipeline.CONTENT
+    assert [event.operation for event in writes] == [action]
+
+
 def _scanned_symlink(db, tmp_path, monkeypatch, kind, folder_mode):
     from app.config import settings
     from media_sources import repository, scanner
@@ -743,20 +813,29 @@ def test_exclude_protects_the_replacement_of_a_selected_provider_subtitle(
     assert not any(event.operation == 'delete' for event in writes)
 
 
+@pytest.mark.parametrize('folder_mode', ['current', 'relative'])
 @pytest.mark.parametrize('same_release', [True, False], ids=['same-release', 'different-release'])
 def test_postgres_release_exclusion_orders_writes_across_different_items(
-        client, arr_library, writes, isolated_jobs, tmp_path, monkeypatch, same_release):
+        client, arr_library, writes, isolated_jobs, tmp_path, monkeypatch, same_release, folder_mode):
     from time import monotonic, sleep
 
+    from app.config import settings
     from media_sources import indexer, manual as source_manual, repository
     from subtitles import manual
+    from utilities.helper import get_target_folder
 
     if arr_library.get_bind().dialect.name != 'postgresql':
         pytest.skip('SQLite serializes source write transactions itself')
+    monkeypatch.setattr(settings.general, 'subfolder', folder_mode)
+    monkeypatch.setattr(settings.general, 'subfolder_custom', 'Subs')
     downloading = _item(arr_library, tmp_path, 'movie', folder='downloads')
     excluding = _item(arr_library, tmp_path, 'movie', folder='exclusions')
-    download_path = Path(downloading.path).with_suffix('.en.srt')
-    exclude_path = Path(excluding.path).with_suffix('.en.srt')
+    assert downloading.source_id != excluding.source_id
+    download_dir = Path(get_target_folder(downloading.path) or Path(downloading.path).parent)
+    exclude_dir = Path(get_target_folder(excluding.path) or Path(excluding.path).parent)
+    assert download_dir != exclude_dir
+    download_path = download_dir / Path(downloading.path).with_suffix('.en.srt').name
+    exclude_path = exclude_dir / Path(excluding.path).with_suffix('.en.srt').name
     exclude_path.write_bytes(pipeline.CONTENT)
     indexer.index_item(excluding.item_id)
 
@@ -808,7 +887,19 @@ def test_postgres_release_exclusion_orders_writes_across_different_items(
                 assert arr_library.scalar(waiting, {'publisher': publisher_pid[0]})
                 assert exclude_path.exists()
             else:
-                assert removing.result(timeout=8).status_code == 204
+                if folder_mode == 'current':
+                    assert removing.result(timeout=8).status_code == 204
+                else:
+                    # The optional index refresh writes to the registry table after the exclusion commits.
+                    excluded = sa.select(repository.Blacklist.c.subs_id).where(
+                        repository.Blacklist.c.item_id == excluding.item_id)
+                    until = monotonic() + 8
+                    while not removing.done() and monotonic() < until:
+                        if arr_library.scalar(excluded) == excluded_release:
+                            break
+                        sleep(0.02)
+                    assert arr_library.scalar(excluded) == excluded_release
+                    assert not exclude_path.exists()
                 assert not download_path.exists()
         finally:
             allow_write.set()

@@ -180,7 +180,7 @@ def _manual_search(path, profile_id, providers, sceneName, title, media_type, *,
                 minimum_score_movie = (settings.general.minimum_score_sports
                                        if source is not None and source.kind == 'sports_event'
                                        else settings.general.minimum_score_movie)
-                min_score, _, _ = _get_scores(media_type, minimum_score_movie, minimum_score)
+                min_score, max_score, scores = _get_scores(media_type, minimum_score_movie, minimum_score)
                 subtitles = list_all_subtitles([video], language_set, pool, min_score=int(min_score),
                                                cancel=_stop_check(cancel),
                                                **({'on_outcome': record_outcome} if provider_outcomes is not None else {}))
@@ -198,8 +198,6 @@ def _manual_search(path, profile_id, providers, sceneName, title, media_type, *,
             logging.exception(f"BAZARR Error trying to get Subtitle list from provider for this file {path}: {repr(e)}")  # noqa: G004
         else:
             subtitles_list = []
-            minimum_score = settings.general.minimum_score
-            minimum_score_movie = settings.general.minimum_score_movie
             score_handler = DEFAULT_SCORES['episode'] if media_type == "series" else DEFAULT_SCORES['movie']
 
             for s in subtitles[video]:
@@ -230,8 +228,9 @@ def _manual_search(path, profile_id, providers, sceneName, title, media_type, *,
                 if s.hearing_impaired or normal:
                     matches.add('hearing_impaired')
 
-                _, max_score, scores = _get_scores(media_type, minimum_score_movie, minimum_score)
                 score, score_without_hash = compute_score(matches, s, video, hearing_impaired=s.hearing_impaired,)
+                if source is not None and source.kind == 'sports_event' and score < int(min_score):
+                    continue
 
                 if 'hash' not in matches:
                     not_matched = scores - matches

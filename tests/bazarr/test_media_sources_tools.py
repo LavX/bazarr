@@ -473,6 +473,28 @@ def test_source_tools_refuse_unindexed_sidecars_and_foreign_instances(toolbox):
     assert not toolbox.db.execute(sa.select(repository.History)).all()
 
 
+
+def test_source_sports_tools_require_authentication_and_the_selected_recording(toolbox):
+    event = pipeline._sports(toolbox.world)
+    path, _ = _sidecars(toolbox, event)
+    foreign = pipeline._episode(toolbox.world)
+    foreign_path, _ = _sidecars(toolbox, foreign)
+    url = f'/api/sources/items/{event.item_id}/subtitles/en/content'
+    sync_params = {'sourceItemId': event.item_id, 'subtitlesPath': str(path)}
+    mod = {'type': 'source', 'id': event.item_id, 'path': str(path), 'language': 'en', 'action': 'remove_tags'}
+
+    assert toolbox.client.get(url).status_code == 401
+    assert toolbox.client.put(url, json={'content': SRT}).status_code == 401
+    assert toolbox.client.get('/api/subtitles', query_string=sync_params).status_code == 401
+    assert toolbox.client.patch('/api/subtitles', json=mod).status_code == 401
+    assert _request(toolbox, event, foreign_path, 'remove_tags').status_code == 403
+    assert _request(toolbox, event, path, 'sync', reference=str(foreign_path)).status_code == 403
+    assert _request(toolbox, event, path, 'remove_tags', arr_instance_id=event.item_id).status_code == 400
+    assert _request(toolbox, event, path, 'ocr').status_code == 400
+    assert not toolbox.jobs.jobs_pending_queue
+    assert path.read_text() == foreign_path.read_text() == SRT
+
+
 def test_source_stream_token_cannot_reopen_a_replaced_video(toolbox, monkeypatch):
     from api.editor import editor
     from media_sources import repository
