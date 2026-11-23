@@ -559,6 +559,24 @@ def _create_table(bind) -> None:
     raise StateStoreError(failure)
 
 
+def _backfill_legacy_registrations(connection) -> None:
+    stored = connection.execute(sa.select(_state_table.c.revision, _state_table.c.document)
+                                .where(_state_table.c.id == ROW_ID).with_for_update()).first()
+    if stored is None:
+        return
+    try:
+        document = json.loads(stored.document)
+    except ValueError:
+        return
+    if not isinstance(document, dict):
+        return
+    rows = releases.read_rows(connection, manifests=releases.RELEASE_STATES)
+    plan = releases.backfill_legacy_registrations(document, rows)
+    if plan:
+        _commit_document(connection, stored.revision, json.dumps(document, sort_keys=True))
+        releases.apply_plan(connection, plan)
+
+
 def ensure_ready(bind=None) -> None:
     """Make sure the table and its row exist. Cheap after the first call.
 
@@ -580,6 +598,7 @@ def ensure_ready(bind=None) -> None:
                 if import_legacy_state(connection, legacy_state_path()):
                     logger.info("Imported the Plugin Hub state from %s into the database",
                                 legacy_state_path())
+                _backfill_legacy_registrations(connection)
 
         _sanitized(import_row)
         _ready[id(bind)] = bind

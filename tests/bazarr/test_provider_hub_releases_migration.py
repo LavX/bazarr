@@ -198,10 +198,12 @@ def _fields_of(engine, release_id):
                                   {"id": release_id}).scalar()
 
 
-@pytest.mark.parametrize("store_first", [False, True], ids=["alembic", "first-write"])
-@pytest.mark.parametrize("evidence", ["v270", "cached-entry", "different-active", "replaced", "replaced-cache"])
+@pytest.mark.parametrize("startup", ["alembic", "first-write", "release-rows"])
+@pytest.mark.parametrize("evidence", [
+    "v270", "cached-entry", "republished", "different-active", "replaced", "replaced-cache",
+])
 def test_community_release_slots_require_matching_legacy_catalog_evidence(
-        hub_store, hub_engine, monkeypatch, store_first, evidence):
+        hub_store, hub_engine, monkeypatch, startup, evidence):
     from plugin_platform_helpers import provider_manifest_v1, write_state
     from provider_hub import releases, service, state
     from provider_hub.kinds.subtitle_provider import SUBTITLE_PROVIDER_KIND
@@ -220,10 +222,13 @@ def test_community_release_slots_require_matching_legacy_catalog_evidence(
     bundles, interpreters = [], []
     for index, manifest in enumerate(manifests):
         version = manifest["version"]
-        if evidence == "cached-entry":
+        if evidence in {"cached-entry", "republished"}:
+            if evidence == "republished":
+                manifest["source"]["catalog_url"] = other
             entries[version] = {"source": source_id, "provider_id": plugin_id, "version": version,
                                 "resolved_commit": source["resolved_commit"],
-                                "manifest": {**manifest, "source": {**manifest["source"], "catalog_url": url}}}
+                                "manifest": {**manifest, "source": {**manifest["source"],
+                                             "catalog_url": other if evidence == "republished" else url}}}
         else:
             matches = evidence == "v270" or (evidence == "different-active" and index == 1)
             manifest["source"]["catalog_url"] = url if matches else other
@@ -237,6 +242,14 @@ def test_community_release_slots_require_matching_legacy_catalog_evidence(
         interpreter.touch()
         bundles.append(str(bundle))
         interpreters.append(str(interpreter))
+
+    if evidence == "replaced":
+        refreshed = provider_manifest_v1(plugin_id, "2.0.0")
+        refreshed["source"].update(catalog_url=url, commit="c" * 40)
+        source["resolved_commit"] = refreshed["source"]["commit"]
+        entries[refreshed["version"]] = {"source": source_id, "provider_id": plugin_id,
+                                         "version": refreshed["version"], "manifest": refreshed,
+                                         "resolved_commit": source["resolved_commit"]}
 
     write_state(hub_store.legacy_state_path(), catalog_sources={source_id: source}, catalog_entries=entries,
                 installations={plugin_id: {
@@ -252,16 +265,39 @@ def test_community_release_slots_require_matching_legacy_catalog_evidence(
     hub_store.ensure_ready()
     if evidence == "replaced-cache":
         assert state.load_state()["catalog_entries"] == {}
-    if store_first:
+    if startup == "first-write":
         state.mutate_state(lambda document: None)
-    with hub_store.write_transaction(hub_engine) as connection:
-        assert _migration().move_state_into_releases(connection) == (0 if store_first else 2)
+    if startup == "release-rows":
+        # Development had already split these releases into rows but had never stored registration fields.
+        _, text = hub_store.read_document()
+        document, old_plan = releases.split(json.loads(text), [])
+        for values, _ in old_plan.inserts:
+            values["fields"] = json.dumps([field for field in json.loads(values["fields"])
+                                           if not field.startswith("catalog_registration:")])
+        with hub_engine.begin() as connection:
+            connection.execute(sa.text("UPDATE provider_hub_state SET document = :document WHERE id = 1"),
+                               {"document": json.dumps(document)})
+            releases.apply_plan(connection, old_plan)
+        hub_store._ready.clear()
+        hub_store.ensure_ready()
+        revision, _ = hub_store.read_document()
+        hub_store._ready.clear()
+        hub_store.ensure_ready()
+        assert hub_store.read_document()[0] == revision
+    else:
+        with hub_store.write_transaction(hub_engine) as connection:
+            assert _migration().move_state_into_releases(connection) == (2 if startup == "alembic" else 0)
     active, = hub_store.list_releases(plugin_id, states=(releases.ACTIVE,))
     staged, = hub_store.list_releases(plugin_id, states=(releases.STAGED,))
-    known_active = evidence in ("v270", "cached-entry")
-    assert (active.source_id, active.catalog_registration) == ((source_id, "legacy") if known_active else (None, None))
+    known_active = evidence in ("v270", "cached-entry", "republished")
+    unresolved = "legacy-unverified" if startup == "release-rows" else None
+    active_source = source_id if known_active or startup == "release-rows" else None
+    assert (active.source_id, active.catalog_registration) == (active_source, "legacy" if known_active else unresolved)
     assert staged.source_id == source_id
-    assert staged.catalog_registration == (None if evidence.startswith("replaced") else "legacy")
+    assert staged.catalog_registration == (unresolved if evidence.startswith("replaced") else "legacy")
+    if evidence == "replaced":
+        assert state.load_state()["catalog_entries"][refreshed["version"]]["source"] == source_id
+        assert service.offered_update_version(plugin_id) is None
     expected = [] if evidence.startswith("replaced") else [plugin_id]
     assert service.activate_staged_installations() == expected
     current, = hub_store.list_releases(plugin_id, states=(releases.ACTIVE,))

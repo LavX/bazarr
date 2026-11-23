@@ -503,7 +503,8 @@ def test_install_is_queued_and_answers_at_once(queue, hub_catalog, monkeypatch):
     assert job.job_name == "Installing provider Example"
     assert (job.module, job.func) == ("provider_hub.jobs", "install_provider")
     assert job.kwargs == {"source_id": "community", "provider_id": "examplehub", "version": "1.0.0",
-                          "name": "Example", "entry_key": "community:examplehub:1.0.0"}
+                          "name": "Example", "entry_key": "community:examplehub:1.0.0",
+                          "catalog_registration": "legacy"}
 
 
 def test_an_install_naming_no_catalog_entry_is_refused_and_queues_nothing(queue, hub_catalog):

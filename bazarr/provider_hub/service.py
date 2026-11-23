@@ -3834,7 +3834,7 @@ def _same_release_owner(state, release: releases.SlotIdentity | releases.Release
     if origin == "local":
         return True
     return (origin == "catalog" and isinstance((state.get("catalog_sources") or {}).get(source_id), dict)
-            and releases.matches_catalog_registration(state, source_id, release.catalog_registration))
+            and release.catalog_registration == releases.catalog_registration(state, source_id))
 
 
 def _rollback_owner_recorded(release: releases.SlotIdentity | releases.Release | None) -> bool:
@@ -3872,22 +3872,17 @@ def _restore_active_source(state, plugin_id, row) -> None:
         row.pop("demoted_commit", None)
         return
     owner = active.source_id, active.origin
+    row.pop("demoted_commit", None)
+    row.pop("trust_note", None)
     if isinstance(previous, dict) and (
             (previous.get("source_id"), previous.get("origin")) == owner or (
                 active.source_id == OFFICIAL_CATALOG_SOURCE_ID and previous.get("source_id") is None
                 and previous.get("trust_note") and previous.get("source_bound"))):
-        row.pop("demoted_commit", None)
-        row.pop("trust_note", None)
         row.update(_installation_source(previous))
         row["trusted"] = bool(previous.get("trusted"))
     else:
-        # Old stages did not save the active release's trust decision.
-        if (row.get("source_id"), row.get("origin")) != owner and not (
-                active.source_id == OFFICIAL_CATALOG_SOURCE_ID and row.get("demoted_commit")):
-            row.update(source_id=active.source_id, origin=active.origin)
-            row.pop("demoted_commit", None)
-            row.pop("trust_note", None)
-        row["trusted"] = False
+        # With no saved decision, only the active release's recorded ownership can be restored.
+        row.update(source_id=active.source_id, origin=active.origin, trusted=False)
     row["source_bound"] = True
     if active.source_id != OFFICIAL_CATALOG_SOURCE_ID:
         row["trusted"] = False

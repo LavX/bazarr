@@ -2035,6 +2035,26 @@ def test_replacing_catalog_url_keeps_cached_releases_out_of_the_new_registration
     assert (original_data / "settings").read_text() == "private catalog A data"
 
 
+def test_queued_catalog_update_stages_the_verified_registrations_data(catalog_data_owner, monkeypatch):
+    from provider_hub import datadir, jobs, releases, state_store
+    from provider_hub.state import provider_hub_dir
+
+    _, _, _, original_data, _ = catalog_data_owner
+    plugin_id = "examplehub"
+    active, = state_store.list_releases(plugin_id, states=(releases.ACTIVE,))
+    queued = []
+    monkeypatch.setattr(jobs, "_enqueue", lambda _label, action, fields: queued.append((action, fields)) or 42)
+    monkeypatch.setattr(jobs, "_checkpoint", lambda _job_id: lambda _message: None)
+    assert jobs.queue_update(plugin_id) == 42
+    (action, fields), = queued
+    assert getattr(jobs, action)(**fields)["staged_version"] == "1.1.0"
+    staged, = state_store.list_releases(plugin_id, states=(releases.STAGED,))
+    assert (staged.source_id, staged.catalog_registration) == (active.source_id, active.catalog_registration)
+    copied = datadir.release_path(provider_hub_dir(), plugin_id, staged.data_key)
+    assert copied != original_data
+    assert (copied / "settings").read_text() == (original_data / "settings").read_text() == "private catalog A data"
+
+
 @pytest.mark.parametrize("already_active", [False, True])
 def test_reinstalling_the_same_bundle_uses_the_new_catalog_registration(catalog_data_owner, monkeypatch, already_active):
     from plugin_platform_helpers import provider_manifest_v2
