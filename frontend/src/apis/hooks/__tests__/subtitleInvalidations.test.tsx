@@ -25,6 +25,7 @@ import {
   usePromoteSyncSubtitle,
   useSubtitleAction,
   useSubtitleCreate,
+  useSubtitleScoreOverride,
 } from "@/apis/hooks/subtitles";
 import { QueryKeys } from "@/apis/queries/keys";
 import api from "@/apis/raw";
@@ -43,6 +44,7 @@ vi.mock("@/apis/raw", () => ({
     },
     subtitles: {
       modify: vi.fn().mockResolvedValue(undefined),
+      setScoreOverride: vi.fn().mockResolvedValue(undefined),
       batch: vi.fn().mockResolvedValue({ queued: 1, skipped: 0, errors: [] }),
       promoteSyncOutput: vi.fn().mockResolvedValue({
         sourceLanguage: "en",
@@ -88,6 +90,37 @@ function capturedKeys(spy: ReturnType<typeof vi.spyOn>) {
     return arg?.queryKey ?? [];
   });
 }
+
+describe("useSubtitleScoreOverride - sports", () => {
+  it("refreshes sports details, history and library without scheduling movie scores", async () => {
+    const { client, wrapper, spy } = makeClientAndWrapper();
+    const keys = [
+      [QueryKeys.Sports, "events", 51, 42],
+      [QueryKeys.Sports, "history", { owner: 42 }],
+      [QueryKeys.Sports, "leagues"],
+    ];
+    keys.forEach((key) => client.setQueryData(key, { data: [] }));
+    const { result } = renderHook(() => useSubtitleScoreOverride(), {
+      wrapper,
+    });
+    result.current.mutate({
+      type: "sports",
+      id: 61,
+      path: "/sports/race.en.srt",
+      score: 0,
+      // eslint-disable-next-line camelcase
+      arr_instance_id: 42,
+    });
+
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+    keys.forEach((key) =>
+      expect(client.getQueryState(key)?.isInvalidated).toBe(true),
+    );
+    // A mistaken Movies branch also schedules a delayed scored-range refresh.
+    await new Promise((resolve) => setTimeout(resolve, 1200));
+    expect(capturedKeys(spy)).toEqual([[QueryKeys.Sports]]);
+  });
+});
 
 // ---------------------------------------------------------------------------
 // useSubtitleAction

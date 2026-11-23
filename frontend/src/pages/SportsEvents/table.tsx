@@ -189,6 +189,10 @@ const EventSubtitleBadge: FunctionComponent<{
 
   const isEmbedded = !subtitle.path;
   const isCombinedOutput = !missing && isCombinedOutputSubtitle(subtitle);
+  const manualScore =
+    !missing && subtitle.path
+      ? event.manual_subtitle_scores?.[subtitle.path]
+      : undefined;
 
   const [compareOpened, setCompareOpened] = useState(false);
 
@@ -263,6 +267,11 @@ const EventSubtitleBadge: FunctionComponent<{
       title={subtitle.path || describeEmbeddedTrack("Embedded", subtitle.codec)}
     >
       {subtitle.language ?? subtitle.code2}
+      {manualScore != null && (
+        <span aria-label="Manual score" style={{ marginLeft: 4 }}>
+          {manualScore}%
+        </span>
+      )}
     </Badge>
   );
 
