@@ -4,7 +4,6 @@
 A search runs through the shared pipeline with the item's ``SourceItemContext``. Its history is written here,
 by the caller that did the work, never inside ``process_subtitle``.
 """
-import ast
 import logging
 import os
 import threading
@@ -365,16 +364,6 @@ def queue_search(item_id):
         raise
 
 
-def _missing_languages(item):
-    languages = []
-    for language in ast.literal_eval(item.missing_subtitles or '[]'):
-        if language is not None:
-            hi_ = "True" if language.endswith(':hi') else "False"
-            forced_ = "True" if language.endswith(':forced') else "False"
-            languages.append((language.split(":")[0], hi_, forced_))
-    return languages
-
-
 def _language_code(language, hi, forced):
     return language + (':hi' if hi == 'True' else ':forced' if forced == 'True' else '')
 
@@ -423,10 +412,11 @@ def search_source_item(item_id, job_id=None, *, translation_gate=True, expected_
     if item is None or not context.same_item(item):
         # Deleted between resolving it and reading it.
         raise JobFailed('The item no longer exists', reason='not_found')
-    languages = _missing_languages(item)
+    from .translation import missing_language_candidates, queue_missing_translations
+
+    languages = missing_language_candidates(context)
     covered = set()
     if translation_gate and languages:
-        from .translation import queue_missing_translations
 
         try:
             covered = queue_missing_translations(context)
