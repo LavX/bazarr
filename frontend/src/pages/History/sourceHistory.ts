@@ -23,13 +23,12 @@ export function useHistorySources(arrKind: "sonarr" | "radarr") {
   const scope = `${arrKind}:${includeSources}:${sourceOnly}`;
   const [nativeScope, setNativeScope] = useState<string | null>(null);
   const nativeFallback = nativeScope === scope;
-  const key = params.get("source");
-  const selected =
-    includeSources &&
-    isSourceKey(key) &&
-    (!sourceOnly || key.startsWith("source:"))
-      ? key
-      : null;
+  const savedKeys = useMemo(
+    () => (includeSources ? params.getAll("source").filter(isSourceKey) : []),
+    [includeSources, params],
+  );
+  const arrKeys = savedKeys.filter((key) => key.startsWith("arr:"));
+  const selected = savedKeys.length === 1 ? savedKeys[0] : null;
   const sourceNames = useMemo(() => {
     const names = new Map<MediaSourceKey, string>();
     for (const source of sources.data?.data ?? []) {
@@ -50,9 +49,11 @@ export function useHistorySources(arrKind: "sonarr" | "radarr") {
   const options: History.PageOptions = {
     includeSources,
     sourceKeys: nativeFallback
-      ? undefined
-      : selected
-        ? [selected]
+      ? arrKeys.length
+        ? arrKeys
+        : undefined
+      : savedKeys.length
+        ? savedKeys
         : sourceOnly
           ? [removedKey, ...sourceNames.keys()]
           : undefined,
@@ -62,19 +63,31 @@ export function useHistorySources(arrKind: "sonarr" | "radarr") {
     (data: History.Page<History.SourceRow | Wanted.ArrRow>) => {
       const fallback = data.source_keys === undefined;
       setNativeScope(fallback ? scope : null);
-      if (fallback && selected) {
+      if (fallback && savedKeys.some((key) => key.startsWith("source:"))) {
         setParams(
           (current) => {
             const next = new URLSearchParams(current);
+            const retained = current
+              .getAll("source")
+              .filter((key) => !isSourceKey(key) || key.startsWith("arr:"));
             next.delete("source");
-            next.delete("page");
+            retained.forEach((key) => next.append("source", key));
+            // Folder keys already match no Arr rows in a native response.
+            // Removing them changes the filter only if no Arr keys remain.
+            if (
+              !retained.some(
+                (key) => isSourceKey(key) && key.startsWith("arr:"),
+              )
+            ) {
+              next.delete("page");
+            }
             return next;
           },
           { replace: true },
         );
       }
     },
-    [scope, selected, setParams],
+    [scope, savedKeys, setParams],
   );
 
   return {
@@ -171,5 +184,26 @@ export function useHistorySourcePresentation<
     refetch,
   ]);
 
-  return sources.getPresentation(data);
+  const restoringSourceOnly =
+    sources.sourceOnly &&
+    nativeFallback &&
+    sources.options.sourceKeys === undefined &&
+    data?.source_keys !== undefined;
+
+  return {
+    ...sources.getPresentation(data),
+    query:
+      restoringSourceOnly && (query.isSuccess || query.isRefetchError)
+        ? {
+            ...query,
+            data: { ...query.data, data: [], total: 0 },
+            paginationStatus: {
+              ...query.paginationStatus,
+              totalCount: 0,
+              pageCount: 0,
+              isPageLoading: true,
+            },
+          }
+        : query,
+  };
 }

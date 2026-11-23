@@ -51,13 +51,15 @@ const SeriesHistoryView: FunctionComponent = () => {
     sources.options,
     sources.enabled,
   );
-  const { labels, nativeFallback, selected } = useHistorySourcePresentation(
-    sources,
-    query,
-  );
+  const {
+    labels,
+    nativeFallback,
+    selected,
+    query: presentedQuery,
+  } = useHistorySourcePresentation(sources, query);
   const { names: arrNames, defaultId: defaultArr } = sources.arrOwners;
   const showBadge = !nativeFallback;
-  const rows = query.data?.data;
+  const rows = presentedQuery.data?.data;
   const anchors = useMemo(() => historyAnchors(rows ?? []), [rows]);
 
   const columns = useMemo<ColumnDef<History.EpisodeRow>[]>(
@@ -250,7 +252,7 @@ const SeriesHistoryView: FunctionComponent = () => {
   return (
     <HistoryView
       name="Series"
-      query={query}
+      query={presentedQuery}
       columns={columns}
       toolbar={
         <Group justify="flex-end" mb="xs">

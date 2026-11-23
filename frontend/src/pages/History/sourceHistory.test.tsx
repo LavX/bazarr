@@ -1,4 +1,5 @@
 /* eslint-disable camelcase -- API field names. */
+import { Profiler } from "react";
 import userEvent from "@testing-library/user-event";
 import { http, HttpResponse } from "msw";
 import { vi } from "vitest";
@@ -810,6 +811,122 @@ describe.each(cases)(
       },
     );
 
+    it.each([
+      { saved: ["arr:6"], retained: ["arr:6"] },
+      { saved: ["arr:5", "arr:6"], retained: ["arr:5", "arr:6"] },
+      {
+        saved: ["source:8", "arr:6", "source:removed"],
+        retained: ["arr:6"],
+      },
+      {
+        saved: ["source:removed", "arr:5", "source:8", "arr:6"],
+        retained: ["arr:5", "arr:6"],
+      },
+    ])(
+      "retains native owner scope and page for $saved",
+      async ({ saved, retained }) => {
+        const requests = vi.fn();
+        configure({ emptyFolder: true });
+        const params = new URLSearchParams({ page: "2" });
+        saved.forEach((key) => params.append("source", key));
+        window.history.replaceState(null, "", `/?${params}`);
+        server.use(
+          http.get(`/api/${api}/history`, ({ request }) => {
+            const params = new URL(request.url).searchParams;
+            const keys = params.getAll("source_key[]");
+            requests(
+              params.get("sources"),
+              keys,
+              params.get("start"),
+              params.get("length"),
+            );
+            return HttpResponse.json({
+              data: [native, secondOwner].filter(
+                (row) => !keys.length || keys.includes(row.source_key),
+              ),
+              total: 75,
+            });
+          }),
+        );
+        customRender(<View />);
+
+        await waitFor(() => expect(queryClient.isFetching()).toBe(0));
+        expect(
+          await screen.findByRole("link", { name: "Second native title" }),
+        ).toBeVisible();
+        expect(requests).toHaveBeenLastCalledWith("1", retained, "25", "25");
+        expect(requests.mock.calls.every(([, keys]) => keys.length > 0)).toBe(
+          true,
+        );
+        expect(
+          new URLSearchParams(window.location.search).getAll("source"),
+        ).toEqual(retained);
+        expect(new URLSearchParams(window.location.search).get("page")).toBe(
+          "2",
+        );
+        expect(
+          screen.queryByRole("columnheader", { name: "Source" }),
+        ).not.toBeInTheDocument();
+      },
+    );
+
+    it("keeps saved Arr scope when source-only history recovers", async () => {
+      const requests = vi.fn();
+      let sourceHistoryRestored = false;
+      configure({ nativeEnabled: false, emptyFolder: true });
+      window.history.replaceState(null, "", "/?source=arr%3A6&page=2");
+      server.use(
+        http.get(`/api/${api}/history`, ({ request }) => {
+          const params = new URL(request.url).searchParams;
+          const keys = params.getAll("source_key[]");
+          requests(params.get("sources"), keys, params.get("start"));
+          return HttpResponse.json({
+            data: keys.includes("arr:6") ? [secondOwner] : [native, live],
+            total: 75,
+            ...(sourceHistoryRestored ? { source_keys: ["source:8"] } : {}),
+          });
+        }),
+      );
+      customRender(<View />);
+      expect(
+        await screen.findByRole("link", { name: "Second native title" }),
+      ).toBeVisible();
+      await waitFor(() => expect(queryClient.isFetching()).toBe(0));
+      sourceHistoryRestored = true;
+      await act(async () => {
+        const reducer = createDefaultReducer().find(
+          ({ key }) => key === "source-item",
+        );
+        if (reducer?.key !== "source-item")
+          throw new Error("source-item reducer is missing");
+        reducer.any?.();
+      });
+      await waitFor(() =>
+        expect(
+          screen.getByRole("columnheader", { name: "Source" }),
+        ).toBeVisible(),
+      );
+      await waitFor(() => expect(queryClient.isFetching()).toBe(0));
+      expect(
+        requests.mock.calls.every(
+          ([sources, keys, start]) =>
+            sources === "1" &&
+            keys.length === 1 &&
+            keys[0] === "arr:6" &&
+            start === "25",
+        ),
+      ).toBe(true);
+      expect(
+        screen.getByRole("link", { name: "Second native title" }),
+      ).toBeVisible();
+      expect(screen.queryByText("Archive item")).not.toBeInTheDocument();
+      expect(screen.queryByText("Native title")).not.toBeInTheDocument();
+      expect(new URLSearchParams(window.location.search).get("source")).toBe(
+        "arr:6",
+      );
+      expect(new URLSearchParams(window.location.search).get("page")).toBe("2");
+    });
+
     it("clears the mounted selection after the final source event disappears", async () => {
       const user = userEvent.setup();
       const requests = vi.fn();
@@ -939,6 +1056,81 @@ describe.each(cases)(
         screen.queryByRole("columnheader", { name: "Source" }),
       ).not.toBeInTheDocument();
       expect(screen.getByRole("button", { name: "Exclude" })).toBeEnabled();
+    });
+
+    it("withholds mixed rows and totals while restoring a source-only filter", async () => {
+      const requests = vi.fn();
+      const mixedCommits = vi.fn();
+      let sourceHistoryRestored = false;
+      let finishScopedRefresh: (() => void) | undefined;
+      const scopedRefresh = new Promise<void>((resolve) => {
+        finishScopedRefresh = resolve;
+      });
+      configure({ nativeEnabled: false, emptyFolder: true });
+      server.use(
+        http.get(`/api/${api}/history`, async ({ request }) => {
+          const keys = new URL(request.url).searchParams.getAll("source_key[]");
+          requests(keys);
+          if (!sourceHistoryRestored) {
+            return HttpResponse.json({
+              data: keys.length ? [] : [native],
+              total: keys.length ? 0 : 1,
+            });
+          }
+          if (keys.length) await scopedRefresh;
+          return HttpResponse.json({
+            data: keys.length ? [live] : [secondOwner, live],
+            total: keys.length ? 1 : 75,
+            source_keys: ["source:8"],
+          });
+        }),
+      );
+      customRender(
+        <Profiler
+          id="source-only-history"
+          onRender={() => {
+            if (
+              sourceHistoryRestored &&
+              (screen.queryByText("Second native title") ||
+                screen.queryByText("Show 1 to 25 of 75 entries"))
+            )
+              mixedCommits();
+          }}
+        >
+          <View />
+        </Profiler>,
+      );
+      expect(
+        await screen.findByRole("link", { name: "Native title" }),
+      ).toBeVisible();
+      await waitFor(() => expect(queryClient.isFetching()).toBe(0));
+      sourceHistoryRestored = true;
+      try {
+        await act(async () => {
+          const reducer = createDefaultReducer().find(
+            ({ key }) => key === "source-item",
+          );
+          if (reducer?.key !== "source-item")
+            throw new Error("source-item reducer is missing");
+          reducer.any?.();
+        });
+        await waitFor(() =>
+          expect(requests).toHaveBeenLastCalledWith([
+            "source:removed",
+            "source:8",
+          ]),
+        );
+        expect(mixedCommits).not.toHaveBeenCalled();
+        expect(
+          screen.queryByText("Second native title"),
+        ).not.toBeInTheDocument();
+      } finally {
+        finishScopedRefresh?.();
+      }
+      expect(await screen.findByText("Archive item")).toBeVisible();
+      expect(screen.queryByText("Native title")).not.toBeInTheDocument();
+      expect(await screen.findByText("Show 1 to 1 of 1 entries")).toBeVisible();
+      expect(mixedCommits).not.toHaveBeenCalled();
     });
 
     it("preserves a selected source on an empty page when kind-wide metadata still has source history", async () => {
