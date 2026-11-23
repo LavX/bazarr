@@ -731,12 +731,13 @@ def test_a_bug_in_the_dispatcher_leaves_the_job_awaiting_a_retry_and_not_running
         monkeypatch.setattr(HistoryStore, "open_job", fail_dispatch)
     else:
         monkeypatch.setattr(Dispatcher, "_plan", fail_dispatch)
+    spec = make_spec(retry_setup_errors=True)
     if stage == "after-history":
         with pytest.raises(RuntimeError, match="a bug"):
-            env.dispatcher().run(make_spec())
+            env.dispatcher().run(spec)
     else:
         with pytest.raises(DispatchFailed) as caught:
-            env.dispatcher().run(make_spec())
+            env.dispatcher().run(spec)
         assert (caught.value.error_class, caught.value.retry_later) == ("internal", True)
         assert isinstance(caught.value.__cause__, RuntimeError)
         assert str(caught.value.__cause__) == "a bug"
