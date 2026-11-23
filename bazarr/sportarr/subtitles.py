@@ -360,7 +360,7 @@ def sports_history(
     return row
 
 
-def _remove_superseded_sports_subtitle(path, previous_artifact, written_paths,
+def _remove_superseded_sports_subtitle(path, previous_artifact, written_paths, is_upgrade,
                                       on_publish=None):
     """Delete the subtitle an upgrade replaced, when it lands under a new name.
 
@@ -377,7 +377,7 @@ def _remove_superseded_sports_subtitle(path, previous_artifact, written_paths,
     A removed file is handed to ``on_publish``; the caller decides when the
     media servers hear about it.
     """
-    if not (previous_artifact and written_paths):
+    if not (is_upgrade and previous_artifact and written_paths):
         return
     previous_path = previous_artifact[0]
     if not previous_path:
@@ -516,12 +516,11 @@ def save_sports_subtitle(
 
                 validate_replacement_state(replacement_state, publication_destination)
             yield session, check
-            if pending_upgrade:
-                # Keep the owner and event locked over both the write and the old-file removal.
-                _remove_superseded_sports_subtitle(
-                    path, previous_artifact, written_paths,
-                    on_publish=lambda removed: changes.append(("delete", removed)),
-                )
+            # Keep the owner and event locked over both the write and the old-file removal.
+            _remove_superseded_sports_subtitle(
+                path, previous_artifact, written_paths, pending_upgrade,
+                on_publish=lambda removed: changes.append(("delete", removed)),
+            )
         pending_upgrade = False
         pending_replacement = False
 

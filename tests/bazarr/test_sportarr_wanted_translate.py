@@ -9,6 +9,12 @@ Bazarr never got its translation. It stayed missing forever and every
 subsequent wanted scan re-searched providers for it.
 """
 
+import sqlalchemy as sa
+from test_sportarr_indexer import indexed_library  # noqa: F401
+from test_sportarr_kind_migration import migration_engine  # noqa: F401
+from test_sportarr_manual import manual_library  # noqa: F401
+from test_sportarr_profile_hooks import profile_library  # noqa: F401
+
 
 def test_the_sports_hook_exists():
     from sportarr import profile_hooks
@@ -68,15 +74,22 @@ def test_the_source_score_guard_uses_the_movie_scale():
     assert "settings.translator.min_source_score" in source
 
 
-def test_no_history_row_proceeds_with_the_translation():
-    """A hand-placed subtitle predates history. The series path treats that as
-    exactly at threshold rather than silently falling back to providers."""
-    import inspect
-
+def test_no_history_row_proceeds_with_the_translation(profile_library, languages_loaded, monkeypatch):  # noqa: F811
+    """An indexed source without history can be translated at a positive threshold."""
+    from app.config import settings
+    from app.database import TableHistorySports
     from sportarr import profile_hooks
 
-    source = inspect.getsource(profile_hooks._source_score_below_threshold)
-    assert "if record is None:\n        return False" in source
+    library = profile_library
+    monkeypatch.setattr(settings.translator, "min_source_score", 90)
+    assert library.session.execute(sa.select(TableHistorySports.id)).first() is None
+
+    assert profile_hooks.translate_from_existing(library.base.context, "hu", translation_gate=True) is True
+
+    (job,) = library.queue.jobs_pending_queue
+    assert job.module == "subtitles.tools.translate.main"
+    assert job.kwargs["source_srt_file"] == str(library.source)
+    assert job.kwargs["to_lang"] == "hu"
 
 
 def test_a_deleted_translation_can_be_requeued():
