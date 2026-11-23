@@ -483,44 +483,11 @@ def test_editor_backend_lookup_preserves_the_original_error(env, monkeypatch):
     assert not env.requests()
 
 
-@pytest.mark.parametrize("operation", ["get_by_job", "finish_job"])
-def test_history_database_failure_keeps_a_dispatch_retry_recoverable(env, monkeypatch, operation):
-    import sqlalchemy as sa
-
-    from subtitles.tools.translate.runtime import service
-    from subtitles.tools.translate.runtime.dispatch import Dispatcher
-    from subtitles.tools.translate.runtime.history import HistoryStore
-
-    env.ai_engine()
-
-    def unavailable(*args, **kwargs):
-        raise RuntimeError("could not read the selected backend")
-
-    def history_error(self, *args, **kwargs):
-        self._session.execute(sa.text("SELECT * FROM missing_test_history_table"))
-
-    with monkeypatch.context() as failure:
-        failure.setattr(Dispatcher, "_candidates", unavailable)
-        failure.setattr(HistoryStore, operation, history_error)
-        with pytest.raises(RuntimeError, match="could not read the selected backend"):
-            service.translate_lines(["Hello"], "en", "hu", dispatcher=env.dispatcher())
-
-    job = env.last_job()
-    assert (job.state, job.error_class) == ("awaiting_retry", "internal")
-    assert job.queue_job_id is None and not env.requests()
-    result = service.translate_lines(["Hello"], "en", "hu", dispatcher=env.dispatcher())
-    assert result.lines == ["[hu] Hello"]
-    assert (env.last_job().id, env.last_job().state) == (job.id, "completed")
-    assert env.history(job)["status"] == "completed"
-
-
-def test_an_editor_planner_cannot_release_another_queue_jobs_claim(env, monkeypatch):
-    from threading import Event, Thread, current_thread
-
+@pytest.fixture
+def editor_runtime_queue(env, monkeypatch):
     from app import jobs_queue as queue_module
     from subtitles.tools.translate import availability, editor
     from subtitles.tools.translate.runtime import service
-    from subtitles.tools.translate.runtime.dispatch import Dispatcher
     from utilities import job_dedupe
 
     env.ai_engine()
@@ -535,7 +502,72 @@ def test_an_editor_planner_cannot_release_another_queue_jobs_claim(env, monkeypa
     monkeypatch.setattr(queue, "_lane_has_room", lambda job: True)
     monkeypatch.setattr(availability, "runtime_active", lambda: True)
     monkeypatch.setattr(service, "Dispatcher", env.dispatcher)
+    return queue
 
+
+@pytest.mark.parametrize("operation", ["lookup", "update"])
+def test_history_database_failure_keeps_a_dispatch_retry_recoverable(
+        env, monkeypatch, editor_runtime_queue, operation, caplog):
+    import sqlalchemy as sa
+
+    from app.database import TableTranslationHistory
+    from subtitles.tools.translate import editor
+    from subtitles.tools.translate.runtime.dispatch import Dispatcher
+    from subtitles.tools.translate.runtime.history import HistoryStore
+
+    lines = [{"position": 5, "line": "Hello"}]
+    queue = editor_runtime_queue
+    first = editor.enqueue_editor_translation(lines, "en", "hu")
+    job = queue._reserve_next_job()
+    assert job.job_id == first
+    failed_operations = []
+
+    def unavailable(*args, **kwargs):
+        raise RuntimeError("could not read the selected backend")
+
+    def fail_lookup(self, job_id):
+        failed_operations.append(job_id)
+        self._session.execute(sa.text("SELECT missing_test_column FROM table_translation_history"))
+
+    def fail_update(mapper, connection, target):
+        if target.status == "awaiting_retry":
+            failed_operations.append(target.job_id)
+            connection.exec_driver_sql("UPDATE table_translation_history SET missing_test_column = 1")
+
+    with monkeypatch.context() as failure:
+        failure.setattr(Dispatcher, "_candidates", unavailable)
+        if operation == "lookup":
+            failure.setattr(HistoryStore, "get_by_job", fail_lookup)
+        else:
+            sa.event.listen(TableTranslationHistory, "before_update", fail_update)
+        try:
+            assert not queue._run_job(job)
+        finally:
+            if operation == "update":
+                sa.event.remove(TableTranslationHistory, "before_update", fail_update)
+
+    assert job.status == "failed" and job.error["reason"] == "unexpected_error"
+    assert "Exception raised while running function: could not read the selected backend" in caplog.text
+    row = env.last_job()
+    assert failed_operations == [str(row.id)]
+    assert (row.state, row.error_class) == ("awaiting_retry", "internal")
+    assert row.queue_job_id is None and not env.requests()
+    retry = editor.enqueue_editor_translation(lines, "en", "hu")
+    job = queue._reserve_next_job()
+    assert job.job_id == retry and retry != first
+    assert queue._run_job(job), job.error
+    assert editor.editor_translation_state(retry)["lines"] == [{"position": 5, "line": "[hu] Hello"}]
+    assert (env.last_job().id, env.last_job().state) == (row.id, "completed")
+    assert env.history(row)["status"] == "completed"
+
+
+def test_an_editor_planner_cannot_release_another_queue_jobs_claim(env, monkeypatch, editor_runtime_queue):
+    from threading import Event, Thread, current_thread
+
+    from subtitles.tools.translate import editor
+    from subtitles.tools.translate.runtime.dispatch import Dispatcher
+
+    queue = editor_runtime_queue
     failing_id = editor.enqueue_editor_translation([{"position": 0, "line": "Hello"}], "en", "hu")
     winning_id = editor.enqueue_editor_translation([{"position": 9, "line": "Hello"}], "en", "hu")
     assert failing_id != winning_id
