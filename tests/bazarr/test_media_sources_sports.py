@@ -474,7 +474,7 @@ def test_sports_wanted_pins_beside_video_destination_through_publication(
                 replacements.append(pool.submit(save_settings))
                 with config._subtitle_settings_condition:
                     assert config._subtitle_settings_condition.wait_for(
-                        lambda: config._subtitle_settings_saving or changed.is_set(), timeout=2)
+                        lambda: config._subtitle_settings_writer is not None or changed.is_set(), timeout=2)
                 assert not changed.is_set(), 'Settings changed before the keyed file replacement'
             return replace_file(staged, installed)
 
