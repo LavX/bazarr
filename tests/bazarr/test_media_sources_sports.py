@@ -349,7 +349,8 @@ def test_unfiltered_clear_after_last_retained_source_exclusion_keeps_native_owne
             id=owner, arr_instance_id=owner, league_id=owner, sportarrEventId=41, file_id=51,
             path=f'/sports/{owner}.mkv', title='Final', monitored='True'))
         arr_library.execute(sa.insert(TableBlacklistSports).values(
-            arr_instance_id=owner, league_id=owner, event_id=owner, provider='alpha', subs_id='release', language='en'))
+            id=owner, arr_instance_id=owner, league_id=owner, event_id=owner, provider='alpha', subs_id='release',
+            language='en'))
     source, _, _ = add_source(arr_library, tmp_path, content_kind='movie')
     repository.insert_blacklist(arr_library, source_id=source, item_kind='sports_event', source_name='Former Sports')
 
