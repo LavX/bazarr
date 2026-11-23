@@ -19,7 +19,7 @@ from app.config import settings
 from app import activity
 from app.jobs_queue import jobs_queue, JobCancelled, JobFailed
 from subtitles.tools.subsync_engines import (SubtitleDestinationChanged, SubtitleSourceChanged,
-                                            validate_subtitle_versions)
+                                            regular_subtitle_version, validate_subtitle_versions)
 
 
 def _failure_record_media_id(media_type, radarr_id, sonarr_episode_id, sports_operation, source=None):
@@ -315,6 +315,8 @@ def translate_subtitles_file(video_path, source_srt_file, from_lang, to_lang, fo
                         del source_pin
                     else:
                         _pick.forget_expected()
+                        if regular_subtitle_version(source_srt_file) != source_tool.sidecar.version:
+                            raise SourceTranslationChanged('The source subtitle changed before queueing')
                 # With the v2 runtime on, a request for a source and target that already has a job joins it.
                 # Reusing ``job_id`` keeps the frame the queue records to the function's own parameters.
                 job_id = _runtime_follow(

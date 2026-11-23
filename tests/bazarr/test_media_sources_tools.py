@@ -617,18 +617,46 @@ def test_manual_source_translation_pin_binds_at_single_video_capture(
         assert default.id != picked.id
 
 
-def test_manual_source_translation_refuses_a_video_removed_at_capture(toolbox, monkeypatch):
+def test_manual_source_request_refuses_a_sidecar_edited_before_queue_lookup(
+        toolbox, toolbox_runtime, monkeypatch):
+    from subtitles.tools.translate import main
+
+    toolbox_runtime.ai_engine()
+    context = pipeline._episode(toolbox.world)
+    path, _ = _sidecars(toolbox, context)
+    first = _request(toolbox, context, path, "translate", language="hu")
+    assert first.status_code == 202
+    version = main.source_translation_video_version
+
+    def edit_before_queue(video_path):
+        path.write_text(SRT.replace("Original cue", "Edited before lookup"))
+        return version(video_path)
+
+    with monkeypatch.context() as edit:
+        edit.setattr(main, "source_translation_video_version", edit_before_queue)
+        conflict = _request(toolbox, context, path, "translate", language="hu")
+    assert conflict.status_code == 409
+    assert [job.job_id for job in toolbox.jobs.jobs_pending_queue] == [first.json["job_id"]]
+    current = _request(toolbox, context, path, "translate", language="hu")
+    assert current.status_code == 202 and current.json["job_id"] != first.json["job_id"]
+
+
+@pytest.mark.parametrize("capture_stage", ["guard", "reservation"])
+def test_manual_source_translation_refuses_a_video_removed_at_capture(toolbox, monkeypatch, capture_stage):
+    from media_sources import subtitle_tools
     from subtitles.tools.translate import main
 
     context = pipeline._episode(toolbox.world)
     path, _ = _sidecars(toolbox, context)
-    version = main.source_translation_video_version
+    module, name = ((subtitle_tools, "source_video_stamp") if capture_stage == "guard"
+                    else (main, "source_translation_video_version"))
+    version = getattr(module, name)
 
     def removed(video_path):
         Path(video_path).unlink()
         return version(video_path)
 
-    monkeypatch.setattr(main, "source_translation_video_version", removed)
+    monkeypatch.setattr(module, name, removed)
     response = _request(toolbox, context, path, "translate", language="hu")
     assert response.status_code == 409
     assert not toolbox.jobs.jobs_pending_queue

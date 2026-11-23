@@ -125,7 +125,7 @@ class SourceSubtitleTool:
     def capture(cls, source, sidecar, reference=None):
         stamp = source_video_stamp(source.path)
         if stamp is None:
-            raise SourceToolError('The source video is unavailable', 404)
+            raise SourceToolError('The source video disappeared before the operation was captured', 409)
         return cls(source, sidecar, stamp, reference)
 
     @classmethod
