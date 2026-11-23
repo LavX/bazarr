@@ -51,11 +51,10 @@ def _client(idle_for, alive=True, pid=4242):
     """A client wired to a stand-in process and a real lock, spawning nothing."""
     from provider_hub.worker import ProviderWorkerClient
 
-    client = ProviderWorkerClient.__new__(ProviderWorkerClient)
+    client = ProviderWorkerClient([])
     client.process = MagicMock()
     client.process.pid = pid
     client.process.poll.return_value = None if alive else 0
-    client._lock = threading.Lock()
     client.last_used = time.monotonic() - idle_for
     return client
 
@@ -241,16 +240,7 @@ def test_a_started_worker_registers_and_a_stopped_one_deregisters(monkeypatch, t
     """The registry is what the sweep walks, so membership is the contract."""
     from provider_hub import worker as worker_mod
 
-    client = worker_mod.ProviderWorkerClient.__new__(worker_mod.ProviderWorkerClient)
-    client.command = ['true']
-    client.cwd = str(tmp_path)
-    client.env = None
-    client.process = None
-    client._lock = threading.Lock()
-    client._stdout_queue = None
-    client._stdout_thread = None
-    client._stderr_thread = None
-    client.last_used = 0.0
+    client = worker_mod.ProviderWorkerClient(['true'], cwd=tmp_path)
 
     fake = MagicMock()
     fake.poll.return_value = None
