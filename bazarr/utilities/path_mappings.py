@@ -58,7 +58,7 @@ def global_sports_mappings():
     return usable_sports_mappings(raw, 'global')
 
 
-def read_sports_mappings(value, inherit=True):
+def read_sports_mappings(value, inherit=True, *, fallback=None):
     """Resolve an instance's path mappings, global first then its own override.
 
     ``value`` is the instance's raw ``path_mappings`` column. An instance that
@@ -71,13 +71,16 @@ def read_sports_mappings(value, inherit=True):
     instance overrides", so inheriting there would show a global mapping as an
     instance override and persist it as one on the next save.
     """
-    if not value:
-        return global_sports_mappings() if inherit else []
-    try:
-        mappings = validate_sports_mappings(json.loads(value))
-    except (TypeError, ValueError):
-        raise ValueError('Invalid stored Sportarr path mappings') from None
-    return mappings or (global_sports_mappings() if inherit else [])
+    if value:
+        try:
+            mappings = validate_sports_mappings(json.loads(value))
+        except (TypeError, ValueError):
+            raise ValueError('Invalid stored Sportarr path mappings') from None
+        if mappings:
+            return mappings
+    if not inherit:
+        return []
+    return global_sports_mappings() if fallback is None else fallback
 
 
 def apply_sports_mapping(path, mapping, reverse=False):
@@ -156,13 +159,20 @@ def _instance_path_mapping(arr_instance_id, media_type):
         from arr_instances.repository import ArrInstanceRepository
 
         row = ArrInstanceRepository(database).get(arr_instance_id)
-        if row is None or not row.path_mappings:
-            return None
-        parsed = json.loads(row.path_mappings)
+        return read_arr_mappings(row.path_mappings, media_type) if row is not None else None
     except Exception:
         logging.debug('BAZARR could not load per-instance path_mappings for instance %s', arr_instance_id)
         return None
 
+
+def read_arr_mappings(value, media_type):
+    """Read an existing legacy instance mapping without fetching an ORM row."""
+    if not value:
+        return None
+    try:
+        parsed = json.loads(value)
+    except (TypeError, ValueError):
+        return None
     if isinstance(parsed, dict):
         key = 'movies' if media_type in ('movie', 'movies') else 'series'
         mapping = parsed.get(key)

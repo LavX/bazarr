@@ -9,10 +9,13 @@ from media_servers.events import publication_callback
 from arr_instances.resolution import scoped
 import subliminal
 import ast
+from contextlib import contextmanager
 
 from subzero.language import Language
 from subliminal_patch.core import save_subtitles
-from subtitles.tools.subsync_engines import subtitle_write_locks, subtitle_mutation, write_subtitle_file
+from subtitles.tools.subsync_engines import (SubtitleDestinationChanged, subtitle_write_locks,
+                                             regular_subtitle_version, subtitle_mutation, subtitle_source_version,
+                                             sync_output_owner_is_unique, write_subtitle_file)
 from subliminal_patch.core_persistent import download_best_subtitles
 
 from app.config import settings
@@ -28,12 +31,20 @@ from .utils import get_video, _get_lang_obj, _get_scores
 from .processing import process_subtitle
 
 
+class SourceMissingLanguagesUnavailable(OSError):
+    """The scheduled publication cannot prove whether the source language is missing."""
+
+
 @update_pools
 def generate_subtitles(path, languages, audio_language, sceneName, title, media_type, profile_id,
                        forced_minimum_score=None, is_upgrade=False, check_if_still_required=False,
                        previous_subtitles_to_delete=None, job_id=None, fallback_allowed=False,
-                       arr_instance_id=None, source=None):
+                       arr_instance_id=None, source=None, auto_translate=True):
     if not languages:
+        return None
+
+    video_version = subtitle_source_version(path) if source is not None else None
+    if source is not None and video_version is None:
         return None
 
     # A media source item is described by its context. Its publication type is what the media servers hear
@@ -108,10 +119,12 @@ def generate_subtitles(path, languages, audio_language, sceneName, title, media_
             # badge while the language is in fact still missing.
             languages_that_landed = []
             for language in language_set:
+                # The saver may adjust the provider's HI flag. Keep the originally requested variant.
+                source_language = Language.rebuild(language) if source is not None else None
                 # confirm if language is still missing or if cutoff has been reached
                 if check_if_still_required and language not in (
-                        check_missing_languages(path, media_type, arr_instance_id) if source is None
-                        else check_missing_languages_source(source)):
+                        check_missing_languages(path, media_type, arr_instance_id,
+                                                **({'source': source} if source is not None else {}))):
                     # cutoff has been reached
                     logging.debug(f"BAZARR this language ({parse_language_object(language)}) is ignored because cutoff "  # noqa: G004
                                   f"has been reached during this search.")
@@ -183,9 +196,23 @@ def generate_subtitles(path, languages, audio_language, sceneName, title, media_
                             fld = get_target_folder(path)
                             chmod = int(settings.general.chmod, 8) if not sys.platform.startswith(
                                 'win') and settings.general.chmod_enabled else None
+                            publish = publication_callback(publication_type, path, 'download', arr_instance_id,
+                                                           **({'source': source} if source is not None else {}))
                             with subtitle_write_locks(path, os.path.join(fld or os.path.dirname(path), '.destination'),
                                                       previous_subtitles_to_delete or path):
                                 written_paths = []
+                                writer = partial(write_subtitle_file, path, written_paths=written_paths,
+                                                 on_publish=publish)
+                                owner_kwargs = {}
+                                if source is not None:
+                                    writer = partial(_write_source_download, path, source=source,
+                                                     language=source_language, recheck_missing=check_if_still_required,
+                                                     is_upgrade=is_upgrade, written_paths=written_paths,
+                                                     on_publish=publish, video_version=video_version)
+                                    if is_upgrade:
+                                        from media_sources.indexer import SourcePublicationOwnerIndex
+
+                                        owner_kwargs['ownership_index'] = SourcePublicationOwnerIndex()
                                 saved_subtitles = save_subtitles(video.original_path, subtitles,
                                                                  single=settings.general.single_language,
                                                                  tags=None,  # fixme
@@ -193,25 +220,24 @@ def generate_subtitles(path, languages, audio_language, sceneName, title, media_
                                                                  chmod=chmod,
                                                                  formats=subtitle_formats,
                                                                  path_decoder=force_unicode,
-                                                                 write_subtitle=partial(
-                                                                     write_subtitle_file, path, written_paths=written_paths,
-                                                                     on_publish=publication_callback(
-                                                                         publication_type, path, 'download',
-                                                                         arr_instance_id))
+                                                                 write_subtitle=writer
                                                                  )
                                 if is_upgrade and previous_subtitles_to_delete and written_paths and (
                                         os.path.normcase(os.path.realpath(previous_subtitles_to_delete)) not in
                                         {os.path.normcase(os.path.realpath(written)) for written in written_paths}):
                                     try:
-                                        with subtitle_mutation(path, previous_subtitles_to_delete):
+                                        with subtitle_mutation(path, previous_subtitles_to_delete, **owner_kwargs):
                                             os.remove(previous_subtitles_to_delete)
-                                            publication_callback(publication_type, path, 'download',
-                                                                 arr_instance_id)(previous_subtitles_to_delete)
+                                            publish(previous_subtitles_to_delete)
                                     except OSError:
                                         logging.exception('BAZARR unable to remove superseded subtitle: %s',
                                                           previous_subtitles_to_delete)
                                 saved_subtitles = [saved for saved in saved_subtitles if saved.storage_path in written_paths]
 
+                        except SourceMissingLanguagesUnavailable:
+                            # The source job must fail rather than report a completed search
+                            # when its final missing-language check could not be performed.
+                            raise
                         except Exception as e:
                             logging.exception(
                                 f'BAZARR Error saving Subtitles file to disk for this file {path}: {repr(e)}')  # noqa: G004
@@ -250,7 +276,8 @@ def generate_subtitles(path, languages, audio_language, sceneName, title, media_
                                                                       is_upgrade=is_upgrade, is_manual=False,
                                                                       path=path, max_score=max_score, job_id=job_id,
                                                                       arr_instance_id=arr_instance_id,
-                                                                      **({} if source is None else {'source': source}))
+                                                                      **({} if source is None else {'source': source}),
+                                                                      **({} if auto_translate else {'auto_translate': False}))
                                 if not processed_subtitle:
                                     logging.debug(f"BAZARR unable to process this subtitles: {subtitle}")  # noqa: G004
                                     continue
@@ -292,20 +319,56 @@ def _get_language_obj(languages):
     return language_set
 
 
-def check_missing_languages_source(source):
-    """The languages a source item still lacks, from the item itself. The arr lookup goes by path through the
-    arr tables, where an unknown path answers nothing and so skips every target as satisfied."""
-    from media_sources import repository
-    item = repository.get_item(source.item_id)
-    if item is None or not item.missing_subtitles:
-        return []
-    languages = []
-    for language in ast.literal_eval(item.missing_subtitles):
-        if language is not None:
-            hi_ = "True" if language.endswith(':hi') else "False"
-            forced_ = "True" if language.endswith(':forced') else "False"
-            languages.append((language.split(":")[0], hi_, forced_))
-    return _get_language_obj(languages=languages)
+def check_missing_languages_source(source, *, external_subtitles=None, target=None):
+    from media_sources.translation import missing_language_candidates
+
+    return _get_language_obj(languages=missing_language_candidates(
+        source, external_subtitles=external_subtitles, target=target))
+
+
+def _write_source_download(video_path, destination, content, *, source, language, recheck_missing, is_upgrade,
+                           written_paths, on_publish, video_version=None):
+    """Publish the actual provider-selected file only while its destination is still eligible."""
+    from media_sources.indexer import SourcePublicationOwnerIndex
+    from media_sources.translation import prepare_source_sidecars
+
+    ownership_index = SourcePublicationOwnerIndex()
+
+    def prepare():
+        if not sync_output_owner_is_unique(video_path, destination, ownership_index=ownership_index):
+            raise SubtitleDestinationChanged('The source subtitle destination does not have one media owner')
+        if recheck_missing:
+            try:
+                return prepare_source_sidecars(source, ownership_index, written_paths)
+            except OSError as error:
+                logging.warning('BAZARR could not verify missing languages for source item %s', source.item_id)
+                raise SourceMissingLanguagesUnavailable(
+                    'The source missing languages could not be verified. Try again when its subtitle files and '
+                    'folders can be read.') from error
+        return None
+
+    @contextmanager
+    def publication():
+        with ownership_index.publication(source, prepare, destination=destination, cleanup_outputs=True) as (
+                current, connection, external_subtitles):
+            if current is None or current.path != video_path:
+                raise SubtitleDestinationChanged('The source item moved or was removed')
+            if video_version is not None and subtitle_source_version(video_path) != video_version:
+                raise SubtitleDestinationChanged('The media file changed while searching for subtitles')
+            if os.path.lexists(destination) and (not is_upgrade or regular_subtitle_version(destination) is None):
+                raise SubtitleDestinationChanged('The source subtitle destination is already occupied')
+            if recheck_missing and language not in check_missing_languages_source(
+                    current, external_subtitles=external_subtitles, target=connection):
+                raise SubtitleDestinationChanged('The source language is no longer missing')
+            yield
+
+    try:
+        write_subtitle_file(video_path, destination, content, written_paths=written_paths, on_publish=on_publish,
+                            publication_guard=publication, invalidate_outputs=False)
+    except SubtitleDestinationChanged as error:
+        logging.info('BAZARR skipped saving a subtitle for source item %s: %s', source.item_id, error)
+        return False
+    return True
 
 
 def parse_language_object(language):
@@ -317,7 +380,9 @@ def parse_language_object(language):
         return language
 
 
-def check_missing_languages(path, media_type, arr_instance_id=None):
+def check_missing_languages(path, media_type, arr_instance_id=None, source=None):
+    if source is not None:
+        return check_missing_languages_source(source)
     # confirm if language is still missing or if cutoff has been reached
     reversed_path = path_mappings.path_replace_reverse_instance(path, arr_instance_id, media_type)
     if media_type == 'series':

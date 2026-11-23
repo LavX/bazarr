@@ -319,6 +319,29 @@ def send_notifications_sports_league(league_id, message, arr_instance_id=None):
     )
 
 
+def send_notifications_source(source, message):
+    """Notify for a source download using its own item and group."""
+    providers = get_notifier_providers()
+    if not providers:
+        return
+
+    from media_sources.context import source_item_title
+
+    variables = {}
+    if _has_custom_notifier(providers):
+        variables = {f'bazarr_source_{key}': value for key, value in vars(source).items()}
+
+    label = source_item_title(source)
+    if source.kind == 'movie':
+        label += _format_year_suffix(source.year)
+    apobj = Apprise(asset=AppriseAsset(async_mode=False))
+    for provider in providers:
+        url = (_expand_notifier_url(provider.url, variables) if provider.name in _CUSTOM_NOTIFIER_NAMES
+               else provider.url)
+        apobj.add(url)
+    apobj.notify(title='Bazarr notification', body=f"{label} : {message}")
+
+
 def _sports_league_title(league_id, arr_instance_id=None):
     if league_id is None:
         return None

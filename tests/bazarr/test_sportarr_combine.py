@@ -50,14 +50,18 @@ def test_an_event_without_a_profile_is_skipped_not_failed():
 def test_the_engine_rejects_an_override_for_sports():
     """Pinned because the route relies on it: a sports composition must follow
     the profile it captured, not whatever the request body asked for."""
-    import inspect
+    from types import SimpleNamespace
 
     from subtitles.tools.combine.main import try_combine_for_video
 
-    source = inspect.getsource(try_combine_for_video)
-    sports = source[source.index("if media_type == 'sports':"):source.index("else:")]
-    assert "if languages is not None or format is not None:" in sports
-    assert "sports_operation is None" in sports
+    path = "/fixture/event.mkv"
+    unowned = try_combine_for_video(path, "sports")
+    assert unowned.status == "failed" and "captured profile operation" in unowned.error
+
+    operation = SimpleNamespace(context=SimpleNamespace(mapped_path=path))
+    override = try_combine_for_video(path, "sports", languages=["en", "hu"], format="srt",
+                                     sports_operation=operation)
+    assert override.status == "failed" and "assigned profile rule" in override.error
 
 
 def test_a_published_combine_with_a_failed_follow_up_is_not_reported_clean():

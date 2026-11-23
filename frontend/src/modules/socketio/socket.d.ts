@@ -7,7 +7,9 @@ declare namespace SocketIO {
     | "episode"
     | "episode-history"
     | "episode-wanted"
-    | "movie-wanted";
+    | "movie-wanted"
+    | "source-item"
+    | "source-group";
 
   type NullEventType =
     | "sports"
