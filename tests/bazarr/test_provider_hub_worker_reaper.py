@@ -500,6 +500,10 @@ def test_windows_job_keeps_the_data_fence_after_the_worker_exits(monkeypatch, tm
     assert activity.previous_workers_stopped(tmp_path)
     assert not process.activity_record.exists()
     handles[0].Close.assert_called_once()
+    pool = SimpleNamespace(_settle_unverified=Mock())
+    slot = SimpleNamespace(unverified_noted=False, session=SimpleNamespace(process=process))
+    WorkerPool._note_unverified(pool, slot)
+    pool._settle_unverified.assert_called_once_with(slot)
 
 
 def test_windows_launch_interrupted_before_spawn_leaves_a_complete_job_record(monkeypatch, tmp_path):
@@ -525,6 +529,8 @@ def test_windows_launch_interrupted_before_spawn_leaves_a_complete_job_record(mo
     assert json.loads(record.read_text())["host"] == [os.getpid(), 42]
     job.close.assert_called_once()
     monkeypatch.setattr(activity, "_owner", "second-run")
+    assert not activity.previous_workers_stopped(tmp_path)
+    monkeypatch.setattr(activity, "_windows_process", lambda pid: (42, False))
     assert activity.previous_workers_stopped(tmp_path)
     assert not record.exists()
 
@@ -575,6 +581,45 @@ def test_posix_launch_interrupted_before_spawn_can_clear_the_group_record(monkey
     running[0] = False
     assert activity.previous_workers_stopped(tmp_path)
     assert list(activity._root.iterdir()) == []
+
+
+def test_posix_interruption_after_the_child_starts_never_reaches_plugin_code(monkeypatch, tmp_path):
+    import os
+    import subprocess
+
+    from provider_hub.sandbox import activity, spawn
+
+    if not hasattr(os, "killpg"):
+        pytest.skip("requires POSIX process groups")
+    monkeypatch.setattr(activity, "_root", activity._directory(tmp_path))
+    sample = tmp_path / "worker.started"
+    command = [sys.executable, "-c", "from pathlib import Path; import sys; Path(sys.argv[1]).touch()", str(sample)]
+    processes = []
+    original_worker = spawn.WorkerProcess
+
+    class InterruptedWorker(original_worker):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            processes.append(self)
+            raise SystemExit(41)
+
+    monkeypatch.setattr(spawn, "WorkerProcess", InterruptedWorker)
+    with pytest.raises(SystemExit):
+        spawn._start_plain(command, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    [process] = processes
+    process.wait(timeout=5)
+    assert not sample.exists()
+    monkeypatch.setattr(activity, "_owner", "second-run")
+    assert activity.previous_workers_stopped(tmp_path)
+
+    monkeypatch.setattr(spawn, "WorkerProcess", original_worker)
+    process = spawn._start_plain(command, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        assert process.wait(timeout=5) == 0
+        assert sample.is_file()
+    finally:
+        process.stop(0)
+        activity.forget(process)
 
 
 @pytest.mark.parametrize("platform", ["win32", "darwin"])

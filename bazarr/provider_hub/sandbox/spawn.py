@@ -832,18 +832,30 @@ _ANCHOR_SCRIPT = (
     "    os.killpg(os.getpgrp(), 9)\n"
 )
 
+# The group is already set when Popen returns. Run plugin code only once
+# the host confirms that handoff. EOF means the host exited during launch.
+_ANCHORED_WORKER_SCRIPT = (
+    "import os, sys\n"
+    "fd = int(sys.argv[1])\n"
+    "ready = os.read(fd, 1)\n"
+    "os.close(fd)\n"
+    "if ready == b'1' and os.getppid() == int(sys.argv[2]):\n"
+    "    os.execvpe(sys.argv[3], sys.argv[3:], os.environ)\n"
+)
 
-def _finish_anchor(anchor: "subprocess.Popen") -> None:
+
+def _finish_anchor(anchor: "subprocess.Popen", *, lifeline_only=False) -> None:
     """Reap the anchor after its group was killed. Only now may its pid be reused."""
     try:
         if anchor.stdin is not None:
             anchor.stdin.close()
     except OSError:
         pass
-    try:
-        anchor.kill()
-    except OSError:
-        pass
+    if not lifeline_only:
+        try:
+            anchor.kill()
+        except OSError:
+            pass
     try:
         anchor.wait(timeout=5)
     except subprocess.TimeoutExpired:
@@ -900,19 +912,38 @@ def _start_plain(command: list, **kwargs: Any) -> "WorkerProcess":
     """
     anchor = _start_anchor()
     try:
-        if anchor is not None:
+        if anchor is not None and activity.registry_enabled():
+            process = _start_registered_group(command, anchor.pid, **kwargs)
+        elif anchor is not None:
             process = activity.start_worker(
                 lambda argv: WorkerProcess(argv, process_group=anchor.pid, **kwargs), command, group=anchor.pid)
         else:
             process = activity.start_worker(lambda argv: WorkerProcess(argv, start_new_session=True, **kwargs), command)
     except BaseException:
         if anchor is not None:
-            _finish_anchor(anchor)
+            # Let the anchor end the group before collecting it. An error
+            # can land after the worker received its launch acknowledgement.
+            _finish_anchor(anchor, lifeline_only=True)
         raise
     process._anchor = anchor
     if anchor is not None:
         process._anchor_mark = _start_mark(anchor.pid)
     return process
+
+
+def _start_registered_group(command, group, **kwargs):
+    read_fd, write_fd = os.pipe()
+    try:
+        launcher = [sys.executable, "-I", "-S", "-B", "-c", _ANCHORED_WORKER_SCRIPT,
+                    str(read_fd), str(os.getpid()), *command]
+        pass_fds = (*kwargs.pop("pass_fds", ()), read_fd)
+        process = activity.start_worker(
+            lambda argv: WorkerProcess(argv, process_group=group, pass_fds=pass_fds, **kwargs), launcher, group=group)
+        os.write(write_fd, b"1")
+        return process
+    finally:
+        os.close(read_fd)
+        os.close(write_fd)
 
 
 def _stat_fields(pid: int) -> "tuple[str, str]":

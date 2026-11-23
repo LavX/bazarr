@@ -30,6 +30,10 @@ def is_windows() -> bool:
     return sys.platform == "win32"
 
 
+def registry_enabled() -> bool:
+    return _root is not None
+
+
 def _windows_process(pid: int) -> tuple[int | None, bool]:
     """Read creation time and exit state through one Windows process handle."""
     import ctypes
@@ -204,13 +208,14 @@ def _still_running(path, record) -> bool:
         if not re.fullmatch(r"[0-9a-f]{32}", path.stem):
             return True
         job = _open_windows_job(_JOB_PREFIX + path.stem)
-        if job is None:
-            return False
         try:
             created, running = _windows_process(pid)
-            return (running and created == expected) or not job.empty()
+            # A missing name alone says nothing about a host that has not
+            # finished closing its handles yet.
+            return (running and created == expected) or (job is not None and not job.empty())
         finally:
-            job.close()
+            if job is not None:
+                job.close()
     return _group_running(record["group"])
 
 

@@ -3643,7 +3643,8 @@ class WorkerPool:
         slot.unverified_noted = True
         session = slot.session
         process = session.process if session is not None else None
-        if process is None or isinstance(process, LauncherProcess):
+        if (process is None or isinstance(process, LauncherProcess)
+                or (activity.is_registered(process) and getattr(process, "activity_job", None) is not None)):
             self._settle_unverified(slot)
             return
         if slot.ephemeral and slot.kill_reason is None and getattr(session, "exit_code", None) == 0:

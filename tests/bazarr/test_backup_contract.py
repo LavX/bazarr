@@ -255,7 +255,13 @@ def test_sqlite_backup_archive_still_contains_the_database(backup_env, monkeypat
 
 
 def _stage_restore(backup_env, database_name):
-    (backup_env.restore_dir / 'config.yaml').write_text('general:\n  port: 7000\n', encoding='utf-8')
+    configuration = {'general': {'port': 7000}}
+    if database_name == 'bazarr_postgres.dump':
+        configuration['postgresql'] = {
+            key: getattr(backup_env.settings.postgresql, key)
+            for key in ('enabled', 'host', 'port', 'database', 'username', 'password', 'url')
+        }
+    (backup_env.restore_dir / 'config.yaml').write_text(yaml.safe_dump(configuration), encoding='utf-8')
     if database_name == 'bazarr.db':
         _write_marker_database(backup_env.restore_dir / database_name, 'restored')
     elif database_name:
@@ -723,15 +729,26 @@ def test_a_configuration_that_cannot_be_put_in_place_stops_the_start(backup_env,
     assert (backup_env.restore_dir / backup_env.module._RESTORE_HANDOFF).is_file()
 
 
-def test_postgresql_restore_resumes_after_config_swap_without_restoring_a_second_database(backup_env, monkeypatch):
+@pytest.mark.parametrize('environment_keeps_target', [False, True])
+def test_postgresql_restore_checks_the_effective_connection_after_the_config_swap(
+        backup_env, monkeypatch, environment_keeps_target):
     _enable_postgresql(backup_env, monkeypatch)
     log_path = _write_fake_tool(str(backup_env.tools_dir), 'pg_restore')
     _stage_restore(backup_env, 'bazarr_postgres.dump')
-    (backup_env.restore_dir / 'config.yaml').write_text(yaml.safe_dump({
-        'general': {'port': 7000},
-        'postgresql': {'enabled': True, 'database': 'replacement'},
-    }), encoding='utf-8')
+    archive_config = backup_env.restore_dir / 'config.yaml'
+    config = yaml.safe_load(archive_config.read_text(encoding='utf-8'))
+    config['postgresql']['database'] = 'replacement'
+    archive_config.write_text(yaml.safe_dump(config), encoding='utf-8')
     dest_config = backup_env.config_dir / 'config' / 'config.yaml'
+    if not environment_keeps_target:
+        original = dest_config.read_bytes()
+        assert not backup_env.module.restore_from_backup()
+        assert not os.path.exists(log_path)
+        assert dest_config.read_bytes() == original
+        assert not backup_env.restarts
+        return
+
+    monkeypatch.setenv('POSTGRES_DATABASE', 'bazarr')
     real_replace = os.replace
 
     with monkeypatch.context() as interruption:
@@ -752,6 +769,22 @@ def test_postgresql_restore_resumes_after_config_swap_without_restoring_a_second
     assert backup_env.restarts == [True]
     with open(log_path, encoding='utf-8') as handle:
         assert handle.read() == before
+
+
+def test_postgresql_restore_compares_passwords_using_the_archived_encryption_key(backup_env, monkeypatch):
+    from secret_store.crypto import encrypt_secret
+
+    _enable_postgresql(backup_env, monkeypatch)
+    _write_fake_tool(str(backup_env.tools_dir), 'pg_restore')
+    _stage_restore(backup_env, 'bazarr_postgres.dump')
+    archived = backup_env.restore_dir / 'config.yaml'
+    config = yaml.safe_load(archived.read_text(encoding='utf-8'))
+    archive_key = 'fixture encryption key'
+    config['general']['secrets_encryption_key'] = archive_key
+    config['postgresql']['password'] = encrypt_secret(config['postgresql']['password'], master_key=archive_key)
+    archived.write_text(yaml.safe_dump(config), encoding='utf-8')
+    assert backup_env.module.restore_from_backup()
+    assert backup_env.restarts == [True]
 
 
 def test_a_start_with_nothing_to_restore_goes_on(backup_env, monkeypatch):

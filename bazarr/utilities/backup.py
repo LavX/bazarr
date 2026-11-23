@@ -16,6 +16,8 @@ from zipfile import ZipFile, BadZipFile, ZIP_DEFLATED
 from glob import glob
 from pathlib import Path, PureWindowsPath
 
+from dynaconf import Dynaconf
+
 from provider_hub import datadir, secret_paths
 
 from app.get_args import args
@@ -86,7 +88,11 @@ class PostgresUnreachableError(BackupError):
     pass
 
 
-def _postgres_enabled():
+class RestoreConnectionMismatch(BackupError):
+    """The archived config cannot start Bazarr on the database receiving the backup."""
+
+
+def _postgres_enabled(configuration=None):
     """Whether this instance runs on PostgreSQL, the way app.database decides it.
 
     POSTGRES_ENABLED wins over the configuration file there, so it has to win
@@ -98,7 +104,8 @@ def _postgres_enabled():
     postgres_enabled_env = os.getenv('POSTGRES_ENABLED')
     if postgres_enabled_env:
         return postgres_enabled_env.lower() == 'true'
-    return bool(settings.postgresql.enabled)
+    configuration = settings if configuration is None else configuration
+    return bool(configuration.postgresql.enabled)
 
 
 def _split_query_host_entries(value):
@@ -615,6 +622,41 @@ def _refuse_start_after_failed_restore(failed_dump_path):
     stop_bazarr(EXIT_RESTORE_ERROR)
 
 
+def _validate_restored_database_connection(path):
+    """Compare what boot will open after the swap with the connection receiving the dump."""
+    from app.config import validators
+    from secret_store.crypto import decrypt_secret, is_encrypted
+
+    try:
+        archived = Dynaconf(settings_file=path, core_loaders=['YAML'], apply_default_on_none=True)
+        for validator in validators:
+            if any(name.startswith('postgresql.') for name in getattr(validator, 'names', ())):
+                validator.validate(archived)
+        current_pg = _postgres_enabled()
+        if _postgres_enabled(archived) != current_pg:
+            raise RestoreConnectionMismatch('The backup configuration selects a different database engine.')
+        if not current_pg:
+            return
+        password = archived.postgresql.password
+        if 'POSTGRES_PASSWORD' not in os.environ and is_encrypted(password):
+            key = archived.get('general.secrets_encryption_key')
+            if not key:
+                raise ValueError('missing archive encryption key')
+            archived.postgresql.password = decrypt_secret(password, master_key=key)
+        try:
+            archived_url = postgres_engine_url(archived)
+            current_url = postgres_engine_url(settings)
+        except Exception:
+            raise RestoreConnectionMismatch('The PostgreSQL connection URL cannot be parsed.') from None
+        if archived_url != current_url:
+            raise RestoreConnectionMismatch('The backup configuration would connect to a different PostgreSQL database.')
+    except RestoreConnectionMismatch:
+        raise
+    except Exception:
+        # Resolver and validator exceptions can contain credentials.
+        raise RestoreConnectionMismatch('The backup database connection could not be verified.') from None
+
+
 def _prepare_restored_configuration(source_path, staged_path):
     """Stage a restored config with a generation no existing cookie can carry.
 
@@ -665,10 +707,11 @@ def _prepare_restored_configuration(source_path, staged_path):
     from app.auth.generation import generation_for_restore
     auth[generation_key] = generation_for_restore(archived_generation)
 
-    prepared_path = f'{staged_path}.prepared'
+    prepared_path = f'{staged_path}.prepared.yaml'
     try:
         with open(prepared_path, 'w', encoding='utf-8') as handle:
             yaml.safe_dump(restored, handle)
+        _validate_restored_database_connection(prepared_path)
         shutil.copymode(staged_path, prepared_path)
         os.replace(prepared_path, staged_path)
     except (yaml.YAMLError, TypeError) as error:
@@ -723,6 +766,14 @@ def restore_from_backup():
     try:
         shutil.copy(restore_config_path, staged_config_path)
         _prepare_restored_configuration(restore_config_path, staged_config_path)
+    except RestoreConnectionMismatch as error:
+        if _postgres_enabled():
+            logging.error('Restore refused before pg_restore was started. %s', error)
+        else:
+            logging.error('Restore refused before changing the database. %s', error)
+        _delete_file(staged_config_path)
+        _clear_restore_directory()
+        return False
     except (BackupError, OSError, shutil.Error):
         logging.error('Restoring the backup configuration failed. Bazarr will not restart, and the '
                       'files staged for the restore have been discarded. The backup archive is untouched.')
