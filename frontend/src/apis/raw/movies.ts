@@ -42,12 +42,20 @@ class MovieApi extends BaseApi {
     await this.post("", { id: form.id, profileid: form.profileid });
   }
 
-  async wanted(params: Parameter.Range) {
-    const response = await this.get<DataWrapperWithTotal<Wanted.Movie>>(
-      "/wanted",
-      params,
-    );
-    return response;
+  async wanted(
+    params: Parameter.Range,
+    includeSources: false,
+  ): Promise<DataWrapperWithTotal<Wanted.Movie>>;
+  async wanted(
+    params: Wanted.Range,
+    includeSources?: boolean,
+  ): Promise<DataWrapperWithTotal<Wanted.MovieRow>>;
+  async wanted({ sourceKeys, ...params }: Wanted.Range, includeSources = true) {
+    return this.get<DataWrapperWithTotal<Wanted.MovieRow>>("/wanted", {
+      ...params,
+      sources: includeSources ? 1 : undefined,
+      source_key: sourceKeys,
+    });
   }
 
   async wantedBy(radarrid: number[]) {

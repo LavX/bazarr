@@ -262,7 +262,7 @@ def _wanted_movie(movie, providers_list, job_id=None, translation_gate=True):
                                 module='subtitles.tools.translate.main',
                                 func='translate_subtitles_file',
                                 args=[],
-                                kwargs=translate_kwargs,
+                                kwargs={**translate_kwargs, 'source': None},
                             ):
                                 continue
                             logging.info(
@@ -393,15 +393,21 @@ def wanted_scan_subtitles_movies(job_id=None):
     jobs_queue.update_job_progress(job_id=job_id, progress_message="Scan completed")
 
 
-def wanted_search_missing_subtitles_movies(job_id=None, wait_for_completion=False):
+def wanted_search_missing_subtitles_movies(job_id=None, wait_for_completion=False, *, active_owners_only=False):
     if not job_id:
         jobs_queue.add_job_from_function("Searching for missing movies subtitles", is_progress=True,
                                          wait_for_completion=wait_for_completion)
         return
 
+    if active_owners_only:
+        from media_sources.wanted import arr_wanted_condition
+        active_owners = [arr_wanted_condition('radarr', TableMovies.arr_instance_id)]
+    else:
+        active_owners = []
+
     conditions = [(TableMovies.missing_subtitles.is_not(None)),
                   (TableMovies.missing_subtitles != '[]')]
-    conditions += get_exclusion_clause('movie')
+    conditions += get_exclusion_clause('movie') + active_owners
     movies = database.execute(
         select(TableMovies.radarrId,
                TableMovies.arr_instance_id,

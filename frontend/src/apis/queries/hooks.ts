@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useSearchParams } from "react-router";
 import {
+  hashKey,
   QueryKey,
   useQuery,
   useQueryClient,
@@ -51,6 +52,7 @@ export function usePaginationQuery<
   // key rather than the base key, which would break the [...queryKey, id]
   // individual cache the detail pages read.
   includeScores = false,
+  isolateScopes = false,
 ): UsePaginationQueryResult<TObject> {
   const client = useQueryClient();
 
@@ -59,11 +61,13 @@ export function usePaginationQuery<
   // The URL always carries a 1-based page; clamp missing/0/negative/NaN values
   // to page 1 (index 0) so the first request never sends a negative or NaN
   // start (the out-of-bounds clamp effect only runs after the first response).
-  const [page, setIndex] = useState(() => {
-    const raw = Number(searchParams.get("page"));
-    if (!Number.isFinite(raw) || raw < 1) return 0;
-    return Math.floor(raw) - 1;
-  });
+  const rawPage = Number(searchParams.get("page"));
+  const urlPage =
+    Number.isFinite(rawPage) && rawPage >= 1 ? Math.floor(rawPage) - 1 : 0;
+  const [page, setIndex] = useState(urlPage);
+  useEffect(() => {
+    setIndex(urlPage);
+  }, [urlPage]);
 
   // The global setting is the default; a per-table selection (null = unset)
   // overrides it so the same size drives the fetch, page count and clamp.
@@ -99,6 +103,15 @@ export function usePaginationQuery<
 
   const results = useQuery({
     enabled,
+    ...(isolateScopes && {
+      placeholderData: (
+        previous: DataWrapperWithTotal<TObject> | undefined,
+        query: { queryKey: QueryKey } | undefined,
+      ) =>
+        query && hashKey(query.queryKey.slice(0, -2)) === hashKey(queryKey)
+          ? previous
+          : undefined,
+    }),
     queryKey: [
       ...queryKey,
       QueryKeys.Range,

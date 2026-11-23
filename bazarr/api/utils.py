@@ -1,6 +1,7 @@
 # coding=utf-8
 
 import ast
+import json
 import contextlib
 import hmac
 import logging
@@ -341,9 +342,20 @@ def authenticate_header_or_stream_token(actual_method):
     return wrapper
 
 
-def postprocess(item):
+def _source_subtitle_list(value):
+    # Older indexers wrote Python literals, including None for embedded paths.
+    try:
+        return json.loads(value)
+    except json.JSONDecodeError:
+        return ast.literal_eval(value)
+
+
+def postprocess(item, *, source=False):
     # Remove ffprobe_cache
-    if item.get('radarrId'):
+    if source:
+        def path_replace(path):
+            return path
+    elif item.get('radarrId'):
         path_replace = path_mappings.path_replace_movie
     else:
         path_replace = path_mappings.path_replace
@@ -366,9 +378,11 @@ def postprocess(item):
     else:
         item['alternativeTitles'] = []
 
+    parse_subtitles = _source_subtitle_list if source else ast.literal_eval
+
     # Parse subtitles
     if item.get('subtitles'):
-        item['subtitles'] = ast.literal_eval(item['subtitles'])
+        item['subtitles'] = parse_subtitles(item['subtitles'])
         for i, subs in enumerate(item['subtitles']):
             language = _subtitle_language_details(subs[0])
             file_size = subs[2] if len(subs) > 2 else 0
@@ -399,7 +413,7 @@ def postprocess(item):
 
     # Parse missing subtitles
     if item.get('missing_subtitles'):
-        item['missing_subtitles'] = ast.literal_eval(item['missing_subtitles'])
+        item['missing_subtitles'] = parse_subtitles(item['missing_subtitles'])
         for i, subs in enumerate(item['missing_subtitles']):
             language = subs.split(':')
             item['missing_subtitles'][i] = {"name": language_from_alpha2(language[0]),
@@ -422,7 +436,9 @@ def postprocess(item):
         item['tags'] = ast.literal_eval(item.get('tags', '[]'))
     else:
         item['tags'] = []
-    if item.get('monitored'):
+    if source:
+        item['monitored'] = bool(item.get('monitored'))
+    elif item.get('monitored'):
         item['monitored'] = item.get('monitored') == 'True'
     else:
         item['monitored'] = False
@@ -475,11 +491,12 @@ def postprocess(item):
         path = image_proxy_path_with_instance(path, arr_instance_id)
         return f"{base_url}/images/{media}{path}"
 
-    if item.get('poster') is not None:
-        item['poster'] = _proxy_image(item['poster'])
+    if not source:
+        if item.get('poster') is not None:
+            item['poster'] = _proxy_image(item['poster'])
 
-    if item.get('fanart') is not None:
-        item['fanart'] = _proxy_image(item['fanart'])
+        if item.get('fanart') is not None:
+            item['fanart'] = _proxy_image(item['fanart'])
 
     return item
 
