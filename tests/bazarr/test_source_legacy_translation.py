@@ -166,6 +166,7 @@ def test_source_legacy_translation_skips_when_the_configured_input_folder_moves(
     from app.config import settings
     from media_sources import repository
     from media_sources.indexer import index_item
+    from subtitles.tools import subsync_engines
     from subtitles.tools.translate import main
     from subtitles.tools.translate.runtime import service
     from subtitles.tools.translate.services import lingarr_translator
@@ -191,7 +192,7 @@ def test_source_legacy_translation_skips_when_the_configured_input_folder_moves(
     original = service.RuntimeTranslatorService._legacy
     translated = []
     loaded = []
-    original_load = lingarr_translator.pysubs2.load
+    original_read = subsync_engines.read_regular_subtitle
 
     def legacy(self, engine, instance):
         if change == 'setting':
@@ -203,9 +204,9 @@ def test_source_legacy_translation_skips_when_the_configured_input_folder_moves(
             folder.symlink_to(second, target_is_directory=True)
         return original(self, engine, instance)
 
-    def load(path, **kwargs):
+    def read(path, version, **kwargs):
         loaded.append(str(path))
-        return original_load(path, **kwargs)
+        return original_read(path, version, **kwargs)
 
     def translate(self, lines, job_id):
         translated.extend(lines)
@@ -213,7 +214,7 @@ def test_source_legacy_translation_skips_when_the_configured_input_folder_moves(
 
     monkeypatch.setattr(service.RuntimeTranslatorService, '_legacy', legacy)
     monkeypatch.setattr(lingarr_translator.LingarrTranslatorService, '_translate_content', translate)
-    monkeypatch.setattr(lingarr_translator.pysubs2, 'load', load)
+    monkeypatch.setattr(subsync_engines, 'read_regular_subtitle', read)
     job_id = main.translate_subtitles_file(context.path, str(path), 'en', 'hu', False, False, 'episode',
                                             None, None, None, None, source=context)
     job = toolbox.jobs._reserve_next_job()
@@ -287,10 +288,13 @@ def test_source_legacy_translation_rejects_a_new_shared_folder_owner(
     assert toolbox.db.execute(sa.select(repository.History)).all() == []
 
 
-def test_automatic_source_legacy_translation_keeps_profile_eligibility(toolbox, legacy_runtime, monkeypatch):
+@pytest.mark.parametrize('encoding', ['utf-8', 'utf-16', 'cp1252'])
+def test_automatic_source_legacy_translation_keeps_profile_eligibility(
+        toolbox, legacy_runtime, monkeypatch, encoding):
     from app.config import settings
     from app.database import TableLanguagesProfiles, update_profile_id_list
     from media_sources import repository, translation
+    from media_sources.indexer import index_item
 
     profile = [{'id': 1, 'language': 'en', 'forced': 'False', 'hi': 'False'},
                {'id': 2, 'language': 'hu', 'forced': 'False', 'hi': 'False', 'translate_from': 'en'}]
@@ -298,7 +302,10 @@ def test_automatic_source_legacy_translation_keeps_profile_eligibility(toolbox, 
     update_profile_id_list.invalidate()
     monkeypatch.setattr(settings.translator, 'min_source_wait_minutes', 0)
     context = tools.pipeline._episode(toolbox.world)
-    tools._sidecars(toolbox, context)
+    path, _ = tools._sidecars(toolbox, context)
+    caption = 'Une tasse de café, un gâteau à la crème et 20 €.'
+    path.write_bytes(tools.SRT.replace('Original cue', caption).encode(encoding))
+    assert index_item(context.item_id) is not None
 
     assert translation.queue_missing_translations(context) == {'hu'}
     job = toolbox.jobs._reserve_next_job()
@@ -306,7 +313,7 @@ def test_automatic_source_legacy_translation_keeps_profile_eligibility(toolbox, 
     assert toolbox.jobs._run_job(job)
 
     target = Path(context.path).with_suffix('.hu.srt')
-    assert 'Translated Original cue' in target.read_text()
+    assert f'Translated {caption}' in target.read_text(encoding='utf-8')
     (row,) = toolbox.db.execute(sa.select(repository.History)).all()
     assert (row.item_id, row.action, row.subtitles_path) == (context.item_id, 6, str(target))
 
