@@ -78,7 +78,8 @@ def list_wanted(session, args, scope, *, arr_instance_id, start, length):
         sort=lambda c: (sa.func.coalesce(c.league_title, ''), sa.func.coalesce(c.event_date, ''),
                         sa.func.coalesce(c.season, 0), sa.func.coalesce(c.episode, 0), c.part_number, c.origin, c.id))
     arr_ids, source_ids = _page_ids(page, 'arr'), _page_ids(page, 'source')
-    arr_rows = workflows.serialize_wanted_page(session, arr_query.where(events.id.in_(arr_ids))) if arr_ids else []
+    arr_rows = workflows.list_wanted(
+        session, length=-1, query=arr_query, owner_filter=events.id.in_(arr_ids))['data'] if arr_ids else []
     arr_data = {row['id']: dict(row, **dict.fromkeys(_METADATA)) for row in arr_rows}
 
     source_data = {}
@@ -112,7 +113,8 @@ def _source_activity(session, table, query, ids):
     items, sources = repository.Items, repository.Sources
     joined = table.outerjoin(items, table.c.item_id == items.c.id).outerjoin(sources, table.c.source_id == sources.c.id)
     details = query.with_only_columns(
-        *table.c, items.c.group_id.label('source_group_id'), items.c.season, items.c.episode,
+        *table.c, items.c.title.label('live_title'), items.c.group_id.label('source_group_id'),
+        items.c.season, items.c.episode,
         items.c.part_number, items.c.part_name, sources.c.kind.label('source_kind'),
     ).select_from(joined).where(table.c.id.in_(ids))
     is_history = table is repository.History
@@ -120,8 +122,9 @@ def _source_activity(session, table, query, ids):
     rows = {}
     for row in session.execute(details):
         data = dict(row._mapping)
+        title = data.pop('item_title')
         data.update(arr_instance_id=None, event_id=None, league_id=None, source_item_id=data.pop('item_id'),
-                    title=data.pop('item_title'), leagueTitle=data.pop('group_title'),
+                    title=data.pop('live_title') or title, leagueTitle=data.pop('group_title'),
                     partNumber=data.pop('part_number') or None, partName=data.pop('part_name'))
         data.pop('item_kind')
         if is_history:
@@ -163,15 +166,17 @@ def clear_blacklist(session, scope):
     source = repository.Blacklist
     removed = 0
     with source_transaction(session) as connection:
+        if scope.includes('source'):
+            removed = connection.execute(sa.delete(source).where(
+                source.c.item_kind == _KIND, scope.source(source.c.source_id),
+            )).rowcount
+        if not scope.keys and not removed:
+            raise ValueError('arr_instance_id is required and must be a positive integer')
         if settings.general.use_sportarr and scope.includes('arr'):
             enabled = sa.select(TableArrInstances.id).where(
                 TableArrInstances.kind == 'sportarr', TableArrInstances.enabled == 1)
             removed += connection.execute(sa.delete(TableBlacklistSports).where(
                 TableBlacklistSports.arr_instance_id.in_(enabled), scope.arr(TableBlacklistSports.arr_instance_id),
-            )).rowcount
-        if scope.includes('source'):
-            removed += connection.execute(sa.delete(source).where(
-                source.c.item_kind == _KIND, scope.source(source.c.source_id),
             )).rowcount
     event_stream(type='sports')
     return removed

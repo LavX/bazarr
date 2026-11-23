@@ -17,6 +17,13 @@ isolated_jobs = pipeline.isolated_jobs
 writes = manual_tests.writes
 
 
+@pytest.fixture(autouse=True)
+def keep_application_scheduler_stopped(monkeypatch):
+    from apscheduler.schedulers.background import BackgroundScheduler
+
+    monkeypatch.setattr(BackgroundScheduler, 'start', lambda self: None)
+
+
 # Paths below the sports root, with date, season year, season, round, title, part, and state.
 FIXTURES = [
     ('Formula 1/2026-05-24 Monaco Grand Prix Race.mkv',
@@ -61,6 +68,13 @@ def test_sports_filename_identity(name, expected):
             parsed.identity_state) == expected
     if parsed.title == Path(name).stem and expected[-1] == 'unmatched' and parsed.event_date:
         assert parsed.parsed_title is None
+
+
+def test_a_bare_filename_year_does_not_identify_a_round():
+    from media_sources.sports_parse import parse_sports_file
+
+    parsed = parse_sports_file('NFL/2026 Week 05 Bears vs Packers.mkv', 'NFL')
+    assert (parsed.year, parsed.round, parsed.identity_state) == (None, 5, 'unmatched')
 
 
 def test_folder_scan_admits_leagues_and_events_with_no_sportarr(source_db, tmp_path, monkeypatch, languages_loaded):
@@ -155,6 +169,9 @@ def test_sports_activity_unions_keep_legacy_shape_filter_and_page(client, arr_li
 
     previous = {endpoint: get(endpoint).data for endpoint in endpoints}
     assert {endpoint: get(endpoint, sources=1).data for endpoint in endpoints} == previous
+    ownerless = client.delete('/api/sports/blacklist?sources=1', headers=HEADERS)
+    assert ownerless.status_code == 400
+    assert get('blacklist').data == previous['blacklist']
     owner, league, dated, round_id = _events(arr_library, tmp_path)
     rows = {}
     at = datetime(2027, 1, 1)
@@ -209,25 +226,43 @@ def test_sports_activity_unions_keep_legacy_shape_filter_and_page(client, arr_li
     assert len(detached) == 1 and detached[0]['source_name'] == 'Removed Sports'
     assert detached[0]['source_item_id'] is None and detached[0]['source_group_id'] is None
 
+    from media_sources.context import resolve_item
+    from media_sources.history import blacklist_log_source
+
+    blacklist_log_source(resolve_item(dated), 'fake', 'race-release', 'en')
+    arr_library.execute(sa.delete(repository.Items).where(repository.Items.c.id == dated))
+    retained = get('blacklist', sources=1, **{'source_key[]': f'source:{owner}'}).get_json()['data']
+    assert len(retained) == 1 and retained[0]['title'] == 'Race Day Race'
+
 
 def test_source_only_sports_badge_and_search_do_not_require_a_sportarr_owner(
         client, arr_library, tmp_path, monkeypatch, isolated_jobs):
     from app.config import settings
-    from media_sources import wanted
+    from media_sources import service, wanted
 
     monkeypatch.setattr(settings.general, 'use_sportarr', False)
     monkeypatch.setattr(wanted, 'jobs_queue', isolated_jobs)
-    _events(arr_library, tmp_path)
+    owner, _, dated, round_id = _events(arr_library, tmp_path)
     assert client.get('/api/badges', headers=HEADERS).get_json()['sports'] == 0
     assert client.get('/api/badges?sources=1', headers=HEADERS).get_json()['sports'] == 2
     response = client.get('/api/sports/wanted?sources=1', headers=HEADERS)
     assert response.status_code == 200
     assert [row['origin'] for row in response.get_json()['data']] == ['source', 'source']
-    response = client.post('/api/sports/wanted?sources=1', headers=HEADERS, json={})
+    _events(arr_library, tmp_path, name='Another source')
+    before = client.post('/api/sports/wanted', headers=HEADERS, json={},
+                         query_string={'sources': 1, 'source_key[]': 'source:removed'})
+    assert before.status_code == 200 and before.get_json()['job_id'] is None
+    response = client.post('/api/sports/wanted', headers=HEADERS, json={},
+                           query_string={'sources': 1, 'source_key[]': f'source:{owner}'})
     assert response.status_code == 202
     queued = isolated_jobs._reserve_next_job()
     assert queued.job_id == response.get_json()['job_id']
-    assert queued.kwargs['kind'] == 'sports_event'
+    assert (queued.kwargs['kind'], queued.kwargs['source_ids']) == ('sports_event', (owner,))
+    searched = []
+    monkeypatch.setattr(service, 'search_wanted_item',
+                        lambda item_id, *_, expected_source_id: searched.append((item_id, expected_source_id)))
+    assert isolated_jobs._run_job(queued)
+    assert searched == [(dated, owner), (round_id, owner)]
 
 
 def test_sports_item_override_controls_provider_identity(client, arr_library, tmp_path):
@@ -376,10 +411,19 @@ def test_source_and_sportarr_videos_share_the_sports_fields_but_keep_separate_po
 def test_manual_sports_uses_the_same_floor_and_rechecks_it_at_download(
         client, arr_library, writes, isolated_jobs, tmp_path, monkeypatch):
     from app.config import settings
+    from media_sources import repository, service
+    from media_sources.context import resolve_item
+    from app.jobs_queue import JobFailed
     from subliminal_patch.score import MAX_SCORES
     from subtitles import manual
 
     _, _, dated, _ = _events(arr_library, tmp_path)
+    expected_source = resolve_item(dated)
+    repository.update_item(dated, arr_library, identity_state='unmatched')
+    unattended = client.post(f'/api/sources/items/{dated}/search', headers=HEADERS)
+    assert unattended.status_code == 409 and unattended.get_json()['error'] == 'incomplete_identity'
+    with pytest.raises(JobFailed, match='sports event identity'):
+        service.search_source_item(dated, job_id=1, expected_source=expected_source)
     monkeypatch.setattr(settings.general, 'minimum_score_sports', 65)
     monkeypatch.setattr(settings.general, 'minimum_score_movie', 0)
     maximum = MAX_SCORES['movie']
@@ -404,6 +448,16 @@ def test_manual_sports_uses_the_same_floor_and_rechecks_it_at_download(
     url = f'/api/sources/items/{dated}/manual'
     (choice,) = client.get(url, headers=HEADERS).get_json()['data']
     assert choice['orig_score'] == high.score
+    correction = client.patch(f'/api/sources/items/{dated}', headers=HEADERS, json={
+        'title': 'Race Day', 'part_name': 'Qualifying',
+    })
+    assert correction.status_code == 200
+    response = client.post(url, headers=HEADERS, json={'provider': 'fake', 'subtitle': choice['subtitle']})
+    job = isolated_jobs._reserve_next_job()
+    assert job.job_id == response.get_json()['job_id'] and not isolated_jobs._run_job(job)
+    assert job.error['reason'] == 'identity_changed'
+
+    (choice,) = client.get(url, headers=HEADERS).get_json()['data']
     monkeypatch.setattr(settings.general, 'minimum_score_sports', 90)
     response = client.post(url, headers=HEADERS, json={'provider': 'fake', 'subtitle': choice['subtitle']})
     job = isolated_jobs._reserve_next_job()

@@ -36,6 +36,9 @@ def validate_source_candidate(candidate, source, provider):
     if source.kind == 'sports_event':
         from subtitles.utils import _get_scores
 
+        identity = ('title', 'year', 'group_title', 'event_date', 'season', 'episode')
+        if any(getattr(candidate.source, field) != getattr(source, field) for field in identity):
+            raise JobFailed('The sports event identity has changed. Search again.', reason='identity_changed')
         minimum, _, _ = _get_scores('movie', settings.general.minimum_score_sports)
         if candidate.subtitle.score is None or candidate.subtitle.score < int(minimum):
             raise JobFailed('This release is below the current sports minimum score. Search again.',
