@@ -1306,7 +1306,7 @@ def test_failed_update_keeps_the_source_detached_after_catalog_replacement(commu
 ] + [(binding, store_first) for binding in (
     "omitted-url-match", "omitted-url-match-active-only", "omitted-url-no-cache", "omitted-url-unusable-cache",
     "omitted-url-wrong-url", "omitted-url-other-source", "omitted-url-other-plugin", "omitted-url-other-version",
-    "omitted-url-manifest-mismatch", "omitted-url-conflicting-cache", "omitted-url-stale-commit",
+    "omitted-url-manifest-mismatch", "omitted-url-duplicate-cache", "omitted-url-stale-commit",
     "omitted-url-unchecked-source", "omitted-url-detached",
 ) for store_first in (False, True)])
 def test_legacy_catalog_binding_requires_matching_evidence(
@@ -1346,8 +1346,7 @@ def test_legacy_catalog_binding_requires_matching_evidence(
         source["registration"] = "current-registration"
     entries = {}
     if omitted_url:
-        # Released refreshes normalized the cached copy, while installation kept
-        # the validated signed manifest, which could omit catalog_url.
+        # Exercise recovery when the saved installation omits catalog_url but the cache records it.
         source.update(last_checked_at="2026-11-22T00:00:00Z", resolved_commit="b" * 40)
         for manifest in (previous, staged):
             manifest["source"].pop("catalog_url")
@@ -1378,7 +1377,7 @@ def test_legacy_catalog_binding_requires_matching_evidence(
                 entry["manifest"]["bundle_sha256"] = "c" * 64
             elif binding == "omitted-url-stale-commit":
                 entry["resolved_commit"] = "c" * 40
-            elif binding == "omitted-url-conflicting-cache":
+            elif binding == "omitted-url-duplicate-cache":
                 entries[f"duplicate:{plugin_id}:{entry['version']}"] = dict(entry)
     published = {**staged, "source": {**staged["source"], "catalog_url": source["url"]}}
     if not omitted_url and source.get("resolved_commit"):

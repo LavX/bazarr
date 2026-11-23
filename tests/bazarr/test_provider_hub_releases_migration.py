@@ -33,6 +33,59 @@ def _migration():
     return module
 
 
+@pytest.mark.parametrize("evidence, bound", [
+    ("matching", True),
+    ("different-digest", False),
+    ("different-digest-first", False),
+    ("malformed-digest", False),
+    ("malformed-peer-digest", False),
+    ("duplicate", False),
+    ("unrelated-source", True),
+    ("historic-url", True),
+    ("malformed-sources", False),
+])
+def test_legacy_release_binding_agrees_on_retained_artifact_evidence(evidence, bound):
+    from provider_hub import releases
+
+    plugin_id, version, source_id = "sample", "1.0.0", "community"
+    url, commit = "https://example.invalid/catalog.json", "a" * 40
+    digest = "b" * 64
+    manifest = {"schema_version": 1, "provider_id": plugin_id, "version": version,
+                "source": {"commit": commit}, "bundle_sha256": digest}
+    source_records = {source_id: {"url": url, "resolved_commit": commit}}
+    if evidence == "historic-url":
+        manifest["source"]["catalog_url"] = url
+        source_records[source_id].pop("resolved_commit")
+    elif evidence == "malformed-digest":
+        manifest["bundle_sha256"] = [digest]
+    elif evidence == "malformed-sources":
+        source_records = [source_id]
+
+    cached = {**manifest, "source": {"commit": commit, "catalog_url": url, "trusted": False}}
+    entry = {"source": source_id, "provider_id": plugin_id, "version": version,
+             "resolved_commit": commit, "manifest": cached}
+    entries = {} if evidence == "historic-url" else {"first": entry}
+    if evidence.startswith("different-digest") or evidence in {"unrelated-source", "malformed-peer-digest"}:
+        peer_digest = None if evidence == "malformed-peer-digest" else "c" * 64
+        peer = {**entry, "manifest": {**cached, "bundle_sha256": peer_digest}}
+        if evidence == "unrelated-source":
+            peer["source"] = "other"
+        entries = {"second": peer, **entries} if evidence.endswith("-first") else {**entries, "second": peer}
+    elif evidence == "duplicate":
+        entries["second"] = copy.deepcopy(entry)
+
+    row = {"origin": "catalog", "source_id": source_id, "active_version": version, "manifest": manifest}
+    document = {"catalog_sources": source_records, "catalog_entries": entries, "installations": {plugin_id: row}}
+    expected_fields = ["catalog_registration:legacy"] if bound else []
+    assert _migration()._legacy_catalog_fields(document, plugin_id, row, version, manifest) == expected_fields
+
+    stored, plan = releases.split(releases.compose(copy.deepcopy(document), []), [])
+    (release, _), = plan.inserts
+    assert json.loads(release["fields"]) == ["manifest", *expected_fields]
+    expected_source = source_id if bound else None
+    assert release["source_id"] == stored["installations"][plugin_id]["source_id"] == expected_source
+
+
 def _run(connection, step):
     context = MigrationContext.configure(connection, opts={"render_as_batch": True})
     with Operations.context(context):
