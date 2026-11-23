@@ -9,7 +9,7 @@ function framesToMs(frame: number, fps: number): number {
 }
 
 export const subParser: SubtitleParser = {
-  parse(content: string): ParseResult {
+  parse(content, { strict } = {}): ParseResult {
     const text = content.replace(/^\uFEFF/, "").replace(/\r\n/g, "\n");
 
     if (!text.trim()) {
@@ -21,7 +21,10 @@ export const subParser: SubtitleParser = {
 
     for (const line of lines) {
       const match = line.match(/^\{(\d+)\}\{(\d+)\}(.*)$/);
-      if (!match) continue;
+      if (!match) {
+        if (strict) throw new Error("Invalid MicroDVD cue");
+        continue;
+      }
 
       const [, startFrame, endFrame, rawText] = match;
       const displayText = rawText.replace(/\|/g, "\n");

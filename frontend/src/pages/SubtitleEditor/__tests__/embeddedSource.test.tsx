@@ -539,9 +539,11 @@ it("loads a replaced source document into the open editor and saves only with it
   ).toBeGreaterThan(0);
   expect(screen.queryByText("From the file on disk")).not.toBeInTheDocument();
   await user.click(screen.getByRole("button", { name: "Save" }));
+  expect(await screen.findByText("Subtitle changed on disk")).toBeVisible();
   expect(
-    await screen.findByText("The source file changed while you were editing."),
-  ).toBeVisible();
+    screen.getByRole("button", { name: "Discard edits and reload" }),
+  ).toBeEnabled();
+  expect(screen.getByRole("button", { name: "Save" })).toBeDisabled();
   expect(put).toHaveBeenCalledExactlyOnceWith(
     "replacement",
     expect.objectContaining({ content: SAVED }),
@@ -744,9 +746,11 @@ it("retains a dirty source draft when a background read or save fails", async ()
   expect(screen.getByDisplayValue("Keep my unsaved draft")).toBeVisible();
   expect(screen.getByText("Unsaved")).toBeVisible();
   await user.click(screen.getByRole("button", { name: "Save" }));
+  expect(await screen.findByText("Subtitle changed on disk")).toBeVisible();
   expect(
-    await screen.findByText("The source file changed while you were editing."),
-  ).toBeVisible();
+    screen.getByRole("button", { name: "Discard edits and reload" }),
+  ).toBeEnabled();
+  expect(screen.getByRole("button", { name: "Save" })).toBeDisabled();
   expect(screen.getByDisplayValue("Keep my unsaved draft")).toBeVisible();
   expect(screen.getByText("Unsaved")).toBeVisible();
   expect(puts).toEqual([

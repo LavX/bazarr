@@ -9,7 +9,7 @@ function parseTimestampToMs(h: string, m: string, s: string): number {
 }
 
 export const txtParser: SubtitleParser = {
-  parse(content: string): ParseResult {
+  parse(content, { strict } = {}): ParseResult {
     const text = content.replace(/^\uFEFF/, "").replace(/\r\n/g, "\n");
 
     if (!text.trim()) {
@@ -20,18 +20,17 @@ export const txtParser: SubtitleParser = {
     const cues = [];
 
     // Try TMPlayer format: HH:MM:SS:text or HH:MM:SS=text
-    const tmPlayerPattern = /^(\d+):(\d+):(\d+)[:=](.+)$/;
-    let isTmPlayer = false;
+    const tmPlayerPattern = /^(\d+):(\d+):(\d+)[:=](.*)$/;
+    const firstMatch = lines[0].match(tmPlayerPattern);
 
-    // Check first non-empty line to detect format
-    if (lines.length > 0 && tmPlayerPattern.test(lines[0])) {
-      isTmPlayer = true;
-    }
-
-    if (isTmPlayer) {
+    // The serializer writes timestamp-only rows for empty cues.
+    if (firstMatch && (strict || firstMatch[4])) {
       for (const line of lines) {
         const match = line.match(tmPlayerPattern);
-        if (!match) continue;
+        if (!match || (!strict && !match[4])) {
+          if (strict) throw new Error("Invalid timed TXT cue");
+          continue;
+        }
 
         const [, h, m, s, cueText] = match;
         const startMs = parseTimestampToMs(h, m, s);
@@ -55,7 +54,10 @@ export const txtParser: SubtitleParser = {
 
       for (const line of lines) {
         const match = line.match(numberedPattern);
-        if (!match) continue;
+        if (!match) {
+          if (strict) throw new Error("Invalid timed TXT cue");
+          continue;
+        }
 
         const [, , h, m, s, cueText] = match;
         const startMs = parseTimestampToMs(h, m, s);

@@ -48,6 +48,7 @@ interface EditorToolbarProps {
   format: string;
   language: string;
   canSaveAs?: boolean;
+  saveDisabled?: boolean;
   translating?: boolean;
   referenceActive?: boolean;
   bookmarkFilterActive?: boolean;
@@ -77,6 +78,7 @@ export default function EditorToolbar({
   format,
   language,
   canSaveAs = true,
+  saveDisabled,
   translating,
   referenceActive,
   bookmarkFilterActive,
@@ -118,6 +120,7 @@ export default function EditorToolbar({
                 size="sm"
                 variant="subtle"
                 color="gray"
+                disabled={saveDisabled}
                 onClick={() => onAction("save")}
                 aria-label="Save"
               >

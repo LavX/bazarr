@@ -1,5 +1,6 @@
 """Bounded scalar library projections. Reads never adopt a media file."""
 from copy import deepcopy
+from dataclasses import replace
 import hashlib
 import json
 import os
@@ -24,7 +25,11 @@ def _positive(value):
 
 
 def _identity(item):
-    return {key: value for key in ("imdb_id", "tmdb_id", "tvdb_id") if (value := item.get(key)) is not None}
+    tmdb = item.get("id") if item.get("source") == "tmdb" else item.get("tmdb_id")
+    if type(tmdb) is not int or not 0 < tmdb < 2**53:
+        tmdb = _positive(tmdb)
+    ids = {"imdb_id": item.get("imdb_id"), "tmdb_id": tmdb, "tvdb_id": item.get("tvdb_id")}
+    return {key: value for key, value in ids.items() if value is not None}
 
 
 def matches(left, right):
@@ -33,6 +38,8 @@ def matches(left, right):
         return False
     a, b = _identity(left), _identity(right)
     common = a.keys() & b.keys()
+    if (_is_source_title(left) or _is_source_title(right)) and not {"tmdb_id", "imdb_id"} & common:
+        return False
     return bool(common) and all(a[key] == b[key] for key in common)
 
 
@@ -82,9 +89,9 @@ def _merge_groups(items, assignments):
             for key, value in _identity(item).items():
                 if group.get(key) is None:
                     group[key] = value
-            existing = {copy["local_id"] for copy in group.get("copies", [])}
+            existing = {_copy_key(copy) for copy in group.get("copies", [])}
             group.setdefault("copies", []).extend(deepcopy(copy) for copy in item.get("copies", [])
-                                                  if copy["local_id"] not in existing)
+                                                  if _copy_key(copy) not in existing)
             group["copies_truncated"] = group.get("copies_truncated", False) or item.get("copies_truncated", False)
         groups.append(group)
     return groups
@@ -97,6 +104,86 @@ def merge_candidates(items):
 def _model(kind):
     from app.database import TableMovies, TableShows
     return TableMovies if kind == "movie" else TableShows
+
+
+def _copy_key(copy):
+    return copy.get("source_id"), copy["local_id"]
+
+
+def _source_model(kind):
+    from app.database import TableSourceGroups, TableSourceItems
+    return TableSourceGroups.__table__ if kind == "show" else TableSourceItems.__table__
+
+
+def _source_library(table, kind, *columns):
+    from app.database import TableMediaSourceLibraries, TableMediaSources
+    library, source = TableMediaSourceLibraries.__table__, TableMediaSources.__table__
+    return (select(*columns).select_from(table)
+            .join(library, and_(library.c.id == table.c.library_id, library.c.source_id == table.c.source_id))
+            .join(source, source.c.id == table.c.source_id)
+            .where(source.c.enabled == 1, library.c.enabled == 1, library.c.content_kind == kind))
+
+
+def source_items(kind, *columns):
+    """Select live file rows of one kind, with source ownership in scope."""
+    table = _source_model(kind)
+    return (_source_library(table, "movie" if kind == "movie" else "series", *columns)
+            .where(table.c.kind == kind, table.c.arr_shadow == 0))
+
+
+def source_titles(kind, *columns):
+    """Select movie files and show groups, excluding files owned by an Arr."""
+    if kind == "movie":
+        return source_items(kind, *columns)
+    group, episode = _source_model("show"), _source_model("episode")
+    episodes = (select(episode.c.id).where(episode.c.group_id == group.c.id, episode.c.kind == "episode",
+                                          episode.c.library_id == group.c.library_id,
+                                          episode.c.source_id == group.c.source_id).correlate(group))
+    return _source_library(group, "series", *columns).where(
+        group.c.kind == "show", or_(~episodes.exists(), episodes.where(episode.c.arr_shadow == 0).exists()))
+
+
+def _is_source_title(item):
+    return str(item.get("source_id", "")).startswith("source:")
+
+
+def _source_id_columns(table):
+    return (func.nullif(func.lower(func.trim(table.c.imdb_id)), ""),
+            func.nullif(func.ltrim(func.trim(table.c.tmdb_id), "0"), ""))
+
+
+def _source_identity_predicate(table, imdb, tmdb, *, exact=False):
+    imdb_column, tmdb_column = _source_id_columns(table)
+    ids = [(column, value) for column, value in ((imdb_column, imdb), (tmdb_column, str(tmdb) if tmdb else None))
+           if value is not None]
+    if not ids:
+        return false()
+    same = or_(*(column == value for column, value in ids))
+    return and_(same, *(or_(column.is_(None), column == value) for column, value in ids)) if exact else same
+
+
+def _source_title_projection(kind):
+    from app.database import TableMediaSources
+    table = _source_model(kind)
+    return source_titles(kind, table.c.id, table.c.source_id, TableMediaSources.name.label("source_name"),
+                         table.c.title, table.c.year, table.c.imdb_id, table.c.tmdb_id, table.c.tvdb_id,
+                         table.c.updated_at)
+
+
+def _project_source(row, kind):
+    imdb, tmdb = _imdb(row.imdb_id), _positive(row.tmdb_id)
+    if not (imdb or tmdb):
+        return None
+    year = _positive(row.year)
+    copy = {"source_id": row.source_id, "source_name": row.source_name, "local_id": row.id,
+            "arr_instance_id": None, "updated_at": row.updated_at.isoformat() if row.updated_at else None,
+            "episode_count": None}
+    return {"source": "local", "source_id": f"source:{kind}:{row.id}", "id": f"source:{row.id}",
+            "media_type": kind, "title": row.title[:500], "year": year if year and 1000 <= year <= 9999 else None,
+            "imdb_id": imdb, "tmdb_id": tmdb, "tvdb_id": _positive(row.tvdb_id) if kind == "show" else None,
+            "mapping_status": "resolved" if imdb else "unresolved", "overview": "",
+            "poster_url": None, "backdrop_url": None, **({"seasons": None} if kind == "show" else {}),
+            "copies": [copy], "copies_truncated": False}
 
 
 def _live(kind):
@@ -140,7 +227,8 @@ def _project(row, kind):
 
 
 def _identity_predicates(item, table):
-    predicates = [table.id.in_([copy["local_id"] for copy in item.get("copies", [])])] if item.get("copies") else []
+    ids = [copy["local_id"] for copy in item.get("copies", []) if copy.get("source_id") is None]
+    predicates = [table.id.in_(ids)] if ids else []
     if item.get("imdb_id"):
         predicates.append(func.lower(func.trim(table.imdbId)) == item["imdb_id"])
     if item["media_type"] == "movie" and item.get("tmdb_id"):
@@ -153,7 +241,9 @@ def _identity_predicates(item, table):
 def _ownership(connection, items):
     from app.database import TableEpisodes as Episode
     from app.database import TableShows as Show
-    ids = {copy["local_id"] for item in items if item["media_type"] == "show" for copy in item.get("copies", [])}
+    copies = [copy for item in items if item["media_type"] == "show" for copy in item.get("copies", [])]
+    ids = {copy["local_id"] for copy in copies if copy.get("source_id") is None}
+    source_groups = {copy["local_id"] for copy in copies if copy.get("source_id") is not None}
     counts = {}
     seasons = {}
     if ids:
@@ -167,19 +257,33 @@ def _ownership(connection, items):
                             Episode.arr_instance_id == Show.arr_instance_id)
                      .group_by(Episode.series_id, Episode.season))
         for series_id, season, count in connection.execute(statement).all():
-            counts[series_id] = counts.get(series_id, 0) + count
+            counts[(None, series_id)] = counts.get((None, series_id), 0) + count
             if season is not None:
-                seasons.setdefault(series_id, set()).add(int(season))
+                seasons.setdefault((None, series_id), set()).add(int(season))
+    if source_groups:
+        episode = _source_model("episode")
+        group = _source_model("show")
+        statement = (source_items("episode", episode.c.source_id, episode.c.group_id, episode.c.season, func.count())
+                     .join(group, and_(group.c.id == episode.c.group_id, group.c.library_id == episode.c.library_id,
+                                      group.c.source_id == episode.c.source_id))
+                     .where(episode.c.group_id.in_(source_groups))
+                     .group_by(episode.c.source_id, episode.c.group_id, episode.c.season))
+        for source_id, group_id, season, count in connection.execute(statement):
+            key = (source_id, group_id)
+            counts[key] = counts.get(key, 0) + count
+            if season is not None:
+                seasons.setdefault(key, set()).add(season)
     for item in items:
         if item["media_type"] != "show":
             continue
         for copy in item.get("copies", []):
-            copy["episode_count"] = counts.get(copy["local_id"], 0) if copy["arr_instance_id"] is not None else None
+            owned = copy["arr_instance_id"] is not None or copy.get("source_id") is not None
+            copy["episode_count"] = counts.get(_copy_key(copy), 0) if owned else None
         item["ownership"] = {"episode_count": sum(copy["episode_count"] or 0 for copy in item.get("copies", [])),
-                             "unknown_owners": any(copy["arr_instance_id"] is None for copy in item.get("copies", [])),
+                             "unknown_owners": any(copy["episode_count"] is None for copy in item.get("copies", [])),
                              "truncated": item.get("copies_truncated", False),
                              "selected_episode_owned": None, "complete_series": None,
-                             "seasons_owned": sorted(set().union(*(seasons.get(copy["local_id"], set())
+                             "seasons_owned": sorted(set().union(*(seasons.get(_copy_key(copy), set())
                                                                    for copy in item.get("copies", []))))}
 
 
@@ -190,15 +294,25 @@ def _expand(connection, items, *, merge=False):
         selected = [items[i] for i in selected_indices]
         table = _model(kind)
         predicates = [predicate for item in selected for predicate in _identity_predicates(item, table)]
-        if not predicates:
+        source_table = _source_model(kind)
+        source_predicates = [_source_identity_predicate(source_table, identity.get("imdb_id"), identity.get("tmdb_id"))
+                             for identity in map(_identity, selected) if {"imdb_id", "tmdb_id"} & identity.keys()]
+        if not predicates and not source_predicates:
             candidate_groups.extend([i] for i in selected_indices)
             continue
-        seed_ids = {copy["local_id"] for item in selected for copy in item.get("copies", [])}
+        seed_ids = {copy["local_id"] for item in selected for copy in item.get("copies", [])
+                    if copy.get("source_id") is None}
         order = (case((table.id.in_(seed_ids), 0), else_=1), table.id) if seed_ids else (table.id,)
         rows = connection.execute(select(*_columns(kind)).where(or_(*predicates), _live(kind))
-                                  .order_by(*order).limit(COPY_LIMIT + 1)).all()
+                                  .order_by(*order).limit(COPY_LIMIT + 1)).all() if predicates else []
+        source_rows = connection.execute(_source_title_projection(kind).where(or_(*source_predicates))
+                                         .order_by(source_table.c.id).limit(COPY_LIMIT + 1)).all() if source_predicates else []
+        if not predicates and not source_rows:
+            candidate_groups.extend([i] for i in selected_indices)
+            continue
         projected = [_project(row, kind) for row in rows[:COPY_LIMIT]]
-        truncated = len(rows) > COPY_LIMIT
+        projected.extend(item for row in source_rows[:COPY_LIMIT] if (item := _project_source(row, kind)))
+        truncated = len(rows) > COPY_LIMIT or len(source_rows) > COPY_LIMIT
         evidence = selected + projected
         groups = _identity_groups(evidence)
         assignments = {index: group for group in groups for index in group}
@@ -219,7 +333,7 @@ def _expand(connection, items, *, merge=False):
                 candidate_groups.append([selected_indices[i] for i in selected_group])
         for index, item in enumerate(selected):
             # Canonical seeds survive independently from optional association.
-            copies = {copy["local_id"]: deepcopy(copy) for copy in item.get("copies", [])}
+            copies = {_copy_key(copy): deepcopy(copy) for copy in item.get("copies", [])}
             compatible = [evidence[i] for i in assignments[index] if i >= len(selected)]
             if truncated:
                 # An unseen row might contradict a partial completion. Exact
@@ -228,7 +342,7 @@ def _expand(connection, items, *, merge=False):
                               if len(_identity(item)) >= 2 and _identity(item) == _identity(other)]
             for other in compatible:
                 for copy in other["copies"]:
-                    copies.setdefault(copy["local_id"], deepcopy(copy))
+                    copies.setdefault(_copy_key(copy), deepcopy(copy))
                 for key, value in _identity(other).items():
                     if item.get(key) is None:
                         item[key] = value
@@ -261,6 +375,14 @@ def _candidate_titles(query, media_type, limit, catalog_items):
                 .order_by(table.id).limit(SHORTLIST_LIMIT + 1)).all()
             truncated |= len(rows) > SHORTLIST_LIMIT
             items.extend(_project(row, kind) for row in rows[:SHORTLIST_LIMIT])
+            source_table = _source_model(kind)
+            imdb, tmdb = _source_id_columns(source_table)
+            rows = connection.execute(_source_title_projection(kind).where(
+                func.lower(source_table.c.title).like("%" + escaped + "%", escape="\\"),
+                or_(imdb.is_not(None), tmdb.is_not(None)))
+                .order_by(source_table.c.id).limit(SHORTLIST_LIMIT + 1)).all()
+            truncated |= len(rows) > SHORTLIST_LIMIT
+            items.extend(item for row in rows[:SHORTLIST_LIMIT] if (item := _project_source(row, kind)))
         merged = _expand(connection, items, merge=True)
         local = [item for item in merged if item["source"] == "local"]
         catalog = [item for item in merged if item["source"] != "local"]
@@ -286,12 +408,20 @@ def attach_local_copies(items):
 
 def local_details(local_id, media_type):
     from app.database import engine
-    if media_type not in ("movie", "show") or not isinstance(local_id, str) or not re.fullmatch(r"[1-9]\d{0,12}", local_id):
+    if (media_type not in ("movie", "show") or not isinstance(local_id, str)
+            or not re.fullmatch(r"(?:source:)?[1-9]\d{0,12}", local_id)):
         raise ValueError("Invalid local identity.")
-    table = _model(media_type)
     with engine.connect() as connection:
-        row = connection.execute(select(*_columns(media_type)).where(table.id == int(local_id))).first()
-        return _expand(connection, [_project(row, media_type)])[0] if row else None
+        if local_id.startswith("source:"):
+            table = _source_model(media_type)
+            row = connection.execute(_source_title_projection(media_type)
+                                     .where(table.c.id == int(local_id.removeprefix("source:")))).first()
+            item = _project_source(row, media_type) if row else None
+        else:
+            table = _model(media_type)
+            row = connection.execute(select(*_columns(media_type)).where(table.id == int(local_id))).first()
+            item = _project(row, media_type) if row else None
+        return _expand(connection, [item])[0] if item else None
 
 
 # --- Explicit, ownership-safe copy matching ---------------------------------
@@ -312,7 +442,7 @@ def local_details(local_id, media_type):
 
 COPY_OPTION_LIMIT = 24
 COPY_HASH_MIN_BYTES = 10 * 1024 * 1024
-_COPY_ID = re.compile(r"c1\.(movie|episode)\.([1-9]\d{0,12})\.(0|[1-9]\d{0,12}|x)")
+_COPY_ID = re.compile(r"c1\.(movie|episode)\.([1-9]\d{0,12})\.(0|s?[1-9]\d{0,12}|x)")
 
 
 class CopyUnavailable(ValueError):
@@ -347,7 +477,8 @@ def _parse_copy_identity(copy_id):
     if match is None:
         return None
     owner = match.group(3)
-    return match.group(1), int(match.group(2)), None if owner == "x" else int(owner)
+    is_source = owner.startswith("s")
+    return match.group(1), int(match.group(2)), None if owner == "x" else int(owner.removeprefix("s")), is_source
 
 
 def _copy_target(target):
@@ -355,22 +486,53 @@ def _copy_target(target):
         raise ValueError("Choose a movie or an exact episode.")
     media_type = target.get("media_type")
     imdb = _imdb(target.get("imdb_id"))
-    if media_type not in ("movie", "episode") or not imdb:
-        raise ValueError("Choose a movie or an exact episode with a valid IMDb ID.")
+    tmdb = _positive(target.get("tmdb_id"))
+    if (media_type not in ("movie", "episode") or not (imdb or tmdb)
+            or (target.get("imdb_id") is not None and not imdb) or (target.get("tmdb_id") is not None and not tmdb)):
+        raise ValueError("Choose a movie or an exact episode with a valid IMDb or TMDB ID.")
     season = episode = None
     if media_type == "episode":
         season, episode = target.get("season"), target.get("episode")
         if (type(season) is not int or type(episode) is not int
                 or not 0 <= season <= 9999 or not 1 <= episode <= 9999):
             raise ValueError("Choose an exact season and episode.")
-    return media_type, imdb, season, episode
+    return media_type, imdb, tmdb, season, episode
+
+
+def _source_episode_predicate(item, season, episode, evidence):
+    numeric = and_(item.c.season == season, item.c.episode == episode)
+    if evidence is None:
+        return numeric
+    original = (evidence.get("season"), evidence.get("episode"))
+    if (type(original[0]) is not int or type(original[1]) is not int
+            or not 0 <= original[0] <= 9999 or not 1 <= original[1] <= 9999):
+        raise ValueError("Choose an exact source season and episode.")
+    imdb_column, tmdb_column = _source_id_columns(item)
+    imdb, tmdb, tvdb = _imdb(evidence.get("imdb_id")), _positive(evidence.get("id")), _positive(evidence.get("tvdb_id"))
+    if any(evidence.get(key) is not None and value is None
+           for key, value in (("imdb_id", imdb), ("id", tmdb), ("tvdb_id", tvdb))):
+        raise ValueError("Invalid source episode identity.")
+    ids = [(column, value) for column, value in ((imdb_column, imdb), (tmdb_column, str(tmdb) if tmdb else None),
+                                                (func.nullif(item.c.tvdb_id, 0), tvdb)) if value is not None]
+    same = [column == value for column, value in ids]
+    if original == (season, episode):
+        same.append(numeric)
+    # Source files can carry either numbering scheme. When the catalog and
+    # Arr numbering differ, only an episode-level ID can establish a match.
+    return and_(or_(false(), *same), *(or_(column.is_(None), column == value) for column, value in ids))
+
+
+def _arr_movie_tmdb_matches(movie, tmdb):
+    normalized = func.ltrim(func.trim(movie.tmdbId), "0")
+    return or_(normalized.is_(None), normalized == "", func.length(normalized) > 13,
+               func.ltrim(normalized, "0123456789") != "", normalized == str(tmdb))
 
 
 def _text(value, limit=300):
     return value[:limit] if isinstance(value, str) and value.strip() else None
 
 
-def _copy_statement(media_type, imdb, season, episode, local_id=None, owner=None):
+def _copy_statement(media_type, imdb, season, episode, local_id=None, owner=None, *, tmdb=None):
     from app.database import TableEpisodes as Episode
     from app.database import TableMovies as Movie
     from app.database import TableShows as Show
@@ -382,6 +544,8 @@ def _copy_statement(media_type, imdb, season, episode, local_id=None, owner=None
             Movie.audio_codec, Movie.file_size, Movie.movie_file_id.label("file_id"),
             Movie.updated_at_timestamp,
         ).where(func.lower(func.trim(Movie.imdbId)) == imdb, _live("movie"))
+        if tmdb is not None:
+            statement = statement.where(_arr_movie_tmdb_matches(Movie, tmdb))
     else:
         table = Episode
         statement = select(
@@ -441,13 +605,48 @@ def _instance_names(connection, owners):
     return {row.id: _text(row.name, 200) for row in rows}
 
 
-def _owning_titles(connection, media_type, imdb):
+def _owning_titles(connection, media_type, imdb, tmdb):
     from app.database import TableMovies as Movie
     from app.database import TableShows as Show
     table = Movie if media_type == "movie" else Show
-    return connection.execute(select(func.count(table.id))
-                              .where(func.lower(func.trim(table.imdbId)) == imdb,
-                                     _live("movie" if media_type == "movie" else "show"))).scalar() or 0
+    kind = "movie" if media_type == "movie" else "show"
+    statement = select(func.count(table.id)).where(func.lower(func.trim(table.imdbId)) == imdb, _live(kind))
+    if kind == "movie" and tmdb is not None:
+        statement = statement.where(_arr_movie_tmdb_matches(Movie, tmdb))
+    return connection.execute(statement).scalar() or 0
+
+
+def _source_copy_statement(media_type, imdb, tmdb, season, episode, *, episode_identity=None):
+    from app.database import TableMediaSources
+    item = _source_model(media_type)
+    group = _source_model("show")
+    title = item if media_type == "movie" else group
+    statement = source_items(media_type, item.c.id, item.c.path, item.c.source_id, item.c.library_id,
+                             TableMediaSources.name.label("source_name"), title.c.title, title.c.year,
+                             item.c.group_id, item.c.season.label("source_season"), item.c.episode.label("source_episode"),
+                             item.c.identity_source,
+                             item.c.episode_title, item.c.scene_name, item.c.format,
+                             item.c.resolution, item.c.video_codec, item.c.audio_codec, item.c.file_size,
+                             item.c.updated_at, title.c.imdb_id, title.c.tmdb_id)
+    if media_type == "episode":
+        statement = (statement.join(group, and_(group.c.id == item.c.group_id, group.c.source_id == item.c.source_id,
+                                               group.c.library_id == item.c.library_id, group.c.kind == "show"))
+                     .add_columns(group.c.group_key.label("source_group_key"))
+                     .where(_source_episode_predicate(item, season, episode, episode_identity)))
+    return statement.where(_source_identity_predicate(title, imdb, tmdb, exact=True)).order_by(item.c.id)
+
+
+def _source_copy_option(row, media_type):
+    filename = os.path.basename(row.path) if row.path else None
+    return {"copy_id": copy_identity(media_type, row.id, f"s{row.source_id}"),
+            "media_type": media_type, "local_id": row.id, "arr_instance_id": None, "instance_name": None,
+            "source_id": row.source_id, "source_name": _text(row.source_name, 200),
+            "series_local_id": row.group_id, "title": _text(row.title), "episode_title": _text(row.episode_title),
+            "release": _text(row.scene_name, 500), "filename": _text(filename, 4000),
+            "source": _text(row.format, 100), "resolution": _text(row.resolution, 100),
+            "video_codec": _text(row.video_codec, 100), "audio_codec": _text(row.audio_codec, 100),
+            "file_size": row.file_size, "updated_at": row.updated_at.isoformat() if row.updated_at else None,
+            "selectable": bool(filename), "unavailable_reason": None if filename else "no_stored_path"}
 
 
 def copy_options(target):
@@ -462,18 +661,26 @@ def copy_options(target):
     absence from the library: a copy beyond the cap is still resolvable.
     """
     from app.database import engine
-    media_type, imdb, season, episode = _copy_target(target)
+    media_type, imdb, tmdb, season, episode = _copy_target(target)
     with engine.connect() as connection:
         rows = connection.execute(
-            _copy_statement(media_type, imdb, season, episode).limit(COPY_OPTION_LIMIT + 1)).all()
+            _copy_statement(media_type, imdb, season, episode, tmdb=tmdb).limit(COPY_OPTION_LIMIT + 1)
+        ).all() if imdb else []
         items = [_copy_option(row, media_type) for row in rows[:COPY_OPTION_LIMIT]]
         names = _instance_names(connection, {item["arr_instance_id"] for item in items})
         for item in items:
             item["instance_name"] = names.get(item["arr_instance_id"])
             if item["selectable"] and item["arr_instance_id"] not in names:
                 item["selectable"], item["unavailable_reason"] = False, "instance_missing"
-        owning = _owning_titles(connection, media_type, imdb)
-    return {"items": items, "truncated": len(rows) > COPY_OPTION_LIMIT,
+        source_rows = connection.execute(_source_copy_statement(
+            media_type, imdb, tmdb, season, episode, episode_identity=target.get("episode_identity"))
+            .limit(COPY_OPTION_LIMIT + 1 - len(items))).all()
+        items.extend(_source_copy_option(row, media_type) for row in source_rows[:COPY_OPTION_LIMIT - len(items)])
+        owning = _owning_titles(connection, media_type, imdb, tmdb) if imdb else 0
+        kind = "movie" if media_type == "movie" else "show"
+        owning += connection.execute(source_titles(kind, func.count()).where(
+            _source_identity_predicate(_source_model(kind), imdb, tmdb, exact=True))).scalar() or 0
+    return {"items": items, "truncated": len(rows) + len(source_rows) > COPY_OPTION_LIMIT,
             "owning_titles": owning, "match_scope": "exact_target_copy"}
 
 
@@ -508,6 +715,9 @@ def _physical_revision(facts, path, status, file_hash):
                 facts["file_id"], facts["stored_path"], path, facts["release"],
                 facts["file_size"], facts["updated_at"],
                 status.st_size, status.st_mtime_ns, file_hash]
+    if facts.get("source_id") is not None:
+        material.extend((facts["source_id"], facts["source_season"], facts["source_episode"], facts["identity_source"],
+                         facts["source_group_key"], *facts["file_identity"]))
     digest = hashlib.sha256(json.dumps(material, sort_keys=True, separators=(",", ":")).encode())
     return digest.hexdigest()[:32]
 
@@ -545,54 +755,50 @@ def _copy_hash(path, size):
 
 
 def resolve_copy(copy_id, target):
-    """Resolve one explicitly chosen copy, or refuse.
-
-    Resolution is by local id plus owning instance, revalidated against the
-    confirmed target, so a colliding upstream id can never redirect it.
-
-    It refuses, with a reason, for exactly these causes and no others:
-    copy_invalid for a malformed identity or one naming the wrong media kind;
-    owner_unknown for an identity that names no owning instance; copy_missing
-    when no row matches that local id and owner within this confirmed target,
-    which is what a deleted row, a reused local id, a row that now belongs to
-    another title and a row of an integration switched off or an instance
-    disabled since all reduce to; instance_missing when the owning arr_instances
-    row is gone; no_stored_path when the row records no file; and
-    copy_unavailable when the mapped path cannot be stat-ed or is not a regular
-    file. Every one of them asks for a new choice instead of quietly searching a
-    different file. An invalid target itself raises a plain ValueError before
-    any of this.
-
-    _copy_option can also mark a row owner_unknown, but not on this path: the
-    identity has already been required to name an owner and the query pins the
-    row to it, so the only projection reason reachable here is no_stored_path.
-    """
+    """Revalidate one selected file against its origin, owner and confirmed target."""
     from app.database import engine
     from utilities.path_mappings import path_mappings
-    media_type, imdb, season, episode = _copy_target(target)
+    media_type, imdb, tmdb, season, episode = _copy_target(target)
     parsed = _parse_copy_identity(copy_id)
     if parsed is None or parsed[0] != media_type:
         raise CopyUnavailable(_RECOVERY, "copy_invalid")
-    _, local_id, owner = parsed
+    _, local_id, owner, is_source = parsed
     if owner is None:
         raise CopyUnavailable("This library copy has no owning instance, so it cannot be "
                               "verified. Search the title only.", "owner_unknown")
-    with engine.connect() as connection:
-        row = connection.execute(
-            _copy_statement(media_type, imdb, season, episode, local_id, owner).limit(2)).first()
+    if is_source:
+        item = _source_model(media_type)
+        evidence = None if target.get("manual_confirmed") else target.get("episode_identity")
+        with engine.connect() as connection:
+            row = connection.execute(_source_copy_statement(media_type, imdb, tmdb, season, episode,
+                                                            episode_identity=evidence)
+                                     .where(item.c.id == local_id, item.c.source_id == owner)).first()
         if row is None:
             raise CopyUnavailable(_RECOVERY, "copy_missing")
-        name = _instance_names(connection, {owner}).get(owner)
-    if name is None:
-        raise CopyUnavailable(_RECOVERY, "instance_missing")
-    facts = _copy_option(row, media_type)
+        facts = _source_copy_option(row, media_type)
+        facts.update(file_id=row.library_id, imdb_id=_imdb(row.imdb_id), tmdb_id=_positive(row.tmdb_id),
+                     year=_positive(row.year), source_season=row.source_season, source_episode=row.source_episode,
+                     identity_source=row.identity_source, source_group_key=getattr(row, "source_group_key", None))
+        path = row.path
+    else:
+        if not imdb:
+            raise CopyUnavailable(_RECOVERY, "copy_missing")
+        with engine.connect() as connection:
+            row = connection.execute(
+                _copy_statement(media_type, imdb, season, episode, local_id, owner, tmdb=tmdb).limit(2)).first()
+            if row is None:
+                raise CopyUnavailable(_RECOVERY, "copy_missing")
+            name = _instance_names(connection, {owner}).get(owner)
+        if name is None:
+            raise CopyUnavailable(_RECOVERY, "instance_missing")
+        facts = _copy_option(row, media_type)
+        facts.update(instance_name=name, file_id=row.file_id)
+        path = row.path
     if not facts["selectable"]:
         raise CopyUnavailable(_RECOVERY, facts["unavailable_reason"])
-    facts["instance_name"] = name
     facts["stored_path"] = row.path
-    facts["file_id"] = row.file_id
-    path = path_mappings.path_replace_instance(
-        row.path, owner, "movies" if media_type == "movie" else "series")
+    if not is_source:
+        path = path_mappings.path_replace_instance(path, owner, "movies" if media_type == "movie" else "series")
     try:
         status = os.stat(path)
     except OSError:
@@ -601,11 +807,35 @@ def resolve_copy(copy_id, target):
         raise CopyUnavailable(_RECOVERY, "copy_unavailable")
     file_hash = _copy_hash(path, status.st_size)
     facts["observed_size"] = status.st_size
+    if is_source:
+        facts["file_identity"] = (status.st_dev, status.st_ino)
     facts["file_revision"] = _physical_revision(facts, path, status, file_hash)
     # Private to the server. copy_context() is what may be serialized.
     facts["path"] = path
     facts["file_hash"] = file_hash
     return facts
+
+
+def require_copy_revision(context):
+    """Check that an explicit choice still names the physical file it described."""
+    if context.get("copy_id"):
+        facts = resolve_copy(context["copy_id"], context)
+        if facts["file_revision"] != context.get("file_revision"):
+            raise CopyUnavailable(_RECOVERY)
+
+
+def source_context_for_copy(facts):
+    """Resolve a provider context only for the exact source row already selected."""
+    from media_sources.context import SourceItemGone, resolve_item
+
+    try:
+        item = resolve_item(facts["local_id"])
+    except SourceItemGone:
+        raise CopyUnavailable(_RECOVERY, "copy_missing") from None
+    if (item.item_id, item.kind, item.source_id, item.library_id, item.path) != (
+            facts["local_id"], facts["media_type"], facts["source_id"], facts["file_id"], facts["path"]):
+        raise CopyUnavailable(_RECOVERY)
+    return replace(item, pinned_file_identity=facts["file_identity"])
 
 
 COPY_CONTEXT_FIELDS = ("copy_id", "media_type", "local_id", "arr_instance_id", "instance_name",
@@ -621,4 +851,7 @@ def copy_context(facts):
     Never the directory, the stored path, the mapped path, the content hash or
     the upstream file id.
     """
-    return {key: facts[key] for key in COPY_CONTEXT_FIELDS}
+    context = {key: facts[key] for key in COPY_CONTEXT_FIELDS}
+    if facts.get("source_id") is not None:
+        context.update(source_id=facts["source_id"], source_name=facts["source_name"])
+    return context
