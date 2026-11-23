@@ -402,8 +402,10 @@ def test_pending_movie_keeps_its_server_link_and_adopts_late_hints(source_db, tm
     assert (item.external_id, item.identify_pending) == ("server-movie-8", 1)
 
     hints = replace(hints, title="Corrected", tmdb_id="180")
-    assert lib.scan().unchanged == 1
+    result = lib.scan()
+    assert (result.status, result.updated, result.unchanged) == ("ok", 1, 0)
     corrected = lib.items()[str(path)]
+    assert (corrected.id, corrected.external_id) == (item.id, item.external_id)
     assert (corrected.title, corrected.tmdb_id, corrected.identity_source, corrected.identify_pending) == (
         "Corrected", "180", "media_server", 0)
     assert queried == [("movie", "Rename")]

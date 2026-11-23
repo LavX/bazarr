@@ -421,6 +421,36 @@ def test_a_search_saves_a_subtitle_next_to_the_file_and_writes_history_and_the_i
     assert world.published[0].video_path == context.path
 
 
+def test_source_download_saves_in_absolute_folder_after_server_displacement(world, monkeypatch):
+    from media_sources import identity, repository, service
+
+    folder = _custom_folder(world, monkeypatch, world.tmp_path)
+    path = world.root / "Film.mkv"
+    old_id = add_item(world.db, world.source_id, world.library_id, path, title="Former recording", external_id="10")
+    history_id = repository.insert_history(world.db, item_id=old_id, source_id=world.source_id,
+                                           item_kind="movie", action=1, item_title="Former recording",
+                                           video_path=str(path), description="Previous download")
+    displaced_path = identity.displaced_item_path(old_id, str(path))
+    assert repository.update_item(old_id, world.db, path=displaced_path, server_missing=1)
+    replacement = _movie(world, path.name)
+    _download(monkeypatch)
+    monkeypatch.setattr(service.jobs_queue, "update_job_progress", lambda **kwargs: None)
+
+    service.search_source_item(replacement.item_id, job_id=3)
+
+    saved = folder / "Film.en.srt"
+    assert saved.read_bytes() == CONTENT
+    indexed = repository.get_item(replacement.item_id)
+    assert ["en", str(saved), len(CONTENT)] in ast.literal_eval(indexed.subtitles)
+    assert indexed.missing_subtitles == "[]"
+    old = repository.get_item(old_id)
+    assert (old.path, old.server_missing) == (displaced_path, 1)
+    former, current = world.db.execute(sa.select(repository.History).order_by(repository.History.c.id)).all()
+    assert (former.id, former.item_id, former.item_title, former.video_path) == (
+        history_id, old_id, "Former recording", str(path))
+    assert (current.item_id, current.subtitles_path) == (replacement.item_id, str(saved))
+
+
 @pytest.mark.parametrize(("admitted", "listing_failure"), [(False, False), (True, False), (True, True)],
                          ids=["replacement", "admitted", "admitted-with-listing-failure"])
 def test_a_failed_probe_is_retried_once_per_search_even_with_download_reindexing(
@@ -2217,10 +2247,13 @@ def test_indexing_with_a_custom_subtitle_folder_reads_no_arr_table_and_keeps_a_s
     assert f"{base}.en.ffsubsync.srt" in listing
 
 
-def test_the_source_ownership_index_only_claims_items_of_the_source_tables(world, tmp_path):
+def test_the_source_ownership_index_only_claims_items_of_the_source_tables(world):
+    from media_sources import repository
     from media_sources.indexer import SourceOutputOwnerIndex
 
     first, second = _movie(world), _movie(world, "Other.2002.mkv")
+    Path(second.path).unlink()
+    assert repository.update_item(second.item_id, world.db, server_missing=1)
     owners = SourceOutputOwnerIndex()._load_owners()
     claimed = {path for paths in owners.values() for path in paths}
     assert claimed == {first.path, second.path}

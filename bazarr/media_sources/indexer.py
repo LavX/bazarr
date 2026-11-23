@@ -99,7 +99,9 @@ class SourceOutputOwnerIndex(SyncOutputOwnerIndex):
             destination = settings.general.subfolder, get_subtitle_destination_folder()
         owners = {}
         for path in paths:
-            SyncOutputOwnerIndex._record_owner(owners, path, destination)
+            # Scanner placeholders such as displaced:<id>:<path> do not own subtitle filenames.
+            if os.path.isabs(path):
+                SyncOutputOwnerIndex._record_owner(owners, path, destination)
         return owners
 
 
