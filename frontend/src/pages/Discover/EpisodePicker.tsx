@@ -122,11 +122,19 @@ export default function EpisodePicker({
   const unavailable = seasons.isError || seasons.data?.status === "unavailable";
   const conflicting = episode?.identity_status === "conflict";
   const unverified = episode?.identity_status === "unverified";
+  const hasSourceCopy = draft.copyTmdbId === show.id;
+  const sourceNumberingDiffers =
+    hasSourceCopy &&
+    episode?.identity_status === "resolved" &&
+    (episode.season !== episode.target_season ||
+      episode.episode !== episode.target_episode);
   const needsManual =
     show.seasons === null ||
     show.seasons.length === 0 ||
     unavailable ||
-    unverified;
+    unverified ||
+    sourceNumberingDiffers ||
+    (hasSourceCopy && !show.imdb_id);
   // The link's own numbering is the only numbering the page knows here, so the
   // reader confirms or corrects it rather than retyping what they just
   // followed. An edit still wins: these are ordinary draft fields.
@@ -280,6 +288,12 @@ export default function EpisodePicker({
           this episode's season and number to search.
         </Text>
       )}
+      {sourceNumberingDiffers && !draft.manualEntry && (
+        <Text size="sm">
+          TMDB and TVDB list this episode under different numbers. You can enter
+          the numbers used by your media source to find a copy.
+        </Text>
+      )}
       {conflicting && (
         <Alert color="red">
           Episode numbering does not match between metadata sources. Refresh
@@ -293,7 +307,7 @@ export default function EpisodePicker({
           </Button>
         </Alert>
       )}
-      {show.imdb_id &&
+      {(show.imdb_id || hasSourceCopy) &&
         !conflicting &&
         !draft.manualEntry &&
         (showOptions || needsManual || !parentMatches) && (

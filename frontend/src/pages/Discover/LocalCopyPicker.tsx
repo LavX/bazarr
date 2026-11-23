@@ -89,6 +89,12 @@ export default function LocalCopyPicker() {
   const imdbId = /^tt\d{7,10}$/.test(imdbInput) ? imdbInput : undefined;
   const tmdbId = draft.copyTmdbId;
   const episode = draft.mediaType === "episode";
+  const sourceEpisode =
+    !draft.manualEntry &&
+    !draft.manualConfirmed &&
+    draft.episodeIdentity?.identity_status === "resolved"
+      ? draft.episodeIdentity
+      : undefined;
   const target =
     draft.mode === "release" || (!imdbId && (imdbInput || !tmdbId))
       ? null
@@ -101,6 +107,7 @@ export default function LocalCopyPicker() {
               tmdbId,
               season: Number(draft.season),
               episode: Number(draft.episode),
+              sourceEpisode,
             }
           : null;
   const offer = useDiscoverCopies(target);

@@ -568,6 +568,98 @@ it("searches a TMDB-only movie from a media source using an explicitly chosen fi
   expect(searches[0]).not.toHaveProperty("imdb_id");
 });
 
+it("lets a TMDB-only show on its catalog page search a manually confirmed source episode", async () => {
+  const sourceCopy = {
+    ...copyA,
+    copy_id: "c1.episode.3.s2",
+    arr_instance_id: null,
+    instance_name: null,
+    source_id: 2,
+    source_name: "Local shows",
+  };
+  copyPayload = { items: [sourceCopy], truncated: false, owning_titles: 1 };
+  server.use(
+    http.get("/api/discover/metadata/shows/100", () =>
+      HttpResponse.json({
+        data: {
+          ...envelope,
+          item: {
+            ...show,
+            imdb_id: null,
+            copies: [{ local_id: 30, source_id: 2, arr_instance_id: null }],
+          },
+        },
+      }),
+    ),
+    http.get("/api/discover/metadata/shows/100/seasons/2/episodes/1", () =>
+      HttpResponse.json({
+        data: {
+          ...envelope,
+          episode: {
+            ...episode,
+            show_imdb_id: null,
+            target_season: null,
+            target_episode: null,
+            numbering: null,
+            identity_status: "unverified",
+          },
+        },
+      }),
+    ),
+  );
+
+  const { user } = browse();
+  expect(await screen.findByText("In your library")).toBeVisible();
+  await user.click(
+    await screen.findByRole("button", {
+      name: "Enter episode numbers manually",
+    }),
+  );
+  await user.clear(screen.getByRole("textbox", { name: "Episode" }));
+  await user.type(screen.getByRole("textbox", { name: "Episode" }), "5");
+  await user.click(
+    screen.getByRole("checkbox", {
+      name: "I confirm the manual season and episode numbers",
+    }),
+  );
+  await pickOption(user, "Subtitle language", "English");
+  await pickOption(user, "Library copy", describeCopy(sourceCopy));
+  await user.click(screen.getByRole("button", { name: "Find subtitles" }));
+  await waitFor(() => expect(searches).toHaveLength(1));
+  expect(new URLSearchParams(copyRequests.at(-1)).get("episode")).toBe("5");
+  expect(searches[0]).toMatchObject({
+    media_type: "episode",
+    tmdb_id: 100,
+    show_id: 100,
+    season: 2,
+    episode: 5,
+    manual_confirmed: true,
+    copy_id: sourceCopy.copy_id,
+  });
+  expect(searches[0]).not.toHaveProperty("imdb_id");
+});
+
+it("uses both episode numbering schemes to ask for copies of a verified catalog episode", async () => {
+  server.use(
+    http.get("/api/discover/metadata/shows/100/seasons/2/episodes/1", () =>
+      HttpResponse.json({
+        data: {
+          ...envelope,
+          episode: { ...episode, target_season: 3, target_episode: 4 },
+        },
+      }),
+    ),
+  );
+  browse();
+  await findSelectInput("Library copy");
+  const actual = new URLSearchParams(copyRequests.at(-1));
+  expect(actual.get("season")).toBe("3");
+  expect(actual.get("episode")).toBe("4");
+  expect(actual.get("source_season")).toBe("2");
+  expect(actual.get("source_episode")).toBe("1");
+  expect(actual.get("episode_tmdb_id")).toBe("401");
+});
+
 it("matches a copy for an IMDb identifier typed straight into the form", async () => {
   copyPayload = { items: [movieCopy], truncated: false, owning_titles: 1 };
   const { user } = browse("/discover");

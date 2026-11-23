@@ -2,11 +2,13 @@
 import pytest
 
 import test_discover_copy_matching as copies_fixtures
+import test_discover_download as download_fixtures
 import test_discover_summary as summary_fixtures
 
 authenticated_client = copies_fixtures.authenticated_client
 copy_database = copies_fixtures.copy_database
 providers = copies_fixtures.providers
+catalog_provider = copies_fixtures.catalog_provider
 summary_database = summary_fixtures.summary_database
 quiet_queue = summary_fixtures.quiet_queue
 
@@ -137,6 +139,87 @@ def test_show_copy_uses_the_groups_identity_and_exact_episode(
     assert response.json["owning_titles"] == 0
 
 
+def test_remapped_episode_offers_only_arr_numbering_or_an_exact_source_identity(
+    authenticated_client, copy_database, providers, monkeypatch, tmp_path,
+):
+    from app.database import TableSourceGroups, TableSourceItems
+    from discover import metadata
+
+    _, session = copy_database
+    owner = add_source(session, "series")
+    group_id = add_title(session, owner, TableSourceGroups, kind="show", title="Breaking Bad", group_key="show",
+                         tmdb_id="84", imdb_id="tt0903747")
+    wrong = tmp_path / "Breaking.Bad.S02E01.mkv"
+    correct = tmp_path / "Breaking.Bad.S01E03.mkv"
+    wrong.write_bytes(b"different episode")
+    correct.write_bytes(b"wanted episode")
+    wrong_id = add_title(session, owner, TableSourceItems, kind="episode", title="Different episode", group_id=group_id,
+                         season=2, episode=1, path=str(wrong))
+    right_id = add_title(session, owner, TableSourceItems, kind="episode", title="Wanted episode", group_id=group_id,
+                         tmdb_id="903", season=1, episode=3, path=str(correct))
+    copies_fixtures.add_instance(session, 1, "Sonarr", kind="sonarr")
+    copies_fixtures.add_episode(session, 8, 1, 40, tmp_path / "arr.mkv", season=2, episode=1)
+    session.commit()
+
+    canonical = {"source": "tmdb", "id": 903, "show_id": 84, "season": 1, "episode": 3,
+                 "target_season": 2, "target_episode": 1, "identity_status": "resolved", "show_imdb_id": "tt0903747",
+                 "show_title": "Breaking Bad", "show_year": 2008, "tvdb_id": 1203, "imdb_id": "tt0000903"}
+    monkeypatch.setattr(metadata, "_episode_details_with_validity", lambda *_: ({"data": {"episode": canonical}}, float("inf")))
+    manual = {"media_type": "episode", "imdb_id": "tt0903747", "tmdb_id": 84, "season": 2, "episode": 1}
+    response = copies_fixtures.copies(authenticated_client, **manual)
+    manual_source = next(copy for copy in response.json["items"] if copy["local_id"] == wrong_id)
+    verified = {**manual, "source_season": 1, "source_episode": 3, "episode_tmdb_id": 903,
+                "episode_tvdb_id": 1203, "episode_imdb_id": "tt0000903"}
+    response = copies_fixtures.copies(authenticated_client, **verified)
+    assert response.status_code == 200
+    assert [copy["local_id"] for copy in response.json["items"]] == [8, right_id]
+    resolved_source = response.json["items"][1]
+
+    providers.add("discover_source", copies_fixtures.catalog("discover_source", [("web", correct.stem)]))
+    selection = {**manual, "language": "eng", "title": "Breaking Bad", "year": 2008, "episode_identity": canonical}
+    refusal = copies_fixtures.post(authenticated_client, {**selection, "copy_id": manual_source["copy_id"]})
+    assert refusal.status_code == 409
+    assert providers.videos == []
+    response = copies_fixtures.post(authenticated_client, {**selection, "copy_id": resolved_source["copy_id"]})
+    assert response.status_code == 200
+    [(_, video, _)] = providers.videos
+    assert (video.name, video.season, video.episode) == (str(correct), 2, 1)
+
+
+def test_tmdb_only_catalog_episode_resolves_a_manually_confirmed_source_copy(
+    authenticated_client, copy_database, providers, monkeypatch, tmp_path,
+):
+    from app.database import TableSourceGroups, TableSourceItems
+    from discover import metadata
+
+    _, session = copy_database
+    owner = add_source(session, "series")
+    group_id = add_title(session, owner, TableSourceGroups, kind="show", title="Moon Show", group_key="moon",
+                         tmdb_id="84", year="2008")
+    path = tmp_path / "Moon.Show.S02E03.mkv"
+    path.write_bytes(b"source episode")
+    add_title(session, owner, TableSourceItems, kind="episode", title="Moon Show", group_id=group_id,
+              season=2, episode=3, path=str(path))
+    session.commit()
+
+    canonical = {"source": "tmdb", "id": 903, "show_id": 84, "season": 2, "episode": 3,
+                 "target_season": None, "target_episode": None, "identity_status": "unverified",
+                 "show_imdb_id": None, "show_title": "Moon Show", "show_year": 2008}
+    monkeypatch.setattr(metadata, "_episode_details_with_validity", lambda *_: ({"data": {"episode": canonical}}, float("inf")))
+    providers.add("discover_source", copies_fixtures.catalog("discover_source", [("web", path.stem)]))
+    target = {"media_type": "episode", "tmdb_id": 84, "season": 2, "episode": 3}
+    [copy] = copies_fixtures.copies(authenticated_client, **target).json["items"]
+    selection = {**target, "copy_id": copy["copy_id"], "show_id": 84, "episode_identity": canonical,
+                 "language": "eng", "title": "Moon Show", "year": 2008}
+    assert copies_fixtures.post(authenticated_client, selection).status_code == 400
+    response = copies_fixtures.post(authenticated_client, {**selection, "manual_confirmed": True})
+    assert response.status_code == 200
+    [(_, video, _)] = providers.videos
+    assert (video.name, video.series_tmdb_id, video.series_imdb_id, video.season, video.episode) == (
+        str(path), 84, None, 2, 3,
+    )
+
+
 def test_unidentified_disabled_and_shadowed_source_rows_do_not_create_copy_options(
     authenticated_client, copy_database, catalog_details, tmp_path,
 ):
@@ -163,17 +246,26 @@ def test_unidentified_disabled_and_shadowed_source_rows_do_not_create_copy_optio
     assert response.json["owning_titles"] == 1
 
 
+@pytest.mark.parametrize("arr_tmdb", ["42", "0", "missing"])
 def test_a_distinct_source_copy_and_arr_copy_can_share_a_row_id(
-    authenticated_client, copy_database, catalog_details, tmp_path,
+    authenticated_client, copy_database, catalog_details, tmp_path, arr_tmdb, monkeypatch,
 ):
     from app.database import TableMovies, TableSourceItems
+    from discover import metadata
+    from discover.library import resolve_copy
+
+    catalog = metadata.movie_details("42")
+    catalog["data"]["item"]["imdb_id"] = "tt0133093"
+    monkeypatch.setattr(metadata, "movie_details", lambda _: catalog)
 
     _, session = copy_database
     owner = add_source(session, "movie")
     item_id = add_title(session, owner, TableSourceItems, kind="movie", title="Night Film",
                         path=str(tmp_path / "disc.mkv"), tmdb_id="42", imdb_id="tt0133093")
     copies_fixtures.add_instance(session, 1, "Radarr")
-    session.add(TableMovies(id=item_id, arr_instance_id=1, radarrId=100, imdbId="tt0133093", tmdbId="42",
+    arr_file = tmp_path / "web.mkv"
+    arr_file.write_bytes(b"radarr copy")
+    session.add(TableMovies(id=item_id, arr_instance_id=1, radarrId=100, imdbId="tt0133093", tmdbId=arr_tmdb,
                             title="Night Film", path=str(tmp_path / "web.mkv")))
     session.commit()
 
@@ -182,8 +274,77 @@ def test_a_distinct_source_copy_and_arr_copy_can_share_a_row_id(
     assert [(copy["local_id"], copy.get("source_id")) for copy in response.json["data"]["item"]["copies"]] == [
         (item_id, None), (item_id, owner[0]),
     ]
-    response = copies_fixtures.copies(authenticated_client, media_type="movie", tmdb_id=42, imdb_id="tt0133093")
+    target = {"media_type": "movie", "tmdb_id": 42, "imdb_id": "tt0133093"}
+    response = copies_fixtures.copies(authenticated_client, **target)
     assert [copy["copy_id"] for copy in response.json["items"]] == [f"c1.movie.{item_id}.1", f"c1.movie.{item_id}.s{owner[0]}"]
+    assert response.json["owning_titles"] == 2
+    assert resolve_copy(f"c1.movie.{item_id}.1", target)["path"] == str(arr_file)
+    if arr_tmdb == "42":
+        conflict = copies_fixtures.copies(authenticated_client, **{**target, "tmdb_id": 43})
+        assert conflict.json["items"] == []
+        assert conflict.json["owning_titles"] == 0
+
+
+def test_scanned_source_copies_download_the_chosen_result_and_never_substitute_a_sibling(
+    authenticated_client, source_db, catalog_provider, providers, monkeypatch, tmp_path,
+):
+    from app import database
+    from discover import metadata
+    from media_sources import indexer, scanner
+
+    def movie(identity, year):
+        return {"id": identity, "source": "tmdb", "media_type": "movie", "title": "The Matrix", "year": year}
+
+    monkeypatch.setattr(indexer, "get_language_set", lambda: set())
+    monkeypatch.setattr(database, "engine", source_db.get_bind())
+    monkeypatch.setattr("app.jobs_queue.event_stream", lambda **kwargs: None)
+    monkeypatch.setattr(metadata, "search_movies", lambda *args, **kwargs: {
+        "data": {"status": "available", "items": [movie(603, 1999), movie(604, 2003)]},
+    })
+    monkeypatch.setattr(metadata, "movie_details", lambda _: {
+        "data": {"status": "available", "item": movie(603, 1999)},
+    })
+    library = tmp_path / "library"
+    chosen_file = copies_fixtures.media_file(library, "The.Matrix.1080p.WEB.mkv", b"first copy")
+    sibling_file = copies_fixtures.media_file(library, "The.Matrix.2160p.BluRay.mkv", b"second copy")
+
+    created = authenticated_client.post("/api/system/media-sources", headers=HEADERS,
+                                       json={"name": "Local films", "library": {"path": str(library), "content_kind": "movie"}})
+    assert created.status_code == 201
+    source_id = created.json["id"]
+    assert scanner.run_scan(source_id)[0].status == "ok"
+    listed = authenticated_client.get("/api/sources/items", headers=HEADERS, query_string={"source_id": source_id})
+    assert listed.status_code == 200
+    assert len(listed.json["data"]) == 2
+    for row in listed.json["data"]:
+        assert row["identity_state"] == "ambiguous"
+        picked = authenticated_client.patch(f"/api/sources/items/{row['id']}", headers=HEADERS, json={"candidate_id": 603})
+        assert picked.status_code == 200
+        assert picked.json["tmdb_id"] == "603"
+
+    target = {"media_type": "movie", "tmdb_id": 603}
+    offer = copies_fixtures.copies(authenticated_client, **target)
+    assert offer.status_code == 200
+    offered = {copy["filename"]: copy["copy_id"] for copy in offer.json["items"]}
+    assert set(offered) == {chosen_file.name, sibling_file.name}
+    chosen = copies_fixtures.post(authenticated_client, {**target, "language": "eng", "copy_id": offered[chosen_file.name]})
+    assert chosen.status_code == 200
+    assert copies_fixtures.searched(providers) == [str(chosen_file)]
+    result = next(row for row in chosen.json["results"] if "1080p" in row["release"])
+    download = download_fixtures.get(authenticated_client, result)
+    assert download.status_code == 200
+    assert download.data == copies_fixtures.SRT
+    assert catalog_provider[1] == ["web"]
+
+    chosen_file.unlink()
+    expired = download_fixtures.get(authenticated_client, result)
+    assert expired.status_code == 410
+    assert expired.json["reason"] == "result_expired"
+    assert catalog_provider[1] == ["web"]
+    assert sibling_file.is_file()
+    sibling = copies_fixtures.post(authenticated_client, {**target, "language": "eng", "copy_id": offered[sibling_file.name]})
+    assert sibling.status_code == 200
+    assert copies_fixtures.searched(providers) == [str(chosen_file), str(sibling_file)]
 
 
 def test_summary_counts_source_files_once(authenticated_client, summary_database, quiet_queue, tmp_path):
