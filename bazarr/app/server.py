@@ -120,6 +120,7 @@ class Server:
             self.shutdown(status)
 
     def start(self):
+        """Run the listener and report whether its loop performed teardown."""
         self.server.print_listen("BAZARR is started and waiting for requests on: http://{}:{}")
         signal.signal(signal.SIGINT, self.interrupt_handler)
         signal.signal(signal.SIGTERM, self.interrupt_handler)
@@ -130,14 +131,15 @@ class Server:
         except Exception:
             pass
         finally:
-            self.close_all()
+            closed_here = self.close_all()
+        return closed_here
 
     def close_all(self):
         # An explicit shutdown can close the listener while start() is
         # running. Its loop exit must not start a second teardown.
         with self._close_lock:
             if self._closing:
-                return
+                return False
             self._closing = True
 
         # The webserver first, so a slow stream teardown cannot hold the UI
@@ -177,6 +179,7 @@ class Server:
         stop_sportarr_clients()
         print("Closing database...")
         close_database()
+        return True
 
     def shutdown(self, status=EXIT_NORMAL):
         self.close_all()

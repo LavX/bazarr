@@ -192,7 +192,7 @@ def test_shutdown_during_the_configuration_lock_wait_prevents_the_next_request(m
             lock.release()
 
     monkeypatch.setattr(configuration, 'lock', ObservedLock())
-    with ThreadPoolExecutor(max_workers=1) as callers:
+    with ThreadPoolExecutor(max_workers=2) as callers:
         try:
             result = callers.submit(links.resolve, snapshot.id, 'movie', 7, configuration)
             assert ready.wait(3), wire
@@ -200,7 +200,9 @@ def test_shutdown_during_the_configuration_lock_wait_prevents_the_next_request(m
             with lock:
                 attempt.set()
                 assert waiting.wait(3)
-                links.shutdown()
+                # A shutdown that joins the lookup must fail the test before
+                # the lock is released, without blocking its release.
+                callers.submit(links.shutdown).result(3)
             assert result.result(3)['state'] == 'unreachable'
             pool.shutdown(wait=True)
             assert wire == (['/Items'] if kind == 'emby' else [])
@@ -407,17 +409,22 @@ def test_an_emby_row_edited_after_it_was_read_is_never_sent_the_old_credential(h
     configuration = native(emby)
     read = configuration.read
 
-    def edited_once_read(instance_id):
-        answer = read(instance_id)
+    def edited_once_read(instance_id, *, guard=None):
+        answer = read(instance_id, guard=guard)
         configuration.publish(replace(emby, apikey='replaced-key'))
         return answer
     monkeypatch.setattr(configuration, 'read', edited_once_read)
     assert links.resolve(emby.id, 'movie', 7, configuration) == {
         'instance_id': emby.id, 'state': 'unreachable', 'url': None}
+    assert configuration.list()[0].revision == emby.revision + 1
     assert records == []
 
 
-def test_an_emby_row_switched_off_after_the_item_is_found_is_not_asked_its_server_id(http_fixture, monkeypatch):
+@pytest.mark.parametrize('changes', [
+    {'instance_enabled': False},
+    {'path_mappings': ((('local_path', '/media'), ('remote_path', '/moved')),)},
+], ids=['disabled', 'mapping edited'])
+def test_an_emby_row_changed_after_the_item_is_found_is_not_asked_its_server_id(http_fixture, monkeypatch, changes):
     # The server id is a request of its own, after the lookup's, and it runs
     # the guard too.
     from emby import client as emby_client
@@ -431,11 +438,11 @@ def test_an_emby_row_switched_off_after_the_item_is_found_is_not_asked_its_serve
     configuration = native(emby)
     request_json = emby_client.MediaServerHTTP.request_json
 
-    def then_switched_off(self, *args, **kwargs):
+    def then_changed(self, *args, **kwargs):
         answer = request_json(self, *args, **kwargs)
-        configuration.publish(replace(emby, instance_enabled=False))
+        configuration.publish(replace(emby, **changes))
         return answer
-    monkeypatch.setattr(emby_client.MediaServerHTTP, 'request_json', then_switched_off)
+    monkeypatch.setattr(emby_client.MediaServerHTTP, 'request_json', then_changed)
     assert links.resolve(emby.id, 'movie', 7, configuration) == {
         'instance_id': emby.id, 'state': 'unreachable', 'url': None}
     assert [record['path'].partition('?')[0] for record in records] == ['/Items']
@@ -462,9 +469,9 @@ def test_a_mapping_edited_while_a_lookup_waited_maps_the_file_it_asks_for(http_f
     configuration = native(emby)
     read = configuration.read
 
-    def edited_then_read(instance_id):
+    def edited_then_read(instance_id, *, guard=None):
         configuration.publish(replace(emby, path_mappings=(tuple(sorted(mapping.items())),)))
-        return read(instance_id)
+        return read(instance_id, guard=guard)
     monkeypatch.setattr(configuration, 'read', edited_then_read)
     answer = links.resolve(emby.id, 'sports', 3, configuration)
     assert [parse_qs(urlsplit(record['path']).query)['Path'][0] for record in records

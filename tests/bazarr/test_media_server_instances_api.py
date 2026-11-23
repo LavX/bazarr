@@ -82,6 +82,40 @@ def _isolated_server(monkeypatch, listener, calls):
     return server
 
 
+def test_listener_loop_leaves_process_exit_to_the_restart_that_closed_it(monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Event
+    from types import SimpleNamespace
+
+    from media_servers import links
+
+    closed, finish_teardown = Event(), Event()
+    calls = []
+
+    def close():
+        closed.set()
+        assert finish_teardown.wait(3)
+
+    listener = SimpleNamespace(close=close, print_listen=lambda _message: None)
+    server = _isolated_server(monkeypatch, listener, calls)
+    monkeypatch.setattr(links, 'shutdown', lambda: None)
+    monkeypatch.setattr(server, 'restart_bazarr', lambda: calls.append('restart'))
+    with ThreadPoolExecutor(max_workers=1) as restart_thread:
+        def run():
+            nonlocal restart
+            restart = restart_thread.submit(server.webserver.restart)
+            assert closed.wait(3)
+
+        restart = None
+        listener.run = run
+        try:
+            assert server.webserver.start() is False
+        finally:
+            finish_teardown.set()
+        restart.result(3)
+    assert calls == ['streams', 'database', 'restart']
+
+
 @pytest.mark.parametrize('lifecycle', [
     'delete-idle', 'delete-active', 'restore', 'loop-return', 'loop-error', 'loop-oserror', 'loop-ebadf',
     'loop-interrupt', 'loop-system-exit',
@@ -184,7 +218,7 @@ def test_play_on_workers_follow_destination_lifecycle(instance_api, monkeypatch,
                 restore.setattr(backup, 'restart_bazarr', lambda: calls.append('restart'))
                 backup._restart_after_restore()
         else:
-            server.webserver.start()
+            return server.webserver.start()
 
     pools = set()
     try:
@@ -225,6 +259,7 @@ def test_play_on_workers_follow_destination_lifecycle(instance_api, monkeypatch,
                 elif not deleting:
                     stopped = ['stop'] if lifecycle in ('loop-interrupt', 'loop-system-exit') else []
                     assert calls == ['run', 'close', 'streams', 'database', *stopped]
+                    assert result is (not stopped)
                 else:
                     assert result == 204
                     assert resolve(removed, 5) == 'not_found'
