@@ -81,15 +81,19 @@ def _target_code(to_lang, forced, hi):
     return f'{to_lang}:forced' if forced else f'{to_lang}:hi' if hi else to_lang
 
 
-def _current_missing(item, profile_id, profile):
+def _current_missing(item, profile_id, profile, *, ownership_index=None, written_paths=()):
     # Profile saves queue an index refresh. While that work waits, evaluate the live
     # policy against the indexed tracks instead of trusting its old missing list.
-    from .indexer import compute_missing_subtitles
+    from .indexer import compute_missing_subtitles, list_current_external_subtitles
 
     ignored = {'pgs': settings.general.ignore_pgs_subs, 'vobsub': settings.general.ignore_vobsub_subs,
                'ass': settings.general.ignore_ass_subs}
-    listing = [entry for entry in ast.literal_eval(item.subtitles or '[]') if
-               (os.path.isfile(entry[1]) if entry[1] else not ignored.get(entry_codec(entry)))]
+    indexed = ast.literal_eval(item.subtitles or '[]')
+    listing = [entry for entry in indexed if not entry[1] and not ignored.get(entry_codec(entry))]
+    if ownership_index is None:
+        listing.extend(entry for entry in indexed if entry[1] and os.path.isfile(entry[1]))
+    else:
+        listing.extend(list_current_external_subtitles(item.path, indexed, ownership_index, written_paths))
     audio_codes = {entry['code2'] for entry in get_audio_profile_languages(item.audio_language)}
     return compute_missing_subtitles(profile, get_profile_cutoff(profile_id), listing, item.failed_attempts,
                                      matches_audio=lambda language: language['language'] in audio_codes)
@@ -104,7 +108,7 @@ def stored_missing_language_candidates(item):
     return _language_candidates(ast.literal_eval(item.missing_subtitles or '[]'))
 
 
-def missing_language_candidates(source):
+def missing_language_candidates(source, *, ownership_index=None, written_paths=()):
     """Read the live source policy and return the shared provider-search language tuples."""
     current = live_source(source)
     if current is None or current.profile_id is None:
@@ -113,7 +117,8 @@ def missing_language_candidates(source):
     if item is None or not current.same_item(item):
         return []
     profile = get_profiles_list(profile_id=current.profile_id)
-    return _language_candidates(_current_missing(item, current.profile_id, profile))
+    return _language_candidates(_current_missing(item, current.profile_id, profile, ownership_index=ownership_index,
+                                               written_paths=written_paths))
 
 
 def automatic_translation_is_current(source, subtitle_path, from_lang, to_lang, forced, hi):

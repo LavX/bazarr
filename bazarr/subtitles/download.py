@@ -334,7 +334,7 @@ def _wanted_source_can_publish(source, language, stamp, profile):
     return True
 
 
-def check_missing_languages_source(source, *, stored=False):
+def check_missing_languages_source(source, *, stored=False, ownership_index=None, written_paths=()):
     from media_sources import repository
     from media_sources.translation import missing_language_candidates, stored_missing_language_candidates
 
@@ -344,7 +344,7 @@ def check_missing_languages_source(source, *, stored=False):
             return set()
         candidates = stored_missing_language_candidates(item)
     else:
-        candidates = missing_language_candidates(source)
+        candidates = missing_language_candidates(source, ownership_index=ownership_index, written_paths=written_paths)
     return _get_language_obj(languages=candidates)
 
 
@@ -360,12 +360,13 @@ def _write_source_download(video_path, destination, content, *, source, language
         if wanted_stamp is not None:
             if not _wanted_source_can_publish(source, language, wanted_stamp, wanted_profile):
                 raise SubtitleDestinationChanged('Wanted source eligibility changed during search')
-        elif recheck_missing and language not in check_missing_languages_source(source):
-            raise SubtitleDestinationChanged('The source language is no longer missing')
         if not sync_output_owner_is_unique(video_path, destination, ownership_index=ownership_index):
             raise SubtitleDestinationChanged('The source subtitle destination does not have one media owner')
         if os.path.lexists(destination) and (not is_upgrade or regular_subtitle_version(destination) is None):
             raise SubtitleDestinationChanged('The source subtitle destination is already occupied')
+        if wanted_stamp is None and recheck_missing and language not in check_missing_languages_source(
+                source, ownership_index=ownership_index, written_paths=written_paths):
+            raise SubtitleDestinationChanged('The source language is no longer missing')
         yield
 
     try:

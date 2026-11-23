@@ -76,7 +76,7 @@ def regular_subtitle_version(path):
     return _subtitle_file_version(entry) if stat.S_ISREG(entry.st_mode) else None
 
 
-def read_regular_subtitle(path, expected_version):
+def read_regular_subtitle(path, expected_version, *, max_bytes=None):
     """Read the same ordinary file the caller approved, without waiting on a stream."""
     if expected_version is None or regular_subtitle_version(path) != expected_version:
         raise SubtitleSourceChanged('The subtitle input is no longer an approved regular file')
@@ -88,7 +88,7 @@ def read_regular_subtitle(path, expected_version):
                 or regular_subtitle_version(path) != expected_version):
             raise SubtitleSourceChanged('The subtitle input changed before it was opened')
         with open(descriptor, 'rb', closefd=False) as handle:
-            return handle.read()
+            return handle.read() if max_bytes is None else handle.read(max_bytes)
     finally:
         os.close(descriptor)
 
@@ -411,6 +411,9 @@ class SyncOutputOwnerIndex:
     def folder_is_shared(self, directory):
         return False
 
+    def conflicting_stems(self, video, subtitle_path):
+        return {_normalized_media_stem(video), _normalized_media_stem(subtitle_path)}
+
     def is_unique(self, video, directory, conflicting_stems):
         if not self._loaded:
             # A failed build leaves an empty index, never a partial ownership
@@ -439,7 +442,8 @@ def sync_output_owner_is_unique(video_path, source_path, ownership_index=None):
     stem = _normalized_media_stem
     if stem(source_path) != stem(video) and not stem(source_path).startswith(stem(video) + '.'):
         return False
-    conflicting_stems = {stem(video), stem(source_path)}
+    conflicting_stems = (ownership_index.conflicting_stems(video, source_path) if ownership_index is not None
+                         else {stem(video), stem(source_path)})
     try:
         with os.scandir(media_directory) as entries:
             local_videos = {os.path.normcase(os.path.realpath(entry.path)) for entry in entries
