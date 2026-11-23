@@ -1,7 +1,12 @@
 import { isArray, isEmpty, isNumber } from "lodash";
+import { mediaSourcesKey } from "@/apis/hooks/mediaSources";
 import queryClient from "@/apis/queries";
 import { scheduleEpisodesHistoryRefresh } from "@/apis/queries/episodeHistory";
 import { QueryKeys } from "@/apis/queries/keys";
+import {
+  invalidateSourceHistory,
+  scheduleSourceHistoryRefresh,
+} from "@/apis/queries/sourceHistory";
 import {
   scheduleSubtitleScoresRefresh,
   skipScoredRangeQueries,
@@ -18,6 +23,29 @@ import { setOnlineStatus } from "@/utilities/event";
 function invalidateHiddenTracks(mediaType: HiddenTrackMediaType) {
   void queryClient.invalidateQueries({
     queryKey: [QueryKeys.Subtitles, QueryKeys.EmbeddedHidden, mediaType],
+  });
+}
+
+function invalidateSourceWanted() {
+  for (const kind of [QueryKeys.Series, QueryKeys.Movies]) {
+    void queryClient.invalidateQueries({
+      queryKey: [kind, QueryKeys.Wanted],
+      predicate: ({ queryKey }) => {
+        const scope = queryKey[2];
+        return (
+          typeof scope === "object" &&
+          scope !== null &&
+          "includeSources" in scope &&
+          scope.includeSources === true
+        );
+      },
+    });
+  }
+  void queryClient.invalidateQueries({
+    queryKey: [QueryKeys.System, QueryKeys.Badges],
+  });
+  void queryClient.invalidateQueries({
+    queryKey: [QueryKeys.System, QueryKeys.Languages, "audio", true],
   });
 }
 
@@ -70,7 +98,10 @@ export function createDefaultReducer(): SocketIO.Reducer[] {
       key: "sports",
       any: () => {
         void queryClient.invalidateQueries({ queryKey: [QueryKeys.Sports] });
-        void queryClient.invalidateQueries({ queryKey: [QueryKeys.Badges] });
+        invalidateSourceWanted();
+        void queryClient.invalidateQueries({
+          queryKey: [QueryKeys.System, QueryKeys.Languages, "audio", false],
+        });
         invalidateHiddenTracks("sports");
       },
     },
@@ -334,6 +365,26 @@ export function createDefaultReducer(): SocketIO.Reducer[] {
       },
     },
     {
+      key: "source-item",
+      any: () => {
+        invalidateSourceWanted();
+        scheduleSourceHistoryRefresh(queryClient);
+      },
+    },
+    {
+      key: "source-removed",
+      update: (items) => {
+        void queryClient.invalidateQueries({
+          queryKey: mediaSourcesKey,
+          exact: true,
+        });
+        void invalidateSourceHistory(
+          queryClient,
+          items.flatMap((item) => item.kinds),
+        );
+      },
+    },
+    {
       key: "reset-episode-wanted",
       any: () => {
         void queryClient.invalidateQueries({
@@ -361,6 +412,14 @@ export function createDefaultReducer(): SocketIO.Reducer[] {
       key: "jobs",
       update: (items) => {
         const keys = [QueryKeys.System, QueryKeys.Jobs];
+
+        if (
+          items.some((payload) =>
+            ["completed", "failed", "cancelled"].includes(payload.status),
+          )
+        ) {
+          scheduleSourceHistoryRefresh(queryClient);
+        }
 
         items.forEach((payload) => {
           // A job event names the backend run it came from. One from a run the

@@ -250,3 +250,65 @@ describe("Wanted Series", () => {
     ).toBeInTheDocument();
   });
 });
+
+it("filters legacy Wanted rows by one Sonarr instance on a no-folder install", async () => {
+  const user = userEvent.setup();
+  server.use(
+    http.get("/api/system/settings", () =>
+      HttpResponse.json({
+        general: { use_sonarr: true },
+        media_sources: { visible: false },
+      }),
+    ),
+    http.get("/api/system/status", () => HttpResponse.json({ data: {} })),
+    http.get("/api/system/arr-instances", () =>
+      HttpResponse.json([
+        {
+          id: 2,
+          kind: "sonarr",
+          enabled: true,
+          is_default: true,
+          name: "Living room",
+        },
+        { id: 4, kind: "sonarr", enabled: true, name: "Guest room" },
+      ]),
+    ),
+    http.get("/api/episodes/wanted", ({ request }) => {
+      const params = new URL(request.url).searchParams;
+      const origin = params.get("source_key[]");
+      const rows = [
+        {
+          id: 5,
+          series_id: 5,
+          seriesTitle: "Westworld",
+          arr_instance_id: 2,
+          missing_subtitles: [],
+        },
+        {
+          id: 9,
+          series_id: 9,
+          seriesTitle: "Top Gear",
+          arr_instance_id: 4,
+          missing_subtitles: [],
+        },
+      ];
+      const data = origin
+        ? rows.filter((row) => origin === `arr:${row.arr_instance_id}`)
+        : rows;
+      return HttpResponse.json({ data, total: data.length });
+    }),
+  );
+  customRender(<WantedSeriesView />);
+  expect(
+    await screen.findByRole("link", { name: "Westworld" }),
+  ).toBeInTheDocument();
+  await openSelect(user, "All instances");
+  await user.click(await screen.findByRole("option", { name: "Guest room" }));
+  await waitFor(() =>
+    expect(screen.queryByText("Westworld")).not.toBeInTheDocument(),
+  );
+  expect(await screen.findByRole("link", { name: "Top Gear" })).toHaveAttribute(
+    "href",
+    "/series/9",
+  );
+});

@@ -22,9 +22,20 @@ class EpisodeApi extends BaseApi {
     return response.data;
   }
 
-  async wanted(params: Parameter.Range) {
-    const response = await this.get<Wanted.EpisodePage>("/wanted", params);
-    return response;
+  async wanted(
+    params: Parameter.Range,
+    includeSources: false,
+  ): Promise<Wanted.EpisodePage>;
+  async wanted(
+    params: Wanted.Range,
+    includeSources?: boolean,
+  ): Promise<Wanted.EpisodePage<Wanted.EpisodeRow>>;
+  async wanted({ sourceKeys, ...params }: Wanted.Range, includeSources = true) {
+    return this.get<Wanted.EpisodePage<Wanted.EpisodeRow>>("/wanted", {
+      ...params,
+      sources: includeSources ? 1 : undefined,
+      source_key: sourceKeys,
+    });
   }
 
   async wantedBy(episodeid: number[]) {
@@ -35,12 +46,18 @@ class EpisodeApi extends BaseApi {
     return response;
   }
 
-  async history(params: Parameter.Range & { include_embedded?: boolean }) {
-    const response = await this.get<DataWrapperWithTotal<History.Episode>>(
-      "/history",
-      params,
-    );
-    return response;
+  async history({
+    includeEmbedded,
+    includeSources,
+    sourceKeys,
+    ...params
+  }: History.Range) {
+    return this.get<History.Page<History.EpisodeRow>>("/history", {
+      ...params,
+      include_embedded: includeEmbedded,
+      sources: includeSources ? 1 : undefined,
+      source_key: sourceKeys,
+    });
   }
 
   async historyBy(id: number) {

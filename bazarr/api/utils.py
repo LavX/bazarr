@@ -1,6 +1,7 @@
 # coding=utf-8
 
 import ast
+import json
 import contextlib
 import hmac
 import logging
@@ -341,9 +342,20 @@ def authenticate_header_or_stream_token(actual_method):
     return wrapper
 
 
-def postprocess(item):
+def _source_subtitle_list(value):
+    # Older indexers wrote Python literals, including None for embedded paths.
+    try:
+        return json.loads(value)
+    except json.JSONDecodeError:
+        return ast.literal_eval(value)
+
+
+def postprocess(item, *, source=False):
     # Remove ffprobe_cache
-    if item.get('radarrId'):
+    if source:
+        def path_replace(path):
+            return path
+    elif item.get('radarrId'):
         path_replace = path_mappings.path_replace_movie
     else:
         path_replace = path_mappings.path_replace
@@ -366,9 +378,11 @@ def postprocess(item):
     else:
         item['alternativeTitles'] = []
 
+    parse_subtitles = _source_subtitle_list if source else ast.literal_eval
+
     # Parse subtitles
     if item.get('subtitles'):
-        item['subtitles'] = ast.literal_eval(item['subtitles'])
+        item['subtitles'] = parse_subtitles(item['subtitles'])
         for i, subs in enumerate(item['subtitles']):
             language = _subtitle_language_details(subs[0])
             file_size = subs[2] if len(subs) > 2 else 0
@@ -399,7 +413,7 @@ def postprocess(item):
 
     # Parse missing subtitles
     if item.get('missing_subtitles'):
-        item['missing_subtitles'] = ast.literal_eval(item['missing_subtitles'])
+        item['missing_subtitles'] = parse_subtitles(item['missing_subtitles'])
         for i, subs in enumerate(item['missing_subtitles']):
             language = subs.split(':')
             item['missing_subtitles'][i] = {"name": language_from_alpha2(language[0]),
@@ -422,7 +436,9 @@ def postprocess(item):
         item['tags'] = ast.literal_eval(item.get('tags', '[]'))
     else:
         item['tags'] = []
-    if item.get('monitored'):
+    if source:
+        item['monitored'] = bool(item.get('monitored'))
+    elif item.get('monitored'):
         item['monitored'] = item.get('monitored') == 'True'
     else:
         item['monitored'] = False
@@ -475,11 +491,12 @@ def postprocess(item):
         path = image_proxy_path_with_instance(path, arr_instance_id)
         return f"{base_url}/images/{media}{path}"
 
-    if item.get('poster') is not None:
-        item['poster'] = _proxy_image(item['poster'])
+    if not source:
+        if item.get('poster') is not None:
+            item['poster'] = _proxy_image(item['poster'])
 
-    if item.get('fanart') is not None:
-        item['fanart'] = _proxy_image(item['fanart'])
+        if item.get('fanart') is not None:
+            item['fanart'] = _proxy_image(item['fanart'])
 
     return item
 
@@ -578,7 +595,7 @@ def _same_media_path(current, stored, instance_mapping, writer_mapping):
             == _media_path_key(stored, writer_mapping, fold))
 
 
-def lowest_subtitle_scores(db, subtitles_by_id, id_column, history_table, *, videos_by_id, media_type):
+def lowest_subtitle_scores(db, subtitles_by_id, id_column, history_table, *, videos_by_id=None, media_type=None):
     """Lowest current-subtitle score (0-100 %) for each item id.
 
     Mirrors what the detail pages show. For every item, per current subtitle:
@@ -614,16 +631,19 @@ def lowest_subtitle_scores(db, subtitles_by_id, id_column, history_table, *, vid
     most records, the global mapping for ``media_type`` ('movie' or 'series')
     for translations. Embedded records are logged once per track and stay
     valid for the item wherever it lives.
+    Source callers omit videos_by_id because their paths are stored locally.
     """
     ids = list(subtitles_by_id.keys())
     if not ids:
         return {}
 
-    global_mapping = (path_mappings.path_mapping_movies if media_type == 'movie'
-                      else path_mappings.path_mapping_series)
+    global_mapping = None
+    if media_type is not None:
+        global_mapping = (path_mappings.path_mapping_movies if media_type == 'movie'
+                          else path_mappings.path_mapping_series)
     instance_mappings = {}
     item_mappings = {}
-    for item_id, (_video_path, arr_instance_id) in videos_by_id.items():
+    for item_id, (_video_path, arr_instance_id) in (videos_by_id or {}).items():
         if arr_instance_id not in instance_mappings:
             mapping = _instance_path_mapping(arr_instance_id, media_type)
             # The same choice path_replace_instance makes.
@@ -646,7 +666,8 @@ def lowest_subtitle_scores(db, subtitles_by_id, id_column, history_table, *, vid
         if raw:
             for entry in ast.literal_eval(raw):
                 if entry[1]:
-                    name, windows = _subtitle_file_name(entry[1])
+                    name, windows = (_subtitle_file_name(entry[1]) if media_type is not None
+                                     else (entry[1], False))
                     paths[name] = paths.get(name, False) or windows
                     full_paths.append(entry[1])
                 else:
@@ -668,11 +689,14 @@ def lowest_subtitle_scores(db, subtitles_by_id, id_column, history_table, *, vid
         translated = action == 6
         key = (item_id, translated, subtitles_path)
         if key not in file_matches:
-            instance_mapping = item_mappings.get(item_id)
-            writer_mapping = global_mapping if translated else instance_mapping
-            file_matches[key] = any(
-                _same_media_path(current, subtitles_path, instance_mapping, writer_mapping)
-                for current in current_subtitle_paths.get(item_id, ()))
+            if media_type is None:
+                file_matches[key] = subtitles_path in current_subtitle_paths.get(item_id, ())
+            else:
+                instance_mapping = item_mappings.get(item_id)
+                writer_mapping = global_mapping if translated else instance_mapping
+                file_matches[key] = any(
+                    _same_media_path(current, subtitles_path, instance_mapping, writer_mapping)
+                    for current in current_subtitle_paths.get(item_id, ()))
         return file_matches[key]
 
     # Chunk the id list so the IN (...) clause stays within SQLite's
@@ -743,7 +767,8 @@ def lowest_subtitle_scores(db, subtitles_by_id, id_column, history_table, *, vid
                 language = forced
             key = (row.item_id, 'embedded', language)
         else:
-            name, windows = _subtitle_file_name(row.subtitles_path)
+            name, windows = (_subtitle_file_name(row.subtitles_path) if media_type is not None
+                             else (row.subtitles_path or '', False))
             names = current_paths.get(row.item_id, {})
             if name in names:
                 current_name = name

@@ -22,6 +22,7 @@ declare namespace FormType {
 
   interface SearchWantedAction {
     action: "search-wanted";
+    sources?: 1;
   }
 
   interface ScanWantedAction {

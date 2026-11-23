@@ -41,12 +41,26 @@ export function useEpisodesBySeriesId(id: number) {
   return query;
 }
 
-export function useEpisodeWantedPagination(fetchAll = false) {
+export function useEpisodeWantedPagination(
+  fetchAll = false,
+  sourceKeys: MediaSourceKey[] = [],
+  includeSources = false,
+) {
   return usePaginationQuery(
-    [QueryKeys.Series, QueryKeys.Wanted],
-    (param) => api.episodes.wanted(param),
-    true,
+    [QueryKeys.Series, QueryKeys.Wanted, { sourceKeys, includeSources }],
+    (param) =>
+      api.episodes.wanted(
+        {
+          ...param,
+          sourceKeys: sourceKeys.length ? sourceKeys : undefined,
+        },
+        includeSources,
+      ),
+    false,
     fetchAll,
+    true,
+    false,
+    true,
   );
 }
 
@@ -119,12 +133,30 @@ export function useEpisodeDeleteBlacklist() {
   });
 }
 
-export function useEpisodeHistoryPagination(includeEmbedded = false) {
+export function useEpisodeHistoryPagination(
+  includeEmbedded = false,
+  options: History.PageOptions = {},
+  enabled = true,
+) {
   return usePaginationQuery(
-    [QueryKeys.Series, QueryKeys.Episodes, QueryKeys.History, includeEmbedded],
+    [
+      QueryKeys.Series,
+      QueryKeys.Episodes,
+      QueryKeys.History,
+      includeEmbedded,
+      options,
+    ],
     (param) =>
-      api.episodes.history({ ...param, include_embedded: includeEmbedded }),
+      api.episodes.history({
+        ...param,
+        includeEmbedded,
+        ...options,
+      }),
     false,
+    false,
+    enabled,
+    false,
+    true,
   );
 }
 

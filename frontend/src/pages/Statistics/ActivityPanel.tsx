@@ -1,6 +1,5 @@
 import { FunctionComponent, useMemo } from "react";
 import { Alert, SimpleGrid, Stack, useMantineTheme } from "@mantine/core";
-import { merge } from "lodash";
 import {
   Bar,
   BarChart,
@@ -37,15 +36,13 @@ const ActivityPanel: FunctionComponent<Props> = ({ filters }) => {
   const convertedData = useMemo(() => {
     if (!data) return [];
 
-    const movies = data.movies.map((v) => ({ date: v.date, movies: v.count }));
-    const series = data.series.map((v) => ({ date: v.date, series: v.count }));
-    // The endpoint has counted sports downloads all along; plotting only two
-    // of the three series it returns would drop them silently.
-    const sports = (data.sports ?? []).map((v) => ({
-      date: v.date,
-      sports: v.count,
-    }));
-    return merge(merge(movies, series), sports);
+    const rows = new Map<string, { date: string }>();
+    for (const key of ["movies", "series", "sports", "sources"] as const) {
+      for (const { date, count } of data[key] ?? []) {
+        rows.set(date, { ...rows.get(date), date, [key]: count });
+      }
+    }
+    return [...rows.values()].sort((a, b) => a.date.localeCompare(b.date));
   }, [data]);
 
   const theme = useMantineTheme();
@@ -65,7 +62,7 @@ const ActivityPanel: FunctionComponent<Props> = ({ filters }) => {
               totals
                 ? `${totals.series} series / ${totals.movies} movies${
                     showSports ? ` / ${totals.sports} sports` : ""
-                  }`
+                  }${totals.sources ? ` / ${totals.sources} media sources` : ""}`
                 : undefined
             }
           />
@@ -115,6 +112,13 @@ const ActivityPanel: FunctionComponent<Props> = ({ filters }) => {
                     name="Sports"
                     dataKey="sports"
                     fill={theme.colors.teal[4]}
+                  />
+                )}
+                {data?.sources && (
+                  <Bar
+                    name="Media sources"
+                    dataKey="sources"
+                    fill={theme.colors.grape[4]}
                   />
                 )}
               </BarChart>

@@ -147,6 +147,23 @@ describe("socketio reducer", () => {
     },
   );
 
+  it("refreshes both Wanted lists and the navigation badge after a source save", () => {
+    reducerFor("source-item").any?.();
+
+    for (const kind of [QueryKeys.Series, QueryKeys.Movies]) {
+      expect(queryClientMock.invalidateQueries).toHaveBeenCalledWith({
+        queryKey: [kind, QueryKeys.Wanted],
+        predicate: expect.any(Function),
+      });
+    }
+    expect(queryClientMock.invalidateQueries).toHaveBeenCalledWith({
+      queryKey: [QueryKeys.System, QueryKeys.Badges],
+    });
+    expect(queryClientMock.invalidateQueries).toHaveBeenCalledWith({
+      queryKey: [QueryKeys.System, QueryKeys.Languages, "audio", true],
+    });
+  });
+
   it("invalidates the wanted series query for reset-episode-wanted events", () => {
     reducerFor("reset-episode-wanted").any?.();
 

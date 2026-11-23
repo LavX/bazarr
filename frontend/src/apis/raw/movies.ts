@@ -42,12 +42,20 @@ class MovieApi extends BaseApi {
     await this.post("", { id: form.id, profileid: form.profileid });
   }
 
-  async wanted(params: Parameter.Range) {
-    const response = await this.get<DataWrapperWithTotal<Wanted.Movie>>(
-      "/wanted",
-      params,
-    );
-    return response;
+  async wanted(
+    params: Parameter.Range,
+    includeSources: false,
+  ): Promise<DataWrapperWithTotal<Wanted.Movie>>;
+  async wanted(
+    params: Wanted.Range,
+    includeSources?: boolean,
+  ): Promise<DataWrapperWithTotal<Wanted.MovieRow>>;
+  async wanted({ sourceKeys, ...params }: Wanted.Range, includeSources = true) {
+    return this.get<DataWrapperWithTotal<Wanted.MovieRow>>("/wanted", {
+      ...params,
+      sources: includeSources ? 1 : undefined,
+      source_key: sourceKeys,
+    });
   }
 
   async wantedBy(radarrid: number[]) {
@@ -60,12 +68,18 @@ class MovieApi extends BaseApi {
     return response;
   }
 
-  async history(params: Parameter.Range & { include_embedded?: boolean }) {
-    const response = await this.get<DataWrapperWithTotal<History.Movie>>(
-      "/history",
-      params,
-    );
-    return response;
+  async history({
+    includeEmbedded,
+    includeSources,
+    sourceKeys,
+    ...params
+  }: History.Range) {
+    return this.get<History.Page<History.MovieRow>>("/history", {
+      ...params,
+      include_embedded: includeEmbedded,
+      sources: includeSources ? 1 : undefined,
+      source_key: sourceKeys,
+    });
   }
 
   async historyBy(id: number) {

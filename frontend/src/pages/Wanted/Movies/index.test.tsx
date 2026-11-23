@@ -3,7 +3,8 @@
 import userEvent from "@testing-library/user-event";
 import { http } from "msw";
 import { HttpResponse } from "msw";
-import { customRender, screen, within } from "@/tests";
+import { vi } from "vitest";
+import { customRender, screen, waitFor, within } from "@/tests";
 import server from "@/tests/mocks/node";
 import { openSelect } from "@/tests/select";
 import WantedMoviesView from ".";
@@ -188,4 +189,90 @@ describe("Wanted Movies", () => {
       screen.getByPlaceholderText("No tags available"),
     ).toBeInTheDocument();
   });
+});
+
+it("shows distinct Arr and folder rows and sends the selected source to the API", async () => {
+  const user = userEvent.setup();
+  const requests = vi.fn();
+  server.use(
+    http.get("/api/system/settings", () =>
+      HttpResponse.json({
+        general: { use_radarr: true },
+        media_sources: { visible: true },
+      }),
+    ),
+    http.get("/api/system/status", () => HttpResponse.json({ data: {} })),
+    http.get("/api/system/arr-instances", () =>
+      HttpResponse.json([
+        {
+          id: 2,
+          kind: "radarr",
+          enabled: true,
+          is_default: true,
+          name: "Cinema Arr",
+        },
+      ]),
+    ),
+    http.get("/api/system/media-sources", () =>
+      HttpResponse.json({
+        data: [
+          {
+            id: 7,
+            kind: "folder",
+            name: "Cinema Folder",
+            enabled: true,
+            libraries: [{ content_kind: "movie", enabled: true }],
+          },
+        ],
+      }),
+    ),
+    http.get("/api/movies/wanted", ({ request }) => {
+      const params = new URL(request.url).searchParams;
+      const source = params.get("source_key[]");
+      requests(params.get("sources"), source);
+      const rows = [
+        {
+          id: 9,
+          origin: "arr",
+          source_key: "arr:2",
+          arr_instance_id: 2,
+          radarrId: 123,
+          title: "Arr title",
+          missing_subtitles: [],
+        },
+        {
+          id: 9,
+          origin: "source",
+          source_key: "source:7",
+          source_id: 7,
+          source_name: "Cinema Folder",
+          radarrId: null,
+          title: "Folder title",
+          missing_subtitles: [],
+        },
+      ];
+      const data = source
+        ? rows.filter((row) => row.source_key === source)
+        : rows;
+      return HttpResponse.json({ data, total: data.length });
+    }),
+  );
+
+  customRender(<WantedMoviesView />);
+  expect(
+    await screen.findByRole("link", { name: "Arr title" }),
+  ).toHaveAttribute("href", "/movies/9");
+  const folder = await screen.findByRole("row", { name: /Folder title/ });
+  expect(within(folder).queryByRole("link")).not.toBeInTheDocument();
+  expect(within(folder).getByText("Cinema Folder")).toBeInTheDocument();
+  expect(requests).toHaveBeenCalledWith("1", null);
+
+  await openSelect(user, "All sources");
+  await user.click(
+    await screen.findByRole("option", { name: "Cinema Folder" }),
+  );
+  await waitFor(() => expect(requests).toHaveBeenCalledWith("1", "source:7"));
+  await waitFor(() =>
+    expect(screen.queryByText("Arr title")).not.toBeInTheDocument(),
+  );
 });

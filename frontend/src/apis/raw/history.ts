@@ -16,6 +16,7 @@ class HistoryApi extends BaseApi {
       action,
       provider,
       language,
+      sources: 1,
     });
     return response;
   }
@@ -31,6 +32,7 @@ class HistoryApi extends BaseApi {
       action,
       provider,
       language,
+      sources: 1,
     });
     return response;
   }
