@@ -111,6 +111,10 @@ export const assParser: SubtitleParser = {
       }
       parts.push(remaining); // The rest is the Text column (or last column)
 
+      if (strict && textColIdx >= parts.length) {
+        throw new Error("Invalid ASS cue fields");
+      }
+
       const rawCueText =
         textColIdx >= 0 && textColIdx < parts.length
           ? parts[textColIdx]

@@ -70,9 +70,7 @@ export const vttParser: SubtitleParser = {
 
     // Parse cue blocks
     const cues = [];
-    const blocks = strict
-      ? text.trimEnd().split(/\n(?:[ \t]*\n)+/)
-      : text.split(/\n\n+/);
+    const blocks = (strict ? text.trimEnd() : text).split(/\n\n+/);
 
     for (const [index, block] of blocks.entries()) {
       if (strict && index === 0) {
@@ -109,10 +107,27 @@ export const vttParser: SubtitleParser = {
 
       const startMs = parseTimestamp(leftTs);
       const endMs = parseTimestamp(rightTs);
-      const cueText = blockLines.slice(tsLineIdx + 1).join("\n");
+      const cueLines = blockLines.slice(tsLineIdx + 1);
+      const cueText = cueLines.join("\n");
 
       if (strict && (tsLineIdx > 1 || startMs === null || endMs === null)) {
         throw new Error("Invalid WebVTT cue timing");
+      }
+      if (
+        strict &&
+        cueLines.some((line) => {
+          const arrow = line.indexOf("-->");
+          if (arrow === -1 || parseTimestamp(line.slice(0, arrow)) === null) {
+            return false;
+          }
+          const [end] = line
+            .slice(arrow + 3)
+            .trim()
+            .split(/\s+/, 1);
+          return parseTimestamp(end) !== null;
+        })
+      ) {
+        throw new Error("Missing WebVTT cue separator");
       }
       if (
         !strict &&

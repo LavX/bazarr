@@ -244,6 +244,11 @@ it.each([
       ),
   },
   {
+    reason: "a MicroDVD file with one valid and one malformed cue",
+    respond: () =>
+      subtitleResponse("{0}{24}Valid cue\n{bad}{48}Broken cue", "sub"),
+  },
+  {
     reason: "invalid ASS timing",
     respond: () =>
       subtitleResponse(

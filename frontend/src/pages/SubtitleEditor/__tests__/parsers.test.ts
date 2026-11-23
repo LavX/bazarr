@@ -4,6 +4,7 @@ import {
   getParser,
   parseReplacementSubtitle,
 } from "@/pages/SubtitleEditor/parsers";
+import { getSerializer } from "@/pages/SubtitleEditor/serializers";
 
 // Mock crypto.randomUUID since it may not be available in test env
 beforeEach(() => {
@@ -1115,6 +1116,65 @@ describe("parseReplacementSubtitle", () => {
         { startMs: 0, text: "Valid cue" },
       ]);
       expect(() => parseReplacementSubtitle(format, valid + invalid)).toThrow();
+    },
+  );
+
+  it("preserves a spaces-only WebVTT payload line", () => {
+    const content = vtt + "\n \nLeft --> right";
+
+    expect(parseReplacementSubtitle("vtt", content).cues).toMatchObject([
+      { text: "Valid cue\n \nLeft --> right" },
+    ]);
+  });
+
+  it("rejects a second WebVTT timing line without a cue separator", () => {
+    const secondCue = "00:02.000 --> 00:03.000\nSecond cue";
+    const content = vtt + "\n" + secondCue;
+
+    expect(getParser("vtt").parse(content).cues).toMatchObject([
+      { text: `Valid cue\n${secondCue}` },
+    ]);
+    expect(() => parseReplacementSubtitle("vtt", content)).toThrow();
+  });
+
+  it("reloads an empty cue emitted by the timed TXT serializer", () => {
+    const content = getSerializer("txt").serialize({
+      metadata: { format: "txt" },
+      cues: [
+        { id: "first", startMs: 0, endMs: 2000, text: "Valid cue" },
+        { id: "empty", startMs: 2000, endMs: 5000, text: "" },
+      ],
+    });
+
+    expect(getParser("txt").parse(content).cues).toMatchObject([
+      { startMs: 0, text: "Valid cue" },
+    ]);
+    expect(parseReplacementSubtitle("txt", content).cues).toMatchObject([
+      { startMs: 0, endMs: 2000, text: "Valid cue" },
+      { startMs: 2000, endMs: 5000, text: "" },
+    ]);
+  });
+
+  it.each([
+    ["ass", "V4+ Styles", "Layer", "0"],
+    ["ssa", "V4 Styles", "Marked", "Marked=0"],
+  ] as const)(
+    "requires the declared text field for %s replacement cues",
+    (format, styles, firstField, firstValue) => {
+      const header = `[${styles}]\n[Events]\nFormat: ${firstField}, Start, End, Text`;
+      const valid = `${header}\nDialogue: ${firstValue},0:00:00.00,0:00:01.00,Hello, world`;
+      const secondRow = `\nDialogue: ${firstValue},0:00:02.00,0:00:03.00`;
+
+      expect(getParser(format).parse(valid + secondRow).cues).toHaveLength(2);
+      expect(() =>
+        parseReplacementSubtitle(format, valid + secondRow),
+      ).toThrow();
+      expect(
+        parseReplacementSubtitle(format, valid + secondRow + ",").cues,
+      ).toMatchObject([
+        { text: "Hello, world" },
+        { startMs: 2000, endMs: 3000, text: "" },
+      ]);
     },
   );
 
