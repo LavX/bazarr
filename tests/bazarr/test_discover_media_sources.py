@@ -212,6 +212,10 @@ def test_remapped_episode_uses_only_the_selected_source_archive_member(
     else:
         assert download.status_code == 502
         assert download.json["reason"] == "archive_no_match"
+    if archive_mode == "worker_sibling":
+        [selector_request] = worker.selections
+        assert selector_request["members"] == [f"{correct.stem}.srt"]
+        assert (selector_request["season"], selector_request["episode"], selector_request["absolute_episode"]) == (1, 3, None)
 
 
 def test_tmdb_only_catalog_episode_resolves_a_manually_confirmed_source_copy(

@@ -111,7 +111,7 @@ class ResultAuthority:
 class _Artifact:
     content: bytes
     filename: str
-    copy_context: dict | None = None
+    source_copy_context: dict | None = None
 
 
 @dataclass(eq=False)
@@ -406,7 +406,7 @@ def _fetch(key, flight, record, result_id, search_id, authority, deadline):
         subtitle = deepcopy(record["subtitle"])
         context = record["context"]
         artifact = _Artifact(_provider_bytes(subtitle), _filename(record),
-                             context if context.get("copy_id") else None)
+                             context if context.get("copy", {}).get("source_id") is not None else None)
         deadline = max(deadline, flight.deadline)
         with _locked(deadline):
             current = _record(result_id, search_id, authority)
@@ -558,8 +558,8 @@ def fetch_ticket(job_id, *, authority: ResultAuthority) -> tuple[bytes, str]:
     if cached is None:
         raise ExpiredResultError("Discover download expired")
     artifact = cached[1]
-    if artifact.copy_context is not None:
-        _require_current_copy(artifact.copy_context)
+    if artifact.source_copy_context is not None:
+        _require_current_copy(artifact.source_copy_context)
     return artifact.content, artifact.filename
 
 
