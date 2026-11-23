@@ -626,7 +626,8 @@ def _source_copy_statement(media_type, imdb, tmdb, season, episode, *, episode_i
     title = item if media_type == "movie" else group
     statement = source_items(media_type, item.c.id, item.c.path, item.c.source_id, item.c.library_id,
                              TableMediaSources.name.label("source_name"), title.c.title, title.c.year,
-                             item.c.group_id, item.c.episode_title, item.c.scene_name, item.c.format,
+                             item.c.group_id, item.c.season.label("source_season"), item.c.episode.label("source_episode"),
+                             item.c.episode_title, item.c.scene_name, item.c.format,
                              item.c.resolution, item.c.video_codec, item.c.audio_codec, item.c.file_size,
                              item.c.updated_at, title.c.imdb_id, title.c.tmdb_id)
     if media_type == "episode":
@@ -716,7 +717,7 @@ def _physical_revision(facts, path, status, file_hash):
                 facts["file_size"], facts["updated_at"],
                 status.st_size, status.st_mtime_ns, file_hash]
     if facts.get("source_id") is not None:
-        material.extend((facts["source_id"], status.st_dev, status.st_ino))
+        material.extend((facts["source_id"], facts["source_season"], facts["source_episode"], status.st_dev, status.st_ino))
     digest = hashlib.sha256(json.dumps(material, sort_keys=True, separators=(",", ":")).encode())
     return digest.hexdigest()[:32]
 
@@ -776,7 +777,7 @@ def resolve_copy(copy_id, target):
             raise CopyUnavailable(_RECOVERY, "copy_missing")
         facts = _source_copy_option(row, media_type)
         facts.update(file_id=row.library_id, imdb_id=_imdb(row.imdb_id), tmdb_id=_positive(row.tmdb_id),
-                     year=_positive(row.year))
+                     year=_positive(row.year), source_season=row.source_season, source_episode=row.source_episode)
         path = row.path
     else:
         if not imdb:
@@ -810,6 +811,14 @@ def resolve_copy(copy_id, target):
     facts["path"] = path
     facts["file_hash"] = file_hash
     return facts
+
+
+def require_copy_revision(context):
+    """Check that an explicit choice still names the physical file it described."""
+    if context.get("copy_id"):
+        facts = resolve_copy(context["copy_id"], context)
+        if facts["file_revision"] != context.get("file_revision"):
+            raise CopyUnavailable(_RECOVERY)
 
 
 COPY_CONTEXT_FIELDS = ("copy_id", "media_type", "local_id", "arr_instance_id", "instance_name",

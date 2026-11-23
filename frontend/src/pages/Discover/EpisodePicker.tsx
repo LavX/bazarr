@@ -75,6 +75,10 @@ export default function EpisodePicker({
       episodeIdentityKey(episode)
     )
       return;
+    if (currentDraft.current.manualEntry) {
+      updateDraft({ episodeIdentity: episode });
+      return;
+    }
     // Adoption is deliberately not gated on the episode agreeing with the show
     // item. The three conditions above already pin it to this link's own show,
     // season and number, so it is the source's current answer for the episode

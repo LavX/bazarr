@@ -26,6 +26,7 @@ from subliminal_patch.extensions import provider_registry
 from subliminal_patch.score import ComputeScore, MAX_SCORES
 
 from .handles import mint_result, renew_result, resolve_result
+from .library import CopyUnavailable, require_copy_revision
 
 _IMDB = re.compile(r"tt[0-9]{7,10}\Z")
 _LANGUAGE = re.compile(r"[a-z]{2,3}(?:-[A-Za-z]{2,4})?\Z")
@@ -115,6 +116,7 @@ class SearchAdmissionExpired(ValueError):
 
 def _admit_provider_search(request):
     from . import metadata
+    require_copy_revision(request.context)
     try:
         metadata._require_dependency_validity(request.metadata_valid_until)
     except metadata.UpstreamFailure:
@@ -458,8 +460,26 @@ def _copy_compatibility(video, sub, parsed):
     return result
 
 
-def _result(sub, video, context, search_id, checked_at, ttl, parsed=None):
-    result_id, expires = mint_result(sub, context, search_id, ttl)
+def _source_archive_context(context, facts):
+    identity = context.get("episode_identity")
+    if not facts or facts.get("source_id") is None or not identity or context.get("manual_confirmed"):
+        return None
+    source_numbers = (facts.get("source_season"), facts.get("source_episode"))
+    target = (context["season"], context["episode"])
+    if source_numbers == target == (identity["season"], identity["episode"]):
+        return None
+    # The provider still searches its canonical episode. A downloaded
+    # archive must select the numbering on the file the reader chose.
+    return {"season": source_numbers[0], "episode": source_numbers[1],
+            "absolute_episode": None, "strict_numbering": True}
+
+
+def _result(sub, video, context, search_id, checked_at, ttl, parsed=None, archive_context=None):
+    stored = sub
+    if archive_context and hasattr(sub, "_requested_archive_context"):
+        stored = copy.copy(sub)
+        stored._requested_archive_context = archive_context
+    result_id, expires = mint_result(stored, context, search_id, ttl)
     language = sub.language
     matches = None
     if context.get("mode") != "release":
@@ -563,6 +583,7 @@ def search(request: SearchRequest, on_progress=None, *, observed: bool = True) -
         parsed = {}
         built = {}
         live_rows = []
+        archive_context = _source_archive_context(context, request.copy)
         # Building a row costs match evidence and a compatibility score. That
         # cost is paid once either way, but paying it here spends the fanout's
         # own wall clock, which the remaining providers are still living on.
@@ -615,7 +636,7 @@ def search(request: SearchRequest, on_progress=None, *, observed: bool = True) -
                 if live_budget <= 0:
                     return
                 started = time.monotonic()
-                row = _result(sub, video, context, search_id, checked, live_ttl, parsed)
+                row = _result(sub, video, context, search_id, checked, live_ttl, parsed, archive_context)
                 built[id(sub)] = (sub, row)
                 live_rows.append(row)
                 live_budget -= time.monotonic() - started
@@ -671,7 +692,7 @@ def search(request: SearchRequest, on_progress=None, *, observed: bool = True) -
             renewed = (renew_result(existing[1]["id"], ttl, shorten=True)
                        if existing is not None and existing[0] is sub else None)
             rows.append({**existing[1], "expires_at": _iso(renewed)} if renewed is not None
-                        else _result(sub, video, context, search_id, checked, ttl, parsed))
+                        else _result(sub, video, context, search_id, checked, ttl, parsed, archive_context))
         # Failed refreshes retain usable rows only for providers that failed.
         # Successful empty searches replace their earlier results. A retained
         # handle is renewed like a live one: this snapshot offers it for its
@@ -715,8 +736,10 @@ def search(request: SearchRequest, on_progress=None, *, observed: bool = True) -
         key, create, expiration_time=0 if refresh else expiration,
     ))
     snapshot.pop("_eligibility", None)
-    if not created and snapshot["cache_status"] != "stale":
-        snapshot["cache_status"] = "cached"
+    if not created:
+        require_copy_revision(context)
+        if snapshot["cache_status"] != "stale":
+            snapshot["cache_status"] = "cached"
     return snapshot
 
 
@@ -789,6 +812,8 @@ def run_search_job(request: SearchRequest, job_id=None):
     except SearchAdmissionExpired as error:
         logging.warning("Discover search failed: reason=metadata_expired: %s", error)
         raise JobFailed(str(error), reason="metadata_expired", retryable=False) from None
+    except CopyUnavailable as error:
+        raise JobFailed(str(error), reason="copy_unavailable", retryable=False) from None
     # Raises JobCancelled if Stop was pressed at any point during the search.
     jobs_queue.update_job_progress(job_id=job_id)
     jobs_queue.publish_job_result(job_id, {"phase": "finished", "providers": snapshot["coverage"]["providers"],

@@ -552,6 +552,22 @@ def _seven_zip_archive(raw: bytes):
     return _SevenZipArchive(raw)
 
 
+def _numbered_episode_members(archive, season, episode, *, forced):
+    """Use the archive selector's filename identities for one named episode."""
+    from guessit import guessit
+
+    if type(season) is not int or type(episode) is not int:
+        return []
+    matching = []
+    for name in _list_archive_members(archive):
+        if not forced and os.path.splitext(name.lower())[0].endswith("forced"):
+            continue
+        guessed = guessit(name, options={"type": "episode"})
+        if (guessed.get("season"), guessed.get("episode")) == (season, episode):
+            matching.append(name)
+    return matching
+
+
 def _worker_archive_to_content(
     subtitle: HubWorkerSubtitle, payload: dict[str, Any], archive_b64: str, select_member_cb=None
 ) -> bool:
@@ -597,10 +613,23 @@ def _worker_archive_to_content(
     member = payload.get("member")
     if member is not None:
         _validate_archive_member_name(member, disk_extracted=isinstance(archive, _SevenZipArchive))
+    context = getattr(subtitle, "_requested_archive_context", None)
+    forced = bool(getattr(getattr(subtitle, "language", None), "forced", False))
+    strict_members = None
+    if context and context.get("strict_numbering"):
+        strict_members = _numbered_episode_members(archive, context.get("season"), context.get("episode"),
+                                                   forced=forced)
+
+    def _require_unambiguous(member):
+        if strict_members is not None and strict_members.count(member) != 1:
+            raise _archive_rejection(subtitle, archive, "No unambiguous member for the selected episode numbering")
 
     def _episode_pick():
-        forced = bool(getattr(getattr(subtitle, "language", None), "forced", False))
-        context = getattr(subtitle, "_requested_archive_context", None)
+        if strict_members is not None:
+            if len(strict_members) != 1:
+                raise _archive_rejection(subtitle, archive, "No unambiguous member for the selected episode numbering")
+            chosen = strict_members[0]
+            return fix_line_ending(archive.read(chosen)), chosen
         if context is None:
             context_season = getattr(subtitle, "season", None)
             if context_season is None:
@@ -626,11 +655,12 @@ def _worker_archive_to_content(
         )
         if picked is None:
             raise _archive_rejection(subtitle, archive, "No usable subtitle member")
-        return picked
+        return picked, payload.get("filename") or ""
 
     if member is not None:
         if member not in set(archive.namelist()):
             raise _archive_rejection(subtitle, archive, "Pinned subtitle member is absent")
+        _require_unambiguous(member)
         content = fix_line_ending(archive.read(member))
         chosen = member
     elif payload.get("select_member"):
@@ -639,7 +669,9 @@ def _worker_archive_to_content(
         # cannot list. "defer" => episode pick; "reject" => skip this candidate.
         if select_member_cb is None:
             raise WorkerProtocolError("download.select_member requires a selector")
-        offered_members = tuple(_list_archive_members(archive))
+        if strict_members == []:
+            raise _archive_rejection(subtitle, archive, "No unambiguous member for the selected episode numbering")
+        offered_members = tuple(_list_archive_members(archive) if strict_members is None else strict_members)
         result = select_member_cb(list(offered_members))
         if not isinstance(result, dict):
             raise WorkerProtocolError("select_archive_member must return an object")
@@ -649,19 +681,18 @@ def _worker_archive_to_content(
         if decision == "pin":
             chosen = result.get("member")
             _validate_archive_member_name(chosen, disk_extracted=isinstance(archive, _SevenZipArchive))
+            _require_unambiguous(chosen)
             if chosen not in offered_members:
                 raise WorkerProtocolError("select_archive_member pinned a member outside the offered subtitles")
             content = fix_line_ending(archive.read(chosen))
         elif decision == "defer":
-            content = _episode_pick()
-            chosen = payload.get("filename") or ""
+            content, chosen = _episode_pick()
         elif decision == "reject":
             raise _archive_rejection(subtitle, archive, "No matching subtitle language")
         else:
             raise WorkerProtocolError("select_archive_member returned an invalid decision")
     else:
-        content = _episode_pick()
-        chosen = payload.get("filename") or ""
+        content, chosen = _episode_pick()
 
     subtitle.content = content
     # Prefer what the member actually is over a worker-supplied format: the worker's

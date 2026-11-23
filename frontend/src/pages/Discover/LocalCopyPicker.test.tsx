@@ -577,6 +577,10 @@ it("lets a TMDB-only show on its catalog page search a manually confirmed source
     source_id: 2,
     source_name: "Local shows",
   };
+  let finishEpisode: () => void = () => undefined;
+  const episodePending = new Promise<void>((resolve) => {
+    finishEpisode = resolve;
+  });
   copyPayload = { items: [sourceCopy], truncated: false, owning_titles: 1 };
   server.use(
     http.get("/api/discover/metadata/shows/100", () =>
@@ -591,20 +595,24 @@ it("lets a TMDB-only show on its catalog page search a manually confirmed source
         },
       }),
     ),
-    http.get("/api/discover/metadata/shows/100/seasons/2/episodes/1", () =>
-      HttpResponse.json({
-        data: {
-          ...envelope,
-          episode: {
-            ...episode,
-            show_imdb_id: null,
-            target_season: null,
-            target_episode: null,
-            numbering: null,
-            identity_status: "unverified",
+    http.get(
+      "/api/discover/metadata/shows/100/seasons/2/episodes/1",
+      async () => {
+        await episodePending;
+        return HttpResponse.json({
+          data: {
+            ...envelope,
+            episode: {
+              ...episode,
+              show_imdb_id: null,
+              target_season: null,
+              target_episode: null,
+              numbering: null,
+              identity_status: "unverified",
+            },
           },
-        },
-      }),
+        });
+      },
     ),
   );
 
@@ -615,6 +623,7 @@ it("lets a TMDB-only show on its catalog page search a manually confirmed source
       name: "Enter episode numbers manually",
     }),
   );
+  expect(screen.getByText("Loading episode details…")).toBeVisible();
   await user.clear(screen.getByRole("textbox", { name: "Episode" }));
   await user.type(screen.getByRole("textbox", { name: "Episode" }), "5");
   await user.click(
@@ -622,6 +631,13 @@ it("lets a TMDB-only show on its catalog page search a manually confirmed source
       name: "I confirm the manual season and episode numbers",
     }),
   );
+  finishEpisode();
+  await waitFor(() =>
+    expect(
+      screen.queryByText("Loading episode details…"),
+    ).not.toBeInTheDocument(),
+  );
+  expect(screen.getByRole("textbox", { name: "Episode" })).toHaveValue("5");
   await pickOption(user, "Subtitle language", "English");
   await pickOption(user, "Library copy", describeCopy(sourceCopy));
   await user.click(screen.getByRole("button", { name: "Find subtitles" }));

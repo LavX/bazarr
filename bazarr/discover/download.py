@@ -111,6 +111,7 @@ class ResultAuthority:
 class _Artifact:
     content: bytes
     filename: str
+    copy_context: dict | None = None
 
 
 @dataclass(eq=False)
@@ -281,15 +282,11 @@ def _require_current_copy(context):
     same-size timestamp-preserving replacement is seen just while a hash is
     present and the change touches the hashed first or last 64 KiB.
     """
-    if not context.get("copy_id"):
-        return
-    from .library import resolve_copy
+    from .library import require_copy_revision
     try:
-        facts = resolve_copy(context["copy_id"], context)
+        require_copy_revision(context)
     except ValueError:
         raise ExpiredResultError("Discover result expired") from None
-    if facts["file_revision"] != context.get("file_revision"):
-        raise ExpiredResultError("Discover result expired")
 
 
 _TIMING = re.compile(
@@ -407,7 +404,9 @@ def _fetch(key, flight, record, result_id, search_id, authority, deadline):
         # The provider mutates content and redirect fields. Separate credential scopes
         # and result handles must never race through the same mutable instance.
         subtitle = deepcopy(record["subtitle"])
-        artifact = _Artifact(_provider_bytes(subtitle), _filename(record))
+        context = record["context"]
+        artifact = _Artifact(_provider_bytes(subtitle), _filename(record),
+                             context if context.get("copy_id") else None)
         deadline = max(deadline, flight.deadline)
         with _locked(deadline):
             current = _record(result_id, search_id, authority)
@@ -558,7 +557,10 @@ def fetch_ticket(job_id, *, authority: ResultAuthority) -> tuple[bytes, str]:
         cached = _cache.get(_ticket_key(authority.scope, job_id))
     if cached is None:
         raise ExpiredResultError("Discover download expired")
-    return cached[1].content, cached[1].filename
+    artifact = cached[1]
+    if artifact.copy_context is not None:
+        _require_current_copy(artifact.copy_context)
+    return artifact.content, artifact.filename
 
 
 def _fail(error, provider, filename):

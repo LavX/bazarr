@@ -139,11 +139,15 @@ def test_show_copy_uses_the_groups_identity_and_exact_episode(
     assert response.json["owning_titles"] == 0
 
 
-def test_remapped_episode_offers_only_arr_numbering_or_an_exact_source_identity(
-    authenticated_client, copy_database, providers, monkeypatch, tmp_path,
+@pytest.mark.parametrize("archive_mode", ["source", "sibling", "ambiguous", "pinned_sibling", "worker_sibling"])
+def test_remapped_episode_uses_only_the_selected_source_archive_member(
+    authenticated_client, copy_database, providers, monkeypatch, tmp_path, archive_mode,
 ):
     from app.database import TableSourceGroups, TableSourceItems
     from discover import metadata
+    from provider_hub.registry import HubProxyProvider
+    from subliminal_patch.extensions import provider_registry
+    from test_provider_hub_archive_candidates import ArchiveSearchWorker, archive_payload
 
     _, session = copy_database
     owner = add_source(session, "series")
@@ -175,15 +179,39 @@ def test_remapped_episode_offers_only_arr_numbering_or_an_exact_source_identity(
     assert [copy["local_id"] for copy in response.json["items"]] == [8, right_id]
     resolved_source = response.json["items"][1]
 
-    providers.add("discover_source", copies_fixtures.catalog("discover_source", [("web", correct.stem)]))
+    sibling_srt = copies_fixtures.SRT.replace(b"Chosen copy dialogue", b"Sibling episode dialogue")
+    members = {f"{wrong.stem}.srt": sibling_srt}
+    if archive_mode != "sibling":
+        members[f"{correct.stem}.srt"] = copies_fixtures.SRT
+    if archive_mode == "ambiguous":
+        members[f"{correct.stem}.Other.srt"] = sibling_srt
+    extra = {"pinned_sibling": {"member": f"{wrong.stem}.srt"},
+             "worker_sibling": {"select_member": True}}.get(archive_mode, {})
+    worker = ArchiveSearchWorker(archive_payload(members, **extra),
+                                 selector={"decision": "pin", "member": f"{wrong.stem}.srt"})
+    name = providers.add("discover_source")
+    cls = provider_registry[name]
+    monkeypatch.setattr(cls, "list_subtitles", HubProxyProvider.list_subtitles)
+    monkeypatch.setattr(cls, "_worker", lambda _: worker)
+    monkeypatch.setattr(cls, "_gated_request", lambda _, operation, payload, timeout: worker.request(operation, payload, timeout))
+    monkeypatch.setattr("app.jobs_queue.event_stream", lambda **kwargs: None)
     selection = {**manual, "language": "eng", "title": "Breaking Bad", "year": 2008, "episode_identity": canonical}
     refusal = copies_fixtures.post(authenticated_client, {**selection, "copy_id": manual_source["copy_id"]})
     assert refusal.status_code == 409
-    assert providers.videos == []
+    assert worker.searches == []
     response = copies_fixtures.post(authenticated_client, {**selection, "copy_id": resolved_source["copy_id"]})
     assert response.status_code == 200
-    [(_, video, _)] = providers.videos
-    assert (video.name, video.season, video.episode) == (str(correct), 2, 1)
+    [video] = worker.searches
+    assert (video["season"], video["episode"]) == (2, 1)
+    assert response.json["context"]["copy"]["filename"] == correct.name
+    [result] = response.json["results"]
+    download = download_fixtures.get(authenticated_client, result)
+    if archive_mode == "source":
+        assert download.status_code == 200
+        assert download.data == copies_fixtures.SRT
+    else:
+        assert download.status_code == 502
+        assert download.json["reason"] == "archive_no_match"
 
 
 def test_tmdb_only_catalog_episode_resolves_a_manually_confirmed_source_copy(
@@ -336,7 +364,15 @@ def test_scanned_source_copies_download_the_chosen_result_and_never_substitute_a
     assert download.data == copies_fixtures.SRT
     assert catalog_provider[1] == ["web"]
 
+    queued = download_fixtures.enqueue(authenticated_client, result)
+    ticket = queued.json["job_id"]
+    job = download_fixtures.run_queued_job(ticket)
+    assert job["status"] == "completed"
+
     chosen_file.unlink()
+    save = authenticated_client.get("/api/discover/download", query_string={"job": ticket}, headers=HEADERS)
+    assert save.status_code == 404
+    assert save.json["reason"] == "ticket_expired"
     expired = download_fixtures.get(authenticated_client, result)
     assert expired.status_code == 410
     assert expired.json["reason"] == "result_expired"
@@ -345,6 +381,39 @@ def test_scanned_source_copies_download_the_chosen_result_and_never_substitute_a
     sibling = copies_fixtures.post(authenticated_client, {**target, "language": "eng", "copy_id": offered[sibling_file.name]})
     assert sibling.status_code == 200
     assert copies_fixtures.searched(providers) == [str(chosen_file), str(sibling_file)]
+
+
+def test_queued_search_rechecks_the_chosen_source_file_before_provider_admission(
+    authenticated_client, copy_database, providers, monkeypatch, tmp_path,
+):
+    import app.jobs_queue as queue_module
+    from app.database import TableSourceItems
+
+    _, session = copy_database
+    owner = add_source(session, "movie")
+    chosen = tmp_path / "chosen.mkv"
+    sibling = tmp_path / "sibling.mkv"
+    for path in (chosen, sibling):
+        path.write_bytes(b"fixture")
+        add_title(session, owner, TableSourceItems, kind="movie", title="Night Film", path=str(path), tmdb_id="42")
+    session.commit()
+    providers.add("discover_source", copies_fixtures.catalog("discover_source", [("web", chosen.stem)]))
+    real_queue = authenticated_client.inline_jobs.real
+    monkeypatch.setattr(queue_module, "jobs_queue", real_queue)
+    monkeypatch.setattr(queue_module, "event_stream", lambda **kwargs: None)
+    monkeypatch.setattr(real_queue, "force_start_pending_job", lambda *_: None)
+    target = {"media_type": "movie", "tmdb_id": 42}
+    copies = copies_fixtures.copies(authenticated_client, **target).json["items"]
+    token = next(item["copy_id"] for item in copies if item["filename"] == chosen.name)
+    queued = authenticated_client.post("/api/discover/search", headers=HEADERS,
+                                       json={**target, "language": "eng", "copy_id": token})
+    assert queued.status_code == 202
+    chosen.unlink()
+    job = download_fixtures.run_queued_job(queued.json["job_id"])
+    assert job["status"] == "failed"
+    assert job["error"]["reason"] == "copy_unavailable"
+    assert providers.videos == []
+    assert sibling.is_file()
 
 
 def test_summary_counts_source_files_once(authenticated_client, summary_database, quiet_queue, tmp_path):
