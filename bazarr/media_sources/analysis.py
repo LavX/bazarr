@@ -5,12 +5,16 @@ import os
 import pickle
 from contextlib import contextmanager
 from contextvars import ContextVar
+from stat import S_ISREG
 
 from app.config import settings
+from compat.local_subs import _path_under_any_root
 from utilities import video_analyzer
 from utilities.binaries import BinaryNotFound
 
+from . import repository
 from .identity import FileStat, file_content_stamp, stored_content_stamp, unsigned
+from .kinds.folder import is_video_file
 
 
 UNKNOWN_STREAM_COLUMNS = dict(ffprobe_cache=None, audio_language=None, audio_codec=None, video_codec=None,
@@ -82,7 +86,28 @@ def cached_metadata(item, stat):
     return data if data.get('source_file') == _content_stamp(stat) else {}
 
 
-def probe_item(item, stat):
+def _probe_path(item, stamp, target):
+    source = repository.get_source(item.source_id, target)
+    if source is None:
+        return None
+    if source.kind != 'folder':
+        return item.path
+    if not is_video_file(item.path):
+        return None
+
+    roots = [os.path.realpath(root.local_path) for root in repository.get_roots(item.library_id, target)
+             if os.path.isabs(root.local_path) and os.path.isdir(root.local_path)]
+    path = os.path.realpath(item.path, strict=True)
+    # Pass the checked path to the parser. A resolved .strm would let it read a URL.
+    if not is_video_file(path) or path.lower().endswith('.strm') or not _path_under_any_root(path, roots):
+        return None
+    resolved_stat = os.stat(path)
+    if not S_ISREG(resolved_stat.st_mode) or _content_stamp(resolved_stat) != stamp:
+        return None
+    return path
+
+
+def probe_item(item, stat, *, target=None):
     """Return cached or newly parsed streams, with a blob only when a probe succeeded."""
     cached = cached_metadata(item, stat)
     parser = settings.general.embedded_subtitles_parser
@@ -97,7 +122,8 @@ def probe_item(item, stat):
     if failures is not None and attempt in failures:
         return cached, None
     try:
-        data = video_analyzer.parse_video_metadata(item.path, stat.st_size, use_cache=False)
+        path = _probe_path(item, stamp, target)
+        data = video_analyzer.parse_video_metadata(path, stat.st_size, use_cache=False) if path else None
     except (OSError, BinaryNotFound):
         logging.warning('BAZARR could not analyze the source file %s', item.path, exc_info=True)
         data = None

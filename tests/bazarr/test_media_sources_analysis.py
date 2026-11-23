@@ -44,6 +44,32 @@ def probe(monkeypatch, languages_loaded):
     return probe
 
 
+@pytest.mark.parametrize("filename, in_library, admitted", [
+    ("Film.2001.mkv", True, True),
+    ("notes.txt", True, False),
+    ("Film.2001.mkv", False, False),
+])
+def test_folder_probe_requires_known_media_inside_its_library(
+    source_db, tmp_path, probe, filename, in_library, admitted,
+):
+    from media_sources import analysis, repository
+
+    source_id, library_id, root = add_source(source_db, tmp_path)
+    path = stamped_video((root if in_library else tmp_path) / filename)
+    item_id = add_item(source_db, source_id, library_id, path)
+    stat = path.stat()
+
+    data, blob = analysis.probe_item(repository.get_item(item_id), stat, target=source_db)
+
+    if admitted:
+        probe.assert_called_once_with(str(path.resolve()), stat.st_size, use_cache=False)
+        assert data == metadata()
+        assert analysis.read_metadata(blob)["ffprobe"] == data["ffprobe"]
+    else:
+        probe.assert_not_called()
+        assert data == {} and blob is None
+
+
 def test_probe_and_profile_filter_use_the_same_tracks(source_db, tmp_path, probe, monkeypatch):
     from app.config import settings
     from media_sources import indexer, repository

@@ -11,6 +11,7 @@ import os
 import sqlite3
 
 import sqlalchemy as sa
+from babelfish.exceptions import LanguageError
 from sqlalchemy.orm import Session
 
 from subliminal_patch import core, search_external_subtitles
@@ -21,11 +22,13 @@ from languages.custom_lang import CustomLanguage
 from languages.get_languages import alpha2_from_alpha3, get_language_set
 from subtitles.adaptive_searching import is_search_given_up
 from subtitles.indexer.entries import embedded_entry, normalize_codec
-from subtitles.indexer.utils import (add_combined_outputs, add_sync_engine_outputs, get_external_subtitles_path,
-                                     guess_external_subtitles, normalize_subtitle_language_variant,
+from subtitles.indexer.utils import (_get_lang_from_str, add_combined_outputs, add_sync_engine_outputs,
+                                     get_external_subtitles_path, guess_external_subtitles,
+                                     normalize_subtitle_language_variant,
                                      partition_embedded_entries, subtitle_language_with_combined_modifier,
                                      subtitle_language_with_sync_modifier)
-from subtitles.tools.subsync_engines import SyncOutputOwnerIndex, _normalized_media_stem, subtitle_write_locks
+from subtitles.tools.subsync_engines import (SYNC_ENGINE_LANGUAGE_MODIFIERS, SyncOutputOwnerIndex,
+                                             _normalized_media_stem, subtitle_write_locks)
 from utilities.helper import get_subtitle_destination_folder, get_target_folder
 from utilities.video_analyzer import audio_languages_from_metadata, embedded_subtitles_from_metadata
 
@@ -68,7 +71,7 @@ class SourceOutputOwnerIndex(SyncOutputOwnerIndex):
 
 
 def list_external_subtitles(path, previous=None, ownership_index=None):
-    """``[[language, subtitle path, size], ...]`` for the subtitle files beside ``path``.
+    """``[[language, subtitle path, size], ...]`` beside ``path``, or None when cache recovery is incomplete.
 
     The caller holds the subtitle write locks. A scan shares ``ownership_index`` across its items; a call
     without one builds its own source index."""
@@ -78,9 +81,15 @@ def list_external_subtitles(path, previous=None, ownership_index=None):
     dest_folder = get_subtitle_destination_folder()
     core.CUSTOM_PATHS = [dest_folder] if dest_folder else []
 
-    previously_indexed = [entry for entry in (previous or [])
-                          if len(entry) == 3 and entry[1] and os.path.isfile(entry[1])
-                          and os.stat(entry[1]).st_size == entry[2]]
+    previously_indexed = []
+    rejected_paths = set()
+    for entry in previous or []:
+        if len(entry) != 3 or not entry[1]:
+            continue
+        if not _can_borrow_language(entry[0]):
+            rejected_paths.add(os.path.normcase(os.path.abspath(entry[1])))
+        elif os.path.isfile(entry[1]) and os.stat(entry[1]).st_size == entry[2]:
+            previously_indexed.append(entry)
     subtitles = search_external_subtitles(path, languages=get_language_set(),
                                           only_one=settings.general.single_language)
     full_dest_folder_path = os.path.dirname(path)
@@ -96,18 +105,18 @@ def list_external_subtitles(path, previous=None, ownership_index=None):
                                          path_reverse=lambda subtitle_path: subtitle_path)
 
     for subtitle, language in subtitles.items():
+        subtitle_path = get_external_subtitles_path(path, subtitle)
         valid_language = False
         if language:
             if hasattr(language, 'alpha3'):
                 valid_language = alpha2_from_alpha3(language.alpha3)
-        else:
-            logging.debug("BAZARR skipping subtitles because we are unable to define language: %s", subtitle)
-            continue
         if not valid_language:
-            logging.debug('BAZARR %s is an unsupported language code.', language.alpha3)
+            if subtitle_path and os.path.normcase(os.path.abspath(subtitle_path)) in rejected_paths:
+                logging.warning('BAZARR unable to reclassify a cached subtitle for this file %s', path)
+                return None
+            logging.debug('BAZARR unable to define a supported subtitle language: %s', subtitle)
             continue
 
-        subtitle_path = get_external_subtitles_path(path, subtitle)
         try:
             subtitle_size = os.stat(subtitle_path).st_size
         except FileNotFoundError:
@@ -248,6 +257,21 @@ def _file_signature(stat):
     return stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns
 
 
+def _can_borrow_language(key):
+    if not isinstance(key, str) or not key:
+        return False
+    modifiers = key.lower().split(':')[1:]
+    normalized = normalize_subtitle_language_variant(key).split(':')[1:]
+    if sorted(modifiers) != sorted(normalized) or any(
+            part.startswith('sync-') and part not in SYNC_ENGINE_LANGUAGE_MODIFIERS for part in modifiers):
+        return False
+    try:
+        # The shared classifier parses the full key and handles custom aliases differently from IETF codes.
+        return _get_lang_from_str(key).alpha3 != 'und'
+    except (LanguageError, ValueError):
+        return False
+
+
 def index_item(item_id, target=None, ownership_index=None, *, keep_index_on_probe_failure=False, expected_path=None):
     """Analyze a source file and return its subtitle listing, or None if the index is unavailable."""
     item = repository.get_item(item_id, target)
@@ -262,7 +286,7 @@ def index_item(item_id, target=None, ownership_index=None, *, keep_index_on_prob
         logging.debug("BAZARR this file doesn't seem to exist or isn't accessible: %s", item.path)
         return None
 
-    data, blob = probe_item(item, stat)
+    data, blob = probe_item(item, stat, target=target)
     destination = os.path.join(get_target_folder(item.path, create=False) or os.path.dirname(item.path), '.destination')
     with subtitle_write_locks(item.path, destination):
         if _file_signature(local_stat(item.path)) != _file_signature(stat):
@@ -286,6 +310,7 @@ def index_item(item_id, target=None, ownership_index=None, *, keep_index_on_prob
             logging.warning('BAZARR invalid stored subtitle listing for this file %s', item.path)
             return None
         if (keep_index_on_probe_failure and blob is None
+                and all(len(entry) != 3 or not entry[1] or _can_borrow_language(entry[0]) for entry in previous)
                 and latest.subtitles is not None and latest.missing_subtitles is not None
                 and index_matches_file(latest, stat, allow_external_only=True)):
             return previous
@@ -293,6 +318,8 @@ def index_item(item_id, target=None, ownership_index=None, *, keep_index_on_prob
             external = list_external_subtitles(item.path, previous, ownership_index)
         except (OSError, UnicodeDecodeError):
             logging.exception('BAZARR unable to index external subtitles for this file %s', item.path)
+            return None
+        if external is None:
             return None
         if _file_signature(local_stat(item.path)) != _file_signature(stat):
             logging.warning('BAZARR source file changed while reading its subtitles: %s', item.path)
