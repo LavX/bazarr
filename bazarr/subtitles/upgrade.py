@@ -36,7 +36,39 @@ def upgrade_subtitles(wait_for_completion=False):
     if use_radarr:
         upgrade_movies_subtitles(wait_for_completion=wait_for_completion)
 
+    from media_sources.schedule import has_enabled_source
+    if has_enabled_source():
+        upgrade_source_subtitles(wait_for_completion=wait_for_completion)
+
     logging.info('BAZARR Finished searching for Subtitles to upgrade. Check History for more information.')
+
+
+def upgrade_source_subtitles(job_id=None, wait_for_completion=False):
+    if not settings.general.upgrade_subs:
+        return None
+    if not job_id:
+        return jobs_queue.add_job_from_function("Trying to upgrade source subtitles", is_progress=True,
+                                                wait_for_completion=wait_for_completion, return_existing=True)
+    from media_sources import shadows
+    from media_sources.history import source_upgrade_candidates
+    from media_sources.service import upgrade_source_subtitle
+    from media_sources.wanted import notify_wanted_changes
+
+    jobs_queue.raise_if_cancelled(job_id)
+    refreshed = shadows.revalidate_shadows()
+    if refreshed['cleared'] or refreshed['refreshed']:
+        notify_wanted_changes()
+    candidates = source_upgrade_candidates()
+    jobs_queue.update_job_progress(job_id=job_id, progress_max=len(candidates))
+    for i, candidate in enumerate(candidates, start=1):
+        jobs_queue.raise_if_cancelled(job_id)
+        jobs_queue.update_job_progress(job_id=job_id, progress_value=i, progress_message=candidate.item_title)
+        if not get_providers():
+            logging.info("BAZARR All providers are throttled")
+            break
+        upgrade_source_subtitle(candidate, job_id)
+    jobs_queue.update_job_progress(job_id=job_id, progress_value='max')
+    jobs_queue.update_job_name(job_id=job_id, new_job_name='Tried to upgrade source subtitles')
 
 
 def upgrade_episodes_subtitles(job_id=None, sonarr_series_ids=None, sonarr_series_filters=None,

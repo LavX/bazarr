@@ -94,16 +94,19 @@ class SystemApi extends BaseApi {
     await this.post("/settings", sanitized);
   }
 
-  async languages(history = false) {
+  async languages(history = false, includeSources = false) {
     const response = await this.get<Language.Server[]>("/languages", {
       history,
+      sources: includeSources ? 1 : undefined,
     });
     return response;
   }
 
-  async audioLanguages() {
-    const response =
-      await this.get<{ code2: string; name: string }[]>("/languages/audio");
+  async audioLanguages(includeSources = false) {
+    const response = await this.get<{ code2: string; name: string }[]>(
+      "/languages/audio",
+      { sources: includeSources ? 1 : undefined },
+    );
     return response;
   }
 

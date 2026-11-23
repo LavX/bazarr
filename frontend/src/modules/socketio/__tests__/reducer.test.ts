@@ -363,7 +363,19 @@ describe("sports reducer", () => {
       queryKey: [QueryKeys.Sports],
     });
     expect(queryClientMock.invalidateQueries).toHaveBeenCalledWith({
-      queryKey: [QueryKeys.Badges],
+      queryKey: [QueryKeys.System, QueryKeys.Badges],
+    });
+    for (const kind of [QueryKeys.Series, QueryKeys.Movies]) {
+      expect(queryClientMock.invalidateQueries).toHaveBeenCalledWith({
+        queryKey: [kind, QueryKeys.Wanted],
+        predicate: expect.any(Function),
+      });
+    }
+    expect(queryClientMock.invalidateQueries).toHaveBeenCalledWith({
+      queryKey: [QueryKeys.System, QueryKeys.Languages, "audio", true],
+    });
+    expect(queryClientMock.invalidateQueries).toHaveBeenCalledWith({
+      queryKey: [QueryKeys.System, QueryKeys.Languages, "audio", false],
     });
   });
 });

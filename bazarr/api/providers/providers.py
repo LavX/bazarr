@@ -5,7 +5,7 @@ from flask_restx import Resource, Namespace, reqparse, fields, marshal
 from operator import itemgetter
 
 from app.config import settings, write_config
-from app.database import TableHistory, TableHistoryMovie, TableHistorySports, database, select
+from app.database import TableHistory, TableHistoryMovie, TableHistorySports, TableSourceHistory, database, select
 from app.get_providers import list_throttled_providers, reset_throttled_providers
 
 from ..utils import authenticate, False_Keys
@@ -17,6 +17,7 @@ api_ns_providers = Namespace('Providers', description='Get and reset providers s
 class Providers(Resource):
     get_request_parser = reqparse.RequestParser()
     get_request_parser.add_argument('history', type=str, required=False, help='Provider name for history stats')
+    get_request_parser.add_argument('sources', type=str, help='Use 1 to include providers from source history.')
 
     get_response_model = api_ns_providers.model('MovieBlacklistGetResponse', {
         'name': fields.String(),
@@ -52,6 +53,10 @@ class Providers(Resource):
                 .where(TableHistorySports.provider != "manual")
                 .distinct())\
                 .all()
+            if args.get('sources') == '1':
+                providers += database.execute(
+                    select(TableSourceHistory.provider)
+                    .where(TableSourceHistory.provider != "manual").distinct()).all()
             providers_list = [x.provider for x in providers]
             providers_dicts = []
             for provider in providers_list:

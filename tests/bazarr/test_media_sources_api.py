@@ -146,6 +146,40 @@ def test_the_item_list_pages_and_filters(api):
     assert api.client.get(ITEMS + "?kind=song", headers=HEADERS).status_code == 400
 
 
+@pytest.mark.parametrize("stored", ["not valid Python", "None", "{}", "[None, ['en'], ['en', []], [None, None]]"])
+def test_malformed_stored_subtitles_do_not_break_scores_or_upgrade_candidates(api, monkeypatch, stored):
+    from app.config import settings
+    from media_sources import repository
+    from media_sources.history import source_upgrade_candidates
+    from media_source_helpers import add_item, add_source
+
+    monkeypatch.setattr(settings.general, "upgrade_subs", True)
+    profile = add_profile(api.db, [("en", "False", "False")])
+    source_id, library_id, root = add_source(api.db, api.tmp_path, folder="Scored", profile_id=profile)
+    items, history_ids = [], []
+    for title, malformed in (("Malformed", True), ("Valid", False)):
+        media = video(root / f"{title}.mkv")
+        subtitle = media.with_suffix(".en.srt")
+        subtitle.write_text("Subtitle", encoding="utf-8")
+        item_id = add_item(api.db, source_id, library_id, media, title=title, missing_subtitles="[]",
+                           subtitles=stored if malformed else str([["en", str(subtitle), 8]]))
+        history_ids.append(repository.insert_history(
+            api.db, source_id=source_id, item_id=item_id, item_kind="movie", item_title=title,
+            action=1, description="downloaded", score=60, score_out_of=120, video_path=str(media),
+            subtitles_path=str(subtitle), language="en", provider="fake"))
+        items.append(item_id)
+
+    assert [row.id for row in source_upgrade_candidates()] == [history_ids[1]]
+    detail = api.client.get(f"{ITEMS}/{items[0]}", headers=HEADERS)
+    assert detail.status_code == 200
+    assert detail.json["lowest_subtitle_score"] is None and detail.json["upgradable"] is False
+    page = api.client.get(ITEMS + "?scores=1", headers=HEADERS)
+    assert page.status_code == 200
+    by_id = {row["id"]: row for row in page.json["data"]}
+    assert by_id[items[0]]["lowest_subtitle_score"] is None and by_id[items[0]]["upgradable"] is False
+    assert by_id[items[1]]["lowest_subtitle_score"] == 50 and by_id[items[1]]["upgradable"] is True
+
+
 def test_a_search_is_queued_through_the_jobs_queue(api):
     from media_sources import scanner
 

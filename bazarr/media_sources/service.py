@@ -4,10 +4,11 @@
 A search runs through the shared pipeline with the item's ``SourceItemContext``. Its history is written here,
 by the caller that did the work, never inside ``process_subtitle``.
 """
-import ast
 import logging
 import os
 import threading
+from copy import deepcopy
+from dataclasses import replace
 
 from sqlalchemy.exc import IntegrityError
 
@@ -17,11 +18,11 @@ from app.jobs_queue import JobFailed, jobs_queue
 from subtitles.indexer.missing_refresh import queue_missing_subtitles_recalculation
 
 from . import identity, paths, repository
-from .analysis import index_matches_file, local_stat, source_search_probes
-from .context import SourceItemGone, resolve_item
+from .analysis import index_matches_file, local_content_stamp, local_stat, source_search_probes
+from .context import SourceItemGone, resolve_item, resolve_same_item
 from .db import source_transaction
 from .history import history_log_source
-from .indexer import index_item, index_saved_subtitle
+from .indexer import index_and_notify_item, index_item
 from .kinds import UnknownSourceKind, get_kind
 from .schedule import refresh_tasks
 
@@ -394,17 +395,16 @@ def queue_search(item_id):
     reason = item_disabled_reason(item_id)
     if reason:
         raise SourceError(reason, 409, 'disabled')
-    return search_source_item(item_id)
+    try:
+        return search_source_item(item_id)
+    except JobFailed as error:
+        if error.reason == 'not_found':
+            raise SourceError(str(error), 404, 'not_found') from error
+        raise
 
 
-def _missing_languages(item):
-    languages = []
-    for language in ast.literal_eval(item.missing_subtitles or '[]'):
-        if language is not None:
-            hi_ = "True" if language.endswith(':hi') else "False"
-            forced_ = "True" if language.endswith(':forced') else "False"
-            languages.append((language.split(":")[0], hi_, forced_))
-    return languages
+def _language_code(language, hi, forced):
+    return language + (':hi' if hi == 'True' else ':forced' if forced == 'True' else '')
 
 
 def _label(item_id):
@@ -412,19 +412,29 @@ def _label(item_id):
     return item.title if item is not None else str(item_id)
 
 
-def search_source_item(item_id, job_id=None):
+def search_source_item(item_id, job_id=None, *, translation_gate=True, expected_source=None):
     """Search the missing subtitles of one source item. Called without a job id it queues itself."""
     if not job_id:
+        if expected_source is None:
+            try:
+                expected_source = resolve_item(item_id)
+            except SourceItemGone as error:
+                raise JobFailed('The item no longer exists', reason='not_found') from error
         return jobs_queue.add_job_from_function(f"Searching subtitles for {_label(item_id)}", is_progress=True)
     with source_search_probes(item_id):
-        return _search_source_item(item_id, job_id)
+        return _search_source_item(item_id, job_id, translation_gate=translation_gate, expected_source=expected_source)
 
 
-def _search_source_item(item_id, job_id):
-    try:
-        context = resolve_item(item_id)
-    except SourceItemGone as error:
-        raise JobFailed('The item no longer exists', reason='not_found') from error
+def _search_source_item(item_id, job_id, *, translation_gate, expected_source):
+    if expected_source is not None:
+        context = resolve_same_item(expected_source)
+        if context is None or context.item_id != item_id:
+            return None
+    else:
+        try:
+            context = resolve_item(item_id)
+        except SourceItemGone as error:
+            raise JobFailed('The item no longer exists', reason='not_found') from error
     reason = item_disabled_reason(item_id)
     if reason:
         # Disabled after the search was queued: nothing is searched, and nothing is an error.
@@ -435,7 +445,7 @@ def _search_source_item(item_id, job_id):
                                        progress_message='No language profile: nothing to search for')
         return None
     item = repository.get_item(item_id)
-    if item is None:
+    if item is None or not context.same_item(item):
         raise JobFailed('The item no longer exists', reason='not_found')
     stat = local_stat(item.path)
     if stat is None:
@@ -445,50 +455,203 @@ def _search_source_item(item_id, job_id):
     if item.missing_subtitles is None or not index_matches_file(item, stat):
         # The scanner still owns admission and re-identification. Refresh the tracks
         # and wanted languages of the file at this path for the immediate search.
-        if index_item(item_id, keep_index_on_probe_failure=True) is None:
+        if index_item(item_id, keep_index_on_probe_failure=True, expected_path=context.path,
+                      expected_source=context) is None:
             raise JobFailed('The source subtitle index could not be refreshed. Try again.', reason='conflict')
         item = repository.get_item(item_id)
-        if item is None:
+        if item is None or not context.same_item(item):
             raise JobFailed('The item no longer exists', reason='not_found')
-        try:
-            refreshed = resolve_item(item_id)
-        except SourceItemGone as error:
-            raise JobFailed('The item no longer exists', reason='not_found') from error
-        if refreshed.path != context.path or item.path != context.path:
+        refreshed = resolve_same_item(context)
+        if refreshed is None or item.path != context.path:
             raise JobFailed('The source file moved while the search was starting. Try again.', reason='conflict')
         context = refreshed
-    languages = _missing_languages(item)
+    from .translation import missing_language_candidates
+
+    candidates = missing_language_candidates(context)
+    languages = _search_languages(context, candidates, translation_gate=translation_gate)
     jobs_queue.update_job_progress(job_id=job_id, progress_max=len(languages), progress_message=context.title)
     if not languages:
-        jobs_queue.update_job_progress(job_id=job_id, progress_value='max', progress_message='Nothing is missing')
+        jobs_queue.update_job_progress(job_id=job_id, progress_value='max',
+                                       progress_message='Subtitles found or queued' if candidates else 'Nothing is missing')
         return None
     if not get_providers():
         logging.info("BAZARR All providers are throttled")
         jobs_queue.update_job_progress(job_id=job_id, progress_value='max', progress_message='All providers throttled')
         return None
 
+    downloaded = _download_source_subtitles(context, item, languages, job_id, translation_gate=translation_gate)
+    jobs_queue.update_job_progress(
+        job_id=job_id, progress_value='max',
+        progress_message=f"{len(downloaded)} subtitle(s) downloaded" if downloaded else 'No subtitles found')
+    return None
+
+
+def _search_languages(context, languages, *, translation_gate, automatic=False):
+    if translation_gate and languages:
+        from .translation import queue_missing_translations
+
+        try:
+            covered = queue_missing_translations(context, **({'wanted': True} if automatic else {}))
+        except Exception:
+            logging.exception('BAZARR could not queue a translation for source item %s', context.item_id)
+        else:
+            languages = [entry for entry in languages if _language_code(*entry) not in covered]
+    return languages
+
+
+def search_wanted_fallback(source, target_language, job_id=None):
+    """Resume one rejected translation's target under the scheduled search rules."""
+    if not job_id:
+        return jobs_queue.add_job_from_function(f"Searching subtitles for {source.title}", is_progress=True,
+                                                return_existing=True)
+    return search_wanted_item(source.item_id, source.created_at, job_id, translation_gate=False,
+                              expected_source=source, target_language=target_language)
+
+
+def search_wanted_item(item_id, created_at, job_id, *, translation_gate=True, expected_source=None,
+                       target_language=None):
+    """Search only stored missing languages, after rechecking eligibility and the current Arr path."""
+    from .shadows import path_stage_shadow
+    from .translation import stored_missing_language_candidates
+    from .wanted import arr_claim_blocks_wanted, notify_wanted_changes, wanted_items
+    from .db import handle
+    from subtitles.adaptive_searching import is_search_active, updateFailedAttempts
+
+    items = repository.Items
+    same_row = (items.c.id == item_id, items.c.created_at == created_at)
+    session = handle()
+    item = session.execute(wanted_items(*items.c).where(*same_row)).first()
+    if item is None:
+        return
+    stamp = local_content_stamp(item.path)
+    if stamp is None or (expected_source is not None and (
+            expected_source.item_id, expected_source.path, expected_source.source_id,
+            expected_source.library_id, expected_source.wanted_file_stamp
+    ) != (item_id, item.path, item.source_id, item.library_id, stamp)):
+        return
+    if path_stage_shadow(item_id):
+        notify_wanted_changes(item.kind)
+        return
+    try:
+        context = resolve_item(item_id)
+    except SourceItemGone:
+        return
+    if not context.same_item(item) or context.path != item.path or not context.profile_id:
+        return
+
+    candidates = stored_missing_language_candidates(item)
+    if target_language is not None:
+        candidates = [entry for entry in candidates if _language_code(*entry) == target_language]
+    wanted_source = replace(context, wanted_file_stamp=stamp)
+    languages = [
+        entry for entry in _search_languages(wanted_source, candidates, translation_gate=translation_gate, automatic=True)
+        if is_search_active(_language_code(*entry), item.failed_attempts or '[]')
+    ]
+    if not languages or not get_providers():
+        return
+
+    # Settings, indexing and scanning can change eligibility while the translation gate runs.
+    current = session.execute(wanted_items(*items.c, profile_id=context.profile_id).where(*same_row)).first()
+    if current is None or current.path != context.path or current.library_id != context.library_id:
+        return
+    languages = [entry for entry in languages if entry in stored_missing_language_candidates(current)]
+    if not languages:
+        return
+    with source_search_probes(item_id):
+        downloaded = _download_source_subtitles(wanted_source, current, languages, job_id,
+                                                translation_gate=translation_gate, wanted_stamp=stamp)
+    failed = {_language_code(*entry) for entry in languages} - set(downloaded)
+    if failed and local_content_stamp(context.path) == stamp and not arr_claim_blocks_wanted(wanted_source):
+        with source_transaction() as connection:
+            current = repository.get_item(item_id, connection, for_update=True)
+            if (current is None or not context.same_item(current) or current.path != context.path
+                    or current.arr_shadow or current.server_missing or not current.monitored):
+                return
+            failed &= {_language_code(*entry) for entry in stored_missing_language_candidates(current)}
+            if failed:
+                attempts = current.failed_attempts or '[]'
+                for language in sorted(failed):
+                    attempts = updateFailedAttempts(language, attempts)
+                repository.set_failed_attempts(item_id, attempts, connection)
+
+
+def _download_source_subtitles(context, item, languages, job_id, *, translation_gate=True, wanted_stamp=None,
+                               upgrade=None):
     audio_languages = get_audio_profile_languages(item.audio_language)
     audio_language = audio_languages[0]['name'] if audio_languages else 'None'
     # For an episode the title the providers get is the show's.
     title = context.group_title if context.kind == 'episode' and context.group_title else context.title
 
     from subtitles.download import generate_subtitles
-    downloaded = 0
+    from app.notifier import send_notifications_source
+
+    upgrade_options = {} if upgrade is None else {
+        'is_upgrade': True,
+        'forced_minimum_score': upgrade.minimum_score,
+        'previous_subtitles_to_delete': upgrade.subtitles_path,
+        'source_upgrade': upgrade,
+    }
+    downloaded = []
     try:
         for result in generate_subtitles(context.path, languages, audio_language, str(context.scene_name), title,
-                                         context.media_type, context.profile_id, check_if_still_required=True,
-                                         job_id=job_id, source=context):
+                                         context.media_type, context.profile_id, check_if_still_required=upgrade is None,
+                                         job_id=job_id, source=context, **upgrade_options,
+                                         **({'source_wanted_stamp': wanted_stamp} if wanted_stamp is not None else {}),
+                                         **({} if translation_gate else {'auto_translate': False})):
             if not result:
+                continue
+            with source_transaction() as connection:
+                if upgrade is None:
+                    history_log_source(1, context, result, target=connection)
+                else:
+                    history_log_source(3, context, result, upgraded_from_id=upgrade.original_id, target=connection)
+            downloaded.append(result.language_code)
+            current = resolve_same_item(context)
+            if current is None:
                 continue
             if getattr(result, 'source_indexed', False) is not True:
                 # Retry an incomplete listing, including results from outside shared processing.
-                index_saved_subtitle(item_id, expected_path=context.path)
-            with source_transaction() as connection:
-                history_log_source(1, context, result, target=connection)
-            downloaded += 1
+                index_and_notify_item(current)
+            try:
+                send_notifications_source(current, result.message)
+            except Exception:
+                logging.exception('BAZARR could not send a notification for source item %s', context.item_id)
     except OSError as error:
         raise JobFailed(f'Unable to save the subtitles file: {error}', reason='save_failed') from error
-    jobs_queue.update_job_progress(
-        job_id=job_id, progress_value='max',
-        progress_message=f"{downloaded} subtitle(s) downloaded" if downloaded else 'No subtitles found')
-    return None
+    return downloaded
+
+
+def upgrade_source_subtitle(candidate, job_id):
+    """Search for a higher score and replace only the subtitle selected from history."""
+    from subtitles.tools.subsync_engines import regular_subtitle_version
+    from subtitles.upgrade import _is_hi_required, parse_language_string
+
+    from .history import SourceSubtitleUpgrade
+
+    try:
+        context = resolve_item(candidate.item_id)
+    except SourceItemGone:
+        return
+    if (context.created_at, context.path, context.profile_id) != (
+            candidate.created_at, candidate.video_path, candidate.profile_id):
+        return
+    stamp = local_content_stamp(context.path)
+    version = regular_subtitle_version(candidate.subtitles_path)
+    profile = get_profiles_list(profile_id=context.profile_id)
+    if stamp is None or version is None or profile is None:
+        return
+    upgrade = SourceSubtitleUpgrade(
+        history_id=candidate.id, original_id=candidate.upgradedFromId or candidate.id,
+        minimum_score=int(candidate.score or 0) + 1, language=candidate.language,
+        subtitles_path=candidate.subtitles_path,
+        subtitle_version=version, video_stamp=stamp, profile=deepcopy(profile))
+    if not upgrade.can_publish(context):
+        return
+
+    language, is_forced, is_hi = parse_language_string(upgrade.language)
+    if is_hi == 'True' and not _is_hi_required(language, context.profile_id):
+        is_hi = 'False'
+    context = replace(context, wanted_file_stamp=stamp)
+    with source_search_probes(context.item_id):
+        _download_source_subtitles(context, context, [(language, is_hi, is_forced)], job_id,
+                                   upgrade=upgrade)

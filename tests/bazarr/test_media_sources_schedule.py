@@ -93,6 +93,10 @@ def test_the_task_registers_while_an_enabled_source_exists_and_unregisters_when_
     function, trigger, kwargs = jobs[schedule.JOB_ID]
     assert function is schedule.scan_due_media_sources and trigger == "interval" and kwargs["hours"] == 1
     assert kwargs["replace_existing"] is True and kwargs["max_instances"] == 1
+    wanted, trigger, options = jobs[schedule.WANTED_JOB_ID]
+    assert wanted is schedule.wanted_search_missing_subtitles_sources
+    assert trigger == "interval" and options["hours"] == 6
+    assert options["kwargs"] == {"wait_for_completion": True}
 
     _set(source, enabled=0)
     schedule.configure_source_jobs(aps, source.session)
@@ -103,7 +107,7 @@ def test_the_task_registers_while_an_enabled_source_exists_and_unregisters_when_
 
     _set(source, enabled=1)
     schedule.configure_source_jobs(aps, source.session)
-    assert schedule.JOB_ID in jobs
+    assert schedule.JOB_ID in jobs and schedule.WANTED_JOB_ID in jobs
     repository.delete_source(source.id, source.session)
     schedule.configure_source_jobs(aps, source.session)
     assert jobs == {}
@@ -138,6 +142,28 @@ def test_the_scheduler_rebuilds_the_scan_task_whenever_the_tasks_are_refreshed(s
     assert "scan_media_sources" in jobs
 
 
+@pytest.mark.parametrize("job_id", [None, 10])
+def test_disabled_upgrades_leave_source_shadows_unchanged(source, monkeypatch, job_id):
+    from app.config import settings
+    from media_source_helpers import add_item, video
+    from media_sources import repository, wanted
+    from subtitles import upgrade
+
+    item_id = add_item(source.session, source.id, source.library_id, video(source.root / "Shadowed.mkv"),
+                       arr_shadow=1)
+    queued = []
+    queue = MagicMock()
+    queue.add_job_from_function.side_effect = lambda *args, **kwargs: queued.append(args)
+    monkeypatch.setattr(upgrade, "jobs_queue", queue)
+    monkeypatch.setattr(wanted, "notify_wanted_changes", lambda: None)
+    monkeypatch.setattr(settings.general, "upgrade_subs", False)
+
+    upgrade.upgrade_source_subtitles(job_id=job_id)
+
+    assert repository.get_item(item_id).arr_shadow == 1
+    assert queued == []
+
+
 def test_a_failure_configuring_the_scan_task_never_stops_the_rest_of_the_schedule(source, real_scheduler,
                                                                                   monkeypatch, caplog):
     from media_sources import schedule
@@ -149,7 +175,7 @@ def test_a_failure_configuring_the_scan_task_never_stops_the_rest_of_the_schedul
 
     monkeypatch.setattr(schedule, "configure_source_jobs", broken)
     scheduler.update_configurable_tasks()
-    assert "could not configure the media source scan task" in caplog.text
+    assert "could not configure the media source tasks" in caplog.text
     assert "provider_hub_update_check" in jobs
 
 
