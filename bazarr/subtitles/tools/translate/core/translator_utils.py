@@ -131,10 +131,10 @@ def translation_write_kwargs(translator, job_id):
                         current, connection, prepared):
                     if current is None or current.profile_id != prepared.profile_id:
                         raise SourceTranslationChanged('The source item moved, was disabled, or its profile changed')
-                    if subtitle_source_version(translator.video_path) != video_version:
-                        raise SourceTranslationChanged('The source media file changed during translation')
                     if not (current.wanted_file_stamp is not None and arr_claim_blocks_wanted(
                             current, target=connection)):
+                        if subtitle_source_version(translator.video_path) != video_version:
+                            raise SourceTranslationChanged('The source media file changed during translation')
                         if not sync_output_owner_is_unique(translator.video_path, translator.source_srt_file, owners):
                             raise SourceTranslationInputAmbiguous('The translation input lost its unique media owner')
                         if captured and not automatic_translation_is_current(

@@ -456,14 +456,13 @@ def compute_missing_subtitles(profile, cutoff_items, subtitles, failed_attempts=
 
     result = []
     for item in missing:
-        if is_search_given_up(item['language'], failed_attempts):
-            continue
         code = item['language']
         if item['forced'] == 'True':
             code += ':forced'
         elif item['hi'] == 'True':
             code += ':hi'
-        result.append(code)
+        if not is_search_given_up(code, failed_attempts):
+            result.append(code)
     return result
 
 
