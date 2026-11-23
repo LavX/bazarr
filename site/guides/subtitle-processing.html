@@ -220,6 +220,10 @@ POST /api/series/&lt;id&gt;/subtitles/combine</code></pre>
       <p>Bazarr+ tells embedded tracks apart by language, HI and forced only, so hiding an English SRT track also hides an English PGS track on the same title. The confirmation lists every track the hide covers. If another subtitle still covers the language, or your language profile does not want it, Bazarr+ says so and does not search.</p>
       <p>Hidden tracks are listed as <strong>Hidden tracks (n)</strong>, under the subtitle table on a movie and in the subtitle cell of the episode or event on series and sports pages. Open it and press <strong>Unhide</strong> to list the track again. Bazarr+ indexes the video again at once; if the file cannot be read at that moment, the next index lists the track.</p>
 
+      <h3 id="legacy-embedded-history">Legacy embedded history</h3>
+      <p>An older version could record a forced and HI embedded track under the <code>en:hi</code> history key. That row is indistinguishable from one for a plain HI track. For movies and episodes, if it is newer than a plain-English download and <strong>Treat Embedded Subtitles as Downloaded</strong> is on, it can keep ending upgrades of that plain-English subtitle. This legacy row does not have the same effect on sports upgrades. Hiding the forced and HI track does not remove the legacy row.</p>
+      <p>History has no control for deleting an individual embedded-source row. <strong>Hide track...</strong> on a plain-HI entry retracts matching <code>en:hi</code> embedded history during re-indexing only when a real plain-HI track was previously counted and hiding it removes that track from the index, with no counted track still covering the same language key. It also hides plain-HI tracks sharing that language key. If those conditions do not hold, there is no safe per-row action to remove the leftover history.</p>
+
       <h2 id="multi-engine-sync">Multi-engine synchronization</h2>
       <p>Synchronization shifts subtitle timing to match the audio. Bazarr+ now lets you choose which sync engine to run and compare the result before you keep it.</p>
       <p>You can start a sync in two places:</p>
