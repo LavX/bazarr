@@ -137,7 +137,8 @@ def test_history_pages_union_keep_orders_owner_filters_and_origins(client, arr_l
     assert client.get(endpoint, headers=HEADERS, query_string={'sources': 1, 'source_key[]': 'bad'}).status_code == 400
 
 
-def test_history_keeps_deleted_item_and_removed_source_snapshots(client, arr_library, tmp_path, history_kind):
+def test_history_keeps_deleted_item_and_removed_source_snapshots(
+        client, arr_library, tmp_path, history_kind, monkeypatch):
     from media_sources import repository
 
     kind, endpoint, _, title_key = history_kind
@@ -162,7 +163,19 @@ def test_history_keeps_deleted_item_and_removed_source_snapshots(client, arr_lib
         assert row['seriesTitle'] == 'Recorded Group'
     assert client.get(item_endpoint, headers=HEADERS).status_code == 404
 
-    repository.delete_source(source_id, arr_library)
+    notifications = []
+
+    def after_delete(event, action='update', payload=None):
+        assert repository.get_source(source_id, arr_library) is None
+        assert arr_library.scalar(sa.select(repository.History.c.source_id).where(
+            repository.History.c.id == original_event)) is None
+        notifications.append((event, payload))
+
+    original_event = event
+    monkeypatch.setattr('app.event_handler.event_stream', after_delete)
+    response = client.delete(f'/api/system/media-sources/{source_id}', headers=HEADERS)
+    assert response.status_code == 204
+    assert notifications.count(('source-removed', {'kinds': [kind]})) == 1
     removed = _get(client, endpoint, {'sources': 1, 'source_key[]': 'source:removed'})
     assert removed['total'] == 1
     assert removed['source_keys'] == ['source:removed']

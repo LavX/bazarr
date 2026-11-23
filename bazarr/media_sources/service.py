@@ -10,6 +10,7 @@ import threading
 from copy import deepcopy
 from dataclasses import replace
 
+from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
 from app.database import get_audio_profile_languages, get_profiles_list
@@ -201,10 +202,20 @@ def update_source(source_id, payload, session=None):
 def delete_source(source_id, session=None):
     """Remove a source. Its libraries, roots, groups and items go; its history and blacklist rows stay, with the
     snapshots they were written with, still listed and filterable."""
-    if repository.get_source(source_id, session) is None:
-        raise SourceError('No such media source', 404, 'not_found')
-    repository.delete_source(source_id, session)
+    from app.event_handler import event_stream
+
+    with source_transaction(session) as connection:
+        sources, history = repository.Sources.c, repository.History.c
+        found = connection.scalar(select(sources.id).where(sources.id == source_id).with_for_update())
+        if found is None:
+            raise SourceError('No such media source', 404, 'not_found')
+        kinds = sorted(connection.scalars(select(history.item_kind).where(history.source_id == source_id).distinct()))
+        repository.delete_source(source_id, connection)
     refresh_tasks()
+    try:
+        event_stream('source-removed', payload={'kinds': kinds})
+    except (AttributeError, RuntimeError):
+        logging.debug('BAZARR could not notify clients of the removed media source', exc_info=True)
 
 
 def add_library(source_id, payload, session=None):

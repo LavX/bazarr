@@ -1,8 +1,12 @@
 import { isArray, isEmpty, isNumber } from "lodash";
+import { mediaSourcesKey } from "@/apis/hooks/mediaSources";
 import queryClient from "@/apis/queries";
 import { scheduleEpisodesHistoryRefresh } from "@/apis/queries/episodeHistory";
 import { QueryKeys } from "@/apis/queries/keys";
-import { scheduleSourceHistoryRefresh } from "@/apis/queries/sourceHistory";
+import {
+  invalidateSourceHistory,
+  scheduleSourceHistoryRefresh,
+} from "@/apis/queries/sourceHistory";
 import {
   scheduleSubtitleScoresRefresh,
   skipScoredRangeQueries,
@@ -365,6 +369,19 @@ export function createDefaultReducer(): SocketIO.Reducer[] {
       any: () => {
         invalidateSourceWanted();
         scheduleSourceHistoryRefresh(queryClient);
+      },
+    },
+    {
+      key: "source-removed",
+      update: (items) => {
+        void queryClient.invalidateQueries({
+          queryKey: mediaSourcesKey,
+          exact: true,
+        });
+        void invalidateSourceHistory(
+          queryClient,
+          items.flatMap((item) => item.kinds),
+        );
       },
     },
     {

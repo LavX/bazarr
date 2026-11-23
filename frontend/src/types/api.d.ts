@@ -339,9 +339,20 @@ declare namespace History {
     source_kind: Wanted.SourceRow["source_kind"] | null;
   };
 
+  type OriginalEvent = {
+    origin: "arr" | "source";
+    source_key: MediaSourceKey | null;
+    history_id: number;
+    timestamp_iso: string | null;
+    action: number;
+    provider: string | null;
+    description: string | null;
+  };
+
   type UpgradeLink = {
     upgradedFromId?: number | null;
     original_id?: number | null;
+    original?: OriginalEvent | null;
   };
 
   type SourceRow = Omit<Base, "monitored" | "description" | "subtitles_path"> &

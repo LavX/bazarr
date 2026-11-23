@@ -1,17 +1,32 @@
-import { ActionIcon, Anchor, Group, Stack, Text, Tooltip } from "@mantine/core";
+import {
+  ActionIcon,
+  Anchor,
+  Group,
+  Popover,
+  Stack,
+  Text,
+  Tooltip,
+} from "@mantine/core";
 import { faInfoCircle, faRecycle } from "@fortawesome/free-solid-svg-icons";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import { HistoryIcon } from "@/components/bazarr";
+import HistoryProvider from "@/components/bazarr/HistoryProvider";
 import TextPopover from "@/components/TextPopover";
 
 type HistoryRow = History.EpisodeRow | History.MovieRow;
 
-function historyAnchor(row: HistoryRow, id = row.history_id) {
-  return id == null ? undefined : `history-${row.origin ?? "arr"}-${id}`;
+function historyAnchor(row: Pick<HistoryRow, "origin" | "history_id">) {
+  return row.history_id == null
+    ? undefined
+    : `history-${row.origin ?? "arr"}-${row.history_id}`;
 }
 
 export function historyAnchors(rows: HistoryRow[]) {
-  return new Set(rows.map((row) => historyAnchor(row)));
+  return new Map(
+    rows
+      .filter((row) => row.origin && row.history_id != null)
+      .map((row) => [historyAnchor(row), row.source_key ?? null]),
+  );
 }
 
 export function HistoryAction({ row }: { row: HistoryRow }) {
@@ -22,20 +37,54 @@ export function HistoryAction({ row }: { row: HistoryRow }) {
   );
 }
 
+function OriginalHistoryDetails({ event }: { event: History.OriginalEvent }) {
+  return (
+    <Popover width={280} trapFocus>
+      <Popover.Target>
+        <Anchor component="button" type="button" size="xs">
+          Original entry
+        </Anchor>
+      </Popover.Target>
+      <Popover.Dropdown>
+        <Stack gap="xs">
+          <Group gap="xs">
+            <HistoryIcon action={event.action} />
+            <HistoryProvider
+              action={event.action}
+              provider={event.provider ?? undefined}
+            />
+          </Group>
+          {event.timestamp_iso && (
+            <Text component="time" dateTime={event.timestamp_iso} size="sm">
+              {new Date(event.timestamp_iso).toLocaleString()}
+            </Text>
+          )}
+          {event.description && <Text size="sm">{event.description}</Text>}
+        </Stack>
+      </Popover.Dropdown>
+    </Popover>
+  );
+}
+
 export function HistoryUpgrade({
   row,
   anchors,
 }: {
   row: HistoryRow;
-  anchors: Set<string | undefined>;
+  anchors: ReturnType<typeof historyAnchors>;
 }) {
-  const originalId = row.upgradedFromId ?? row.original_id;
-  const target =
-    originalId != null && originalId !== row.history_id
-      ? historyAnchor(row, originalId)
-      : undefined;
-  const link = row.origin && target && anchors.has(target);
-  if (!row.upgradable && !link) return null;
+  const original = row.original;
+  const verified =
+    original &&
+    original.origin === row.origin &&
+    original.source_key !== "source:removed" &&
+    original.source_key === (row.source_key ?? null) &&
+    original.history_id !== row.history_id;
+  if (!row.upgradable && !verified) return null;
+
+  const target = verified ? historyAnchor(original) : undefined;
+  const onPage =
+    target !== undefined && anchors.get(target) === original?.source_key;
 
   return (
     <Group gap="xs" wrap="nowrap">
@@ -44,11 +93,14 @@ export function HistoryUpgrade({
           <FontAwesomeIcon size="sm" icon={faRecycle} />
         </TextPopover>
       )}
-      {link && (
-        <Anchor href={`#${target}`} size="xs">
-          Original entry
-        </Anchor>
-      )}
+      {verified &&
+        (onPage ? (
+          <Anchor href={`#${target}`} size="xs">
+            Original entry
+          </Anchor>
+        ) : (
+          <OriginalHistoryDetails event={original} />
+        ))}
     </Group>
   );
 }

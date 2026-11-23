@@ -490,19 +490,75 @@ describe.each(cases)(
       ).not.toBeInTheDocument();
     });
 
-    it("links upgrades only to an original from the same origin on the page", async () => {
+    it("shows verified originals on this page and in earlier pages", async () => {
+      const user = userEvent.setup();
       configure();
+      const original = {
+        history_id: 7,
+        timestamp_iso: "2026-11-20T12:00:00",
+        action: 1,
+        provider: "subdl",
+        description: "Original download",
+      };
+      const arrOriginal = { ...original, origin: "arr", source_key: "arr:5" };
+      const sourceOriginal = {
+        ...original,
+        origin: "source",
+        source_key: "source:8",
+      };
       server.use(
         http.get(`/api/${api}/history`, () =>
           HttpResponse.json({
             data: [
-              native,
-              live,
+              { ...native, original: arrOriginal },
+              { ...live, original: sourceOriginal },
               {
                 ...live,
-                item_title: "Outside page",
+                item_title: "Source upgrade",
                 history_id: 20,
                 upgradedFromId: 13,
+                original: {
+                  ...sourceOriginal,
+                  history_id: 13,
+                  description: "Source download on an earlier page",
+                },
+              },
+              {
+                ...native,
+                title: "Arr upgrade",
+                seriesTitle: "Arr upgrade",
+                history_id: 21,
+                upgradedFromId: 22,
+                original: {
+                  ...arrOriginal,
+                  history_id: 22,
+                  description: "Arr download on an earlier page",
+                },
+              },
+              {
+                ...live,
+                item_title: "Unverified upgrade",
+                history_id: 23,
+                upgradedFromId: 7,
+                original: null,
+              },
+              {
+                ...live,
+                item_title: "Different owner",
+                history_id: 24,
+                original: { ...sourceOriginal, source_key: "source:9" },
+              },
+              {
+                ...live,
+                item_title: "Different origin",
+                history_id: 25,
+                original: arrOriginal,
+              },
+              {
+                ...removed,
+                item_title: "Removed owner",
+                history_id: 26,
+                original: { ...sourceOriginal, source_key: "source:removed" },
               },
               {
                 ...native,
@@ -528,7 +584,7 @@ describe.each(cases)(
                 upgradedFromId: null,
               },
             ],
-            total: 7,
+            total: 75,
             source_keys: ["source:8"],
           }),
         ),
@@ -543,12 +599,104 @@ describe.each(cases)(
       expect(
         within(source).getByRole("link", { name: "Original entry" }),
       ).toHaveAttribute("href", "#history-source-7");
-      expect(
-        within(screen.getByRole("row", { name: /Outside page/ })).queryByRole(
-          "link",
-          { name: "Original entry" },
-        ),
-      ).not.toBeInTheDocument();
+
+      for (const origin of ["Source", "Arr"]) {
+        const row = screen.getByRole("row", {
+          name: new RegExp(`${origin} upgrade`),
+        });
+        expect(
+          within(row).queryByRole("link", { name: "Original entry" }),
+        ).not.toBeInTheDocument();
+        await user.click(
+          within(row).getByRole("button", { name: "Original entry" }),
+        );
+        await waitFor(() =>
+          expect(
+            screen.getByText(`${origin} download on an earlier page`),
+          ).toBeVisible(),
+        );
+        await user.keyboard("{Escape}");
+      }
+
+      for (const title of [
+        "Unverified upgrade",
+        "Different owner",
+        "Different origin",
+        "Removed owner",
+      ]) {
+        const row = screen.getByRole("row", { name: new RegExp(title) });
+        expect(
+          within(row).queryByText("Original entry"),
+        ).not.toBeInTheDocument();
+      }
+    });
+
+    it("refreshes only mixed History of the removed source's kind from a socket event", async () => {
+      const requests = vi.fn();
+      let deleted = false;
+      configure();
+      window.history.replaceState(null, "", "/?page=2");
+      server.use(
+        http.get(`/api/${api}/history`, ({ request }) => {
+          const params = new URL(request.url).searchParams;
+          requests(
+            params.get("sources"),
+            params.get("start"),
+            params.get("length"),
+          );
+          return HttpResponse.json({
+            data: [native, deleted ? removed : live],
+            total: 75,
+            source_keys: [deleted ? "source:removed" : "source:8"],
+          });
+        }),
+      );
+      const sameKind =
+        kind === "series"
+          ? [QueryKeys.Series, QueryKeys.Episodes, QueryKeys.History]
+          : [QueryKeys.Movies, QueryKeys.History];
+      const otherKind =
+        kind === "series"
+          ? [QueryKeys.Movies, QueryKeys.History]
+          : [QueryKeys.Series, QueryKeys.Episodes, QueryKeys.History];
+      const nativeKey = [
+        ...sameKind,
+        false,
+        { includeSources: false },
+        QueryKeys.Range,
+        { start: 25, size: 25 },
+      ];
+      const otherMixedKey = [
+        ...otherKind,
+        false,
+        { includeSources: true },
+        QueryKeys.Range,
+        { start: 25, size: 25 },
+      ];
+      queryClient.setQueryData(nativeKey, { data: [native], total: 75 });
+      queryClient.setQueryData(otherMixedKey, { data: [live], total: 75 });
+      customRender(<View />);
+      expect(await screen.findByText("Archive item")).toBeVisible();
+
+      deleted = true;
+      await act(async () => {
+        const reducer = createDefaultReducer().find(
+          ({ key }) => key === "source-removed",
+        );
+        if (reducer?.key !== "source-removed")
+          throw new Error("source-removed reducer is missing");
+        reducer.update?.([
+          { kinds: [kind === "series" ? "episode" : "movie"] },
+        ]);
+      });
+
+      expect(await screen.findByText("Retained item")).toBeVisible();
+      expect(screen.queryByText("Archive item")).not.toBeInTheDocument();
+      expect(requests).toHaveBeenLastCalledWith("1", "25", "25");
+      expect(queryClient.getQueryState(nativeKey)?.isInvalidated).toBe(false);
+      expect(queryClient.getQueryState(otherMixedKey)?.isInvalidated).toBe(
+        false,
+      );
     });
 
     it("includes removed sources on a retained-only page and preserves the embedded toggle", async () => {

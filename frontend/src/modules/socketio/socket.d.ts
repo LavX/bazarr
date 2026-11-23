@@ -27,11 +27,11 @@ declare namespace SocketIO {
     | "settings"
     | "languages";
 
-  type SpecialEventType = "jobs" | "session";
+  type SpecialEventType = "jobs" | "session" | "source-removed";
 
   type ActionType = "update" | "delete";
 
-  type PayloadType = number | string;
+  type PayloadType = number | string | CustomEvent.SourceRemoved;
 
   type ReducerGroup<
     E extends EventType,
@@ -60,7 +60,8 @@ declare namespace SocketIO {
     | ReducerGroup<NumEventType, number>
     | ReducerGroup<NullEventType, undefined>
     | ReducerGroup<"jobs", CustomEvent.Jobs>
-    | ReducerGroup<"session", string>;
+    | ReducerGroup<"session", string>
+    | ReducerGroup<"source-removed", CustomEvent.SourceRemoved>;
 
   type ActionRecord = {
     [P in EventType]?: {
@@ -70,5 +71,6 @@ declare namespace SocketIO {
 
   namespace CustomEvent {
     type Jobs = Manager.Jobs;
+    type SourceRemoved = { kinds: ("movie" | "episode" | "sports_event")[] };
   }
 }

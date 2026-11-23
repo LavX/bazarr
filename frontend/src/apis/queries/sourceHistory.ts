@@ -2,10 +2,10 @@ import { QueryClient } from "@tanstack/react-query";
 import { debounce, DebouncedFunc } from "lodash";
 import { QueryKeys } from "./keys";
 
-const historyKeys = [
-  [QueryKeys.Movies, QueryKeys.History],
-  [QueryKeys.Series, QueryKeys.Episodes, QueryKeys.History],
-] as const;
+const historyKeys = {
+  movie: [QueryKeys.Movies, QueryKeys.History],
+  episode: [QueryKeys.Series, QueryKeys.Episodes, QueryKeys.History],
+} as const;
 
 const refreshes = new WeakMap<
   QueryClient,
@@ -15,10 +15,16 @@ const refreshes = new WeakMap<
 export const SOURCE_HISTORY_DEBOUNCE_MS = 1_000;
 export const SOURCE_HISTORY_MAX_WAIT_MS = 5_000;
 
-export async function invalidateSourceHistory(client: QueryClient) {
-  refreshes.get(client)?.cancel();
+export async function invalidateSourceHistory(
+  client: QueryClient,
+  kinds?: readonly string[],
+) {
+  if (kinds === undefined) refreshes.get(client)?.cancel();
+  const keys = Object.entries(historyKeys)
+    .filter(([kind]) => kinds === undefined || kinds.includes(kind))
+    .map(([, key]) => key);
   await Promise.all(
-    historyKeys.map(async (queryKey) => {
+    keys.map(async (queryKey) => {
       const filters = {
         queryKey,
         predicate: ({ queryKey: key }: { queryKey: readonly unknown[] }) => {
