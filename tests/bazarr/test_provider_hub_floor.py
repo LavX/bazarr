@@ -1389,12 +1389,13 @@ def test_signed_build_refuses_an_unavailable_legacy_provider_wheel(tmp_path, mon
 
 
 @pytest.fixture
-def provider_sandbox_probes(monkeypatch, schema_session):
+def provider_sandbox_probes(monkeypatch, tmp_path):
     """Exercise the normal profile with an empty, migrated media root inventory."""
     from app import database as app_database
     from provider_hub import sandbox
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import scoped_session, sessionmaker
 
-    monkeypatch.setattr(app_database, "database", schema_session)
     host = sandbox.probe_sandbox()
     real_spawn = sandbox.spawn_worker
     confined = host.enforces(sandbox.PROVIDER_MIN_ABI)
@@ -1414,7 +1415,16 @@ def provider_sandbox_probes(monkeypatch, schema_session):
     monkeypatch.setattr(sandbox, "provider_profile_enabled", lambda: True)
     monkeypatch.setattr(sandbox, "probe_sandbox", probe)
     monkeypatch.setattr(sandbox, "spawn_worker", spawn)
-    return probes, launches, confined
+    # Connection checks query media roots from another thread.
+    engine = create_engine(f"sqlite:///{tmp_path / 'sandbox-inventory.db'}")
+    session = scoped_session(sessionmaker(bind=engine))
+    try:
+        app_database.Base.metadata.create_all(engine)
+        monkeypatch.setattr(app_database, "database", session)
+        yield probes, launches, confined
+    finally:
+        session.remove()
+        engine.dispose()
 
 
 def test_marketplace_installs_and_tests_a_signed_seeded_provider(
