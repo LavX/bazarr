@@ -113,7 +113,8 @@ def _live(row) -> bool:
 
 
 def attach_for(queue_job_id, source_key: str, to_lang: str, forced: bool = False, hi: bool = False, *,
-               session=None, clock: Callable[[], datetime] = datetime.now) -> None:
+               session=None, clock: Callable[[], datetime] = datetime.now,
+               worker_waits_for_attachment: bool = False) -> None:
     """Record the queue job a request to queue ended up with, on the job the request made or joined.
 
     The job is found again by its key, so nothing has to be carried from ``decide`` to here.
@@ -129,8 +130,11 @@ def attach_for(queue_job_id, source_key: str, to_lang: str, forced: bool = False
     if row is None:
         return
     if row.state == AWAITING_RETRY:
-        # A worker can finish before its original enqueue call attaches it.
-        jobs.requeue(row.id, queue_job_id, only_if_due=True)
+        # A worker that can already dispatch must activate its own retry. This callback could be for
+        # the attempt that just failed, including a failure that left no deadline.
+        queue_status = JobsQueuePort().status(queue_job_id)
+        if queue_status == "pending" or (queue_status == "running" and worker_waits_for_attachment):
+            jobs.requeue(row.id, queue_job_id, only_if_due=True, retry_snapshot=(row.updated_at, row.retry_at))
     elif row.state == QUEUED and (row.queue_job_id in (None, queue_job_id) or not _live(row)):
         jobs.attach_queue_job(row.id, queue_job_id, expected_queue_job_id=row.queue_job_id)
 

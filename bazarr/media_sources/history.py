@@ -223,10 +223,16 @@ def source_upgrade_history_committed(history_id, original_id, video_path, subtit
     """A fresh read resolves a lost commit acknowledgement for this exact replacement."""
     history = repository.History.c
     with handle().get_bind().connect() as connection:
-        return connection.scalar(sa.select(history.id).where(
-            history.id == history_id, history.action == 3, history.upgradedFromId == original_id,
-            history.video_path == video_path, history.subtitles_path == subtitles_path,
-        )) is not None
+        postgres = connection.dialect.name == 'postgresql'
+        if postgres:
+            connection.execution_options(isolation_level='READ COMMITTED')
+        with connection.begin():
+            if postgres:
+                connection.exec_driver_sql("SET LOCAL statement_timeout = '2s'")
+            return connection.scalar(sa.select(history.id).where(
+                history.id == history_id, history.action == 3, history.upgradedFromId == original_id,
+                history.video_path == video_path, history.subtitles_path == subtitles_path,
+            )) is not None
 
 
 def blacklist_log_source(context: SourceItemContext, provider, subs_id, language, target=None):

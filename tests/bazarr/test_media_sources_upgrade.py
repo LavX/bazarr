@@ -430,6 +430,7 @@ def test_postgres_upgrade_keeps_replacement_after_a_lost_commit_acknowledgement(
     monkeypatch.setattr(upgrade, 'jobs_queue', Mock())
     pipeline._download(monkeypatch)
     commits = []
+    recoveries = []
 
     def lose_acknowledgement(connection):
         if commits or not destination.exists():
@@ -444,18 +445,42 @@ def test_postgres_upgrade_keeps_replacement_after_a_lost_commit_acknowledgement(
         raise sa.exc.OperationalError('COMMIT', None, OSError('Lost commit acknowledgement'),
                                       connection_invalidated=True)
 
+    def observe_recovery(connection, cursor, statement, parameters, context, executemany):
+        if statement == "SET LOCAL statement_timeout = '2s'":
+            assert commits and destination.read_bytes() == pipeline.CONTENT
+            assert [path.read_bytes() for path in media.parent.glob('.bazarr-replaced-*')] == [b'Old subtitle']
+            recoveries.append(connection)
+
     engine = world.db.get_bind()
     sa.event.listen(engine, 'commit', lose_acknowledgement)
+    sa.event.listen(engine, 'before_cursor_execute', observe_recovery)
     try:
         upgrade.upgrade_source_subtitles(job_id=10)
     finally:
         sa.event.remove(engine, 'commit', lose_acknowledgement)
+        sa.event.remove(engine, 'before_cursor_execute', observe_recovery)
 
     assert len(commits) == 1
+    assert len(recoveries) == 1
     assert record_rows(world.db) == [(first, 1, None), (commits[0], 3, first)]
     assert not original.exists()
     assert destination.read_bytes() == pipeline.CONTENT
     assert [event.subtitle_path for event in world.published] == [str(destination), str(original)]
+
+
+def test_postgres_upgrade_history_recovery_has_a_statement_deadline(world, backend):
+    if backend != 'postgresql':
+        pytest.skip('PostgreSQL lock and statement timeouts are under test')
+
+    from media_sources import repository
+    from media_sources.history import source_upgrade_history_committed
+
+    with world.db.get_bind().connect().execution_options(isolation_level='READ COMMITTED') as blocker:
+        with blocker.begin():
+            blocker.exec_driver_sql(f'LOCK TABLE {repository.History.name} IN ACCESS EXCLUSIVE MODE')
+            with pytest.raises(sa.exc.DBAPIError) as failure:
+                source_upgrade_history_committed(1, 1, '/fixture/movie.mkv', '/fixture/movie.en.srt')
+            assert failure.value.orig.pgcode == '57014'
 
 
 def test_postgres_shared_upgrade_blocks_normal_arr_insert_through_publication(world, backend, monkeypatch):
