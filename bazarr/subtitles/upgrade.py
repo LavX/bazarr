@@ -44,7 +44,7 @@ def upgrade_subtitles(wait_for_completion=False):
 
 
 def upgrade_source_subtitles(job_id=None, wait_for_completion=False, item_id=None, history_id=None,
-                             expected_item=None):
+                             expected_item=None, expected_subtitles=()):
     if not settings.general.upgrade_subs:
         if job_id and item_id is not None:
             jobs_queue.publish_job_result(job_id, {'upgraded': 0})
@@ -70,6 +70,9 @@ def upgrade_source_subtitles(job_id=None, wait_for_completion=False, item_id=Non
             return None
     candidates = source_upgrade_candidates(item_ids=[item_id] if item_id is not None else None,
                                            history_ids=[history_id] if history_id is not None else None)
+    pinned = {row_id: (path, version) for row_id, path, version in expected_subtitles}
+    if item_id is not None:
+        candidates = [row for row in candidates if row.id in pinned]
     upgraded = 0
     jobs_queue.update_job_progress(job_id=job_id, progress_max=len(candidates))
     for i, candidate in enumerate(candidates, start=1):
@@ -78,7 +81,7 @@ def upgrade_source_subtitles(job_id=None, wait_for_completion=False, item_id=Non
         if not get_providers():
             logging.info("BAZARR All providers are throttled")
             break
-        if upgrade_source_subtitle(candidate, job_id):
+        if upgrade_source_subtitle(candidate, job_id, expected_subtitle=pinned.get(candidate.id)):
             upgraded += 1
     jobs_queue.update_job_progress(job_id=job_id, progress_value='max')
     jobs_queue.update_job_name(job_id=job_id, new_job_name='Tried to upgrade source subtitles')

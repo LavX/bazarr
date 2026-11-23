@@ -89,7 +89,10 @@ def _request(toolbox, source, subtitle, action, **extra):
 
 
 def _run(toolbox, response):
+    from api.queued_job import PROCESS_SESSION
+
     assert response.status_code == 202, response.get_data(as_text=True)
+    assert response.get_json()['session'] == PROCESS_SESSION
     job = toolbox.jobs._reserve_next_job()
     assert job.job_id == response.get_json()['job_id']
     assert toolbox.jobs._run_job(job)
@@ -182,6 +185,19 @@ def test_source_tools_write_files_history_and_index_for_each_media_kind(toolbox,
     assert status.status_code == 200 and status.json['synced'] is True
 
 
+def test_forced_source_subtitle_is_not_queued_for_sync(toolbox):
+    from media_sources.indexer import index_item
+
+    context = pipeline._episode(toolbox.world)
+    forced = Path(context.path).with_suffix('.en.forced.srt')
+    forced.write_text(SRT)
+    index_item(context.item_id)
+    response = _request(toolbox, context, forced, 'sync')
+    assert response.status_code == 400
+    assert 'Forced subtitles' in response.get_data(as_text=True)
+    assert not toolbox.jobs.jobs_pending_queue
+
+
 def test_source_combine_route_builds_only_the_selected_items_subtitle(toolbox):
     from media_sources import repository
     from subtitles.tools.combine.naming import compose_combined_filename
@@ -203,6 +219,61 @@ def test_source_combine_route_builds_only_the_selected_items_subtitle(toolbox):
     assert path.is_file()
     assert any(item[1] == str(path) for item in ast.literal_eval(repository.get_item(context.item_id).subtitles))
     assert table_counts(toolbox.db, ARR_AND_SPORTS_TABLES) == before
+
+
+@pytest.mark.parametrize(('kind', 'variant'), [('movie', 'hi'), ('episode', 'forced')])
+def test_source_combine_route_pins_explicit_indexed_variants(toolbox, kind, variant):
+    from media_sources.indexer import index_item
+
+    context = pipeline._episode(toolbox.world) if kind == 'episode' else pipeline._movie(toolbox.world)
+    media = Path(context.path)
+    selected, reference = media.with_suffix(f'.en.{variant}.srt'), media.with_suffix('.de.srt')
+    selected.write_text(SRT.replace('Original cue', 'Selected English cue'))
+    reference.write_text(SRT.replace('Original cue', 'Selected German cue'))
+    assert index_item(context.item_id) is not None
+    plain = media.with_suffix('.en.srt')
+    plain.write_text(SRT.replace('Original cue', 'Unindexed neighbor cue'))
+
+    endpoint = f'/api/sources/items/{context.item_id}/subtitles/combine'
+    inputs = [{'path': str(selected), 'language': f'en:{variant}'}, {'path': str(reference), 'language': 'de'}]
+    body = {'languages': ['en', 'de'], 'format': 'srt', 'inputs': inputs}
+    foreign = [inputs[0] | {'path': str(plain)}, inputs[1]]
+    assert toolbox.client.post(endpoint, headers=HEADERS, json=body | {'inputs': foreign}).status_code == 403
+    assert toolbox.client.post(endpoint, headers=HEADERS, json=body | {'inputs': inputs[::-1]}).status_code == 400
+    response = toolbox.client.post(endpoint, headers=HEADERS, json=body)
+    assert response.status_code == 200 and response.json['status'] == 'built', response.json
+    combined = Path(response.json['path']).read_text()
+    assert 'Selected English cue' in combined and 'Selected German cue' in combined
+    assert 'Unindexed neighbor cue' not in combined
+    assert 'Unindexed neighbor cue' in plain.read_text()
+
+
+def test_source_combine_route_preserves_output_when_a_selected_input_is_replaced(toolbox, monkeypatch):
+    from subtitles.tools.combine import main as combine
+
+    context = pipeline._episode(toolbox.world)
+    source, reference = _sidecars(toolbox, context)
+    output = Path(context.path).with_suffix('.en.combined-de.srt')
+    output.write_text('Existing combination')
+    original = combine.compose
+
+    def compose_then_replace(**options):
+        result = original(**options)
+        replacement = source.with_suffix('.tmp')
+        replacement.write_text(SRT.replace('Original cue', 'Replacement cue'))
+        replacement.replace(source)
+        return result
+
+    monkeypatch.setattr(combine, 'compose', compose_then_replace)
+    response = toolbox.client.post(f'/api/sources/items/{context.item_id}/subtitles/combine', headers=HEADERS, json={
+        'languages': ['en', 'de'], 'format': 'srt',
+        'inputs': [{'path': str(source), 'language': 'en'}, {'path': str(reference), 'language': 'de'}],
+    })
+    assert response.status_code == 500
+    assert response.json['status'] == 'failed' and 'changed' in response.json['error']
+    assert output.read_text() == 'Existing combination'
+    assert 'Replacement cue' in source.read_text()
+    assert not toolbox.world.published
 
 
 def test_source_sync_status_uses_edit_history_within_mtime_tolerance(toolbox):

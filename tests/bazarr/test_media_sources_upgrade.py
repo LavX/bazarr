@@ -141,7 +141,7 @@ def test_candidates_and_item_routes_share_current_source_history(client, arr_lib
     assert get_upgradable_source_subtitles([expected, history_ids['Unwanted']]) == {expected: None}
 
 
-@pytest.mark.parametrize('target', ['movie', 'episode', 'moved item', 'replaced video'])
+@pytest.mark.parametrize('target', ['movie', 'episode', 'moved item', 'replaced video', 'replaced subtitle'])
 def test_item_upgrade_route_uses_only_the_scoped_source_candidate(
         world, everything_uses_the_test_database, isolated_jobs, monkeypatch, target):
     from flask import Flask
@@ -157,12 +157,12 @@ def test_item_upgrade_route_uses_only_the_scoped_source_candidate(
     monkeypatch.setattr(jobs_api, 'jobs_queue', isolated_jobs)
     monkeypatch.setattr(upgrade, 'jobs_queue', isolated_jobs)
     monkeypatch.setattr(upgrade, 'get_providers', lambda: ['fake'])
-    pipeline._download(monkeypatch)
+    requested = pipeline._download(monkeypatch)
     app = Flask(__name__)
     app.register_blueprint(api_bp)
     source_client = app.test_client()
 
-    selected = pipeline._episode(world) if target == 'episode' else pipeline._movie(world)
+    selected = pipeline._episode(world) if target in {'episode', 'replaced subtitle'} else pipeline._movie(world)
     other = pipeline._movie(world, name='Different.2005.1080p.BluRay.x264-GRP.mkv')
     originals = {}
     history_ids = {}
@@ -184,7 +184,7 @@ def test_item_upgrade_route_uses_only_the_scoped_source_candidate(
     assert stale.status_code == 409 and stale.get_json()['error'] == 'not_upgradable'
     assert not isolated_jobs.jobs_pending_queue
 
-    params = {'history_id': ours} if target == 'episode' else {}
+    params = {'history_id': ours} if target in {'episode', 'replaced subtitle'} else {}
     queued = source_client.post(endpoint, headers=HEADERS, json=params)
     assert queued.status_code == 202
     queued_job = queued.get_json()
@@ -194,14 +194,23 @@ def test_item_upgrade_route_uses_only_the_scoped_source_candidate(
     assert job.job_id == queued_job['job_id']
     assert job.kwargs['item_id'] == selected.item_id
     assert job.kwargs['history_id'] == params.get('history_id')
+    ((pinned_id, pinned_path, pinned_version),) = job.kwargs['expected_subtitles']
+    assert pinned_id == ours and pinned_path == str(originals[selected.item_id]) and pinned_version
     assert not isolated_jobs.jobs_pending_queue
 
+    expected_bytes = b'Old subtitle'
     if target == 'moved item':
         moved = Path(selected.path).with_name('Moved.mkv')
         Path(selected.path).rename(moved)
         repository.update_item(selected.item_id, world.db, path=str(moved))
     elif target == 'replaced video':
         Path(selected.path).write_bytes(b'Replacement video')
+    elif target == 'replaced subtitle':
+        expected_bytes = b'Replacement without a History row'
+        path = originals[selected.item_id]
+        replacement = path.with_suffix('.tmp')
+        replacement.write_bytes(expected_bytes)
+        replacement.replace(path)
     upgraded = target in {'movie', 'episode'}
     assert isolated_jobs._run_job(job), job.error
     result = source_client.get('/api/system/jobs/result', headers=HEADERS,
@@ -210,9 +219,10 @@ def test_item_upgrade_route_uses_only_the_scoped_source_candidate(
     assert result.get_json()['session'] == queued_job['session']
     assert result.get_json()['result'] == {'upgraded': int(upgraded)}
     assert originals[other.item_id].read_bytes() == b'Old subtitle'
-    assert originals[selected.item_id].read_bytes() == (pipeline.CONTENT if upgraded else b'Old subtitle')
+    assert originals[selected.item_id].read_bytes() == (pipeline.CONTENT if upgraded else expected_bytes)
     rows = record_rows(world.db)
     if not upgraded:
+        assert requested == {}
         assert len(rows) == 2 and not world.published
     else:
         assert len(rows) == 3 and rows[-1][1:] == (3, ours)

@@ -798,14 +798,14 @@ def _source_subtitle_action(args, subtitles_path, language, hi, forced, pin):
                 force_sync=True, return_job_id=True, source=source,
                 source_tool=source_tool,
             )
-            return {'job_id': job_id or None}, 202
+            return queued_job_response(job_id or None), 202
 
         job_id = apply_subtitle_mods(
             language=subtitle.language.split(':', 1)[0], subtitle_path=subtitle.path, mods=[action],
             video_path=source.path, media_type='source', media_id=source.item_id, never_replace=True,
             require_within_area=True, source_tool=SourceSubtitleTool.capture(source, subtitle),
         )
-        return {'job_id': job_id or None}, 202
+        return queued_job_response(job_id or None), 202
     except SourceToolError as error:
         return str(error), error.status
     except (OSError, ValueError) as error:

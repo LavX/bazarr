@@ -36,6 +36,20 @@ def _item(db, tmp_path, kind, *, folder='source'):
     return resolve_item(item)
 
 
+def _record_provider_sidecar(db, source, path, provider, subs_id):
+    from media_sources import repository
+
+    return repository.insert_history(db, item_id=source.item_id, source_id=source.source_id, item_kind=source.kind,
+                                     video_path=source.path, subtitles_path=str(path), language='en', action=2,
+                                     provider=provider, subs_id=subs_id, description='Fixture acquisition')
+
+
+def _history_id(client, url):
+    results = client.get(f'{url}/history', headers=HEADERS)
+    assert results.status_code == 200
+    return results.get_json()['data'][0]['history_id']
+
+
 @pytest.fixture
 def writes(client, arr_library, isolated_jobs, monkeypatch):
     from media_servers import dispatcher
@@ -112,6 +126,7 @@ def test_manual_search_download_and_delete_blacklist(client, arr_library, writes
 
     response = client.post(f'{url}/blacklist', headers=HEADERS, json={
         'subtitles_path': str(saved), 'language': 'en', 'provider': 'fake', 'subs_id': candidate.id,
+        'history_id': _history_id(client, url),
     })
     assert response.status_code == 204
     assert not saved.exists()
@@ -238,6 +253,7 @@ def test_exclude_while_manual_provider_download_is_in_flight(
     indexer.index_item(source.item_id)
     url = f'/api/sources/items/{source.item_id}'
     payload, release_id = _search_for_download(client, monkeypatch, source)
+    acquired = _record_provider_sidecar(arr_library, source, sidecar, payload['provider'], release_id)
     download_paused, download_may_continue = Event(), Event()
     write_locks = manual.subtitle_write_locks
 
@@ -276,7 +292,7 @@ def test_exclude_while_manual_provider_download_is_in_flight(
                     patch.setattr(delete.os, 'remove', unlink_fails)
                 excluded = client.post(f'{url}/blacklist', headers=HEADERS, json={
                     'subtitles_path': str(sidecar), 'language': 'en', 'provider': payload['provider'],
-                    'subs_id': release_id,
+                    'subs_id': release_id, 'history_id': acquired,
                 })
             assert excluded.status_code == (204 if exclude_succeeds else 409)
             assert sidecar.exists() is not exclude_succeeds
@@ -291,13 +307,13 @@ def test_exclude_while_manual_provider_download_is_in_flight(
         assert 'has been excluded' in job.error['message']
         assert not sidecar.exists()
         assert exclusions == [release_id]
-        assert actions == [0]
+        assert actions == [2, 0]
         assert [event.operation for event in writes] == ['delete']
         assert 'en' in repository.get_item(source.item_id).missing_subtitles
     else:
         assert sidecar.read_bytes() == pipeline.CONTENT
         assert exclusions == []
-        assert actions == [2]
+        assert actions == [2, 2]
         assert [event.operation for event in writes] == ['download']
 
 
@@ -392,6 +408,7 @@ def test_admitted_symlink_supports_download_exclude_upload_and_delete(
     assert saved.read_bytes() == pipeline.CONTENT
     response = client.post(f'{url}/blacklist', headers=HEADERS, json={
         'subtitles_path': str(saved), 'language': 'en', 'provider': 'fake', 'subs_id': candidate.id,
+        'history_id': _history_id(client, url),
     })
     assert response.status_code == 204, response.get_json()
     assert not saved.exists()
@@ -653,12 +670,74 @@ def test_blacklist_cannot_delete_a_different_items_subtitle(client, arr_library,
 
     response = client.post(f'/api/sources/items/{source.item_id}/blacklist', headers=HEADERS, json={
         'subtitles_path': str(other_subtitle), 'language': 'en', 'provider': 'fake', 'subs_id': 'sub-1',
+        'history_id': 1,
     })
     assert response.status_code == 403
     assert other_subtitle.read_bytes() == pipeline.CONTENT
     assert arr_library.scalar(sa.select(sa.func.count()).select_from(repository.Blacklist)) == 0
     assert arr_library.scalar(sa.select(sa.func.count()).select_from(repository.History)) == 0
     assert writes == []
+
+
+@pytest.mark.parametrize(('kind', 'pending_history'), [('movie', False), ('episode', True)])
+def test_exclude_protects_the_replacement_of_a_selected_provider_subtitle(
+        client, arr_library, writes, isolated_jobs, tmp_path, monkeypatch, kind, pending_history):
+    from media_sources import indexer, repository
+    from subtitles import upload
+
+    source = _item(arr_library, tmp_path, kind)
+    other = _item(arr_library, tmp_path, 'movie', folder='Different item')
+    subtitle = Path(source.path).with_suffix('.en.srt')
+    subtitle.write_bytes(pipeline.CONTENT)
+    other_subtitle = Path(other.path).with_suffix('.en.srt')
+    other_subtitle.write_bytes(pipeline.CONTENT)
+    indexer.index_item(source.item_id)
+    acquired = _record_provider_sidecar(arr_library, source, subtitle, 'fixture', 'ours')
+    foreign = _record_provider_sidecar(arr_library, other, other_subtitle, 'fixture', 'theirs')
+    url = f'/api/sources/items/{source.item_id}'
+    assert acquired == _history_id(client, url)
+    evidence = {'subtitles_path': str(subtitle), 'language': 'en', 'provider': 'fixture', 'subs_id': 'ours',
+                'history_id': acquired}
+    for wrong_evidence in ({'history_id': foreign}, {'provider': 'wrong'}, {'subs_id': 'theirs'}):
+        assert client.post(f'{url}/blacklist', headers=HEADERS, json=evidence | wrong_evidence).status_code == 409
+        assert subtitle.read_bytes() == pipeline.CONTENT
+
+    new_subtitle = pipeline.CONTENT.replace(b'Downloaded', b'Uploaded replacement')
+    response = client.post(f'{url}/subtitles', headers=HEADERS, data={
+        'file': (BytesIO(new_subtitle), 'edition.srt'), 'language': 'en',
+    })
+    assert response.status_code == 202
+    job = isolated_jobs._reserve_next_job()
+
+    if pending_history:
+        write_finished, record_history = Event(), Event()
+        finish = upload._finish_source_upload
+
+        def pause_before_history(*args, **kwargs):
+            write_finished.set()
+            assert record_history.wait(10)
+            return finish(*args, **kwargs)
+
+        monkeypatch.setattr(upload, '_finish_source_upload', pause_before_history)
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            running = executor.submit(isolated_jobs._run_job, job)
+            try:
+                assert write_finished.wait(10), job.error
+                assert subtitle.read_bytes() == new_subtitle
+                assert acquired == _history_id(client, url)
+                response = client.post(f'{url}/blacklist', headers=HEADERS, json=evidence)
+            finally:
+                record_history.set()
+            assert running.result(timeout=10), job.error
+    else:
+        assert isolated_jobs._run_job(job), job.error
+        response = client.post(f'{url}/blacklist', headers=HEADERS, json=evidence)
+
+    assert response.status_code == 409
+    assert subtitle.read_bytes() == new_subtitle
+    assert other_subtitle.read_bytes() == pipeline.CONTENT
+    assert arr_library.scalar(sa.select(sa.func.count()).select_from(repository.Blacklist)) == 0
+    assert not any(event.operation == 'delete' for event in writes)
 
 
 @pytest.mark.parametrize('same_release', [True, False], ids=['same-release', 'different-release'])
@@ -680,6 +759,7 @@ def test_postgres_release_exclusion_orders_writes_across_different_items(
 
     payload, release = _search_for_download(client, monkeypatch, downloading)
     excluded_release = release if same_release else f'{release}-other'
+    acquired = _record_provider_sidecar(arr_library, excluding, exclude_path, payload['provider'], excluded_release)
     monkeypatch.setattr(manual, 'download_subtitles', lambda subtitles, pool: None)
     response = client.post(f'/api/sources/items/{downloading.item_id}/manual', headers=HEADERS, json=payload)
     job = isolated_jobs._reserve_next_job()
@@ -704,7 +784,7 @@ def test_postgres_release_exclusion_orders_writes_across_different_items(
     def exclude():
         return exclusion_client.post(f'/api/sources/items/{excluding.item_id}/blacklist', headers=HEADERS, json={
             'subtitles_path': str(exclude_path), 'language': 'en', 'provider': payload['provider'],
-            'subs_id': excluded_release,
+            'subs_id': excluded_release, 'history_id': acquired,
         })
 
     with ThreadPoolExecutor(max_workers=2) as executor:

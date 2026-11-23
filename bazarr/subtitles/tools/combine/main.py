@@ -17,7 +17,7 @@ from sportarr.connection import check_cancelled
 
 from .composer import compose
 from .naming import compose_combined_filename, external_subtitles_dir
-from .rules import resolve_source_paths
+from .rules import SourcePaths, resolve_source_paths
 
 _TWO_LETTER_RE = re.compile(r"^[a-z]{2}$")
 
@@ -38,7 +38,7 @@ class CombineResult:
 def try_combine_for_video(video_path, media_type, sonarr_series_id=None,
                             sonarr_episode_id=None, radarr_id=None,
                             languages=None, format=None, arr_instance_id=None,
-                            sports_operation=None, cancel=None, source=None):
+                            sports_operation=None, cancel=None, source=None, selected_inputs=None):
     """Single entry point: build (or rebuild) a combined subtitle file
     for the given video. Best-effort, never raises.
 
@@ -94,10 +94,17 @@ def try_combine_for_video(video_path, media_type, sonarr_series_id=None,
                 error=f"invalid combine format: {rule['format']!r}",
             )
 
-        sources = resolve_source_paths(
-            video_path=video_path,
-            languages=langs,
-        )
+        selected = {}
+        if selected_inputs is not None:
+            if source is None or len(selected_inputs) != len(langs):
+                raise ValueError('An exact subtitle selection requires a source item and each requested language')
+            selected = {tool.sidecar.path: tool for tool in selected_inputs}
+            paths = list(selected)
+            if len(paths) != len(langs):
+                raise ValueError('Choose a different subtitle file for each requested language')
+            sources = SourcePaths(paths[0], paths[1:])
+        else:
+            sources = resolve_source_paths(video_path=video_path, languages=langs)
         if sources is None:
             return CombineResult(
                 status="skipped",
@@ -107,8 +114,10 @@ def try_combine_for_video(video_path, media_type, sonarr_series_id=None,
         inputs = (sources.primary, *sources.secondaries)
         input_versions = {}
         if source is not None:
-            input_versions = {path: regular_subtitle_version(path) for path in inputs}
-            if any(version is None or not sync_output_owner_is_unique(video_path, path, **owner_kwargs)
+            input_versions = ({path: tool.sidecar.version for path, tool in selected.items()} if selected else
+                              {path: regular_subtitle_version(path) for path in inputs})
+            if any(version is None or regular_subtitle_version(path) != version
+                   or not sync_output_owner_is_unique(video_path, path, **owner_kwargs)
                    for path, version in input_versions.items()):
                 return CombineResult(status="skipped", reason="combined subtitle input has no unique regular-file owner")
 
@@ -176,15 +185,24 @@ def try_combine_for_video(video_path, media_type, sonarr_series_id=None,
                 @contextmanager
                 def publication():
                     with owners.publication(source, prepare, destination=out_path, cleanup_outputs=True) as (
-                            current, _, alternates):
+                            current, connection, alternates):
                         if current is None or current.path != video_path:
                             raise ValueError('The source item moved or was removed during composition')
+                        for path, tool in selected.items():
+                            tool.check_current(current, connection)
+                            if not sync_output_owner_is_unique(video_path, path, owners):
+                                raise ValueError('The selected subtitle lost its unique owner before publication')
                         yield
                         _retire_source_alternates(video_path, alternates, owners, notify)
 
                 write_kwargs['publication_guard'] = publication
                 write_kwargs['invalidate_outputs'] = False
-                read_kwargs['read_bytes'] = lambda path: read_regular_subtitle(path, input_versions[path])
+                def read_input(path):
+                    if path in selected:
+                        selected[path].validate()
+                    return read_regular_subtitle(path, input_versions[path])
+
+                read_kwargs['read_bytes'] = read_input
 
             def capture_published():
                 nonlocal published_versions

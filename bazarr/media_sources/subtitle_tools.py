@@ -114,6 +114,48 @@ def indexed_sidecar(source, item, *, path=None, language=None):
     raise SourceToolError('The listed subtitle is unavailable or has ambiguous ownership', 409)
 
 
+def indexed_combine_inputs(source, item, languages, selection):
+    """Capture the exact SRTs accepted for an interactive composition."""
+    from subtitles.tools.combine.main import _normalize_language_codes
+
+    def variant_priority(key, code):
+        language, *variants = key.split(':')
+        if _normalize_language_codes([language]) != [code]:
+            return None
+        if not variants:
+            return 0
+        if variants == ['hi']:
+            return 1
+        if variants == ['forced']:
+            return 2
+        return None
+
+    if selection is None:
+        # Keep language-only clients on the current index. A file appearing
+        # beside the video during this request cannot supersede that choice.
+        selection = []
+        stored = indexed_subtitles(item)
+        for code in languages:
+            choices = [(priority, path, key) for key, path in stored
+                       if path.lower().endswith('.srt') and (priority := variant_priority(key, code)) is not None]
+            if not choices:
+                return None
+            _, path, key = min(choices)
+            selection.append({'path': path, 'language': key})
+    if not isinstance(selection, list) or len(selection) != len(languages):
+        raise SourceToolError('Choose one source subtitle for each requested language.', 400)
+
+    inputs = []
+    for code, selected in zip(languages, selection):
+        if (not isinstance(selected, dict) or set(selected) != {'path', 'language'}
+                or not isinstance(selected['path'], str) or not os.path.isabs(selected['path'])
+                or not selected['path'].lower().endswith('.srt') or not isinstance(selected['language'], str)
+                or variant_priority(selected['language'], code) is None):
+            raise SourceToolError('A selected subtitle does not match its requested language.', 400)
+        inputs.append(indexed_sidecar(source, item, path=selected['path'], language=selected['language']))
+    return tuple(SourceSubtitleTool.capture(source, sidecar) for sidecar in inputs)
+
+
 @dataclass(frozen=True)
 class SourceSubtitleTool:
     source: SourceItemContext
@@ -133,6 +175,8 @@ class SourceSubtitleTool:
         """Resolve the reference and capture the identities used by either sync entry point."""
         if is_sync_engine_output(sidecar.path):
             raise SourceToolError('Generated sync output files cannot be synchronized again.', 400)
+        if 'forced' in sidecar.language.split(':')[1:]:
+            raise SourceToolError('Forced subtitles cannot be synchronized.', 400)
         external = None
         if reference in empty_values or reference == source.path:
             reference = source.path

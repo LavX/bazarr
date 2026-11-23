@@ -429,6 +429,7 @@ def source_upgrade_item_stamp(item_id):
 
 
 def queue_source_upgrade(item_id, history_id=None):
+    from subtitles.tools.subsync_engines import regular_subtitle_version
     from subtitles.upgrade import upgrade_source_subtitles
 
     from .history import source_upgrade_candidates
@@ -441,9 +442,14 @@ def queue_source_upgrade(item_id, history_id=None):
     reason = item_disabled_reason(item_id)
     if reason:
         raise SourceError(reason, 409, 'disabled')
-    if not source_upgrade_candidates(item_ids=[item_id], history_ids=[history_id] if history_id is not None else None):
+    candidates = source_upgrade_candidates(item_ids=[item_id],
+                                           history_ids=[history_id] if history_id is not None else None)
+    expected_subtitles = tuple((row.id, row.subtitles_path, version) for row in candidates
+                               if (version := regular_subtitle_version(row.subtitles_path)) is not None)
+    if not expected_subtitles:
         raise SourceError('There is no eligible subtitle to upgrade for this item.', 409, 'not_upgradable')
-    return upgrade_source_subtitles(item_id=item_id, history_id=history_id, expected_item=expected_item)
+    return upgrade_source_subtitles(item_id=item_id, history_id=history_id, expected_item=expected_item,
+                                    expected_subtitles=expected_subtitles)
 
 
 def queue_group_search(group_id):
@@ -708,7 +714,7 @@ def _download_source_subtitles(context, item, languages, job_id, *, translation_
     return downloaded
 
 
-def upgrade_source_subtitle(candidate, job_id):
+def upgrade_source_subtitle(candidate, job_id, *, expected_subtitle=None):
     """Search for a higher score and replace only the subtitle selected from history."""
     from subtitles.tools.subsync_engines import regular_subtitle_version
     from subtitles.upgrade import _is_hi_required, parse_language_string
@@ -724,6 +730,8 @@ def upgrade_source_subtitle(candidate, job_id):
         return
     stamp = local_content_stamp(context.path)
     version = regular_subtitle_version(candidate.subtitles_path)
+    if expected_subtitle is not None and expected_subtitle != (candidate.subtitles_path, version):
+        return
     profile = get_profiles_list(profile_id=context.profile_id)
     if stamp is None or version is None or profile is None:
         return

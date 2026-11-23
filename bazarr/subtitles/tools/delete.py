@@ -202,11 +202,11 @@ def delete_subtitles(media_type, language, forced, hi, media_path, subtitles_pat
 
 def _delete_source_subtitle(source, subtitle_path, language_code, language_name, blacklist):
     from media_sources import repository
-    from media_sources.history import blacklist_log_source, history_log_source
+    from media_sources.history import blacklist_log_source, current_source_release_version, history_log_source
     from media_sources.indexer import SourcePublicationOwnerIndex, index_and_notify_item
     from media_sources.manual import manual_source_publication
     from subtitles.tools.delete_ownership import SubtitleDeletionError
-    from subtitles.tools.subsync_engines import SubtitleDestinationChanged
+    from subtitles.tools.subsync_engines import SubtitleDestinationChanged, regular_subtitle_version
 
     ownership_index = SourcePublicationOwnerIndex()
     with subtitle_write_locks(source.path, subtitle_path):
@@ -225,14 +225,25 @@ def _delete_source_subtitle(source, subtitle_path, language_code, language_name,
             raise SubtitleDeletionError('The source item moved or was removed.', 409)
         require_indexed(item)
         try:
-            release = (source.kind, *blacklist) if blacklist is not None else None
+            release = (source.kind, *blacklist[1:]) if blacklist is not None else None
             with manual_source_publication(source, subtitle_path, ownership_index, release=release) as (
                     current, connection):
                 require_indexed(repository.get_item(current.item_id, connection))
+                revalidate = None
+                if blacklist is not None:
+                    version = current_source_release_version(current, subtitle_path, language_code, *blacklist,
+                                                             target=connection)
+                    if version is None:
+                        raise SubtitleDeletionError('The selected release is no longer the current subtitle.', 409)
+
+                    def revalidate():
+                        if regular_subtitle_version(subtitle_path) != version:
+                            raise SubtitleDeletionError('The selected subtitle changed before deletion.', 409)
+
                 removed = _delete_subtitle_file(
                     current.path, subtitle_path,
                     publication_callback(current.publication_type, current.path, 'delete', source=current),
-                    ownership_index=ownership_index)
+                    revalidate=revalidate, ownership_index=ownership_index)
                 if removed:
                     result = ProcessSubtitlesResult(
                         message=f'{language_name} subtitles deleted from disk.', reversed_path=current.path,
@@ -240,7 +251,7 @@ def _delete_source_subtitle(source, subtitle_path, language_code, language_name,
                         forced=None, subtitle_id=None, reversed_subtitles_path=subtitle_path, hearing_impaired=None)
                     history_log_source(0, current, result, target=connection)
                     if blacklist is not None:
-                        provider, subs_id = blacklist
+                        _, provider, subs_id = blacklist
                         blacklist_log_source(current, provider, subs_id, language_code, target=connection)
         except SubtitleDestinationChanged as error:
             raise SubtitleDeletionError(str(error), 409) from error

@@ -37,6 +37,30 @@ def _stored_subtitles(raw):
             and (entry[1] is None or isinstance(entry[1], str))]
 
 
+def current_source_release_version(source, path, language, history_id, provider, subs_id, target):
+    """Prove that the newest file-changing row still describes this sidecar."""
+    from .subtitle_tools import SOURCE_SUBTITLE_EDITED_ACTION
+    from subtitles.upgrade import _FILE_WRITING_ACTIONS
+
+    history = repository.History.c
+    latest = handle(target).execute(sa.select(
+        history.id, history.action, history.provider, history.subs_id, history.language, history.timestamp
+    ).where(
+        history.item_id == source.item_id, history.source_id == source.source_id,
+        history.item_kind == source.kind, history.video_path == source.path, history.subtitles_path == path,
+        history.action.in_((*_FILE_WRITING_ACTIONS, 5, SOURCE_SUBTITLE_EDITED_ACTION)),
+    ).order_by(history.timestamp.desc(), history.id.desc()).limit(1)).first()
+    if (latest is None or latest.action not in (1, 2, 3)
+            or (latest.id, latest.provider, latest.subs_id, latest.language) != (history_id, provider, subs_id, language)):
+        return None
+    version = regular_subtitle_version(path)
+    # A replacement can be on disk before its history transaction starts.
+    # It must not inherit the older release just because the path is unchanged.
+    if version is None or max(version[3:]) > int(latest.timestamp.timestamp() * 1_000_000_000):
+        return None
+    return version
+
+
 def _source_upgrade_query():
     from subtitles.upgrade import (EMBEDDED_SOURCE_ACTION, UPLOAD_ACTION, _FILE_WRITING_ACTIONS,
                                    _ai_translated_subtitles_are_upgrade_candidates,

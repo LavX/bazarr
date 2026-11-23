@@ -356,6 +356,7 @@ class SourceItemSubtitlesCombine(Resource):
     @api_ns_sources_items.response(404, 'No such item')
     def post(self, item_id):
         """Build or rebuild a combined subtitle for one source item."""
+        from media_sources.subtitle_tools import SourceToolError, indexed_combine_inputs
         from subtitles.tools.combine.main import try_combine_for_video
 
         source, refusal = _manual_target(item_id)
@@ -367,14 +368,25 @@ class SourceItemSubtitlesCombine(Resource):
         if not isinstance(payload, dict):
             return {'message': 'Expected a combine request object.'}, 400
         languages, format_ = payload.get('languages'), payload.get('format')
-        if languages is not None or format_ is not None:
+        inputs = None
+        if languages is not None or format_ is not None or 'inputs' in payload:
             if (not isinstance(languages, list) or not 2 <= len(languages) <= 3
                     or any(not isinstance(code, str) or len(code) != 2 or not alpha3_from_alpha2(code)
                            for code in languages)
                     or len(set(languages)) != len(languages) or format_ not in ('srt', 'ass')):
                 return {'message': 'Choose two or three distinct subtitle languages and an SRT or ASS format.'}, 400
+            item = repository.get_item(source.item_id)
+            if item is None or not source.same_item(item) or source.path != item.path:
+                return {'message': 'The source item moved or was removed.'}, 409
+            try:
+                inputs = indexed_combine_inputs(source, item, languages, payload.get('inputs'))
+            except SourceToolError as error:
+                return {'message': str(error)}, error.status
+            if inputs is None:
+                return {'status': 'skipped', 'path': '', 'alignment': '', 'error': '',
+                        'reason': 'A requested language has no indexed SRT subtitle.'}, 200
         result = try_combine_for_video(video_path=source.path, media_type=source.publication_type,
-                                       languages=languages, format=format_, source=source)
+                                       languages=languages, format=format_, source=source, selected_inputs=inputs)
         body = {'status': result.status, 'path': result.path, 'alignment': result.alignment,
                 'reason': result.reason, 'error': result.error}
         if result.status == 'failed':
@@ -387,6 +399,7 @@ class SourceItemBlacklist(Resource):
     post_request_parser = _delete_args()
     post_request_parser.add_argument('provider', type=str, required=True, nullable=False)
     post_request_parser.add_argument('subs_id', type=str, required=True, nullable=False)
+    post_request_parser.add_argument('history_id', type=inputs.positive, required=True, nullable=False)
 
     @authenticate
     @api_ns_sources_items.doc(parser=post_request_parser)
@@ -395,4 +408,4 @@ class SourceItemBlacklist(Resource):
         args = self.post_request_parser.parse_args()
         if not args['provider'].strip() or not args['subs_id'].strip():
             return {'message': 'A provider and subtitle ID are required.'}, 400
-        return _delete_item_subtitle(item_id, args, blacklist=(args['provider'], args['subs_id']))
+        return _delete_item_subtitle(item_id, args, blacklist=(args['history_id'], args['provider'], args['subs_id']))
