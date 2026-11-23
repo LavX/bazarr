@@ -21,7 +21,7 @@ from sonarr.history import history_log
 from app.jobs_queue import jobs_queue, JobCancelled, JobFailed
 
 from ..core.translator_utils import (add_translator_info, create_process_result, get_title,
-                                     record_source_translation, translation_write_kwargs)
+                                     record_source_translation, require_source_translation, translation_write_kwargs)
 from .auth import get_translator_auth_headers
 from .sidecar_errors import describe_sidecar_refusal, redact_service_text, MAX_REFUSAL_LENGTH
 
@@ -364,6 +364,7 @@ class OpenRouterTranslatorService:
                     if i in translation_map and translation_map[i].strip():
                         line.text = translation_map[i]
 
+                require_source_translation(self.source, lines_list, (line.plaintext for line in subs))
                 subs.save(temporary)
                 translated = 'partially translated' if self.partial_error else 'translated'
                 add_translator_info(temporary, f"# Subtitles {translated} with AI Subtitle Translator #")
@@ -392,7 +393,7 @@ class OpenRouterTranslatorService:
 
             return self.dest_srt_file
 
-        except (JobCancelled, SubtitleDestinationChanged, TranslationServiceError):
+        except (JobCancelled, SubtitleDestinationChanged, JobFailed):
             raise
         except Exception as e:
             if self.sports_operation:

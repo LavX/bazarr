@@ -16,7 +16,7 @@ from app.get_providers import get_providers
 from app.jobs_queue import JobFailed, jobs_queue
 
 from . import identity, paths, repository
-from .context import SourceItemGone, resolve_item
+from .context import SourceItemGone, resolve_item, resolve_same_item
 from .db import source_transaction
 from .history import history_log_source
 from .indexer import index_item
@@ -357,7 +357,12 @@ def queue_search(item_id):
     reason = item_disabled_reason(item_id)
     if reason:
         raise SourceError(reason, 409, 'disabled')
-    return search_source_item(item_id)
+    try:
+        return search_source_item(item_id)
+    except JobFailed as error:
+        if error.reason == 'not_found':
+            raise SourceError(str(error), 404, 'not_found') from error
+        raise
 
 
 def _missing_languages(item):
@@ -370,20 +375,34 @@ def _missing_languages(item):
     return languages
 
 
+def _language_code(language, hi, forced):
+    return language + (':hi' if hi == 'True' else ':forced' if forced == 'True' else '')
+
+
 def _label(item_id):
     item = repository.get_item(item_id)
     return item.title if item is not None else str(item_id)
 
 
-def search_source_item(item_id, job_id=None, *, translation_gate=True):
+def search_source_item(item_id, job_id=None, *, translation_gate=True, expected_source=None):
     """Search the missing subtitles of one source item. Called without a job id it queues itself."""
     if not job_id:
+        if expected_source is None:
+            try:
+                expected_source = resolve_item(item_id)
+            except SourceItemGone as error:
+                raise JobFailed('The item no longer exists', reason='not_found') from error
         return jobs_queue.add_job_from_function(f"Searching subtitles for {_label(item_id)}", is_progress=True)
 
-    try:
-        context = resolve_item(item_id)
-    except SourceItemGone as error:
-        raise JobFailed('The item no longer exists', reason='not_found') from error
+    if expected_source is not None:
+        context = resolve_same_item(expected_source)
+        if context is None or context.item_id != item_id:
+            return None
+    else:
+        try:
+            context = resolve_item(item_id)
+        except SourceItemGone as error:
+            raise JobFailed('The item no longer exists', reason='not_found') from error
     reason = item_disabled_reason(item_id)
     if reason:
         # Disabled after the search was queued: nothing is searched, and nothing is an error.
@@ -401,13 +420,24 @@ def search_source_item(item_id, job_id=None, *, translation_gate=True):
         # Indexing for this item is incomplete, so it is done again.
         index_item(item_id)
         item = repository.get_item(item_id)
-    if item is None:
+    if item is None or not context.same_item(item):
         # Deleted between resolving it and reading it.
         raise JobFailed('The item no longer exists', reason='not_found')
     languages = _missing_languages(item)
+    covered = set()
+    if translation_gate and languages:
+        from .translation import queue_missing_translations
+
+        try:
+            covered = queue_missing_translations(context)
+        except Exception:
+            logging.exception('BAZARR could not queue a translation for source item %s', item_id)
+        else:
+            languages = [entry for entry in languages if _language_code(*entry) not in covered]
     jobs_queue.update_job_progress(job_id=job_id, progress_max=len(languages), progress_message=context.title)
     if not languages:
-        jobs_queue.update_job_progress(job_id=job_id, progress_value='max', progress_message='Nothing is missing')
+        jobs_queue.update_job_progress(job_id=job_id, progress_value='max',
+                                       progress_message='Subtitles found or queued' if covered else 'Nothing is missing')
         return None
     if not get_providers():
         logging.info("BAZARR All providers are throttled")

@@ -10,6 +10,7 @@ from typing import Union
 from types import SimpleNamespace
 
 from app.config import settings
+from app.jobs_queue import JobCancelled, JobFailed
 from subzero.language import Language
 from subliminal_patch.core import get_subtitle_path
 from subliminal_patch.score import MAX_SCORES
@@ -109,28 +110,55 @@ def translation_write_kwargs(translator, job_id):
     kwargs = {'expected_versions': captured} if captured else {}
     source = getattr(translator, 'source', None)
     if source is not None:
-        from media_sources.indexer import SourceOutputOwnerIndex
+        from media_sources.indexer import SourcePublicationOwnerIndex
+
+        owners = SourcePublicationOwnerIndex()
 
         @contextmanager
         def publication():
-            current_translation_source(source, translator.video_path)
+            validate_source_translation(source, translator.video_path, translator.source_srt_file,
+                                        translator.dest_srt_file, translator.from_lang, translator.orig_to_lang,
+                                        translator.forced, translator.hi, captured, owners)
             yield
-        kwargs.update(publication_guard=publication, ownership_index=SourceOutputOwnerIndex())
+        kwargs.update(publication_guard=publication, ownership_index=owners)
     return kwargs
 
 
-def current_translation_source(source, video_path):
-    """Check that the queued translation still belongs to this source file."""
-    from media_sources.context import SourceItemGone, resolve_item
-    from subtitles.tools.subsync_engines import SubtitleSourceChanged
+class SourceTranslationChanged(JobCancelled):
+    """The source item or its translation request ceased to be current."""
 
-    try:
-        current = resolve_item(source.item_id)
-    except SourceItemGone:
-        raise SubtitleSourceChanged('The source item was removed while the translation waited') from None
-    if (current.path, current.source_id, current.kind) != (video_path, source.source_id, source.kind):
-        raise SubtitleSourceChanged('The source item moved while the translation waited')
+
+def validate_source_translation(source, video_path, subtitle_path, destination, from_lang, to_lang, forced, hi,
+                                captured=(), owners=None):
+    """Validate the queued source item, profile and write destination."""
+    from media_sources.indexer import SourcePublicationOwnerIndex
+    from media_sources.translation import automatic_translation_is_current, live_source
+    from subtitles.tools.subsync_engines import sync_output_owner_is_unique
+
+    current = live_source(source)
+    if current is None or current.path != video_path:
+        raise SourceTranslationChanged('The source item moved, was removed, or was disabled')
+    if destination != translated_destination_path(video_path, to_lang, forced, hi):
+        raise SourceTranslationChanged('The configured subtitle destination changed')
+    if captured and (str(captured[0].path) != destination or not automatic_translation_is_current(
+            current, subtitle_path, from_lang, to_lang, forced, hi)):
+        raise SourceTranslationChanged('The source profile or translation eligibility changed')
+    if owners is None:
+        owners = SourcePublicationOwnerIndex()
+    if not sync_output_owner_is_unique(video_path, destination, ownership_index=owners):
+        raise SourceTranslationChanged('The translated subtitle destination does not have one media owner')
+    if not sync_output_owner_is_unique(video_path, subtitle_path, ownership_index=owners):
+        raise SourceTranslationChanged('The translation input does not have one media owner')
     return current
+
+
+def require_source_translation(source, original, translated):
+    """Stop before publication if none of the subtitle cues was translated."""
+    if source is not None and not any(
+        isinstance(new, str) and old.strip() and new.strip() and new.strip() != old.strip()
+        for old, new in zip(original, translated)
+    ):
+        raise JobFailed('The translator returned no translated cues', reason='empty_translation', retryable=False)
 
 
 def record_source_translation(source, result):

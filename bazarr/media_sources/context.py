@@ -1,6 +1,7 @@
 # coding=utf-8
 """The one object the shared pipeline is given for a source item."""
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Optional
 
 from . import repository
@@ -35,6 +36,12 @@ class SourceItemContext:
     identity_source: str = 'filename'  # 'user' when the user set the identity: it outranks the file name
     group_id: Optional[int] = None
     series_year: Optional[int] = None
+    created_at: Optional[datetime] = None
+
+    def same_item(self, current):
+        """SQLite may reuse the integer id of a deleted item."""
+        current_id = current.item_id if isinstance(current, SourceItemContext) else current.id
+        return self.item_id == current_id and self.created_at == current.created_at
 
     @property
     def media_type(self):
@@ -96,4 +103,17 @@ def resolve_item(item_id, target=None) -> SourceItemContext:
         series_tvdb_id=group.tvdb_id if is_episode and group is not None else None,
         publication_type=_PUBLICATION[item.kind], scene_name=item.scene_name,
         audio_language=item.audio_language, identity_source=item.identity_source, group_id=item.group_id,
-        series_year=_year(group.year) if is_episode and group is not None else None)
+        series_year=_year(group.year) if is_episode and group is not None else None, created_at=item.created_at)
+
+
+
+def resolve_same_item(source):
+    """Resolve a captured item only while its row, owner and path still match."""
+    try:
+        current = resolve_item(source.item_id)
+    except SourceItemGone:
+        return None
+    if not source.same_item(current) or (source.source_id, source.library_id, source.path, source.kind) != (
+            current.source_id, current.library_id, current.path, current.kind):
+        return None
+    return current

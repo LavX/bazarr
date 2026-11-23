@@ -30,7 +30,7 @@ from subtitles.processing import ProcessSubtitlesResult  # noqa: F401
 from app.jobs_queue import JobCancelled, jobs_queue
 from languages.get_languages import alpha3_from_alpha2, language_from_alpha2, language_from_alpha3  # noqa: F401
 from ..core.translator_utils import (add_translator_info, get_description, create_process_result,
-                                     record_source_translation, translation_write_kwargs)
+                                     record_source_translation, require_source_translation, translation_write_kwargs)
 
 logger = logging.getLogger(__name__)
 DEFAULT_GEMINI_BATCH_SIZE = 300
@@ -160,6 +160,10 @@ class GeminiTranslatorService:
                     self._translate_with_gemini()
                     if self.sports_operation and (not os.path.isfile(temporary) or not os.path.getsize(temporary)):
                         raise RuntimeError("Gemini returned no translated text")
+                    if self.source is not None:
+                        result = pysubs2.load(temporary, encoding='utf-8')
+                        require_source_translation(self.source, (line.plaintext for line in subs),
+                                                   (line.plaintext for line in result))
                     # A partial file says so: the footer is the file's own claim
                     # about itself, and it must not read as a full translation
                     # while source-language cues remain.

@@ -107,7 +107,7 @@ def _year(value):
         return None
 
 
-def media_metadata(media_type, video_path, arr_instance_id, *, source_item_id=None):
+def media_metadata(media_type, video_path, arr_instance_id, *, source_item_id=None, source_created_at=None):
     """Read the identifiers Bazarr already stores for this published video.
 
     Resolved here rather than threaded through every publication callback:
@@ -126,7 +126,8 @@ def media_metadata(media_type, video_path, arr_instance_id, *, source_item_id=No
 
             with _reader() as session:
                 source = resolve_item(source_item_id, session)
-            if source.publication_type != media_type or not media_paths_equal(source.path, video_path):
+            if (source_created_at is not None and source.created_at != source_created_at
+                    or source.publication_type != media_type or not media_paths_equal(source.path, video_path)):
                 return None
             if media_type == 'episode':
                 return MediaMetadata(imdb_id=source.series_imdb_id, tvdb_id=source.series_tvdb_id,

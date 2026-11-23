@@ -349,14 +349,10 @@ class SyncOutputOwnerIndex:
     @staticmethod
     def _load_owners():
         from app.database import database, select, TableEpisodes, TableMovies, TableSportsEvents, TableArrInstances
-        from app.config import settings
+        from utilities.helper import get_target_folder
         from utilities.path_mappings import path_mappings
         from utilities.path_mappings import apply_sports_mapping, read_sports_mappings
 
-        subfolder = settings.general.subfolder
-        custom_folder = settings.general.subfolder_custom
-        absolute_folder = (os.path.normcase(os.path.realpath(custom_folder))
-                           if subfolder == 'absolute' else None)
         owners = {}
         for table, media_type in ((TableEpisodes, 'episode'), (TableMovies, 'movie'),
                                   (TableSportsEvents, 'sports')):
@@ -375,15 +371,16 @@ class SyncOutputOwnerIndex:
                                    row.path, row.arr_instance_id, media_type))
                 mapped = os.path.normcase(os.path.realpath(mapped_path))
                 folders = {os.path.dirname(mapped)}
-                if subfolder == 'absolute':
-                    folders.add(absolute_folder)
-                elif subfolder == 'relative':
-                    folders.add(os.path.normcase(os.path.realpath(os.path.join(
-                        os.path.dirname(mapped), custom_folder))))
+                custom_folder = get_target_folder(mapped, create=False)
+                if custom_folder:
+                    folders.add(os.path.normcase(os.path.realpath(custom_folder)))
                 stem = _normalized_media_stem(mapped)
                 for folder in folders:
                     owners.setdefault((folder, stem), set()).add(mapped)
         return owners
+
+    def folder_is_shared(self, directory):
+        return False
 
     def is_unique(self, video, directory, conflicting_stems):
         if not self._loaded:
@@ -420,7 +417,8 @@ def sync_output_owner_is_unique(video_path, source_path, ownership_index=None):
                             if entry.is_file() and entry.name.lower().endswith(VIDEO_EXTENSIONS)}
         if any(path != video and stem(path) in conflicting_stems for path in local_videos):
             return False
-        if directory == media_directory:
+        if directory == media_directory and (ownership_index is None or not ownership_index.folder_is_shared(
+                directory)):
             return video in local_videos
 
         # Separate media directories can share a custom subtitle folder. Keep

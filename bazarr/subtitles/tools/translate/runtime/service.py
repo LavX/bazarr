@@ -31,7 +31,7 @@ from subtitles.tools.subsync_engines import (SubtitleDestinationChanged, Subtitl
                                              validate_subtitle_versions)
 
 from ..core.translator_utils import (add_translator_info, create_process_result, get_title,
-                                     record_source_translation, translation_write_kwargs)
+                                     record_source_translation, require_source_translation, translation_write_kwargs)
 from .failure import MESSAGES
 from .dispatch import DispatchFailed, Dispatcher, JobSpec, LegacyDeclined, LegacyResult
 from .jobs import line_digest, target_key
@@ -238,6 +238,7 @@ class RuntimeTranslatorService:
         staged write, which checks them once more under its locks at the moment of publication.
         """
         self._check_inputs()
+        require_source_translation(self.source, source_lines, outcome.lines)
         write_kwargs = dict(translation_write_kwargs(self, job_id))
         write_kwargs["expected_versions"] = tuple(write_kwargs.get("expected_versions") or ()) + self._versions
         with staged_subtitle_write(self.video_path, self.dest_srt_file,

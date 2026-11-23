@@ -1063,9 +1063,25 @@ def test_source_download_respects_its_profile_translation_wait(world, monkeypatc
     assert all(job[name] is None for name in ("sonarr_series_id", "sonarr_episode_id", "radarr_id"))
 
 
+@pytest.fixture
+def isolated_jobs(monkeypatch):
+    """Run real queue reservations and job execution without starting its background consumer."""
+    from app import jobs_queue as queue
+    from media_sources import service
+    from subtitles.tools.translate import main
+    from subtitles.tools.translate.runtime import service as runtime_service
+
+    monkeypatch.setattr(queue.JobsQueue, "_flush_progress_loop", lambda self: None)
+    monkeypatch.setattr(queue, "_job_event", lambda *args, **kwargs: None)
+    jobs = queue.JobsQueue()
+    for module in (queue, service, main, runtime_service):
+        monkeypatch.setattr(module, "jobs_queue", jobs)
+    return jobs
+
+
 @pytest.mark.parametrize("custom", [False, True], ids=["beside-video", "custom-folder"])
-def test_episode_download_dispatches_runtime_and_indexes_translation_and_combined_subtitle(world, monkeypatch,
-                                                                                         custom):
+def test_episode_download_dispatches_runtime_and_indexes_translation_and_combined_subtitle(
+        world, monkeypatch, isolated_jobs, custom):
     import json
 
     from app import database, notifier
@@ -1107,26 +1123,22 @@ def test_episode_download_dispatches_runtime_and_indexes_translation_and_combine
     destination = _custom_folder(world, monkeypatch, world.tmp_path) if custom else Path(context.path).parent
     _download(monkeypatch)
     before = table_counts(world.db, ARR_AND_SPORTS_TABLES)
-    queued = []
-    monkeypatch.setattr(main.jobs_queue, "feed_jobs_pending_queue", lambda **job: queued.append(job) or 42)
-    monkeypatch.setattr(main.jobs_queue, "update_job_progress", lambda **kwargs: None)
-    monkeypatch.setattr(main.jobs_queue, "update_job_name", lambda **kwargs: None)
-    monkeypatch.setattr(main.jobs_queue, "get_job_name", lambda job_id: "Translating Bluey (EN to HU)")
-
     env = Env(world.db, world.tmp_path)
     try:
         env.ai_engine()
         monkeypatch.setattr(gate, "translation_gate", lambda: gate.evaluate(env.store, env.holds, env.workers))
         monkeypatch.setattr(runtime_service, "Dispatcher", env.dispatcher)
-        service.search_source_item(context.item_id, job_id=3)
-        (job,) = queued
-        assert (job["module"], job["func"]) == ("subtitles.tools.translate.main", "translate_subtitles_file")
-        assert job["job_name"] == "Translating Bluey - S01E02 - Mum School (EN to HU)"
-        assert job["kwargs"]["source"] == context and job["kwargs"]["media_type"] == "episode"
-        (pending,) = TranslationSummary(world.db, queue_job=lambda job_id: job).queue()["data"]
+        service.search_source_item(context.item_id)
+        assert isolated_jobs._run_job(isolated_jobs._reserve_next_job())
+        (job,) = isolated_jobs.jobs_pending_queue
+        assert (job.module, job.func) == ("subtitles.tools.translate.main", "translate_subtitles_file")
+        assert job.job_name == "Translating Bluey - S01E02 - Mum School (EN to HU)"
+        assert job.kwargs["source"] == context and job.kwargs["media_type"] == "episode"
+        (pending,) = TranslationSummary(world.db).queue()["data"]
         assert (pending["media_type"], pending["media_id"], pending["media_title"]) == (
             "source", context.item_id, "Bluey - S01E02 - Mum School")
-        main.translate_subtitles_file(**{**job["kwargs"], "job_id": 42})
+        assert isolated_jobs._run_job(isolated_jobs._reserve_next_job())
+        assert job.status == "completed"
 
         (request,) = env.requests()
         assert request["request"]["media"] == {
@@ -1228,19 +1240,21 @@ def test_failed_source_translation_applies_its_own_language_hold(world, monkeypa
         failure_record.clear_failed_translations()
 
 
-def test_provider_fallback_targets_the_source_item(world, monkeypatch):
-    from media_sources import service
+def test_provider_fallback_targets_the_source_item(world, monkeypatch, isolated_jobs):
+    from media_sources import repository
     from subtitles.tools.translate.main import _search_providers_instead
 
     context = _movie(world)
-    queued = []
-    monkeypatch.setattr(service.jobs_queue, "feed_jobs_pending_queue", lambda **job: queued.append(job) or 42)
+    _download(monkeypatch)
 
     _search_providers_instead("movies", None, None, None, source=context)
 
-    (job,) = queued
-    assert (job["module"], job["func"]) == ("media_sources.service", "search_source_item")
-    assert job["kwargs"] == {"item_id": context.item_id, "job_id": None, "translation_gate": False}
+    (job,) = isolated_jobs.jobs_pending_queue
+    assert (job.module, job.func) == ("media_sources.service", "search_source_item")
+    assert job.kwargs == {"item_id": context.item_id, "job_id": None, "translation_gate": False,
+                          "expected_source": context}
+    assert isolated_jobs._run_job(isolated_jobs._reserve_next_job())
+    assert repository.get_item(context.item_id).missing_subtitles == "[]"
 
 
 def test_source_refresh_uses_the_show_ids_and_publishes_sports_as_sports(world, monkeypatch):
@@ -1265,3 +1279,191 @@ def test_source_refresh_uses_the_show_ids_and_publishes_sports_as_sports(world, 
     assert resolution.media_metadata("episode", sports.path, None, source_item_id=episode.item_id) is None
     assert sports_event.media_type == "sports" and sports_event.source_item_id == sports.item_id
     assert dispatcher._metadata(sports_event).title == "Monaco Grand Prix Race"
+
+
+@pytest.mark.parametrize("engine", ["google_translate", "lingarr"])
+def test_source_translation_refuses_output_with_no_translated_cue(world, monkeypatch, engine):
+    from app.config import settings
+    from media_sources import repository
+    from subtitles.tools.translate import main
+    from subtitles.tools.translate.failure_record import clear_failed_translations
+    from subtitles.tools.translate.services import google_translator, lingarr_translator
+
+    context = _episode(world)
+    original = Path(context.path).with_suffix(".en.srt")
+    original.write_bytes(CONTENT)
+    monkeypatch.setattr(settings.translator, "translator_type", engine)
+    monkeypatch.setattr(settings.translator, "runtime_v2", False)
+    monkeypatch.setattr(google_translator.GoogleTranslatorService, "_translate_text",
+                        lambda self, text, job_id: None)
+    monkeypatch.setattr(lingarr_translator.LingarrTranslatorService, "_translate_content",
+                        lambda self, lines, job_id: [])
+    try:
+        with pytest.raises(main.JobFailed, match="no translated cues"):
+            main.translate_subtitles_file(context.path, str(original), "en", "hu", False, False, "episode",
+                                          None, None, None, None, source=context, job_id=42)
+    finally:
+        clear_failed_translations()
+    assert not Path(context.path).with_suffix(".hu.srt").exists()
+    assert world.db.execute(sa.select(repository.History)).all() == []
+    assert not world.published
+
+
+@pytest.mark.parametrize("other_owner", ["source", "arr"])
+@pytest.mark.parametrize("shared_is_media_directory", [False, True])
+def test_source_outputs_refuse_ambiguous_shared_destination(world, monkeypatch, other_owner,
+                                                            shared_is_media_directory):
+    from app.config import settings
+    from app.database import TableMovies
+    from subtitles.tools.combine import main as combine
+    from subtitles.tools.translate import main
+
+    destination = _custom_folder(world, monkeypatch, world.tmp_path)
+    context = _movie(world)
+    if shared_is_media_directory:
+        destination = Path(context.path).parent
+        monkeypatch.setattr(settings.general, "subfolder_custom", str(destination))
+    video_name = Path(context.path).name
+    other = video(world.tmp_path / "Other" / video_name)
+    if other_owner == "source":
+        add_item(world.db, world.source_id, world.library_id, other)
+    else:
+        world.db.execute(sa.insert(TableMovies).values(path=str(other), title="Arr copy", tmdbId="8765"))
+    original = destination / Path(video_name).with_suffix(".en.srt")
+    original.write_bytes(CONTENT)
+    extra = destination / Path(video_name).with_suffix(".de.srt")
+    extra.write_bytes(CONTENT)
+    monkeypatch.setattr(settings.translator, "runtime_v2", False)
+    factory = Mock(side_effect=AssertionError("ambiguous target reached the engine"))
+    monkeypatch.setattr(main.TranslatorFactory, "create_translator", factory)
+
+    assert main.translate_subtitles_file(context.path, str(original), "en", "hu", False, False, "movies",
+                                         None, None, None, None, source=context, job_id=12) is None
+    factory.assert_not_called()
+    assert not (destination / Path(video_name).with_suffix(".hu.srt")).exists()
+    result = combine.try_combine_for_video(context.path, "movie", languages=["en", "de"], format="srt",
+                                           source=context)
+    assert result.status == "skipped" and "unique" in result.reason
+    assert not (destination / Path(video_name).with_suffix(".en.combined-de.srt")).exists()
+
+
+@pytest.mark.parametrize("change", [
+    "none", "profile", "disable", "reuse", "wait-increased", "score-increased", "profile-during-engine",
+])
+def test_source_wait_resumes_in_normal_queue_and_rechecks_item(world, monkeypatch, isolated_jobs, change):
+    import json
+    import os
+    import time
+    from datetime import datetime, timedelta
+
+    from app import database
+    from app.config import settings
+    from app.database import TableLanguagesProfiles, update_profile_id_list
+    from media_sources import repository, service
+    from media_sources.context import resolve_item
+    from subtitles import download
+    from subtitles.tools.translate import main, runtime
+    from subtitles.tools.translate.failure_record import (
+        clear_failed_translations, record_failed_translation, translation_recently_failed,
+    )
+    from subtitles.tools.translate.runtime import gate, service as runtime_service
+    from subtitles.tools.translate.runtime.summary import TranslationSummary
+    from translator_dispatch_helpers import Env
+
+    profile = [{"id": 1, "language": "en", "forced": "False", "hi": "False"},
+               {"id": 2, "language": "hu", "forced": "False", "hi": "False", "translate_from": "en"}]
+
+    def write_profile(items):
+        world.db.execute(sa.update(TableLanguagesProfiles).values(items=json.dumps(items)))
+        update_profile_id_list.invalidate()
+
+    write_profile(profile)
+    monkeypatch.setattr(settings.translator, "runtime_v2", True)
+    monkeypatch.setattr(settings.translator, "min_source_wait_minutes", 10)
+    monkeypatch.setattr(settings.translator, "min_source_score", 0)
+    monkeypatch.setattr(settings.translator, "translator_info", False)
+    monkeypatch.setattr(database, "engine", world.db.get_bind())
+    monkeypatch.setattr(runtime, "_tables_present", False)
+    monkeypatch.setattr(runtime, "_absent_until", 0.0)
+    monkeypatch.setattr(main.TranslatorFactory, "create_translator",
+                        Mock(side_effect=AssertionError("runtime test attempted a legacy service")))
+    context = _movie(world)
+    _download(monkeypatch)
+    original = Path(context.path).with_suffix(".en.srt")
+    destination = Path(context.path).with_suffix(".hu.srt")
+
+    env = Env(world.db, world.tmp_path)
+    try:
+        env.ai_engine()
+        monkeypatch.setattr(gate, "translation_gate", lambda: gate.evaluate(env.store, env.holds, env.workers))
+        monkeypatch.setattr(runtime_service, "Dispatcher", env.dispatcher)
+
+        service.search_source_item(context.item_id)
+        assert isolated_jobs._run_job(isolated_jobs._reserve_next_job())
+        assert original.exists() and not isolated_jobs.jobs_pending_queue
+
+        # The source-age policy uses the download record rather than the time of the second search.
+        past = time.time() - 660
+        os.utime(original, (past, past))
+        world.db.execute(sa.update(repository.History).values(timestamp=datetime.now() - timedelta(minutes=11)))
+        provider = Mock(side_effect=AssertionError("a queued language reached providers again"))
+        monkeypatch.setattr(download, "download_best_subtitles", provider)
+        service.search_source_item(context.item_id)
+        assert isolated_jobs._run_job(isolated_jobs._reserve_next_job())
+        assert len(isolated_jobs.jobs_pending_queue) == 1
+
+        if change == "profile":
+            write_profile(profile[:1])
+        elif change == "disable":
+            repository.update_library(context.library_id, world.db, enabled=0)
+        elif change == "reuse":
+            failure = (None, "source", context.item_id, "en", "hu", False, False)
+            record_failed_translation(*failure, source_created_at=context.created_at)
+            repository.delete_items([context.item_id], world.db)
+            replacement = add_item(world.db, context.source_id, context.library_id, context.path)
+            if world.db.get_bind().dialect.name == "sqlite":
+                assert replacement == context.item_id
+            new_context = resolve_item(replacement)
+            assert new_context.created_at != context.created_at
+            assert not translation_recently_failed(None, "source", replacement, "en", "hu", False, False)
+        elif change == "wait-increased":
+            monkeypatch.setattr(settings.translator, "min_source_wait_minutes", 60)
+        elif change == "score-increased":
+            world.db.execute(sa.update(repository.History).values(score=1))
+            monkeypatch.setattr(settings.translator, "min_source_score", 100)
+        elif change == "profile-during-engine":
+            write_output = runtime_service.RuntimeTranslatorService._write_file
+
+            def change_before_publish(engine, *args):
+                write_profile(profile[:1])
+                return write_output(engine, *args)
+
+            monkeypatch.setattr(runtime_service.RuntimeTranslatorService, "_write_file", change_before_publish)
+
+        assert isolated_jobs._run_job(isolated_jobs._reserve_next_job())
+        assert TranslationSummary(world.db).queue()["data"] == []
+        provider.assert_not_called()
+        assert env.last_job().state == ("completed" if change == "none" else "cancelled")
+        assert len(env.requests()) == (1 if change in ("none", "profile-during-engine") else 0)
+        assert destination.exists() == (change == "none")
+        actions = world.db.execute(sa.select(repository.History.c.action)).scalars().all()
+        assert sorted(actions) == ([1, 6] if change == "none" else [1])
+    finally:
+        clear_failed_translations()
+        env.close()
+
+
+def test_source_provider_fallback_does_not_search_a_reused_item(world, monkeypatch, isolated_jobs):
+    from media_sources import repository, service
+    from subtitles.tools.translate.main import _search_providers_instead
+
+    context = _movie(world)
+    _search_providers_instead("movies", None, None, None, source=context)
+    repository.delete_items([context.item_id], world.db)
+    replacement = add_item(world.db, context.source_id, context.library_id, context.path)
+    if world.db.get_bind().dialect.name == "sqlite":
+        assert replacement == context.item_id
+    providers = Mock(side_effect=AssertionError("a replacement item's providers were searched"))
+    monkeypatch.setattr(service, "get_providers", providers)
+    assert isolated_jobs._run_job(isolated_jobs._reserve_next_job())
+    providers.assert_not_called()

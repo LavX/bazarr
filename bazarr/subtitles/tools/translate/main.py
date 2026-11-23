@@ -1,12 +1,14 @@
 # coding=utf-8
 
 import logging
+from contextlib import nullcontext
+from threading import RLock
 
 
 from .core.translator_utils import (validate_translation_params, convert_language_codes, get_title,
-                                    current_translation_source, translated_destination_path)
+                                    SourceTranslationChanged, translated_destination_path, validate_source_translation)
 from . import pick as _pick
-from .availability import runtime_active as _runtime_active
+from .availability import runtime_active as _runtime_active, translation_available
 from .failure_record import clear_failed_translation, record_failed_translation
 from .services.translator_factory import TranslatorFactory
 from languages.get_languages import alpha3_from_alpha2
@@ -84,12 +86,16 @@ NO_HOLD_REASONS = frozenset({OCR_BUSY_REASON, OCR_SOURCE_TAKEN_REASON, OCR_SOURC
 # The v2 translation runtime is reached from this module at two points only, the enqueue and the dispatch of the
 # job, and only through the functions below. With its switch off none of them imports the runtime package.
 _RUNTIME_MODULE = 'subtitles.tools.translate.runtime'
+# A source worker may start as soon as the queue publishes it. Wait for the persistent attachment before
+# validating and potentially retiring that exact queued job.
+_SOURCE_ENQUEUE_LOCK = RLock()
 
 
 def _job_source_key(video_path, source_srt_file, embedded_source, source=None):
     """What the runtime keys a translation job by as its source: the file, or the embedded track it is read from."""
     if source is not None:
-        return f"source:{source.item_id}:{source_srt_file}"
+        stamp = source.created_at.isoformat() if source.created_at is not None else ''
+        return f"source:{source.item_id}:{stamp}:{source_srt_file}"
     if embedded_source:
         return (f"{video_path}#embedded:{embedded_source.get('language') or ''}:"
                 f"{'hi' if embedded_source.get('hi') else ''}:{'forced' if embedded_source.get('forced') else ''}")
@@ -197,7 +203,7 @@ def _search_providers_instead(media_type, radarr_id, sonarr_episode_id, arr_inst
     try:
         if source is not None:
             from media_sources.service import search_source_item
-            search_source_item(source.item_id, translation_gate=False)
+            search_source_item(source.item_id, translation_gate=False, expected_source=source)
         elif media_type == 'episode' and sonarr_episode_id:
             from subtitles.wanted.series import wanted_download_subtitles
             wanted_download_subtitles(sonarr_episode_id, arr_instance_id=arr_instance_id, translation_gate=False)
@@ -240,36 +246,41 @@ def translate_subtitles_file(video_path, source_srt_file, from_lang, to_lang, fo
         raise ValueError('A source translation requires source media metadata')
 
     if not job_id:
-        try:
-            # With the v2 runtime on, a request for a source and target that already has a job joins it.
-            # Reusing ``job_id`` keeps the frame the queue records to the function's own parameters.
-            job_id = _runtime_follow(video_path, source_srt_file, to_lang, forced, hi, embedded_source,
-                                     **({'source': source} if source is not None else {}))
-            if job_id is not None:
-                # A joined job keeps what it was made for, picked or not.
-                _pick.forget_expected()
+        with _SOURCE_ENQUEUE_LOCK if source is not None else nullcontext():
+            try:
+                # With the v2 runtime on, a request for a source and target that already has a job joins it.
+                # Reusing ``job_id`` keeps the frame the queue records to the function's own parameters.
+                job_id = _runtime_follow(video_path, source_srt_file, to_lang, forced, hi, embedded_source,
+                                         **({'source': source} if source is not None else {}))
+                if job_id is not None:
+                    # A joined job keeps what it was made for, picked or not.
+                    _pick.forget_expected()
+                    return job_id or None
+                # Build the label inline: add_job_from_function captures the frame,
+                # which must contain only function parameters before it is called.
+                job_id = jobs_queue.add_job_from_function(
+                    (lambda t: f'Translating {t} ({from_lang.upper()} to {to_lang.upper()})' if t else
+                     f'Translating {from_lang.upper()} to {to_lang.upper()}')(
+                        get_title(media_type, radarr_id, sonarr_series_id, sonarr_episode_id,
+                                  arr_instance_id,
+                                  **({'sports_context': sports_operation.context} if sports_operation else {}),
+                                  **({'source': source} if source is not None else {}))),
+                    is_progress=True, return_existing=True)
+                _runtime_attach(job_id, video_path, source_srt_file, to_lang, forced, hi, embedded_source,
+                                **({'source': source} if source is not None else {}))
+                # The queue job carries the pick the request noted, if it noted one.
+                _pick.bind(_pick_key(video_path, source_srt_file, to_lang, forced, hi, embedded_source, source), job_id)
                 return job_id or None
-            # Build the label inline: add_job_from_function captures the frame,
-            # which must contain only function parameters before it is called.
-            job_id = jobs_queue.add_job_from_function(
-                (lambda t: f'Translating {t} ({from_lang.upper()} to {to_lang.upper()})' if t else
-                 f'Translating {from_lang.upper()} to {to_lang.upper()}')(
-                    get_title(media_type, radarr_id, sonarr_series_id, sonarr_episode_id,
-                              arr_instance_id,
-                              **({'sports_context': sports_operation.context} if sports_operation else {}),
-                              **({'source': source} if source is not None else {}))),
-                is_progress=True, return_existing=True)
-            _runtime_attach(job_id, video_path, source_srt_file, to_lang, forced, hi, embedded_source,
-                            **({'source': source} if source is not None else {}))
-            # The queue job carries the pick the request noted, if it noted one.
-            _pick.bind(_pick_key(video_path, source_srt_file, to_lang, forced, hi, embedded_source, source), job_id)
-            return job_id or None
-        except BaseException:
-            # The request never queued its job: its pick must not be lent to the next request on this thread.
-            _pick.forget_expected()
-            raise
+            except BaseException:
+                # The request never queued its job: its pick must not be lent to the next request on this thread.
+                _pick.forget_expected()
+                raise
 
     translator_label = settings.translator.translator_type.replace("_", " ").title()
+    with _SOURCE_ENQUEUE_LOCK if source is not None else nullcontext():
+        runtime_on = _runtime_active()
+        source_key = _job_source_key(video_path, source_srt_file, embedded_source, source) if runtime_on else None
+    failure_owner = {'source_created_at': source.created_at} if source is not None else {}
     owner_type = 'source' if source is not None else media_type
     failure_key = (
         arr_instance_id, owner_type,
@@ -294,8 +305,6 @@ def translate_subtitles_file(video_path, source_srt_file, from_lang, to_lang, fo
         logging.debug('Could not record the media title for this translation observation')
     try:
         cancel = None
-        if source is not None:
-            source = current_translation_source(source, video_path)
         if media_type == 'sports':
             from sportarr.workflows import SportsJobSignal
             if sports_operation is None or sports_operation.context.arr_instance_id != arr_instance_id:
@@ -304,10 +313,6 @@ def translate_subtitles_file(video_path, source_srt_file, from_lang, to_lang, fo
                 raise ValueError('Sports translation cannot use native media metadata')
             cancel = SportsJobSignal(arr_instance_id, job_id)
             sports_operation.validate(wanted=True, cancel=cancel)
-        # The runtime keys the job by its source as it was asked for, which for an embedded track is the track
-        # and not the file the extraction below produces.
-        runtime_on = _runtime_active()
-        source_key = _job_source_key(video_path, source_srt_file, embedded_source, source) if runtime_on else None
         if not runtime_on and _pick.noted(
                 _pick_key(video_path, source_srt_file, to_lang, forced, hi, embedded_source, source), job_id):
             # A pick was made for this job and the new translator was switched off while it waited. Running
@@ -320,6 +325,14 @@ def translate_subtitles_file(video_path, source_srt_file, from_lang, to_lang, fo
                                                        arr_instance_id, media_id=media_id)
         logging.debug(f'Translation request: video={video_path}, source={source_srt_file}, from={from_lang}, to={to_lang}')  # noqa: G004
 
+        if source is not None:
+            destination = translated_destination_path(video_path, to_lang, forced, hi)
+            source = validate_source_translation(source, video_path, source_srt_file, destination, from_lang,
+                                                 to_lang, forced, hi, expected_destination_versions)
+            if expected_destination_versions and not runtime_on and not translation_available().available:
+                _report_runtime_skip(job_id, from_lang, to_lang, 'translation unavailable')
+                _search_providers_instead(media_type, None, None, None, source=source)
+                return None
         validate_translation_params(video_path, source_srt_file, from_lang, to_lang)
         lang_obj, orig_to_lang = convert_language_codes(to_lang, forced, hi)
 
@@ -342,6 +355,8 @@ def translate_subtitles_file(video_path, source_srt_file, from_lang, to_lang, fo
             try:
                 validate_subtitle_versions(expected_destination_versions)
             except (SubtitleSourceChanged, SubtitleDestinationChanged):
+                if source is not None:
+                    raise SourceTranslationChanged('The subtitle input or destination changed') from None
                 _report_destination_skip(job_id, from_lang, to_lang)
                 return None
 
@@ -438,7 +453,7 @@ def translate_subtitles_file(video_path, source_srt_file, from_lang, to_lang, fo
 
         # The item is served now, so a failure on record for it must not hold
         # the next scan back from translating anything else it is asked for.
-        clear_failed_translation(*failure_key)
+        clear_failed_translation(*failure_key, **failure_owner)
 
         # Get current job name (which batch.py already set with title) and mark as done
         completion_label = 'Partially translated' if partial_detail else 'Translated'
@@ -452,6 +467,14 @@ def translate_subtitles_file(video_path, source_srt_file, from_lang, to_lang, fo
         _pick.forget(_pick_key(video_path, source_srt_file, to_lang, forced, hi, embedded_source, source), job_id)
         return result
 
+    except SourceTranslationChanged as error:
+        logging.info('BAZARR source translation skipped for item %s: %s', source.item_id, error)
+        if runtime_on:
+            from .runtime import enqueue
+
+            enqueue.cancel_waiting_for(job_id, source_key, to_lang, forced, hi, str(error))
+        _report_runtime_skip(job_id, from_lang, to_lang, str(error))
+        return None
     except JobCancelled:
         raise
     except Exception as e:
@@ -468,7 +491,7 @@ def translate_subtitles_file(video_path, source_srt_file, from_lang, to_lang, fo
             # Every engine asked declined the job; the provider search result stays in place. The item is held
             # back like a failed one, so the next scan does not offer the same job again.
             logging.info('BAZARR translation declined: %s', e)
-            record_failed_translation(*failure_key)
+            record_failed_translation(*failure_key, **failure_owner)
             _report_runtime_skip(job_id, from_lang, to_lang, 'declined')
             return None
         if (expected_destination_versions or source is not None) and _destination_race(e):
@@ -487,7 +510,7 @@ def translate_subtitles_file(video_path, source_srt_file, from_lang, to_lang, fo
         # name taken or its track unlisted: those say nothing about whether
         # this item can be translated, and the user asked for it by hand.
         if getattr(e, 'reason', None) not in NO_HOLD_REASONS and not getattr(e, 'retry_later', False):
-            record_failed_translation(*failure_key)
+            record_failed_translation(*failure_key, **failure_owner)
         current_name = jobs_queue.get_job_name(job_id)
         if current_name and 'Translating' in current_name:
             fail_name = current_name.replace('Translating', 'Failed')

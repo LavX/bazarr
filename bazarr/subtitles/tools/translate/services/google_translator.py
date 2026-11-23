@@ -9,7 +9,7 @@ from media_servers.events import publication_callback
 from retry.api import retry
 from app.config import settings  # noqa: F401
 from ..core.translator_utils import (add_translator_info, create_process_result,
-                                     record_source_translation, translation_write_kwargs)
+                                     record_source_translation, require_source_translation, translation_write_kwargs)
 from sonarr.history import history_log
 from radarr.history import history_log_movie
 from deep_translator import GoogleTranslator
@@ -82,6 +82,7 @@ class GoogleTranslatorService:
 
                 translated_lines = []
                 completed = set()
+                original_lines = lines_list.copy()
                 logger.debug(f'starting translation for {self.source_srt_file}')  # noqa: G004
 
                 def translate_line(line_id, subtitle_line):
@@ -139,6 +140,7 @@ class GoogleTranslatorService:
                                                                         f'malformed subtitles for {self.source_srt_file}')
                         raise
 
+                require_source_translation(self.source, original_lines, (line.plaintext for line in subs))
                 try:
                     subs.save(temporary)
                     add_translator_info(temporary, f"# Subtitles translated with Google Translate # ")  # noqa: F541

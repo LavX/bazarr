@@ -2,6 +2,7 @@
 """Actual subtitle publications, expressed in Bazarr-visible paths."""
 
 from dataclasses import dataclass
+from datetime import datetime
 from contextlib import contextmanager
 import hashlib
 import os
@@ -16,6 +17,7 @@ class SubtitleMutation:
     operation: str
     arr_instance_id: int | None = None
     source_item_id: int | None = None
+    source_created_at: datetime | None = None
 
 
 def notify_subtitle_mutation(event: SubtitleMutation) -> None:
@@ -32,7 +34,8 @@ def publication_callback(media_type, video_path, operation, arr_instance_id=None
     def published(subtitle_path):
         notify_subtitle_mutation(SubtitleMutation(media_type, video_path, str(subtitle_path),
                                                   operation, arr_instance_id,
-                                                  source.item_id if source is not None else None))
+                                                  source.item_id if source is not None else None,
+                                                  source.created_at if source is not None else None))
     return published
 
 

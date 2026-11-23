@@ -73,6 +73,18 @@ def _trigger_auto_translation(downloaded_lang, subtitle_path, video_path, media_
     # gets queued for it. A closed gate leaves the language to the next
     # wanted scan, which asks the same gate before keeping a language away
     # from the provider search.
+    if source is not None:
+        if forced or not subtitle_path or not downloaded_lang:
+            return
+        try:
+            from media_sources.translation import queue_missing_translations
+
+            return queue_missing_translations(source, downloaded_path=subtitle_path, downloaded_language=downloaded_lang,
+                                              score=source_score_percent)
+        except Exception:
+            logging.exception('BAZARR could not queue a translation for source item %s', source.item_id)
+            return
+
     availability = translation_available()
     if not availability.available:
         logging.debug('BAZARR auto-translate skipped after this download: %s', availability.reason)
@@ -105,9 +117,7 @@ def _trigger_auto_translation(downloaded_lang, subtitle_path, video_path, media_
         # crashed the translation job during post-processing.
         translation_metadata = None
         profile_id = None
-        if source is not None:
-            profile_id = source.profile_id
-        elif media_type == 'series' and episode_id:
+        if media_type == 'series' and episode_id:
             metadata_query = (
                 select(TableEpisodes.sonarrSeriesId,
                        TableEpisodes.season,
@@ -145,7 +155,7 @@ def _trigger_auto_translation(downloaded_lang, subtitle_path, video_path, media_
                 profile_id = translation_metadata.profileId
 
         if not profile_id:
-            if source is not None or arr_instance_id is not None:
+            if arr_instance_id is not None:
                 return
             if media_type == 'series' and episode_id:
                 profile_id = get_profile_id(episode_id=episode_id)
@@ -194,8 +204,7 @@ def _trigger_auto_translation(downloaded_lang, subtitle_path, video_path, media_
         # profile item being considered, so calling it once per profile item
         # (potentially N database/indexer queries) is wasteful. Compute the
         # missing-codes set once and reuse for every item.
-        missing = check_missing_languages(path=video_path, media_type=media_type,
-                                          **({'source': source} if source is not None else {}))
+        missing = check_missing_languages(path=video_path, media_type=media_type)
         missing_codes = set()
         for lang_obj in missing or []:
             try:
@@ -224,11 +233,6 @@ def _trigger_auto_translation(downloaded_lang, subtitle_path, video_path, media_
 
             item_forced = item.get('forced') == 'True'
             item_hi = item.get('hi') == 'True'
-            if source is not None:
-                from .tools.translate.failure_record import translation_recently_failed
-                if translation_recently_failed(None, 'source', source.item_id, downloaded_lang,
-                                               target_lang, item_forced, item_hi):
-                    continue
             destination = translated_destination_path(video_path, target_lang, item_forced, item_hi)
             expected_destination_versions = capture_subtitle_versions(video_path, (destination,))
             # The capture holds the media write lock, so this answers for the
@@ -264,7 +268,6 @@ def _trigger_auto_translation(downloaded_lang, subtitle_path, video_path, media_
                 # job writes is the provider's, and the job refuses to replace
                 # it (see translate_subtitles_file).
                 expected_destination_versions=expected_destination_versions,
-                **({'source': source} if source is not None else {}),
             )
     except Exception:
         logging.exception('BAZARR error in _trigger_auto_translation')
@@ -372,7 +375,8 @@ def process_subtitle(subtitle, media_type, audio_language, path, max_score, is_u
             logging.info('BAZARR source item %s was deleted while its subtitles were being fetched; the file '
                          'was kept: %s', source.item_id, downloaded_path)
             return
-        if current_source.path != path or current_source.source_id != source.source_id:
+        if (not source.same_item(current_source) or current_source.path != path
+                or current_source.source_id != source.source_id):
             logging.info('BAZARR source item %s moved while its subtitles were being fetched; the file '
                          'was kept: %s', source.item_id, downloaded_path)
             return

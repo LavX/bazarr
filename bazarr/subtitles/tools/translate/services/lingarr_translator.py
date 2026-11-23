@@ -23,7 +23,7 @@ from utilities.path_mappings import path_mappings  # noqa: F401
 
 from ..runtime.legacy_engines import request_target
 from ..core.translator_utils import (add_translator_info, create_process_result, get_title,
-                                     record_source_translation, translation_write_kwargs)
+                                     record_source_translation, require_source_translation, translation_write_kwargs)
 
 logger = logging.getLogger(__name__)
 
@@ -110,6 +110,7 @@ class LingarrTranslatorService:
                     if i in translation_map and translation_map[i]:
                         line.text = translation_map[i]
 
+                require_source_translation(self.source, lines_list, (line.plaintext for line in subs))
                 try:
                     subs.save(temporary)
                     add_translator_info(temporary, f"# Subtitles translated with Lingarr # ")  # noqa: F541

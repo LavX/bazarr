@@ -43,10 +43,10 @@ def try_combine_for_video(video_path, media_type, sonarr_series_id=None,
     try:
         owner_kwargs = {}
         if source is not None:
-            from media_sources.indexer import SourceOutputOwnerIndex
+            from media_sources.indexer import SourcePublicationOwnerIndex
             if sports_operation is not None or arr_instance_id is not None:
                 raise ValueError('A source composition requires source media metadata')
-            owner_kwargs['ownership_index'] = SourceOutputOwnerIndex()
+            owner_kwargs['ownership_index'] = SourcePublicationOwnerIndex()
 
         if media_type == 'sports' and source is None:
             if sports_operation is None or video_path != sports_operation.context.mapped_path:
@@ -151,7 +151,7 @@ def try_combine_for_video(video_path, media_type, sonarr_series_id=None,
                     _remove_stale_combined_siblings(out_path, video_path, on_publish=notify, **owner_kwargs)
 
             if source is not None:
-                owner_kwargs['ownership_index'] = SourceOutputOwnerIndex()
+                owner_kwargs['ownership_index'] = SourcePublicationOwnerIndex()
 
                 def validate_source():
                     if _metadata_for(video_path, media_type, None, None, None, source=source) is None:
@@ -296,13 +296,9 @@ def _profile_for(media_type, sonarr_series_id, sonarr_episode_id, radarr_id,
 
 def _metadata_for(video_path, media_type, sonarr_episode_id, radarr_id, arr_instance_id, source=None):
     if source is not None:
-        from media_sources.context import SourceItemGone, resolve_item
+        from media_sources.context import resolve_same_item
 
-        try:
-            current = resolve_item(source.item_id)
-        except SourceItemGone:
-            return None
-        return current if (current.path, current.source_id) == (video_path, source.source_id) else None
+        return resolve_same_item(source) if source.path == video_path else None
 
     from app.database import TableEpisodes, TableShows, TableMovies, database, select
     from arr_instances.resolution import scoped
