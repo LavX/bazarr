@@ -100,6 +100,7 @@ class JobSpec:
     # A source scan may requeue a recorded retry when setup failed before any engine invocation.
     retry_setup_errors: bool = False
     queue_job_id: int | None = None
+    owns_native_queue_job: bool = False
 
 
 @dataclass
@@ -363,7 +364,12 @@ class Dispatcher:
         row = jobs.active_for(spec.source_key, spec.target_key)
         picked = spec.pinned_connection_id
         if row is not None and row.queue_job_id not in (None, spec.queue_job_id):
-            return None
+            # The replacement can start before its enqueue callback attaches it.
+            if not spec.owns_native_queue_job or not jobs.replace_stale_queue_attachment(row, spec.queue_job_id):
+                return None
+            row = jobs.get(row.id)
+            if row is None or row.state != QUEUED or row.queue_job_id != spec.queue_job_id:
+                return None
         if row is not None and picked is not None and row.pinned_connection_id != picked \
                 and row.state in (QUEUED, AWAITING_RETRY):
             # A new pick replaces the one the job has: the old job ends superseded and its checkpoints go.

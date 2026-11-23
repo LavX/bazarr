@@ -210,6 +210,10 @@ class RuntimeTranslatorService:
                          "arr_instance_id": self.arr_instance_id}
         if self.source is not None:
             history_media.update(media_type="source", media_id=self.source.item_id, arr_instance_id=None)
+        owns_native_queue_job = bool(job_id and self.source is None and jobs_queue.matches_active_job(
+            job_id, 'subtitles.tools.translate.main', 'translate_subtitles_file', running_only=True,
+            video_path=self.video_path, from_lang=self.from_lang, to_lang=self.orig_to_lang,
+            forced=self.forced, hi=self.hi))
         spec = JobSpec(
             source_key=self.source_key, target_key=target_key(self.orig_to_lang, self.forced, self.hi), lines=lines,
             source_language=self.from_lang, target_language=self.orig_to_lang,
@@ -221,7 +225,8 @@ class RuntimeTranslatorService:
             history_media=history_media, pinned_connection_id=self.pinned_connection_id,
             pin_from_job=True, check_cancel=self._check, progress=self._progress, legacy=self._legacy,
             before_send=self._check_source_before_send if self.source is not None else None,
-            retry_setup_errors=self.source is not None, queue_job_id=job_id)
+            retry_setup_errors=self.source is not None, queue_job_id=job_id,
+            owns_native_queue_job=owns_native_queue_job)
         try:
             outcome = (self._dispatcher or Dispatcher()).run(spec)
         except DispatchFailed as failed:

@@ -44,7 +44,7 @@ def generate_subtitles(path, languages, audio_language, sceneName, title, media_
                        forced_minimum_score=None, is_upgrade=False, check_if_still_required=False,
                        previous_subtitles_to_delete=None, job_id=None, fallback_allowed=False,
                        arr_instance_id=None, source=None, auto_translate=True, source_wanted_stamp=None,
-                       source_upgrade=None):
+                       source_upgrade=None, source_wanted_deferred=None):
     if not languages:
         return None
 
@@ -226,7 +226,8 @@ def generate_subtitles(path, languages, audio_language, sceneName, title, media_
                                                      wanted_profile=wanted_profile, upgrade=source_upgrade,
                                                      video_version=video_version,
                                                      published_versions=published_versions, mode=chmod or None,
-                                                     destination_setting=destination_setting)
+                                                     destination_setting=destination_setting,
+                                                     wanted_deferred=source_wanted_deferred)
                                     writer_arg = 'write_selected_subtitle'
                                     if is_upgrade and source_upgrade is None:
                                         from media_sources.indexer import SourcePublicationOwnerIndex
@@ -352,9 +353,10 @@ def _wanted_source_can_publish(source, language, stamp, profile, *, target=None)
     if local_content_stamp(source.path) != stamp or get_profiles_list(profile_id=source.profile_id) != profile:
         return False
     items = repository.Items.c
-    live = handle(target).execute(wanted_items(items.missing_subtitles, kind=source.kind, profile_id=source.profile_id).where(
-        items.id == source.item_id, items.created_at == source.created_at, items.path == source.path,
-        items.source_id == source.source_id, items.library_id == source.library_id)).first()
+    live = handle(target).execute(wanted_items(
+        items.missing_subtitles, items.failed_attempts, kind=source.kind, profile_id=source.profile_id).where(
+            items.id == source.item_id, items.created_at == source.created_at, items.path == source.path,
+            items.source_id == source.source_id, items.library_id == source.library_id)).first()
     if live is None or language not in _get_language_obj(languages=stored_missing_language_candidates(live)):
         return False
     return not arr_claim_blocks_wanted(source, target=target)
@@ -447,10 +449,10 @@ def _source_subtitle_destination_setting():
 def _write_source_download(video_path, destination, content, *, source, language, recheck_missing, is_upgrade,
                            written_paths, on_publish, wanted_stamp=None, wanted_profile=None, upgrade=None,
                            video_version=None, destination_setting=None, published_versions=None, mode=None,
-                           selected_subtitle=None):
+                           selected_subtitle=None, wanted_deferred=None):
     """Publish the actual provider-selected file only while its destination is still eligible."""
     from media_sources import repository
-    from media_sources.indexer import SourcePublicationOwnerIndex
+    from media_sources.indexer import SourcePublicationBusy, SourcePublicationOwnerIndex
     from media_sources.translation import prepare_source_sidecars
     from media_sources.wanted import arr_claim_blocks_wanted
 
@@ -496,7 +498,8 @@ def _write_source_download(video_path, destination, content, *, source, language
     def publication(files):
         with ownership_index.publication(source, prepare, destination=registry_destination,
                                          cleanup_outputs=upgrade is None, release=release,
-                                         native_owners=upgrade is not None or wanted_stamp is not None) as (
+                                         native_owners=upgrade is not None,
+                                         guard_registry=wanted_stamp is not None) as (
                 current, connection, prepared):
             if current is None or current.path != video_path:
                 raise SubtitleDestinationChanged('The source item moved or was removed')
@@ -540,6 +543,8 @@ def _write_source_download(video_path, destination, content, *, source, language
                                           rollback_new_on_guard_error=upgrade is not None, invalidate_outputs=False,
                                           mode=mode, capture_version=published_versions is not None)
     except SubtitleDestinationChanged as error:
+        if wanted_deferred is not None and isinstance(error, SourcePublicationBusy):
+            wanted_deferred.add(language)
         logging.info('BAZARR skipped saving a subtitle for source item %s: %s', source.item_id, error)
         return False
     if upgrade is not None:

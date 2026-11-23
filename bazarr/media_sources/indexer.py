@@ -115,6 +115,10 @@ class SourcePublicationOwnersChanged(SubtitleDestinationChanged):
     """The prepared shared ownership could not be pinned for publication."""
 
 
+class SourcePublicationBusy(SourcePublicationOwnersChanged):
+    """The registry lock remained busy after bounded publication retries."""
+
+
 class SourcePublicationOwnerIndex(SourceOutputOwnerIndex):
     """Source writes in shared subtitle folders must account for all media stored there."""
 
@@ -258,7 +262,7 @@ class SourcePublicationOwnerIndex(SourceOutputOwnerIndex):
                     if publishing or sqlstate != '55P03':
                         raise
             else:
-                raise SourcePublicationOwnersChanged('The shared subtitle owners are being updated')
+                raise SourcePublicationBusy('The shared subtitle owners are being updated')
         raise SourcePublicationOwnersChanged('The shared subtitle owners changed while preparing publication')
 
 

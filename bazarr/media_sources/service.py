@@ -18,7 +18,7 @@ from app.jobs_queue import JobFailed, jobs_queue
 from subtitles.indexer.missing_refresh import queue_missing_subtitles_recalculation
 
 from . import identity, paths, repository
-from .analysis import index_matches_file, local_content_stamp, local_stat, source_search_probes
+from .analysis import indexed_local_content_stamp, index_matches_file, local_content_stamp, local_stat, source_search_probes
 from .context import SourceItemGone, resolve_item, resolve_same_item
 from .db import source_transaction
 from .history import history_log_source
@@ -638,7 +638,7 @@ def search_wanted_item(item_id, created_at, job_id, *, translation_gate=True, ex
     item = session.execute(wanted_items(*items.c).where(*same_row)).first()
     if item is None:
         return
-    stamp = local_content_stamp(item.path)
+    stamp = indexed_local_content_stamp(item)
     if stamp is None or (expected_source is not None and (
             expected_source.item_id, expected_source.path, expected_source.source_id,
             expected_source.library_id, expected_source.wanted_file_stamp
@@ -669,13 +669,21 @@ def search_wanted_item(item_id, created_at, job_id, *, translation_gate=True, ex
     current = session.execute(wanted_items(*items.c, profile_id=context.profile_id).where(*same_row)).first()
     if current is None or current.path != context.path or current.library_id != context.library_id:
         return
+    if indexed_local_content_stamp(current) != stamp:
+        return
     languages = [entry for entry in languages if entry in stored_missing_language_candidates(current)]
     if not languages:
         return
+    deferred = set()
     with source_search_probes(item_id):
         downloaded = _download_source_subtitles(wanted_source, current, languages, job_id,
-                                                translation_gate=translation_gate, wanted_stamp=stamp)
+                                                translation_gate=translation_gate, wanted_stamp=stamp,
+                                                wanted_deferred=deferred)
     failed = {_language_code(*entry) for entry in languages} - set(downloaded)
+    if deferred:
+        from subtitles.download import _get_language_obj
+
+        failed -= {_language_code(*entry) for entry in languages if deferred & _get_language_obj(entry)}
     if failed and local_content_stamp(context.path) == stamp and not arr_claim_blocks_wanted(wanted_source):
         with source_transaction() as connection:
             current = repository.get_item(item_id, connection, for_update=True)
@@ -691,7 +699,7 @@ def search_wanted_item(item_id, created_at, job_id, *, translation_gate=True, ex
 
 
 def _download_source_subtitles(context, item, languages, job_id, *, translation_gate=True, wanted_stamp=None,
-                               upgrade=None):
+                               upgrade=None, wanted_deferred=None):
     audio_languages = get_audio_profile_languages(item.audio_language)
     audio_language = audio_languages[0]['name'] if audio_languages else 'None'
     # For an episode the title the providers get is the show's.
@@ -712,7 +720,8 @@ def _download_source_subtitles(context, item, languages, job_id, *, translation_
         for result in generate_subtitles(context.path, languages, audio_language, str(context.scene_name), title,
                                          context.media_type, context.profile_id, check_if_still_required=upgrade is None,
                                          job_id=job_id, source=context, **upgrade_options,
-                                         **({'source_wanted_stamp': wanted_stamp} if wanted_stamp is not None else {}),
+                                         **({'source_wanted_stamp': wanted_stamp, 'source_wanted_deferred': wanted_deferred}
+                                            if wanted_stamp is not None else {}),
                                          **({} if translation_gate else {'auto_translate': False})):
             if not result:
                 continue
