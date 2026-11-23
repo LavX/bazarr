@@ -1125,7 +1125,8 @@ class TranslatorSettingsService:
         # A probe that says the request never left Bazarr+ (too many other tests running, one that would not
         # start) is not a verdict on the back end: the same test may go through in a moment.
         return self._test_result(False, self._said(answer.get("message"), held) or self._unanswered(where),
-                                 outcome=NOT_READY if answer.get("sent") is False else FAILED)
+                                 outcome=(REFUSED if answer.get("cost_refused") is True else
+                                          NOT_READY if answer.get("sent") is False else FAILED))
 
     def _run_probe(self, request: ProbeRequest, claim: _Claim) -> Mapping[str, Any]:
         """Call the probe, and stop waiting for it a little after the time it was given.
@@ -1171,8 +1172,12 @@ class TranslatorSettingsService:
 
         prices = (_price(connection.price_input_per_million), _price(connection.price_output_per_million))
         used_in, used_out = answer.get("input_tokens"), answer.get("output_tokens")
+        tokens, measured = answer.get("tokens"), answer.get("actual_micros")
         if all(isinstance(item, int) and not isinstance(item, bool) and item >= 0 for item in (used_in, used_out)):
             actual = worst_case_micros(used_in, used_out, *prices)
+        elif type(tokens) is int and tokens >= 0 and type(measured) is int and measured >= 0:
+            # The SDK reports combined tokens and the actual cost, as it does for translation attempts.
+            used_in, used_out, actual = tokens, 0, measured
         elif answer.get("sent") is False:
             used_in = used_out = actual = 0
         else:
