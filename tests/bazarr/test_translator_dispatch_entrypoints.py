@@ -752,12 +752,13 @@ def test_a_paused_editor_retry_cannot_activate_a_newer_hold(env, monkeypatch, ed
     assert stale.error["reason"] == "skipped"
     fresh = env.last_job()
     assert (fresh.state, fresh.queue_job_id, fresh.retry_at) == ("awaiting_retry", None, retry_at)
+    active_id = fresh.id
     env.clock.advance(seconds=61)
     recovery = pending(3)
     execute(recovery)
     assert recovery.status == "completed"
     assert editor.editor_translation_state(recovery.job_id)["lines"] == [{"position": 3, "line": "[hu] Hello"}]
-    assert (env.last_job().id, env.last_job().state) == (fresh.id, "completed")
+    assert (env.last_job().id, env.last_job().state) == (active_id, "completed")
 
 
 @pytest.mark.parametrize("attachment", ["own", "competing", "due-retry", "late-original", "late-immediate"])
