@@ -1,4 +1,5 @@
 """A source item through the shared subtitle pipeline: the seam, the pool, the blacklist, sync and history."""
+import ast
 import logging
 import re
 import sqlite3
@@ -415,6 +416,115 @@ def test_indexing_leaves_a_malformed_stored_listing_incomplete(world, stored):
     item = repository.get_item(context.item_id)
     assert (item.subtitles, item.missing_subtitles, item.indexed_at) == (
         initial.subtitles, initial.missing_subtitles, initial.indexed_at)
+
+
+@pytest.mark.parametrize(("cached_language", "guessed_language", "indexed_language"), [
+    ("en:hi:forced", "hu", "hu"),
+    ("en:hi:forced", None, None),
+    ("aaa", "hu", "hu"),
+    ("aaa", None, None),
+    ("pob", None, "pt-BR"),
+], ids=["content-fallback", "unclassified-fallback", "unsupported-content-fallback",
+        "unsupported-unclassified-fallback", "custom-alias"])
+def test_search_preserves_history_when_a_cached_language_needs_reclassification(
+        world, monkeypatch, cached_language, guessed_language, indexed_language):
+    from languages import get_languages
+    from media_sources import repository, service
+    from subtitles import download
+    from subtitles.indexer import utils
+
+    monkeypatch.setattr(get_languages, "languages_dict", get_languages.languages_dict + [
+        {"code2": "pt", "code3": "por", "name": "Portuguese", "code3b": "por"}])
+    monkeypatch.setattr(utils, "guess_language", lambda text: guessed_language)
+    context = _movie(world)
+    sidecar = Path(context.path).with_suffix(".srt")
+    sidecar.write_bytes(CONTENT)
+    saved = Path(context.path).with_suffix(".en.srt")
+    _download(monkeypatch)
+    best = download.download_best_subtitles
+    cached = []
+    jobs = []
+
+    def download_with_cached_language(*args, **kwargs):
+        # The search refreshes the index before downloading. Replace the cache afterwards,
+        # so the real post-save indexer encounters this entry without blocking the search.
+        repository.update_item(context.item_id, world.db,
+                               subtitles=repr([[cached_language, str(sidecar), len(CONTENT)]]))
+        cached.append(repository.get_item(context.item_id))
+        return best(*args, **kwargs)
+
+    monkeypatch.setattr(download, "download_best_subtitles", download_with_cached_language)
+    monkeypatch.setattr(service.jobs_queue, "update_job_progress", lambda **kwargs: jobs.append(kwargs))
+
+    service.search_source_item(context.item_id, job_id=3)
+
+    assert saved.read_bytes() == sidecar.read_bytes() == CONTENT
+    (row,) = world.db.execute(sa.select(repository.History)).all()
+    assert (row.item_id, row.subtitles_path, row.language) == (context.item_id, str(saved), "en")
+    assert jobs[-1]["progress_message"] == "1 subtitle(s) downloaded"
+    item = repository.get_item(context.item_id)
+    if indexed_language is not None:
+        listing = {path: language for language, path, _ in ast.literal_eval(item.subtitles)}
+        assert listing == {str(saved): "en", str(sidecar): indexed_language}
+        assert item.missing_subtitles == "[]"
+        assert cached_language not in item.subtitles
+    else:
+        (initial,) = cached
+        assert (item.subtitles, item.missing_subtitles, item.indexed_at) == (
+            initial.subtitles, initial.missing_subtitles, initial.indexed_at)
+
+
+@pytest.mark.parametrize(("cached_language", "indexed_language"), [
+    ("pob:forced", "pt-BR:forced"),
+    ("pob:hi", "pt-BR:hi"),
+], ids=["forced", "hearing-impaired"])
+def test_a_cached_custom_language_keeps_its_variant_across_index_passes(
+        world, monkeypatch, cached_language, indexed_language):
+    from languages import get_languages
+    from media_sources import indexer, repository
+    from subtitles.indexer import utils
+
+    monkeypatch.setattr(get_languages, "languages_dict", get_languages.languages_dict + [
+        {"code2": "pt", "code3": "por", "name": "Portuguese", "code3b": "por"}])
+    guess = Mock(return_value=None)
+    monkeypatch.setattr(utils, "guess_language", guess)
+    context = _movie(world)
+    sidecar = Path(context.path).with_suffix(".srt")
+    sidecar.write_bytes(CONTENT)
+    repository.update_item(context.item_id, world.db,
+                           subtitles=repr([[cached_language, str(sidecar), len(CONTENT)]]))
+    expected = [[indexed_language, str(sidecar), len(CONTENT)]]
+
+    for _ in range(2):
+        assert indexer.index_item(context.item_id) == expected
+        assert ast.literal_eval(repository.get_item(context.item_id).subtitles) == expected
+
+    guess.assert_not_called()
+
+
+@pytest.mark.parametrize(("locale", "suffix", "variant"), [
+    ("en", "", ""),
+    ("en", ".forced", ":forced"),
+    ("en", ".hi", ":hi"),
+    ("pt", "", ""),
+    ("pt", ".forced", ":forced"),
+    ("pt", ".hi", ":hi"),
+    ("pt", ".forced.hi", ":forced"),
+], ids=["en-normal", "en-forced", "en-hi", "pt-normal", "pt-forced", "pt-hi", "pt-both"])
+def test_sync_sidecar_variants_keep_movie_indexer_precedence_across_passes(world, monkeypatch, locale, suffix, variant):
+    from languages import get_languages
+    from media_sources import indexer, repository
+
+    monkeypatch.setattr(get_languages, "languages_dict", get_languages.languages_dict + [
+        {"code2": "pt", "code3": "por", "name": "Portuguese", "code3b": "por"}])
+    context = _movie(world)
+    sidecar = Path(context.path).with_suffix(f".{locale}{suffix}.ffsubsync.srt")
+    sidecar.write_bytes(CONTENT)
+    expected = [[f"{locale}{variant}:sync-ffsubsync", str(sidecar), len(CONTENT)]]
+
+    for _ in range(2):
+        assert indexer.index_item(context.item_id) == expected
+        assert ast.literal_eval(repository.get_item(context.item_id).subtitles) == expected
 
 
 @pytest.mark.parametrize("after_save", [False, True], ids=["ordinary-index", "post-save-index"])
