@@ -335,9 +335,10 @@ def _wanted_source_can_publish(source, language, stamp, profile, *, target=None)
     if local_content_stamp(source.path) != stamp or get_profiles_list(profile_id=source.profile_id) != profile:
         return False
     items = repository.Items.c
-    live = handle(target).execute(wanted_items(items.missing_subtitles, kind=source.kind, profile_id=source.profile_id).where(
-        items.id == source.item_id, items.created_at == source.created_at, items.path == source.path,
-        items.source_id == source.source_id, items.library_id == source.library_id)).first()
+    live = handle(target).execute(wanted_items(
+        items.missing_subtitles, items.failed_attempts, kind=source.kind, profile_id=source.profile_id).where(
+            items.id == source.item_id, items.created_at == source.created_at, items.path == source.path,
+            items.source_id == source.source_id, items.library_id == source.library_id)).first()
     if live is None or language not in _get_language_obj(languages=stored_missing_language_candidates(live)):
         return False
     return not arr_claim_blocks_wanted(source, target=target)
@@ -382,8 +383,9 @@ def _write_source_download(video_path, destination, content, *, source, language
 
     @contextmanager
     def publication():
-        with ownership_index.publication(source, prepare, destination=destination, cleanup_outputs=True) as (
-                current, connection, external_subtitles):
+        with ownership_index.publication(
+                source, prepare, destination=destination, cleanup_outputs=True,
+                guard_registry=wanted_stamp is not None) as (current, connection, external_subtitles):
             if current is None or current.path != video_path:
                 raise SubtitleDestinationChanged('The source item moved or was removed')
             if video_version is not None and subtitle_source_version(video_path) != video_version:

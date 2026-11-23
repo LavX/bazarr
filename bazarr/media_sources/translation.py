@@ -9,6 +9,7 @@ from sqlalchemy import select
 
 from app.config import settings
 from app.database import get_audio_profile_languages, get_profile_cutoff, get_profiles_list
+from subtitles.adaptive_searching import is_search_given_up
 from subtitles.indexer.entries import entry_codec
 from subtitles.language_profiles import build_translate_from_map
 from subtitles.tools.subsync_engines import (capture_subtitle_versions, subtitle_source_version,
@@ -117,8 +118,13 @@ def _language_candidates(codes):
             for code in codes if code is not None]
 
 
+def _stored_missing_codes(item):
+    attempts = item.failed_attempts or '[]'
+    return [code for code in ast.literal_eval(item.missing_subtitles or '[]') if not is_search_given_up(code, attempts)]
+
+
 def stored_missing_language_candidates(item):
-    return _language_candidates(ast.literal_eval(item.missing_subtitles or '[]'))
+    return _language_candidates(_stored_missing_codes(item))
 
 
 def missing_language_candidates(source, *, external_subtitles=None, target=None):
@@ -192,7 +198,7 @@ def queue_missing_translations(source, *, downloaded_path=None, downloaded_langu
     rules = build_translate_from_map(profile)
     if not rules:
         return set()
-    missing = set(ast.literal_eval(item.missing_subtitles or '[]') if wanted
+    missing = set(_stored_missing_codes(item) if wanted
                   else _current_missing(item, source.profile_id, profile))
     owners = SourcePublicationOwnerIndex()
     covered = set()
