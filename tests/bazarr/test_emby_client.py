@@ -52,6 +52,23 @@ def test_authenticated_connection_uses_system_info(http_fixture):
     assert records[0]["headers"]["X-Emby-Token"] == "synthetic-key"
 
 
+def test_collection_requests_premiere_date(http_fixture):
+    from emby.client import EmbyClient
+
+    premiere = '2021-10-09T00:00:00.000Z'
+    base, records = http_fixture([
+        (200, {'Items': [{'Id': '12', 'PremiereDate': premiere}], 'TotalRecordCount': 1}, {}),
+        (200, {'Items': [{'Id': '12'}], 'TotalRecordCount': 1}, {}),
+    ])
+    with EmbyClient(base + '/emby', 'synthetic-key') as client:
+        listing = client.get_item_pages('5', ('Movie',))
+        assert listing.complete and listing.items['12']['PremiereDate'] == premiere
+        assert client.lookup_item_ids(('12',)) == {'12'}
+    listed, lookup = [parse_qs(urlsplit(record['path']).query) for record in records]
+    assert listed['Fields'] == ['Path,ProviderIds,PremiereDate']
+    assert 'Fields' not in lookup
+
+
 def test_invalid_key_returns_only_a_sanitized_code(http_fixture):
     from emby.operations import emby_test_connection
     base, _records = http_fixture([(401, b"synthetic-sensitive-response", {})])

@@ -53,6 +53,10 @@ def configure_sqlite_connection(dbapi_connection, connection_record):
     # or tooling) - PRAGMA is invalid SQL on PostgreSQL.
     if not isinstance(dbapi_connection, sqlite3.Connection):
         return
+    # SQLite's lower() only folds ASCII. Windows paths also compare non-ASCII letters without case.
+    from utilities.path_case import windows_path_casefold
+
+    dbapi_connection.create_function('unicode_path_casefold', 1, windows_path_casefold, deterministic=True)
     cursor = dbapi_connection.cursor()
     try:
         cursor.execute("PRAGMA journal_mode=WAL")

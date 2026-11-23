@@ -151,6 +151,25 @@ class JellyfinClient:
         data = self.get('/Items', params=params).json()
         return data.get('Items', [])
 
+    def _fetch_collection_items(self, params):
+        from media_servers.http import MediaServerError
+
+        try:
+            with self.get('/Items', params=params) as response:
+                return response.json()
+        except (requests.RequestException, ValueError, RecursionError):
+            raise MediaServerError('collection_request_failed') from None
+
+    def get_item_pages(self, parent_id, item_types, *, cancel=None):
+        from media_servers.item_pages import collect_items
+
+        return collect_items(self._fetch_collection_items, parent_id, item_types, cancel)
+
+    def lookup_item_ids(self, ids):
+        from media_servers.item_pages import find_ids
+
+        return find_ids(self._fetch_collection_items, ids)
+
     def get_episodes(self, series_id: str, season: int) -> list:
         """GET /Shows/{seriesId}/Episodes — list episodes for a season."""
         data = self.get(f'/Shows/{_validate_id(series_id)}/Episodes', params={

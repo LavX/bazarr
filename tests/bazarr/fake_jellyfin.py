@@ -9,6 +9,7 @@ import json
 import os
 
 from jsonschema import validate, RefResolver
+from media_servers.item_pages import collect_items, find_ids
 
 # Spec downloaded from https://api.jellyfin.org/openapi/jellyfin-openapi-stable.json
 
@@ -202,6 +203,32 @@ class FakeJellyfinClient:
         if _has_spec():
             validate_response(response, "/Items")
         return response["Items"]
+
+    def _item_page(self, params):
+        query = {name[0].lower() + name[1:]: value for name, value in params.items()}
+        if _has_spec():
+            _validate_params(query, "/Items")
+            if "fields" in query:
+                _validate_fields(query["fields"])
+        rows = self.items
+        if "ids" in query:
+            requested = set(query["ids"].split(","))
+            rows = [item for item in rows if item["Id"] in requested]
+        if "includeItemTypes" in query:
+            item_types = set(query["includeItemTypes"].split(","))
+            rows = [item for item in rows if item["Type"] in item_types]
+        start = query["startIndex"]
+        response = {"Items": rows[start:start + query["limit"]],
+                    "TotalRecordCount": len(rows), "StartIndex": start}
+        if _has_spec():
+            validate_response(response, "/Items")
+        return response
+
+    def get_item_pages(self, parent_id, item_types, *, cancel=None):
+        return collect_items(self._item_page, parent_id, item_types, cancel)
+
+    def lookup_item_ids(self, ids):
+        return find_ids(self._item_page, ids)
 
     def get_episodes(self, series_id: str, season: int) -> list:
         params = {"season": season, "fields": "ProviderIds"}

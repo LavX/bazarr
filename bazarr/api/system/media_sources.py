@@ -43,12 +43,24 @@ class MediaSourcesList(Resource):
     @api_ns_system_media_sources.response(400, 'The request was refused')
     @api_ns_system_media_sources.response(409, 'A source with that name exists')
     def post(self):
-        """Create a folder source with one library: {name, library: {path, content_kind, profile_id?}}"""
+        """Create a folder source or register a saved Jellyfin or Emby connection as a source."""
         try:
             source_id = service.create_source(_body())
         except SourceError as error:
             return {"error": error.code, "message": str(error)}, error.status
         return service.describe_source(source_id), 201
+
+
+@api_ns_system_media_sources.route("system/media-sources/server-libraries")
+class MediaSourceServerLibraries(Resource):
+    @authenticate
+    @api_ns_system_media_sources.doc(params={'media_server_instance_id': 'Already saved Jellyfin or Emby connection'})
+    def get(self):
+        """List server libraries and their proposed roots using the saved connection."""
+        try:
+            return {'data': service.server_libraries(request.args.get('media_server_instance_id'))}
+        except SourceError as error:
+            return _refused(error)
 
 
 @api_ns_system_media_sources.route("system/media-sources/validate-path")
@@ -97,7 +109,7 @@ class MediaSourceLibraries(Resource):
     @authenticate
     @api_ns_system_media_sources.response(201, 'The library was added')
     def post(self, source_id):
-        """Add a folder library: {path, content_kind, profile_id?}"""
+        """Add a local folder or a server library with its local root mappings."""
         try:
             return service.add_library(source_id, _body()), 201
         except SourceError as error:
@@ -109,7 +121,7 @@ class MediaSourceLibrary(Resource):
     @authenticate
     @api_ns_system_media_sources.response(400, 'A folder library path cannot be edited')
     def patch(self, source_id, library_id):
-        """Edit a library: {enabled?, profile_id?, name?}. A folder library's path is immutable"""
+        """Edit library settings or replace server roots after confirming the preview count."""
         try:
             return service.update_library(source_id, library_id, _body()), 200
         except SourceError as error:
@@ -124,6 +136,17 @@ class MediaSourceLibrary(Resource):
         except SourceError as error:
             return _refused(error)
         return "", 204
+
+
+@api_ns_system_media_sources.route("system/media-sources/<int:source_id>/libraries/<int:library_id>/roots/preview")
+class MediaSourceRootsPreview(Resource):
+    @authenticate
+    def post(self, source_id, library_id):
+        """Count existing media rows that would be removed by a server root edit."""
+        try:
+            return {'removed_items': service.preview_library_roots(source_id, library_id, _body().get('roots'))}
+        except SourceError as error:
+            return _refused(error)
 
 
 @api_ns_system_media_sources.route("system/media-sources/<int:source_id>/libraries/<int:library_id>/scan")

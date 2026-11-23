@@ -3,6 +3,7 @@
 import ast
 import logging
 
+from flask import request
 from flask_restx import Resource, Namespace
 from operator import itemgetter
 
@@ -72,6 +73,19 @@ class AudioLanguages(Resource):
                         lang_set.add(lang)
             except (ValueError, SyntaxError):
                 continue
+
+        if request.args.get('sources') == '1':
+            from media_sources import repository
+            from media_sources.wanted import wanted_list_items
+
+            audio = repository.Items.c.audio_language
+            for kind in ('episode', 'movie'):
+                query = wanted_list_items(kind, database, audio).where(audio.is_not(None), audio != '[]').distinct()
+                for value in database.scalars(query):
+                    try:
+                        lang_set.update(lang for lang in ast.literal_eval(value) if lang)
+                    except (ValueError, SyntaxError):
+                        continue
 
         # Convert to code2/name format
         result = []

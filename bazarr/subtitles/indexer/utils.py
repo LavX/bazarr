@@ -4,6 +4,7 @@ import ast
 import os
 import logging
 import unicodedata
+from pathlib import Path
 
 from guess_language import guess_language
 from sqlalchemy import delete
@@ -302,9 +303,20 @@ def add_sync_engine_outputs(dest_folder, subtitles, video_filename=None, video_p
                            for entry in media_files
                            if entry.is_file() and entry.name.lower().endswith(core.VIDEO_EXTENSIONS)}
 
+    with os.scandir(dest_folder) as entries:
+        names = []
+        vobsub_indexes = set()
+        for entry in entries:
+            names.append(entry.name)
+            if entry.name.lower().endswith('.idx') and entry.is_file(follow_symlinks=False):
+                vobsub_indexes.add(entry.name.lower())
+
     ownership = {}
-    for subtitle in os.listdir(dest_folder):
+    for subtitle in names:
         if not sync_engine_from_subtitle_name(subtitle):
+            continue
+        if core.is_vobsub_pair(subtitle, vobsub_indexes):
+            subtitles.pop(subtitle, None)
             continue
 
         subtitle_path = os.path.join(dest_folder, subtitle)
@@ -455,7 +467,8 @@ def subtitle_language_with_combined_modifier(language_str, subtitle):
 
 
 def guess_external_subtitles(dest_folder, subtitles, media_type, previously_indexed_subtitles_to_exclude=None,
-                             path_reverse=None):
+                             path_reverse=None, read_bytes=None):
+    read_bytes = read_bytes or (lambda path: Path(path).read_bytes())
     for subtitle, language in subtitles.items():
         subtitle_path = os.path.join(dest_folder, subtitle)
         reverse = path_reverse or (path_mappings.path_replace_reverse if media_type == "series"
@@ -487,8 +500,9 @@ def guess_external_subtitles(dest_folder, subtitles, media_type, previously_inde
                                   f"{subtitle_path}")
                     continue
 
-                with open(subtitle_path, 'rb') as f:
-                    text = f.read()
+                text = read_bytes(subtitle_path)
+                if not text:
+                    continue
 
                 encoding = detect(text)
                 if encoding and 'encoding' in encoding and encoding['encoding']:
@@ -538,8 +552,9 @@ def guess_external_subtitles(dest_folder, subtitles, media_type, previously_inde
                                   f"{subtitle_path}")
                     continue
 
-                with open(subtitle_path, 'rb') as f:
-                    text = f.read()
+                text = read_bytes(subtitle_path)
+                if not text:
+                    continue
 
                 encoding = detect(text)
                 if encoding and 'encoding' in encoding and encoding['encoding']:

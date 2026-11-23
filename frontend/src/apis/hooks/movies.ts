@@ -95,20 +95,34 @@ export function useMovieAction() {
   });
 }
 
-export function useMovieWantedPagination(fetchAll = false) {
+export function useMovieWantedPagination(
+  fetchAll = false,
+  sourceKeys: MediaSourceKey[] = [],
+  includeSources = false,
+) {
   return usePaginationQuery(
-    [QueryKeys.Movies, QueryKeys.Wanted],
-    (param) => api.movies.wanted(param),
-    true,
+    [QueryKeys.Movies, QueryKeys.Wanted, { sourceKeys, includeSources }],
+    (param) =>
+      api.movies.wanted(
+        {
+          ...param,
+          sourceKeys: sourceKeys.length ? sourceKeys : undefined,
+        },
+        includeSources,
+      ),
+    false,
     fetchAll,
+    true,
+    false,
+    true,
   );
 }
 
-export function useMovieBlacklist() {
+export function useMovieBlacklist(scope: Blacklist.Scope = {}) {
   return useQuery({
-    queryKey: [QueryKeys.Movies, QueryKeys.Blacklist],
-
-    queryFn: () => api.movies.blacklist(),
+    queryKey: [QueryKeys.Movies, QueryKeys.Blacklist, scope],
+    queryFn: ({ signal }) => api.movies.blacklist(scope, signal),
+    placeholderData: undefined,
   });
 }
 
@@ -143,14 +157,13 @@ export function useMovieDeleteBlacklist() {
   return useMutation({
     mutationKey: [QueryKeys.Movies, QueryKeys.Blacklist],
 
-    mutationFn: (param: { all?: boolean; form?: FormType.DeleteBlacklist }) =>
-      api.movies.deleteBlacklist(param.all, param.form),
+    mutationFn: (removal: Blacklist.Removal) =>
+      api.movies.deleteBlacklist(removal),
 
-    onSuccess: () => {
-      void client.invalidateQueries({
+    onSuccess: () =>
+      client.invalidateQueries({
         queryKey: [QueryKeys.Movies, QueryKeys.Blacklist],
-      });
-    },
+      }),
   });
 }
 

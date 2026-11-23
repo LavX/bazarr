@@ -170,6 +170,8 @@ def jellyfin_get_libraries(url: str = None, apikey: str = None,
                     'id': lib.get('ItemId', ''),
                     'name': lib['Name'],
                     'type': (lib.get('CollectionType') or '').lower(),
+                    **({'locations': [path for path in lib['Locations'] if isinstance(path, str)]}
+                       if isinstance(lib.get('Locations'), list) else {}),
                 }
                 for lib in libraries
                 if include_all or (lib.get('CollectionType') or '').lower() in ('movies', 'tvshows')
