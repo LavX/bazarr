@@ -459,10 +459,11 @@ def sync_output_owner_is_unique(video_path, source_path, ownership_index=None):
         if ownership_index is None:
             ownership_index = SyncOutputOwnerIndex()
         return ownership_index.is_unique(video, directory, conflicting_stems)
-    except (OSError, ValueError):
-        return False
-    except Exception:
-        logging.exception('BAZARR unable to verify generated subtitle ownership')
+    except Exception as error:
+        if getattr(ownership_index, 'propagate_errors', False):
+            raise
+        if not isinstance(error, (OSError, ValueError)):
+            logging.exception('BAZARR unable to verify generated subtitle ownership')
         return False
 
 

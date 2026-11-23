@@ -183,11 +183,7 @@ def _best_effort(action, *args):
 
 
 def _queue_recalculation():
-    """Queue the library-wide missing subtitles recalculation, and say whether it was queued.
-
-    The helper never raises: it logs its own failure and returns None, which for
-    a library-wide pass means no job was queued or joined.
-    """
+    """Queue the library-wide missing subtitles recalculation and return whether it was queued."""
     return queue_missing_subtitles_recalculation() is not None
 
 
