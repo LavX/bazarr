@@ -370,17 +370,22 @@ def _normalized_media_stem(path):
     return unicodedata.normalize('NFC', os.path.splitext(os.path.basename(path))[0].lower())
 
 
-def _subtitle_owner_claims(path, canonical, destination):
-    """Pair each media name with the sidecar destinations for its own parent."""
+def _subtitle_path_claims(path, destination):
+    """Pair one media name with its own sidecar destinations."""
     mode, custom = destination
+    parent = os.path.dirname(path)
+    folders = {parent}
+    if custom and mode in ('absolute', 'relative'):
+        folders.add(custom if mode == 'absolute' else os.path.join(parent, custom))
+    stem = _normalized_media_stem(path)
+    for folder in folders:
+        yield os.path.normcase(os.path.realpath(folder)), stem, path
+
+
+def _subtitle_owner_claims(path, canonical, destination):
+    """Track admitted and resolved names when checking for competing owners."""
     for media_path in {os.fspath(path), canonical}:
-        parent = os.path.dirname(media_path)
-        folders = {parent}
-        if custom and mode in ('absolute', 'relative'):
-            folders.add(custom if mode == 'absolute' else os.path.join(parent, custom))
-        stem = _normalized_media_stem(media_path)
-        for folder in folders:
-            yield os.path.normcase(os.path.realpath(folder)), stem, media_path
+        yield from _subtitle_path_claims(media_path, destination)
 
 
 class SyncOutputOwnerIndex:
@@ -511,10 +516,16 @@ def _local_video_stems_are_clear(video_path, video, directory, conflicting_stems
 
 
 def _clear_local_owner_stems(video_path, canonical, directory, subtitle_path, ownership_index):
+    from subliminal_patch.core import VIDEO_EXTENSIONS
+
+    if not str(video_path).lower().endswith(VIDEO_EXTENSIONS) or not os.path.isfile(video_path):
+        return set()
     destination = ownership_index.subtitle_destination()
     subtitle_stem = _normalized_media_stem(subtitle_path)
     stems = set()
-    for folder, media_stem, media_path in _subtitle_owner_claims(video_path, canonical, destination):
+    # Resolved names reserve conflicts, but only the selected admitted name
+    # and its parent can authorize a mutation for this video.
+    for folder, media_stem, media_path in _subtitle_path_claims(video_path, destination):
         if folder == directory and (subtitle_stem == media_stem or subtitle_stem.startswith(media_stem + '.')):
             stems.update(ownership_index.conflicting_stems(media_path, subtitle_path))
     if stems and _local_video_stems_are_clear(video_path, canonical, directory, stems, destination):
@@ -535,8 +546,6 @@ def local_subtitle_owner_is_clear(video_path, subtitle_path, ownership_index=Non
 
 def sync_output_owner_is_unique(video_path, source_path, ownership_index=None):
     """Prove ownership before moving or replacing an exact generated variant."""
-    from subliminal_patch.core import VIDEO_EXTENSIONS
-
     video = os.path.normcase(os.path.realpath(video_path))
     directory = os.path.normcase(os.path.realpath(os.path.dirname(source_path)))
     owners = ownership_index if ownership_index is not None else SyncOutputOwnerIndex()
@@ -545,7 +554,7 @@ def sync_output_owner_is_unique(video_path, source_path, ownership_index=None):
         if not conflicting_stems:
             return False
         if directory in _media_parent_folders(video_path, video) and not owners.folder_is_shared(directory):
-            return str(video_path).lower().endswith(VIDEO_EXTENSIONS) and os.path.isfile(video)
+            return True
 
         # Separate media directories can share a custom subtitle folder. Keep
         # all mapped owners, amortizing that lookup only within an explicit scan.

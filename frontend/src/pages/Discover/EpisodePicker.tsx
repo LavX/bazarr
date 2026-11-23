@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef } from "react";
 import { useNavigate } from "react-router";
 import { Alert, Button, Stack, Text } from "@mantine/core";
 import { useDiscoverMetadata } from "@/apis/hooks/discover";
@@ -6,8 +6,9 @@ import { useDiscover } from "@/contexts/Discover";
 import {
   episodeIdentityKey,
   episodeMatchesShow,
+  selectedEpisodeIdentity,
 } from "@/contexts/discoverState";
-import type { MetadataShow } from "@/types/discover";
+import type { MetadataEpisode, MetadataShow } from "@/types/discover";
 import DiscoverSelect from "./DiscoverSelect";
 import styles from "./Discover.module.scss";
 
@@ -26,6 +27,10 @@ export default function EpisodePicker({
   const { browsing, draft } = state;
   const season = browsing.selectedSeason;
   const number = browsing.selectedEpisode;
+  const belongsToLink = (episode?: MetadataEpisode | null) =>
+    episode?.show_id === show.id &&
+    episode.season === season &&
+    episode.episode === number;
   const navigate = useNavigate();
   const seasons = useDiscoverMetadata(
     `shows/${show.id}/seasons/${season}`,
@@ -50,58 +55,36 @@ export default function EpisodePicker({
   );
   const refetchEpisode = details.refetch;
   const refetchShow = showDetails.refetch;
-  const received = details.data?.episode;
-  const episode =
+  const response = details.data?.episode;
+  const received = belongsToLink(response) ? response : undefined;
+  const catalogEpisode =
     received ??
-    (draft.episodeIdentity?.show_id === show.id &&
-    draft.episodeIdentity.season === season &&
-    draft.episodeIdentity.episode === number
-      ? draft.episodeIdentity
-      : undefined);
-  const currentDraft = useRef(draft);
-  currentDraft.current = draft;
-  const parentMatches = episode ? episodeMatchesShow(episode, show) : true;
-  useEffect(() => {
-    if (
-      !received ||
-      !episode ||
-      episode.show_id !== show.id ||
-      episode.season !== season ||
-      episode.episode !== number
-    )
-      return;
-    if (
-      episodeIdentityKey(currentDraft.current.episodeIdentity) ===
-      episodeIdentityKey(episode)
-    )
-      return;
-    // Adoption is deliberately not gated on the episode agreeing with the show
-    // item. The three conditions above already pin it to this link's own show,
-    // season and number, so it is the source's current answer for the episode
-    // the reader asked for, and refusing while a disagreement lasts is what
-    // made the warning unrecoverable.
-    updateDraft({
-      mediaType: "episode",
-      showId: episode.show_id,
-      // The episode carries its own view of the show's identity, which is the
-      // view a search is gated on. Writing a disagreeing one over the show
-      // item's would leave the request carrying the mapping the warning above
-      // is about, so the show item's copy stands until the two agree.
-      ...(parentMatches
-        ? {
-            showTvdbId: episode.show_tvdb_id,
-            imdbId: episode.show_imdb_id ?? "",
-            title: episode.show_title,
-            year: episode.show_year ?? undefined,
-          }
-        : {}),
-      episodeIdentity: episode,
-      season: episode.target_season?.toString() ?? "",
-      episode: episode.target_episode?.toString() ?? "",
-      manualConfirmed: false,
-      manualEntry: false,
+    (belongsToLink(draft.episodeIdentity) ? draft.episodeIdentity : undefined);
+  const episode = selectedEpisodeIdentity({
+    ...draft,
+    episodeIdentity: catalogEpisode,
+  });
+  const parentMatches =
+    !catalogEpisode || episodeMatchesShow(catalogEpisode, show);
+  useLayoutEffect(() => {
+    if (!received) return;
+    // Keep the link's canonical evidence, including conflicts. Only automatic
+    // selection takes its search coordinates from a metadata response.
+    updateDraft((current) => {
+      if (
+        episodeIdentityKey(current.episodeIdentity) ===
+        episodeIdentityKey(received)
+      )
+        return;
+      if (current.manualEntry) return { episodeIdentity: received };
+      return {
+        episodeIdentity: received,
+        season: received.target_season?.toString() ?? "",
+        episode: received.target_episode?.toString() ?? "",
+        manualConfirmed: false,
+      };
     });
-  }, [received, episode, parentMatches, show.id, season, number, updateDraft]);
+  }, [received, draft.episodeIdentity, updateDraft]);
   const reconciliation = useRef<string | null>(null);
   const parentKey = JSON.stringify([
     show.id,
@@ -122,17 +105,26 @@ export default function EpisodePicker({
   const unavailable = seasons.isError || seasons.data?.status === "unavailable";
   const conflicting = episode?.identity_status === "conflict";
   const unverified = episode?.identity_status === "unverified";
+  const hasSourceCopy = draft.copyTmdbId === show.id;
+  const sourceNumberingDiffers =
+    hasSourceCopy &&
+    episode?.identity_status === "resolved" &&
+    (episode.season !== episode.target_season ||
+      episode.episode !== episode.target_episode);
   const needsManual =
     show.seasons === null ||
     show.seasons.length === 0 ||
     unavailable ||
-    unverified;
+    unverified ||
+    sourceNumberingDiffers ||
+    (hasSourceCopy && !show.imdb_id);
   // The link's own numbering is the only numbering the page knows here, so the
   // reader confirms or corrects it rather than retyping what they just
   // followed. An edit still wins: these are ordinary draft fields.
   const beginManual = () =>
     updateDraft({
-      manualEntry: true,
+      manualEntry:
+        catalogEpisode || browsing.recentContext ? "catalog" : "numbers",
       manualConfirmed: false,
       season: season?.toString() ?? "",
       episode: number?.toString() ?? "",
@@ -172,7 +164,7 @@ export default function EpisodePicker({
               season: "",
               episode: "",
               manualConfirmed: false,
-              manualEntry: false,
+              manualEntry: undefined,
             });
             void navigate(
               `/discover?show=${show.id}${next === null ? "" : `&season=${next}`}`,
@@ -252,7 +244,7 @@ export default function EpisodePicker({
             </Button>
           </Alert>
         )}
-      {episode && !parentMatches && !unverified && (
+      {!parentMatches && catalogEpisode?.identity_status !== "unverified" && (
         <Alert color="yellow">
           Show details changed. Refresh the episode and the show before
           searching.
@@ -280,6 +272,12 @@ export default function EpisodePicker({
           this episode's season and number to search.
         </Text>
       )}
+      {sourceNumberingDiffers && !draft.manualEntry && (
+        <Text size="sm">
+          TMDB and TVDB list this episode under different numbers. You can enter
+          the numbers used by your media source to find a copy.
+        </Text>
+      )}
       {conflicting && (
         <Alert color="red">
           Episode numbering does not match between metadata sources. Refresh
@@ -293,7 +291,7 @@ export default function EpisodePicker({
           </Button>
         </Alert>
       )}
-      {show.imdb_id &&
+      {(show.imdb_id || hasSourceCopy) &&
         !conflicting &&
         !draft.manualEntry &&
         (showOptions || needsManual || !parentMatches) && (

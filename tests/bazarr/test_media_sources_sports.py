@@ -495,17 +495,19 @@ def test_sportarr_search_all_intersects_the_explicit_owner_with_the_filter(clien
     assert queued == [3]
 
 
-@pytest.mark.parametrize('change', ['event_identity', 'recording', 'unchanged'])
+@pytest.mark.parametrize('change', ['event_identity', 'recording', 'score_floor', 'unchanged'])
 def test_manual_sports_download_rechecks_the_selected_event_before_publication(
         client, arr_library, writes, isolated_jobs, tmp_path, monkeypatch, change):
     import sqlalchemy as sa
+    from app.config import settings
     from media_sources import repository
     from subtitles import manual
     from subliminal_patch.score import MAX_SCORES
 
     source_id, _, dated, _ = _events(arr_library, tmp_path)
     path = Path(repository.get_item(dated, arr_library).path)
-    candidate = pipeline.FakeSubtitle(score=MAX_SCORES['movie'])
+    monkeypatch.setattr(settings.general, 'minimum_score_sports', 65)
+    candidate = pipeline.FakeSubtitle(score=int(MAX_SCORES['movie'] * 0.8))
     candidate.matches = {'title', 'year'}
     candidate.page_link = 'https://example.invalid/release'
 
@@ -525,6 +527,8 @@ def test_manual_sports_download_rechecks_the_selected_event_before_publication(
             assert correction.get_json()['part_name'] == 'Qualifying'
         elif change == 'recording':
             video(path.with_name('replacement.mkv'), size=2000).replace(path)
+        elif change == 'score_floor':
+            monkeypatch.setattr(settings.general, 'minimum_score_sports', 90)
 
     monkeypatch.setattr(manual, 'list_all_subtitles', search)
     monkeypatch.setattr(manual, 'compute_score', lambda *args, **kwargs: (candidate.score, candidate.score))
@@ -544,6 +548,8 @@ def test_manual_sports_download_rechecks_the_selected_event_before_publication(
         assert not isolated_jobs._run_job(job)
         if change == 'event_identity':
             assert job.error['reason'] == 'identity_changed'
+        elif change == 'score_floor':
+            assert job.error['reason'] == 'below_minimum_score'
         else:
             assert 'video changed' in job.error['message'].lower()
         assert not saved.exists()
