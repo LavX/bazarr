@@ -13,7 +13,7 @@ from functools import cache
 from itertools import chain
 
 import sqlalchemy as sa
-from utilities.path_case import windows_path_lower, windows_path_lowercase
+from utilities.path_case import windows_path_case_mapping, windows_path_casefold
 
 FileStat = namedtuple('FileStat', 'dev ino size mtime_ns')
 
@@ -517,8 +517,8 @@ class ArrOwners:
             if mapper.sports:
                 codec = _windows_postgres_codec(session)
                 arr_paths = {_sports_path_key(candidate, codec) for candidate in arr_paths}
-                lower = _windows_sql_lower(arr_paths, codec)
-                path_column = _sports_sql_path_key(path_column, lower)
+                fold = _windows_sql_casefold(arr_paths, codec)
+                path_column = _sports_sql_path_key(path_column, fold)
                 if _LOCAL_WINDOWS_PATHS:
                     local_candidates = {_sports_path_key(candidate) for candidate in candidates}
             for row in session.execute(sa.select(model.id, model.path, model.file_size, file_id)
@@ -555,7 +555,7 @@ def _sports_path_key(path, codec=None):
     normalized = path.replace('\\', '/')
     if not _LOCAL_WINDOWS_PATHS:
         return normalized
-    folded = windows_path_lower(normalized)
+    folded = windows_path_casefold(normalized)
     return _encodable_key(folded, codec) if codec else folded
 
 
@@ -568,15 +568,15 @@ def _encodable_key(key, codec):
 @cache
 def _postgres_windows_case_mapping(codec):
     singles, expansions = defaultdict(list), []
-    for original, lowered in windows_path_lowercase().items():
+    for original, folded in windows_path_case_mapping().items():
         original = chr(original)
         if original != _encodable_key(original, codec):
             continue
-        lowered = _encodable_key(lowered, codec)
-        if len(lowered) == 1:
-            singles[lowered].append(original)
+        folded = _encodable_key(folded, codec)
+        if len(folded) == 1:
+            singles[folded].append(original)
         else:
-            expansions.append((original, lowered))
+            expansions.append((original, folded))
     return singles, expansions
 
 
@@ -593,11 +593,11 @@ def _windows_postgres_codec(session):
     return encodings[encoding.replace('_', '')]
 
 
-def _windows_sql_lower(keys=(), codec=None):
+def _windows_sql_casefold(keys=(), codec=None):
     if not _LOCAL_WINDOWS_PATHS:
         return None
     if codec is None:
-        return sa.func.unicode_path_lower
+        return sa.func.unicode_path_casefold
 
     # PostgreSQL's lower() uses its database locale. Use the same case mapping
     # as Python and SQLite. For membership against known folded keys, only
@@ -606,21 +606,29 @@ def _windows_sql_lower(keys=(), codec=None):
     singles, expansions = _postgres_windows_case_mapping(codec)
     rules = [(value, symbol) for symbol in sorted(symbols) for value in singles.get(symbol, ())]
     args = tuple(sa.literal(''.join(values)) for values in zip(*rules))
-    expanded = [(sa.literal(before), sa.literal(after)) for before, after in expansions
-                if symbols.issuperset(after)]
+    relevant = [(before, after) for before, after in expansions
+                if symbols.issuperset(after) and any(after in key for key in keys)]
+    expansion_chars = sa.literal(''.join(before for before, _ in relevant))
+    expanded = [(sa.literal(before), sa.literal(after)) for before, after in relevant]
 
-    def lower(path):
+    def casefold(path):
         folded = sa.func.translate(path, *args) if args else path
-        for before, after in expanded:
-            folded = sa.func.replace(folded, before, after)
-        return folded.collate('C')
+        folded = folded.collate('C')
+        if expanded:
+            # Most paths contain no character that needs a multi-character fold.
+            without_expansions = sa.func.translate(folded, expansion_chars, '')
+            replacement = folded
+            for before, after in expanded:
+                replacement = sa.func.replace(replacement, before, after)
+            folded = sa.case((without_expansions != folded, replacement), else_=folded)
+        return folded
 
-    return lower
+    return casefold
 
 
-def _sports_sql_path_key(path, lower):
+def _sports_sql_path_key(path, fold):
     normalized = sa.func.replace(path, '\\', '/')
-    return lower(normalized) if lower is not None else normalized
+    return fold(normalized) if fold is not None else normalized
 
 
 def _mapped_sports_sql_path(path, rules):
@@ -649,7 +657,7 @@ def arr_claims_stored_path(path, target):
     postgres_keys = set()
     owners = ArrOwners.load(target)
     codec = _windows_postgres_codec(target)
-    lower = None if codec else _windows_sql_lower()
+    fold = None if codec else _windows_sql_casefold()
     for instance in owners.instances.values():
         mapper = owners.mapper(instance.id)
         if mapper is None:
@@ -662,8 +670,8 @@ def arr_claims_stored_path(path, target):
                 postgres_keys.update(_sports_path_key(mapper.forward(value), codec) for value in paths)
             else:
                 mapped = _mapped_sports_sql_path(model.path, mapper.rules)
-                if lower is not None:
-                    mapped = _sports_sql_path_key(mapped, lower)
+                if fold is not None:
+                    mapped = _sports_sql_path_key(mapped, fold)
                 sports_paths.append(sa.select(mapped.label('path')).where(*owned))
             continue
         claim = model.path == path
@@ -675,12 +683,12 @@ def arr_claims_stored_path(path, target):
     claims = [sa.select(model.id).where(sa.or_(*conditions)).correlate(path.table).exists()
               for model, conditions in clauses.items()]
     if sports_paths:
-        local = _sports_sql_path_key(path, lower) if lower is not None else path
+        local = _sports_sql_path_key(path, fold) if fold is not None else path
         claims.append(local.in_(sa.union_all(*sports_paths)))
     if postgres_keys:
         from sqlalchemy.dialects.postgresql import ARRAY
 
-        folded = _sports_sql_path_key(path, _windows_sql_lower(postgres_keys, codec))
+        folded = _sports_sql_path_key(path, _windows_sql_casefold(postgres_keys, codec))
         keys = sa.literal(list(postgres_keys), ARRAY(sa.Text))
         claims.append(folded.in_(sa.select(sa.func.unnest(keys))))
     return sa.or_(sa.false(), *claims)

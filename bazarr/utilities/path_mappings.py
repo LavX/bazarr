@@ -5,7 +5,7 @@ import logging
 import re
 
 from app.config import settings
-from .path_case import windows_path_lower
+from .path_case import windows_path_casefold
 
 
 def validate_sports_mappings(value):
@@ -93,7 +93,7 @@ def apply_sports_mapping(path, mapping, reverse=False, *, ignore_case=False):
             # Locate the original boundary before folding, which can change the prefix length.
             components = prefix.count('/') + 1
             original_prefix = '/'.join(normalized.split('/', components)[:components])
-            matches = windows_path_lower(original_prefix) == windows_path_lower(prefix)
+            matches = windows_path_casefold(original_prefix) == windows_path_casefold(prefix)
         else:
             original_prefix = normalized[:len(prefix)]
             matches = original_prefix == prefix

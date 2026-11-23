@@ -236,6 +236,9 @@ def test_wanted_refreshes_stale_shadows_and_retains_mount_shadows(client, arr_li
 @pytest.mark.parametrize('windows,local,stored,claimed', [
     pytest.param(True, 'C:/Media', r'c:\MEDIA\épreuve.mkv', True, id='windows-filename-case'),
     pytest.param(True, 'C:/Vidéos', r'c:\VIDÉOS\Épreuve.mkv', True, id='windows-prefix-case'),
+    pytest.param(True, 'C:/ΟΣ', r'c:\ος\Épreuve.mkv', True, id='windows-final-sigma'),
+    pytest.param(True, 'C:/ος', r'c:\οσ\Épreuve.mkv', True, id='windows-medial-sigma'),
+    pytest.param(True, 'C:/STRASSE', r'c:\Straße\Épreuve.mkv', True, id='windows-sharp-s'),
     pytest.param(True, 'C:/İzmir', r'c:\İzmir\Épreuve.mkv', True, id='windows-expanding-prefix'),
     pytest.param(True, 'C:/İzmir', r'c:\i̇zmir\épreuve.mkv', True, id='windows-longer-path-prefix'),
     pytest.param(True, 'C:/i̇zmir', r'c:\İzmir\Épreuve.mkv', True, id='windows-shorter-path-prefix'),

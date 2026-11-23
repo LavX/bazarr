@@ -6,16 +6,17 @@ from sys import maxunicode
 
 
 @cache
-def windows_path_lowercase():
-    """Use Unicode lowercase per code point, independently of surrounding text."""
+def windows_path_case_mapping():
+    """Build the default Unicode case-fold mapping for SQL's sparse path comparison."""
     mapping = {}
     for value in range(maxunicode + 1):
         original = chr(value)
-        lowered = original.lower()
-        if lowered != original:
-            mapping[value] = lowered
+        folded = original.casefold()
+        if folded != original:
+            mapping[value] = folded
     return mapping
 
 
-def windows_path_lower(path):
-    return path.translate(windows_path_lowercase()) if path is not None else None
+def windows_path_casefold(path):
+    """Apply default Unicode case folding to the original spelling of the path."""
+    return path.casefold() if path is not None else None
