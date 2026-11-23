@@ -244,9 +244,12 @@ class SportsBlacklistEntry(Resource):
     def delete(self, entry_id):
         try:
             if request.args.get('origin') == 'source':
-                if request.args.get('sources') != '1' or 'arr_instance_id' in request.args:
-                    raise ValueError('Source exclusion removal requires sources=1 and a source row.')
-                removed = sports_activity.remove_blacklist_entry(database, entry_id)
+                removal_key = request.args.get('source_blacklist_key')
+                if request.args.get('sources') != '1' or 'arr_instance_id' in request.args or not removal_key:
+                    raise ValueError('Source exclusion removal requires sources=1 and the entry removal key.')
+                removed = sports_activity.remove_blacklist_entry(database, entry_id, removal_key)
+                if not removed:
+                    return {'message': 'This exclusion changed or was removed. Refresh the list and try again.'}, 409
             else:
                 removed = history.remove_blacklist(
                     database, entry_id, _owner(request.args.get("arr_instance_id"))
