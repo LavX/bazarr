@@ -59,6 +59,7 @@ import SubtitleToolsModal, {
 } from "@/components/modals/SubtitleToolsModal";
 import { useModals } from "@/modules/modals";
 import { notification } from "@/modules/notification";
+import FolderMediaNotice from "@/pages/views/FolderMediaNotice";
 import ItemOverview from "@/pages/views/ItemOverview";
 import { useLanguageProfileBy } from "@/utilities/languages";
 import { navigateApp } from "@/utilities/whatsNew";
@@ -73,12 +74,10 @@ const SportsEventsView: FunctionComponent = () => {
   const [params] = useSearchParams();
   const leagueId = Number.parseInt(id as string);
   const ownerParam = params.get("instance");
+  const owner = ownerParam ? Number(ownerParam) : undefined;
 
-  const { enabled, isLoading } = useSportsAvailability();
-  const leagueQuery = useSportsLeague(
-    leagueId,
-    ownerParam ? Number(ownerParam) : undefined,
-  );
+  const { enabled, arrEnabled, instances, isLoading } = useSportsAvailability();
+  const leagueQuery = useSportsLeague(leagueId, owner);
   const { data: league } = leagueQuery;
   const eventsQuery = useSportsEvents(leagueId, league?.arr_instance_id, 1);
   const { data: eventPage } = eventsQuery;
@@ -219,7 +218,25 @@ const SportsEventsView: FunctionComponent = () => {
   );
 
   if (isLoading) return null;
-  if (!enabled) {
+  if (
+    enabled &&
+    owner !== undefined &&
+    !instances.some(({ id }) => id === owner)
+  ) {
+    return (
+      <Container px={0} fluid>
+        <Text p="md">
+          This Sportarr instance is unavailable. Return to{" "}
+          <Anchor component={Link} to="/sports">
+            Sports
+          </Anchor>
+          .
+        </Text>
+      </Container>
+    );
+  }
+  if (!arrEnabled && enabled) return <FolderMediaNotice />;
+  if (!arrEnabled) {
     return (
       <Container px={0} fluid>
         <Text p="md">

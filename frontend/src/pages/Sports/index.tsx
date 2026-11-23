@@ -8,7 +8,6 @@ import {
   Container,
   Group,
   Menu,
-  Progress,
   Text,
   Tooltip,
 } from "@mantine/core";
@@ -43,6 +42,7 @@ import {
   useSyncSports,
 } from "@/apis/hooks/sports";
 import { useUpgradableItems } from "@/apis/hooks/subtitles";
+import type { ArrInstance } from "@/apis/raw/arrInstances";
 import { BatchAction, BatchItem } from "@/apis/raw/subtitles";
 import { Toolbox } from "@/components";
 import { AudioList, InstanceBadge } from "@/components/bazarr";
@@ -57,6 +57,7 @@ import {
 } from "@/components/forms/MassTranslateForm";
 import { SUBTITLE_TOOL_ACTIONS } from "@/constants/batch";
 import { useModals } from "@/modules/modals";
+import FolderMediaNotice from "@/pages/views/FolderMediaNotice";
 import ItemView from "@/pages/views/ItemView";
 import { LIBRARY_ROUTES } from "@/Router/mediaRoutes";
 
@@ -184,8 +185,9 @@ const LeagueRowActions: FunctionComponent<{ league: SportsLeagueRow }> = ({
   );
 };
 
-const Sports: FunctionComponent = () => {
-  const { instances, enabled, isLoading } = useSportsAvailability();
+const SportarrLeagues: FunctionComponent<{ instances: ArrInstance[] }> = ({
+  instances,
+}) => {
   const { data: audioCatalogue } = useAudioLanguages();
   const nameToCode = useMemo(
     () => new Map(audioCatalogue?.map(({ name, code2 }) => [name, code2])),
@@ -594,19 +596,6 @@ const Sports: FunctionComponent = () => {
     [multiInstance, instanceDefaultId, instanceNameById, upgradableLeagueKeys],
   );
 
-  useDocumentTitle(`Sports - ${useInstanceName()}`);
-
-  if (isLoading) return null;
-  if (!enabled) {
-    return (
-      <Container px={0} fluid>
-        <Text p="md">
-          Enable a Sportarr instance in Connections to view sports.
-        </Text>
-      </Container>
-    );
-  }
-
   return (
     <Container px={0} fluid>
       <Toolbox>
@@ -634,6 +623,22 @@ const Sports: FunctionComponent = () => {
         profileToolbar={profileToolbar}
         itemNoun={{ one: "league", other: "leagues" }}
       ></ItemView>
+    </Container>
+  );
+};
+
+const Sports: FunctionComponent = () => {
+  const { instances, enabled, arrEnabled, isLoading } = useSportsAvailability();
+  useDocumentTitle(`Sports - ${useInstanceName()}`);
+
+  if (isLoading) return null;
+  if (arrEnabled) return <SportarrLeagues instances={instances} />;
+  if (enabled) return <FolderMediaNotice />;
+  return (
+    <Container px={0} fluid>
+      <Text p="md">
+        Enable a Sportarr instance in Connections to view sports.
+      </Text>
     </Container>
   );
 };

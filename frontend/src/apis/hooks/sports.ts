@@ -11,12 +11,22 @@ import sports, {
 } from "@/apis/raw/sports";
 import { isSameRun } from "@/utilities/jobs";
 import { useArrKindAvailability } from "./arrInstances";
+import { useSourceAvailability } from "./mediaSources";
 import { useSystemJobs } from "./system";
 
-// Kept as its own name because most of this module calls it, but the rule it
-// encodes is not specific to sports: see useArrKindAvailability.
 export function useSportsAvailability() {
-  return useArrKindAvailability("sportarr");
+  const arr = useArrKindAvailability("sportarr");
+  const { availability, isLoading } = useSourceAvailability();
+  const sources = availability?.sports;
+  const enabled = arr.enabled || sources?.browsable === true;
+  return {
+    arrEnabled: arr.enabled,
+    instances: arr.enabled ? arr.instances : [],
+    enabled,
+    activity: enabled || sources?.retained === true,
+    searchable: arr.enabled || sources?.searchable === true,
+    isLoading: arr.isLoading || (!arr.enabled && isLoading),
+  };
 }
 // A league in the shape the shared ItemView table expects, so Sports renders
 // through the same component as Series and Movies instead of a bespoke grid.
@@ -59,7 +69,7 @@ export function useSportsLeaguesPagination(
   fetchAll = false,
   nameToCode: ReadonlyMap<string, string> = EMPTY_AUDIO_LANGUAGE_MAP,
 ) {
-  const { instances, enabled } = useSportsAvailability();
+  const { instances, arrEnabled } = useSportsAvailability();
   return usePaginationQuery(
     [
       QueryKeys.Sports,
@@ -82,12 +92,12 @@ export function useSportsLeaguesPagination(
     // searched one page, exactly as the Series and Movies pages would if they
     // did not request every row while a filter is active.
     fetchAll,
-    enabled,
+    arrEnabled,
   );
 }
 
 export function useSportsLeagues(owner?: number, page = 1) {
-  const { enabled, instances } = useSportsAvailability();
+  const { arrEnabled, instances } = useSportsAvailability();
   return useQuery({
     queryKey: [
       QueryKeys.Sports,
@@ -98,13 +108,13 @@ export function useSportsLeagues(owner?: number, page = 1) {
     ],
     queryFn: () => sports.list(owner, (page - 1) * 100),
     enabled:
-      enabled &&
+      arrEnabled &&
       (owner === undefined ||
         instances.some((instance) => instance.id === owner)),
   });
 }
 export function useSportsLeague(id: number, owner?: number) {
-  const { enabled, instances } = useSportsAvailability();
+  const { arrEnabled, instances } = useSportsAvailability();
   return useQuery({
     queryKey: [
       QueryKeys.Sports,
@@ -115,7 +125,7 @@ export function useSportsLeague(id: number, owner?: number) {
     ],
     queryFn: () => sports.getOne(id, owner),
     enabled:
-      enabled &&
+      arrEnabled &&
       Number.isInteger(id) &&
       id > 0 &&
       (owner === undefined ||
@@ -316,7 +326,7 @@ function useSportsActivityPagination<T extends object>(
   fetchAll = false,
   keySignatures: unknown[] = [],
 ) {
-  const { enabled, instances } = useSportsAvailability();
+  const { arrEnabled, instances } = useSportsAvailability();
   const ownerKnown =
     filters.owner === undefined ||
     instances.some((instance) => instance.id === filters.owner);
@@ -342,7 +352,7 @@ function useSportsActivityPagination<T extends object>(
     },
     false,
     fetchAll,
-    enabled && ownerKnown,
+    arrEnabled && ownerKnown,
   );
 }
 

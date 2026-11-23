@@ -37,6 +37,7 @@ import Language from "@/components/bazarr/Language";
 import PlayOnMenu from "@/components/PlayOnMenu";
 import StateIcon from "@/components/StateIcon";
 import TextPopover from "@/components/TextPopover";
+import FolderMediaNotice from "@/pages/views/FolderMediaNotice";
 import HistoryView from "@/pages/views/HistoryView";
 import SportsActivityFilters from "@/pages/views/SportsActivityFilters";
 
@@ -74,7 +75,7 @@ const SportsPlayCell = ({
 );
 
 const SportsHistoryView: FunctionComponent = () => {
-  const { enabled, isLoading } = useSportsAvailability();
+  const { activity, arrEnabled, isLoading } = useSportsAvailability();
   const [params] = useSearchParams();
   const owner = params.get("instance")
     ? Number(params.get("instance"))
@@ -247,7 +248,8 @@ const SportsHistoryView: FunctionComponent = () => {
   );
 
   if (isLoading) return null;
-  if (!enabled) {
+  if (!arrEnabled && activity) return <FolderMediaNotice />;
+  if (!arrEnabled) {
     return (
       <Container px={0} fluid>
         <Text p="md">

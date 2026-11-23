@@ -43,7 +43,11 @@ const SportsActivityFilters: FunctionComponent<Props> = ({
   // With exactly one Sportarr there is nothing to choose, so its actions run
   // against it without making the user pick it first.
   const selectedOwner =
-    owner ?? (instances.length === 1 ? instances[0].id : undefined);
+    owner === undefined
+      ? instances.length === 1
+        ? instances[0].id
+        : undefined
+      : instances.find((instance) => instance.id === owner)?.id;
 
   return (
     <>
