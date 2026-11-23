@@ -442,6 +442,60 @@ def test_scanned_episode_archive_uses_manual_numbers_and_respects_an_identity_co
         assert download.json["reason"] == "archive_no_match"
 
 
+def test_linked_show_with_ambiguous_attachment_resolves_and_downloads_the_selected_source(
+    authenticated_client, copy_database, providers, catalog_provider, monkeypatch, tmp_path,
+):
+    from app.database import TableSourceGroups, TableSourceItems
+    from discover import metadata
+    from discover.handles import resolve_result
+
+    _, session = copy_database
+    owner = add_source(session, "series")
+    group_id = add_title(session, owner, TableSourceGroups, kind="show", title="Moon Show", group_key="moon",
+                         tmdb_id="84", year="2008")
+    add_title(session, owner, TableSourceGroups, kind="show", title="Other Show", group_key="other",
+              tmdb_id="84", imdb_id="tt9999999")
+    path = tmp_path / "Moon.Show.S02E03.mkv"
+    path.write_bytes(b"source episode")
+    episode_id = add_title(session, owner, TableSourceItems, kind="episode", title="Moon Show", group_id=group_id,
+                           season=2, episode=3, path=str(path))
+    session.commit()
+    catalog = {"source": "tmdb", "source_id": "tmdb:show:84", "id": 84, "media_type": "show",
+               "imdb_id": "tt0000084", "title": "Moon Show", "year": 2008}
+    monkeypatch.setattr(metadata, "show_details", lambda _: {"data": {"item": dict(catalog)}})
+    canonical = {"source": "tmdb", "id": 903, "show_id": 84, "season": 2, "episode": 3,
+                 "target_season": 2, "target_episode": 3, "identity_status": "resolved",
+                 "show_imdb_id": "tt0000084", "show_title": "Moon Show", "show_year": 2008}
+    monkeypatch.setattr(metadata, "_episode_details_with_validity",
+                        lambda *_: ({"data": {"episode": canonical}}, float("inf")))
+    details = authenticated_client.get("/api/discover/metadata/shows/84?source=tmdb", headers=HEADERS)
+    assert details.status_code == 200
+    assert details.json["data"]["item"]["copies"] == []
+
+    target = {"media_type": "episode", "imdb_id": "tt0000084", "tmdb_id": 84, "season": 2, "episode": 3}
+    offered = copies_fixtures.copies(authenticated_client, **target)
+    assert offered.status_code == 200
+    [copy] = offered.json["items"]
+    assert copy["local_id"] == episode_id
+    selection = {**target, "show_id": 84, "copy_id": copy["copy_id"], "language": "eng",
+                 "title": "Moon Show", "year": 2008, "episode_identity": canonical}
+    without_tmdb = dict(selection)
+    del without_tmdb["tmdb_id"]
+    assert copies_fixtures.post(authenticated_client, without_tmdb).status_code == 409
+    response = copies_fixtures.post(authenticated_client, selection)
+    assert response.status_code == 200
+    assert response.json["context"]["copy"]["local_id"] == episode_id
+    assert providers.videos[0][1].name == str(path)
+    [row, *_] = response.json["results"]
+    record = resolve_result(row["id"], row["search_id"])
+    assert record["context"]["tmdb_id"] == 84
+    assert record["context"]["copy_id"] == copy["copy_id"]
+    monkeypatch.setattr("app.jobs_queue.event_stream", lambda **kwargs: None)
+    download = download_fixtures.get(authenticated_client, row)
+    assert download.status_code == 200
+    assert download.data == copies_fixtures.SRT
+
+
 def test_tmdb_only_catalog_episode_resolves_a_manually_confirmed_source_copy(
     authenticated_client, copy_database, providers, monkeypatch, tmp_path,
 ):

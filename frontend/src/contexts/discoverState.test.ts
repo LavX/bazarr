@@ -164,6 +164,18 @@ describe("episodeMatchesShow", () => {
 });
 
 describe("searchSelection", () => {
+  it("submits the chooser's linked show identity only when a copy is chosen", () => {
+    const draft = draftWith({ copyTmdbId: undefined });
+    expect(searchSelection(draft)).not.toHaveProperty("tmdb_id");
+    expect(
+      searchSelection({ ...draft, copyId: "c1.episode.3.s1" }),
+    ).toMatchObject({
+      imdb_id: "tt1234567",
+      show_id: 100,
+      tmdb_id: 100,
+      copy_id: "c1.episode.3.s1",
+    });
+  });
   // The draft reaches the comparison only through a valid IMDb id and a valid
   // season and episode, and spells an absent year as undefined rather than
   // null, so the cases that need those spellings are the predicate's alone.

@@ -704,6 +704,13 @@ it("uses both episode numbering schemes to ask for copies of a verified catalog 
 });
 
 it("keeps the linked show's TMDB identity when the title has no attached source copy", async () => {
+  const sourceCopy = {
+    ...copyA,
+    copy_id: "c1.episode.3.s1",
+    arr_instance_id: null,
+    source_id: 1,
+    source_name: "Local show",
+  };
   const conflictingCopy = {
     ...copyA,
     copy_id: "c1.episode.99.s2",
@@ -725,8 +732,8 @@ it("keeps the linked show's TMDB identity when the title has no attached source 
         items:
           params.get("imdb_id") === show.imdb_id &&
           params.get("tmdb_id") !== "100"
-            ? [copyA, conflictingCopy]
-            : [copyA],
+            ? [sourceCopy, conflictingCopy]
+            : [sourceCopy],
         truncated: false,
         owning_titles: 1,
       });
@@ -737,7 +744,7 @@ it("keeps the linked show's TMDB identity when the title has no attached source 
   const listbox = await openSelect(user, "Library copy");
   expect(
     within(listbox).getByRole("option", {
-      name: describeCopy(copyA),
+      name: describeCopy(sourceCopy),
       hidden: true,
     }),
   ).toBeInTheDocument();
@@ -752,7 +759,23 @@ it("keeps the linked show's TMDB identity when the title has no attached source 
   expect(actual.get("tmdb_id")).toBe("100");
   expect(actual.get("episode_tmdb_id")).toBe("401");
 
-  await user.keyboard("{Escape}");
+  await user.click(
+    within(listbox).getByRole("option", {
+      name: describeCopy(sourceCopy),
+      hidden: true,
+    }),
+  );
+  await pickOption(user, "Subtitle language", "English");
+  await user.click(screen.getByRole("button", { name: "Find subtitles" }));
+  await waitFor(() => expect(searches).toHaveLength(1));
+  expect(searches[0]).toMatchObject({
+    imdb_id: "tt1234567",
+    tmdb_id: 100,
+    show_id: 100,
+    copy_id: sourceCopy.copy_id,
+    season: 2,
+    episode: 1,
+  });
   await openSearchOptions(user);
   const imdb = screen.getByLabelText("IMDb ID");
   await user.clear(imdb);

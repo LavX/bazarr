@@ -210,7 +210,7 @@ export function searchSelection(
   }
   const imdbId = draft.imdbId.trim().toLowerCase();
   const validImdb = /^tt\d{7,10}$/.test(imdbId);
-  const copyTmdbId = draft.copyId ? draft.copyTmdbId : undefined;
+  const copyTmdbId = draft.copyId ? copyLookupTmdbId(draft) : undefined;
   if ((!validImdb && (!copyTmdbId || imdbId)) || !draft.language) return null;
   /* eslint-disable camelcase -- the selection is the request body, so its keys
      keep the API spelling. */
@@ -406,7 +406,7 @@ export function discoverContextKey(state: DiscoverSearchInput): string {
     // A different copy is a different search context: its results, preview,
     // feedback and pending responses all belong to the copy that was chosen.
     draft.copyId ?? null,
-    draft.copyId ? (draft.copyTmdbId ?? null) : null,
+    draft.copyId ? (copyLookupTmdbId(draft) ?? null) : null,
     recentMismatch,
   ]);
 }
