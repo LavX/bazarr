@@ -230,10 +230,10 @@ def create_group(*, source_id, library_id, kind, group_key, title, identity_sour
 
 # Items
 
-def get_item(item_id, target=None, *, for_update=False):
+def get_item(item_id, target=None, *, for_update=False, nowait=False):
     statement = sa.select(Items).where(Items.c.id == item_id)
     if for_update:
-        statement = statement.with_for_update()
+        statement = statement.with_for_update(nowait=nowait)
     return _target(target).execute(statement).first()
 
 

@@ -331,7 +331,8 @@ def _write_source_download(video_path, destination, content, *, source, language
 
     @contextmanager
     def publication():
-        with ownership_index.publication(source, prepare) as (current, connection, external_subtitles):
+        with ownership_index.publication(source, prepare, destination=destination) as (
+                current, connection, external_subtitles):
             if current is None or current.path != video_path:
                 raise SubtitleDestinationChanged('The source item moved or was removed')
             if os.path.lexists(destination) and (not is_upgrade or regular_subtitle_version(destination) is None):

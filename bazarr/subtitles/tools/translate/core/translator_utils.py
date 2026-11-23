@@ -111,6 +111,7 @@ def translation_write_kwargs(translator, job_id):
     source = getattr(translator, 'source', None)
     if source is not None:
         from media_sources.indexer import SourcePublicationOwnerIndex, SourcePublicationOwnersChanged
+        from media_sources.translation import automatic_translation_is_current
 
         owners = SourcePublicationOwnerIndex()
 
@@ -122,9 +123,14 @@ def translation_write_kwargs(translator, job_id):
         @contextmanager
         def publication():
             try:
-                with owners.publication(source, prepare) as (current, _, prepared):
+                with owners.publication(source, prepare, destination=translator.dest_srt_file) as (
+                        current, connection, prepared):
                     if current is None or current.profile_id != prepared.profile_id:
-                        raise SourceTranslationChanged('The source item moved or its profile changed')
+                        raise SourceTranslationChanged('The source item moved, was disabled, or its profile changed')
+                    if captured and not automatic_translation_is_current(
+                            current, translator.source_srt_file, translator.from_lang, translator.orig_to_lang,
+                            translator.forced, translator.hi, connection=connection):
+                        raise SourceTranslationChanged('The source translation is no longer eligible')
                     yield
             except SourcePublicationOwnersChanged as error:
                 raise SourceTranslationChanged(str(error)) from error

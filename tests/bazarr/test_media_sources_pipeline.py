@@ -1139,7 +1139,7 @@ def test_source_shared_publication_serializes_a_scanner_admission(world, monkeyp
         assert sync_output_owner_is_unique(context.path, destination, ownership_index=owners)
 
     with ThreadPoolExecutor(max_workers=1) as pool:
-        with owners.publication(context, prepare) as (current, connection, _):
+        with owners.publication(context, prepare, destination=destination) as (current, connection, _):
             assert current == context
             pending = pool.submit(scanner.run_scan, other_source, other_library)
             assert admitting.wait(10)
@@ -1149,6 +1149,201 @@ def test_source_shared_publication_serializes_a_scanner_admission(world, monkeyp
         (result,) = pending.result(timeout=10)
 
     assert result.inserted == 1 and repository.get_item_by_path(str(other)) is not None
+
+
+@pytest.mark.parametrize("layout", ["relative", "absolute"])
+def test_source_publication_survives_an_unrelated_scanner_writer(world, monkeypatch, layout):
+    from concurrent.futures import ThreadPoolExecutor, TimeoutError
+    from contextlib import contextmanager
+    from threading import Event
+
+    from app.config import settings
+    from media_sources import indexer, repository, scanner
+    from subtitles.download import _write_source_download
+    from utilities import video_analyzer
+
+    if world.db.get_bind().dialect.name != "postgresql":
+        pytest.skip("SQLite serializes writers independently of destination geometry")
+    monkeypatch.setattr(video_analyzer, "parse_video_metadata", lambda *args, **kwargs: {
+        "ffprobe": {"audio": [{"language": "eng"}]}, "mediainfo": {},
+    })
+    if layout == "relative":
+        monkeypatch.setattr(settings.general, "subfolder", "relative")
+        monkeypatch.setattr(settings.general, "subfolder_custom", "Subs")
+        folder = world.root / "Subs"
+        folder.mkdir()
+    else:
+        folder = _custom_folder(world, monkeypatch, world.tmp_path)
+    context = _movie(world)
+    destination = folder / Path(context.path).with_suffix(".en.srt").name
+    other_source, other_library, other_root = add_source(world.db, world.tmp_path, name="Other", folder="Other")
+    other = video(other_root / "Unrelated.2002.mkv")
+    inserted, release_scanner, attempted = Event(), Event(), Event()
+    insert_item = repository.insert_item
+    publication = indexer.source_item_publication
+
+    def pause_insert(*args, **kwargs):
+        item_id = insert_item(*args, **kwargs)
+        if kwargs["path"] == str(other):
+            inserted.set()
+            assert release_scanner.wait(10)
+        return item_id
+
+    @contextmanager
+    def observe_publication(source, *, shared=False):
+        assert shared is (layout == "absolute")
+        attempted.set()
+        with publication(source, shared=shared) as result:
+            yield result
+
+    monkeypatch.setattr(repository, "insert_item", pause_insert)
+    monkeypatch.setattr(indexer, "source_item_publication", observe_publication)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        scan = pool.submit(scanner.run_scan, other_source, other_library)
+        try:
+            assert inserted.wait(10)
+            save = pool.submit(_write_source_download, context.path, str(destination), CONTENT,
+                               source=context, language=Language("eng"), recheck_missing=True,
+                               is_upgrade=False, written_paths=[], on_publish=None)
+            assert attempted.wait(10)
+            if layout == "relative":
+                assert save.result(timeout=5)
+                assert destination.read_bytes() == CONTENT
+            else:
+                with pytest.raises(TimeoutError):
+                    save.result(timeout=0.10)
+        finally:
+            release_scanner.set()
+        assert scan.result(timeout=10)[0].inserted == 1
+        assert save.result(timeout=10)
+    assert destination.read_bytes() == CONTENT
+
+
+def test_source_shared_publication_yields_to_a_registry_row_writer(world, monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor, TimeoutError
+    from contextlib import contextmanager
+    from threading import Event
+
+    from media_sources import indexer, repository
+    from media_sources.db import source_transaction
+    from subtitles.download import _write_source_download
+
+    if world.db.get_bind().dialect.name != "postgresql":
+        pytest.skip("PostgreSQL row lock order")
+    folder = _custom_folder(world, monkeypatch, world.tmp_path)
+    context = _movie(world)
+    destination = folder / Path(context.path).with_suffix(".en.srt").name
+    held, can_update, attempted = Event(), Event(), Event()
+    publication = indexer.source_item_publication
+
+    def update():
+        with source_transaction() as connection:
+            assert repository.get_item(context.item_id, connection, for_update=True) is not None
+            held.set()
+            assert can_update.wait(10)
+            repository.update_item(context.item_id, connection, title="Updated")
+
+    @contextmanager
+    def observe_publication(source, *, shared=False):
+        assert shared
+        attempted.set()
+        with publication(source, shared=shared) as result:
+            yield result
+
+    monkeypatch.setattr(indexer, "source_item_publication", observe_publication)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        writer = pool.submit(update)
+        try:
+            assert held.wait(10)
+            save = pool.submit(_write_source_download, context.path, str(destination), CONTENT,
+                               source=context, language=Language("eng"), recheck_missing=True,
+                               is_upgrade=False, written_paths=[], on_publish=None)
+            assert attempted.wait(10)
+            with pytest.raises(TimeoutError):
+                save.result(timeout=0.10)
+        finally:
+            can_update.set()
+        writer.result(timeout=10)
+        assert save.result(timeout=10)
+    assert repository.get_item(context.item_id).title == "Updated"
+    assert destination.read_bytes() == CONTENT
+
+
+def test_source_translation_rechecks_library_enablement_after_preparation(world, monkeypatch):
+    from contextlib import contextmanager
+
+    from media_sources import indexer, repository
+    from subtitles.tools.subsync_engines import write_subtitle_file
+    from subtitles.tools.translate.core.translator_utils import (SourceTranslationChanged, translation_write_kwargs,
+                                                               translated_destination_path)
+
+    _custom_folder(world, monkeypatch, world.tmp_path)
+    context = _movie(world)
+    original = Path(context.path).with_suffix(".en.srt")
+    original.write_bytes(CONTENT)
+    destination = translated_destination_path(context.path, "hu", False, False)
+    publication = indexer.SourcePublicationOwnerIndex.publication
+
+    @contextmanager
+    def disable_after_preparation(self, source, prepare, **kwargs):
+        def disable():
+            prepared = prepare()
+            repository.update_library(context.library_id, world.db, enabled=0)
+            return prepared
+        with publication(self, source, disable, **kwargs) as result:
+            yield result
+
+    monkeypatch.setattr(indexer.SourcePublicationOwnerIndex, "publication", disable_after_preparation)
+    translator = SimpleNamespace(source=context, video_path=context.path, source_srt_file=str(original),
+                                 dest_srt_file=destination, from_lang="en", orig_to_lang="hu", forced=False, hi=False)
+    with pytest.raises(SourceTranslationChanged, match="disabled"):
+        write_subtitle_file(context.path, destination, CONTENT, **translation_write_kwargs(translator, None))
+
+    assert not Path(destination).exists()
+
+
+def test_source_combine_sweeps_stale_siblings_without_scanning_under_the_writer(world, monkeypatch):
+    import os
+    from contextlib import contextmanager
+
+    from media_sources import indexer
+    from subtitles.tools.combine import main as combine
+
+    folder = _custom_folder(world, monkeypatch, world.tmp_path)
+    context = _movie(world)
+    media = Path(context.path)
+    media.with_suffix(".en.srt").write_bytes(CONTENT)
+    media.with_suffix(".hu.srt").write_bytes(CONTENT)
+    superseded = folder / media.with_suffix(".en.combined-hu.ass").name
+    superseded.write_bytes(CONTENT)
+    publication = indexer.source_item_publication
+    scandir = os.scandir
+    locked_scans = []
+    writer_open = False
+
+    @contextmanager
+    def observe_writer(source, *, shared=False):
+        nonlocal writer_open
+        with publication(source, shared=shared) as result:
+            writer_open = True
+            try:
+                yield result
+            finally:
+                writer_open = False
+
+    def observe_scan(path):
+        if writer_open:
+            locked_scans.append(path)
+        return scandir(path)
+
+    monkeypatch.setattr(indexer, "source_item_publication", observe_writer)
+    monkeypatch.setattr(os, "scandir", observe_scan)
+    result = combine.try_combine_for_video(context.path, "movie", languages=["en", "hu"], format="srt", source=context)
+
+    assert result.status == "built" and Path(result.path).is_file()
+    assert not superseded.exists()
+    assert not locked_scans
 
 
 # Sync

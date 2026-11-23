@@ -85,11 +85,15 @@ def source_item_title(source: SourceItemContext) -> str:
     return ' - '.join(parts)
 
 
-def resolve_item(item_id, target=None, *, for_update=False) -> SourceItemContext:
+def resolve_item(item_id, target=None) -> SourceItemContext:
     """Build the context from the item's row and its group, or raise ``SourceItemGone``."""
-    item = repository.get_item(item_id, target, for_update=for_update)
+    item = repository.get_item(item_id, target)
     if item is None:
         raise SourceItemGone(item_id)
+    return _context_for_item(item, target)
+
+
+def _context_for_item(item, target):
     group = repository.get_group(item.group_id, target) if item.group_id is not None else None
     library = repository.get_library(item.library_id, target)
     source = repository.get_source(item.source_id, target)
@@ -121,12 +125,16 @@ def resolve_item(item_id, target=None, *, for_update=False) -> SourceItemContext
 
 
 
-def resolve_same_item(source, target=None, *, for_update=False):
+def resolve_same_item(source, target=None):
     """Resolve a captured item only while its row, owner and path still match."""
     try:
-        current = resolve_item(source.item_id, target, for_update=for_update)
+        current = resolve_item(source.item_id, target)
     except SourceItemGone:
         return None
+    return _same_context(source, current)
+
+
+def _same_context(source, current):
     if not source.same_item(current) or (source.source_id, source.library_id, source.path, source.kind) != (
             current.source_id, current.library_id, current.path, current.kind):
         return None
@@ -137,7 +145,11 @@ def resolve_same_item(source, target=None, *, for_update=False):
 def source_item_publication(source, *, shared=False):
     """Keep the captured item stable through an atomic subtitle publication."""
     with source_transaction() as connection:
-        if shared and connection.dialect.name == 'postgresql':
+        shared_postgres = shared and connection.dialect.name == 'postgresql'
+        item = repository.get_item(source.item_id, connection, for_update=True, nowait=shared_postgres)
+        if item is not None and shared_postgres:
             # The item row lock alone cannot see an owner the scanner is about to insert.
+            # Take it first, as the scanner may need to upgrade from its row lock to UPDATE.
             connection.execute(text('LOCK TABLE table_source_items IN SHARE MODE NOWAIT'))
-        yield resolve_same_item(source, connection, for_update=True), connection
+        current = _same_context(source, _context_for_item(item, connection)) if item is not None else None
+        yield current, connection

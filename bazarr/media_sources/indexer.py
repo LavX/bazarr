@@ -11,6 +11,7 @@ import os
 import sqlite3
 from contextlib import contextmanager
 from functools import partial
+from time import sleep
 
 import sqlalchemy as sa
 from sqlalchemy.orm import Session
@@ -128,33 +129,64 @@ class SourcePublicationOwnerIndex(SourceOutputOwnerIndex):
         # A relative custom path can also resolve into another video's directory.
         return bool(get_subtitle_destination_folder())
 
+    def _shared_destination(self, source, destination, destination_setting):
+        if destination is None:
+            return False
+        media_directory = os.path.normcase(os.path.realpath(os.path.dirname(source.path)))
+        directory = os.path.normcase(os.path.realpath(os.path.dirname(destination)))
+        subfolder, custom = destination_setting
+        if not custom:
+            return directory != media_directory
+        relative = os.path.normcase(os.path.normpath(custom))
+        if (subfolder != 'relative' or os.path.isabs(relative)
+                or relative == '..' or relative.startswith('..' + os.sep)):
+            return True
+        # An ordinary child directory belongs to its media directory. A resolved
+        # alias or a folder already claimed from elsewhere shares the registry.
+        local_directory = os.path.join(media_directory, relative) if relative != '.' else media_directory
+        if directory not in (media_directory, local_directory):
+            return True
+        return any(folder == directory and any(os.path.dirname(video) != media_directory for video in videos)
+                   for (folder, _), videos in self._owners.items())
+
     @contextmanager
-    def publication(self, source, prepare=None):
+    def publication(self, source, prepare=None, *, destination=None):
         """Keep slow ownership and subtitle discovery outside the writer transaction."""
         for _ in range(2):
             self._loaded = False
             self._owners = {}
             self._prepared_paths = None
             destination_setting = settings.general.subfolder, get_subtitle_destination_folder()
-            shared = bool(destination_setting[1])
             prepared = prepare() if prepare is not None else None
+            shared = self._shared_destination(source, destination, destination_setting)
             if shared and self._prepared_paths is None:
                 raise SourcePublicationOwnersChanged('The shared subtitle owners could not be verified')
-            publishing = False
-            try:
-                with source_item_publication(source, shared=shared) as (current, connection):
-                    if destination_setting != (settings.general.subfolder, get_subtitle_destination_folder()):
-                        continue
-                    if shared and self._prepared_paths != self._source_owner_paths(connection):
-                        continue
-                    publishing = True
-                    yield current, connection, prepared
-                    return
-            except sa.exc.OperationalError as error:
-                sqlstate = getattr(error.orig, 'sqlstate', None) or getattr(error.orig, 'pgcode', None)
-                if publishing or sqlstate != '55P03':
-                    raise
-                raise SourcePublicationOwnersChanged('The shared subtitle owners are being updated') from error
+            # A scanner with the conflicting lock finishes outside this transaction.
+            # Retrying after rollback leaves it free to finish any remaining row writes.
+            for delay in (0, 0.025, 0.05, 0.10, 0.20, 0.40, 0.40):
+                if delay:
+                    sleep(delay)
+                publishing = False
+                try:
+                    with source_item_publication(source, shared=shared) as (current, connection):
+                        if destination_setting != (settings.general.subfolder, get_subtitle_destination_folder()):
+                            break
+                        if shared and current is not None and self._prepared_paths != self._source_owner_paths(connection):
+                            break
+                        if current is not None:
+                            state = repository.item_state(current.item_id, connection)
+                            if (state is None or not state.source_enabled or not state.library_enabled
+                                    or not os.path.isfile(current.path)):
+                                current = None
+                        publishing = True
+                        yield current, connection, prepared
+                        return
+                except sa.exc.OperationalError as error:
+                    sqlstate = getattr(error.orig, 'sqlstate', None) or getattr(error.orig, 'pgcode', None)
+                    if publishing or sqlstate != '55P03':
+                        raise
+            else:
+                raise SourcePublicationOwnersChanged('The shared subtitle owners are being updated')
         raise SourcePublicationOwnersChanged('The shared subtitle owners changed while preparing publication')
 
 
