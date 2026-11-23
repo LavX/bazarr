@@ -142,6 +142,28 @@ def test_the_scheduler_rebuilds_the_scan_task_whenever_the_tasks_are_refreshed(s
     assert "scan_media_sources" in jobs
 
 
+@pytest.mark.parametrize("job_id", [None, 10])
+def test_disabled_upgrades_leave_source_shadows_unchanged(source, monkeypatch, job_id):
+    from app.config import settings
+    from media_source_helpers import add_item, video
+    from media_sources import repository, wanted
+    from subtitles import upgrade
+
+    item_id = add_item(source.session, source.id, source.library_id, video(source.root / "Shadowed.mkv"),
+                       arr_shadow=1)
+    queued = []
+    queue = MagicMock()
+    queue.add_job_from_function.side_effect = lambda *args, **kwargs: queued.append(args)
+    monkeypatch.setattr(upgrade, "jobs_queue", queue)
+    monkeypatch.setattr(wanted, "notify_wanted_changes", lambda: None)
+    monkeypatch.setattr(settings.general, "upgrade_subs", False)
+
+    upgrade.upgrade_source_subtitles(job_id=job_id)
+
+    assert repository.get_item(item_id).arr_shadow == 1
+    assert queued == []
+
+
 def test_a_failure_configuring_the_scan_task_never_stops_the_rest_of_the_schedule(source, real_scheduler,
                                                                                   monkeypatch, caplog):
     from media_sources import schedule

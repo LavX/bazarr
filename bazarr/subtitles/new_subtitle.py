@@ -25,7 +25,7 @@ from contextlib import nullcontext
 
 from app.config import settings
 from media_servers.events import publication_callback
-from subtitles.tools.subsync_engines import subtitle_mutation, subtitle_write_locks
+from subtitles.tools.subsync_engines import open_regular_subtitle, subtitle_mutation, subtitle_write_locks
 
 logger = logging.getLogger(__name__)
 
@@ -169,7 +169,7 @@ def _copy_into_new_name(tmp_path, path, discard_source=True):
     return identity
 
 
-def _backup_for_replacement(path):
+def _backup_for_replacement(path, *, expected_version=None):
     """Copy the file at ``path`` beside it and return the copy's name.
 
     The copy is the only thing that can put the original back when a write is
@@ -177,10 +177,10 @@ def _backup_for_replacement(path):
     publication boundary. Returns None when there is no file to keep.
     """
     try:
-        source = open(path, 'rb')
+        source_file = open(path, 'rb') if expected_version is None else open_regular_subtitle(path, expected_version)
     except FileNotFoundError:
         return None
-    with source:
+    with source_file as source:
         fd, backup = tempfile.mkstemp(prefix='.bazarr-replaced-', suffix='.tmp',
                                       dir=os.path.dirname(path))
         try:

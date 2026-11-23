@@ -2,12 +2,18 @@
 
 import operator
 import ast
+
+import sqlalchemy as sa
 from functools import reduce
 
 from api.swaggerui import subtitles_language_model
 from app.database import TableEpisodes, TableShows, TableHistory, TableBlacklist, database, select, func
 from subtitles.upgrade import get_upgradable_episode_subtitles,  _language_still_desired
 from utilities.pretty_date import pretty_date
+
+from media_sources import repository
+from media_sources.history_rows import arr_history_rows, history_origin_fields, merge_history_rows, mixed_history_page
+from media_sources.union import SourceKeyFilter, add_source_arguments, includes_sources
 
 from flask_restx import Resource, Namespace, inputs, reqparse, fields, marshal
 from ..utils import authenticate, postprocess
@@ -27,6 +33,8 @@ class EpisodesHistory(Resource):
                                     help='Include Embedded Source records (default excludes them)')
     get_request_parser.add_argument('include_upgradable', type=inputs.boolean, required=False, default=True,
                                     help='Include the upgradable computation (default includes it)')
+
+    add_source_arguments(get_request_parser)
 
     get_language_model = api_ns_episodes_history.model('subtitles_language_model', subtitles_language_model)
 
@@ -65,12 +73,21 @@ class EpisodesHistory(Resource):
         'total': fields.Integer(),
     })
 
+    mixed_data_model = api_ns_episodes_history.model(
+        'EpisodeHistorySourceRow', {**data_model, **history_origin_fields})
+    mixed_response_model = {
+        **get_response_model, 'data': fields.Nested(mixed_data_model), 'source_keys': fields.List(fields.String),
+    }
+
     @authenticate
     @api_ns_episodes_history.response(401, 'Not Authenticated')
     @api_ns_episodes_history.doc(parser=get_request_parser)
     def get(self):
         """List episodes history events"""
         args = self.get_request_parser.parse_args()
+        source_filter = SourceKeyFilter(tuple(args.get('source_key[]') or ()))
+        history = repository.History
+        mixed = includes_sources(args, database, history, history.c.item_kind == 'episode')
         start = args.get('start')
         length = args.get('length')
         local_episode_id = args.get('id')
@@ -84,7 +101,7 @@ class EpisodesHistory(Resource):
                                        TableBlacklist.arr_instance_id) \
             .subquery()
 
-        query_conditions = [(TableEpisodes.title.is_not(None))]
+        query_conditions = [TableEpisodes.title.is_not(None), source_filter.arr(TableHistory.arr_instance_id)]
         if not include_embedded:
             # "Treat Embedded Subtitles as Downloaded" writes one action=7 row
             # per episode/language combination; a large library carries six
@@ -141,10 +158,20 @@ class EpisodesHistory(Resource):
                             (func.coalesce(TableHistory.arr_instance_id, -1) ==
                              func.coalesce(blacklisted_subtitles.c.arr_instance_id, -1))),
                   isouter=True) \
-            .where(reduce(operator.and_, query_conditions)) \
-            .order_by(TableHistory.timestamp.desc(), TableHistory.id.desc())
-        if length > 0:
-            stmt = stmt.limit(length).offset(start)
+            .where(reduce(operator.and_, query_conditions))
+        if mixed:
+            arr_keys = select(TableHistory.id, TableHistory.arr_instance_id.label('_owner'),
+                              sa.cast(TableHistory.timestamp, sa.Text).label('timestamp')).select_from(TableHistory)
+            arr_keys = arr_keys.join(TableEpisodes).join(
+                TableShows, onclause=TableHistory.series_id == TableShows.id).where(*query_conditions)
+            timeline, count = mixed_history_page(database, arr_keys, 'episode', args,
+                                                 arr_detail=bool(local_episode_id or episodeid or local_series_id))
+            rows = arr_history_rows(database, stmt.add_columns(TableHistory.upgradedFromId), TableHistory.id, timeline)
+        else:
+            stmt = stmt.order_by(TableHistory.timestamp.desc(), TableHistory.id.desc())
+            if length > 0:
+                stmt = stmt.limit(length).offset(start)
+            rows = database.execute(stmt).all()
         episode_history = [{
             'history_id': x.history_id,
             'id': x.id,
@@ -175,13 +202,14 @@ class EpisodesHistory(Resource):
             'dont_matches': x.not_matched,
             'external_subtitles': [y[1] for y in ast.literal_eval(x.external_subtitles) if y[1]],
             'blacklisted': bool(x.blacklisted),
-        } for x in database.execute(stmt).all()]
+            **({'upgradedFromId': x.upgradedFromId} if mixed else {}),
+        } for x in rows]
 
         # The upgradable computation aggregates the whole history table and
         # materializes every library-wide candidate. The series detail table
         # reads only score, provider and matches, so callers that never read
         # upgradable can skip it with include_upgradable=false.
-        if include_upgradable:
+        if include_upgradable and (episode_history or not mixed):
             upgradable_episodes_not_perfect = get_upgradable_episode_subtitles(history_id_list=[x['history_id'] for x in
                                                                                                 episode_history])
 
@@ -205,7 +233,8 @@ class EpisodesHistory(Resource):
                 item.update({'upgradable': False})
 
             del item['path']
-            del item['video_path']
+            if not mixed:
+                del item['video_path']
             del item['external_subtitles']
             del item['profileId']
 
@@ -228,6 +257,11 @@ class EpisodesHistory(Resource):
                 item.update({'dont_matches': ast.literal_eval(item['dont_matches'])})
             else:
                 item.update({'dont_matches': []})
+
+        if mixed:
+            data, source_keys = merge_history_rows(database, timeline, episode_history, 'episode',
+                                                   include_upgradable=include_upgradable)
+            return marshal({'data': data, 'total': count, 'source_keys': source_keys}, self.mixed_response_model)
 
         count = database.execute(
             select(func.count())

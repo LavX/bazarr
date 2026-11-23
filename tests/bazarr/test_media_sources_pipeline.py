@@ -124,6 +124,91 @@ def _generate(context, languages=(("en", "False", "False"),), **kwargs):
                                    context.media_type, context.profile_id, source=context, **kwargs))
 
 
+def test_download_keeps_another_registered_videos_exact_engine_named_sidecar(world, monkeypatch):
+    from media_sources.indexer import SourcePublicationOwnerIndex
+    from subtitles.indexer.utils import add_sync_engine_outputs
+
+    folder = _custom_folder(world, monkeypatch, world.tmp_path)
+    context = _movie(world, "Film.mkv")
+    owner, library, other_root = add_source(world.db, world.tmp_path, name="Other", folder="Other")
+    competing = video(other_root / "Film.en.ffsubsync.mkv")
+    add_item(world.db, owner, library, competing)
+    protected = folder / "Film.en.ffsubsync.srt"
+    obsolete = folder / "Film.en.alass.srt"
+    protected.write_bytes(CONTENT.replace(b"Downloaded", b"Other video"))
+    obsolete.write_bytes(CONTENT)
+    _download(monkeypatch)
+
+    assert len(_generate(context)) == 1
+    assert (folder / "Film.en.srt").read_bytes() == CONTENT
+    assert protected.read_bytes() == CONTENT.replace(b"Downloaded", b"Other video")
+    assert not obsolete.exists()
+    found = add_sync_engine_outputs(folder, {}, video_path=str(competing),
+                                    ownership_index=SourcePublicationOwnerIndex())
+    assert protected.name in found
+    local_found = add_sync_engine_outputs(competing.parent, {}, video_path=str(competing),
+                                          ownership_index=SourcePublicationOwnerIndex())
+    assert competing.name not in local_found
+
+
+def test_source_download_does_not_clean_generated_siblings_after_releasing_the_owner_proof(world, monkeypatch):
+    from contextlib import contextmanager
+
+    from media_sources import indexer
+    from subtitles.download import _write_source_download
+
+    folder = _custom_folder(world, monkeypatch, world.tmp_path)
+    context = _movie(world, 'Film.mkv')
+    other_source, other_library, other_root = add_source(world.db, world.tmp_path, name='Other', folder='Other')
+    destination = folder / 'Film.en.srt'
+    obsolete = folder / 'Film.en.alass.srt'
+    obsolete.write_bytes(CONTENT)
+    protected = folder / 'Film.en.ffsubsync.srt'
+    original_publication = indexer.source_item_publication
+    before_commit = []
+
+    @contextmanager
+    def publish_then_admit(source, *, shared=False):
+        with original_publication(source, shared=shared) as outcome:
+            yield outcome
+            before_commit.append(obsolete.exists())
+        # The scanner and the other writer land as soon as the registry is writable again.
+        add_item(world.db, other_source, other_library, video(other_root / 'Film.en.ffsubsync.mkv'))
+        protected.write_bytes(CONTENT)
+
+    monkeypatch.setattr(indexer, 'source_item_publication', publish_then_admit)
+    assert _write_source_download(context.path, str(destination), CONTENT, source=context,
+                                  language=Language('eng'), recheck_missing=False, is_upgrade=False,
+                                  written_paths=[], on_publish=None)
+    assert before_commit == [False]
+    assert destination.read_bytes() == protected.read_bytes() == CONTENT
+
+
+def test_download_keeps_a_provider_result_from_reaching_a_replaced_video(world, monkeypatch):
+    from media_sources import repository
+    from subtitles import download
+
+    context = _movie(world, "Film.mkv")
+    path = Path(context.path)
+    original_inode = path.stat().st_ino
+
+    def replace_during_provider_request(videos, **kwargs):
+        replacement = video(path.with_name("replacement.mkv"))
+        replacement.replace(path)
+        status = path.stat()
+        assert status.st_ino != original_inode
+        repository.update_item(context.item_id, world.db, file_dev=str(status.st_dev), file_ino=str(status.st_ino),
+                               file_size=status.st_size, file_mtime_ns=status.st_mtime_ns)
+        (requested,) = videos
+        return {requested: [FakeSubtitle()]}
+
+    monkeypatch.setattr(download, "download_best_subtitles", replace_during_provider_request)
+    assert _generate(context) == []
+    assert repository.get_item(context.item_id).created_at == context.created_at
+    assert not path.with_suffix(".en.srt").exists()
+    assert not world.published
+
+
 # The whole flow
 
 def test_a_search_saves_a_subtitle_next_to_the_file_and_writes_history_and_the_index(world, monkeypatch):
@@ -1261,6 +1346,151 @@ def test_source_shared_publication_serializes_a_scanner_admission(world, monkeyp
     assert result.inserted == 1 and repository.get_item_by_path(str(other)) is not None
 
 
+def _legacy_owner_insert(world, owner, path):
+    from app.database import TableArrInstances, TableMovies, TableSportsEvents, TableSportsLeagues
+
+    instance = world.db.execute(sa.insert(TableArrInstances).values(
+        kind=owner, name="Fixture owner", stable_key=owner, port=5000,
+    )).inserted_primary_key[0]
+    if owner == "radarr":
+        return sa.insert(TableMovies).values(arr_instance_id=instance, path=str(path), title="Other film",
+                                             radarrId=1, tmdbId="1")
+    league = world.db.execute(sa.insert(TableSportsLeagues).values(
+        arr_instance_id=instance, sportarrLeagueId=2, title="Fixture league",
+    )).inserted_primary_key[0]
+    return sa.insert(TableSportsEvents).values(arr_instance_id=instance, league_id=league, sportarrEventId=3,
+                                               file_id=4, path=str(path), title="Other event")
+
+
+@pytest.mark.parametrize("owner", ["radarr", "sportarr"])
+def test_shared_source_download_rechecks_legacy_owners_added_after_preparation(world, monkeypatch, owner):
+    from media_sources.db import source_transaction
+    from media_sources.indexer import SourcePublicationOwnerIndex
+    from subtitles.download import _write_source_download
+
+    folder = _custom_folder(world, monkeypatch, world.tmp_path)
+    context = _movie(world, "Film.mkv")
+    other = video(world.tmp_path / "Other" / "Film.mkv")
+    destination = folder / "Film.en.srt"
+    insertion = _legacy_owner_insert(world, owner, other)
+    registry_snapshot = SourcePublicationOwnerIndex._registry_snapshot
+    committed = []
+
+    def snapshot_then_admit(self, target=None):
+        snapshot = registry_snapshot(self, target)
+        if target is None and not committed:
+            with source_transaction() as connection:
+                connection.execute(insertion)
+            committed.append(True)
+        return snapshot
+
+    monkeypatch.setattr(SourcePublicationOwnerIndex, "_registry_snapshot", snapshot_then_admit)
+    assert not _write_source_download(context.path, str(destination), CONTENT, source=context,
+                                      language=Language("eng"), recheck_missing=False, is_upgrade=False,
+                                      written_paths=[], on_publish=None)
+    assert committed == [True]
+    assert not destination.exists()
+
+
+@pytest.mark.parametrize("owner", ["radarr", "sportarr"])
+def test_shared_source_publication_holds_concurrent_legacy_admission_until_exit(world, monkeypatch, owner):
+    from concurrent.futures import ThreadPoolExecutor, TimeoutError
+    from threading import Event
+
+    from media_sources.db import source_transaction
+    from media_sources.indexer import SourcePublicationOwnerIndex
+    from subtitles.tools.subsync_engines import sync_output_owner_is_unique
+
+    folder = _custom_folder(world, monkeypatch, world.tmp_path)
+    context = _movie(world, "Film.mkv")
+    other = video(world.tmp_path / "Other" / "Film.mkv")
+    destination = folder / "Film.en.srt"
+    insertion = _legacy_owner_insert(world, owner, other)
+    started = Event()
+    owners = SourcePublicationOwnerIndex()
+
+    def prepare():
+        assert sync_output_owner_is_unique(context.path, destination, ownership_index=owners)
+
+    def admit():
+        started.set()
+        with source_transaction() as connection:
+            if connection.dialect.name == "postgresql":
+                connection.exec_driver_sql("SET LOCAL lock_timeout = '3s'")
+            connection.execute(insertion)
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        with owners.publication(context, prepare, destination=destination) as (current, _, _):
+            assert current == context
+            pending = pool.submit(admit)
+            assert started.wait(2)
+            with pytest.raises(TimeoutError):
+                pending.result(timeout=0.15)
+        pending.result(timeout=4)
+    assert not sync_output_owner_is_unique(context.path, destination, ownership_index=SourcePublicationOwnerIndex())
+
+
+@pytest.mark.parametrize('mapping', ['radarr-global', 'radarr-instance', 'sportarr-global'])
+def test_source_download_rechecks_mappings_for_an_existing_owner_in_a_shared_relative_folder(
+        world, monkeypatch, mapping):
+    import json
+
+    from app.config import settings
+    from app.database import TableArrInstances
+    from discover.metadata import CONFIG_LOCK
+    from media_sources.db import source_transaction
+    from media_sources.indexer import SourcePublicationOwnerIndex
+    from subtitles.download import _write_source_download
+    from subtitles.tools.subsync_engines import sync_output_owner_is_unique
+    from utilities.path_mappings import path_mappings
+
+    monkeypatch.setattr(settings.general, 'subfolder', 'relative')
+    monkeypatch.setattr(settings.general, 'subfolder_custom', 'Subs')
+    monkeypatch.setattr(path_mappings, 'path_mapping_series', [])
+    monkeypatch.setattr(path_mappings, 'path_mapping_movies', [])
+    monkeypatch.setattr(settings.general, 'path_mappings_sports', [])
+    context = _movie(world, 'Film.mkv')
+    folder = Path(context.path).parent / 'Subs'
+    folder.mkdir()
+    other = video(world.tmp_path / 'mapped' / 'Film.mkv')
+    (other.parent / 'Subs').symlink_to(folder, target_is_directory=True)
+    remote = str(world.tmp_path / 'remote')
+    owner, scope = mapping.split('-')
+    insertion = _legacy_owner_insert(world, owner, Path(remote) / 'Film.mkv')
+    with source_transaction() as connection:
+        connection.execute(insertion)
+    destination = folder / 'Film.en.srt'
+    assert sync_output_owner_is_unique(context.path, str(destination), ownership_index=SourcePublicationOwnerIndex())
+
+    snapshot = SourcePublicationOwnerIndex._registry_snapshot
+    applied = []
+
+    def prepare_then_change_mapping(self, target=None):
+        rows = snapshot(self, target)
+        if target is None and not applied:
+            pairs = [[remote, str(other.parent)]]
+            with CONFIG_LOCK:
+                if scope == 'instance':
+                    with source_transaction() as connection:
+                        connection.execute(sa.update(TableArrInstances).where(TableArrInstances.kind == owner)
+                                           .values(path_mappings=json.dumps(pairs)))
+                elif owner == 'sportarr':
+                    monkeypatch.setattr(settings.general, 'path_mappings_sports', pairs)
+                else:
+                    monkeypatch.setattr(settings.general, 'path_mappings', [])
+                    monkeypatch.setattr(settings.general, 'path_mappings_movie', pairs)
+                    path_mappings.update()
+            applied.append(True)
+        return rows
+
+    monkeypatch.setattr(SourcePublicationOwnerIndex, '_registry_snapshot', prepare_then_change_mapping)
+    assert not _write_source_download(context.path, str(destination), CONTENT, source=context,
+                                      language=Language('eng'), recheck_missing=False, is_upgrade=False,
+                                      written_paths=[], on_publish=None)
+    assert applied == [True] and not destination.exists()
+    assert not sync_output_owner_is_unique(context.path, str(destination), ownership_index=SourcePublicationOwnerIndex())
+
+
 @pytest.mark.parametrize("layout", ["relative", "absolute"])
 def test_source_publication_survives_an_unrelated_scanner_writer(world, monkeypatch, layout):
     from concurrent.futures import ThreadPoolExecutor, TimeoutError
@@ -2056,6 +2286,51 @@ def test_episode_download_dispatches_runtime_and_indexes_translation_and_combine
     assert [(event.media_type, event.operation, event.source_item_id) for event in world.published] == [
         ("episode", operation, context.item_id) for operation in ("download", "translate", "combine")
     ]
+
+
+def test_completed_source_translation_keeps_history_during_owner_removal(world, monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor, TimeoutError
+    from threading import Event
+
+    from media_sources import repository
+    from media_sources.db import source_transaction
+    from subtitles.tools.translate.core.translator_utils import create_process_result, record_source_translation
+
+    context = _movie(world)
+    translated = Path(context.path).with_suffix(".hu.srt")
+    translated.write_bytes(CONTENT)
+    result = create_process_result("Fixture translation", context.path, "hu", False, False,
+                                   str(translated), "movie", source=context)
+    deleting = Event()
+    insert_history = repository.insert_history
+
+    def delete_source():
+        deleting.set()
+        with source_transaction() as connection:
+            if connection.dialect.name == "postgresql":
+                connection.exec_driver_sql("SET LOCAL lock_timeout = '3s'")
+            repository.delete_source(world.source_id, connection)
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        pending = []
+
+        def start_removal(target, **fields):
+            assert target.in_transaction()
+            pending.append(pool.submit(delete_source))
+            assert deleting.wait(2)
+            with pytest.raises(TimeoutError):
+                pending[0].result(timeout=0.15)
+            return insert_history(target, **fields)
+
+        monkeypatch.setattr(repository, "insert_history", start_removal)
+        assert record_source_translation(context, result)
+        pending[0].result(timeout=4)
+
+    (row,) = world.db.execute(sa.select(repository.History)).all()
+    assert row.action == 6 and row.source_id is None and row.item_id is None
+    assert (row.source_name, row.item_title, row.video_path, row.subtitles_path) == (
+        context.source_name, context.title, context.path, str(translated),
+    )
 
 
 @pytest.mark.parametrize("translator", ["google_translate", "gemini", "lingarr", "openrouter"])

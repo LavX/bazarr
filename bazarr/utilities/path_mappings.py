@@ -5,7 +5,6 @@ import logging
 import re
 
 from app.config import settings
-from .path_case import windows_path_casefold
 
 
 def validate_sports_mappings(value):
@@ -59,7 +58,7 @@ def global_sports_mappings():
     return usable_sports_mappings(raw, 'global')
 
 
-def read_sports_mappings(value, inherit=True):
+def read_sports_mappings(value, inherit=True, *, fallback=None):
     """Resolve an instance's path mappings, global first then its own override.
 
     ``value`` is the instance's raw ``path_mappings`` column. An instance that
@@ -72,16 +71,19 @@ def read_sports_mappings(value, inherit=True):
     instance overrides", so inheriting there would show a global mapping as an
     instance override and persist it as one on the next save.
     """
-    if not value:
-        return global_sports_mappings() if inherit else []
-    try:
-        mappings = validate_sports_mappings(json.loads(value))
-    except (TypeError, ValueError):
-        raise ValueError('Invalid stored Sportarr path mappings') from None
-    return mappings or (global_sports_mappings() if inherit else [])
+    if value:
+        try:
+            mappings = validate_sports_mappings(json.loads(value))
+        except (TypeError, ValueError):
+            raise ValueError('Invalid stored Sportarr path mappings') from None
+        if mappings:
+            return mappings
+    if not inherit:
+        return []
+    return global_sports_mappings() if fallback is None else fallback
 
 
-def apply_sports_mapping(path, mapping, reverse=False, *, ignore_case=False):
+def apply_sports_mapping(path, mapping, reverse=False):
     if path is None:
         return None
     normalized = path.replace('\\', '/')
@@ -89,21 +91,10 @@ def apply_sports_mapping(path, mapping, reverse=False, *, ignore_case=False):
     # Most-specific prefix wins. An interior filename substring never matches.
     for pair in sorted(validate_sports_mappings(mapping), key=lambda pair: len(pair[source]), reverse=True):
         prefix = pair[source].replace('\\', '/').rstrip('/')
-        if ignore_case:
-            # Locate the original boundary before folding, which can change the prefix length.
-            components = prefix.count('/') + 1
-            original_prefix = '/'.join(normalized.split('/', components)[:components])
-            matches = windows_path_casefold(original_prefix) == windows_path_casefold(prefix)
-        else:
-            original_prefix = normalized[:len(prefix)]
-            matches = original_prefix == prefix
-        if not matches:
-            continue
-        suffix = normalized[len(original_prefix):]
-        if not suffix.rstrip('/'):
+        if normalized.rstrip('/') == prefix:
             return pair[target]
-        if suffix.startswith('/'):
-            result = pair[target].rstrip('/\\') + suffix
+        if normalized == prefix or normalized.startswith(prefix + '/'):
+            result = pair[target].rstrip('/\\') + normalized[len(prefix):]
             if pair[target].startswith('\\\\') or re.match(r'^[a-zA-Z]:\\', pair[target]):
                 return result.replace('/', '\\')
             return result
@@ -168,13 +159,20 @@ def _instance_path_mapping(arr_instance_id, media_type):
         from arr_instances.repository import ArrInstanceRepository
 
         row = ArrInstanceRepository(database).get(arr_instance_id)
-        if row is None or not row.path_mappings:
-            return None
-        parsed = json.loads(row.path_mappings)
+        return read_arr_mappings(row.path_mappings, media_type) if row is not None else None
     except Exception:
         logging.debug('BAZARR could not load per-instance path_mappings for instance %s', arr_instance_id)
         return None
 
+
+def read_arr_mappings(value, media_type):
+    """Read an existing legacy instance mapping without fetching an ORM row."""
+    if not value:
+        return None
+    try:
+        parsed = json.loads(value)
+    except (TypeError, ValueError):
+        return None
     if isinstance(parsed, dict):
         key = 'movies' if media_type in ('movie', 'movies') else 'series'
         mapping = parsed.get(key)

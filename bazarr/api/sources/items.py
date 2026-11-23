@@ -6,12 +6,15 @@ import os
 from io import BytesIO
 
 from flask import request
-from flask_restx import Namespace, Resource, inputs, reqparse
+from flask_restx import Namespace, Resource, fields, inputs, marshal, reqparse
 from subliminal_patch.core import SUBTITLE_EXTENSIONS
 from werkzeug.datastructures import FileStorage
 
 from media_sources import identify, overrides, repository, service
 from media_sources.api_rows import postprocess_source
+from media_sources.db import handle
+from media_sources.history import source_subtitle_summary
+from media_sources.history_rows import item_history, source_history_fields
 from media_sources.service import SourceError
 from media_sources.context import SourceItemGone, resolve_item, source_item_title
 from media_sources.indexer import effective_profile_id
@@ -96,6 +99,7 @@ class SourceItemsList(Resource):
     get_request_parser.add_argument('start', type=int, required=False, default=0, help='Paging start')
     get_request_parser.add_argument('length', type=int, required=False, default=25,
                                     help='Paging length, -1 for all')
+    get_request_parser.add_argument('scores', type=str, required=False, help='Include subtitle scores and upgradability')
 
     @authenticate
     @api_ns_sources_items.doc(parser=get_request_parser)
@@ -112,7 +116,9 @@ class SourceItemsList(Resource):
             data = [_item_detail(row, group, library) for row in rows]
         else:
             data = [item_to_dict(row) for row in rows]
-        return {'data': data, 'total': repository.count_items(**filters)}
+        summary = source_subtitle_summary(rows) if args.get('scores') == '1' else {}
+        return {'data': [{**value, **summary.get(value['id'], {})} for value in data],
+                'total': repository.count_items(**filters)}
 
 
 @api_ns_sources_items.route("sources/items/<int:item_id>")
@@ -125,7 +131,7 @@ class SourceItem(Resource):
         kind = request.args.get('kind')
         if row is None or (kind is not None and row.kind != kind):
             return {"error": "not_found"}, 404
-        return item_detail(row)
+        return {**item_detail(row), **source_subtitle_summary([row])[row.id]}
 
     @authenticate
     @api_ns_sources_items.response(400, 'Invalid identity correction or language profile')
@@ -143,6 +149,36 @@ class SourceItem(Resource):
         except SourceError as error:
             return {"error": error.code, "message": str(error)}, error.status
         return item_detail(row)
+
+
+@api_ns_sources_items.route("sources/items/<int:item_id>/history")
+class SourceItemHistory(Resource):
+    get_request_parser = reqparse.RequestParser()
+    get_request_parser.add_argument('start', type=int, location='args', default=0, help='Paging start')
+    get_request_parser.add_argument('length', type=int, location='args', default=-1, help='Paging length, -1 for all')
+    get_request_parser.add_argument('include_embedded', type=inputs.boolean, location='args', default=False,
+                                    help='Include Embedded Source records')
+    get_request_parser.add_argument('include_upgradable', type=inputs.boolean, location='args', default=True,
+                                    help='Include the upgradable computation')
+    data_model = api_ns_sources_items.model('SourceItemHistoryRow', source_history_fields)
+    response_model = api_ns_sources_items.model('SourceItemHistoryResponse', {
+        'data': fields.List(fields.Nested(data_model)), 'total': fields.Integer(),
+    })
+
+    @authenticate
+    @api_ns_sources_items.doc(parser=get_request_parser)
+    @api_ns_sources_items.response(404, 'No such item')
+    def get(self, item_id):
+        """List history events for one live source item"""
+        session = handle()
+        item = repository.get_item(item_id, session)
+        if item is None:
+            return {"error": "not_found"}, 404
+        args = self.get_request_parser.parse_args()
+        response = item_history(session, item, include_embedded=args['include_embedded'],
+                                include_upgradable=args['include_upgradable'],
+                                start=max(0, args['start']), length=args['length'])
+        return marshal(response, self.response_model)
 
 
 @api_ns_sources_items.route("sources/items/<int:item_id>/search")

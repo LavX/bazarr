@@ -3,6 +3,8 @@
 import operator
 import ast
 
+import sqlalchemy as sa
+
 from flask_restx import Resource, Namespace, inputs, reqparse, fields, marshal
 from functools import reduce
 
@@ -10,6 +12,10 @@ from app.database import TableMovies, TableHistoryMovie, TableBlacklistMovie, da
 from subtitles.upgrade import get_upgradable_movies_subtitles, _language_still_desired
 from api.swaggerui import subtitles_language_model
 from utilities.pretty_date import pretty_date
+
+from media_sources import repository
+from media_sources.history_rows import arr_history_rows, history_origin_fields, merge_history_rows, mixed_history_page
+from media_sources.union import SourceKeyFilter, add_source_arguments, includes_sources
 
 from api.utils import authenticate, postprocess
 
@@ -25,6 +31,10 @@ class MoviesHistory(Resource):
     get_request_parser.add_argument('radarrid', type=int, required=False, help='Movie ID')
     get_request_parser.add_argument('include_embedded', type=inputs.boolean, required=False, default=False,
                                     help='Include Embedded Source records (default excludes them)')
+    get_request_parser.add_argument('include_upgradable', type=inputs.boolean, required=False, default=True,
+                                    help='Include the upgradable computation (default includes it)')
+
+    add_source_arguments(get_request_parser)
 
     get_language_model = api_ns_movies_history.model('subtitles_language_model', subtitles_language_model)
 
@@ -60,24 +70,34 @@ class MoviesHistory(Resource):
         'total': fields.Integer(),
     })
 
+    mixed_data_model = api_ns_movies_history.model(
+        'MovieHistorySourceRow', {**data_model, **history_origin_fields})
+    mixed_response_model = {
+        **get_response_model, 'data': fields.Nested(mixed_data_model), 'source_keys': fields.List(fields.String),
+    }
+
     @authenticate
     @api_ns_movies_history.response(401, 'Not Authenticated')
     @api_ns_movies_history.doc(parser=get_request_parser)
     def get(self):
         """List movies history events"""
         args = self.get_request_parser.parse_args()
+        source_filter = SourceKeyFilter(tuple(args.get('source_key[]') or ()))
+        history = repository.History
+        mixed = includes_sources(args, database, history, history.c.item_kind == 'movie')
         start = args.get('start')
         length = args.get('length')
         movie_id = args.get('id')
         radarrid = args.get('radarrid')
         include_embedded = args.get('include_embedded')
+        include_upgradable = not mixed or args.get('include_upgradable')
 
         blacklisted_subtitles = select(TableBlacklistMovie.provider,
                                        TableBlacklistMovie.subs_id,
                                        TableBlacklistMovie.arr_instance_id) \
             .subquery()
 
-        query_conditions = [(TableMovies.title.is_not(None))]
+        query_conditions = [TableMovies.title.is_not(None), source_filter.arr(TableHistoryMovie.arr_instance_id)]
         if not include_embedded:
             # "Treat Embedded Subtitles as Downloaded" writes one action=7 row
             # per episode/language combination; a large library carries six
@@ -123,10 +143,19 @@ class MoviesHistory(Resource):
                             (func.coalesce(TableHistoryMovie.arr_instance_id, -1) ==
                              func.coalesce(blacklisted_subtitles.c.arr_instance_id, -1))),
                   isouter=True) \
-            .where(reduce(operator.and_, query_conditions)) \
-            .order_by(TableHistoryMovie.timestamp.desc(), TableHistoryMovie.id.desc())
-        if length > 0:
-            stmt = stmt.limit(length).offset(start)
+            .where(reduce(operator.and_, query_conditions))
+        if mixed:
+            arr_keys = select(TableHistoryMovie.id, TableHistoryMovie.arr_instance_id.label('_owner'),
+                              sa.cast(TableHistoryMovie.timestamp, sa.Text).label('timestamp')).select_from(TableHistoryMovie)
+            arr_keys = arr_keys.join(TableMovies).where(*query_conditions)
+            timeline, count = mixed_history_page(database, arr_keys, 'movie', args,
+                                                 arr_detail=bool(movie_id or radarrid))
+            rows = arr_history_rows(database, stmt.add_columns(TableHistoryMovie.upgradedFromId), TableHistoryMovie.id, timeline)
+        else:
+            stmt = stmt.order_by(TableHistoryMovie.timestamp.desc(), TableHistoryMovie.id.desc())
+            if length > 0:
+                stmt = stmt.limit(length).offset(start)
+            rows = database.execute(stmt).all()
         movie_history = [{
             'history_id': x.history_id,
             'id': x.id,
@@ -153,14 +182,17 @@ class MoviesHistory(Resource):
             'dont_matches': x.not_matched,
             'external_subtitles': [y[1] for y in ast.literal_eval(x.external_subtitles) if y[1]],
             'blacklisted': bool(x.blacklisted),
-        } for x in database.execute(stmt).all()]
+            **({'upgradedFromId': x.upgradedFromId} if mixed else {}),
+        } for x in rows]
 
-        upgradable_movies_not_perfect = get_upgradable_movies_subtitles(history_id_list=[x['history_id'] for x in
-                                                                                         movie_history])
+        upgradable_movies_not_perfect = {}
+        if include_upgradable and (movie_history or not mixed):
+            history_ids = [row['history_id'] for row in movie_history]
+            upgradable_movies_not_perfect = get_upgradable_movies_subtitles(history_id_list=history_ids)
 
         for item in movie_history:
             # is this language still desired or should we simply skip this subtitles from upgrade logic?
-            still_desired = _language_still_desired(item['language'], item['profileId'])
+            still_desired = _language_still_desired(item['language'], item['profileId']) if include_upgradable else None
 
             item.update(postprocess(item))
 
@@ -175,7 +207,8 @@ class MoviesHistory(Resource):
                     item.update({"upgradable": False})
 
             del item['path']
-            del item['video_path']
+            if not mixed:
+                del item['video_path']
             del item['external_subtitles']
             del item['profileId']
 
@@ -198,6 +231,11 @@ class MoviesHistory(Resource):
                 item.update({'dont_matches': ast.literal_eval(item['dont_matches'])})
             else:
                 item.update({'dont_matches': []})
+
+        if mixed:
+            data, source_keys = merge_history_rows(database, timeline, movie_history, 'movie',
+                                                   include_upgradable=include_upgradable)
+            return marshal({'data': data, 'total': count, 'source_keys': source_keys}, self.mixed_response_model)
 
         count = database.execute(
             select(func.count())

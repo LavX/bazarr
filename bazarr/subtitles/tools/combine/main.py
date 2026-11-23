@@ -6,8 +6,7 @@ import re
 import stat
 from contextlib import contextmanager
 from dataclasses import dataclass
-from subtitles.tools.subsync_engines import (capture_subtitle_versions, quarantine_sync_outputs_after_mutation,
-                                             read_regular_subtitle,
+from subtitles.tools.subsync_engines import (capture_subtitle_versions, read_regular_subtitle,
                                              regular_subtitle_version, staged_subtitle_write,
                                              subtitle_mutation, sync_output_owner_is_unique)
 from app.jobs_queue import JobCancelled
@@ -47,7 +46,7 @@ def try_combine_for_video(video_path, media_type, sonarr_series_id=None,
     try:
         owner_kwargs = {}
         if source is not None:
-            from media_sources.indexer import SourcePublicationOwnerIndex
+            from media_sources.indexer import SourcePublicationOwnerIndex, SourcePublicationOwnersChanged
             if sports_operation is not None or arr_instance_id is not None:
                 raise ValueError('A source composition requires source media metadata')
             owner_kwargs['ownership_index'] = SourcePublicationOwnerIndex()
@@ -180,17 +179,29 @@ def try_combine_for_video(video_path, media_type, sonarr_series_id=None,
 
                 @contextmanager
                 def publication():
-                    with owners.publication(source, prepare, destination=out_path) as (current, _, _prepared):
+                    with owners.publication(source, prepare, destination=out_path, cleanup_outputs=True) as (
+                            current, _, _prepared):
                         if current is None or current.path != video_path:
                             raise ValueError('The source item moved or was removed during composition')
                         yield
 
                 def quarantine_removed_siblings():
-                    ownership_index = SourcePublicationOwnerIndex()
                     for sibling in removed_siblings:
-                        quarantine_sync_outputs_after_mutation(video_path, sibling, ownership_index)
+                        ownership_index = SourcePublicationOwnerIndex()
+
+                        def prepare_cleanup():
+                            if not sync_output_owner_is_unique(video_path, sibling, ownership_index=ownership_index):
+                                raise SourcePublicationOwnersChanged('The removed combined subtitle has no unique owner')
+
+                        try:
+                            with ownership_index.publication(source, prepare_cleanup, destination=sibling,
+                                                             cleanup_outputs=True):
+                                pass
+                        except (OSError, SourcePublicationOwnersChanged) as error:
+                            logging.info('BAZARR left obsolete source combined variants in place: %s', error)
 
                 write_kwargs['publication_guard'] = publication
+                write_kwargs['invalidate_outputs'] = False
                 write_kwargs['after_write'] = quarantine_removed_siblings
                 read_kwargs['read_bytes'] = lambda path: read_regular_subtitle(path, input_versions[path])
 

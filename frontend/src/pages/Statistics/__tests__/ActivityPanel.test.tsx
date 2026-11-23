@@ -6,6 +6,7 @@ import { customRender, screen, waitFor } from "@/tests";
 import server from "@/tests/mocks/node";
 
 const onStats = vi.fn();
+const onMetrics = vi.fn();
 
 const emptyTotals: History.MetricsTotals = {
   downloads: 0,
@@ -23,6 +24,7 @@ const mock = (
     series?: History.StatItem[];
     movies?: History.StatItem[];
     sports?: History.StatItem[];
+    sources?: History.StatItem[];
     totals?: Partial<History.MetricsTotals>;
   } = {},
 ) => {
@@ -33,18 +35,20 @@ const mock = (
         series: opts.series ?? [],
         movies: opts.movies ?? [],
         sports: opts.sports ?? [],
+        sources: opts.sources,
       });
     }),
-    http.get("/api/history/metrics", () =>
-      HttpResponse.json({
+    http.get("/api/history/metrics", ({ request }) => {
+      onMetrics(Object.fromEntries(new URL(request.url).searchParams));
+      return HttpResponse.json({
         totals: { ...emptyTotals, ...opts.totals },
         byProvider: [],
         providerReliability: [],
         byLanguage: [],
         byAction: [],
         scoreHistogram: [],
-      }),
-    ),
+      });
+    }),
     http.get("/api/system/arr-instances", () => HttpResponse.json([])),
     http.get("/api/system/settings", () =>
       HttpResponse.json({ general: { use_sportarr: false } }),
@@ -58,6 +62,7 @@ const render = () =>
 describe("Statistics > ActivityPanel", () => {
   beforeEach(() => {
     onStats.mockClear();
+    onMetrics.mockClear();
     mock();
   });
 
@@ -65,7 +70,12 @@ describe("Statistics > ActivityPanel", () => {
     render();
 
     await waitFor(() => expect(onStats).toHaveBeenCalled());
-    expect(onStats.mock.calls[0][0]).toMatchObject({ timeFrame: "month" });
+    await waitFor(() => expect(onMetrics).toHaveBeenCalled());
+    expect(onStats.mock.calls[0][0]).toMatchObject({
+      timeFrame: "month",
+      sources: "1",
+    });
+    expect(onMetrics.mock.calls[0][0]).toMatchObject({ sources: "1" });
   });
 
   it("headlines the download total and its media split", async () => {
@@ -106,6 +116,18 @@ describe("Statistics > ActivityPanel", () => {
 
     expect(
       await screen.findByText(/5 series \/ 3 movies \/ 2 sports/),
+    ).toBeInTheDocument();
+  });
+
+  it("shows source downloads as their own count", async () => {
+    mock({
+      sources: [{ date: "2026-09-14", count: 4 }],
+      totals: { downloads: 6, series: 2, sources: 4 },
+    });
+    render();
+
+    expect(
+      await screen.findByText(/2 series \/ 0 movies \/ 4 media sources/),
     ).toBeInTheDocument();
   });
 

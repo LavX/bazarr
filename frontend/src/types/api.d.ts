@@ -373,6 +373,7 @@ declare namespace History {
     movies: StatItem[];
     series: StatItem[];
     sports?: StatItem[];
+    sources?: StatItem[];
   };
 
   type MetricsTotals = {
@@ -380,6 +381,7 @@ declare namespace History {
     series: number;
     movies: number;
     sports: number;
+    sources?: number;
     dailyAverage: number;
     /** Local calendar date of the busiest day, or null when nothing matched. */
     peakDate: string | null;
