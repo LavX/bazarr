@@ -3024,8 +3024,11 @@ def test_legacy_translation_writes_unmapped_source_history(world, monkeypatch, t
     monkeypatch.setattr(google_translator.GoogleTranslatorService, "_translate_text",
                         lambda self, text, job_id: "Translated")
     monkeypatch.setattr(gemini_translator.GeminiTranslatorService, "_get_configured_api_keys", lambda self: ["fixture"])
-    monkeypatch.setattr(gemini_translator.GeminiTranslatorService, "_translate_with_gemini",
-                        lambda self: Path(self.output_file).write_bytes(CONTENT.replace(b"Downloaded", b"Translated")))
+    def translate_gemini(engine, *, source_text):
+        assert "Downloaded" in source_text
+        Path(engine.output_file).write_text(source_text.replace("Downloaded", "Translated"))
+
+    monkeypatch.setattr(gemini_translator.GeminiTranslatorService, "_translate_with_gemini", translate_gemini)
     monkeypatch.setattr(lingarr_translator.LingarrTranslatorService, "_translate_content",
                         lambda self, lines, job_id: [{"position": 0, "line": "Translated"}])
     monkeypatch.setattr(openrouter_translator.OpenRouterTranslatorService, "_submit_and_poll",
@@ -3377,8 +3380,8 @@ def test_gemini_formatting_cannot_make_unchanged_rtl_dialogue_a_source_translati
     monkeypatch.setattr(settings.translator, "translator_type", "gemini")
     monkeypatch.setattr(GeminiTranslatorService, "_get_configured_api_keys", lambda self: ["fixture"])
 
-    def format_unchanged_lines(engine):
-        cues = list(srt.parse(original.read_text()))
+    def format_unchanged_lines(engine, *, source_text):
+        cues = list(srt.parse(source_text))
         GeminiTranslatorService._process_translated_lines([{"index": "0", "content": cues[0].content}], cues)
         assert cues[0].content.startswith("\u202b")
         Path(engine.output_file).write_text(srt.compose(cues))

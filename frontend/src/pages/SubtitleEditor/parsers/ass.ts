@@ -97,7 +97,11 @@ function* dialogueRows(eventSections: string[][], strict: boolean) {
         }
         yield { columns, line, afterPrefix: dialogue[1] };
       } else if (line.trim().startsWith("Dialogue:")) {
-        yield { columns, line, afterPrefix: line.replace(/^Dialogue:\s*/, "") };
+        yield {
+          columns,
+          line,
+          afterPrefix: line.trimStart().replace(/^Dialogue:\s*/, ""),
+        };
       }
     }
   }

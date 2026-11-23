@@ -18,6 +18,7 @@ from subliminal_patch.score import MAX_SCORES
 from languages.custom_lang import CustomLanguage
 from languages.get_languages import alpha3_from_alpha2, language_from_alpha2, language_from_alpha3  # noqa: F401
 from subtitles.processing import ProcessSubtitlesResult
+from subtitles.encoding import decode_subtitle_bytes
 from subtitles.indexer.utils import get_subtitle_destination_path
 from utilities.path_mappings import path_mappings
 
@@ -176,7 +177,8 @@ def load_translation_input(translator, loader):
     from subtitles.tools.subsync_engines import SubtitleSourceChanged
 
     try:
-        return pysubs2.SSAFile.from_string(source_tool.sidecar.read().decode('utf-8'))
+        content, _ = decode_subtitle_bytes(source_tool.sidecar.read())
+        return pysubs2.SSAFile.from_string(content)
     except (OSError, SubtitleSourceChanged) as error:
         raise SourceTranslationChanged('The source subtitle changed before translation') from error
 

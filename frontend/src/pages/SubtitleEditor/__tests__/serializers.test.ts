@@ -437,7 +437,7 @@ describe("ASS serializer", () => {
       "",
       "[Events]",
       "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text",
-      "Dialogue: 0,0:00:01.00,0:00:04.00,Default,,0000,0000,0000,,Hello world",
+      "  Dialogue: 2,0:00:01.00,0:00:04.00,Default,,0000,0000,0000,,Hello world",
       "Dialogue: 0,0:01:00.50,0:01:03.00,Default,,0000,0000,0000,,Second line",
     ].join("\n");
 
@@ -446,6 +446,9 @@ describe("ASS serializer", () => {
     const serialized = serializer.serialize(parsed);
     const reparsed = parser.parse(serialized);
 
+    expect(serialized).toContain(
+      "Dialogue: 2,0:00:01.00,0:00:04.00,Default,,0000,0000,0000,,Hello world",
+    );
     expect(reparsed.cues).toHaveLength(parsed.cues.length);
     for (let i = 0; i < parsed.cues.length; i++) {
       expect(reparsed.cues[i].startMs).toBe(parsed.cues[i].startMs);

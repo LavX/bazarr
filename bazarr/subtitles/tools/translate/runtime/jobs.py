@@ -498,8 +498,9 @@ class TranslationJobs:
         suffix = f":{identity}"
         # Match literal paths in SQL, then ensure the intervening fields really identify a recording.
         # File names can themselves contain colons and reservation-like fragments.
-        stamp = r"(?::-?[0-9]+){4}" if namespace == "source-wanted" else ""
-        prefix = re.compile(re.escape(namespace) + stamp + r"(?::video:-?[0-9]+(?:,-?[0-9]+){4})?")
+        version = r"-?[0-9]+(?:,-?[0-9]+){4}"
+        stamp = {"source-wanted": r"(?::-?[0-9]+){4}", "source-editor": f":sidecar:{version}"}.get(namespace, "")
+        prefix = re.compile(re.escape(namespace) + stamp + f"(?::video:{version})?")
         rows = self._session.execute(select(TableTranslatorJob.id, TableTranslatorJob.source_path,
                                             TableTranslatorJob.state, TableTranslatorJob.queue_job_id).where(
             TableTranslatorJob.target == target, TableTranslatorJob.state.in_((QUEUED, AWAITING_RETRY)),

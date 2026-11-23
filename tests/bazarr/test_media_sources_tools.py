@@ -531,6 +531,134 @@ def test_source_sync_overwrite_retires_only_unchanged_generated_outputs(toolbox,
             assert retired.read_text() == SYNCED
 
 
+@pytest.fixture
+def toolbox_runtime(toolbox, monkeypatch):
+    from app import database
+    from app.config import settings
+    from subtitles.tools.translate import runtime
+    from subtitles.tools.translate.runtime import gate, service
+    from translator_dispatch_helpers import Env
+
+    monkeypatch.setattr(settings.translator, "runtime_v2", True)
+    monkeypatch.setattr(database, "engine", toolbox.db.get_bind())
+    monkeypatch.setattr(runtime, "_tables_present", False)
+    monkeypatch.setattr(runtime, "_absent_until", 0.0)
+    env = Env(toolbox.db, toolbox.world.tmp_path)
+    try:
+        monkeypatch.setattr(gate, "translation_gate", lambda: gate.evaluate(env.store, env.holds, env.workers))
+        monkeypatch.setattr(service, "Dispatcher", env.dispatcher)
+        yield env
+    finally:
+        env.close()
+
+
+def test_manual_source_translation_dedup_uses_its_exact_sidecar(toolbox, toolbox_runtime):
+    from subtitles.tools.subsync_engines import capture_subtitle_versions
+    from subtitles.tools.translate import main
+
+    env = toolbox_runtime
+    env.ai_engine()
+    context = pipeline._episode(toolbox.world)
+    path, _ = _sidecars(toolbox, context)
+    target = Path(context.path).with_suffix(".hu.srt")
+    auto = main.translate_subtitles_file(
+        context.path, str(path), "en", "hu", False, False, "episode", None, None, None, None, source=context,
+        expected_destination_versions=capture_subtitle_versions(context.path, (str(path), str(target))))
+    first = _request(toolbox, context, path, "translate", language="hu")
+    assert first.status_code == 202
+    manual = first.json["job_id"]
+    assert manual != auto
+    assert _request(toolbox, context, path, "translate", language="hu").json["job_id"] == manual
+    path.write_text(SRT.replace("Original cue", "Edited cue"))
+    changed = _request(toolbox, context, path, "translate", language="hu")
+    assert changed.status_code == 202 and changed.json["job_id"] not in (auto, manual)
+    assert toolbox.jobs.remove_job_from_pending_queue(job_id=auto)
+    stale = toolbox.jobs._reserve_next_job()
+    assert stale.job_id == manual and toolbox.jobs._run_job(stale)
+    assert not target.exists() and not env.requests()
+    _run(toolbox, changed)
+    assert "[hu] Edited cue" in target.read_text()
+
+
+@pytest.mark.parametrize("touch_metadata", [False, True])
+def test_manual_source_translation_pin_binds_at_single_video_capture(
+        toolbox, toolbox_runtime, monkeypatch, touch_metadata):
+    from app.database import TableTranslatorJob
+    from subtitles.tools.translate import main
+
+    env = toolbox_runtime
+    instance = env.ai_engine()
+    default = env.connection(instance, model="default")
+    picked = env.connection(instance, model="selected")
+    context = pipeline._episode(toolbox.world)
+    path, _ = _sidecars(toolbox, context)
+    video = Path(context.path)
+    version = main.source_translation_video_version
+    captures = []
+
+    def capture(path):
+        current = version(path)
+        captures.append(current)
+        if touch_metadata and len(captures) == 1:
+            video.chmod(0o600)
+        return current
+
+    monkeypatch.setattr(main, "source_translation_video_version", capture)
+    response = _request(toolbox, context, path, "translate", language="hu", connection_id=picked.id)
+    assert response.status_code == 202
+    assert len(captures) == 1
+    (row,) = toolbox.db.execute(sa.select(TableTranslatorJob)).scalars().all()
+    assert (row.queue_job_id, row.pinned_connection_id) == (response.json["job_id"], picked.id)
+    _run(toolbox, response)
+    if touch_metadata:
+        assert not env.requests()
+    else:
+        assert env.served() == [str(picked.id)]
+        assert default.id != picked.id
+
+
+def test_manual_source_translation_refuses_a_video_removed_at_capture(toolbox, monkeypatch):
+    from subtitles.tools.translate import main
+
+    context = pipeline._episode(toolbox.world)
+    path, _ = _sidecars(toolbox, context)
+    version = main.source_translation_video_version
+
+    def removed(video_path):
+        Path(video_path).unlink()
+        return version(video_path)
+
+    monkeypatch.setattr(main, "source_translation_video_version", removed)
+    response = _request(toolbox, context, path, "translate", language="hu")
+    assert response.status_code == 409
+    assert not toolbox.jobs.jobs_pending_queue
+
+
+@pytest.mark.parametrize("encoding", ["utf-16", "cp1252"])
+@pytest.mark.parametrize("runtime_on", [False, True], ids=["legacy", "runtime"])
+def test_manual_source_translation_decodes_the_captured_editor_text(
+        toolbox, toolbox_runtime, monkeypatch, encoding, runtime_on):
+    from app.config import settings
+
+    env = toolbox_runtime
+    env.ai_engine()
+    monkeypatch.setattr(settings.translator, "runtime_v2", runtime_on)
+    context = pipeline._episode(toolbox.world)
+    path, _ = _sidecars(toolbox, context)
+    cue = "Café"
+    path.write_bytes(SRT.replace("<i>Original cue</i>", cue).encode(encoding))
+    loaded = toolbox.client.get(f"/api/sources/items/{context.item_id}/subtitles/en/content", headers=HEADERS)
+    assert loaded.status_code == 200
+    assert cue in loaded.json["content"]
+    _run(toolbox, _request(toolbox, context, path, "translate", language="hu"))
+    target = Path(context.path).with_suffix(".hu.srt")
+    if runtime_on:
+        assert f"[hu] {cue}" in target.read_text()
+    else:
+        assert "Translated cue" in target.read_text()
+        assert cue in str(toolbox.transport.return_value.translate.call_args)
+
+
 def test_manual_source_translation_runs_through_v2_runtime(toolbox, monkeypatch):
     from app import database
     from app.config import settings

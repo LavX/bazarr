@@ -24,6 +24,7 @@ from sonarr.history import history_log
 from subtitles.indexer.movies import store_subtitles_movie
 from subtitles.indexer.series import store_subtitles
 from subtitles.processing import ProcessSubtitlesResult
+from subtitles.encoding import decode_subtitle_bytes
 from subtitles.new_subtitle import (SubtitleFileExists, write_new_subtitle,
                                     apply_subtitle_chmod as _apply_subtitle_chmod,
                                     write_bytes_atomically as _write_bytes_atomically)
@@ -615,35 +616,7 @@ def read_subtitle_file(path):
         raise ValueError(f'Subtitle file too large ({file_size} bytes, max {MAX_FILE_SIZE})')
 
     with open(path, 'rb') as f:
-        return _decode_subtitle_bytes(f.read())
-
-
-def _decode_subtitle_bytes(raw):
-    # BOM detection
-    if raw.startswith(b'\xef\xbb\xbf'):
-        return raw[3:].decode('utf-8'), 'utf-8-sig'
-    if raw.startswith(b'\xff\xfe'):
-        return raw[2:].decode('utf-16-le'), 'utf-16-le'
-    if raw.startswith(b'\xfe\xff'):
-        return raw[2:].decode('utf-16-be'), 'utf-16-be'
-
-    # Try UTF-8
-    try:
-        return raw.decode('utf-8'), 'utf-8'
-    except UnicodeDecodeError:
-        pass
-
-    # charset_normalizer
-    try:
-        import charset_normalizer
-        result = charset_normalizer.from_bytes(raw).best()
-        if result is not None:
-            return str(result), result.encoding
-    except Exception:
-        pass
-
-    # Fallback
-    return raw.decode('cp1252', errors='replace'), 'cp1252'
+        return decode_subtitle_bytes(f.read())
 
 
 def detect_subtitle_format(path):
@@ -1070,7 +1043,7 @@ def _get_source_subtitle_content(item_id, language, arr_instance_id):
     if request.headers.get('If-None-Match', '').strip('"') == etag:
         return '', 304
     try:
-        content, encoding = _decode_subtitle_bytes(raw)
+        content, encoding = decode_subtitle_bytes(raw)
     except UnicodeDecodeError:
         return 'Invalid subtitle encoding', 422
     response = make_response(jsonify({
