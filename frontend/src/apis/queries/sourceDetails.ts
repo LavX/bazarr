@@ -103,8 +103,7 @@ export async function invalidateSportsSource(
         typeof filters !== "object" ||
         filters === null ||
         !("includeSources" in filters) ||
-        filters.includeSources !== true ||
-        ("owner" in filters && filters.owner !== undefined)
+        filters.includeSources !== true
       )
         return false;
       // Activity routes with a legacy Arr owner are Arr-only even with sources=1.

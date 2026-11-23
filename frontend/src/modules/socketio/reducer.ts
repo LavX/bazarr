@@ -123,7 +123,7 @@ export function createDefaultReducer(): SocketIO.Reducer[] {
       key: "source-sports",
       update: (ids) => {
         for (const sourceId of new Set(ids)) {
-          void invalidateSportsSource(queryClient, { sourceId });
+          void invalidateSportsSource(queryClient, { owner: { sourceId } });
         }
       },
     },
