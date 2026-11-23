@@ -154,13 +154,21 @@ class SourcePublicationOwnerIndex(SourceOutputOwnerIndex):
         return self._source_owner_paths(target), self._registry_rows(target)
 
     def _load_owners(self):
-        source_paths, registry_rows = self._registry_snapshot()
-        self._prepared_owners = source_paths, registry_rows
+        self._prepared_owners = self._registry_snapshot()
+        return self._map_owners(self._prepared_owners)
+
+    def _map_owners(self, snapshot):
+        source_paths, registry_rows = snapshot
         destination, mappings = self._publication_settings or self._settings_snapshot()
         owners = self._map_source_owners(source_paths, destination)
         for key, paths in self._map_registry_rows(registry_rows, mappings=mappings, destination=destination).items():
             owners.setdefault(key, set()).update(paths)
         return owners
+
+    def refresh_mapped_owners(self):
+        """Resolve current filesystem claims from the rows pinned by publication."""
+        if self._prepared_owners is not None:
+            self._owners = self._map_owners(self._prepared_owners)
 
     def subtitle_destination(self):
         if self._publication_settings is not None:
@@ -184,7 +192,8 @@ class SourcePublicationOwnerIndex(SourceOutputOwnerIndex):
         return directory != media_directory
 
     @contextmanager
-    def publication(self, source, prepare=None, *, destination=None, cleanup_outputs=False, release=None):
+    def publication(self, source, prepare=None, *, destination=None, cleanup_outputs=False, release=None,
+                    guard_registry=False):
         """Keep slow ownership and subtitle discovery outside the writer transaction."""
         for _ in range(2):
             self._loaded = False
@@ -213,7 +222,8 @@ class SourcePublicationOwnerIndex(SourceOutputOwnerIndex):
                     options = {'release': release} if release is not None else {}
                     settings_guard = self._settings_guard() if pin_settings else nullcontext()
                     with (settings_guard,
-                          source_item_publication(source, shared=shared, **options) as (current, connection),
+                          source_item_publication(source, shared=shared or guard_registry, **options) as (
+                              current, connection),
                           self._keyed_settings_guard(not pin_settings)):
                         if shared and current is not None and self._prepared_owners != self._registry_snapshot(connection):
                             break

@@ -428,6 +428,14 @@ class JobsQueue:
         else:
             return [vars(job) for job in queues]
 
+    def matches_active_job(self, job_id, module, func, *, running_only=False, **kwargs):
+        """Match an exact queue record and its requested arguments under the queue lock."""
+        with self._queue_lock:
+            jobs = self.jobs_running_queue if running_only else self.jobs_pending_queue + self.jobs_running_queue
+            return any(job.job_id == job_id and job.module == module and job.func == func
+                       and all((job.kwargs or {}).get(key) == value for key, value in kwargs.items())
+                       for job in jobs)
+
     SNAPSHOT_FIELDS = (
         'job_id', 'job_name', 'module', 'func', 'status', 'is_progress', 'is_signalr',
         'progress_value', 'progress_max', 'progress_message', 'cancelled',

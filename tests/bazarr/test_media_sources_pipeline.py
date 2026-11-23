@@ -2523,6 +2523,223 @@ def isolated_jobs(monkeypatch):
     return jobs
 
 
+@pytest.mark.parametrize("change", ["unchanged", "replaced", "unsigned-auto-job", "unsigned-manual-job", "guarded-direct"])
+def test_automatic_source_translation_checks_queued_video_version(world, monkeypatch, isolated_jobs, change):
+    import json
+
+    from app.config import settings
+    from app.database import TableLanguagesProfiles, update_profile_id_list
+    from media_sources import repository
+    from media_sources.indexer import index_item
+    from media_sources.translation import queue_missing_translations
+    from subtitles.tools.subsync_engines import capture_subtitle_versions, subtitle_source_version
+    from subtitles.tools.translate import main
+    from subtitles.tools.translate.services.lingarr_translator import LingarrTranslatorService
+
+    profile = [{"id": 1, "language": "en", "forced": "False", "hi": "False"},
+               {"id": 2, "language": "hu", "forced": "False", "hi": "False", "translate_from": "en"}]
+    world.db.execute(sa.update(TableLanguagesProfiles).values(items=json.dumps(profile)))
+    update_profile_id_list.invalidate()
+    monkeypatch.setattr(settings.translator, "runtime_v2", False)
+    monkeypatch.setattr(settings.translator, "translator_type", "lingarr")
+    monkeypatch.setattr(settings.translator, "lingarr_url", "http://lingarr.example.test")
+    monkeypatch.setattr(settings.translator, "min_source_wait_minutes", 0)
+    monkeypatch.setattr(settings.translator, "min_source_score", 0)
+    monkeypatch.setattr(settings.translator, "translator_info", False)
+    translate = Mock(return_value=[{"position": 0, "line": "Translated"}])
+    monkeypatch.setattr(LingarrTranslatorService, "_translate_content", translate)
+
+    context = _movie(world)
+    media = Path(context.path)
+    original = media.with_suffix(".en.srt")
+    destination = media.with_suffix(".hu.srt")
+    original.write_bytes(CONTENT)
+    index_item(context.item_id)
+    version = subtitle_source_version(media)
+    if change == "guarded-direct":
+        versions = capture_subtitle_versions(context.path, (str(destination), str(original)))
+        assert isolated_jobs.list_jobs_from_queue(job_id=42) == []
+        main.translate_subtitles_file(context.path, str(original), "en", "hu", False, False, "movies",
+                                      None, None, None, None, job_id=42, source=context,
+                                      expected_destination_versions=versions)
+        translate.assert_called_once_with(["Downloaded"], job_id=42)
+        assert "Translated" in destination.read_text()
+        assert world.db.execute(sa.select(repository.History.c.action)).scalars().all() == [6]
+        assert [event.operation for event in world.published] == ["translate"]
+        return
+
+    assert queue_missing_translations(context) == {"hu"}
+    (job,) = isolated_jobs.jobs_pending_queue
+    assert (job.module, job.func) == ("subtitles.tools.translate.main", "translate_subtitles_file")
+    queued_version = job.kwargs.get("source_video_version")
+
+    if change == "replaced":
+        replacement = media.with_suffix(".incoming")
+        replacement.write_bytes(b"another media file")
+        replacement.replace(media)
+        assert subtitle_source_version(media) != version
+    elif change.startswith("unsigned-"):
+        job.kwargs.pop("source_video_version", None)
+        if change == "unsigned-manual-job":
+            job.kwargs["expected_destination_versions"] = ()
+
+    assert isolated_jobs._run_job(isolated_jobs._reserve_next_job())
+    assert original.read_bytes() == CONTENT
+    actions = world.db.execute(sa.select(repository.History.c.action)).scalars().all()
+    if change == "unchanged":
+        translate.assert_called_once_with(["Downloaded"], job_id=job.job_id)
+        assert "Translated" in destination.read_text()
+        assert actions == [6]
+        assert [event.operation for event in world.published] == ["translate"]
+    else:
+        translate.assert_not_called()
+        assert job.job_name.startswith("Skipped")
+        assert not destination.exists()
+        assert actions == []
+        assert not world.published
+    assert queued_version == version
+
+
+@pytest.mark.parametrize(
+    "old_state", ["queued", "legacy-unsigned", "legacy-pinned", "legacy-current", "awaiting-retry", "legacy-recovered",
+                  "retry-during-replacement", "wanted-awaiting-retry", "wanted-legacy-stale-retry"])
+def test_runtime_queues_a_new_source_translation_for_a_replacement_recording(
+        world, monkeypatch, isolated_jobs, old_state):
+    from dataclasses import replace
+    import json
+
+    from app import database
+    from app.config import settings
+    from app.database import TableLanguagesProfiles, TableTranslatorJob, update_profile_id_list
+    from media_sources import repository
+    from media_sources.analysis import local_content_stamp
+    from media_sources.context import resolve_item
+    from media_sources.indexer import index_item
+    from media_sources.translation import queue_missing_translations
+    from subtitles.tools.subsync_engines import subtitle_source_version
+    from subtitles.tools.translate import main, runtime
+    from subtitles.tools.translate.runtime import gate, service as runtime_service
+    from subtitles.tools.translate.runtime.jobs import TranslationJobs
+    from translator_dispatch_helpers import Env
+
+    profile = [{"id": 1, "language": "en", "forced": "False", "hi": "False"},
+               {"id": 2, "language": "hu", "forced": "False", "hi": "False", "translate_from": "en"}]
+    world.db.execute(sa.update(TableLanguagesProfiles).values(items=json.dumps(profile)))
+    update_profile_id_list.invalidate()
+    monkeypatch.setattr(settings.translator, "runtime_v2", True)
+    monkeypatch.setattr(settings.translator, "min_source_wait_minutes", 0)
+    monkeypatch.setattr(settings.translator, "min_source_score", 0)
+    monkeypatch.setattr(settings.translator, "translator_info", False)
+    monkeypatch.setattr(database, "engine", world.db.get_bind())
+    monkeypatch.setattr(runtime, "_tables_present", False)
+    monkeypatch.setattr(runtime, "_absent_until", 0.0)
+
+    scheduled = old_state.startswith("wanted-")
+    old_state = old_state.removeprefix("wanted-")
+    source = _movie(world)
+    if scheduled:
+        source = replace(source, wanted_file_stamp=local_content_stamp(source.path))
+    path = Path(source.path)
+    subtitle = path.with_suffix(".en.srt")
+    result = path.with_suffix(".hu.srt")
+    subtitle.write_bytes(CONTENT)
+    index_item(source.item_id)
+    env = Env(world.db, world.tmp_path)
+    try:
+        env.ai_engine()
+        monkeypatch.setattr(gate, "translation_gate", lambda: gate.evaluate(env.store, env.holds, env.workers))
+        monkeypatch.setattr(runtime_service, "Dispatcher", env.dispatcher)
+        assert queue_missing_translations(source) == {"hu"}
+        (older,) = isolated_jobs.jobs_pending_queue
+        assert queue_missing_translations(source) == {"hu"}
+        assert list(isolated_jobs.jobs_pending_queue) == [older]
+        older_id = world.db.execute(sa.select(TableTranslatorJob.id)).scalar_one()
+        if old_state.startswith("legacy-"):
+            world.db.execute(sa.update(TableTranslatorJob).where(TableTranslatorJob.id == older_id)
+                             .values(source_path=main._job_source_key(source.path, subtitle, None, source)))
+        if old_state == "legacy-unsigned":
+            older.kwargs.pop("source_video_version")
+        if old_state in ("legacy-pinned", "legacy-current"):
+            assert queue_missing_translations(source) == {"hu"}
+            assert world.db.execute(sa.select(TableTranslatorJob.id)).scalars().all() == [older_id]
+        if old_state == "legacy-current":
+            assert isolated_jobs._reserve_next_job() is older and isolated_jobs._run_job(older)
+            assert "[hu] Downloaded" in result.read_text()
+            assert world.db.execute(sa.select(TableTranslatorJob.id, TableTranslatorJob.state)).all() == [
+                (older_id, "completed")]
+            return
+        waits_for_retry = old_state in ("awaiting-retry", "legacy-recovered", "legacy-stale-retry")
+        if waits_for_retry:
+            isolated_jobs.jobs_pending_queue.remove(older)
+            jobs = TranslationJobs(world.db)
+            if old_state == "legacy-recovered":
+                assert jobs.recover_interrupted() == [older_id]
+            else:
+                assert jobs.await_retry(older_id, "interrupted")
+            assert jobs.get(older_id).queue_job_id is None
+            unrelated_id = jobs.request(jobs.get(older_id).source_path, "hu:hi").job_id
+            assert jobs.await_retry(unrelated_id, "interrupted")
+            if scheduled:
+                manual = main._job_source_key(source.path, subtitle, None, replace(source, wanted_file_stamp=None),
+                                              older.kwargs["source_video_version"])
+                manual_id = jobs.request(manual, "hu").job_id
+                assert jobs.await_retry(manual_id, "interrupted")
+
+        dispatched = old_state == "retry-during-replacement"
+        if dispatched:
+            from subtitles.tools.translate.core.translator_utils import SourceTranslationChanged
+
+            def retry_while_replacing(translator, job_id):
+                jobs = TranslationJobs(world.db)
+                assert jobs.start(older_id, source_digest="copy", engine_instance_id=1, settings_revision=1)
+                _replace_and_scan_movie(world, source)
+                assert queue_missing_translations(resolve_item(source.item_id)) == {"hu"}
+                assert jobs.await_retry(older_id, "publish_failed")
+                raise SourceTranslationChanged("The recording changed while translation was running")
+
+            with monkeypatch.context() as worker:
+                worker.setattr(runtime_service.RuntimeTranslatorService, "translate", retry_while_replacing)
+                assert isolated_jobs._reserve_next_job() is older and isolated_jobs._run_job(older)
+        elif old_state != "legacy-recovered":
+            _replace_and_scan_movie(world, source)
+        current = resolve_item(source.item_id)
+        if scheduled:
+            current = replace(current, wanted_file_stamp=local_content_stamp(current.path))
+        assert current.same_item(source) and current.path == source.path
+        assert queue_missing_translations(current) == {"hu"}
+        *earlier, newer = isolated_jobs.jobs_pending_queue
+        assert earlier == ([] if waits_for_retry or dispatched else [older])
+        assert newer.job_id != older.job_id
+        assert newer.kwargs["source_srt_file"] == older.kwargs["source_srt_file"] == str(subtitle)
+        assert newer.kwargs["source_video_version"] == subtitle_source_version(path)
+        assert (newer.kwargs["source_video_version"] == older.kwargs.get("source_video_version")) is (
+            old_state == "legacy-recovered")
+        assert queue_missing_translations(current) == {"hu"}
+        assert list(isolated_jobs.jobs_pending_queue) == [*earlier, newer]
+        newer_id = world.db.execute(sa.select(TableTranslatorJob.id).where(
+            TableTranslatorJob.queue_job_id == newer.job_id)).scalar_one()
+
+        if not waits_for_retry:
+            if not dispatched:
+                assert isolated_jobs._reserve_next_job() is older and isolated_jobs._run_job(older)
+            assert older.job_name.startswith("Skipped")
+        assert not result.exists() and not env.requests()
+        assert isolated_jobs._reserve_next_job() is newer and isolated_jobs._run_job(newer)
+        assert "[hu] Downloaded" in result.read_text()
+        assert len(env.requests()) == 1
+        jobs = dict(world.db.execute(sa.select(TableTranslatorJob.id, TableTranslatorJob.state)).all())
+        expected = {older_id: "cancelled", newer_id: "completed"}
+        if waits_for_retry:
+            expected[unrelated_id] = "awaiting_retry"
+            if scheduled:
+                expected[manual_id] = "awaiting_retry"
+        assert jobs == expected
+        assert world.db.execute(sa.select(repository.History.c.action)).scalars().all() == [6]
+        assert [event.operation for event in world.published] == ["translate"]
+    finally:
+        env.close()
+
+
 @pytest.mark.parametrize("custom", [False, True], ids=["beside-video", "custom-folder"])
 def test_episode_download_dispatches_runtime_and_indexes_translation_and_combined_subtitle(
         world, monkeypatch, isolated_jobs, custom):
