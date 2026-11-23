@@ -101,7 +101,12 @@ function browserCandidates(): string[] {
  * Idempotent: if a profile already exists (re-entering the wizard), we show a
  * short note and let Continue advance without rewriting anything.
  */
-const LanguagesStep: FC<WizardStepProps> = ({ onNext, onBack, stepKey }) => {
+const LanguagesStep: FC<WizardStepProps> = ({
+  onNext,
+  onBack,
+  onWritten,
+  stepKey,
+}) => {
   const { data: languages, isLoading } = useLanguages();
   const {
     data: profiles,
@@ -132,8 +137,7 @@ const LanguagesStep: FC<WizardStepProps> = ({ onNext, onBack, stepKey }) => {
 
   const [draft, patchDraft] = useStepDraft<{
     selected: string[] | null;
-    written: boolean;
-  }>(stepKey, { selected: null, written: false });
+  }>(stepKey, { selected: null });
   const selected = draft.selected ?? preselected;
   const setSelected = (next: string[]) => patchDraft({ selected: next });
   // What the last change to the selection did, said out loud. Measured with
@@ -190,22 +194,8 @@ const LanguagesStep: FC<WizardStepProps> = ({ onNext, onBack, stepKey }) => {
   const profilesUnknown = profilesLoading || profilesFailed;
 
   const handleContinue = () => {
-    if (profilesUnknown) {
-      // No new write is possible, but a confirmed earlier write still counts.
-      if (draft.written) {
-        onNext();
-      } else {
-        onNext(NOTHING_WRITTEN);
-      }
-      return;
-    }
-    if (alreadyConfigured) {
-      // Keeping an existing profile does not write an answer for this visit.
-      if (draft.written) {
-        onNext();
-      } else {
-        onNext(NOTHING_WRITTEN);
-      }
+    if (profilesUnknown || alreadyConfigured) {
+      onNext(NOTHING_WRITTEN);
       return;
     }
 
@@ -249,7 +239,7 @@ const LanguagesStep: FC<WizardStepProps> = ({ onNext, onBack, stepKey }) => {
         },
         onError: (error) => {
           if (isSettingsFollowupError(error)) {
-            patchDraft({ written: true });
+            onWritten?.();
           }
           setSaveFailed(true);
         },

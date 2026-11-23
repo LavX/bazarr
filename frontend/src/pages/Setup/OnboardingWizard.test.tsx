@@ -6,6 +6,8 @@ import { pathToFileURL } from "node:url";
 import { compileString } from "sass-embedded";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useSettingsMutation } from "@/apis/hooks";
+import queryClient from "@/apis/queries";
+import type { ArrInstance } from "@/apis/raw/arrInstances";
 import client from "@/apis/raw/client";
 import { cleanup, customRender, screen, waitFor, within } from "@/tests";
 import server from "@/tests/mocks/node";
@@ -1287,6 +1289,213 @@ describe("the rail, visited and completed", () => {
     expect(rail()).toHaveAttribute(
       "aria-valuetext",
       expect.stringContaining("skipped: Connect, Subtitles"),
+    );
+  });
+
+  it("keeps Subtitles completed after a confirmed language save and a reload before Continue", async () => {
+    const { useSettingsMutation: realSettingsMutation } =
+      await vi.importActual<typeof import("@/apis/hooks")>("@/apis/hooks");
+    mockedSettingsMutation.mockImplementation(realSettingsMutation);
+    let profiles: Language.Profile[] = [];
+    let settingsWrites = 0;
+    server.use(
+      http.get("/api/system/media-server-instances", () =>
+        HttpResponse.json({ data: [] }),
+      ),
+      http.get("/api/provider-hub/providers", () =>
+        HttpResponse.json({ data: [] }),
+      ),
+      http.get("/api/provider-hub/catalog", () =>
+        HttpResponse.json({ sources: [], entries: [] }),
+      ),
+      http.get("/api/system/languages", () =>
+        HttpResponse.json([
+          { code2: "en", code3: "eng", name: "English", enabled: false },
+          { code2: "es", code3: "spa", name: "Spanish", enabled: false },
+        ]),
+      ),
+      http.get("/api/system/languages/profiles", () =>
+        HttpResponse.json(profiles),
+      ),
+      http.post("/api/system/settings", async ({ request }) => {
+        const written = await request.formData();
+        profiles = JSON.parse(
+          String(written.get("languages-profiles")),
+        ) as Language.Profile[];
+        settingsWrites += 1;
+        return HttpResponse.json(
+          {
+            code: "settings_refresh_failed",
+            message: "Settings were saved, but applying them failed.",
+          },
+          { status: 503 },
+        );
+      }),
+    );
+    const user = userEvent.setup();
+    customRender(<OnboardingWizardView />);
+
+    await user.click(screen.getByRole("button", { name: /get started/i }));
+    await user.click(
+      await screen.findByRole("radio", {
+        name: /find subtitles for anything/i,
+      }),
+    );
+    await user.click(screen.getByRole("button", { name: /^continue$/i }));
+    await user.click(
+      await screen.findByRole("button", { name: /continue without a server/i }),
+    );
+    await user.click(
+      await screen.findByRole("button", { name: /continue without requests/i }),
+    );
+    await screen.findByRole("heading", { name: /subtitle languages/i });
+    await user.click(screen.getByRole("combobox", { name: "Languages" }));
+    await user.click(await screen.findByRole("option", { name: "Spanish" }));
+    const continueLanguages = screen.getByRole("button", {
+      name: /^continue$/i,
+    });
+    await waitFor(() => expect(continueLanguages).toBeEnabled());
+    await user.click(continueLanguages);
+
+    expect(
+      await screen.findByText("Could not save your languages"),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("heading", { name: /subtitle languages/i }),
+    ).toBeInTheDocument();
+    await screen.findByText("Languages already configured");
+
+    // The profile reached the server before applying it failed. A reload
+    // drops the in-memory draft, and Continue now has nothing left to write.
+    cleanup();
+    await queryClient.cancelQueries();
+    queryClient.clear();
+    customRender(<OnboardingWizardView />);
+
+    await screen.findByRole("heading", { name: /subtitle languages/i });
+    await screen.findByText("Languages already configured");
+    await user.click(screen.getByRole("button", { name: /^continue$/i }));
+    await user.click(
+      await screen.findByRole("button", {
+        name: /i will pick providers later/i,
+      }),
+    );
+    await user.click(
+      await screen.findByRole("button", {
+        name: /continue without translation/i,
+      }),
+    );
+    await screen.findByRole("heading", { name: /general basics/i });
+
+    expect(settingsWrites).toBe(1);
+    expect(checks()).toHaveLength(2);
+    expect(within(rail()).queryByText("3")).toBeNull();
+    expect(rail()).toHaveAttribute(
+      "aria-valuetext",
+      expect.stringContaining("skipped: Connect"),
+    );
+    expect(rail()).not.toHaveAttribute(
+      "aria-valuetext",
+      expect.stringContaining("Subtitles"),
+    );
+  });
+
+  it("keeps Connect completed after removing an instance with an enabled sibling left", async () => {
+    /* eslint-disable camelcase */
+    const first: ArrInstance = {
+      id: 1,
+      kind: "sonarr",
+      stable_key: "sonarr-1",
+      name: "Main Sonarr",
+      display_name: "Main Sonarr",
+      enabled: true,
+      is_default: true,
+      ip: "sonarr.local",
+      port: 8989,
+      base_url: "/",
+      ssl: false,
+      verify_ssl: true,
+      http_timeout: 60,
+      api_key_set: true,
+    };
+    let instances: ArrInstance[] = [
+      first,
+      {
+        ...first,
+        id: 2,
+        stable_key: "sonarr-2",
+        name: "Other Sonarr",
+        display_name: "Other Sonarr",
+        is_default: false,
+      },
+    ];
+    /* eslint-enable camelcase */
+    const removed: number[] = [];
+    server.use(
+      http.get("/api/system/settings", () =>
+        // eslint-disable-next-line camelcase
+        HttpResponse.json({ general: { use_sonarr: true } }),
+      ),
+      http.get("/api/system/arr-instances", () => HttpResponse.json(instances)),
+      http.delete("/api/system/arr-instances/:id", ({ params }) => {
+        const id = Number(params.id);
+        instances = instances.filter((instance) => instance.id !== id);
+        removed.push(id);
+        return new HttpResponse(null, { status: 204 });
+      }),
+      http.get("/api/system/media-server-instances", () =>
+        HttpResponse.json({ data: [] }),
+      ),
+      http.get("/api/system/languages", () =>
+        HttpResponse.json([
+          { code2: "en", code3: "eng", name: "English", enabled: true },
+        ]),
+      ),
+    );
+    const user = userEvent.setup();
+    customRender(<OnboardingWizardView />);
+
+    await user.click(screen.getByRole("button", { name: /get started/i }));
+    await user.click(
+      await screen.findByRole("radio", {
+        name: /sonarr, radarr or sportarr/i,
+      }),
+    );
+    await user.click(screen.getByRole("button", { name: /^continue$/i }));
+    await screen.findByText(/Main Sonarr at/);
+    await user.click(
+      screen.getByRole("button", { name: /remove and enter it again/i }),
+    );
+    await user.click(
+      screen.getByRole("button", { name: /^remove main sonarr$/i }),
+    );
+    await screen.findByText(/Other Sonarr at/);
+
+    // Continue keeps the enabled sibling without another write. The earlier
+    // removal still changed this phase, even though its other steps do not.
+    await user.click(screen.getByRole("button", { name: /^continue$/i }));
+    for (const arr of ["Radarr", "Sportarr"]) {
+      await user.click(
+        await screen.findByRole("button", {
+          name: new RegExp(`^continue without ${arr}$`, "i"),
+        }),
+      );
+    }
+    await user.click(
+      await screen.findByRole("button", { name: /continue without a server/i }),
+    );
+    await user.click(
+      await screen.findByRole("button", { name: /continue without requests/i }),
+    );
+    await screen.findByRole("heading", { name: /subtitle languages/i });
+
+    expect(removed).toEqual([1]);
+    expect(mutate).not.toHaveBeenCalled();
+    expect(checks()).toHaveLength(2);
+    expect(within(rail()).queryByText("2")).toBeNull();
+    expect(rail()).not.toHaveAttribute(
+      "aria-valuetext",
+      expect.stringContaining("skipped: Connect"),
     );
   });
 

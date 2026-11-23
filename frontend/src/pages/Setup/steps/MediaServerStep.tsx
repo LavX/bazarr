@@ -1,5 +1,6 @@
 import { FC, useMemo, useState } from "react";
 import { Alert, Button, Checkbox, Group, Text } from "@mantine/core";
+import { useIsMutating } from "@tanstack/react-query";
 import {
   isSettingsFollowupError,
   useSettingsMutation,
@@ -15,8 +16,9 @@ import { readMediaServerTest } from "@/pages/Setup/connectionTests";
 import StepLayout from "@/pages/Setup/StepLayout";
 import { useOnboardingSelection } from "@/pages/Setup/useOnboardingSelection";
 import { useReportStepBusy } from "@/pages/Setup/useStepBusy";
-import { useStepDraft } from "@/pages/Setup/useStepDrafts";
-import ConnectedServerRow from "./mediaServer/ConnectedServerRow";
+import ConnectedServerRow, {
+  MEDIA_SERVER_DISCONNECT_KEY,
+} from "./mediaServer/ConnectedServerRow";
 import StepActions from "./mediaServer/StepActions";
 import { NOTHING_WRITTEN, type WizardStepProps } from "./types";
 import styles from "./MediaServerStep.module.scss";
@@ -52,17 +54,20 @@ const ORDER: MediaServerKind[] = ["plex", "jellyfin", "emby", "silo"];
  * because Bazarr+ finds and downloads subtitles with no media server at all.
  * Skipping is the shell's control.
  */
-const MediaServerStep: FC<WizardStepProps> = ({ onNext, onBack, stepKey }) => {
+const MediaServerStep: FC<WizardStepProps> = ({
+  onNext,
+  onBack,
+  onWritten,
+}) => {
   const { drafts, addDraft, removeKind, removeDraft } =
     useOnboardingSelection();
 
   const { data: settings, isPending: settingsPending } = useSystemSettings();
   const settingsMutation = useSettingsMutation(false, { inlineErrors: true });
-  const [disconnecting, setDisconnecting] = useState<string[]>([]);
-  const pending = settingsMutation.isPending || disconnecting.length > 0;
-  useReportStepBusy(pending);
-  // A successful write stays an answer if Back remounts the picker before Continue.
-  const [{ changed }, patchDraft] = useStepDraft(stepKey, { changed: false });
+  const disconnecting = useIsMutating({
+    mutationKey: [MEDIA_SERVER_DISCONNECT_KEY],
+  });
+  useReportStepBusy(settingsMutation.isPending);
   // Which kind's switch write failed. The client keeps a restarting or
   // unreachable Bazarr+ out of its toasts, so it is said here or not at all.
   const [switchFailed, setSwitchFailed] = useState<MediaServerKind | null>(
@@ -158,7 +163,6 @@ const MediaServerStep: FC<WizardStepProps> = ({ onNext, onBack, stepKey }) => {
   };
 
   const forgetInstance = (instanceId: string) => {
-    patchDraft({ changed: true });
     // A draft that has written its row but is still on screen, because its
     // master switch failed, holds that row under savedInstanceId rather than
     // instanceId. Matching only the latter left such a draft standing after
@@ -176,16 +180,6 @@ const MediaServerStep: FC<WizardStepProps> = ({ onNext, onBack, stepKey }) => {
   const pendingTotal = drafts.filter(
     (draft) => draft.instanceId === undefined,
   ).length;
-
-  // Existing rows are not an answer written by this wizard. Keep the answer
-  // from a successful change here or a generated step whose saved draft no
-  // longer generates a step, even before the instance list catches up.
-  const untouched =
-    !changed &&
-    drafts.every(
-      (draft) =>
-        draft.instanceId === undefined && draft.savedInstanceId === undefined,
-    );
 
   // Whether the kind's master switch is on. The dispatcher reads it before it
   // reads any row, so an enabled instance under a switched-off kind refreshes
@@ -229,9 +223,9 @@ const MediaServerStep: FC<WizardStepProps> = ({ onNext, onBack, stepKey }) => {
       layout="wide"
       actions={
         <StepActions
-          onNext={() => (untouched ? onNext(NOTHING_WRITTEN) : onNext())}
+          onNext={() => onNext(NOTHING_WRITTEN)}
           onBack={onBack}
-          continuePending={pending}
+          continuePending={settingsMutation.isPending || disconnecting > 0}
           continueLabel={
             pendingTotal > 0
               ? `Set up ${pendingTotal} ${pendingTotal === 1 ? "server" : "servers"}`
@@ -334,16 +328,7 @@ const MediaServerStep: FC<WizardStepProps> = ({ onNext, onBack, stepKey }) => {
                       ownershipPending={kind === "plex" && settingsPending}
                       kindEnabled={kindOn}
                       onDisconnected={forgetInstance}
-                      onWritten={() => patchDraft({ changed: true })}
-                      onBusyChange={(busy) =>
-                        setDisconnecting((current) =>
-                          busy
-                            ? current.includes(instance.id)
-                              ? current
-                              : [...current, instance.id]
-                            : current.filter((id) => id !== instance.id),
-                        )
-                      }
+                      onWritten={onWritten}
                     />
                   ))}
                   {/* One pending server is undone by unticking the card, so it
@@ -388,10 +373,10 @@ const MediaServerStep: FC<WizardStepProps> = ({ onNext, onBack, stepKey }) => {
                           settingsMutation.mutate(
                             { [`settings-general-use_${kind}`]: true },
                             {
-                              onSuccess: () => patchDraft({ changed: true }),
+                              onSuccess: onWritten,
                               onError: (error) => {
                                 if (isSettingsFollowupError(error)) {
-                                  patchDraft({ changed: true });
+                                  onWritten?.();
                                 }
                                 setSwitchFailed(kind);
                               },

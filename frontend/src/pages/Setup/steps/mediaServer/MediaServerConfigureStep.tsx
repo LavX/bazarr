@@ -20,7 +20,12 @@ type Props = WizardStepProps;
  * of its own, which is what the test and libraries hooks need: they close over
  * the connection values and reset when one changes.
  */
-const MediaServerConfigureStep: FC<Props> = ({ draftId, onNext, onBack }) => {
+const MediaServerConfigureStep: FC<Props> = ({
+  draftId,
+  onNext,
+  onBack,
+  onWritten,
+}) => {
   const { drafts } = useOnboardingSelection();
   const draft = drafts.find((entry) => entry.draftId === draftId);
 
@@ -40,9 +45,19 @@ const MediaServerConfigureStep: FC<Props> = ({ draftId, onNext, onBack }) => {
   }
 
   return draft.kind === "plex" ? (
-    <PlexServerForm draft={draft} onNext={onNext} onBack={onBack} />
+    <PlexServerForm
+      draft={draft}
+      onNext={onNext}
+      onBack={onBack}
+      onWritten={onWritten}
+    />
   ) : (
-    <InstanceServerForm draft={draft} onNext={onNext} onBack={onBack} />
+    <InstanceServerForm
+      draft={draft}
+      onNext={onNext}
+      onBack={onBack}
+      onWritten={onWritten}
+    />
   );
 };
 

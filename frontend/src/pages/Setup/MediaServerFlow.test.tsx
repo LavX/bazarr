@@ -2,9 +2,10 @@ import userEvent from "@testing-library/user-event";
 import { http, HttpResponse } from "msw";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { MediaServerKind } from "@/apis/raw/mediaServers";
-import { customRender, screen, waitFor } from "@/tests";
+import { customRender, screen, waitFor, within } from "@/tests";
 import server from "@/tests/mocks/node";
 import OnboardingWizardView from "./OnboardingWizard";
+import wizardStyles from "./OnboardingWizard.module.scss";
 
 const navigate = vi.fn();
 
@@ -236,8 +237,9 @@ describe("media server selection", () => {
 
   // Saving never waits for a Test, so Back used to call a server saved with a
   // wrong key "Connected" while Finish said the connection was not tested.
-  it("saves a server, flips one switch, and shows it saved on the picker", async () => {
+  it("saves a server, completes Connect after Requests writes nothing, and shows it saved on the picker", async () => {
     const user = userEvent.setup();
+    localStorage.setItem("bazarr.onboarding.intent", "discover");
     customRender(<OnboardingWizardView />);
 
     await screen.findByRole("heading", { name: /^media servers$/i });
@@ -265,6 +267,38 @@ describe("media server selection", () => {
       await screen.findByRole("heading", { name: /^requests$/i }),
     ).toBeInTheDocument();
 
+    await user.click(
+      screen.getByRole("button", { name: /continue without requests/i }),
+    );
+    await screen.findByRole("heading", { name: /subtitle languages/i });
+
+    // Saving removes the generated server step. Its completed phase must
+    // survive that removal when Requests contributes no write of its own.
+    expect(creates).toHaveLength(1);
+    expect(settingsWrites).toEqual([
+      { "settings-general-use_jellyfin": "true" },
+    ]);
+    const progress = screen.getByRole("progressbar", {
+      name: "Setup progress",
+    });
+    expect(within(progress).queryByText("2")).not.toBeInTheDocument();
+    expect(
+      // eslint-disable-next-line testing-library/no-node-access
+      progress.querySelectorAll(
+        `.${wizardStyles.dotDone} svg[data-icon="check"]`,
+      ),
+    ).toHaveLength(2);
+    expect(progress).not.toHaveAttribute(
+      "aria-valuetext",
+      expect.stringContaining("skipped: Connect"),
+    );
+    const currentDot = within(progress).getByText("3");
+    expect(currentDot).toHaveClass(wizardStyles.dotActive);
+    expect(currentDot).not.toHaveClass(wizardStyles.dotDone);
+    expect(currentDot).not.toHaveClass(wizardStyles.dotSkipped);
+
+    await user.click(screen.getByRole("button", { name: /^back$/i }));
+    await screen.findByRole("heading", { name: /^requests$/i });
     await user.click(screen.getByRole("button", { name: /^back$/i }));
     await screen.findByRole("heading", { name: /^media servers$/i });
     expect(await screen.findByText("Not tested")).toBeInTheDocument();
@@ -277,6 +311,81 @@ describe("media server selection", () => {
       screen.getByRole("button", { name: /^disconnect$/i }),
     ).toBeInTheDocument();
   });
+
+  it.each([
+    { control: "Back", destination: /^sportarr$/i },
+    { control: "Do this later", destination: /^requests$/i },
+  ])(
+    "keeps $control usable while a server disconnect is pending",
+    async ({ control, destination }) => {
+      rows = [{ id: "saved-jellyfin", kind: "jellyfin", name: "Attic" }];
+      let releaseDisconnect: (() => void) | undefined;
+      const pendingDisconnect = new Promise<void>((resolve) => {
+        releaseDisconnect = resolve;
+      });
+      const disconnectStarted = vi.fn();
+      server.use(
+        http.delete(
+          "/api/system/media-server-instances/:id",
+          async ({ params }) => {
+            disconnectStarted();
+            await pendingDisconnect;
+            rows = rows.filter((row) => row.id !== params.id);
+            return new HttpResponse(null, { status: 204 });
+          },
+        ),
+      );
+      const user = userEvent.setup();
+      customRender(<OnboardingWizardView />);
+
+      await user.click(
+        await screen.findByRole("button", { name: /^disconnect$/i }),
+      );
+      await user.click(screen.getByRole("button", { name: /^disconnect$/i }));
+      await waitFor(() => expect(disconnectStarted).toHaveBeenCalledOnce());
+
+      try {
+        expect(
+          screen.getByRole("button", { name: "Set up later" }),
+        ).toBeEnabled();
+        const leaveStep = screen.getByRole("button", { name: control });
+        expect(leaveStep).toBeEnabled();
+        await user.click(leaveStep);
+        await screen.findByRole("heading", { name: destination });
+        expect(rows).toHaveLength(1);
+        if (control === "Back") {
+          await user.click(
+            screen.getByRole("button", { name: /continue without sportarr/i }),
+          );
+          await screen.findByRole("heading", { name: /^media servers$/i });
+          const continuePicker = screen.getByRole("button", {
+            name: /continue without a server/i,
+          });
+          expect(continuePicker).toBeDisabled();
+          await user.click(continuePicker);
+          expect(
+            screen.getByRole("heading", { name: /^media servers$/i }),
+          ).toBeInTheDocument();
+          expect(disconnectStarted).toHaveBeenCalledOnce();
+          expect(rows).toHaveLength(1);
+          await user.click(screen.getByRole("button", { name: "Back" }));
+          await screen.findByRole("heading", { name: destination });
+        }
+      } finally {
+        releaseDisconnect?.();
+      }
+
+      await waitFor(() => expect(rows).toEqual([]));
+      await waitFor(() =>
+        expect(settingsWrites).toEqual([
+          { "settings-general-use_jellyfin": "false" },
+        ]),
+      );
+      expect(
+        screen.getByRole("heading", { name: destination }),
+      ).toBeInTheDocument();
+    },
+  );
 
   it("calls a server connected on the picker once its Test passed", async () => {
     server.use(
