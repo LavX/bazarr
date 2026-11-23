@@ -1898,7 +1898,7 @@ def test_a_legacy_community_stage_rebinds_to_its_selected_official_entry(hub, mo
     from plugin_platform_helpers import provider_manifest_v2
     from provider_hub import releases, service, state_store
     from provider_hub.kinds import SUBTITLE_PROVIDER, get_kind
-    from provider_hub.state import OFFICIAL_CATALOG_URL, mutate_state
+    from provider_hub.state import OFFICIAL_CATALOG_URL, load_state, mutate_state
 
     plugin_id, version, previous = "examplehub", "1.1.0", "community"
     community_url = "https://github.com/example/community/blob/main/catalog.json"
@@ -1915,17 +1915,21 @@ def test_a_legacy_community_stage_rebinds_to_its_selected_official_entry(hub, mo
     original, = state_store.list_releases(plugin_id, states=(releases.STAGED,))
 
     def historical_selection(state):
-        state["catalog_sources"][previous].pop("registration")
+        former = state["catalog_sources"][previous]
+        former.pop("registration")
+        former.update(last_checked_at="2026-11-01T00:00:00Z", resolved_commit=published["source"]["commit"])
         state["catalog_sources"]["official"]["trusted"] = False
         state["installations"][plugin_id]["source_id"] = "official"
         for source in (previous, "official") if selected_entry else (previous,):
             state["catalog_entries"][f"{source}:plugins:{plugin_id}:{version}"] = {
                 "source": source, "source_name": source, "provider_id": plugin_id, "version": version,
                 "manifest": published, "catalog_list": "plugins", "trusted": False,
+                "resolved_commit": published["source"]["commit"],
             }
 
     mutate_state(historical_selection)
     _reopen_pre_registration_store(plugin_id)
+    assert f"{previous}:plugins:{plugin_id}:{version}" in load_state()["catalog_entries"]
     stage, = state_store.list_releases(plugin_id, states=(releases.STAGED,))
     assert stage.id == original.id and stage.catalog_registration == releases.LEGACY_RESTAGED_REGISTRATION
     monkeypatch.setattr(service, "validated_bundle_path", lambda _root, path: Path(path))
