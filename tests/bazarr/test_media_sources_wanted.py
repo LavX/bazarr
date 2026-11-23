@@ -3,6 +3,7 @@
 import ast
 import json
 import os
+from contextlib import contextmanager
 from datetime import datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -477,6 +478,160 @@ def test_provider_return_rechecks_file_profile_and_arr_claim(world, monkeypatch,
     assert bool(refreshed.arr_shadow) == change.startswith('arr claimed')
     if change != 'profile edited':
         assert refreshed.failed_attempts is None
+
+
+@pytest.mark.parametrize('new_claim', [None, 'destination', 'generated', 'generated-after-primary'])
+def test_wanted_rechecks_mapped_relative_claims_after_writer_admission(world, monkeypatch, new_claim):
+    from app.config import settings
+    from media_servers import dispatcher
+    from media_sources import indexer, repository, wanted
+    from subtitles import download
+    from subtitles.tools.subsync_engines import engine_output_path
+    from utilities.path_mappings import path_mappings
+
+    monkeypatch.setattr(settings.general, 'use_radarr', True)
+    monkeypatch.setattr(settings.general, 'subfolder', 'relative')
+    monkeypatch.setattr(settings.general, 'subfolder_custom', 'Subs')
+    context = pipeline._movie(world, 'Film.mkv')
+    folder = world.root / 'Subs'
+    folder.mkdir()
+    destination = folder / 'Film.en.srt'
+    generated = engine_output_path(destination, 'ffsubsync')
+    other_generated = engine_output_path(destination, 'alass')
+
+    other_root = world.tmp_path / 'arr'
+    claim_name = (generated.with_suffix('.mkv').name
+                  if new_claim in ('generated', 'generated-after-primary') else 'Film.en.mkv')
+    other = video(other_root / claim_name)
+    other_subs = other_root / 'Subs'
+    previous = world.tmp_path / 'previous-subtitles'
+    previous.mkdir()
+    other_subs.symlink_to(previous, target_is_directory=True)
+    monkeypatch.setattr(path_mappings, 'path_mapping_movies', [['/remote', str(other_root)]])
+    world.db.execute(pipeline._legacy_owner_insert(world, 'radarr', f'/remote/{claim_name}'))
+    assert other.is_file() and other_subs.resolve() == previous
+
+    def choose(videos, **kwargs):
+        generated.write_bytes(b'Existing generated subtitle')
+        other_generated.write_bytes(b'Other generated subtitle')
+        return {next(iter(videos)): [pipeline.FakeSubtitle()]}
+
+    admitted = []
+    original_publication = indexer.source_item_publication
+
+    def retarget():
+        other_subs.unlink()
+        other_subs.symlink_to(folder, target_is_directory=True)
+
+    def after_primary(event):
+        world.published.append(event)
+        assert destination.read_bytes() == pipeline.CONTENT
+        retarget()
+
+    @contextmanager
+    def change_folder_at_admission(source, **kwargs):
+        with original_publication(source, **kwargs) as (current, connection):
+            assert current is not None and kwargs['shared'] and connection.in_transaction()
+            admitted.append(current.item_id)
+            if new_claim in ('destination', 'generated'):
+                retarget()
+            yield current, connection
+
+    monkeypatch.setattr(download, 'download_best_subtitles', choose)
+    monkeypatch.setattr(indexer, 'source_item_publication', change_folder_at_admission)
+    if new_claim == 'generated-after-primary':
+        monkeypatch.setattr(dispatcher, 'notify_subtitle_mutation', after_primary)
+    wanted.wanted_search_missing_subtitles_sources(kind='movie', job_id=1)
+
+    assert admitted == [context.item_id]
+    history = world.db.execute(sa.select(repository.History.c.item_id, repository.History.c.action)).all()
+    if new_claim in ('destination', 'generated'):
+        assert not destination.exists()
+        assert generated.read_bytes() == b'Existing generated subtitle'
+        assert other_generated.read_bytes() == b'Other generated subtitle'
+        assert not list(folder.glob('.bazarr-sync-obsolete-*'))
+        assert history == []
+        assert not world.published
+    else:
+        assert destination.read_bytes() == pipeline.CONTENT
+        assert not other_generated.exists()
+        assert [event.subtitle_path for event in world.published] == [str(destination)]
+        assert history == [(context.item_id, 1)]
+        if new_claim == 'generated-after-primary':
+            assert other_subs.resolve() == folder
+            assert generated.read_bytes() == b'Existing generated subtitle'
+        else:
+            assert not generated.exists()
+    assert other.exists()
+
+
+@pytest.mark.parametrize('setting_change', ['unchanged', 'new-custom-folder', 'restored-while-selecting'])
+def test_wanted_uses_the_captured_setting_to_select_and_clean_the_save_folder(
+        world, monkeypatch, setting_change):
+    from app.config import settings
+    from media_sources import repository, wanted
+    from subtitles import download
+    from subtitles.tools.subsync_engines import engine_output_path
+
+    custom_folder = world.tmp_path / 'new-subtitle-folder'
+    custom_folder.mkdir()
+    restored = setting_change == 'restored-while-selecting'
+    monkeypatch.setattr(settings.general, 'subfolder', 'absolute' if restored else 'current')
+    monkeypatch.setattr(settings.general, 'subfolder_custom', str(custom_folder))
+    context = pipeline._movie(world, 'Film.mkv')
+    local_destination = Path(context.path).with_suffix('.en.srt')
+    custom_destination = custom_folder / local_destination.name
+    local_output = engine_output_path(local_destination, 'ffsubsync')
+    custom_output = engine_output_path(custom_destination, 'ffsubsync')
+    original_save = download.save_subtitles
+    selected_folders = []
+
+    def choose(videos, **kwargs):
+        local_output.write_bytes(b'Generated in the media folder')
+        if restored:
+            custom_output.write_bytes(b'Generated in the configured folder')
+        return {next(iter(videos)): [pipeline.FakeSubtitle()]}
+
+    def change_settings_after_folder_selection(*args, **kwargs):
+        selected_folders.append(kwargs['directory'])
+        if setting_change == 'new-custom-folder':
+            monkeypatch.setattr(settings.general, 'subfolder', 'absolute')
+        return original_save(*args, **kwargs)
+
+    if restored:
+        original_target = download.get_target_folder
+
+        def change_settings_during_folder_selection(*args, **kwargs):
+            assert settings.general.subfolder == 'absolute'
+            with monkeypatch.context() as transient:
+                transient.setattr(settings.general, 'subfolder', 'current')
+                return original_target(*args, **kwargs)
+
+        monkeypatch.setattr(download, 'get_target_folder', change_settings_during_folder_selection)
+    monkeypatch.setattr(download, 'download_best_subtitles', choose)
+    monkeypatch.setattr(download, 'save_subtitles', change_settings_after_folder_selection)
+    wanted.wanted_search_missing_subtitles_sources(kind='movie', job_id=1)
+
+    assert selected_folders == [str(custom_folder) if restored else None]
+    history = world.db.execute(sa.select(repository.History.c.item_id, repository.History.c.action)).all()
+    if setting_change == 'new-custom-folder':
+        assert not local_destination.exists()
+        assert local_output.read_bytes() == b'Generated in the media folder'
+        assert not list(custom_folder.iterdir())
+        assert not world.published
+        assert history == []
+    else:
+        destination, obsolete = ((custom_destination, custom_output) if restored
+                                 else (local_destination, local_output))
+        assert destination.read_bytes() == pipeline.CONTENT
+        assert not obsolete.exists()
+        assert [event.subtitle_path for event in world.published] == [str(destination)]
+        assert history == [(context.item_id, 1)]
+        if restored:
+            assert not local_destination.exists()
+            assert local_output.read_bytes() == b'Generated in the media folder'
+        else:
+            assert not list(custom_folder.iterdir())
 
 
 def test_explicit_api_opt_in_controls_search_all_but_not_the_source_schedule(

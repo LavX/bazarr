@@ -46,6 +46,7 @@ class SourceItemContext:
     source_created_at: Optional[datetime] = None
     source_name: Optional[str] = None
     wanted_file_stamp: Optional[tuple] = None
+    pinned_file_identity: Optional[tuple[int, int]] = None  # device and inode from an explicit Discover copy
 
     def same_item(self, current):
         """SQLite may reuse the integer id of a deleted item."""
@@ -139,7 +140,8 @@ def _same_context(source, current):
     if not source.same_item(current) or (source.source_id, source.library_id, source.path, source.kind) != (
             current.source_id, current.library_id, current.path, current.kind):
         return None
-    return replace(current, wanted_file_stamp=source.wanted_file_stamp) if source.wanted_file_stamp else current
+    return replace(current, wanted_file_stamp=source.wanted_file_stamp,
+                   pinned_file_identity=source.pinned_file_identity)
 
 
 @contextmanager

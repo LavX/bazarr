@@ -17,7 +17,7 @@ from subzero.language import Language
 from subliminal_patch.core import save_subtitles
 from subtitles.tools.subsync_engines import (
     SubtitleDestinationChanged, SubtitleSourceChanged, _report_subtitle_publication,
-    local_subtitle_ownership_is_current, plan_sync_output_cleanup, regular_subtitle_version, subtitle_mutation,
+    plan_sync_output_cleanup, regular_subtitle_version, subtitle_mutation,
     subtitle_source_version, subtitle_write_locks, sync_output_owner_is_unique, write_subtitle_file,
 )
 from subliminal_patch.core_persistent import download_best_subtitles
@@ -33,6 +33,10 @@ from .mismatch import clear_mismatch_for_video, report_release_type_mismatch
 from .pool import update_pools, _get_pool
 from .utils import get_video, _get_lang_obj, _get_scores
 from .processing import process_subtitle
+
+
+class SourceMissingLanguagesUnavailable(OSError):
+    """The source publication cannot verify whether the target language is missing."""
 
 
 @update_pools
@@ -198,10 +202,15 @@ def generate_subtitles(path, languages, audio_language, sceneName, title, media_
                             subtitle_formats.add(s.format)
 
                         try:
-                            destination_setting = (
-                                _source_subtitle_destination_setting() if source_upgrade is not None else None
-                            )
-                            fld = get_target_folder(path)
+                            destination_setting = None
+                            if source_wanted_stamp is not None or source_upgrade is not None:
+                                from discover.metadata import CONFIG_LOCK
+
+                                with CONFIG_LOCK:
+                                    destination_setting = _source_subtitle_destination_setting()
+                                fld = get_target_folder(path, destination_setting=destination_setting)
+                            else:
+                                fld = get_target_folder(path)
                             chmod = int(settings.general.chmod, 8) if not sys.platform.startswith(
                                 'win') and settings.general.chmod_enabled else None
                             publish = publication_callback(publication_type, path, 'download', arr_instance_id,
@@ -244,6 +253,10 @@ def generate_subtitles(path, languages, audio_language, sceneName, title, media_
                                                           previous_subtitles_to_delete)
                                 saved_subtitles = [saved for saved in saved_subtitles if saved.storage_path in written_paths]
 
+                        except SourceMissingLanguagesUnavailable:
+                            # The source job must fail rather than report a completed search
+                            # when its final missing-language check could not be performed.
+                            raise
                         except Exception as e:
                             logging.exception(
                                 f'BAZARR Error saving Subtitles file to disk for this file {path}: {repr(e)}')  # noqa: G004
@@ -460,32 +473,38 @@ def _write_source_download(video_path, destination, content, *, source, language
             paths = (old_path, destination) if remove_previous else (destination,)
             outputs = tuple(output for path in paths
                             for output in plan_sync_output_cleanup(video_path, path, ownership_index))
-            return paths, outputs
+            proof = ownership_index.prepare_registered_ownership(video_path, (*paths, *(path for path, _ in outputs)))
+            return paths, outputs, proof
         if wanted_stamp is None and recheck_missing:
-            return prepare_source_sidecars(source, ownership_index, written_paths)
+            try:
+                return prepare_source_sidecars(source, ownership_index, written_paths)
+            except OSError as error:
+                logging.warning('BAZARR could not verify missing languages for source item %s', source.item_id)
+                raise SourceMissingLanguagesUnavailable(
+                    'The source missing languages could not be verified. Try again when its subtitle files and '
+                    'folders can be read.') from error
         return None
 
     @contextmanager
     def publication(files):
         with ownership_index.publication(source, prepare, destination=registry_destination,
-                                         cleanup_outputs=upgrade is None) as (
-                current, connection, prepared):
+                                         cleanup_outputs=upgrade is None,
+                                         recheck_registered=wanted_stamp is not None) as (current, connection, prepared):
             if current is None or current.path != video_path:
                 raise SubtitleDestinationChanged('The source item moved or was removed')
             if video_version is not None and subtitle_source_version(video_path) != video_version:
                 raise SubtitleDestinationChanged('The media file changed while searching for subtitles')
+            if destination_setting is not None and destination_setting != _source_subtitle_destination_setting():
+                raise SubtitleDestinationChanged('The subtitle destination setting changed before publication')
             overwrite = is_upgrade if upgrade is None else same_destination
             if os.path.lexists(destination) and (not overwrite or regular_subtitle_version(destination) is None):
                 raise SubtitleDestinationChanged('The source subtitle destination is already occupied')
             if upgrade is not None:
                 if current.profile_id != source.profile_id or not upgrade.can_publish(current, target=connection):
                     raise SubtitleDestinationChanged('Source upgrade eligibility changed during search')
-                if destination_setting is not None and destination_setting != _source_subtitle_destination_setting():
-                    raise SubtitleDestinationChanged('The subtitle destination setting changed before publication')
-                paths, outputs = prepared
+                paths, outputs, proof = prepared
                 output_paths = tuple(path for path, _ in outputs)
-                if not local_subtitle_ownership_is_current(video_path, (*paths, *output_paths), ownership_index):
-                    raise SubtitleDestinationChanged('Subtitle ownership in the source directory changed during search')
+                ownership_index.require_current_ownership(video_path, (*paths, *output_paths), proof)
                 files.enter_context(subtitle_mutation(video_path, old_path, *output_paths, invalidate_outputs=False))
                 files.enter_context(_preserve_source_subtitle(old_path, upgrade.subtitle_version, retire=remove_previous))
                 for output, version in outputs:

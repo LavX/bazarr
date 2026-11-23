@@ -113,10 +113,12 @@ def get_subtitle_destination_folder():
     return fld_custom
 
 
-def get_target_folder(file_path, create=True):
-    subfolder = settings.general.subfolder
-    fld_custom = str(settings.general.subfolder_custom).strip() \
-        if settings.general.subfolder_custom else None
+def get_target_folder(file_path, create=True, *, destination_setting=None):
+    if destination_setting is None:
+        subfolder = settings.general.subfolder
+        fld_custom = str(settings.general.subfolder_custom).strip() if settings.general.subfolder_custom else None
+    else:
+        subfolder, fld_custom = destination_setting
 
     if subfolder != "current" and fld_custom:
         # specific subFolder requested, create it if it doesn't exist
