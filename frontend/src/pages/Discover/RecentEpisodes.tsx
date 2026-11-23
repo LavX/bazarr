@@ -92,7 +92,7 @@ export default function RecentEpisodes() {
       showTvdbId: undefined,
       episodeIdentity: undefined,
       manualConfirmed: false,
-      manualEntry: false,
+      manualEntry: undefined,
       season: "",
       episode: "",
     });

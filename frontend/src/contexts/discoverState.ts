@@ -21,6 +21,7 @@ export interface DiscoverDraft {
   query?: string;
   mediaType: "movie" | "episode";
   imdbId: string;
+  copyTmdbId?: number;
   language: string;
   season: string;
   episode: string;
@@ -28,9 +29,12 @@ export interface DiscoverDraft {
   year?: number;
   showId?: number;
   showTvdbId?: number | null;
+  // Latest accepted details for the catalog link.
   episodeIdentity?: MetadataEpisode;
   manualConfirmed?: boolean;
-  manualEntry?: boolean;
+  // A catalog selection keeps its source episode when the reader changes its
+  // numbering. A numbers-only selection starts without that association.
+  manualEntry?: "catalog" | "numbers";
   /**
    * The explicitly chosen library copy, or undefined for title-only matching.
    * Opaque: the server resolves it against the confirmed target every time.
@@ -120,6 +124,15 @@ export function discoverPageKey(
   ]);
 }
 
+export function discoverTitleKey(browsing: DiscoverBrowsing): string | null {
+  if (browsing.selectedId === null)
+    return browsing.retainedTitle?.source_id ?? browsing.adoptedSourceId;
+  const id = String(browsing.selectedId);
+  return browsing.selectedSource === "local" && id.startsWith("source:")
+    ? `source:${browsing.selectedType}:${id.slice("source:".length)}`
+    : `${browsing.selectedSource}:${browsing.selectedType}:${id}`;
+}
+
 export function initialDiscoverState(): DiscoverState {
   let language = "";
   let storageAvailable = true;
@@ -177,6 +190,19 @@ export function initialDiscoverState(): DiscoverState {
   };
 }
 
+export function selectedEpisodeIdentity(draft: DiscoverDraft) {
+  const identity = draft.episodeIdentity;
+  if (
+    draft.manualEntry === "numbers" &&
+    identity &&
+    (!draft.season ||
+      Number(draft.season) !== identity.season ||
+      Number(draft.episode) !== identity.episode)
+  )
+    return undefined;
+  return identity;
+}
+
 export function searchSelection(
   draft: DiscoverDraft,
 ): DiscoverSelection | null {
@@ -192,12 +218,15 @@ export function searchSelection(
     return { mode: "release", query, language: draft.language };
   }
   const imdbId = draft.imdbId.trim().toLowerCase();
-  if (!/^tt\d{7,10}$/.test(imdbId) || !draft.language) return null;
+  const validImdb = /^tt\d{7,10}$/.test(imdbId);
+  const copyTmdbId = draft.copyId ? copyLookupTmdbId(draft) : undefined;
+  if ((!validImdb && (!copyTmdbId || imdbId)) || !draft.language) return null;
   /* eslint-disable camelcase -- the selection is the request body, so its keys
      keep the API spelling. */
   const selection: DiscoverSelection = {
     media_type: draft.mediaType,
-    imdb_id: imdbId,
+    ...(validImdb ? { imdb_id: imdbId } : {}),
+    ...(copyTmdbId ? { tmdb_id: copyTmdbId } : {}),
     language: draft.language,
   };
   /* eslint-enable camelcase */
@@ -208,7 +237,7 @@ export function searchSelection(
     selection.episode = Number(draft.episode);
     if (selection.episode < 1) return null;
     if (draft.manualEntry && !draft.manualConfirmed) return null;
-    const identity = draft.episodeIdentity;
+    const identity = selectedEpisodeIdentity(draft);
     if (identity?.identity_status === "conflict") return null;
     // An identity the show now contradicts cannot run a search on its own, but
     // it must not stand in the way of a confirmed manual one either: a reader
@@ -303,13 +332,21 @@ export function episodeMatchesShow(
 function draftShow(draft: DiscoverDraft): ShowIdentity {
   return {
     id: draft.showId,
-    imdb_id: draft.imdbId.trim().toLowerCase(),
+    imdb_id: draft.imdbId.trim().toLowerCase() || undefined,
     tvdb_id: draft.showTvdbId,
     title: draft.title,
     year: draft.year,
   };
 }
 /* eslint-enable camelcase */
+
+export function copyLookupTmdbId(draft: DiscoverDraft) {
+  // Constrain an existing IMDb episode lookup with the linked catalog show,
+  // even when title details could not attach a source copy.
+  return draft.mediaType === "episode" && draft.imdbId.trim()
+    ? (draft.showId ?? draft.copyTmdbId)
+    : draft.copyTmdbId;
+}
 
 /**
  * The target a chosen copy belongs to.
@@ -328,18 +365,37 @@ export function copyTargetKey(draft: DiscoverDraft): string {
   return JSON.stringify([
     draft.mediaType,
     draft.imdbId.trim().toLowerCase(),
+    copyLookupTmdbId(draft) ?? null,
     draft.mediaType === "episode" ? draft.season : null,
     draft.mediaType === "episode" ? draft.episode : null,
   ]);
 }
 
-export function discoverContextKey(draft: DiscoverDraft): string {
+type DiscoverSearchInput = Pick<DiscoverState, "browsing" | "draft">;
+
+export function discoverSearchEligibility(state: DiscoverSearchInput) {
+  const recentMismatch = recentEpisodeMismatch(state);
+  return {
+    recentMismatch,
+    selection: recentMismatch ? null : searchSelection(state.draft),
+  };
+}
+
+export function discoverContextKey(state: DiscoverSearchInput): string {
+  const { draft } = state;
   if (draft.mode === "release")
     return JSON.stringify([
       "release",
       (draft.query ?? "").trim(),
       draft.language,
     ]);
+  const { recentMismatch, selection } = discoverSearchEligibility(state);
+  if (draft.mediaType === "episode" && draft.manualConfirmed && selection) {
+    // A late episode response can invalidate the search even when it would
+    // leave the request body unchanged, if the feed now needs reconciliation.
+    const { episode_identity: identity, ...request } = selection;
+    return JSON.stringify([request, episodeIdentityKey(identity)]);
+  }
   return JSON.stringify([
     draft.mediaType,
     draft.imdbId.trim().toLowerCase(),
@@ -352,19 +408,42 @@ export function discoverContextKey(draft: DiscoverDraft): string {
     draft.mediaType === "episode" ? (draft.showId ?? null) : null,
     draft.mediaType === "episode" ? (draft.showTvdbId ?? null) : null,
     draft.mediaType === "episode"
-      ? episodeIdentityKey(draft.episodeIdentity)
+      ? episodeIdentityKey(selectedEpisodeIdentity(draft))
       : null,
     draft.mediaType === "episode" ? Boolean(draft.manualConfirmed) : null,
     draft.mediaType === "episode" ? Boolean(draft.manualEntry) : null,
     // A different copy is a different search context: its results, preview,
     // feedback and pending responses all belong to the copy that was chosen.
     draft.copyId ?? null,
+    draft.copyId ? (copyLookupTmdbId(draft) ?? null) : null,
+    // Empty IMDb fields cannot distinguish catalog titles while details load.
+    draft.imdbId.trim() ? null : discoverTitleKey(state.browsing),
+    recentMismatch,
   ]);
+}
+
+export function mergeDiscoverBrowsing(
+  browsing: DiscoverBrowsing,
+  changes: Partial<DiscoverBrowsing>,
+): DiscoverBrowsing {
+  return {
+    ...browsing,
+    ...(changes.selectedId != null
+      ? { releaseContext: null, recentContext: null, manualSearch: false }
+      : {}),
+    ...((changes.selectedSeason !== undefined &&
+      changes.selectedSeason !== browsing.selectedSeason) ||
+    (changes.selectedEpisode !== undefined &&
+      changes.selectedEpisode !== browsing.selectedEpisode)
+      ? { recentContext: null }
+      : {}),
+    ...changes,
+  };
 }
 
 type DiscoverAction =
   | { type: "restore"; state: DiscoverState; generation: number }
-  | { type: "browsing"; changes: Partial<DiscoverBrowsing> }
+  | { type: "browsing"; browsing: DiscoverBrowsing; generation: number }
   | {
       type: "draft";
       draft: DiscoverDraft;
@@ -460,23 +539,6 @@ export function discoverReducer(
       preview: saved.preview?.status === "pending" ? null : saved.preview,
     };
   }
-  if (action.type === "browsing")
-    return {
-      ...state,
-      browsing: {
-        ...state.browsing,
-        ...(action.changes.selectedId != null
-          ? { releaseContext: null, recentContext: null, manualSearch: false }
-          : {}),
-        ...((action.changes.selectedSeason !== undefined &&
-          action.changes.selectedSeason !== state.browsing.selectedSeason) ||
-        (action.changes.selectedEpisode !== undefined &&
-          action.changes.selectedEpisode !== state.browsing.selectedEpisode)
-          ? { recentContext: null }
-          : {}),
-        ...action.changes,
-      },
-    };
   if (action.type === "clear") {
     return {
       ...initialDiscoverState(),
@@ -484,15 +546,23 @@ export function discoverReducer(
       generation: action.generation,
     };
   }
-  if (action.type === "draft") {
+  if (action.type === "draft" || action.type === "browsing") {
+    const draft = action.type === "draft" ? action.draft : state.draft;
+    const browsing =
+      action.type === "browsing" ? action.browsing : state.browsing;
     const changed =
-      discoverContextKey(state.draft) !== discoverContextKey(action.draft);
+      (draft !== state.draft || browsing !== state.browsing) &&
+      discoverContextKey(state) !== discoverContextKey({ draft, browsing });
+    const cached = action.type === "draft" ? action.cached : undefined;
     return {
       ...state,
-      draft: action.draft,
+      draft,
+      browsing,
       generation: action.generation,
-      storageAvailable: action.storageAvailable,
-      languageSeeded: action.languageSeeded ?? state.languageSeeded,
+      ...(action.type === "draft" && {
+        storageAvailable: action.storageAvailable,
+        languageSeeded: action.languageSeeded ?? state.languageSeeded,
+      }),
       ...(changed
         ? ({
             snapshot: null,
@@ -502,19 +572,19 @@ export function discoverReducer(
             download: null,
             preview: null,
             retiredResultIds: [],
-            ...(action.cached
+            ...(cached
               ? {
-                  snapshot: action.cached.snapshot,
-                  status: action.cached.snapshot?.status ?? "unsearched",
+                  snapshot: cached.snapshot,
+                  status: cached.snapshot?.status ?? "unsearched",
                   download:
-                    action.cached.download?.status === "pending"
+                    cached.download?.status === "pending"
                       ? null
-                      : action.cached.download,
+                      : cached.download,
                   preview:
-                    action.cached.preview?.status === "pending"
+                    cached.preview?.status === "pending"
                       ? null
-                      : action.cached.preview,
-                  retiredResultIds: action.cached.retiredResultIds,
+                      : cached.preview,
+                  retiredResultIds: cached.retiredResultIds,
                 }
               : {}),
           } as const)
@@ -566,7 +636,7 @@ export function discoverReducer(
   if (action.type === "preview") {
     const { feedback } = action;
     if (
-      action.key !== discoverContextKey(state.draft) ||
+      action.key !== discoverContextKey(state) ||
       (feedback.status !== "pending" &&
         state.preview?.requestId !== feedback.requestId) ||
       !offeredResults(state).some(
@@ -594,7 +664,7 @@ export function discoverReducer(
     };
   }
   if (action.type === "download") {
-    if (action.key !== discoverContextKey(state.draft)) return state;
+    if (action.key !== discoverContextKey(state)) return state;
     const { feedback } = action;
     if (
       feedback.status !== "pending" &&
@@ -625,7 +695,7 @@ export function discoverReducer(
   }
   if (
     action.generation !== state.generation ||
-    action.key !== discoverContextKey(state.draft)
+    action.key !== discoverContextKey(state)
   )
     return state;
   if (action.type === "failure") {
@@ -685,9 +755,7 @@ export function discoverReducer(
   };
 }
 
-export function recentEpisodeMismatch(
-  state: Pick<DiscoverState, "browsing" | "draft">,
-): boolean {
+function recentEpisodeMismatch(state: DiscoverSearchInput): boolean {
   const item = state.browsing.recentContext?.item;
   if (!item || state.draft.mode === "release") return false;
   const episode = state.draft.episodeIdentity;

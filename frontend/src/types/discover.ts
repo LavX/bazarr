@@ -2,7 +2,9 @@ export interface DiscoverIdentifiedSelection {
   mode?: "title";
   query?: never;
   media_type: "movie" | "episode";
-  imdb_id: string;
+  imdb_id?: string | null;
+  /** Present for an explicitly chosen local copy of this TMDB title. */
+  tmdb_id?: number;
   language: string;
   season?: number;
   episode?: number;
@@ -21,6 +23,7 @@ export interface DiscoverReleaseSelection {
   language: string;
   media_type?: never;
   imdb_id?: never;
+  tmdb_id?: never;
   season?: never;
   episode?: never;
   title?: never;
@@ -42,6 +45,8 @@ export interface DiscoverCopy {
   local_id: number;
   arr_instance_id: number | null;
   instance_name: string | null;
+  source_id?: number;
+  source_name?: string | null;
   series_local_id: number | null;
   title: string | null;
   episode_title: string | null;
@@ -272,6 +277,8 @@ export interface LocalOwnership {
 export interface LocalCopy {
   local_id: number;
   arr_instance_id: number | null;
+  source_id?: number;
+  source_name?: string;
   updated_at: string | null;
   episode_count: number | null;
 }
@@ -288,6 +295,7 @@ export interface MetadataMovie {
   title: string;
   year: number | null;
   imdb_id: string | null;
+  tmdb_id?: number | null;
   mapping_status: "resolved" | "unresolved";
   overview: string;
   poster_url: string | null;
@@ -350,7 +358,6 @@ export interface MetadataFallbackTitle extends Omit<
   id: string | number;
   media_type: "movie" | "show";
   tvdb_id?: number | null;
-  tmdb_id?: number | null;
   seasons?: null;
 }
 export type MetadataTitle =

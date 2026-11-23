@@ -11,6 +11,7 @@ from subliminal_patch.score import MAX_SCORES
 
 from . import repository
 from .context import SourceItemContext
+from .db import lock_source_release, source_transaction
 
 
 def _snapshot(context: SourceItemContext, item, source):
@@ -59,6 +60,11 @@ def history_log_source(action, context: SourceItemContext, result, fake_provider
 
 
 def blacklist_log_source(context: SourceItemContext, provider, subs_id, language, target=None):
+    # Deletion passes its publication transaction, which reserved the release before it touched the file.
+    if target is None:
+        with source_transaction() as connection:
+            lock_source_release(connection, (context.kind, provider, subs_id))
+            return blacklist_log_source(context, provider, subs_id, language, target=connection)
     item, source = _owners(context, target)
     return repository.insert_blacklist(
         target, item_id=item.id if item is not None else None, source_id=source.id if source is not None else None,
