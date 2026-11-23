@@ -265,20 +265,14 @@ def test_a_decline_without_a_fallback_ends_declined(env):
     assert env.history(env.last_job())["taken_over_by_instance_id"] is None
 
 
-def test_a_terminal_decline_history_fault_leaves_the_job_awaiting_retry(env, monkeypatch):
-    from subtitles.tools.translate.runtime.history import HistoryStore
+def test_a_terminal_decline_history_fault_leaves_the_job_awaiting_retry(env):
+    from sqlalchemy.exc import DBAPIError
+    from translator_dispatch_helpers import reject_history_update
 
     env.engine(SECOND_PLUGIN)
     env.scripts[SECOND_PLUGIN] = {"*": [decline()]}
-    note_declined = HistoryStore.note_declined
-
-    def fail_after_note(history, *args, **kwargs):
-        note_declined(history, *args, **kwargs)
-        raise RuntimeError("could not finish decline history")
-
-    with monkeypatch.context() as failed_history:
-        failed_history.setattr(HistoryStore, "note_declined", fail_after_note)
-        with pytest.raises(RuntimeError, match="could not finish decline history"):
+    with reject_history_update(env.session, "declined"):
+        with pytest.raises(DBAPIError, match="fixture history write failed"):
             env.dispatcher().run(make_spec())
 
     job = env.last_job()
