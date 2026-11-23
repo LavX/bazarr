@@ -2602,7 +2602,7 @@ def test_automatic_source_translation_checks_queued_video_version(world, monkeyp
 
 @pytest.mark.parametrize(
     "old_state", ["queued", "legacy-unsigned", "legacy-pinned", "legacy-current", "awaiting-retry", "legacy-recovered",
-                  "retry-during-replacement", "legacy-removed"])
+                  "retry-during-replacement", "legacy-removed", "planning-retry"])
 def test_runtime_queues_a_new_source_translation_for_a_replacement_recording(
         world, monkeypatch, isolated_jobs, old_state):
     import json
@@ -2656,7 +2656,23 @@ def test_runtime_queues_a_new_source_translation_for_a_replacement_recording(
         if old_state in ("legacy-pinned", "legacy-current"):
             assert queue_missing_translations(source) == {"hu"}
             assert world.db.execute(sa.select(TableTranslatorJob.id)).scalars().all() == [older_id]
-        if old_state == "legacy-current":
+        if old_state in ("legacy-current", "planning-retry"):
+            if old_state == "planning-retry":
+                from subtitles.tools.translate.runtime.dispatch import Dispatcher
+
+                def fail_planning(*args, **kwargs):
+                    raise RuntimeError("could not read the selected engine")
+
+                with monkeypatch.context() as broken_runtime:
+                    broken_runtime.setattr(Dispatcher, "_plan", fail_planning)
+                    assert isolated_jobs._reserve_next_job() is older and not isolated_jobs._run_job(older)
+                assert older.retryable is True
+                assert older.error["reason"] == "internal"
+                assert TranslationJobs(world.db).get(older_id).state == "awaiting_retry"
+                assert queue_missing_translations(source) == {"hu"}
+                (retry,) = isolated_jobs.jobs_pending_queue
+                assert retry.job_id != older.job_id
+                older = retry
             assert isolated_jobs._reserve_next_job() is older and isolated_jobs._run_job(older)
             assert "[hu] Downloaded" in result.read_text()
             assert world.db.execute(sa.select(TableTranslatorJob.id, TableTranslatorJob.state)).all() == [

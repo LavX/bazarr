@@ -51,6 +51,7 @@ def test_queue_status_observes_a_job_during_scheduler_handoff(monkeypatch):
 
     from app import jobs_queue as app_queue
 
+    monkeypatch.setattr(app_queue.JobsQueue, "_flush_progress_loop", lambda self: None)
     queue = app_queue.JobsQueue()
     job = app_queue.Job(41, "Translate", "subtitles.tools.translate.main", "translate_subtitles_file")
     queue.jobs_pending_queue.append(job)
