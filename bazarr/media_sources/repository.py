@@ -512,6 +512,12 @@ def blacklist_pairs(item_kind, target=None):
         sa.select(Blacklist.c.provider, Blacklist.c.subs_id).where(Blacklist.c.item_kind == item_kind)).all()]
 
 
+def is_release_blacklisted(release, target):
+    item_kind, provider, subs_id = release
+    return target.scalar(sa.select(sa.exists().where(
+        Blacklist.c.item_kind == item_kind, Blacklist.c.provider == provider, Blacklist.c.subs_id == subs_id)))
+
+
 def retained_activity_by_kind(target=None):
     """History and blacklist rows can outlive both the source and its library."""
     by_kind = {'movie': 'movie', 'series': 'episode', 'sports': 'sports_event'}
