@@ -209,7 +209,7 @@ class RuntimeTranslatorService:
                                  **({"source": self.source} if self.source is not None else {})),
             history_media=history_media,
             pin_from_job=True, check_cancel=self._check, progress=self._progress, legacy=self._legacy,
-            retry_setup_errors=self.source is not None)
+            retry_setup_errors=self.source is not None, queue_job_id=job_id)
         try:
             outcome = (self._dispatcher or Dispatcher()).run(spec)
         except DispatchFailed as failed:
@@ -364,7 +364,7 @@ def translate_lines(lines, source_language, target_language, title="", media_typ
         media={"type": media_type or "", "title": title or ""} if (media_type or title) else {},
         pinned_connection_id=pinned_connection_id,
         history_media={"media_type": media_type or "editor", "media_title": title or None},
-        check_cancel=check, progress=progress, legacy=legacy)
+        check_cancel=check, progress=progress, legacy=legacy, queue_job_id=job_id)
     try:
         outcome = (dispatcher or Dispatcher()).run(spec)
     except DispatchFailed as failed:

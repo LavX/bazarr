@@ -44,12 +44,13 @@ from .destinations import effective_destinations, schema_for_backend, schema_for
 from .failure import AttemptFailure
 from .history import HistoryStore
 from .host_calls import AttemptContext, stored_checkpoints
-from .jobs import (AWAITING_RETRY, DEADLINE_EXCEEDED, INACTIVITY_TIMEOUT, QUEUED, DeadlineAction, DeadlineWatch,
+from .jobs import (AWAITING_RETRY, DEADLINE_EXCEEDED, INACTIVITY_TIMEOUT, QUEUED, RUNNING,
+                   DeadlineAction, DeadlineWatch,
                    TranslationJobs, line_digest, retry_hold)
 from .output_checks import add_rtl_marks, check_line
 from .request import LanguageSpec, UnsupportedLanguage, normalize_request_languages
 from .store import CONNECTION, INSTANCE, Notice, TranslatorStore
-from .transaction import ledger_transaction
+from .transaction import ledger_transaction, write_transaction
 from .usage import JOB_CAP_SPENT, MONTH_SPENT, RESERVED, WAIT, CostLimits, UsageLedger
 from .workers import WorkerPort, bound_port
 
@@ -96,6 +97,7 @@ class JobSpec:
     legacy: Callable[[Any, Any], "LegacyResult"] | None = None
     # A source scan may requeue a recorded retry when setup failed before any engine invocation.
     retry_setup_errors: bool = False
+    queue_job_id: int | None = None
 
 
 @dataclass
@@ -262,6 +264,8 @@ class _Run:
     job_id: int
     ledger_id: str
     watch: DeadlineWatch
+    queue_job_id: int | None = None
+    claimed: bool = False
     budget: Any = None
     # True once this dispatcher reserved the job's budget: only that one gives it back.
     budget_reserved: bool = False
@@ -309,10 +313,11 @@ class Dispatcher:
         history = HistoryStore(self.session, clock=self.clock)
         ledger = UsageLedger(self.session, clock=self.clock)
         row = self._ensure_job(jobs, spec)
-        if row is None:
+        if row is None or (spec.queue_job_id is not None and row.queue_job_id not in (None, spec.queue_job_id)):
             return DispatchOutcome("skipped")
         _maintain_when_due(self.session, self.clock, self.monotonic, self.limits)
-        state = _Run(row.id, str(row.id), DeadlineWatch(clock=self.monotonic, **self.deadlines))
+        state = _Run(row.id, str(row.id), DeadlineWatch(clock=self.monotonic, **self.deadlines),
+                     queue_job_id=row.queue_job_id)
         try:
             try:
                 chain, state.notices = self._plan(spec)
@@ -439,8 +444,12 @@ class Dispatcher:
             release = "" if info is None else info.digest
             if position == 0:
                 if not jobs.start(state.job_id, source_digest=digest, engine_instance_id=instance.id,
-                                  settings_revision=instance.revision, release_digest=release):
+                                  settings_revision=instance.revision, release_digest=release,
+                                  expected_queue_job_id=state.queue_job_id, queue_job_id=spec.queue_job_id):
                     return DispatchOutcome("skipped", job_id=state.job_id)
+                state.claimed = True
+                if spec.queue_job_id is not None:
+                    state.queue_job_id = spec.queue_job_id
             elif not jobs.switch_engine(state.job_id, engine_instance_id=instance.id,
                                         settings_revision=instance.revision, release_digest=release):
                 return DispatchOutcome("skipped", job_id=state.job_id)
@@ -511,10 +520,18 @@ class Dispatcher:
     def _await_retry(self, jobs, history, state, error_class, message, *, retry_at=None, detail=None) -> bool:
         # A replacement can cancel the retry as soon as the job state is visible.
         with ledger_transaction(self.session):
-            recorded = jobs.await_retry(state.job_id, error_class, message, retry_at=retry_at)
-            if recorded and history.get_by_job(state.ledger_id) is not None:
-                history.finish_job(state.ledger_id, "awaiting_retry", error_class=error_class,
-                                   error_detail=detail or message)
+            recorded = jobs.await_retry(state.job_id, error_class, message, retry_at=retry_at,
+                                        expected_state=RUNNING if state.claimed else QUEUED,
+                                        expected_queue_job_id=state.queue_job_id)
+            if recorded:
+                try:
+                    # History failure must not roll back the job's retry.
+                    with write_transaction(self.session):
+                        if history.get_by_job(state.ledger_id) is not None:
+                            history.finish_job(state.ledger_id, "awaiting_retry", error_class=error_class,
+                                               error_detail=detail or message)
+                except Exception:
+                    logger.warning("A translation history row could not be finished", exc_info=True)
         return recorded
 
     def _finish_history(self, history, state, status, error_class=None, detail=None):

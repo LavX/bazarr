@@ -483,6 +483,163 @@ def test_editor_backend_lookup_preserves_the_original_error(env, monkeypatch):
     assert not env.requests()
 
 
+@pytest.fixture
+def editor_runtime_queue(env, monkeypatch):
+    from app import jobs_queue as queue_module
+    from subtitles.tools.translate import availability, editor
+    from subtitles.tools.translate.runtime import service
+    from utilities import job_dedupe
+
+    env.ai_engine()
+    monkeypatch.setattr(queue_module.JobsQueue, "_flush_progress_loop", lambda self: None)
+    monkeypatch.setattr(queue_module, "_job_event", lambda *args, **kwargs: None)
+    queue = queue_module.JobsQueue()
+    monkeypatch.setattr(editor, "_results", type(editor._results)())
+    monkeypatch.setattr(editor, "_followers", type(editor._followers)())
+    for module in (queue_module, editor, job_dedupe, service):
+        monkeypatch.setattr(module, "jobs_queue", queue)
+    monkeypatch.setattr(queue, "_has_capacity_for", lambda job: True)
+    monkeypatch.setattr(queue, "_lane_has_room", lambda job: True)
+    monkeypatch.setattr(availability, "runtime_active", lambda: True)
+    monkeypatch.setattr(service, "Dispatcher", env.dispatcher)
+    return queue
+
+
+@pytest.mark.parametrize("operation", ["lookup", "update"])
+def test_history_database_failure_keeps_a_dispatch_retry_recoverable(
+        env, monkeypatch, editor_runtime_queue, operation, caplog):
+    import sqlalchemy as sa
+
+    from subtitles.tools.translate import editor
+    from subtitles.tools.translate.runtime.dispatch import Dispatcher
+    from subtitles.tools.translate.runtime.history import HistoryStore
+
+    lines = [{"position": 5, "line": "Hello"}]
+    queue = editor_runtime_queue
+    first = editor.enqueue_editor_translation(lines, "en", "hu")
+    job = queue._reserve_next_job()
+    assert job.job_id == first
+    queried = []
+    engine = env.session.get_bind()
+
+    def unavailable(*args, **kwargs):
+        row = env.last_job()
+        assert (row.state, row.queue_job_id) == ("running", first)
+        raise RuntimeError("could not read the selected backend")
+
+    def fail_lookup(self, job_id):
+        queried.append(job_id)
+        self._session.execute(sa.text("SELECT missing_test_column FROM translation_history"))
+
+    if operation == "update":
+        with engine.begin() as connection:
+            if connection.dialect.name == "sqlite":
+                connection.exec_driver_sql("""
+                    CREATE TRIGGER reject_history_retry BEFORE UPDATE ON translation_history
+                    FOR EACH ROW WHEN NEW.status = 'awaiting_retry'
+                    BEGIN SELECT RAISE(ABORT, 'fixture history write failed'); END
+                """)
+            else:
+                connection.exec_driver_sql("""
+                    CREATE FUNCTION reject_history_retry() RETURNS trigger AS $failure$
+                    BEGIN RAISE EXCEPTION 'fixture history write failed'; END;
+                    $failure$ LANGUAGE plpgsql
+                """)
+                connection.exec_driver_sql("""
+                    CREATE TRIGGER reject_history_retry BEFORE UPDATE ON translation_history
+                    FOR EACH ROW WHEN (NEW.status = 'awaiting_retry') EXECUTE FUNCTION reject_history_retry()
+                """)
+
+    with monkeypatch.context() as failure:
+        failure.setattr(Dispatcher, "_candidates", unavailable)
+        if operation == "lookup":
+            failure.setattr(HistoryStore, "get_by_job", fail_lookup)
+        try:
+            assert not queue._run_job(job)
+        finally:
+            if operation == "update":
+                with engine.begin() as connection:
+                    if connection.dialect.name == "sqlite":
+                        connection.exec_driver_sql("DROP TRIGGER reject_history_retry")
+                    else:
+                        connection.exec_driver_sql("DROP TRIGGER reject_history_retry ON translation_history")
+                        connection.exec_driver_sql("DROP FUNCTION reject_history_retry()")
+
+    assert job.status == "failed" and job.error["reason"] == "unexpected_error"
+    assert "Exception raised while running function: could not read the selected backend" in caplog.text
+    row = env.last_job()
+    if operation == "lookup":
+        assert queried == [str(row.id)] and "missing_test_column" in caplog.text
+    else:
+        assert "fixture history write failed" in caplog.text
+    assert (row.state, row.error_class) == ("awaiting_retry", "internal")
+    assert row.queue_job_id is None and not env.requests()
+    retry = editor.enqueue_editor_translation(lines, "en", "hu")
+    job = queue._reserve_next_job()
+    assert job.job_id == retry and retry != first
+    assert queue._run_job(job), job.error
+    assert editor.editor_translation_state(retry)["lines"] == [{"position": 5, "line": "[hu] Hello"}]
+    assert (env.last_job().id, env.last_job().state) == (row.id, "completed")
+    assert env.history(row)["status"] == "completed"
+
+
+def test_an_editor_planner_cannot_release_another_queue_jobs_claim(env, monkeypatch, editor_runtime_queue):
+    from threading import Event, Thread, current_thread
+
+    from subtitles.tools.translate import editor
+    from subtitles.tools.translate.runtime.dispatch import Dispatcher
+
+    queue = editor_runtime_queue
+    failing_id = editor.enqueue_editor_translation([{"position": 0, "line": "Hello"}], "en", "hu")
+    winning_id = editor.enqueue_editor_translation([{"position": 9, "line": "Hello"}], "en", "hu")
+    assert failing_id != winning_id
+    failing_job, winning_job = queue._reserve_next_job(), queue._reserve_next_job()
+    assert (failing_job.job_id, winning_job.job_id) == (failing_id, winning_id)
+
+    entered, claimed, release = Event(), Event(), Event()
+    original_plan, original_run_plugin = Dispatcher._plan, Dispatcher._run_plugin
+
+    def plan(dispatcher, spec):
+        if current_thread() is failing_worker:
+            entered.set()
+            assert claimed.wait(8)
+            raise RuntimeError("could not read the selected engine")
+        return original_plan(dispatcher, spec)
+
+    def run_plugin(dispatcher, *args, **kwargs):
+        claimed.set()
+        assert release.wait(8)
+        return original_run_plugin(dispatcher, *args, **kwargs)
+
+    def execute(job):
+        try:
+            queue._run_job(job)
+        finally:
+            env.session.remove()
+
+    monkeypatch.setattr(Dispatcher, "_plan", plan)
+    monkeypatch.setattr(Dispatcher, "_run_plugin", run_plugin)
+    failing_worker = Thread(target=execute, args=(failing_job,), daemon=True)
+    winning_worker = Thread(target=execute, args=(winning_job,), daemon=True)
+    failing_worker.start()
+    try:
+        assert entered.wait(8)
+        winning_worker.start()
+        assert claimed.wait(8)
+        failing_worker.join(8)
+        assert failing_job.status == "failed"
+        row = env.last_job()
+        assert (row.state, row.queue_job_id) == ("running", winning_id)
+    finally:
+        release.set()
+        failing_worker.join(8)
+        if winning_worker.ident is not None:
+            winning_worker.join(8)
+    assert winning_job.status == "completed"
+    assert editor.editor_translation_state(winning_id)["lines"] == [{"position": 9, "line": "[hu] Hello"}]
+    assert env.last_job().state == "completed"
+
+
 def test_lingarr_publishes_through_its_own_service_and_the_runtime_writes_nothing(env, media, monkeypatch):
     from app.config import settings
     from subtitles.tools.translate.runtime import legacy_engines
