@@ -39,7 +39,7 @@ import {
 import classes from "./ItemOverview.module.scss";
 
 export type OverviewItem = Omit<Item.Base, "audio_language"> & {
-  audio_language: (Language.Info | string)[];
+  audio_language: (Language.Info | string | null)[];
 };
 
 interface Props {
@@ -100,7 +100,9 @@ const ItemOverview: FunctionComponent<Props> = (props) => {
   const audioBadges = useMemo(
     () =>
       (item?.audio_language ?? []).map((language, idx) => {
-        const name = typeof language === "string" ? language : language.name;
+        const name =
+          (typeof language === "string" ? language : language?.name)?.trim() ||
+          "Unknown";
         return (
           <ItemBadge
             key={BuildKey(idx, "audio", name)}

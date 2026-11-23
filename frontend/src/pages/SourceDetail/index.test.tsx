@@ -119,6 +119,29 @@ it("reads the source movie despite a colliding Arr cache and normalizes its stor
   });
 });
 
+it("labels untagged source audio tracks while preserving named tracks", async () => {
+  server.use(
+    http.get("/api/sources/items/7", () =>
+      HttpResponse.json({
+        ...movie,
+        audio_language: ["English", null, "Japanese"],
+      }),
+    ),
+  );
+
+  openPage("movie");
+
+  expect(
+    await screen.findByRole("heading", { name: /Folder movie/ }),
+  ).toBeVisible();
+  expect(screen.getAllByLabelText("Audio Language")).toHaveLength(3);
+  expect(
+    screen
+      .getAllByLabelText("Audio Language")
+      .map((badge) => badge.textContent),
+  ).toEqual(["English", "Unknown", "Japanese"]);
+});
+
 it("sends search and scan to the source item and its owning library", async () => {
   const user = userEvent.setup();
   const search = vi.fn();
