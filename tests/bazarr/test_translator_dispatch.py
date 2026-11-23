@@ -265,6 +265,27 @@ def test_a_decline_without_a_fallback_ends_declined(env):
     assert env.history(env.last_job())["taken_over_by_instance_id"] is None
 
 
+def test_a_terminal_decline_history_fault_leaves_the_job_awaiting_retry(env):
+    from sqlalchemy.exc import DBAPIError
+    from translator_dispatch_helpers import reject_history_update
+
+    env.engine(SECOND_PLUGIN)
+    env.scripts[SECOND_PLUGIN] = {"*": [decline()]}
+    with reject_history_update(env.session, "declined"):
+        with pytest.raises(DBAPIError, match="fixture history write failed"):
+            env.dispatcher().run(make_spec())
+
+    job = env.last_job()
+    assert (job.state, job.error_class) == ("awaiting_retry", "internal")
+    history = env.history(job)
+    assert history["status"] == "awaiting_retry" and history["declined_reason"] is None
+
+    env.ai_engine()
+    output = env.dispatcher().run(make_spec())
+    output.complete()
+    assert (env.last_job().id, env.last_job().state) == (job.id, "completed")
+
+
 def test_a_fallback_that_is_not_configured_is_skipped_with_a_notice(env):
     env.engine(SECOND_PLUGIN)
     fallback = env.engine(PLUGIN, select=False)
@@ -715,16 +736,38 @@ def test_an_answer_that_fails_the_checks_is_refused_and_never_fails_over(env, co
     assert env.history(env.last_job())["status"] == "failed"
 
 
-def test_a_bug_in_the_dispatcher_leaves_the_job_awaiting_a_retry_and_not_running(env, monkeypatch):
+@pytest.mark.parametrize("stage", ["after-history", "open-history", "engine-plan"])
+def test_a_bug_in_the_dispatcher_leaves_the_job_awaiting_a_retry_and_not_running(env, monkeypatch, stage):
     from subtitles.tools.translate.runtime.dispatch import Dispatcher
+    from subtitles.tools.translate.runtime.history import HistoryStore
 
     env.ai_engine()
-    monkeypatch.setattr(Dispatcher, "_compose", lambda *args: (_ for _ in ()).throw(RuntimeError("a bug")))
-    with pytest.raises(RuntimeError):
-        env.dispatcher().run(make_spec())
+
+    def fail_dispatch(*args, **kwargs):
+        raise RuntimeError("a bug")
+
+    if stage == "after-history":
+        monkeypatch.setattr(Dispatcher, "_compose", fail_dispatch)
+    elif stage == "open-history":
+        monkeypatch.setattr(HistoryStore, "open_job", fail_dispatch)
+    else:
+        monkeypatch.setattr(Dispatcher, "_plan", fail_dispatch)
+    spec = make_spec(retry_setup_errors=True)
+    if stage == "after-history":
+        with pytest.raises(RuntimeError, match="a bug"):
+            env.dispatcher().run(spec)
+    else:
+        with pytest.raises(DispatchFailed) as caught:
+            env.dispatcher().run(spec)
+        assert (caught.value.error_class, caught.value.retry_later) == ("internal", True)
+        assert isinstance(caught.value.__cause__, RuntimeError)
+        assert str(caught.value.__cause__) == "a bug"
     job = env.last_job()
     assert (job.state, job.error_class) == ("awaiting_retry", "internal")
-    assert env.history(job)["status"] == "awaiting_retry"
+    if stage == "after-history":
+        assert env.history(job)["status"] == "awaiting_retry"
+    else:
+        assert env.history(job) is None
     assert UsageLedger(env.session, clock=env.clock).job_hold(str(job.id)) == 0
 
 

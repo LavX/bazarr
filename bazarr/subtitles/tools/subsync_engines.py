@@ -149,10 +149,12 @@ class SubtitlePublication:
     def destination_owned(self, path):
         return self.owns_destinations and not os.path.islink(path)
 
-    def destination_unchanged(self, path):
+    def destination_unchanged(self, path, *, version=None):
+        """Compare the original destination with an observed version or the file on disk."""
         expected = self.destinations.get(str(path))
         return (self.state is not None and self.destination_owned(path) and expected is not None
-                and expected == (self.state.revision(path), subtitle_source_version(path)))
+                and expected == (self.state.revision(path),
+                                 subtitle_source_version(path) if version is None else version))
 
     def release(self):
         self.state = None

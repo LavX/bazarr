@@ -180,7 +180,7 @@ class SourceSubtitleTool:
     def capture(cls, source, sidecar, reference=None):
         stamp = source_video_stamp(source.path)
         if stamp is None:
-            raise SourceToolError('The source video is unavailable', 404)
+            raise SourceToolError('The source video disappeared before the operation was captured', 409)
         return cls(source, sidecar, stamp, reference)
 
     @classmethod
@@ -223,7 +223,7 @@ class SourceSubtitleTool:
             raise SubtitleSourceChanged('The source subtitle or reference has ambiguous ownership')
 
     @contextmanager
-    def publication(self, output_path, *, cleanup_outputs=False):
+    def publication(self, output_path, *, cleanup_matches=None):
         owners = SourcePublicationOwnerIndex()
 
         def prepare():
@@ -234,7 +234,7 @@ class SourceSubtitleTool:
                 raise SubtitleSourceChanged('The source subtitle or output has ambiguous ownership')
 
         with owners.publication(self.source, prepare, destination=output_path,
-                                cleanup_outputs=cleanup_outputs, native_owners=True) as (current, connection, _):
+                                cleanup_matches=cleanup_matches, native_owners=True) as (current, connection, _):
             self.check_current(current, connection)
             if os.path.lexists(output_path) and regular_subtitle_version(output_path) is None:
                 raise SubtitleSourceChanged('The output is no longer a regular subtitle file')

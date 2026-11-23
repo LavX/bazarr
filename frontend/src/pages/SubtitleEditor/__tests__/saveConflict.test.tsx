@@ -70,6 +70,7 @@ async function openEditor(
   mediaType: "source" | "movie",
   format: "srt" | "ass" = "srt",
   extraCues = "",
+  acceptFirstSave = false,
 ) {
   const user = userEvent.setup();
   const base = mediaType === "source" ? "sources/items" : "movies";
@@ -125,7 +126,7 @@ async function openEditor(
         etag: request.headers.get("If-Match"),
         body: await request.json(),
       });
-      if (writes.length === 1) {
+      if (writes.length === 1 && !acceptFirstSave) {
         return HttpResponse.json(
           "Subtitle file has been modified since last read",
           { status: 412 },
@@ -146,7 +147,7 @@ async function openEditor(
       <Router />
     </AllProviders>,
   );
-  const editor = await screen.findByDisplayValue("Original subtitle");
+  const editor = await screen.findByDisplayValue(/^Original subtitle(?:$|\s)/);
   return { user, editor, reads, writes, contentPath, container };
 }
 
@@ -316,6 +317,35 @@ it("accepts a valid SRT cue starting at zero during reload", async () => {
   expect(
     screen.queryByText("Subtitle changed on disk"),
   ).not.toBeInTheDocument();
+});
+
+it("saves ordinary ASS edits when the opened dialogue contains a bare CR", async () => {
+  const { user, editor, writes } = await openEditor(
+    "source",
+    "ass",
+    "\rLegacy text",
+    true,
+  );
+  expect(editor).toHaveValue("Original subtitle\nLegacy text");
+  fireEvent.change(editor, { target: { value: "Edited ASS dialogue" } });
+  const start = screen.getByTitle("Start time");
+  act(() => start.focus());
+  fireEvent.change(start, { target: { value: "00:00:01.500" } });
+  await user.click(screen.getByRole("button", { name: "Save" }));
+  await screen.findByText("Saved");
+
+  expect(writes).toEqual([
+    {
+      etag: originalEtag,
+      body: {
+        content: assContent("Edited ASS dialogue").replace(
+          "Dialogue: 0,0:00:01.00",
+          "Dialogue: 0,0:00:01.50",
+        ),
+        encoding: "utf-8",
+      },
+    },
+  ]);
 });
 
 it("adopts reloaded ASS text, timing, styles and encoding together before saving", async () => {

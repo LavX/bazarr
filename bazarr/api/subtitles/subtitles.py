@@ -763,6 +763,7 @@ class Subtitles(Resource):
 
 def _source_subtitle_action(args, subtitles_path, language, hi, forced, pin):
     from media_sources.subtitle_tools import SourceSubtitleTool, SourceToolError, indexed_sidecar, tool_item
+    from subtitles.tools.translate.core.translator_utils import SourceTranslationChanged
 
     action = args['action']
     if not subtitles_path or action in ('extract', 'ocr'):
@@ -775,12 +776,11 @@ def _source_subtitle_action(args, subtitles_path, language, hi, forced, pin):
             if any(not code or len(code) != 2 or not alpha3_from_alpha2(code) for code in (from_language, language)):
                 return 'Source and target languages must be valid alpha2 codes.', 400
             source_tool = SourceSubtitleTool.capture(source, subtitle)
-            pin_translation(source.path, subtitle.path, language, forced, hi, None, pin, source=source)
             job_id = translate_subtitles_file(
                 video_path=source.path, source_srt_file=subtitle.path, from_lang=from_language, to_lang=language,
                 forced=forced, hi=hi, media_type='episode' if source.kind == 'episode' else 'movies',
                 sonarr_series_id=None, sonarr_episode_id=None, radarr_id=None, metadata=None, source=source,
-                source_tool=source_tool,
+                source_tool=source_tool, source_pin=pin,
             )
             return queued_job_response(job_id or None), 202
 
@@ -808,7 +808,7 @@ def _source_subtitle_action(args, subtitles_path, language, hi, forced, pin):
         return queued_job_response(job_id or None), 202
     except SourceToolError as error:
         return str(error), error.status
-    except (OSError, ValueError) as error:
+    except (OSError, ValueError, SourceTranslationChanged) as error:
         return str(error), 409
 
 

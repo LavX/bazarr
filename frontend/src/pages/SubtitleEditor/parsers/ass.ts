@@ -2,7 +2,7 @@ import type { Cue, ParseResult } from "@/pages/SubtitleEditor/types";
 import type { SubtitleParser } from "./index";
 import { cueId } from "./uuid";
 
-function parseTimestamp(raw: string): number | null {
+export function parseAssTimestamp(raw: string): number | null {
   // H:MM:SS.cc (centiseconds)
   const match = raw.trim().match(/^(\d+):(\d+):(\d+)\.(\d+)$/);
   if (!match) return null;
@@ -40,8 +40,13 @@ export const ASS_EVENT_COLUMNS = [
   "Text",
 ] as const;
 
+export const SSA_EVENT_COLUMNS = [
+  "Marked",
+  ...ASS_EVENT_COLUMNS.slice(1),
+] as const;
+
 export interface AssEventMetadata {
-  assFields: Record<string, string>;
+  assFields: Partial<Record<string, string>> & { text: string };
 }
 
 function formatColumns(value: string) {
@@ -59,7 +64,7 @@ function* dialogueRows(eventSections: string[][], strict: boolean) {
       ? undefined
       : lines.find((line) => line.trim().startsWith("Format:"));
     let columns = firstFormat
-      ? formatColumns(firstFormat.replace(/^Format:\s*/, ""))
+      ? formatColumns(firstFormat.trim().replace(/^Format:\s*/, ""))
       : [];
     for (const line of lines) {
       if (strict && /^\s*Format\b/i.test(line)) {
@@ -86,13 +91,17 @@ function* dialogueRows(eventSections: string[][], strict: boolean) {
       }
       if (strict) {
         if (!/^\s*Dialogue\b/i.test(line)) continue;
-        const dialogue = line.match(/^\s*Dialogue\s*:\s*(.*)$/i);
+        const dialogue = line.match(/^\s*Dialogue\s*:\s*([^\r\n]*)$/i);
         if (!dialogue || columns.length === 0) {
           throw new Error("Invalid ASS event format");
         }
         yield { columns, line, afterPrefix: dialogue[1] };
       } else if (line.trim().startsWith("Dialogue:")) {
-        yield { columns, line, afterPrefix: line.replace(/^Dialogue:\s*/, "") };
+        yield {
+          columns,
+          line,
+          afterPrefix: line.trimStart().replace(/^Dialogue:\s*/, ""),
+        };
       }
     }
   }
@@ -101,6 +110,11 @@ function* dialogueRows(eventSections: string[][], strict: boolean) {
 export const assParser: SubtitleParser = {
   parse(content, { strict } = {}): ParseResult {
     const text = content.replace(/^\uFEFF/, "").replace(/\r\n/g, "\n");
+
+    // A bare CR could hide another event within a line split on LF.
+    if (strict && text.includes("\r")) {
+      throw new Error("Invalid ASS line ending");
+    }
 
     if (!text.trim()) {
       return { metadata: { format: "ass" }, cues: [] };
@@ -132,7 +146,7 @@ export const assParser: SubtitleParser = {
         sections[currentSection] = "";
       } else {
         if (strict) {
-          if (/^\s*\[\s*Events(?:\s*\]|$)/i.test(line)) {
+          if (/^\s*\[\s*Events\s*(?:\]|$)/i.test(line)) {
             throw new Error("Invalid ASS Events section");
           }
           if (currentSection === "Events") {
@@ -184,7 +198,7 @@ export const assParser: SubtitleParser = {
       for (let i = 0; i < maxSplits; i++) {
         const commaIdx = remaining.indexOf(",");
         if (commaIdx === -1) break;
-        parts.push(remaining.slice(0, commaIdx).trim());
+        parts.push(remaining.slice(0, commaIdx));
         remaining = remaining.slice(commaIdx + 1);
       }
       parts.push(remaining); // The rest is the Text column (or last column)
@@ -194,8 +208,8 @@ export const assParser: SubtitleParser = {
       }
 
       const rawCueText =
-        textColIdx >= 0 && textColIdx < parts.length
-          ? parts[textColIdx]
+        textColIdx >= 0 && textColIdx < parts.length - 1
+          ? parts[textColIdx].trim()
           : parts[parts.length - 1];
       const startStr =
         startColIdx >= 0 && startColIdx < parts.length
@@ -204,8 +218,8 @@ export const assParser: SubtitleParser = {
       const endStr =
         endColIdx >= 0 && endColIdx < parts.length ? parts[endColIdx] : "";
 
-      const startMs = parseTimestamp(startStr);
-      const endMs = parseTimestamp(endStr);
+      const startMs = parseAssTimestamp(startStr);
+      const endMs = parseAssTimestamp(endStr);
       if (strict && (startMs === null || endMs === null)) {
         throw new Error("Invalid ASS cue timing");
       }
@@ -215,13 +229,17 @@ export const assParser: SubtitleParser = {
         endMs: endMs ?? 0,
         text: assTextToDisplay(rawCueText),
         rawText: line,
-        ...(strict && {
-          formatMetadata: {
-            assFields: Object.fromEntries(
-              columns.map((column, index) => [column, parts[index]]),
+        formatMetadata: {
+          assFields: {
+            // Fixed fields end before the unsplit remainder of a lenient row.
+            ...Object.fromEntries(
+              columns
+                .slice(0, parts.length - 1)
+                .map((column, index) => [column, parts[index]]),
             ),
-          } satisfies AssEventMetadata,
-        }),
+            text: rawCueText,
+          },
+        } satisfies AssEventMetadata,
       });
     }
 

@@ -5,6 +5,7 @@ BAZARR_PG_TEST_URL is set.
 """
 import os
 import sys
+from contextlib import nullcontext
 from datetime import datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -465,6 +466,241 @@ def test_a_failure_the_dispatcher_recorded_reaches_the_queue_as_a_job_failure_wi
         build_service(env, media).translate(job_id=None)
     assert isinstance(caught.value, JobFailed)
     assert (caught.value.reason, caught.value.retry_later) == ("rate_limited", True)
+
+
+def test_editor_backend_lookup_preserves_the_original_error(env, monkeypatch):
+    from subtitles.tools.translate.runtime import service
+    from subtitles.tools.translate.runtime.dispatch import Dispatcher
+
+    env.ai_engine()
+
+    def unavailable(*args, **kwargs):
+        raise RuntimeError("could not read the selected backend")
+
+    monkeypatch.setattr(Dispatcher, "_candidates", unavailable)
+    with pytest.raises(RuntimeError, match="could not read the selected backend"):
+        service.translate_lines(["Hello", "World"], "en", "hu", dispatcher=env.dispatcher())
+    assert env.last_job().state == "awaiting_retry"
+    assert not env.requests()
+
+
+@pytest.fixture
+def editor_runtime_queue(env, monkeypatch):
+    from app import jobs_queue as queue_module
+    from subtitles.tools.translate import availability, editor
+    from subtitles.tools.translate.runtime import service
+    from utilities import job_dedupe
+
+    env.ai_engine()
+    monkeypatch.setattr(queue_module.JobsQueue, "_flush_progress_loop", lambda self: None)
+    monkeypatch.setattr(queue_module, "_job_event", lambda *args, **kwargs: None)
+    queue = queue_module.JobsQueue()
+    monkeypatch.setattr(editor, "_results", type(editor._results)())
+    monkeypatch.setattr(editor, "_followers", type(editor._followers)())
+    for module in (queue_module, editor, job_dedupe, service):
+        monkeypatch.setattr(module, "jobs_queue", queue)
+    monkeypatch.setattr(queue, "_has_capacity_for", lambda job: True)
+    monkeypatch.setattr(queue, "_lane_has_room", lambda job: True)
+    monkeypatch.setattr(availability, "runtime_active", lambda: True)
+    monkeypatch.setattr(service, "Dispatcher", env.dispatcher)
+    return queue
+
+
+@pytest.mark.parametrize("operation", ["lookup", "update"])
+def test_history_database_failure_keeps_a_dispatch_retry_recoverable(
+        env, monkeypatch, editor_runtime_queue, operation, caplog):
+    import sqlalchemy as sa
+
+    from subtitles.tools.translate import editor
+    from subtitles.tools.translate.runtime.dispatch import Dispatcher
+    from subtitles.tools.translate.runtime.history import HistoryStore
+
+    lines = [{"position": 5, "line": "Hello"}]
+    queue = editor_runtime_queue
+    first = editor.enqueue_editor_translation(lines, "en", "hu")
+    job = queue._reserve_next_job()
+    assert job.job_id == first
+    queried = []
+
+    def unavailable(*args, **kwargs):
+        row = env.last_job()
+        assert (row.state, row.queue_job_id) == ("running", first)
+        raise RuntimeError("could not read the selected backend")
+
+    def fail_lookup(self, job_id):
+        queried.append(job_id)
+        self._session.execute(sa.text("SELECT missing_test_column FROM translation_history"))
+
+    fault = helpers.reject_history_update(env.session, "awaiting_retry") if operation == "update" else nullcontext()
+    with monkeypatch.context() as failure, fault:
+        failure.setattr(Dispatcher, "_candidates", unavailable)
+        if operation == "lookup":
+            failure.setattr(HistoryStore, "get_by_job", fail_lookup)
+        assert not queue._run_job(job)
+
+    assert job.status == "failed" and job.error["reason"] == "unexpected_error"
+    assert "Exception raised while running function: could not read the selected backend" in caplog.text
+    row = env.last_job()
+    if operation == "lookup":
+        assert queried == [str(row.id)] and "missing_test_column" in caplog.text
+    else:
+        assert "fixture history write failed" in caplog.text
+    assert (row.state, row.error_class) == ("awaiting_retry", "internal")
+    assert row.queue_job_id is None and not env.requests()
+    retry = editor.enqueue_editor_translation(lines, "en", "hu")
+    job = queue._reserve_next_job()
+    assert job.job_id == retry and retry != first
+    assert queue._run_job(job), job.error
+    assert editor.editor_translation_state(retry)["lines"] == [{"position": 5, "line": "[hu] Hello"}]
+    assert (env.last_job().id, env.last_job().state) == (row.id, "completed")
+    assert env.history(row)["status"] == "completed"
+
+
+@pytest.mark.parametrize("planner_failure", ["unexpected", "gate-closed"])
+def test_an_editor_planner_cannot_release_another_queue_jobs_claim(
+        env, monkeypatch, editor_runtime_queue, planner_failure):
+    from threading import Event, Thread, current_thread
+
+    from subtitles.tools.translate import editor
+    from subtitles.tools.translate.runtime.dispatch import Dispatcher
+
+    queue = editor_runtime_queue
+    failing_id = editor.enqueue_editor_translation([{"position": 0, "line": "Hello"}], "en", "hu")
+    winning_id = editor.enqueue_editor_translation([{"position": 9, "line": "Hello"}], "en", "hu")
+    assert failing_id != winning_id
+    failing_job, winning_job = queue._reserve_next_job(), queue._reserve_next_job()
+    assert (failing_job.job_id, winning_job.job_id) == (failing_id, winning_id)
+
+    entered, claimed, release = Event(), Event(), Event()
+    original_plan, original_run_plugin = Dispatcher._plan, Dispatcher._run_plugin
+
+    def plan(dispatcher, spec):
+        if current_thread() is failing_worker:
+            entered.set()
+            assert claimed.wait(8)
+            if planner_failure == "gate-closed":
+                raise GateClosed("the selected engine is unavailable", "engine_missing")
+            raise RuntimeError("could not read the selected engine")
+        return original_plan(dispatcher, spec)
+
+    def run_plugin(dispatcher, *args, **kwargs):
+        claimed.set()
+        assert release.wait(8)
+        return original_run_plugin(dispatcher, *args, **kwargs)
+
+    def execute(job):
+        try:
+            queue._run_job(job)
+        finally:
+            env.session.remove()
+
+    monkeypatch.setattr(Dispatcher, "_plan", plan)
+    monkeypatch.setattr(Dispatcher, "_run_plugin", run_plugin)
+    failing_worker = Thread(target=execute, args=(failing_job,), daemon=True)
+    winning_worker = Thread(target=execute, args=(winning_job,), daemon=True)
+    failing_worker.start()
+    try:
+        assert entered.wait(8)
+        winning_worker.start()
+        assert claimed.wait(8)
+        failing_worker.join(8)
+        assert failing_job.status == "failed"
+        row = env.last_job()
+        assert (row.state, row.queue_job_id) == ("running", winning_id)
+        history = env.history(row)
+        assert history["status"] == "running" and history["declined_reason"] is None
+    finally:
+        release.set()
+        failing_worker.join(8)
+        if winning_worker.ident is not None:
+            winning_worker.join(8)
+    assert winning_job.status == "completed"
+    assert editor.editor_translation_state(winning_id)["lines"] == [{"position": 9, "line": "[hu] Hello"}]
+    assert env.last_job().state == "completed"
+
+
+@pytest.mark.parametrize("attachment", ["own", "competing"])
+def test_native_dispatch_preserves_its_claim_when_attachment_arrives_late(
+        env, media, monkeypatch, editor_runtime_queue, attachment):
+    from threading import Event, Thread
+
+    from subtitles.tools.translate import main
+    from subtitles.tools.translate.runtime import service
+    from subtitles.tools.translate.runtime.dispatch import Dispatcher
+
+    queue = editor_runtime_queue
+    monkeypatch.setattr(main, "jobs_queue", queue)
+    monkeypatch.setattr(service, "jobs_queue", queue)
+    monkeypatch.setattr(main, "_runtime_active", lambda: True)
+    monkeypatch.setattr(main, "get_title", lambda *args, **kwargs: "Film")
+    monkeypatch.setattr(main, "record_failed_translation", lambda *args, **kwargs: None)
+    monkeypatch.setattr("api.subtitles.subtitles.postprocess_subtitles", lambda *args, **kwargs: None)
+    monkeypatch.setattr("subtitles.tools.combine.main.try_combine_for_video", lambda **kwargs: None)
+    attach = main._runtime_attach
+    attachments = []
+    monkeypatch.setattr(main, "_runtime_attach", lambda *args, **kwargs: attachments.append((args, kwargs)))
+
+    first = _request(main, video_path=str(media.video), source_srt_file=str(media.source))
+    if attachment == "competing":
+        second = _request(main, video_path=str(media.video), source_srt_file=str(media.source),
+                          metadata={"title": "A second copy of the same request"})
+        assert first != second
+    job = queue._reserve_next_job()
+    assert job.job_id == first and env.last_job().queue_job_id is None
+    ready, release = Event(), Event()
+    original_plan = Dispatcher._plan
+    original_run_plugin = Dispatcher._run_plugin
+
+    def plan(dispatcher, spec):
+        ready.set()
+        assert release.wait(8)
+        return original_plan(dispatcher, spec)
+
+    def fail_owner(dispatcher, *args, **kwargs):
+        ready.set()
+        assert release.wait(8)
+        raise RuntimeError("the running owner failed")
+
+    if attachment == "own":
+        monkeypatch.setattr(Dispatcher, "_plan", plan)
+    else:
+        monkeypatch.setattr(Dispatcher, "_run_plugin", fail_owner)
+
+    def execute():
+        try:
+            queue._run_job(job)
+        finally:
+            env.session.remove()
+
+    worker = Thread(target=execute, daemon=True)
+    worker.start()
+    try:
+        assert ready.wait(8)
+        args, kwargs = attachments[-1]
+        attach(*args, **kwargs)
+        row = env.last_job()
+        assert row.queue_job_id == first
+        assert row.state == ("queued" if attachment == "own" else "running")
+    finally:
+        release.set()
+        worker.join(8)
+
+    if attachment == "own":
+        assert job.status == "completed"
+        assert "[fr] One" in media.dest.read_text()
+        assert len(media.logged) == 1 and media.logged[0]["action"] == 6
+        assert env.last_job().state == "completed"
+    else:
+        assert job.status == "failed"
+        row = env.last_job()
+        assert (row.state, row.queue_job_id) == ("awaiting_retry", None)
+        assert not media.dest.exists()
+        monkeypatch.setattr(Dispatcher, "_run_plugin", original_run_plugin)
+        attach(*args, **kwargs)
+        retry = queue._reserve_next_job()
+        assert retry.job_id == second and queue._run_job(retry)
+        assert "[fr] One" in media.dest.read_text()
+        assert (env.last_job().id, env.last_job().state) == (row.id, "completed")
 
 
 def test_lingarr_publishes_through_its_own_service_and_the_runtime_writes_nothing(env, media, monkeypatch):

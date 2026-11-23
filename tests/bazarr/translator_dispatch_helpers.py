@@ -2,6 +2,7 @@
 fake translator, and a dispatcher wired to both."""
 import json
 import os
+from contextlib import contextmanager
 from datetime import datetime, timedelta
 from uuid import uuid4
 
@@ -233,6 +234,40 @@ class Env:
 
     def close(self):
         self.pool.close()
+
+
+@contextmanager
+def reject_history_update(session, status):
+    """Let the ORM send its real History update and have the fixture database reject it."""
+    assert status in ("awaiting_retry", "declined")
+    engine = session.get_bind()
+    with engine.begin() as connection:
+        sqlite = connection.dialect.name == "sqlite"
+        if sqlite:
+            connection.exec_driver_sql(f"""
+                CREATE TRIGGER reject_history_update BEFORE UPDATE ON translation_history
+                FOR EACH ROW WHEN NEW.status = '{status}'
+                BEGIN SELECT RAISE(ABORT, 'fixture history write failed'); END
+            """)
+        else:
+            connection.exec_driver_sql("""
+                CREATE FUNCTION reject_history_update() RETURNS trigger AS $failure$
+                BEGIN RAISE EXCEPTION 'fixture history write failed'; END;
+                $failure$ LANGUAGE plpgsql
+            """)
+            connection.exec_driver_sql(f"""
+                CREATE TRIGGER reject_history_update BEFORE UPDATE ON translation_history
+                FOR EACH ROW WHEN (NEW.status = '{status}') EXECUTE FUNCTION reject_history_update()
+            """)
+    try:
+        yield
+    finally:
+        with engine.begin() as connection:
+            if sqlite:
+                connection.exec_driver_sql("DROP TRIGGER reject_history_update")
+            else:
+                connection.exec_driver_sql("DROP TRIGGER reject_history_update ON translation_history")
+                connection.exec_driver_sql("DROP FUNCTION reject_history_update()")
 
 
 def make_spec(lines=LINES, target=TARGET, **overrides):

@@ -109,7 +109,7 @@ class RuntimeTranslatorService:
     def __init__(self, source_srt_file, dest_srt_file, lang_obj, to_lang, from_lang, media_type, video_path,
                  orig_to_lang, forced, hi, sonarr_series_id, sonarr_episode_id, radarr_id, arr_instance_id=None,
                  sports_operation=None, cancel=None, expected_destination_versions=(), source_key=None,
-                 dispatcher=None, source=None, source_video_version=None):
+                 dispatcher=None, source=None, source_video_version=None, pinned_connection_id=None):
         self.source_srt_file = source_srt_file
         self.dest_srt_file = dest_srt_file
         self.lang_obj = lang_obj
@@ -127,6 +127,7 @@ class RuntimeTranslatorService:
         self.sports_operation = sports_operation
         self.source = source
         self.source_video_version = source_video_version
+        self.pinned_connection_id = pinned_connection_id
         self.cancel = cancel
         self.expected_destination_versions = tuple(expected_destination_versions or ())
         self.source_key = source_key or str(source_srt_file)
@@ -217,9 +218,10 @@ class RuntimeTranslatorService:
             media=_media_context(self.media_type, self.radarr_id, self.sonarr_series_id, self.sonarr_episode_id,
                                  self.arr_instance_id, self.sports_operation,
                                  **({"source": self.source} if self.source is not None else {})),
-            history_media=history_media,
+            history_media=history_media, pinned_connection_id=self.pinned_connection_id,
             pin_from_job=True, check_cancel=self._check, progress=self._progress, legacy=self._legacy,
-            before_send=self._check_source_before_send if self.source is not None else None)
+            before_send=self._check_source_before_send if self.source is not None else None,
+            retry_setup_errors=self.source is not None, queue_job_id=job_id)
         try:
             outcome = (self._dispatcher or Dispatcher()).run(spec)
         except DispatchFailed as failed:
@@ -374,7 +376,7 @@ def translate_lines(lines, source_language, target_language, title="", media_typ
         media={"type": media_type or "", "title": title or ""} if (media_type or title) else {},
         pinned_connection_id=pinned_connection_id,
         history_media={"media_type": media_type or "editor", "media_title": title or None},
-        check_cancel=check, progress=progress, legacy=legacy)
+        check_cancel=check, progress=progress, legacy=legacy, queue_job_id=job_id)
     try:
         outcome = (dispatcher or Dispatcher()).run(spec)
     except DispatchFailed as failed:
