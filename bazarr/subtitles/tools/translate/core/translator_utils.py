@@ -6,6 +6,7 @@ import srt
 import pysubs2
 import datetime
 from contextlib import contextmanager
+from io import StringIO
 
 from typing import Union
 from types import SimpleNamespace
@@ -180,8 +181,10 @@ def load_translation_input(translator, loader):
             raw = read_regular_subtitle(path, runtime_versions[0].version)
             validate_subtitle_versions(runtime_versions[:1])
         content, _ = decode_subtitle_bytes(raw)
-        return pysubs2.SSAFile.from_string(content)
+        return pysubs2.SSAFile.from_file(StringIO(content, newline=None))
     except (OSError, SubtitleSourceChanged) as error:
+        if source_tool is None and isinstance(error, OSError):
+            raise
         raise SourceTranslationChanged('The source subtitle changed before translation') from error
 
 

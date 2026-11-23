@@ -288,9 +288,11 @@ def test_source_legacy_translation_rejects_a_new_shared_folder_owner(
     assert toolbox.db.execute(sa.select(repository.History)).all() == []
 
 
-@pytest.mark.parametrize('encoding', ['utf-8', 'utf-16', 'cp1252'])
+@pytest.mark.parametrize(('encoding', 'newline'), [
+    ('utf-8', '\n'), ('utf-8', '\r'), ('utf-16', '\n'), ('cp1252', '\n'),
+], ids=['utf-8', 'utf-8-cr', 'utf-16', 'cp1252'])
 def test_automatic_source_legacy_translation_keeps_profile_eligibility(
-        toolbox, legacy_runtime, monkeypatch, encoding):
+        toolbox, legacy_runtime, monkeypatch, encoding, newline):
     from app.config import settings
     from app.database import TableLanguagesProfiles, update_profile_id_list
     from media_sources import repository, translation
@@ -304,7 +306,7 @@ def test_automatic_source_legacy_translation_keeps_profile_eligibility(
     context = tools.pipeline._episode(toolbox.world)
     path, _ = tools._sidecars(toolbox, context)
     caption = 'Une tasse de café, un gâteau à la crème et 20 €.'
-    path.write_bytes(tools.SRT.replace('Original cue', caption).encode(encoding))
+    path.write_bytes(tools.SRT.replace('Original cue', caption).replace('\n', newline).encode(encoding))
     assert index_item(context.item_id) is not None
 
     assert translation.queue_missing_translations(context) == {'hu'}
