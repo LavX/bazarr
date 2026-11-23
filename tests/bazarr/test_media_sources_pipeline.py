@@ -154,6 +154,36 @@ def test_download_keeps_another_registered_videos_exact_engine_named_sidecar(wor
     assert competing.name not in local_found
 
 
+@pytest.mark.parametrize('target_kind', ['file', 'directory', 'dangling'])
+def test_source_download_distinguishes_video_aliases_from_resolved_directory_aliases(world, monkeypatch, target_kind):
+    folder = _custom_folder(world, monkeypatch, world.tmp_path)
+    context = _movie(world, 'Film.mkv')
+    target = world.tmp_path / 'resolved' / 'Film.en.mkv'
+    target.parent.mkdir()
+    if target_kind == 'file':
+        video(target)
+    elif target_kind == 'directory':
+        target.mkdir()
+    (Path(context.path).parent / 'Alias.mkv').symlink_to(target, target_is_directory=target_kind == 'directory')
+    destination = folder / 'Film.en.srt'
+    obsolete = folder / 'Film.en.alass.srt'
+    obsolete.write_bytes(CONTENT.replace(b'Downloaded', b'Previous subtitle'))
+    _download(monkeypatch)
+
+    results = _generate(context)
+
+    if target_kind == 'directory':
+        assert len(results) == 1
+        assert destination.read_bytes() == CONTENT
+        assert not obsolete.exists()
+        assert len(world.published) == 1
+    else:
+        assert results == []
+        assert not destination.exists()
+        assert obsolete.read_bytes() == CONTENT.replace(b'Downloaded', b'Previous subtitle')
+        assert not world.published
+
+
 def test_source_download_does_not_clean_generated_siblings_after_releasing_the_owner_proof(world, monkeypatch):
     from contextlib import contextmanager
 

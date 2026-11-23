@@ -495,8 +495,11 @@ def _local_video_stems_are_clear(video_path, video, directory, conflicting_stems
             for entry in entries:
                 if not entry.name.lower().endswith(VIDEO_EXTENSIONS):
                     continue
-                if not entry.is_symlink() and (_normalized_media_stem(entry.name) not in conflicting_stems
-                                               or not entry.is_file(follow_symlinks=False)):
+                if entry.is_symlink():
+                    if entry.is_dir():
+                        continue
+                elif (_normalized_media_stem(entry.name) not in conflicting_stems
+                      or not entry.is_file(follow_symlinks=False)):
                     continue
                 # A symlink's resolved name may match even when its own name does not.
                 other = os.path.normcase(os.path.realpath(entry.path))
