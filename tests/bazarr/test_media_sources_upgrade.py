@@ -616,24 +616,26 @@ def test_source_upgrade_rechecks_ownership_and_versions_at_publication(world, mo
 
 @pytest.mark.parametrize(('registry', 'change'), [
     ('source', 'regular video becomes alias'),
-    ('mapped Arr', 'regular video becomes alias'),
-    ('mapped Arr', 'regular video becomes alias within timestamp tick'),
+    ('global Radarr mapping', 'regular video becomes alias'),
+    ('global Radarr mapping', 'regular video becomes alias within timestamp tick'),
     ('source', 'relative subtitle folder retarget'),
-    ('mapped Arr', 'relative subtitle folder retarget through mapped symlink parent'),
+    ('global Radarr mapping', 'relative subtitle folder retarget through mapped symlink parent'),
 ])
 @pytest.mark.parametrize('outcome', ['competing', 'unrelated', 'rollback'])
 def test_source_upgrade_rechecks_registered_filesystem_claims_after_writer_admission(
         world, monkeypatch, registry, change, outcome):
+    from app import config
     from app.config import settings
     from app.database import TableArrInstances, TableMovies
     from media_sources import indexer, repository
     from subtitles import upgrade
     from subtitles.tools.subsync_engines import engine_output_path
+    from utilities.path_mappings import path_mappings
 
     context = pipeline._movie(world, 'Film.mkv')
     media = Path(context.path)
     relative = change.startswith('relative subtitle folder retarget')
-    mapped_parent = relative and registry == 'mapped Arr'
+    mapped_parent = relative and registry == 'global Radarr mapping'
     coarse_timestamps = change.endswith('within timestamp tick')
     competing = outcome == 'competing'
     if relative:
@@ -687,12 +689,27 @@ def test_source_upgrade_rechecks_registered_filesystem_claims_after_writer_admis
     if registry == 'source':
         registered_id = add_item(world.db, other_source, other_library, registered)
     else:
+        monkeypatch.setattr(settings.general, 'use_radarr', True)
+        monkeypatch.setattr(settings.general, 'path_mappings_movie', [])
+        monkeypatch.setattr(path_mappings, 'path_mapping_series', [])
+        monkeypatch.setattr(path_mappings, 'path_mapping_movies', [])
+        monkeypatch.setattr(config, 'write_config', lambda: True)
+        monkeypatch.setattr(config, 'validate_log_regex', lambda: None)
+        monkeypatch.setattr(settings.validators, 'validate', lambda: None)
+        # Connections saves global Radarr mappings as repeated form values.
+        config.save_settings([('settings-general-path_mappings_movie', [f'/movies,{mapped_root}'])])
+        expected_mapping = [['/movies', str(mapped_root)]]
+        assert settings.general.path_mappings_movie == expected_mapping
+        assert path_mappings.path_mapping_movies == expected_mapping
         world.db.execute(sa.insert(TableArrInstances).values(
             id=42, kind='radarr', name='Cinema', stable_key='cinema', port=9800, enabled=1,
-            path_mappings=json.dumps([['/movies', str(mapped_root)]])))
+            path_mappings=None))
         stored_path = f'/movies/{registered.name}'
         world.db.execute(sa.insert(TableMovies).values(
             id=73, arr_instance_id=42, radarrId=9000, title='Other', path=stored_path, tmdbId='73'))
+        mapped_path = Path(path_mappings.path_replace_instance(stored_path, 42, 'movie'))
+        assert mapped_path == mapped_root / registered.name
+        assert mapped_path.samefile(registered)
     registered_realpath = registered.resolve()
     indexer.index_item(context.item_id)
     first = _history(world.db, world.source_id, context.item_id, media, original)
@@ -743,6 +760,7 @@ def test_source_upgrade_rechecks_registered_filesystem_claims_after_writer_admis
         assert repository.get_item(registered_id).path == str(registered)
     else:
         assert world.db.scalar(sa.select(TableMovies.path).where(TableMovies.id == 73)) == stored_path
+        assert world.db.scalar(sa.select(TableArrInstances.path_mappings).where(TableArrInstances.id == 42)) is None
     if outcome != 'unrelated':
         assert record_rows(world.db) == [(first, 1, None)]
         assert original.read_bytes() == b'Old subtitle'
