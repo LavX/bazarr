@@ -862,7 +862,29 @@ class TranslatorSettingsService:
     # ------------------------------------------------------------ options
     def options(self, instance_id: int, backend_type: str, field_key: str,
                 draft: Mapping[str, Any], *, plugin: InstalledPlugin | None = None) -> dict[str, Any]:
-        """The live choices of an ``options`` field, or ``available: false`` so the page offers free text.
+        """The live choices of an ``options`` field, or ``available: false`` so the page offers free text."""
+        choices = self._option_choices(instance_id, backend_type, field_key, draft, plugin=plugin)
+        items = []
+        for choice in choices or ():
+            if not isinstance(choice, Mapping):
+                continue
+            model_id = choice.get("id", choice.get("value"))
+            if not isinstance(model_id, str) or not model_id.strip():
+                continue
+            # SDK choices use value/label, while the editor reads id/name.
+            name = choice.get("name", choice.get("label"))
+            item = {key: value for key, value in choice.items() if key not in {"value", "label", "name"}}
+            item["id"] = model_id
+            if isinstance(name, str) and name.strip():
+                item["name"] = name
+            items.append(item)
+        if items:
+            return {"available": True, "items": items, "reason": ""}
+        return {"available": False, "items": [], "reason": "The model list could not be fetched."}
+
+    def _option_choices(self, instance_id: int, backend_type: str, field_key: str,
+                        draft: Mapping[str, Any], *, plugin: InstalledPlugin | None = None) -> list[Any] | None:
+        """Fetch a model list. An empty list still answers a connection test.
 
         The request is checked against the manifest before a source sees it: the back-end type and the
         field must exist, and only declared, non-secret draft values pass. The contract for a source
@@ -872,9 +894,8 @@ class TranslatorSettingsService:
         instance = self._instance(instance_id)
         plugin = plugin or self._plugin(instance.plugin_id)  # a connection served by an extension names its own
         display = self._display_schema(plugin)
-        unavailable = {"available": False, "items": [], "reason": "The model list could not be fetched."}
         if display is None:
-            return unavailable
+            return None
         if backend_type:
             definition = display["backend_types"].get(backend_type)
             if definition is None:
@@ -897,23 +918,8 @@ class TranslatorSettingsService:
             raise InvalidValuesError("The values are not valid.", field_errors=errors)
         source = self._options_source
         answer = source(instance_id, backend_type, field_key, clean) if source is not None else None
-        if not answer or not isinstance(answer.get("items"), list):
-            return unavailable
-        items = []
-        for choice in answer["items"]:
-            if not isinstance(choice, Mapping):
-                continue
-            model_id = choice.get("id", choice.get("value"))
-            if not isinstance(model_id, str) or not model_id.strip():
-                continue
-            # SDK choices use value/label, while the editor reads id/name.
-            name = choice.get("name", choice.get("label"))
-            item = {key: value for key, value in choice.items() if key not in {"value", "label", "name"}}
-            item["id"] = model_id
-            if isinstance(name, str) and name.strip():
-                item["name"] = name
-            items.append(item)
-        return {"available": True, "items": items, "reason": ""} if items else unavailable
+        choices = answer.get("items") if answer else None
+        return choices if isinstance(choices, list) else None
 
     # --------------------------------------------------------------- test
     def test_connection(self, connection_id: int, payload: Any = None) -> dict[str, Any]:
@@ -1039,11 +1045,11 @@ class TranslatorSettingsService:
         draft = {**values, **({MODEL_KEY: connection.model} if connection.model else {})}
         started = time.monotonic()
         try:
-            answer = self.options(instance.id, connection.backend_type, listing, draft, plugin=plugin)
+            choices = self._option_choices(instance.id, connection.backend_type, listing, draft, plugin=plugin)
         except InvalidValuesError:
             return self._test_result(False, "The saved settings no longer fit this version of the plugin. Open "
                                             "this back end and save it again.", outcome=REFUSED)
-        if answer.get("available") is True:
+        if choices is not None:
             return self._test_result(True, "", started)
         return self._test_result(False, self._unanswered(where))
 
