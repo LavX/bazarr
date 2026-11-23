@@ -845,16 +845,16 @@ def test_a_root_edit_checks_the_new_roots_and_survives_a_scan_that_cannot_be_que
     other_source, other_library, other_root = add_source(source_db, tmp_path, name="Other", folder="Other")
     monkeypatch.setattr(repository, "get_source", lambda sid, target=None: SimpleNamespace(kind="jellyfin", id=sid))
     (tmp_path / "New").mkdir()
+    (other_root / "inside").mkdir()
 
     def roots(path):
         return [{"server_path": "/server/movies", "local_path": str(path)}]
 
-    for path, message in ((tmp_path / "missing", "not a readable folder"),
-                          (other_root / "inside", "overlaps"), (other_root, "overlaps")):
-        (other_root / "inside").mkdir(exist_ok=True)
+    for path, failure in ((tmp_path / "missing", (400, "not_a_directory")),
+                          (other_root / "inside", (409, "overlap")), (other_root, (409, "overlap"))):
         with pytest.raises(service.SourceError) as refused:
             service.change_library_roots(source_id, library_id, roots(path))
-        assert message in str(refused.value)
+        assert (refused.value.status, refused.value.code) == failure
     assert [row.local_path for row in repository.get_roots(library_id)] == [str(root)]
 
     def disabled(source_id, library_id=None):
