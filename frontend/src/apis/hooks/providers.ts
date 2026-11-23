@@ -5,10 +5,15 @@ import { QueryKeys } from "@/apis/queries/keys";
 import api from "@/apis/raw";
 import { searchAsJob } from "@/utilities/jobs";
 
-export function useSystemProviders(history?: boolean) {
+export function useSystemProviders(history = false, includeSources = false) {
   return useQuery({
-    queryKey: [QueryKeys.System, QueryKeys.Providers, history ?? false],
-    queryFn: () => api.providers.providers(history),
+    queryKey: [
+      QueryKeys.System,
+      QueryKeys.Providers,
+      history,
+      ...(includeSources ? [true] : []),
+    ],
+    queryFn: () => api.providers.providers(history, includeSources),
   });
 }
 

@@ -450,11 +450,21 @@ class Scheduler:
                 kwargs=dict(wait_for_completion=True))
 
     def __upgrade_subtitles_task(self):
-        if settings.general.use_sonarr or settings.general.use_radarr:
+        enabled = settings.general.use_sonarr or settings.general.use_radarr
+        if not enabled:
+            try:
+                from media_sources.schedule import has_enabled_source
+                enabled = has_enabled_source(database)
+            except Exception:
+                logging.exception('BAZARR could not check for enabled media sources')
+
+        if enabled:
             self.aps_scheduler.add_job(
                 upgrade_subtitles, 'interval', hours=int(settings.general.upgrade_frequency), max_instances=1,
                 coalesce=True, misfire_grace_time=15, id='upgrade_subtitles', kwargs=dict(wait_for_completion=True),
                 name='Upgrade Previously Downloaded Subtitles', replace_existing=True)
+        elif self.aps_scheduler.get_job('upgrade_subtitles'):
+            self.aps_scheduler.remove_job('upgrade_subtitles')
 
     def __mass_sync_task(self):
         self.aps_scheduler.add_job(

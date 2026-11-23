@@ -36,7 +36,8 @@ from .processing import process_subtitle
 def generate_subtitles(path, languages, audio_language, sceneName, title, media_type, profile_id,
                        forced_minimum_score=None, is_upgrade=False, check_if_still_required=False,
                        previous_subtitles_to_delete=None, job_id=None, fallback_allowed=False,
-                       arr_instance_id=None, source=None, auto_translate=True, source_wanted_stamp=None):
+                       arr_instance_id=None, source=None, auto_translate=True, source_wanted_stamp=None,
+                       source_upgrade=None):
     if not languages:
         return None
 
@@ -206,8 +207,8 @@ def generate_subtitles(path, languages, audio_language, sceneName, title, media_
                                                      language=source_language, recheck_missing=check_if_still_required,
                                                      is_upgrade=is_upgrade, written_paths=written_paths,
                                                      on_publish=publish, wanted_stamp=source_wanted_stamp,
-                                                     wanted_profile=wanted_profile)
-                                    if is_upgrade:
+                                                     wanted_profile=wanted_profile, upgrade=source_upgrade)
+                                    if is_upgrade and source_upgrade is None:
                                         from media_sources.indexer import SourcePublicationOwnerIndex
 
                                         owner_kwargs['ownership_index'] = SourcePublicationOwnerIndex()
@@ -219,7 +220,7 @@ def generate_subtitles(path, languages, audio_language, sceneName, title, media_
                                                                  formats=subtitle_formats,
                                                                  path_decoder=force_unicode,
                                                                  write_subtitle=writer)
-                                if is_upgrade and previous_subtitles_to_delete and written_paths and (
+                                if is_upgrade and source_upgrade is None and previous_subtitles_to_delete and written_paths and (
                                         os.path.normcase(os.path.realpath(previous_subtitles_to_delete)) not in
                                         {os.path.normcase(os.path.realpath(written)) for written in written_paths}):
                                     try:
@@ -346,16 +347,29 @@ def check_missing_languages_source(source, *, stored=False, external_subtitles=N
 
 
 def _write_source_download(video_path, destination, content, *, source, language, recheck_missing, is_upgrade,
-                           written_paths, on_publish, wanted_stamp=None, wanted_profile=None):
+                           written_paths, on_publish, wanted_stamp=None, wanted_profile=None, upgrade=None):
     """Publish the actual provider-selected file only while its destination is still eligible."""
     from media_sources.indexer import SourcePublicationOwnerIndex
     from media_sources.translation import prepare_source_sidecars
+    from media_sources.wanted import arr_claim_blocks_wanted
 
     ownership_index = SourcePublicationOwnerIndex()
+    old_path = upgrade.subtitles_path if upgrade is not None else None
+    same_destination = old_path is not None and os.path.normcase(os.path.realpath(old_path)) == (
+        os.path.normcase(os.path.realpath(destination)))
+    registry_destination = destination
+    if old_path is not None and os.path.dirname(old_path) != os.path.dirname(video_path):
+        registry_destination = old_path
 
     def prepare():
         if wanted_stamp is not None and not _wanted_source_can_publish(source, language, wanted_stamp, wanted_profile):
             raise SubtitleDestinationChanged('Wanted source eligibility changed during search')
+        if old_path is not None:
+            if arr_claim_blocks_wanted(source):
+                raise SubtitleDestinationChanged('Arr claimed the source video during the upgrade search')
+            if not same_destination and not sync_output_owner_is_unique(
+                    video_path, old_path, ownership_index=ownership_index):
+                raise SubtitleDestinationChanged('The previous subtitle does not have one media owner')
         if not sync_output_owner_is_unique(video_path, destination, ownership_index=ownership_index):
             raise SubtitleDestinationChanged('The source subtitle destination does not have one media owner')
         if wanted_stamp is None and recheck_missing:
@@ -364,19 +378,31 @@ def _write_source_download(video_path, destination, content, *, source, language
 
     @contextmanager
     def publication():
-        with ownership_index.publication(source, prepare, destination=destination) as (
+        with ownership_index.publication(source, prepare, destination=registry_destination) as (
                 current, connection, external_subtitles):
             if current is None or current.path != video_path:
                 raise SubtitleDestinationChanged('The source item moved or was removed')
-            if os.path.lexists(destination) and (not is_upgrade or regular_subtitle_version(destination) is None):
+            overwrite = is_upgrade if upgrade is None else same_destination
+            if os.path.lexists(destination) and (not overwrite or regular_subtitle_version(destination) is None):
                 raise SubtitleDestinationChanged('The source subtitle destination is already occupied')
-            if wanted_stamp is not None:
+            if upgrade is not None:
+                if current.profile_id != source.profile_id or not upgrade.can_publish(current, target=connection):
+                    raise SubtitleDestinationChanged('Source upgrade eligibility changed during search')
+            elif wanted_stamp is not None:
                 if not _wanted_source_can_publish(current, language, wanted_stamp, wanted_profile, target=connection):
                     raise SubtitleDestinationChanged('Wanted source eligibility changed during search')
             elif recheck_missing and language not in check_missing_languages_source(
                     current, external_subtitles=external_subtitles, target=connection):
                 raise SubtitleDestinationChanged('The source language is no longer missing')
             yield
+            if old_path is not None and not same_destination:
+                try:
+                    with subtitle_mutation(video_path, old_path, ownership_index=ownership_index):
+                        if regular_subtitle_version(old_path) == upgrade.subtitle_version:
+                            os.remove(old_path)
+                            on_publish(old_path)
+                except OSError:
+                    logging.exception('BAZARR unable to remove superseded source subtitle: %s', old_path)
 
     try:
         write_subtitle_file(video_path, destination, content, written_paths=written_paths, on_publish=on_publish,

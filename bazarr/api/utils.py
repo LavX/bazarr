@@ -595,7 +595,7 @@ def _same_media_path(current, stored, instance_mapping, writer_mapping):
             == _media_path_key(stored, writer_mapping, fold))
 
 
-def lowest_subtitle_scores(db, subtitles_by_id, id_column, history_table, *, videos_by_id, media_type):
+def lowest_subtitle_scores(db, subtitles_by_id, id_column, history_table, *, videos_by_id=None, media_type=None):
     """Lowest current-subtitle score (0-100 %) for each item id.
 
     Mirrors what the detail pages show. For every item, per current subtitle:
@@ -631,16 +631,19 @@ def lowest_subtitle_scores(db, subtitles_by_id, id_column, history_table, *, vid
     most records, the global mapping for ``media_type`` ('movie' or 'series')
     for translations. Embedded records are logged once per track and stay
     valid for the item wherever it lives.
+    Source callers omit videos_by_id because their paths are stored locally.
     """
     ids = list(subtitles_by_id.keys())
     if not ids:
         return {}
 
-    global_mapping = (path_mappings.path_mapping_movies if media_type == 'movie'
-                      else path_mappings.path_mapping_series)
+    global_mapping = None
+    if media_type is not None:
+        global_mapping = (path_mappings.path_mapping_movies if media_type == 'movie'
+                          else path_mappings.path_mapping_series)
     instance_mappings = {}
     item_mappings = {}
-    for item_id, (_video_path, arr_instance_id) in videos_by_id.items():
+    for item_id, (_video_path, arr_instance_id) in (videos_by_id or {}).items():
         if arr_instance_id not in instance_mappings:
             mapping = _instance_path_mapping(arr_instance_id, media_type)
             # The same choice path_replace_instance makes.
@@ -663,7 +666,8 @@ def lowest_subtitle_scores(db, subtitles_by_id, id_column, history_table, *, vid
         if raw:
             for entry in ast.literal_eval(raw):
                 if entry[1]:
-                    name, windows = _subtitle_file_name(entry[1])
+                    name, windows = (_subtitle_file_name(entry[1]) if media_type is not None
+                                     else (entry[1], False))
                     paths[name] = paths.get(name, False) or windows
                     full_paths.append(entry[1])
                 else:
@@ -685,11 +689,14 @@ def lowest_subtitle_scores(db, subtitles_by_id, id_column, history_table, *, vid
         translated = action == 6
         key = (item_id, translated, subtitles_path)
         if key not in file_matches:
-            instance_mapping = item_mappings.get(item_id)
-            writer_mapping = global_mapping if translated else instance_mapping
-            file_matches[key] = any(
-                _same_media_path(current, subtitles_path, instance_mapping, writer_mapping)
-                for current in current_subtitle_paths.get(item_id, ()))
+            if media_type is None:
+                file_matches[key] = subtitles_path in current_subtitle_paths.get(item_id, ())
+            else:
+                instance_mapping = item_mappings.get(item_id)
+                writer_mapping = global_mapping if translated else instance_mapping
+                file_matches[key] = any(
+                    _same_media_path(current, subtitles_path, instance_mapping, writer_mapping)
+                    for current in current_subtitle_paths.get(item_id, ()))
         return file_matches[key]
 
     # Chunk the id list so the IN (...) clause stays within SQLite's
@@ -760,7 +767,8 @@ def lowest_subtitle_scores(db, subtitles_by_id, id_column, history_table, *, vid
                 language = forced
             key = (row.item_id, 'embedded', language)
         else:
-            name, windows = _subtitle_file_name(row.subtitles_path)
+            name, windows = (_subtitle_file_name(row.subtitles_path) if media_type is not None
+                             else (row.subtitles_path or '', False))
             names = current_paths.get(row.item_id, {})
             if name in names:
                 current_name = name

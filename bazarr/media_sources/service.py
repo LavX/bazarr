@@ -7,6 +7,7 @@ by the caller that did the work, never inside ``process_subtitle``.
 import logging
 import os
 import threading
+from copy import deepcopy
 from dataclasses import replace
 
 from sqlalchemy.exc import IntegrityError
@@ -574,7 +575,8 @@ def search_wanted_item(item_id, created_at, job_id, *, translation_gate=True, ex
                 repository.set_failed_attempts(item_id, attempts, connection)
 
 
-def _download_source_subtitles(context, item, languages, job_id, *, translation_gate=True, wanted_stamp=None):
+def _download_source_subtitles(context, item, languages, job_id, *, translation_gate=True, wanted_stamp=None,
+                               upgrade=None):
     audio_languages = get_audio_profile_languages(item.audio_language)
     audio_language = audio_languages[0]['name'] if audio_languages else 'None'
     # For an episode the title the providers get is the show's.
@@ -583,17 +585,26 @@ def _download_source_subtitles(context, item, languages, job_id, *, translation_
     from subtitles.download import generate_subtitles
     from app.notifier import send_notifications_source
 
+    upgrade_options = {} if upgrade is None else {
+        'is_upgrade': True,
+        'forced_minimum_score': upgrade.minimum_score,
+        'previous_subtitles_to_delete': upgrade.subtitles_path,
+        'source_upgrade': upgrade,
+    }
     downloaded = []
     try:
         for result in generate_subtitles(context.path, languages, audio_language, str(context.scene_name), title,
-                                         context.media_type, context.profile_id, check_if_still_required=True,
-                                         job_id=job_id, source=context,
+                                         context.media_type, context.profile_id, check_if_still_required=upgrade is None,
+                                         job_id=job_id, source=context, **upgrade_options,
                                          **({'source_wanted_stamp': wanted_stamp} if wanted_stamp is not None else {}),
                                          **({} if translation_gate else {'auto_translate': False})):
             if not result:
                 continue
             with source_transaction() as connection:
-                history_log_source(1, context, result, target=connection)
+                if upgrade is None:
+                    history_log_source(1, context, result, target=connection)
+                else:
+                    history_log_source(3, context, result, upgraded_from_id=upgrade.original_id, target=connection)
             downloaded.append(result.language_code)
             current = resolve_same_item(context)
             if current is None:
@@ -608,3 +619,38 @@ def _download_source_subtitles(context, item, languages, job_id, *, translation_
     except OSError as error:
         raise JobFailed(f'Unable to save the subtitles file: {error}', reason='save_failed') from error
     return downloaded
+
+
+def upgrade_source_subtitle(candidate, job_id):
+    """Search for a higher score and replace only the subtitle selected from history."""
+    from subtitles.tools.subsync_engines import regular_subtitle_version
+    from subtitles.upgrade import _is_hi_required, parse_language_string
+
+    from .history import SourceSubtitleUpgrade
+
+    try:
+        context = resolve_item(candidate.item_id)
+    except SourceItemGone:
+        return
+    if (context.created_at, context.path, context.profile_id) != (
+            candidate.created_at, candidate.video_path, candidate.profile_id):
+        return
+    stamp = local_content_stamp(context.path)
+    version = regular_subtitle_version(candidate.subtitles_path)
+    profile = get_profiles_list(profile_id=context.profile_id)
+    if stamp is None or version is None or profile is None:
+        return
+    upgrade = SourceSubtitleUpgrade(
+        history_id=candidate.id, original_id=candidate.upgradedFromId or candidate.id,
+        minimum_score=int(candidate.score or 0) + 1, subtitles_path=candidate.subtitles_path,
+        subtitle_version=version, video_stamp=stamp, profile=deepcopy(profile))
+    if not upgrade.can_publish(context):
+        return
+
+    language, is_forced, is_hi = parse_language_string(candidate.language)
+    if is_hi == 'True' and not _is_hi_required(language, context.profile_id):
+        is_hi = 'False'
+    context = replace(context, wanted_file_stamp=stamp)
+    with source_search_probes(context.item_id):
+        _download_source_subtitles(context, context, [(language, is_hi, is_forced)], job_id,
+                                   upgrade=upgrade)
