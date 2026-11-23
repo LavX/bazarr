@@ -31,6 +31,10 @@ from .utils import get_video, _get_lang_obj, _get_scores
 from .processing import process_subtitle
 
 
+class SourceMissingLanguagesUnavailable(OSError):
+    """The scheduled publication cannot prove whether the source language is missing."""
+
+
 @update_pools
 def generate_subtitles(path, languages, audio_language, sceneName, title, media_type, profile_id,
                        forced_minimum_score=None, is_upgrade=False, check_if_still_required=False,
@@ -230,6 +234,10 @@ def generate_subtitles(path, languages, audio_language, sceneName, title, media_
                                                           previous_subtitles_to_delete)
                                 saved_subtitles = [saved for saved in saved_subtitles if saved.storage_path in written_paths]
 
+                        except SourceMissingLanguagesUnavailable:
+                            # The source job must fail rather than report a completed search
+                            # when its final missing-language check could not be performed.
+                            raise
                         except Exception as e:
                             logging.exception(
                                 f'BAZARR Error saving Subtitles file to disk for this file {path}: {repr(e)}')  # noqa: G004
@@ -330,7 +338,13 @@ def _write_source_download(video_path, destination, content, *, source, language
         if not sync_output_owner_is_unique(video_path, destination, ownership_index=ownership_index):
             raise SubtitleDestinationChanged('The source subtitle destination does not have one media owner')
         if recheck_missing:
-            return prepare_source_sidecars(source, ownership_index, written_paths)
+            try:
+                return prepare_source_sidecars(source, ownership_index, written_paths)
+            except OSError as error:
+                logging.warning('BAZARR could not verify missing languages for source item %s', source.item_id)
+                raise SourceMissingLanguagesUnavailable(
+                    'The source missing languages could not be verified. Try again when its subtitle folders '
+                    'can be read.') from error
         return None
 
     @contextmanager

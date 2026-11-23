@@ -179,12 +179,22 @@ def try_combine_for_video(video_path, media_type, sonarr_series_id=None,
                             current, _, alternates):
                         if current is None or current.path != video_path:
                             raise ValueError('The source item moved or was removed during composition')
+                        # The prepared registry owners are pinned here. Recheck
+                        # media-folder videos for inputs in either subtitle folder.
+                        if any(not sync_output_owner_is_unique(video_path, path, owners) for path in inputs):
+                            raise ValueError('A combined subtitle input lost its unique owner before publication')
                         yield
                         _retire_source_alternates(video_path, alternates, owners, notify)
 
                 write_kwargs['publication_guard'] = publication
                 write_kwargs['invalidate_outputs'] = False
-                read_kwargs['read_bytes'] = lambda path: read_regular_subtitle(path, input_versions[path])
+
+                def read_input(path):
+                    if not sync_output_owner_is_unique(video_path, path, owners):
+                        raise ValueError('A combined subtitle input lost its unique owner before reading')
+                    return read_regular_subtitle(path, input_versions[path])
+
+                read_kwargs['read_bytes'] = read_input
 
             def capture_published():
                 nonlocal published_versions

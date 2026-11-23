@@ -429,17 +429,16 @@ class SyncOutputOwnerIndex:
     def _record_owner(owners, path, destination):
         mode, custom = destination
         canonical = os.path.normcase(os.path.realpath(path))
-        logical_parent = os.path.dirname(path)
-        folders = _media_parent_folders(path, canonical)
-        if custom and mode in ('absolute', 'relative'):
-            # The writer makes Subs relative to the mapped path it receives.
-            # Resolving a symlinked file first can select a different parent.
-            folder = custom if mode == 'absolute' else os.path.join(logical_parent, custom)
-            folders.add(os.path.normcase(os.path.realpath(folder)))
-        # A file alias can expose another basename for the same video.
-        for stem in {_normalized_media_stem(path), _normalized_media_stem(canonical)}:
+        # Each name uses its own parent for sidecars and relative destinations.
+        for media_path in {os.fspath(path), canonical}:
+            parent = os.path.dirname(media_path)
+            folders = {parent}
+            if custom and mode in ('absolute', 'relative'):
+                folders.add(custom if mode == 'absolute' else os.path.join(parent, custom))
+            stem = _normalized_media_stem(media_path)
             for folder in folders:
-                owners.setdefault((folder, stem), set()).add(canonical)
+                directory = os.path.normcase(os.path.realpath(folder))
+                owners.setdefault((directory, stem), set()).add(canonical)
 
     @staticmethod
     def _load_owners():
@@ -479,24 +478,26 @@ def _local_video_stems_are_clear(video_path, video, conflicting_stems):
     for directory in _media_parent_folders(video_path, video):
         with os.scandir(directory) as entries:
             for entry in entries:
-                if not entry.name.lower().endswith(VIDEO_EXTENSIONS):
+                if (not entry.name.lower().endswith(VIDEO_EXTENSIONS)
+                        or _normalized_media_stem(entry.name) not in conflicting_stems):
                     continue
-                is_link = entry.is_symlink()
-                if not is_link and _normalized_media_stem(entry.name) not in conflicting_stems:
-                    continue
-                canonical = os.path.normcase(os.path.realpath(entry.path))
-                if canonical == video:
-                    continue
-                if (is_link or entry.is_file(follow_symlinks=False)) and (
-                        {_normalized_media_stem(entry.name), _normalized_media_stem(canonical)} & conflicting_stems):
+                if ((entry.is_symlink() or entry.is_file(follow_symlinks=False))
+                        and os.path.normcase(os.path.realpath(entry.path)) != video):
                     return False
     return True
 
 
 def _subtitle_owner_stems(video_path, canonical, subtitle_path, ownership_index):
-    return {_normalized_media_stem(video_path)} | (
-        ownership_index.conflicting_stems(canonical, subtitle_path) if ownership_index is not None
-        else {_normalized_media_stem(canonical), _normalized_media_stem(subtitle_path)})
+    subtitle_stem = _normalized_media_stem(subtitle_path)
+    stems = set()
+    for path in {os.fspath(video_path), canonical}:
+        media_stem = _normalized_media_stem(path)
+        if subtitle_stem == media_stem or subtitle_stem.startswith(media_stem + '.'):
+            if ownership_index is None:
+                stems.update((media_stem, subtitle_stem))
+            else:
+                stems.update(ownership_index.conflicting_stems(path, subtitle_path))
+    return stems
 
 
 def local_subtitle_owner_is_clear(video_path, subtitle_path, ownership_index=None):
@@ -506,8 +507,8 @@ def local_subtitle_owner_is_clear(video_path, subtitle_path, ownership_index=Non
     if directory not in _media_parent_folders(video_path, canonical):
         return True  # The caller's registry proof covers a separate shared directory.
     try:
-        return _local_video_stems_are_clear(
-            video_path, canonical, _subtitle_owner_stems(video_path, canonical, subtitle_path, ownership_index))
+        stems = _subtitle_owner_stems(video_path, canonical, subtitle_path, ownership_index)
+        return bool(stems) and _local_video_stems_are_clear(video_path, canonical, stems)
     except OSError:
         return False
 
@@ -519,13 +520,9 @@ def sync_output_owner_is_unique(video_path, source_path, ownership_index=None):
     video = os.path.normcase(os.path.realpath(video_path))
     directory = os.path.normcase(os.path.realpath(os.path.dirname(source_path)))
 
-    stem = _normalized_media_stem
-    if not any(stem(source_path) == name or stem(source_path).startswith(name + '.')
-               for name in {stem(video_path), stem(video)}):
-        return False
-    conflicting_stems = _subtitle_owner_stems(video_path, video, source_path, ownership_index)
     try:
-        if not _local_video_stems_are_clear(video_path, video, conflicting_stems):
+        conflicting_stems = _subtitle_owner_stems(video_path, video, source_path, ownership_index)
+        if not conflicting_stems or not _local_video_stems_are_clear(video_path, video, conflicting_stems):
             return False
         if directory in _media_parent_folders(video_path, video) and (ownership_index is None or not ownership_index.folder_is_shared(
                 directory)):

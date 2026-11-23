@@ -211,6 +211,51 @@ def test_source_download_keeps_the_primary_write_when_a_shared_subtitle_folder_c
     assert destination.read_bytes() == generated.read_bytes() == CONTENT
 
 
+def test_scheduled_source_download_skips_publication_when_missing_languages_cannot_be_verified(
+        world, monkeypatch, caplog):
+    import os
+
+    from app.jobs_queue import JobFailed
+    from media_sources import repository, service
+
+    folder = _custom_folder(world, monkeypatch, world.tmp_path)
+    context = _movie(world, 'Film.mkv')
+    destination = folder / 'Film.en.srt'
+    generated = folder / 'Film.en.alass.srt'
+    generated.write_bytes(CONTENT)
+    initial = repository.get_item(context.item_id)
+    asked = _download(monkeypatch)
+    jobs = []
+    monkeypatch.setattr(service.jobs_queue, 'update_job_progress', lambda **kwargs: jobs.append(kwargs))
+    scandir = os.scandir
+    refused = []
+
+    def no_subtitle_listing(path):
+        if isinstance(path, (str, os.PathLike)) and Path(path) == folder:
+            refused.append(True)
+            raise PermissionError('The subtitle folder is write-only')
+        return scandir(path)
+
+    monkeypatch.setattr(os, 'scandir', no_subtitle_listing)
+    with caplog.at_level(logging.INFO):
+        with pytest.raises(JobFailed, match='The source missing languages could not be verified') as failed:
+            service.search_source_item(context.item_id, job_id=3)
+    monkeypatch.setattr(os, 'scandir', scandir)
+
+    assert failed.value.reason == 'save_failed'
+    assert asked['video'].source_context.item_id == context.item_id
+    assert refused
+    assert not destination.exists()
+    assert generated.read_bytes() == CONTENT
+    assert not list(folder.glob('.bazarr-*'))
+    current = repository.get_item(context.item_id)
+    assert (current.subtitles, current.missing_subtitles) == (initial.subtitles, initial.missing_subtitles)
+    assert world.db.execute(sa.select(sa.func.count()).select_from(repository.History)).scalar_one() == 0
+    assert not world.published
+    assert not any(job.get('progress_value') == 'max' for job in jobs)
+    assert 'Error saving Subtitles file to disk' not in caplog.text
+
+
 @pytest.mark.parametrize('late_change', ['video', 'subtitle'])
 def test_source_download_preserves_own_folder_siblings_that_change_after_planning(world, monkeypatch, late_change):
     import tempfile
@@ -1573,33 +1618,79 @@ def test_source_download_rechecks_mappings_for_an_existing_owner_in_a_shared_rel
     assert not sync_output_owner_is_unique(context.path, str(destination), ownership_index=SourcePublicationOwnerIndex())
 
 
-def test_source_download_reserves_a_mapped_owners_logical_parent_for_relative_subtitles(world, monkeypatch):
+@pytest.mark.parametrize('filename', ['Film.mkv', 'Other.mkv'])
+@pytest.mark.parametrize('alias_location', ['mapped folder', 'media folder'])
+def test_source_download_pairs_a_mapped_alias_stem_with_its_relative_subtitle_folder(
+        world, monkeypatch, filename, alias_location):
     from app.config import settings
-    from subtitles.download import _write_source_download
     from utilities.helper import get_target_folder
     from utilities.path_mappings import path_mappings
 
     monkeypatch.setattr(settings.general, 'subfolder', 'relative')
     monkeypatch.setattr(settings.general, 'subfolder_custom', 'Subs')
-    context = _movie(world, 'Film.mkv')
-    folder = Path(context.path).parent / 'Subs'
+    context = _movie(world, filename)
+    folder = world.tmp_path / 'Shared subtitles'
     folder.mkdir()
-    actual = video(world.tmp_path / 'library' / 'Film.mkv')
-    alias = world.tmp_path / 'alias' / 'Film.mkv'
-    alias.parent.mkdir()
+    media_folder = Path(context.path).parent
+    (media_folder / 'Subs').symlink_to(folder, target_is_directory=True)
+    actual = video(world.tmp_path / 'library' / 'Other.mkv')
+    alias_folder = media_folder if alias_location == 'media folder' else world.tmp_path / 'aliases'
+    alias = alias_folder / ('Film.mp4' if alias_location == 'media folder' else 'Film.mkv')
+    if alias_folder != media_folder:
+        alias_folder.mkdir()
+        (alias_folder / 'Subs').symlink_to(folder, target_is_directory=True)
     alias.symlink_to(actual)
-    (alias.parent / 'Subs').symlink_to(folder, target_is_directory=True)
     remote = world.tmp_path / 'remote'
     monkeypatch.setattr(path_mappings, 'path_mapping_movies', [[str(remote), str(alias.parent)]])
-    world.db.execute(_legacy_owner_insert(world, 'radarr', remote / 'Film.mkv'))
+    world.db.execute(_legacy_owner_insert(world, 'radarr', remote / alias.name))
     assert Path(get_target_folder(str(alias), create=False)).resolve() == folder
     assert Path(get_target_folder(str(actual), create=False)).resolve() != folder
 
-    destination = folder / 'Film.en.srt'
-    assert not _write_source_download(context.path, str(destination), CONTENT, source=context,
-                                      language=Language('eng'), recheck_missing=False, is_upgrade=False,
-                                      written_paths=[], on_publish=None)
-    assert not destination.exists()
+    destination = folder / Path(filename).with_suffix('.en.srt')
+    existing = folder / 'Film.en.alass.srt'
+    existing_content = CONTENT.replace(b'Downloaded', b'Alias subtitle')
+    existing.write_bytes(existing_content)
+    _download(monkeypatch)
+
+    results = _generate(context, check_if_still_required=True)
+
+    if filename == 'Film.mkv':
+        assert results == []
+        assert not destination.exists()
+        assert not world.published
+    else:
+        assert len(results) == 1
+        assert destination.read_bytes() == CONTENT
+    assert existing.read_bytes() == existing_content
+
+
+def test_source_download_uses_its_logical_filename_in_a_shared_relative_folder(world, monkeypatch):
+    from app.config import settings
+    from media_sources.context import resolve_item
+    from media_sources.indexer import index_item
+
+    monkeypatch.setattr(settings.general, 'subfolder', 'relative')
+    monkeypatch.setattr(settings.general, 'subfolder_custom', 'Subs')
+    shared = world.tmp_path / 'Shared subtitles'
+    shared.mkdir()
+    (world.root / 'Subs').symlink_to(shared, target_is_directory=True)
+    actual = video(world.tmp_path / 'library' / 'Other.mkv')
+    alias = world.root / 'Film.mkv'
+    alias.symlink_to(actual)
+    item_id = add_item(world.db, world.source_id, world.library_id, alias, title='Film')
+    index_item(item_id)
+    context = resolve_item(item_id)
+    competing = video(world.tmp_path / 'competing' / 'Other.mkv')
+    (competing.parent / 'Subs').symlink_to(shared, target_is_directory=True)
+    world.db.execute(_legacy_owner_insert(world, 'radarr', competing))
+    existing = shared / 'Other.en.srt'
+    existing_content = CONTENT.replace(b'Downloaded', b'Existing subtitle')
+    existing.write_bytes(existing_content)
+    _download(monkeypatch)
+
+    assert len(_generate(context, check_if_still_required=True)) == 1
+    assert (shared / 'Film.en.srt').read_bytes() == CONTENT
+    assert existing.read_bytes() == existing_content
 
 
 @pytest.mark.parametrize("layout", ["relative", "absolute"])
@@ -1751,8 +1842,11 @@ def test_source_translation_rechecks_library_enablement_after_preparation(world,
     assert not Path(destination).exists()
 
 
+@pytest.mark.parametrize('alternate_format', ['ass', 'ssa'])
+@pytest.mark.parametrize('deny_shared_listing', [False, True])
 @pytest.mark.parametrize('replace_alternate', [False, True])
-def test_source_combine_sweeps_stale_siblings_without_scanning_under_the_writer(world, monkeypatch, replace_alternate):
+def test_source_combine_sweeps_stale_siblings_without_scanning_shared_folder_under_writer(
+        world, monkeypatch, replace_alternate, deny_shared_listing, alternate_format):
     import os
     from contextlib import contextmanager
 
@@ -1764,9 +1858,9 @@ def test_source_combine_sweeps_stale_siblings_without_scanning_under_the_writer(
     media = Path(context.path)
     media.with_suffix(".en.srt").write_bytes(CONTENT)
     media.with_suffix(".hu.srt").write_bytes(CONTENT)
-    superseded = folder / media.with_suffix(".en.combined-hu.ass").name
+    superseded = folder / media.with_suffix(f".en.combined-hu.{alternate_format}").name
     superseded.write_bytes(CONTENT)
-    superseded_variant = superseded.with_suffix('.ffsubsync.ass')
+    superseded_variant = superseded.with_suffix(f'.ffsubsync.{alternate_format}')
     current_variant = superseded.with_suffix('.alass.srt')
     superseded_variant.write_bytes(CONTENT)
     current_variant.write_bytes(CONTENT)
@@ -1794,7 +1888,10 @@ def test_source_combine_sweeps_stale_siblings_without_scanning_under_the_writer(
                 writer_open = False
 
     def observe_scan(path):
-        if writer_open:
+        shared = Path(path).resolve() == folder.resolve()
+        if shared and deny_shared_listing:
+            raise PermissionError('Shared subtitle folder cannot be listed')
+        if writer_open and shared:
             locked_scans.append(path)
         return scandir(path)
 
@@ -3225,6 +3322,65 @@ def test_source_combine_rechecks_input_ownership_at_publication(world, monkeypat
                                            source=context)
     assert result.status == "failed" and "input" in result.error
     assert not (world.tmp_path / media.with_suffix(".en.combined-hu.srt").name).exists()
+
+
+@pytest.mark.parametrize('language', ['en', 'hu'])
+@pytest.mark.parametrize('input_location', ['media folder', 'shared folder'])
+@pytest.mark.parametrize('arrival', ['before reading', 'after preparation'])
+def test_source_combine_rechecks_local_input_ownership_after_preparation(
+        world, monkeypatch, language, input_location, arrival):
+    from contextlib import contextmanager
+
+    from media_sources import indexer, repository
+    from subtitles.tools.combine import main as combine
+
+    folder = _custom_folder(world, monkeypatch, world.tmp_path)
+    context = _movie(world)
+    media = Path(context.path)
+    input_folder = media.parent if input_location == 'media folder' else folder
+    primary = input_folder / media.with_suffix('.en.srt').name
+    secondary = input_folder / media.with_suffix('.hu.srt').name
+    primary.write_bytes(CONTENT)
+    secondary.write_bytes(CONTENT)
+    destination = folder / media.with_suffix('.en.combined-hu.srt').name
+    alternate = destination.with_suffix('.ssa')
+    variant = alternate.with_suffix('.ffsubsync.ssa')
+    for path in (destination, alternate, variant):
+        path.write_bytes(CONTENT)
+    publication = indexer.source_item_publication
+    compose = combine.compose
+    read = combine.read_regular_subtitle
+    consumed = []
+
+    def arrive_before_reading(**kwargs):
+        if arrival == 'before reading':
+            video(media.with_suffix(f'.{language}.mkv'))
+        return compose(**kwargs)
+
+    def record_read(path, version):
+        consumed.append(path)
+        return read(path, version)
+
+    @contextmanager
+    def add_local_owner(source, *, shared=False):
+        with publication(source, shared=shared) as result:
+            if arrival == 'after preparation':
+                video(media.with_suffix(f'.{language}.mkv'))
+            yield result
+
+    monkeypatch.setattr(indexer, 'source_item_publication', add_local_owner)
+    monkeypatch.setattr(combine, 'compose', arrive_before_reading)
+    monkeypatch.setattr(combine, 'read_regular_subtitle', record_read)
+    result = combine.try_combine_for_video(context.path, 'movie', languages=['en', 'hu'], format='srt',
+                                           source=context)
+
+    assert result.status == 'failed' and 'input' in result.error
+    if arrival == 'before reading':
+        assert str(primary if language == 'en' else secondary) not in consumed
+    for path in (primary, secondary, destination, alternate, variant):
+        assert path.read_bytes() == CONTENT
+    assert world.db.execute(sa.select(repository.History)).all() == []
+    assert not world.published
 
 
 def test_source_combine_refuses_an_input_with_an_intermediate_owner(world, monkeypatch):
