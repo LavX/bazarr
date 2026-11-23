@@ -1312,10 +1312,26 @@ describe("parseReplacementSubtitle", () => {
         ]);
 
         const reopened = getParser(format).parse(saved);
+        const edited = text + "\u2028Edited";
         reopened.cues[0].endMs = 1500;
+        reopened.cues[0].text = edited;
         expect(
           parseReplacementSubtitle(format, serializer.serialize(reopened)).cues,
-        ).toMatchObject([{ endMs: 1500, text }]);
+        ).toMatchObject([{ endMs: 1500, text: edited }]);
+      });
+
+      it("rejects a bare CR dialogue boundary and accepts CRLF", () => {
+        const first = `${header}\nFormat: ${firstField}, Start, End, Text\nDialogue: ${firstValue},0:00:00.00,0:00:01.00,First`;
+        const second = `Dialogue: ${firstValue},0:00:01.00,0:00:02.00,Second`;
+        const crlf = `${first}\n${second}`.replace(/\n/g, "\r\n");
+
+        expect(parseReplacementSubtitle(format, crlf).cues).toMatchObject([
+          { text: "First" },
+          { text: "Second" },
+        ]);
+        expect(() =>
+          parseReplacementSubtitle(format, `${first}\r${second}`),
+        ).toThrow("Invalid ASS line ending");
       });
 
       it("rejects an unterminated Events section with trailing whitespace", () => {

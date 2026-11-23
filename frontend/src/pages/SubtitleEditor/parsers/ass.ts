@@ -94,7 +94,7 @@ function* dialogueRows(eventSections: string[][], strict: boolean) {
       }
       if (strict) {
         if (!/^\s*Dialogue\b/i.test(line)) continue;
-        const dialogue = line.match(/^\s*Dialogue\s*:\s*(.*)$/is);
+        const dialogue = line.match(/^\s*Dialogue\s*:\s*([^\r\n]*)$/i);
         if (!dialogue || columns.length === 0) {
           throw new Error("Invalid ASS event format");
         }
@@ -109,6 +109,11 @@ function* dialogueRows(eventSections: string[][], strict: boolean) {
 export const assParser: SubtitleParser = {
   parse(content, { strict } = {}): ParseResult {
     const text = content.replace(/^\uFEFF/, "").replace(/\r\n/g, "\n");
+
+    // A bare CR could hide another event within a line split on LF.
+    if (strict && text.includes("\r")) {
+      throw new Error("Invalid ASS line ending");
+    }
 
     if (!text.trim()) {
       return { metadata: { format: "ass" }, cues: [] };

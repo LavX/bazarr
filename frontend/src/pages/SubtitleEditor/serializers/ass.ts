@@ -45,7 +45,7 @@ function patchDialogueLine(
   text: string,
 ): string {
   // Dialogue: Layer,Start,End,Style,Name,MarginL,MarginR,MarginV,Effect,Text
-  const match = rawLine.match(/^(Dialogue:\s*)(.*)$/s);
+  const match = rawLine.match(/^(Dialogue:[ \t]*)([^\r\n]*)$/);
   if (!match) return rawLine;
 
   const afterPrefix = match[2];
