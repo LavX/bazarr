@@ -445,6 +445,69 @@ def test_a_generated_source_sync_output_can_be_promoted(toolbox, monkeypatch):
     assert rows == [(5, str(generated)), (5, str(path))]
 
 
+@pytest.mark.parametrize('completion', ['overwrite', 'cancelled', 'generated file changed'])
+def test_source_sync_overwrite_retires_only_unchanged_generated_outputs(toolbox, monkeypatch, completion):
+    from media_sources import repository
+    from subtitles.tools import subsyncer
+
+    context = pipeline._movie(toolbox.world)
+    path, _ = _sidecars(toolbox, context)
+    generated = path.with_suffix('.alass.srt')
+    replacement = SYNCED.replace('Original cue', 'Overwritten cue')
+    edited = SYNCED.replace('Original cue', 'Edited generated cue')
+    output = SYNCED
+
+    def align(self, engine, output_path, video_path, no_fix_framerate):
+        output_path.write_text(output)
+        return {'offset_seconds': 0.25}
+
+    monkeypatch.setattr(subsyncer.SubSyncer, '_run_external_engine', align)
+    _run(toolbox, _request(toolbox, context, path, 'sync', output_mode='keep_all', enabled_engines='alass'))
+    assert generated.read_text() == SYNCED and path.read_text() == SRT
+
+    output = replacement
+    response = _request(toolbox, context, path, 'sync', output_mode='overwrite', enabled_engines='alass')
+    assert response.status_code == 202
+    job_id = response.json['job_id']
+    job = toolbox.jobs._reserve_next_job()
+    assert job.job_id == job_id
+    report = subsyncer.SubSyncer._report_progress
+    at_publication = []
+
+    def change_before_publication(self, message, value, total):
+        if message == 'Saving synchronized subtitle':
+            at_publication.append(True)
+            if completion == 'cancelled':
+                assert toolbox.jobs.cancel_running_job(job_id)
+            elif completion == 'generated file changed':
+                updated = generated.with_suffix('.incoming')
+                updated.write_text(edited)
+                updated.replace(generated)
+        report(self, message, value, total)
+
+    monkeypatch.setattr(subsyncer.SubSyncer, '_report_progress', change_before_publication)
+    assert toolbox.jobs._run_job(job) is (completion != 'cancelled')
+    assert at_publication == [True]
+    rows = toolbox.db.execute(sa.select(repository.History.c.action, repository.History.c.subtitles_path)
+                              .order_by(repository.History.c.id)).all()
+    listing = ast.literal_eval(repository.get_item(context.item_id).subtitles)
+    assert rows[0] == (5, str(generated))
+    if completion == 'cancelled':
+        assert toolbox.jobs.get_job_status(job_id) == 'cancelled'
+        assert path.read_text() == SRT and generated.read_text() == SYNCED
+        assert len(rows) == 1
+    else:
+        assert toolbox.jobs.get_job_status(job_id) == 'completed'
+        assert path.read_text() == replacement and rows == [(5, str(generated)), (5, str(path))]
+        if completion == 'generated file changed':
+            assert generated.read_text() == edited
+        else:
+            assert not generated.exists()
+            assert not any(entry[1] == str(generated) for entry in listing)
+            retired, = path.parent.glob('.bazarr-sync-obsolete-*.bak')
+            assert retired.read_text() == SYNCED
+
+
 def test_manual_source_translation_runs_through_v2_runtime(toolbox, monkeypatch):
     from app import database
     from app.config import settings

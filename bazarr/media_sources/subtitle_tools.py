@@ -162,7 +162,7 @@ class SourceSubtitleTool:
             raise SubtitleSourceChanged('The source subtitle or reference has ambiguous ownership')
 
     @contextmanager
-    def publication(self, output_path):
+    def publication(self, output_path, *, cleanup_outputs=False):
         owners = SourcePublicationOwnerIndex()
 
         def prepare():
@@ -172,7 +172,8 @@ class SourceSubtitleTool:
             if not all(_owned(self.source, path, owners) for path in paths):
                 raise SubtitleSourceChanged('The source subtitle or output has ambiguous ownership')
 
-        with owners.publication(self.source, prepare, destination=output_path) as (current, connection, _):
+        with owners.publication(self.source, prepare, destination=output_path,
+                                cleanup_outputs=cleanup_outputs) as (current, connection, _):
             self.check_current(current, connection)
             if os.path.lexists(output_path) and regular_subtitle_version(output_path) is None:
                 raise SubtitleSourceChanged('The output is no longer a regular subtitle file')
