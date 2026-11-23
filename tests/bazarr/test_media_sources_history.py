@@ -62,7 +62,8 @@ def test_history_pages_union_keep_orders_owner_filters_and_origins(client, arr_l
     monkeypatch.setattr(settings.general, 'upgrade_subs', True)
     monkeypatch.setattr(settings.general, 'days_to_upgrade_subs', 7)
     monkeypatch.setattr(settings.general, 'use_embedded_subs', False)
-    now = datetime.now().replace(microsecond=123456)
+    # The legacy response contains a relative label. Keep it stable across the requests.
+    now = (datetime.now() - timedelta(hours=26)).replace(microsecond=123456)
     arr_history, arr_media = (TableHistory, TableEpisodes) if kind == 'episode' else (TableHistoryMovie, TableMovies)
     arr_video = video(tmp_path / 'arr' / 'Arr.mkv')
     arr_subtitle = arr_video.with_suffix('.en.srt')
