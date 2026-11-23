@@ -202,11 +202,15 @@ def generate_subtitles(path, languages, audio_language, sceneName, title, media_
                             subtitle_formats.add(s.format)
 
                         try:
-                            destination_setting = (
-                                _source_subtitle_destination_setting()
-                                if source_wanted_stamp is not None or source_upgrade is not None else None
-                            )
-                            fld = get_target_folder(path)
+                            destination_setting = None
+                            if source_wanted_stamp is not None or source_upgrade is not None:
+                                from discover.metadata import CONFIG_LOCK
+
+                                with CONFIG_LOCK:
+                                    destination_setting = _source_subtitle_destination_setting()
+                                fld = get_target_folder(path, destination_setting=destination_setting)
+                            else:
+                                fld = get_target_folder(path)
                             chmod = int(settings.general.chmod, 8) if not sys.platform.startswith(
                                 'win') and settings.general.chmod_enabled else None
                             publish = publication_callback(publication_type, path, 'download', arr_instance_id,

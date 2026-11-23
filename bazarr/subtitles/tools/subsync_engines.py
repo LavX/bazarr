@@ -630,7 +630,8 @@ def plan_sync_output_cleanup(video_path, source_path, ownership_index=None, *, i
     return tuple((output, version) for output, version in candidates.items() if output.name in owned)
 
 
-def quarantine_sync_outputs(video_path, source_path, ownership_index=None, *, prepared=None):
+def quarantine_sync_outputs(video_path, source_path, ownership_index=None, *, prepared=None,
+                            output_is_current=None):
     """Preserve proven generated siblings under names no subtitle scan accepts."""
     directory = os.path.dirname(source_path)
     with subtitle_write_lock(video_path, directory) as state:
@@ -640,6 +641,7 @@ def quarantine_sync_outputs(video_path, source_path, ownership_index=None, *, pr
             os.close(fd)
             try:
                 if (not local_subtitle_owner_is_clear(video_path, output, ownership_index)
+                        or (output_is_current is not None and not output_is_current(output))
                         or regular_subtitle_version(output) != version):
                     os.unlink(quarantine)
                     continue
@@ -651,13 +653,12 @@ def quarantine_sync_outputs(video_path, source_path, ownership_index=None, *, pr
             state.changed(output)
 
 
-def quarantine_sync_outputs_after_mutation(video_path, source_path, ownership_index=None, *, prepared=None):
+def quarantine_sync_outputs_after_mutation(video_path, source_path, ownership_index=None, *, prepared=None,
+                                           output_is_current=None):
     """Report cleanup failure separately from an already completed file change."""
     try:
-        if prepared is None:
-            quarantine_sync_outputs(video_path, source_path, ownership_index)
-        else:
-            quarantine_sync_outputs(video_path, source_path, ownership_index, prepared=prepared)
+        quarantine_sync_outputs(video_path, source_path, ownership_index, prepared=prepared,
+                                output_is_current=output_is_current)
     except OSError as exc:
         logging.error(
             'BAZARR subtitle change completed for %s, but obsolete generated subtitle cleanup failed (%s). '

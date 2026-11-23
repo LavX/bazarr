@@ -114,7 +114,7 @@ class SourcePublicationOwnersChanged(SubtitleDestinationChanged):
 class _RegisteredSubtitleClaims:
     video: str
     output_folders: dict[str, str]
-    candidates: tuple[set[tuple[str, str]], ...]
+    candidates: dict[str, set[tuple[str, str]]]
 
 
 class SourcePublicationOwnerIndex(SourceOutputOwnerIndex):
@@ -185,16 +185,16 @@ class SourcePublicationOwnerIndex(SourceOutputOwnerIndex):
         try:
             video = resolve(os.fspath(video_path))
             output_folders = {parent: resolve(parent) for parent in {os.path.dirname(path) for path in subtitle_paths}}
-            candidates = []
+            candidates = {}
             for path in subtitle_paths:
                 directory = output_folders[os.path.dirname(path)]
                 stems = self.matching_stems(video_path, video, directory, path, destination, resolve=resolve)
-                candidates.append({(directory, stem) for stem in stems})
-            return _RegisteredSubtitleClaims(video, output_folders, tuple(candidates))
+                candidates[os.fspath(path)] = {(directory, stem) for stem in stems}
+            return _RegisteredSubtitleClaims(video, output_folders, candidates)
         except (OSError, ValueError) as error:
             raise SourcePublicationOwnersChanged('Registered subtitle ownership could not be prepared') from error
 
-    def registered_ownership_is_current(self, proof):
+    def registered_ownership_is_current(self, proof, output=None):
         """Resolve registered claims afresh under the writer guard before touching files."""
         if proof is None:
             return True
@@ -202,10 +202,16 @@ class SourcePublicationOwnerIndex(SourceOutputOwnerIndex):
         source_paths, registry_rows = self._prepared_owners
         destination, mappings = self._publication_settings
         resolve = cache(self._registered_owner_path)
+        folders = proof.output_folders.items()
+        candidates = proof.candidates.values()
+        if output is not None:
+            parent = os.path.dirname(output)
+            folders = ((parent, proof.output_folders[parent]),)
+            candidates = (proof.candidates[os.fspath(output)],)
         try:
-            if any(resolve(folder) != version for folder, version in proof.output_folders.items()):
+            if any(resolve(folder) != version for folder, version in folders):
                 return False
-            keys = set().union(*proof.candidates)
+            keys = set().union(*candidates)
             stems = {stem for _, stem in keys}
             owned = set()
             paths = chain(source_paths, self._mapped_registry_paths(registry_rows, mappings))
@@ -219,7 +225,7 @@ class SourcePublicationOwnerIndex(SourceOutputOwnerIndex):
                         if canonical != proof.video:
                             return False
                         owned.add(key)
-            return all(owned & candidate for candidate in proof.candidates)
+            return all(owned & candidate for candidate in candidates)
         except (OSError, ValueError):
             return False
 
@@ -295,7 +301,9 @@ class SourcePublicationOwnerIndex(SourceOutputOwnerIndex):
                         publishing = True
                         yield current, connection, prepared
                         if current is not None and outputs:
-                            quarantine_sync_outputs_after_mutation(current.path, destination, self, prepared=outputs)
+                            output_is_current = partial(self.registered_ownership_is_current, proof) if proof else None
+                            quarantine_sync_outputs_after_mutation(current.path, destination, self, prepared=outputs,
+                                                                   output_is_current=output_is_current)
                         return
                 except sa.exc.OperationalError as error:
                     sqlstate = getattr(error.orig, 'sqlstate', None) or getattr(error.orig, 'pgcode', None)
