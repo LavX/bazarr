@@ -1653,6 +1653,133 @@ def data_release(hub, service_kind, monkeypatch):
     return service, new, active
 
 
+@pytest.fixture
+def catalog_data_release(data_release, monkeypatch):
+    from plugin_platform_helpers import verified_official_source
+    from provider_hub.state import mutate_state
+
+    service, manifest, _ = data_release
+
+    def list_update(state):
+        state["catalog_sources"]["official"] = verified_official_source()
+        state["catalog_entries"]["official:plugins:exampleservice:1.1.0"] = {
+            "source": "official", "provider_id": "exampleservice", "version": "1.1.0",
+            "trusted": True, "manifest": manifest, "catalog_list": "plugins",
+        }
+
+    mutate_state(list_update)
+    monkeypatch.setattr(service, "_fetch_bundle",
+                        lambda candidate, deadline: Path(_bundle(candidate.provider_id, candidate.version)))
+    return data_release
+
+
+def test_stage_install_fences_active_data_copy_and_reopens_before_smoke(
+        catalog_data_release, service_kind, monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Event
+
+    from provider_hub import datadir
+    from provider_hub.worker import ProviderWorkerClient
+
+    service, manifest, active = catalog_data_release
+    plugin_id = manifest["id"]
+    started = Event()
+    dispatched = Event()
+    active_settings = active / "settings"
+    client = ProviderWorkerClient([], provider_id=plugin_id, env={"BAZARR_PLUGIN_DATA_DIR": str(active)})
+    monkeypatch.setattr(client, "_request", lambda *args: dispatched.set())
+
+    def call_worker():
+        started.set()
+        client.request("health", {})
+
+    def settle(checked_id, timeout):
+        assert checked_id == plugin_id
+        assert 0 < timeout <= 10.0
+        active_settings.write_text("last settled write")
+        return True
+
+    copy_folder = datadir.copy_folder
+
+    def copy(source, destination):
+        assert source == active
+        worker = executor.submit(call_worker)
+        assert started.wait(2)
+        assert not dispatched.wait(0.05)
+        assert not worker.done()
+        return copy_folder(source, destination)
+
+    def smoke(validated, bundle, interpreter, *, data_dir, timeout):
+        assert dispatched.wait(2)
+        assert (data_dir / "settings").read_text() == "last settled write"
+        assert 0 < timeout <= 10.0
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        monkeypatch.setattr(service_kind, "settle_data", settle)
+        monkeypatch.setattr(service_kind, "smoke_test", smoke)
+        monkeypatch.setattr(datadir, "copy_folder", copy)
+        row = service.stage_install(manifest, source_id="official", install_timeout=10.0)
+
+    assert row["staged_version"] == "1.1.0"
+    assert row["active_version"] == "1.0.0"
+
+
+@pytest.mark.parametrize("busy_at", ["dispatch", "settle"])
+def test_stage_install_refuses_a_snapshot_when_active_data_does_not_settle(
+        catalog_data_release, service_kind, monkeypatch, busy_at):
+    from contextlib import nullcontext
+
+    from provider_hub import datadir
+    from provider_hub.state import load_state
+
+    service, manifest, active = catalog_data_release
+    plugin_id = manifest["id"]
+    settled = []
+
+    def settle(checked_id, timeout):
+        settled.append(checked_id)
+        assert 0 <= timeout <= 0.03
+        return False
+
+    monkeypatch.setattr(datadir, "QUIESCE_TIMEOUT", 0.03)
+    monkeypatch.setattr(service_kind, "settle_data", settle)
+    dispatch = datadir.dispatch(plugin_id) if busy_at == "dispatch" else nullcontext()
+    with dispatch, pytest.raises(service.ProviderHubInstallError, match="busy"):
+        service.stage_install(manifest, source_id="official")
+
+    assert settled == ([plugin_id] if busy_at == "settle" else [])
+    row = load_state()["installations"][plugin_id]
+    assert row["active_version"] == "1.0.0" and row["staged_version"] is None
+    assert list(active.parent.iterdir()) == [active]
+    assert (active / "settings").read_text() == "from v1"
+
+
+def test_stage_install_does_not_copy_when_the_install_budget_expires_while_settling(
+        catalog_data_release, service_kind, monkeypatch):
+    from types import SimpleNamespace
+
+    from provider_hub import datadir
+
+    service, manifest, active = catalog_data_release
+    now = 0.0
+    monkeypatch.setattr(service, "time", SimpleNamespace(monotonic=lambda: now, perf_counter=service.time.perf_counter))
+
+    def settle(plugin_id, timeout):
+        nonlocal now
+        assert 0 < timeout <= 10.0
+        now = 10.0
+        return True
+
+    def unexpected_copy(*args):
+        pytest.fail("the snapshot started after the install deadline")
+
+    monkeypatch.setattr(service_kind, "settle_data", settle)
+    monkeypatch.setattr(datadir, "copy_folder", unexpected_copy)
+    with pytest.raises(service.ProviderHubInstallError, match="time budget"):
+        service.stage_install(manifest, source_id="official", install_timeout=10.0)
+    assert list(active.parent.iterdir()) == [active]
+
+
 def test_staging_uses_private_data_and_switch_refreshes_work_done_since_staging(data_release, service_kind, monkeypatch):
     from provider_hub import datadir, secret_paths
     from provider_hub.state import load_state, provider_hub_dir

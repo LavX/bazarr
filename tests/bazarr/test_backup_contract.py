@@ -1580,6 +1580,109 @@ def test_plugin_backup_uses_the_published_pg_restore_and_checkpoints_its_result(
         assert not stage.exists()
 
 
+@pytest.mark.skipif(os.name == 'nt', reason='POSIX execute permissions')
+def test_backup_and_restore_preserve_plugin_owner_execute(backup_env, monkeypatch, tmp_path, service_kind):
+    import json
+
+    from plugin_platform_helpers import service_manifest
+    from provider_hub import datadir
+
+    monkeypatch.setattr(backup_env.settings.postgresql, 'enabled', False)
+    root = tmp_path / 'provider_hub'
+    key = 'a' * 32
+    folder = datadir.release_path(root, 'exampleservice', key)
+    executable = folder / 'bin' / 'nested' / 'run'
+    executable.parent.mkdir(parents=True)
+    executable.write_text('#!/bin/sh\nexit 0\n')
+    executable.chmod(0o700)
+    state_path = root / 'state.json'
+    state_path.write_text(json.dumps({'installations': {'exampleservice': {
+        'active_version': '2.0.0', 'active_data_key': key, 'kind': service_kind.name,
+        'manifest': service_manifest(permissions=['data_dir'])}}}))
+    monkeypatch.setenv('BAZARR_PROVIDER_HUB_STATE', str(state_path))
+
+    assert backup_env.module.backup_to_zip(job_id=1)
+    [archive] = _archives(backup_env)
+    with zipfile.ZipFile(backup_env.backup_dir / archive) as zipped:
+        entry = zipped.getinfo(f'plugin_data/exampleservice/{key}/bin/nested/run')
+        assert stat.S_IMODE(entry.external_attr >> 16) == 0o700
+
+    executable.write_text('changed after backup')
+    executable.chmod(0o600)
+    assert backup_env.module.prepare_restore(archive)
+    assert backup_env.module.restore_from_backup()
+    backup_env.module.apply_pending_plugin_restore()
+
+    assert not backup_env.stops
+    assert executable.read_text() == '#!/bin/sh\nexit 0\n'
+    assert stat.S_IMODE(executable.stat().st_mode) == 0o700
+
+
+@pytest.mark.skipif(os.name == 'nt', reason='POSIX execute permissions')
+@pytest.mark.parametrize('duplicate', [False, True])
+@pytest.mark.parametrize('member,mode,system,execute', [
+    ('plugin_data/exampleservice/' + 'a' * 32 + '/bin/run', stat.S_IFREG | 0o7777, 3, True),
+    ('plugin_data/exampleservice/' + 'a' * 32 + '/plain', stat.S_IFREG | 0o6677, 3, False),
+    ('plugin_data/exampleservice/' + 'a' * 32 + '/link', stat.S_IFLNK | 0o777, 3, False),
+    ('plugin_data/exampleservice/' + 'a' * 32 + '/device', stat.S_IFCHR | 0o777, 3, False),
+    ('plugin_data/exampleservice/' + 'a' * 32 + '/dos', stat.S_IFREG | 0o7777, 0, False),
+    ('plugin_data/exampleservice/' + 'a' * 32 + '/untyped', 0o7777, 3, False),
+    ('plugin_data/exampleservice/' + 'a' * 32, stat.S_IFREG | 0o7777, 3, False),
+    ('outside_plugin_data', stat.S_IFREG | 0o7777, 3, False),
+])
+def test_prepare_restore_only_adds_owner_execute_for_regular_plugin_data(
+        backup_env, monkeypatch, member, mode, system, execute, duplicate):
+    monkeypatch.setattr(backup_env.settings.postgresql, 'enabled', False)
+    archive = backup_env.backup_dir / 'bazarr_backup_v1.2.3.zip'
+    entry = zipfile.ZipInfo(member)
+    entry.create_system = system
+    entry.external_attr = mode << 16
+    with zipfile.ZipFile(archive, 'w') as zipped:
+        zipped.write(backup_env.config_dir / 'db' / 'bazarr.db', 'bazarr.db')
+        zipped.write(backup_env.config_dir / 'config' / 'config.yaml', 'config.yaml')
+        zipped.writestr('baseline', b'ordinary permissions')
+        if duplicate:
+            earlier = zipfile.ZipInfo(member)
+            earlier.create_system = 3
+            earlier.external_attr = (stat.S_IFREG | 0o700) << 16
+            zipped.writestr(earlier, b'earlier contents')
+            with pytest.warns(UserWarning, match='Duplicate name'):
+                zipped.writestr(entry, b'file contents')
+        else:
+            zipped.writestr(entry, b'file contents')
+
+    assert backup_env.module.prepare_restore(archive.name)
+    payload = backup_env.restore_dir / backup_env.module._BACKUP_STAGE / 'payload'
+    baseline_mode = stat.S_IMODE((payload / 'baseline').stat().st_mode)
+    assert (payload / member).read_bytes() == b'file contents'
+    assert stat.S_IMODE((payload / member).stat().st_mode) == baseline_mode | (0o100 if execute else 0)
+
+
+@pytest.mark.skipif(os.name == 'nt', reason='POSIX execute permissions')
+@pytest.mark.parametrize('alias_last', [True, False])
+def test_prepare_restore_uses_the_metadata_of_the_member_that_wrote_plugin_data(
+        backup_env, monkeypatch, alias_last):
+    monkeypatch.setattr(backup_env.settings.postgresql, 'enabled', False)
+    archive = backup_env.backup_dir / 'bazarr_backup_v1.2.3.zip'
+    member = 'plugin_data/exampleservice/' + 'a' * 32 + '/run'
+    executable = zipfile.ZipInfo(member)
+    executable.create_system = 3
+    executable.external_attr = (stat.S_IFREG | 0o700) << 16
+    members = [(executable, b'executable contents'), ('./' + member, b'alias contents')]
+    if not alias_last:
+        members.reverse()
+    with zipfile.ZipFile(archive, 'w') as zipped:
+        zipped.write(backup_env.config_dir / 'db' / 'bazarr.db', 'bazarr.db')
+        zipped.write(backup_env.config_dir / 'config' / 'config.yaml', 'config.yaml')
+        for entry, contents in members:
+            zipped.writestr(entry, contents)
+
+    assert backup_env.module.prepare_restore(archive.name)
+    payload = backup_env.restore_dir / backup_env.module._BACKUP_STAGE / 'payload'
+    assert (payload / member).read_bytes() == members[-1][1]
+    assert bool((payload / member).stat().st_mode & stat.S_IXUSR) is not alias_last
+
+
 def test_backup_and_restore_exclude_release_sign_in_paths(backup_env, monkeypatch, tmp_path):
     import json
 

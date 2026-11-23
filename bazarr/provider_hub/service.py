@@ -3925,6 +3925,15 @@ def _stage_validated(
     ) as job, pin_scope():
         try:
             deadline = None if install_timeout is None else time.monotonic() + max(0.0, install_timeout)
+
+            def time_left() -> float:
+                if deadline is None:
+                    return float("inf")
+                left = deadline - time.monotonic()
+                if left <= 0:
+                    raise ProviderHubInstallError(f"install for {validated.provider_id} exceeded its time budget")
+                return left
+
             step("Downloading the provider")
             bundle_path = bundle_stager(validated, deadline)
             staged.append(bundle_path)
@@ -3935,24 +3944,28 @@ def _stage_validated(
             staged.append(env_path)
             staged_python_path = python_executable(env_path)
             step("Checking that the provider starts")
-            smoke_timeout = None
-            if deadline is not None:
-                # The check shares the install's budget instead of adding its own.
-                left = deadline - time.monotonic()
-                if left <= 0:
-                    raise ProviderHubInstallError(
-                        f"install for {validated.provider_id} exceeded its time budget"
-                    )
-                smoke_timeout = min(10.0, left)
             if datadir.declared(validated.raw):
-                data_key = uuid.uuid4().hex
-                data_path = datadir.release_path(provider_hub_dir(), validated.provider_id, data_key)
-                source = _stage_data_source(validated.provider_id, existing or {},
-                                            (state.get("kept_data") or {}).get(validated.provider_id),
-                                            source_id, validated.kind, origin, validated.raw)
-                data_from_active = source is not None and source == _active_data_path(
-                    validated.provider_id, existing or {})
-                data_fingerprint = datadir.copy_folder(source, data_path)
+                # Activation and backup use the same fence. Serialize the snapshot
+                # with them and reopen dispatch before starting the smoke worker.
+                with datadir.release_lock:
+                    data_key = uuid.uuid4().hex
+                    data_path = datadir.release_path(provider_hub_dir(), validated.provider_id, data_key)
+                    source = _stage_data_source(validated.provider_id, existing or {},
+                                                (state.get("kept_data") or {}).get(validated.provider_id),
+                                                source_id, validated.kind, origin, validated.raw)
+                    data_from_active = source is not None and source == _active_data_path(
+                        validated.provider_id, existing or {})
+                    idle = contextlib.nullcontext(True)
+                    if data_from_active:
+                        timeout = min(datadir.QUIESCE_TIMEOUT, time_left())
+                        idle = datadir.quiesced(validated.provider_id, get_kind(validated.kind).settle_data, timeout)
+                    with idle as settled:
+                        if not settled:
+                            raise datadir.DataFolderError("The active plugin data is busy. Try the update again.")
+                        time_left()
+                        data_fingerprint = datadir.copy_folder(source, data_path)
+            # The check shares what is left of the install's budget after the snapshot.
+            smoke_timeout = None if deadline is None else min(10.0, time_left())
             get_kind(validated.kind).smoke_test(
                 validated, bundle_path, staged_python_path, timeout=smoke_timeout,
                 **({"data_dir": data_path} if data_path is not None else {}))

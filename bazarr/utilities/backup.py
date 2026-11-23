@@ -9,6 +9,7 @@ import subprocess
 import logging
 import re
 import secrets
+import stat
 import tempfile
 import yaml
 
@@ -587,8 +588,10 @@ def _validate_backup_filename(filename):
 def _safe_extract(zip_obj, dest_path):
     """Extract a ZIP archive while rejecting entries that escape `dest_path`."""
     dest_real = os.path.realpath(dest_path)
-    for member in zip_obj.namelist():
-        if member.startswith(datadir.ARCHIVE_DIR + '/'):
+    plugin_prefix = datadir.ARCHIVE_DIR + '/'
+    members = zip_obj.namelist()
+    for member in members:
+        if member.startswith(plugin_prefix):
             parts = member.rstrip('/').split('/')
             if (len(parts) < 3 or '\\' in member
                     or any(part in ('', '.', '..') or PureWindowsPath(part).drive for part in parts)):
@@ -596,9 +599,33 @@ def _safe_extract(zip_obj, dest_path):
         member_real = os.path.realpath(os.path.join(dest_real, member))
         if member_real != dest_real and not member_real.startswith(dest_real + os.sep):
             raise BadZipFile(f'Unsafe path in backup archive: {member}')
-    zip_obj.extractall(path=dest_path)
+
+    executable_data = {}
+    if os.name == 'nt':
+        zip_obj.extractall(path=dest_path)
+    else:
+        # Use the same member order and duplicate-name lookup as extractall.
+        # Track the extracted file so a later alias cannot inherit its mode.
+        for member in members:
+            entry = zip_obj.getinfo(member)
+            path = Path(zip_obj.extract(entry, path=dest_path))
+            if entry.is_dir():
+                continue
+            extracted = path.lstat()
+            identity = (extracted.st_dev, extracted.st_ino)
+            archived_mode = entry.external_attr >> 16
+            if (member.startswith(plugin_prefix) and member.count('/') >= 3 and entry.create_system == 3
+                    and stat.S_ISREG(archived_mode) and archived_mode & stat.S_IXUSR
+                    and stat.S_ISREG(extracted.st_mode)):
+                executable_data[identity] = (path, stat.S_IMODE(extracted.st_mode))
+            else:
+                executable_data.pop(identity, None)
     if (dest_path / datadir.ARCHIVE_DIR / datadir.RESTORE_APPLIED_MARKER).exists():
         raise BadZipFile('Backup archive contains a plugin restore completion marker')
+    # ZIP extraction drops permissions. Only plugin data needs its owner
+    # execute bit back; all other archive permission bits remain ignored.
+    for path, mode in executable_data.values():
+        path.chmod(mode | stat.S_IXUSR)
 
 
 def get_backup_path():
