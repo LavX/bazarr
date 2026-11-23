@@ -225,7 +225,7 @@ const InstanceServerForm: FC<Props> = ({
       // Held on the draft the way the first save holds it, so a remount during
       // the retry still reports the step busy.
       updateDraft(draft.draftId, { submitting: true });
-      void retrySwitch(kind).then((reason) => {
+      void retrySwitch(kind, savedInstanceId).then((reason) => {
         updateDraft(draft.draftId, { submitting: false });
         if (reason !== null) {
           setFailure(reason);

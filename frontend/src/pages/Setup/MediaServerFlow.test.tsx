@@ -1,6 +1,7 @@
 import userEvent from "@testing-library/user-event";
 import { http, HttpResponse } from "msw";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import queryClient from "@/apis/queries";
 import type { MediaServerKind } from "@/apis/raw/mediaServers";
 import { customRender, screen, waitFor, within } from "@/tests";
 import server from "@/tests/mocks/node";
@@ -793,6 +794,66 @@ describe("media server selection", () => {
     release?.();
     await waitFor(() => expect(settingsWrites).toHaveLength(1));
     expect(creates).toHaveLength(1);
+  });
+
+  it("does not re-enable a deleted row when its configure step retries during disconnect", async () => {
+    refuseSwitch = true;
+    const user = userEvent.setup();
+    customRender(<OnboardingWizardView />);
+
+    await connectJellyfin(user);
+    await screen.findByText(/master switch could not be turned on/i);
+    refuseSwitch = false;
+    const { release: releaseDisconnect, started: disconnectStarted } =
+      deferDisconnect();
+    let releaseSwitch!: () => void;
+    heldSwitch = new Promise<void>((resolve) => {
+      releaseSwitch = resolve;
+    });
+
+    await user.click(screen.getByRole("button", { name: "Back" }));
+    await user.click(
+      await screen.findByRole("button", { name: /^disconnect$/i }),
+    );
+    await user.click(screen.getByRole("button", { name: /^disconnect$/i }));
+    await waitFor(() => expect(disconnectStarted).toHaveBeenCalledOnce());
+
+    try {
+      await user.click(screen.getByRole("button", { name: "Do this later" }));
+      await screen.findByRole("heading", { name: /^jellyfin$/i });
+      expect(screen.getByRole("button", { name: "Back" })).toBeEnabled();
+      expect(
+        screen.getByRole("button", { name: "Do this later" }),
+      ).toBeEnabled();
+
+      releaseDisconnect();
+      await waitFor(() => expect(switchWriteAttempts).toBe(2));
+      expect(rows).toEqual([]);
+      await user.click(
+        screen.getByRole("button", {
+          name: /turn on jellyfin and continue/i,
+        }),
+      );
+      expect(
+        screen.getByText(/master switch could not be turned on/i),
+      ).toBeInTheDocument();
+      expect(creates).toHaveLength(1);
+    } finally {
+      releaseDisconnect();
+      releaseSwitch();
+    }
+
+    await waitFor(() => expect(queryClient.isMutating()).toBe(0));
+    expect(settingsWrites).toEqual([
+      { "settings-general-use_jellyfin": "false" },
+    ]);
+    await screen.findByRole("heading", { name: /^media servers$/i });
+    await user.click(
+      screen.getByRole("button", { name: /continue without a server/i }),
+    );
+    await screen.findByRole("heading", { name: /^requests$/i });
+    expect(switchWriteAttempts).toBe(2);
+    expect(rows).toEqual([]);
   });
 
   it("drops the draft when the row it already wrote is disconnected", async () => {

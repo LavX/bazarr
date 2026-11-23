@@ -1,6 +1,7 @@
 /* eslint-disable camelcase */
 
 import { useCallback, useState } from "react";
+import { useQueryClient } from "@tanstack/react-query";
 import { AxiosError } from "axios";
 import { isSettingsFollowupError } from "@/apis/hooks";
 import {
@@ -11,7 +12,10 @@ import type { MediaServerKind } from "@/apis/raw/mediaServers";
 import { KINDS_WITH_PATH_MAPPINGS } from "@/apis/raw/mediaServers";
 import { SETUP_CREDENTIAL_LABELS } from "@/pages/Settings/MediaServers/kinds";
 import type { MediaServerDraft } from "@/pages/Setup/useOnboardingSelection";
-import { useSetupMediaServerRefreshes } from "./operations";
+import {
+  MEDIA_SERVER_DISCONNECT_KEY,
+  useSetupMediaServerRefreshes,
+} from "./operations";
 import { validateServerUrl } from "./validation";
 
 /** One message per field, so it lands on the field that is wrong. */
@@ -134,6 +138,7 @@ function toPayload(draft: MediaServerDraft): SaveMediaServerInput {
  * a second write of a switch the callback already set.
  */
 export function useMediaServerSubmit() {
+  const client = useQueryClient();
   // A failed save is reported on the server's own screen.
   const save = useSaveMediaServerInstance(undefined, undefined, undefined, {
     inlineErrors: true,
@@ -236,7 +241,20 @@ export function useMediaServerSubmit() {
   // does after the write failed. Anything else leaves the switch off and the
   // step where it was.
   const retrySwitch = useCallback(
-    async (kind: MediaServerKind): Promise<string | null> => {
+    async (
+      kind: MediaServerKind,
+      instanceId: string,
+    ): Promise<string | null> => {
+      // Back and Skip can reopen this row's draft while its disconnect still
+      // owns the switch-off write. Never queue an enable behind that write.
+      if (
+        client.isMutating({
+          mutationKey: [MEDIA_SERVER_DISCONNECT_KEY, kind, instanceId],
+          exact: true,
+        }) > 0
+      ) {
+        return "This server is being disconnected. Continue without it or go back.";
+      }
       setPending(true);
       try {
         await settings.mutateAsync({
@@ -252,7 +270,7 @@ export function useMediaServerSubmit() {
         setPending(false);
       }
     },
-    [settings],
+    [client, settings],
   );
 
   return { submit, retrySwitch, isPending };
