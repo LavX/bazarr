@@ -1934,7 +1934,7 @@ def probe_process_evidence(monkeypatch):
     monkeypatch.setattr(sweep, "_pidfd_available", lambda: True)
     evidence = {"partial": False, "unreadable": 0, "sessions": [], "launchers": {}, "scans": 0}
 
-    def scan(instance, deadline, result):
+    def scan(instance, deadline, result, config_dir=None):
         evidence["scans"] += 1
         result.truncated = evidence["partial"]
         result.unreadable = evidence["unreadable"]
@@ -2181,7 +2181,7 @@ def test_probe_copy_fences_only_its_release_and_does_not_publish_partial_data(
         probe = pool.submit(service.test_provider_connection, plugin_id)
         try:
             assert copying.wait(10)
-            [temporary] = list(provider_hub_dir().glob(".probe-*"))
+            [temporary] = list((provider_hub_dir() / datadir.PROBE_DIRECTORY).glob(".probe-*"))
             assert not (temporary / "data").exists()
             assert not checks
             assert pool.submit(service.remove_installation, "beta").result(timeout=10)
@@ -2228,12 +2228,14 @@ def test_connection_probe_caps_data_copy_work(isolated_probe_release, monkeypatc
     result = service.test_provider_connection(plugin_id)
     assert not result["ok"] and result["status"] == "busy"
     assert load_state()["installations"][plugin_id] == original
-    assert not list(provider_hub_dir().glob(".probe-*"))
+    assert not list((provider_hub_dir() / datadir.PROBE_DIRECTORY).glob(".probe-*"))
 
 
-@pytest.mark.parametrize(("remaining", "worker_start_expires"), [(0.01, False), (6.0, False), (6.0, True)])
+@pytest.mark.parametrize(("remaining", "outcome"), [
+    (0.01, "copy"), (6.0, "reply"), (6.0, "startup"), (6.0, "late_success"),
+])
 def test_connection_probe_admission_delay_does_not_mark_healthy_environment_for_repair(
-        isolated_probe_release, monkeypatch, remaining, worker_start_expires):
+        isolated_probe_release, monkeypatch, remaining, outcome):
     from types import SimpleNamespace
 
     from provider_hub import datadir
@@ -2242,6 +2244,8 @@ def test_connection_probe_admission_delay_does_not_mark_healthy_environment_for_
     from provider_hub.worker import ProviderWorkerClient, WorkerError
 
     service, plugin_id, _, _, _ = isolated_probe_release
+    service.env_registry.mark_needs_repair(plugin_id)
+    service._record_provider_last_error(plugin_id, "previous health check failed")
     original = load_state()["installations"][plugin_id]
     now = 0.0
     clock = SimpleNamespace(monotonic=lambda: now, perf_counter=service.time.perf_counter)
@@ -2262,7 +2266,10 @@ def test_connection_probe_admission_delay_does_not_mark_healthy_environment_for_
             nonlocal now
             health_timeouts.append(timeout)
             if timeout < service.PROBE_TIMEOUT - 1:
-                if worker_start_expires:
+                if outcome == "late_success":
+                    now += timeout + 1
+                    return SimpleNamespace(payload={"initialized": True})
+                if outcome == "startup":
                     now += timeout
                     raise WorkerError("worker process did not start")
                 raise WorkerError("worker response timed out", code="timeout")
@@ -2278,6 +2285,99 @@ def test_connection_probe_admission_delay_does_not_mark_healthy_environment_for_
     now = 0.0
     monkeypatch.setattr(datadir, "copy_folder", copy_folder)
     assert service.test_provider_connection(plugin_id)["ok"]
+    healthy = load_state()["installations"][plugin_id]
+    assert not healthy.get("needs_repair") and healthy["last_error"] is None
+
+
+def test_connection_probe_deadline_does_not_wait_for_worker_startup(isolated_probe_release, monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+    from contextlib import nullcontext
+    from threading import Event, current_thread
+    from types import SimpleNamespace
+
+    from provider_hub import datadir, worker
+    from provider_hub.sandbox import sweep
+    from provider_hub.state import load_state
+    from provider_hub.worker import ProviderWorkerClient
+
+    service, plugin_id, active, _, _ = isolated_probe_release
+    _seed(beta=_row("beta", active="1.0.0"))
+    original = load_state()["installations"][plugin_id]
+    starting, finish_start, cleaned = Event(), Event(), Event()
+    probe_folders = []
+    probe_threads = []
+    hold_environment = service.hold_environment
+    real_time = service.time
+    started_at = None
+
+    def monotonic():
+        return real_time.monotonic() - started_at if started_at is not None else 0.0
+
+    clock = SimpleNamespace(monotonic=monotonic, perf_counter=real_time.perf_counter, sleep=real_time.sleep)
+    for module in (service, datadir, sweep, worker):
+        monkeypatch.setattr(module, "time", clock)
+
+    def hold_until_done(path):
+        release = hold_environment(path)
+
+        def done():
+            release()
+            cleaned.set()
+
+        return done
+
+    class ProbeClient(ProviderWorkerClient):
+        def start(self):
+            nonlocal started_at
+            probe_folders.append(Path(self.env["BAZARR_PLUGIN_DATA_DIR"]))
+            probe_threads.append(current_thread())
+            started_at = real_time.monotonic()
+            starting.set()
+            assert finish_start.wait(30)
+            return True
+
+    monkeypatch.setattr(service, "PROBE_TIMEOUT", 1.0)
+    monkeypatch.setattr(service, "ProviderWorkerClient", ProbeClient)
+    monkeypatch.setattr(service, "hold_environment", hold_until_done)
+    monkeypatch.setattr(service, "record_job", lambda *_, **__: nullcontext(
+        SimpleNamespace(data={}, update=lambda **_: None)))
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        probe = pool.submit(service.test_provider_connection, plugin_id)
+        try:
+            assert starting.wait(10)
+            assert probe.result(timeout=10)["status"] == "busy"
+            assert (probe_folders[0] / "settings").read_text() == "before request"
+            assert service.remove_installation("beta")
+        finally:
+            finish_start.set()
+        assert cleaned.wait(5)
+        probe_threads[0].join(timeout=5)
+
+    assert not probe_folders[0].exists()
+    assert load_state()["installations"][plugin_id] == original
+    assert (active / "settings").read_text() == "before request"
+    started_at = None
+    monkeypatch.setattr(ProbeClient, "_request", lambda *_: SimpleNamespace(payload={}))
+    assert service.test_provider_connection(plugin_id)["status"] == "ready"
+
+
+def test_boot_cleans_only_owned_probe_workspaces(tmp_path):
+    from provider_hub import datadir
+
+    root = tmp_path / "provider_hub"
+    root.mkdir()
+    with datadir.probe_workspace(root) as temporary:
+        abandoned = Path(temporary)
+        (abandoned / "data").mkdir()
+        other = abandoned.with_name("keep")
+        other.mkdir()
+        root_peer = root / ".probe-unrelated"
+        root_peer.mkdir()
+        datadir.cleanup_probe_workspaces(root, lambda: False)
+        assert abandoned.is_dir()
+        datadir.cleanup_probe_workspaces(root, lambda: True)
+        assert not abandoned.exists()
+        assert other.is_dir() and root_peer.is_dir()
 
 
 def test_connection_probe_without_data_can_use_the_remaining_health_time(

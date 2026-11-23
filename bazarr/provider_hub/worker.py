@@ -623,6 +623,10 @@ class ProviderWorkerClient:
         # stopped is told apart from the one that replaces it.
         self.release = release if isinstance(release, str) and release else None
         self.process: subprocess.Popen | None = None
+        # A one-shot health probe can share its host's absolute deadline. Its
+        # owner bounds the caller's wait and stops this client after the request
+        # unwinds, including when an OS launch or pipe write outlives that wait.
+        self.request_deadline: float | None = None
         # monotonic timestamp of the last request, read by reap_idle_workers
         self.last_used: float = time.monotonic()
         self._lock = threading.Lock()
@@ -1328,7 +1332,10 @@ class ProviderWorkerClient:
         while True:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
-                self._kill_worker()
+                # One-shot probes let their owner perform ordinary shutdown
+                # after the request unwinds. Other requests keep the hard stop.
+                if not getattr(self, "_defer_probe_timeout_stop", False):
+                    self._kill_worker()
                 # Carry the cause. Without a code this arrives at
                 # provider_search_failure as a bare RuntimeError and is
                 # classified "error", so a plugin that hung until the hard kill
@@ -1643,9 +1650,13 @@ class ProviderWorkerClient:
 
     def _request(self, op, payload, timeout, admit, source_media, consume_source_reply) -> WorkerResult:
         if admit is None:
-            self._lock.acquire()
+            if op == "health" and getattr(self, "request_deadline", None) is not None:
+                if not self._lock.acquire(timeout=self._request_time_left(op, timeout)):
+                    raise WorkerBusy(f"worker busy for {timeout:.1f}s")
+            else:
+                self._lock.acquire()
         else:
-            self._acquire_gated(timeout, admit)
+            self._acquire_gated(self._request_time_left(op, timeout), admit)
         grant = None
         completed = False
         try:
@@ -1687,7 +1698,17 @@ class ProviderWorkerClient:
             finally:
                 self._lock.release()
 
+    def _request_time_left(self, op, timeout):
+        deadline = getattr(self, "request_deadline", None)
+        if op != "health" or deadline is None:
+            return timeout
+        remaining = min(float(timeout), deadline - time.monotonic())
+        if remaining <= 0:
+            raise WorkerError("worker exceeded the probe deadline", code="timeout")
+        return remaining
+
     def _request_locked(self, op, payload, timeout, *, source_media=None, process=None) -> WorkerResult:
+        self._request_time_left(op, timeout)
         if getattr(self, "_closed", False) and op != "shutdown":
             raise self._closed_worker_error("worker client is stopped", bound_selector=process is not None)
         # A bound archive selector may speak only to the worker that downloaded
@@ -1711,7 +1732,12 @@ class ProviderWorkerClient:
         # Only an ordinary request may retry if the kernel cannot apply its
         # ruleset. Source media is never sent to an unsandboxed worker.
         for attempt in (0, 1):
+            self._request_time_left(op, timeout)
             worker_started = process is None and self.start(**launch_options) is True
+            remaining = self._request_time_left(op, timeout)
+            if op == "health" and getattr(self, "request_deadline", None) is not None:
+                message["deadline_ms"] = int(remaining * 1000)
+                encoded = json.dumps(message, separators=(",", ":"), default=_json_default) + "\n"
             if (source_media is not None or process is not None) and self._closed:
                 raise self._closed_worker_error("worker client is stopped", bound_selector=process is not None)
             provider_id = getattr(self, "provider_id", None)
@@ -1722,6 +1748,7 @@ class ProviderWorkerClient:
             self.last_used = time.monotonic()
             if self.process is None or self.process.stdin is None or self.process.stdout is None:
                 raise WorkerError("worker process did not start")
+            self._request_time_left(op, timeout)
             try:
                 self.process.stdin.write(encoded)
                 self.process.stdin.flush()
@@ -1731,7 +1758,12 @@ class ProviderWorkerClient:
                 if process is None and attempt == 0 and self._opened_after_apply_failure(**fallback):
                     continue
                 raise
-            line = self._read_reply(request_id, timeout)
+            self._defer_probe_timeout_stop = op == "health" and getattr(self, "request_deadline", None) is not None
+            try:
+                line = self._read_reply(request_id, self._request_time_left(op, timeout))
+            finally:
+                self._defer_probe_timeout_stop = False
+            self._request_time_left(op, timeout)
             if not line and process is None and attempt == 0 and self._opened_after_apply_failure(**fallback):
                 continue
             break
@@ -1763,6 +1795,7 @@ class ProviderWorkerClient:
             raise WorkerError("worker payload must be an object")
         if not isinstance(events, list):
             events = []
+        self._request_time_left(op, timeout)
         return WorkerResult(
             ok=True,
             payload=payload,

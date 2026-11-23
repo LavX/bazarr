@@ -21,6 +21,8 @@ from pathlib import Path, PurePosixPath, PureWindowsPath
 ARCHIVE_DIR = "plugin_data"
 OMISSIONS_ARCHIVE = "plugin_data_omitted.json"
 RESTORE_APPLIED_MARKER = ".applied"
+PROBE_DIRECTORY = ".probe"
+_PROBE_PREFIX = ".probe-"
 QUIESCE_TIMEOUT = 15 * 60
 PROBE_COPY_MAX_ENTRIES = 4096
 PROBE_COPY_MAX_BYTES = 64 * 1024 * 1024
@@ -396,6 +398,31 @@ def remove(path: Path) -> None:
         shutil.rmtree(path)
     elif path.exists():
         path.unlink()
+
+
+def _probe_root(root: Path) -> Path:
+    directory = root / PROBE_DIRECTORY
+    if directory.is_symlink() or directory.is_junction():
+        raise DataFolderError("The plugin probe directory is a link")
+    return directory
+
+
+def probe_workspace(root: Path) -> tempfile.TemporaryDirectory:
+    directory = _probe_root(root)
+    directory.mkdir(mode=0o700, exist_ok=True)
+    return tempfile.TemporaryDirectory(prefix=_PROBE_PREFIX, dir=directory)
+
+
+def cleanup_probe_workspaces(root: Path, workers_stopped) -> None:
+    """Remove temporary copies left by the previous host before starting new probes."""
+    directory = _probe_root(root)
+    if not directory.is_dir():
+        return
+    folders = [folder for folder in directory.glob(f"{_PROBE_PREFIX}*")
+               if not folder.is_symlink() and not folder.is_junction() and folder.is_dir()]
+    if folders and workers_stopped():
+        for folder in folders:
+            remove(folder)
 
 
 def cleanup(root: Path, state) -> None:

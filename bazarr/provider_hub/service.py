@@ -17,6 +17,7 @@ import zipfile
 import requests
 
 from collections import Counter
+from concurrent.futures import Future
 import threading
 from dataclasses import dataclass, field as dataclass_field
 from datetime import datetime, timezone
@@ -99,6 +100,7 @@ SECRET_PLACEHOLDER = "********"
 PROBE_TIMEOUT = 10.0
 _PROBE_COPIES_LOCK = threading.Lock()
 _PROBE_COPIES: set[str] = set()
+_CONNECTION_PROBES: set[str] = set()
 _PLUGIN_BUSY = "The plugin is busy. Try again."
 _JOB_LOG_LIMIT = 200
 # A job that has not reported for this long is taken as dead. An install or a repair has time limits far below it.
@@ -2923,6 +2925,49 @@ def _blocked_connection_result(provider_id: str, provider: dict[str, Any], job) 
     return {"provider_id": provider_id, "ok": False, "status": "blocked", "message": message}
 
 
+def _request_connection_health(client, provider_id: str, bundle_path: Path, deadline: float,
+                               probe_files: contextlib.ExitStack):
+    """Bound the caller's wait while the temporary client owns its cleanup."""
+    _snapshot_time_left(deadline)
+    with _PROBE_COPIES_LOCK:
+        if provider_id in _CONNECTION_PROBES:
+            raise datadir.SnapshotBusy(_PLUGIN_BUSY)
+        _CONNECTION_PROBES.add(provider_id)
+    resources = probe_files.pop_all()
+    completed = Future()
+
+    def forget_probe():
+        with _PROBE_COPIES_LOCK:
+            _CONNECTION_PROBES.remove(provider_id)
+
+    def run():
+        try:
+            with contextlib.ExitStack() as cleanup:
+                cleanup.callback(forget_probe)
+                cleanup.callback(release_when_gone, client, resources.close,
+                                 f"the connection test of {provider_id}", budget=0)
+                cleanup.callback(_remove_bundle_runtime_artifacts, bundle_path)
+                cleanup.callback(client.stop)
+                client.request_deadline = deadline
+                result = client.request("health", {}, timeout=_snapshot_time_left(deadline))
+        except BaseException as error:
+            completed.set_exception(error)
+        else:
+            completed.set_result(result)
+
+    # Process creation can be uninterruptible. A timed-out caller leaves the
+    # request thread in charge of stopping the worker and releasing its files.
+    try:
+        threading.Thread(target=run, name="plugin-connection-probe", daemon=True).start()
+    except RuntimeError as error:
+        try:
+            resources.close()
+        finally:
+            forget_probe()
+        raise datadir.SnapshotBusy(_PLUGIN_BUSY) from error
+    return completed.result(timeout=_snapshot_time_left(deadline))
+
+
 def test_provider_connection(provider_id: str) -> dict[str, Any] | None:
     deadline = time.monotonic() + PROBE_TIMEOUT
     provider = get_provider(provider_id, redact=False)
@@ -2951,9 +2996,7 @@ def test_provider_connection(provider_id: str) -> dict[str, Any] | None:
         if provider.get("blocked"):
             return _blocked_connection_result(provider_id, provider, job)
 
-        client = None
         python_path = None
-        release_environment = None
         try:
             # Pin the interpreter under the cleanup lock. Drop this lock before
             # acquiring the release lock, as staging records in the opposite order.
@@ -2965,7 +3008,7 @@ def test_provider_connection(provider_id: str) -> dict[str, Any] | None:
                 active_path = provider.get("active_path")
                 python_path = provider.get("python_path")
                 if python_path:
-                    release_environment = hold_environment(env_registry.env_dir_of(python_path))
+                    probe_files.callback(hold_environment(env_registry.env_dir_of(python_path)))
 
             if not isinstance(manifest_data, dict):
                 raise ProviderHubInstallError("active manifest is missing")
@@ -3008,18 +3051,16 @@ def test_provider_connection(provider_id: str) -> dict[str, Any] | None:
                 },
             )
             try:
-                result = client.request("health", {}, timeout=timeout)
+                result = _request_connection_health(client, provider_id, bundle_path, deadline, probe_files)
+                _snapshot_time_left(deadline)
             except Exception as error:
-                if (time.monotonic() >= deadline or isinstance(error, (WorkerBusy, TimeoutError))
+                if (time.monotonic() >= deadline or isinstance(error, (datadir.SnapshotBusy, WorkerBusy, TimeoutError))
                         or isinstance(error, WorkerError) and error.code == "timeout"):
                     raise datadir.SnapshotBusy(_PLUGIN_BUSY) from error
                 # The worker could not start or answer here, which is what a
                 # missing, stale or foreign environment looks like.
                 env_registry.mark_needs_repair(provider_id, python_path)
                 raise
-            finally:
-                client.stop()
-                _remove_bundle_runtime_artifacts(bundle_path)
 
             _record_provider_last_error(provider_id, None, python_path)
             env_registry.clear_needs_repair(provider_id, python_path)
@@ -3051,13 +3092,6 @@ def test_provider_connection(provider_id: str) -> dict[str, Any] | None:
                 "status": status,
                 "message": message,
             }
-        finally:
-            if release_environment is not None:
-                if client is None:
-                    release_environment()
-                else:
-                    # Keep the environment pinned until the worker and its children exit.
-                    release_when_gone(client, release_environment, f"the connection test of {provider_id}")
 
 
 def _built_in_provider_ids() -> set[str]:
@@ -5678,7 +5712,7 @@ def _probe_release_data(plugin_id: str, row, *, staged: bool = False, deadline: 
                     source, active):
                 with contextlib.ExitStack() as copy_files:
                     # A later release removal can delete the plugin's data root.
-                    temporary = copy_files.enter_context(tempfile.TemporaryDirectory(prefix=".probe-", dir=root))
+                    temporary = copy_files.enter_context(datadir.probe_workspace(root))
                     target = Path(temporary) / "data"
                     datadir.copy_folder(source, target, probe_deadline=deadline)
                     if select_source() != (source, active):

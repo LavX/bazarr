@@ -116,6 +116,7 @@ def no_owner_marker():
     # Keep the case's own monkeypatch teardown ahead of started-process cleanup.
     with pytest.MonkeyPatch.context() as patch:
         patch.setattr(sweep, "_previous_worker_uncertainty", set())
+        patch.setattr(sweep, "_previous_worker_persisted", set())
         spawn.set_owner_marker(None)
         try:
             yield
@@ -967,6 +968,7 @@ def test_the_second_scan_loop_honours_the_deadline(tmp_path, instance, started, 
 @pytest.mark.parametrize("namespace_readable", [True, False])
 def test_boot_sweep_remembers_a_launcher_without_any_marked_children(tmp_path, monkeypatch, namespace_readable):
     config = tmp_path / "config"
+    monkeypatch.setattr(sweep, "_boot_identity", lambda: "11111111-1111-1111-1111-111111111111")
     instance = sweep.instance_key(config)
     launcher = sweep._Proc(pid=321, state="S", ppid=1, pgrp=321, session=321, start="20")
     marker = f"{instance}:123:10"
@@ -988,6 +990,8 @@ def test_boot_sweep_remembers_a_launcher_without_any_marked_children(tmp_path, m
     result = sweep.sweep_leftovers(config)
     assert not result.sessions
     assert result.launchers == {launcher.pid: launcher.start}
+    sweep._previous_worker_uncertainty.clear()
+    sweep._previous_worker_persisted.clear()
 
     state = ["S"]
     monkeypatch.setattr(spawn, "_stat_fields", lambda pid: (state[0], launcher.start))
@@ -1068,6 +1072,7 @@ def test_current_host_processes_do_not_poison_previous_worker_checks(tmp_path, m
 
 def test_boot_sweep_remembers_a_previous_marked_tree_after_ending_scanned_members(tmp_path, monkeypatch):
     config = tmp_path / "config"
+    monkeypatch.setattr(sweep, "_boot_identity", lambda: "11111111-1111-1111-1111-111111111111")
     marker = f"{sweep.instance_key(config)}:123:10"
     entry = sweep._Proc(pid=321, state="S", ppid=1, pgrp=321, session=321, start="20")
     monkeypatch.setattr(sweep, "_has_proc", lambda: True)
@@ -1085,5 +1090,143 @@ def test_boot_sweep_remembers_a_previous_marked_tree_after_ending_scanned_member
 
     monkeypatch.setattr(sweep, "_end", end)
     assert sweep.sweep_leftovers(config).ended == 1
+    sweep._previous_worker_uncertainty.clear()
+    sweep._previous_worker_persisted.clear()
     monkeypatch.setattr(sweep, "_list_pids", lambda: ([], False))
     assert not sweep.previous_workers_stopped(config)
+
+
+@pytest.mark.parametrize("observed", ["launcher", "session"])
+def test_previous_tree_uncertainty_survives_a_host_process_restart(tmp_path, monkeypatch, observed):
+    config = tmp_path / "config"
+    monkeypatch.setattr(sweep, "_boot_identity", lambda: "11111111-1111-1111-1111-111111111111")
+    result = (sweep.SweepResult(launchers={321: "20"}) if observed == "launcher" else
+              sweep.SweepResult(sessions=[sweep.SweptSession(321, (321, 322), "ended")]))
+    monkeypatch.setattr(sweep, "sweep_leftovers", lambda config, **kwargs: result)
+    assert not sweep.previous_workers_stopped(config)
+
+    # A fresh interpreter has no remembered process identities or cleanup socket.
+    sweep._previous_worker_uncertainty.clear()
+    sweep._previous_worker_persisted.clear()
+    monkeypatch.setattr(sweep, "sweep_leftovers", lambda config, **kwargs: sweep.SweepResult())
+    assert not sweep.previous_workers_stopped(config)
+    assert sweep.previous_workers_stopped(tmp_path / "other-config")
+
+
+@pytest.mark.parametrize("boot, allowed", [
+    ("11111111-1111-1111-1111-111111111111", False),
+    (None, False),
+    ("22222222-2222-2222-2222-222222222222", True),
+])
+def test_only_a_proved_os_reboot_releases_persisted_previous_tree_uncertainty(tmp_path, monkeypatch, boot, allowed):
+    config = tmp_path / "config"
+    monkeypatch.setattr(sweep, "_boot_identity", lambda: "11111111-1111-1111-1111-111111111111")
+    monkeypatch.setattr(sweep, "sweep_leftovers", lambda config, **kwargs: sweep.SweepResult(launchers={321: "20"}))
+    assert not sweep.previous_workers_stopped(config)
+
+    sweep._previous_worker_uncertainty.clear()
+    sweep._previous_worker_persisted.clear()
+    monkeypatch.setattr(sweep, "_boot_identity", lambda: boot)
+    monkeypatch.setattr(sweep, "sweep_leftovers", lambda config, **kwargs: sweep.SweepResult())
+    assert sweep.previous_workers_stopped(config) is allowed
+    sweep._previous_worker_uncertainty.clear()
+    sweep._previous_worker_persisted.clear()
+    assert sweep.previous_workers_stopped(config) is allowed
+
+
+def test_an_unreadable_original_boot_identity_does_not_invent_reboot_proof(tmp_path, monkeypatch):
+    config = tmp_path / "config"
+    monkeypatch.setattr(sweep, "_boot_identity", lambda: None)
+    monkeypatch.setattr(sweep, "sweep_leftovers", lambda config, **kwargs: sweep.SweepResult(launchers={321: "20"}))
+    assert not sweep.previous_workers_stopped(config)
+    sweep._previous_worker_uncertainty.clear()
+    sweep._previous_worker_persisted.clear()
+    monkeypatch.setattr(sweep, "_boot_identity", lambda: "22222222-2222-2222-2222-222222222222")
+    monkeypatch.setattr(sweep, "sweep_leftovers", lambda config, **kwargs: sweep.SweepResult())
+    assert not sweep.previous_workers_stopped(config)
+    sweep._previous_worker_uncertainty.clear()
+    sweep._previous_worker_persisted.clear()
+    monkeypatch.setattr(sweep, "_boot_identity", lambda: "33333333-3333-3333-3333-333333333333")
+    assert sweep.previous_workers_stopped(config)
+
+
+def test_a_new_unconfirmed_tree_after_reboot_is_remembered_under_the_new_boot(tmp_path, monkeypatch):
+    config = tmp_path / "config"
+    monkeypatch.setattr(sweep, "_boot_identity", lambda: "11111111-1111-1111-1111-111111111111")
+    monkeypatch.setattr(sweep, "sweep_leftovers", lambda config, **kwargs: sweep.SweepResult(launchers={321: "20"}))
+    assert not sweep.previous_workers_stopped(config)
+    sweep._previous_worker_uncertainty.clear()
+    sweep._previous_worker_persisted.clear()
+    monkeypatch.setattr(sweep, "_boot_identity", lambda: "22222222-2222-2222-2222-222222222222")
+    assert not sweep.previous_workers_stopped(config)
+    sweep._previous_worker_uncertainty.clear()
+    sweep._previous_worker_persisted.clear()
+    monkeypatch.setattr(sweep, "sweep_leftovers", lambda config, **kwargs: sweep.SweepResult())
+    assert not sweep.previous_workers_stopped(config)
+
+
+@pytest.mark.parametrize("suffix", ["", ".not-a-boot", ".11111111-1111-1111-1111-111111111111-extra"])
+def test_a_damaged_uncertainty_record_cannot_prove_reboot(tmp_path, monkeypatch, suffix):
+    config = tmp_path / "config"
+    path = config / "provider_hub" / "worker-activity" / ("linux-unconfirmed-tree" + suffix)
+    path.parent.mkdir(parents=True)
+    path.touch()
+    monkeypatch.setattr(sweep, "_boot_identity", lambda: "22222222-2222-2222-2222-222222222222")
+    monkeypatch.setattr(sweep, "sweep_leftovers", lambda config, **kwargs: sweep.SweepResult())
+    assert not sweep.previous_workers_stopped(config)
+    assert path.exists()
+
+
+def test_a_transient_state_write_failure_is_retried_before_host_restart(tmp_path, monkeypatch):
+    config = tmp_path / "config"
+    monkeypatch.setattr(sweep, "_boot_identity", lambda: "11111111-1111-1111-1111-111111111111")
+    with monkeypatch.context() as patch:
+        def unavailable(*args, **kwargs):
+            raise OSError("temporarily unavailable")
+        patch.setattr(sweep, "_uncertainty_directory", unavailable)
+        sweep._remember_unproven_tree(sweep.instance_key(config), config)
+    assert not sweep.previous_workers_stopped(config)
+    sweep._previous_worker_uncertainty.clear()
+    sweep._previous_worker_persisted.clear()
+    monkeypatch.setattr(sweep, "sweep_leftovers", lambda config, **kwargs: sweep.SweepResult())
+    assert not sweep.previous_workers_stopped(config)
+
+
+def test_uncertainty_state_does_not_follow_a_runtime_directory_symlink(tmp_path, monkeypatch):
+    config = tmp_path / "config"
+    hub = config / "provider_hub"
+    hub.mkdir(parents=True)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (hub / "worker-activity").symlink_to(outside, target_is_directory=True)
+    monkeypatch.setattr(sweep, "_boot_identity", lambda: "11111111-1111-1111-1111-111111111111")
+    sweep._remember_unproven_tree(sweep.instance_key(config), config)
+    assert list(outside.iterdir()) == []
+    sweep._previous_worker_uncertainty.clear()
+    sweep._previous_worker_persisted.clear()
+    monkeypatch.setattr(sweep, "sweep_leftovers", lambda config, **kwargs: sweep.SweepResult())
+    assert not sweep.previous_workers_stopped(config)
+
+
+def test_a_transient_state_read_error_does_not_create_worker_uncertainty(tmp_path, monkeypatch):
+    config = tmp_path / "config"
+    monkeypatch.setattr(sweep, "sweep_leftovers", lambda config, **kwargs: sweep.SweepResult())
+    with monkeypatch.context() as patch:
+        def unavailable(*args, **kwargs):
+            raise OSError("temporarily unavailable")
+        patch.setattr(sweep, "_uncertainty_directory", unavailable)
+        assert not sweep.previous_workers_stopped(config)
+    assert sweep.previous_workers_stopped(config)
+
+
+def test_a_temporarily_unreadable_current_boot_can_be_rechecked(tmp_path, monkeypatch):
+    config = tmp_path / "config"
+    monkeypatch.setattr(sweep, "_boot_identity", lambda: "11111111-1111-1111-1111-111111111111")
+    sweep._remember_unproven_tree(sweep.instance_key(config), config)
+    sweep._previous_worker_uncertainty.clear()
+    sweep._previous_worker_persisted.clear()
+    monkeypatch.setattr(sweep, "_boot_identity", lambda: None)
+    assert not sweep.previous_workers_stopped(config)
+    monkeypatch.setattr(sweep, "_boot_identity", lambda: "22222222-2222-2222-2222-222222222222")
+    monkeypatch.setattr(sweep, "sweep_leftovers", lambda config, **kwargs: sweep.SweepResult())
+    assert sweep.previous_workers_stopped(config)
