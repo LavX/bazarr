@@ -949,7 +949,8 @@ jobs:
     needs: [changes, frontend-build]
     if: ${{ needs.changes.outputs.code == 'true' }}
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    # The translator and media-source integration files can exceed 25 minutes together.
+    timeout-minutes: 35
     strategy: *python-matrix
     services: *postgres
     steps:
