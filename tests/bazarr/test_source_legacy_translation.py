@@ -141,8 +141,9 @@ def test_source_legacy_translation_keeps_runtime_input_version_without_a_manual_
     assert toolbox.db.execute(sa.select(repository.History)).all() == []
 
 
+@pytest.mark.parametrize('change', ['setting', 'symlink'])
 def test_source_legacy_translation_skips_when_the_configured_input_folder_moves(
-        toolbox, legacy_runtime, monkeypatch):
+        toolbox, legacy_runtime, monkeypatch, change):
     from app.config import settings
     from media_sources import repository
     from media_sources.indexer import index_item
@@ -169,11 +170,22 @@ def test_source_legacy_translation_skips_when_the_configured_input_folder_moves(
     target.write_text(tools.SRT)
     original = service.RuntimeTranslatorService._legacy
     translated = []
+    loaded = []
+    original_load = lingarr_translator.pysubs2.load
 
     def legacy(self, engine, instance):
-        folder.unlink()
-        folder.symlink_to(second, target_is_directory=True)
+        if change == 'setting':
+            (video.parent / 'Other').mkdir()
+            monkeypatch.setattr(settings.general, 'subfolder_custom', 'Other')
+            assert path.is_file() and path.read_text() == tools.SRT
+        else:
+            folder.unlink()
+            folder.symlink_to(second, target_is_directory=True)
         return original(self, engine, instance)
+
+    def load(path, **kwargs):
+        loaded.append(str(path))
+        return original_load(path, **kwargs)
 
     def translate(self, lines, job_id):
         translated.extend(lines)
@@ -181,6 +193,7 @@ def test_source_legacy_translation_skips_when_the_configured_input_folder_moves(
 
     monkeypatch.setattr(service.RuntimeTranslatorService, '_legacy', legacy)
     monkeypatch.setattr(lingarr_translator.LingarrTranslatorService, '_translate_content', translate)
+    monkeypatch.setattr(lingarr_translator.pysubs2, 'load', load)
     job_id = main.translate_subtitles_file(context.path, str(path), 'en', 'hu', False, False, 'episode',
                                             None, None, None, None, source=context)
     job = toolbox.jobs._reserve_next_job()
@@ -188,6 +201,7 @@ def test_source_legacy_translation_skips_when_the_configured_input_folder_moves(
     assert job.kwargs['expected_destination_versions'] == ()
     assert toolbox.jobs._run_job(job)
 
+    assert loaded == [str(path)]
     assert translated == []
     assert target.read_text() == tools.SRT
     assert toolbox.db.execute(sa.select(repository.History)).all() == []

@@ -578,9 +578,10 @@ function AutoSyncTab({
   const [vad, setVad] = useState("");
   const [syncing, setSyncing] = useState(false);
   const [progressMsg, setProgressMsg] = useState("");
-  const [engineResults, setEngineResults] = useState<
-    SyncEngineContentResult[] | null
-  >(null);
+  const [engineResults, setEngineResults] = useState<{
+    results: SyncEngineContentResult[];
+    applyContent: TimingToolsPanelProps["onApplySyncedContent"];
+  } | null>(null);
   const [selectedEngine, setSelectedEngine] = useState<string | null>(null);
 
   const isSyncOutput = isSyncOutputLanguageKey(language);
@@ -672,7 +673,7 @@ function AutoSyncTab({
                 )
               : [];
             if (results.length > 1) {
-              setEngineResults(results);
+              setEngineResults({ results, applyContent: onApplySyncedContent });
               setSelectedEngine(results[0].engine);
               setProgressMsg("");
               setSyncing(false);
@@ -769,11 +770,11 @@ function AutoSyncTab({
 
   const applySelectedEngineResult = useCallback(() => {
     if (!engineResults || !selectedEngine) return;
-    const selected = engineResults.find(
+    const selected = engineResults.results.find(
       (item) => item.engine === selectedEngine,
     );
     if (!selected) return;
-    if (onApplySyncedContent(selected.content) === false) return;
+    if (engineResults.applyContent(selected.content) === false) return;
     showNotification({
       message: `${syncEngineLabel(selected.engine)} result loaded into editor`,
       color: "green",
@@ -781,7 +782,7 @@ function AutoSyncTab({
     });
     setEngineResults(null);
     setSelectedEngine(null);
-  }, [engineResults, selectedEngine, onApplySyncedContent]);
+  }, [engineResults, selectedEngine]);
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
@@ -803,7 +804,7 @@ function AutoSyncTab({
             onChange={setSelectedEngine}
           >
             <Stack gap="xs">
-              {engineResults?.map((result) => (
+              {engineResults?.results.map((result) => (
                 <Radio
                   key={result.engine}
                   value={result.engine}

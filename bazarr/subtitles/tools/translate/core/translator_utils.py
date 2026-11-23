@@ -95,6 +95,14 @@ def translated_destination_path(video_path, to_lang, forced, hi):
 
 def load_translation_input(translator, loader):
     """Read from the captured input when a source tool or the runtime has bound it."""
+    if getattr(translator, 'source', None) is not None:
+        from media_sources.indexer import source_subtitle_directories
+
+        directory = os.path.normcase(os.path.realpath(os.path.dirname(translator.source_srt_file)))
+        current_directories = {os.path.normcase(os.path.realpath(path))
+                               for path in source_subtitle_directories(translator.video_path)}
+        if directory not in current_directories:
+            raise SourceTranslationChanged('The configured source subtitle folder changed')
     source_tool = getattr(translator, 'source_tool', None)
     if source_tool is None:
         path = translator.source_srt_file

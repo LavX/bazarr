@@ -213,13 +213,18 @@ export default function EditorPage() {
     source,
     codec,
   ]);
-  const currentSubtitleKeyRef = useRef<string | null>(subtitleKey);
+  // A preview belongs to this visit to the subtitle and the cues it submitted.
+  const syncDocument = useMemo(
+    () => ({ subtitleKey, cues: docState.cues }),
+    [subtitleKey, docState.cues],
+  );
+  const currentSyncDocumentRef = useRef<typeof syncDocument | null>(null);
   useLayoutEffect(() => {
-    currentSubtitleKeyRef.current = subtitleKey;
+    currentSyncDocumentRef.current = syncDocument;
     return () => {
-      currentSubtitleKeyRef.current = null;
+      currentSyncDocumentRef.current = null;
     };
-  }, [subtitleKey]);
+  }, [syncDocument]);
   const prevSubtitleKeyRef = useRef(subtitleKey);
   useEffect(() => {
     if (prevSubtitleKeyRef.current !== subtitleKey) {
@@ -2075,23 +2080,28 @@ export default function EditorPage() {
               {availableSubtitles.length === 0 && (
                 <Menu.Item disabled>No subtitles found</Menu.Item>
               )}
-              <Menu.Divider />
-              <Menu.Label>Create new</Menu.Label>
-              {languageOptions
-                .filter(
-                  (opt) =>
-                    !availableSubtitles.some((s) => s.language === opt.value) &&
-                    opt.value !== language,
-                )
-                .slice(0, 20)
-                .map((opt) => (
-                  <Menu.Item
-                    key={opt.value}
-                    onClick={() => switchToLanguage(opt.value)}
-                  >
-                    {opt.label}
-                  </Menu.Item>
-                ))}
+              {mediaType !== "source" && (
+                <>
+                  <Menu.Divider />
+                  <Menu.Label>Create new</Menu.Label>
+                  {languageOptions
+                    .filter(
+                      (opt) =>
+                        !availableSubtitles.some(
+                          (s) => s.language === opt.value,
+                        ) && opt.value !== language,
+                    )
+                    .slice(0, 20)
+                    .map((opt) => (
+                      <Menu.Item
+                        key={opt.value}
+                        onClick={() => switchToLanguage(opt.value)}
+                      >
+                        {opt.label}
+                      </Menu.Item>
+                    ))}
+                </>
+              )}
             </Menu.Dropdown>
           </Menu>
         </Breadcrumbs>
@@ -2290,11 +2300,14 @@ export default function EditorPage() {
               return { content: serialized, format, encoding };
             }}
             onApplySyncedContent={(syncedContent: string) => {
-              if (currentSubtitleKeyRef.current !== subtitleKey) {
+              const currentDocument = currentSyncDocumentRef.current;
+              if (currentDocument !== syncDocument) {
                 showNotification({
                   title: "Sync",
                   message:
-                    "Sync finished for a different subtitle; its cues were not loaded.",
+                    currentDocument?.subtitleKey === subtitleKey
+                      ? "The subtitle changed while syncing. The sync result was not loaded."
+                      : "Sync finished for a different subtitle; its cues were not loaded.",
                   color: "yellow",
                 });
                 return false;

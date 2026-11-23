@@ -4,7 +4,7 @@ import { http, HttpResponse } from "msw";
 import { expect, it, vi } from "vitest";
 import EditorPage from "@/pages/SubtitleEditor/EditorPage";
 import { AllProviders } from "@/providers";
-import { act, rawRender, screen, waitFor } from "@/tests";
+import { act, fireEvent, rawRender, screen, waitFor } from "@/tests";
 import server from "@/tests/mocks/node";
 
 vi.mock("@/pages/SubtitleEditor/VideoPreview", () => ({ default: () => null }));
@@ -12,7 +12,7 @@ vi.mock("@/pages/SubtitleEditor/WaveformTimeline", () => ({
   default: () => null,
 }));
 
-it("keeps the newly selected subtitle and its ETag when an earlier sync finishes", async () => {
+async function openSourceEditor(multipleEngines = false) {
   const user = userEvent.setup();
   const poll = Promise.withResolvers<void>();
   const polled = vi.fn();
@@ -27,7 +27,9 @@ it("keeps the newly selected subtitle and its ETag when an earlier sync finishes
         ],
       }),
     ),
-    http.get("/api/system/languages", () => HttpResponse.json([])),
+    http.get("/api/system/languages", () =>
+      HttpResponse.json([{ code2: "de", name: "German", enabled: true }]),
+    ),
     http.get("/api/system/jobs", () => HttpResponse.json({ data: [] })),
     http.get("/api/system/status", () => HttpResponse.json({ data: {} })),
     http.get(
@@ -70,9 +72,16 @@ it("keeps the newly selected subtitle and its ETag when an earlier sync finishes
     http.get("/api/editor/sync", async () => {
       polled();
       await poll.promise;
+      const content = "1\n00:00:03,000 --> 00:00:04,000\nSynced English\n";
       return HttpResponse.json({
         status: "completed",
-        content: "1\n00:00:03,000 --> 00:00:04,000\nSynced English\n",
+        content,
+        results: multipleEngines
+          ? [
+              { engine: "ffsubsync", content },
+              { engine: "alass", content },
+            ]
+          : undefined,
       });
     }),
   );
@@ -91,6 +100,29 @@ it("keeps the newly selected subtitle and its ETag when an earlier sync finishes
     </AllProviders>,
   );
   await screen.findAllByText("Original en");
+  return { user, poll, polled, saved };
+}
+
+async function startSync(user: ReturnType<typeof userEvent.setup>) {
+  await user.click(screen.getByRole("button", { name: "Timing Tools" }));
+  await user.click(screen.getByRole("button", { name: "Auto-Sync" }));
+  await user.click(screen.getByRole("button", { name: "Sync" }));
+}
+
+async function switchLanguage(
+  user: ReturnType<typeof userEvent.setup>,
+  from: "en" | "hu",
+  to: "en" | "hu",
+) {
+  await user.click(screen.getByRole("button", { name: `${from} [srt] ▾` }));
+  await user.click(
+    await screen.findByRole("menuitem", { name: `${to} [srt]` }),
+  );
+  await screen.findAllByText(`Original ${to}`);
+}
+
+it("offers only existing subtitles in the source language menu", async () => {
+  const { user } = await openSourceEditor();
   expect(
     screen.queryByRole("button", { name: "Save As" }),
   ).not.toBeInTheDocument();
@@ -101,13 +133,17 @@ it("keeps the newly selected subtitle and its ETag when an earlier sync finishes
   expect(
     screen.queryByRole("link", { name: "Local film" }),
   ).not.toBeInTheDocument();
-  await user.click(screen.getByRole("button", { name: "Timing Tools" }));
-  await user.click(screen.getByRole("button", { name: "Auto-Sync" }));
-  await user.click(screen.getByRole("button", { name: "Sync" }));
-  await waitFor(() => expect(polled).toHaveBeenCalled());
   await user.click(screen.getByRole("button", { name: /^en \[srt\]/ }));
-  await user.click(await screen.findByRole("menuitem", { name: "hu [srt]" }));
-  await screen.findAllByText("Original hu");
+  await screen.findByRole("menuitem", { name: "hu [srt]" });
+  expect(screen.queryByText("Create new")).not.toBeInTheDocument();
+  expect(screen.queryByRole("menuitem", { name: "German (de)" })).toBeNull();
+});
+
+it("keeps the newly selected subtitle and its ETag when an earlier sync finishes", async () => {
+  const { user, poll, polled, saved } = await openSourceEditor();
+  await startSync(user);
+  await waitFor(() => expect(polled).toHaveBeenCalled());
+  await switchLanguage(user, "en", "hu");
   await act(async () => {
     poll.resolve();
   });
@@ -122,4 +158,67 @@ it("keeps the newly selected subtitle and its ETag when an earlier sync finishes
     content: "1\n00:00:01,000 --> 00:00:02,000\nOriginal hu",
     etag: "hu",
   });
+});
+
+it.each([
+  { scenario: "editing in place", leaveAndReturn: false },
+  { scenario: "reopening and editing the same subtitle", leaveAndReturn: true },
+])("keeps an edit and its undo after $scenario", async ({ leaveAndReturn }) => {
+  const { user, poll, polled } = await openSourceEditor();
+  await startSync(user);
+  await waitFor(() => expect(polled).toHaveBeenCalled());
+  if (leaveAndReturn) {
+    await switchLanguage(user, "en", "hu");
+    await switchLanguage(user, "hu", "en");
+  }
+  fireEvent.change(screen.getByDisplayValue("Original en"), {
+    target: { value: "Edited English" },
+  });
+  await act(async () => {
+    poll.resolve();
+  });
+  await screen.findByText(/The sync result was not loaded/);
+  expect(screen.getByDisplayValue("Edited English")).toBeInTheDocument();
+  expect(screen.queryByText("Synced English")).not.toBeInTheDocument();
+  await user.click(screen.getByRole("button", { name: "Undo" }));
+  expect(screen.getByDisplayValue("Original en")).toBeInTheDocument();
+});
+
+it("discards a pending sync after switching away and back without edits", async () => {
+  const { user, poll, polled } = await openSourceEditor();
+  await startSync(user);
+  await waitFor(() => expect(polled).toHaveBeenCalled());
+  await switchLanguage(user, "en", "hu");
+  await switchLanguage(user, "hu", "en");
+  await act(async () => {
+    poll.resolve();
+  });
+  await screen.findByText(/The sync result was not loaded/);
+  expect(screen.getByDisplayValue("Original en")).toBeInTheDocument();
+});
+
+it("keeps edits made before choosing an engine result", async () => {
+  const { user, poll, polled } = await openSourceEditor(true);
+  await startSync(user);
+  await waitFor(() => expect(polled).toHaveBeenCalled());
+  fireEvent.change(screen.getByDisplayValue("Original en"), {
+    target: { value: "Edited English" },
+  });
+  await act(async () => {
+    poll.resolve();
+  });
+  await user.click(await screen.findByRole("button", { name: "Load Result" }));
+  await screen.findByText(/The sync result was not loaded/);
+  await user.click(screen.getByRole("button", { name: "Cancel" }));
+  expect(screen.getByDisplayValue("Edited English")).toBeInTheDocument();
+  await user.click(screen.getByRole("button", { name: "Undo" }));
+  expect(screen.getByDisplayValue("Original en")).toBeInTheDocument();
+});
+
+it("loads a chosen engine result when the submitted cues are still current", async () => {
+  const { user, poll } = await openSourceEditor(true);
+  await startSync(user);
+  poll.resolve();
+  await user.click(await screen.findByRole("button", { name: "Load Result" }));
+  expect(screen.getByDisplayValue("Synced English")).toBeInTheDocument();
 });
