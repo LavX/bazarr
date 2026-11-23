@@ -424,10 +424,14 @@ backup.restart_bazarr = lambda: os._exit(41)
 backup.stop_bazarr = lambda code: os._exit(code & 255)
 backup.event_stream = lambda **fields: None
 backup.jobs_queue.update_job_name = lambda **fields: True
-# These children never launch plugin workers. Let the real worker check see
-# a complete, empty process list so it cannot inspect or signal host workers.
-sweep._list_pids = lambda: ([], False)
 root = Path(backup.args.config_dir)
+
+# These children never launch plugin workers. Keep the fixture at the
+# worker-exit boundary instead of inspecting the test runner's process tree.
+def fixture_workers_stopped(config_dir, *, deadline=None):
+    assert Path(config_dir) == root
+    return True
+sweep.previous_workers_stopped = fixture_workers_stopped
 run_tool = backup._run_postgres_tool
 def count(tool, *args, **kwargs):
     with (root / 'postgres-tool-runs').open('a') as stream:

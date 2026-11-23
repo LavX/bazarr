@@ -1696,6 +1696,8 @@ def test_backup_and_restore_exclude_release_sign_in_paths(backup_env, monkeypatc
     from provider_hub import datadir, releases, state_store
 
     monkeypatch.setattr(backup_env.settings.postgresql, 'enabled', False)
+    # This fixture launches no workers, so archive creation need not inspect host processes.
+    monkeypatch.setattr("provider_hub.sandbox.sweep.previous_workers_stopped", lambda _config, **_kwargs: True)
     root = tmp_path / "provider_hub"
     root.mkdir()
     key, prior_key = "a" * 32, "b" * 32
@@ -1847,6 +1849,8 @@ def test_plugin_restore_retries_the_handoff_without_restoring_sqlite_twice(
     from provider_hub import datadir, state, state_store
 
     monkeypatch.setattr(backup_env.settings.postgresql, "enabled", False)
+    # This fixture launches no workers, so archive creation need not inspect host processes.
+    monkeypatch.setattr("provider_hub.sandbox.sweep.previous_workers_stopped", lambda _config, **_kwargs: True)
     root = tmp_path / "provider_hub"
     state_path = root / "state.json"
     monkeypatch.delenv("BAZARR_PROVIDER_HUB_STATE", raising=False)
