@@ -307,10 +307,11 @@ def _get_language_obj(languages):
     return language_set
 
 
-def check_missing_languages_source(source):
+def check_missing_languages_source(source, *, ownership_index=None, written_paths=()):
     from media_sources.translation import missing_language_candidates
 
-    return _get_language_obj(languages=missing_language_candidates(source))
+    return _get_language_obj(languages=missing_language_candidates(
+        source, ownership_index=ownership_index, written_paths=written_paths))
 
 
 def _write_source_download(video_path, destination, content, *, source, language, recheck_missing, is_upgrade,
@@ -322,12 +323,13 @@ def _write_source_download(video_path, destination, content, *, source, language
 
     @contextmanager
     def publication():
-        if recheck_missing and language not in check_missing_languages_source(source):
-            raise SubtitleDestinationChanged('The source language is no longer missing')
         if not sync_output_owner_is_unique(video_path, destination, ownership_index=ownership_index):
             raise SubtitleDestinationChanged('The source subtitle destination does not have one media owner')
         if os.path.lexists(destination) and (not is_upgrade or regular_subtitle_version(destination) is None):
             raise SubtitleDestinationChanged('The source subtitle destination is already occupied')
+        if recheck_missing and language not in check_missing_languages_source(
+                source, ownership_index=ownership_index, written_paths=written_paths):
+            raise SubtitleDestinationChanged('The source language is no longer missing')
         yield
 
     try:

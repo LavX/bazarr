@@ -1663,7 +1663,50 @@ def test_source_provider_fallback_uses_current_cutoff(world, monkeypatch, isolat
     assert media.with_suffix(".hu.srt").is_file() == (edit == "cutoff-cleared")
 
 
-@pytest.mark.parametrize("conflict", ["shared", "arrived-during-fetch"])
+@pytest.mark.parametrize("location", ["media", "configured", "untagged", "sync"])
+def test_source_provider_sees_cutoff_sidecar_before_index_refresh(world, monkeypatch, isolated_jobs, location):
+    import json
+
+    from app.config import settings
+    from app.database import TableLanguagesProfiles, update_profile_id_list
+    from media_sources import repository, service
+    from subtitles import download
+
+    profile = [{"id": 1, "language": "en", "forced": "False", "hi": "False"},
+               {"id": 2, "language": "hu", "forced": "False", "hi": "False"}]
+    world.db.execute(sa.update(TableLanguagesProfiles).values(items=json.dumps(profile), cutoff=1))
+    update_profile_id_list.invalidate()
+    if location == "configured":
+        monkeypatch.setattr(settings.general, "subfolder", "relative")
+        monkeypatch.setattr(settings.general, "subfolder_custom", "Subs")
+    context = _movie(world)
+    media = Path(context.path)
+    folder = media.parent / "Subs" if location == "configured" else media.parent
+    folder.mkdir(exist_ok=True)
+    suffix = {"untagged": ".srt", "sync": ".en.ffsubsync.srt"}.get(location, ".en.srt")
+    name = media.with_suffix(suffix).name
+    cutoff = folder / name
+    content = CONTENT.replace(b"Downloaded", b"The children sat by the river while their mother read a story. "
+                              b"It was a warm afternoon, and they could hear the birds in the trees above them.")
+
+    def fetch(videos, languages, **kwargs):
+        if {str(language) for language in languages} == {"hu"}:
+            cutoff.write_bytes(content)
+            assert "en" in repository.get_item(context.item_id).missing_subtitles
+            return {next(iter(videos)): [FakeSubtitle(Language("hun"))]}
+        return {}
+
+    monkeypatch.setattr(download, "download_best_subtitles", fetch)
+    service.search_source_item(context.item_id, translation_gate=False)
+    assert isolated_jobs._run_job(isolated_jobs._reserve_next_job())
+
+    assert cutoff.read_bytes() == content
+    assert not (folder / media.with_suffix(".hu.srt").name).exists()
+    assert world.db.execute(sa.select(repository.History)).all() == []
+    assert not world.published
+
+
+@pytest.mark.parametrize("conflict", ["shared", "shared-modifier", "arrived-during-fetch"])
 def test_source_provider_write_preserves_an_unavailable_destination(world, monkeypatch, isolated_jobs, conflict):
     from app.config import settings
     from app.database import TableMovies
@@ -1675,21 +1718,24 @@ def test_source_provider_write_preserves_an_unavailable_destination(world, monke
     context = _movie(world)
     media = Path(context.path)
     destination = world.tmp_path / "Sidecars" / media.with_suffix(".en.srt").name
-    if conflict == "shared":
-        other = video(world.tmp_path / "Arr" / media.name)
+    if conflict in {"shared", "shared-modifier"}:
+        other_name = media.with_suffix(".en.mkv").name if conflict == "shared-modifier" else media.name
+        other = video(world.tmp_path / "Arr" / other_name)
         world.db.execute(sa.insert(TableMovies).values(path=str(other), title="Another film", tmdbId="7711"))
 
     def fetch(videos, **kwargs):
         if conflict == "arrived-during-fetch":
             destination.parent.mkdir(exist_ok=True)
             destination.write_bytes(CONTENT.replace(b"Downloaded", b"Already present"))
-        return {next(iter(videos)): [FakeSubtitle(Language("eng"))]}
+        return {next(iter(videos)): [FakeSubtitle(Language("eng", hi=conflict == "shared-modifier"))]}
 
     monkeypatch.setattr(download, "download_best_subtitles", fetch)
     service.search_source_item(context.item_id, translation_gate=False)
     assert isolated_jobs._run_job(isolated_jobs._reserve_next_job())
 
-    if conflict == "shared":
+    if conflict == "shared-modifier":
+        assert not destination.with_suffix(".hi.srt").exists()
+    elif conflict == "shared":
         assert not destination.exists()
     else:
         assert b"Already present" in destination.read_bytes()
@@ -1750,6 +1796,28 @@ def test_source_combine_rechecks_input_ownership_at_publication(world, monkeypat
     assert not (world.tmp_path / media.with_suffix(".en.combined-hu.srt").name).exists()
 
 
+def test_source_combine_refuses_an_input_with_an_intermediate_owner(world, monkeypatch):
+    from app.config import settings
+    from app.database import TableMovies
+    from subtitles.tools.combine import main as combine
+
+    monkeypatch.setattr(settings.general, "subfolder", "relative")
+    monkeypatch.setattr(settings.general, "subfolder_custom", "../Sidecars")
+    context = _movie(world)
+    media = Path(context.path)
+    sidecars = world.tmp_path / "Sidecars"
+    sidecars.mkdir()
+    (sidecars / media.with_suffix(".en.hi.srt").name).write_bytes(CONTENT)
+    media.with_suffix(".hu.srt").write_bytes(CONTENT)
+    other = video(world.tmp_path / "Arr" / media.with_suffix(".en.mkv").name)
+    world.db.execute(sa.insert(TableMovies).values(path=str(other), title="Another film", tmdbId="7711"))
+
+    result = combine.try_combine_for_video(context.path, "movie", languages=["en", "hu"], format="srt",
+                                           source=context)
+    assert result.status == "skipped" and "input" in result.reason
+    assert not (sidecars / media.with_suffix(".en.combined-hu.srt").name).exists()
+
+
 def test_source_provider_guard_preserves_the_selected_subtitle_format(world, monkeypatch, isolated_jobs):
     import pysubs2
     from app.database import TableLanguagesProfiles, update_profile_id_list
@@ -1772,3 +1840,15 @@ def test_source_provider_guard_preserves_the_selected_subtitle_format(world, mon
     assert not media.with_suffix(".en.srt").exists()
     (result,) = world.db.execute(sa.select(repository.History)).all()
     assert result.subtitles_path == str(destination)
+
+
+def test_saver_continues_after_a_declined_candidate_in_single_language_mode(tmp_path):
+    from subliminal_patch.core import save_subtitles
+
+    first, second = FakeSubtitle(), FakeSubtitle()
+    writer = Mock(side_effect=[False, None])
+
+    result = save_subtitles(str(tmp_path / "Film.mkv"), [first, second], single=True, write_subtitle=writer)
+
+    assert writer.call_count == 2
+    assert result == [second] and first.storage_path is None

@@ -4,6 +4,7 @@ import ast
 import os
 import logging
 import unicodedata
+from pathlib import Path
 
 from guess_language import guess_language
 from sqlalchemy import delete
@@ -455,7 +456,8 @@ def subtitle_language_with_combined_modifier(language_str, subtitle):
 
 
 def guess_external_subtitles(dest_folder, subtitles, media_type, previously_indexed_subtitles_to_exclude=None,
-                             path_reverse=None):
+                             path_reverse=None, read_bytes=None):
+    read_bytes = read_bytes or (lambda path: Path(path).read_bytes())
     for subtitle, language in subtitles.items():
         subtitle_path = os.path.join(dest_folder, subtitle)
         reverse = path_reverse or (path_mappings.path_replace_reverse if media_type == "series"
@@ -487,8 +489,9 @@ def guess_external_subtitles(dest_folder, subtitles, media_type, previously_inde
                                   f"{subtitle_path}")
                     continue
 
-                with open(subtitle_path, 'rb') as f:
-                    text = f.read()
+                text = read_bytes(subtitle_path)
+                if not text:
+                    continue
 
                 encoding = detect(text)
                 if encoding and 'encoding' in encoding and encoding['encoding']:
@@ -538,8 +541,9 @@ def guess_external_subtitles(dest_folder, subtitles, media_type, previously_inde
                                   f"{subtitle_path}")
                     continue
 
-                with open(subtitle_path, 'rb') as f:
-                    text = f.read()
+                text = read_bytes(subtitle_path)
+                if not text:
+                    continue
 
                 encoding = detect(text)
                 if encoding and 'encoding' in encoding and encoding['encoding']:

@@ -58,6 +58,7 @@ REMOVE_CRAP_FROM_FILENAME = re.compile(r"(?i)(?:([\s_-]+(?:obfuscated|scrambled|
                                        r"|asrequested)(?:\[.+\])?)|([\s_-]\w{2,})(\[.+\]))(?=\.\w+$|$)")
 
 SUBTITLE_EXTENSIONS = ('.srt', '.sub', '.smi', '.txt', '.ssa', '.ass', '.mpl', '.vtt')
+EXTERNAL_SUBTITLE_MODIFIERS = ('forced', 'normal', 'default', 'embedded', 'embedded-forced', 'custom', 'hi', 'cc', 'sdh')
 
 _POOL_LIFETIME = datetime.timedelta(hours=12)
 
@@ -2256,7 +2257,13 @@ def scan_video(path, dont_use_actual_file=False, hints=None, providers=None, ski
     return video
 
 
-def _search_external_subtitles(path, languages=None, only_one=False, match_strictness="strict"):
+def external_subtitle_base(stem):
+    """Strip a recognized language tag from a subtitle filename stem."""
+    return ENDSWITH_LANGUAGECODE_RE.sub(
+        lambda match: "" if match.group(1).lower() in FULL_LANGUAGE_LIST else match.group(0), stem)
+
+
+def search_external_subtitles_in_directory(path, languages=None, only_one=False, match_strictness="strict"):
     dirpath, filename = os.path.split(path)
     dirpath = dirpath or '.'
     fn_no_ext, fileext = os.path.splitext(filename)
@@ -2295,7 +2302,7 @@ def _search_external_subtitles(path, languages=None, only_one=False, match_stric
         adv_tag = None
         if len(split_tag) > 1:
             adv_tag = split_tag[1].lower()
-            if adv_tag in ['forced', 'normal', 'default', 'embedded', 'embedded-forced', 'custom', 'hi', 'cc', 'sdh']:
+            if adv_tag in EXTERNAL_SUBTITLE_MODIFIERS:
                 p_root = split_tag[0]
 
         forced = False
@@ -2315,8 +2322,7 @@ def _search_external_subtitles(path, languages=None, only_one=False, match_stric
         p_root = p_root.replace('zh-TW', 'zht')
 
         # remove possible language code for matching
-        p_root_bare = ENDSWITH_LANGUAGECODE_RE.sub(
-            lambda m: "" if str(m.group(1)).lower() in FULL_LANGUAGE_LIST else m.group(0), p_root)
+        p_root_bare = external_subtitle_base(p_root)
 
         p_root_lower = p_root_bare.lower()
         # comparing to both unicode normalization forms to prevent broking stuff and improve indexing on some platforms.
@@ -2381,8 +2387,8 @@ def search_external_subtitles(path, languages=None, only_one=False, match_strict
         logger.debug("external subs: scanning path %s", abspath)
 
         if os.path.isdir(os.path.dirname(abspath)):
-            subtitles.update(_search_external_subtitles(abspath, languages=languages, only_one=only_one,
-                                                        match_strictness=match_strictness))
+            subtitles.update(search_external_subtitles_in_directory(
+                abspath, languages=languages, only_one=only_one, match_strictness=match_strictness))
     logger.debug("external subs: found %s", subtitles)
     return subtitles
 
@@ -2615,6 +2621,7 @@ def save_subtitles(file_path, subtitles, single=False, directory=None, chmod=Non
         subtitle.storage_path = subtitle_path
 
         written_path = None
+        declined = False
         for format in formats:
             extension = SUBTITLE_FORMAT_EXTENSIONS.get(format, format)
             if extension != "srt":
@@ -2626,6 +2633,7 @@ def save_subtitles(file_path, subtitles, single=False, directory=None, chmod=Non
                 if write_subtitle is not None:
                     # A writer can reject a destination after the provider has returned.
                     if write_subtitle(subtitle_path, content) is False:
+                        declined = True
                         continue
                 else:
                     if os.path.exists(subtitle_path):
@@ -2635,6 +2643,10 @@ def save_subtitles(file_path, subtitles, single=False, directory=None, chmod=Non
                 written_path = subtitle.storage_path = subtitle_path
             else:
                 logger.error(u"Something went wrong when getting modified subtitle for %s", subtitle)
+
+        if declined and written_path is None:
+            subtitle.storage_path = None
+            continue
 
         # change chmod if requested
         if chmod and written_path is not None:

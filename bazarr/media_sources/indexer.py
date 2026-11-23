@@ -9,6 +9,7 @@ tracks and the audio-language rules come with the media analysis.
 import ast
 import logging
 import os
+from functools import partial
 
 import sqlalchemy as sa
 
@@ -16,12 +17,17 @@ from subliminal_patch import core, search_external_subtitles
 
 from app.config import settings
 from app.database import get_profile_cutoff, get_profiles_list
+from constants import MAXIMUM_SUBTITLE_SIZE
 from languages.custom_lang import CustomLanguage
 from languages.get_languages import alpha2_from_alpha3, get_language_set
 from subtitles.adaptive_searching import is_search_given_up
 from subtitles.indexer.utils import (add_combined_outputs, add_sync_engine_outputs, get_external_subtitles_path,
                                      guess_external_subtitles, subtitle_language_with_combined_modifier, subtitle_language_with_sync_modifier)
-from subtitles.tools.subsync_engines import SyncOutputOwnerIndex, _normalized_media_stem, subtitle_write_locks
+from subtitles.tools.combine.naming import parse_combined_filename
+from subtitles.tools.combine.rules import _dotted_custom_aliases
+from subtitles.tools.subsync_engines import (SubtitleSourceChanged, SyncOutputOwnerIndex, _normalized_media_stem,
+                                             read_regular_subtitle, regular_subtitle_version, subtitle_write_locks,
+                                             sync_engine_from_output_path, sync_output_owner_is_unique)
 from utilities.helper import get_subtitle_destination_folder, get_target_folder
 
 from . import repository
@@ -34,6 +40,24 @@ class SourceOutputOwnerIndex(SyncOutputOwnerIndex):
     The base index reads the arr and Sportarr tables, which a source never does. Here the owners are the source
     items, each claiming its own folder and, with a custom subtitle folder, that folder too.
     """
+
+    def conflicting_stems(self, video, subtitle_path):
+        """Include media whose stem consumes only part of the subtitle suffix."""
+        stems = super().conflicting_stems(video, subtitle_path)
+        stem = _normalized_media_stem(subtitle_path)
+        if sync_engine_from_output_path(subtitle_path):
+            stem = stem.rsplit('.', 1)[0]
+            stems.add(stem)
+            subtitle_path = stem + os.path.splitext(subtitle_path)[1]
+        base, _, tail = stem.rpartition('.')
+        if tail in core.EXTERNAL_SUBTITLE_MODIFIERS or parse_combined_filename(subtitle_path):
+            stems.add(base)
+            stem = base
+        stems.add(core.external_subtitle_base(stem))
+        for alias in _dotted_custom_aliases():
+            if stem.endswith('.' + alias):
+                stems.add(stem[:-len(alias) - 1])
+        return stems
 
     @staticmethod
     def _load_owners():
@@ -101,38 +125,80 @@ def list_external_subtitles(path, previous=None, ownership_index=None):
                                              path_reverse=lambda subtitle_path: subtitle_path)
 
     for subtitle, language in subtitles.items():
-        valid_language = False
-        if language:
-            if hasattr(language, 'alpha3'):
-                valid_language = alpha2_from_alpha3(language.alpha3)
-        else:
-            logging.debug("BAZARR skipping subtitles because we are unable to define language: %s", subtitle)
+        if language is None:
             continue
-        if not valid_language:
-            logging.debug('BAZARR %s is an unsupported language code.', language.alpha3)
-            continue
-
         subtitle_path = get_external_subtitles_path(path, subtitle)
+        if subtitle_path is None:
+            continue
         try:
             subtitle_size = os.stat(subtitle_path).st_size
         except FileNotFoundError:
             logging.debug("BAZARR skipping missing subtitle file: %s", subtitle_path)
             continue
 
-        custom = CustomLanguage.found_external(subtitle, subtitle_path)
-        if custom is not None:
-            actual.append([custom, subtitle_path, subtitle_size])
-        elif str(language.basename) != 'und':
-            if language.forced:
-                language_str = f'{language}:forced'
-            elif language.hi:
-                language_str = f'{language}:hi'
-            else:
-                language_str = str(language)
-            language_str = subtitle_language_with_sync_modifier(language_str, subtitle)
-            language_str = subtitle_language_with_combined_modifier(language_str, subtitle)
-            actual.append([language_str, subtitle_path, subtitle_size])
+        entry = _external_subtitle_entry(subtitle, language, subtitle_path, subtitle_size)
+        if entry is not None:
+            actual.append(entry)
     return actual
+
+
+def _external_subtitle_entry(subtitle, language, subtitle_path, size):
+    if not hasattr(language, 'alpha3') or not alpha2_from_alpha3(language.alpha3):
+        return None
+    custom = CustomLanguage.found_external(subtitle, subtitle_path)
+    if custom is not None:
+        return [custom, subtitle_path, size]
+    if str(language.basename) == 'und':
+        return None
+    language_str = f'{language}:forced' if language.forced else f'{language}:hi' if language.hi else str(language)
+    language_str = subtitle_language_with_sync_modifier(language_str, subtitle)
+    language_str = subtitle_language_with_combined_modifier(language_str, subtitle)
+    return [language_str, subtitle_path, size]
+
+
+def list_current_external_subtitles(video_path, indexed, ownership_index, written_paths=()):
+    """Check the two subtitle folders for new sidecars during provider publication."""
+    def unique(path):
+        return sync_output_owner_is_unique(video_path, path, ownership_index=ownership_index)
+
+    media_directory, filename = os.path.split(video_path)
+    target = get_target_folder(video_path, create=False) or media_directory
+    directories = dict.fromkeys(os.path.abspath(path) for path in (media_directory, target))
+    excluded = {os.path.abspath(path) for path in written_paths}
+    current = {}
+    for entry in indexed:
+        if entry[1]:
+            path = os.path.abspath(entry[1])
+            if (path not in excluded and os.path.dirname(path) in directories
+                    and regular_subtitle_version(path) is not None and unique(path)):
+                current[path] = entry
+    languages = get_language_set() if settings.general.single_language else None
+    for directory in directories:
+        try:
+            found = core.search_external_subtitles_in_directory(
+                os.path.join(directory, filename), languages=languages, only_one=bool(languages))
+            found = add_sync_engine_outputs(directory, found, video_path=video_path, ownership_index=ownership_index)
+        except FileNotFoundError:
+            continue
+        for subtitle, language in found.items():
+            path = os.path.abspath(os.path.join(directory, subtitle))
+            if path in current or path in excluded:
+                continue
+            version = regular_subtitle_version(path)
+            if version is None or not unique(path):
+                continue
+            if language is None and version[2] <= MAXIMUM_SUBTITLE_SIZE:
+                try:
+                    read_sample = partial(read_regular_subtitle, expected_version=version,
+                                          max_bytes=MAXIMUM_SUBTITLE_SIZE)
+                    language = guess_external_subtitles(directory, {subtitle: None}, 'movie', path_reverse=os.fspath,
+                                                        read_bytes=read_sample)[subtitle]
+                except (OSError, UnicodeError, SubtitleSourceChanged):
+                    continue
+            entry = _external_subtitle_entry(subtitle, language, path, version[2])
+            if entry is not None:
+                current[path] = entry
+    return list(current.values())
 
 
 def compute_missing_subtitles(profile, cutoff_items, subtitles, failed_attempts=None,
