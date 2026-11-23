@@ -4,6 +4,7 @@ import { useForm } from "@mantine/form";
 import { showNotification } from "@mantine/notifications";
 import { isObject } from "lodash";
 import {
+  isShownSubtitleActionError,
   useSubtitleAction,
   useSystemSettings,
   useTranslationAvailability,
@@ -243,6 +244,7 @@ const TranslationForm: FunctionComponent<Props> = ({
             onSubmit?.();
             modals.closeSelf();
           } catch (error) {
+            if (isShownSubtitleActionError(error)) return;
             // A stale status can leave the action enabled while the gate is
             // closed: a 409 shows the server's own reason, and the generic
             // sentence stays for every other failure.

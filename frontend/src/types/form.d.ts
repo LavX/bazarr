@@ -44,9 +44,13 @@ declare namespace FormType {
   }
 
   interface ModifySubtitle {
-    /** episodeId, radarrId, or the local sports event id. */
+    /** episodeId, radarrId, or the local sports event or source item id. */
     id: number;
-    type: "episode" | "movie" | "sports";
+    type: "episode" | "movie" | "sports" | "source";
+    /** Client-only check of the source item's current action availability. */
+    validateSource?: (readByLanguage?: boolean) => Promise<void>;
+    /** Client-only editor language key for the indexed source subtitle. */
+    sourceLanguage?: string;
     language: string;
     /** File path. Empty string signals an embedded track, backend extracts it. */
     path: string;

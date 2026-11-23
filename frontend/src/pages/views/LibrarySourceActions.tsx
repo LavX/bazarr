@@ -1,10 +1,12 @@
-import { Link } from "react-router";
+/* eslint-disable camelcase -- Source row fields use the API names. */
+import { Link, useNavigate } from "react-router";
 import { ActionIcon, Group, Menu, Tooltip } from "@mantine/core";
 import {
   faCloudUploadAlt,
   faEllipsisVertical,
   faHardDrive,
   faMagnifyingGlass,
+  faToolbox,
   faWrench,
 } from "@fortawesome/free-solid-svg-icons";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
@@ -22,6 +24,10 @@ import {
   SourceManualSearchModal,
   SourceUploadModal,
 } from "@/pages/SourceDetail/forms";
+import {
+  SourceToolsModal,
+  SourceToolsTarget,
+} from "@/pages/SourceDetail/Tools";
 
 interface SourceActionRow {
   origin: "source";
@@ -37,6 +43,19 @@ interface SourceActionRow {
 
 type CanUseLibrary = (row: SourceActionRow) => boolean;
 type SourceAction = "search" | "scan";
+
+function toolTarget(
+  kind: LibraryKind,
+  row: SourceActionRow,
+): SourceToolsTarget {
+  return {
+    id: row.id,
+    kind: kind === "series" ? "show" : "movie",
+    source_id: row.source_id,
+    library_id: row.library_id,
+    path: kind === "movies" ? row.path : undefined,
+  };
+}
 
 function canSearch(row: SourceActionRow, kind: LibraryKind) {
   return (
@@ -105,8 +124,22 @@ export function LibrarySourceRowActions({
 }) {
   const action = useLibrarySourceAction(kind);
   const modals = useModals();
+  const openEditor = useNavigate();
   const active = canUseLibrary(row);
   const searchable = active && canSearch(row, kind);
+  const movie =
+    kind === "movies" && row.source_id !== null && row.path
+      ? {
+          id: row.id,
+          kind: "movie" as const,
+          source_id: row.source_id,
+          library_id: row.library_id,
+          group_id: null,
+          path: row.path,
+          scene_name: row.sceneName ?? null,
+          arr_shadow: !!row.shadowed_by,
+        }
+      : null;
   return (
     <Menu shadow="md" width={220} position="bottom-end">
       <Menu.Target>
@@ -139,16 +172,12 @@ export function LibrarySourceRowActions({
         {kind === "movies" && (
           <>
             <Menu.Item
-              disabled={!searchable || !row.path}
+              disabled={!searchable || !movie}
               onClick={() => {
-                if (!row.path) return;
-                modals.openContextModal(SourceManualSearchModal, {
-                  item: {
-                    id: row.id,
-                    path: row.path,
-                    scene_name: row.sceneName ?? null,
-                  },
-                });
+                if (movie)
+                  modals.openContextModal(SourceManualSearchModal, {
+                    item: movie,
+                  });
               }}
               leftSection={
                 <FontAwesomeIcon icon={faMagnifyingGlass} size="sm" />
@@ -157,12 +186,11 @@ export function LibrarySourceRowActions({
               Manual Search
             </Menu.Item>
             <Menu.Item
-              disabled={!searchable}
-              onClick={() =>
-                modals.openContextModal(SourceUploadModal, {
-                  item: { id: row.id },
-                })
-              }
+              disabled={!searchable || !movie}
+              onClick={() => {
+                if (movie)
+                  modals.openContextModal(SourceUploadModal, { item: movie });
+              }}
               leftSection={
                 <FontAwesomeIcon icon={faCloudUploadAlt} size="sm" />
               }
@@ -171,6 +199,20 @@ export function LibrarySourceRowActions({
             </Menu.Item>
           </>
         )}
+        <Menu.Item
+          disabled={
+            !active || (kind === "movies" && (!row.path || !!row.shadowed_by))
+          }
+          onClick={() =>
+            modals.openContextModal(SourceToolsModal, {
+              targets: [toolTarget(kind, row)],
+              openEditor,
+            })
+          }
+          leftSection={<FontAwesomeIcon icon={faToolbox} size="sm" />}
+        >
+          Subtitle Tools
+        </Menu.Item>
         <Menu.Item
           disabled={!active}
           onClick={() => action.mutate({ action: "scan", rows: [row] })}
@@ -196,8 +238,17 @@ export function LibrarySourceSelectionActions({
 }) {
   const sourceAction = useLibrarySourceAction(kind);
   const arrAction = useBatchAction();
+  const modals = useModals();
+  const openEditor = useNavigate();
   const active = rows.every(canUseLibrary);
   const pending = sourceAction.isPending || arrAction.isPending;
+  const toolTargets = rows
+    .filter(
+      (row) =>
+        canUseLibrary(row) &&
+        (kind === "series" || (row.path && !row.shadowed_by)),
+    )
+    .map((row) => toolTarget(kind, row));
 
   function run(action: SourceAction) {
     sourceAction.mutate({ action, rows });
@@ -211,6 +262,18 @@ export function LibrarySourceSelectionActions({
 
   return (
     <Group gap="xs">
+      <Toolbox.Button
+        icon={faToolbox}
+        disabled={toolTargets.length === 0}
+        onClick={() =>
+          modals.openContextModal(SourceToolsModal, {
+            targets: toolTargets,
+            openEditor,
+          })
+        }
+      >
+        {arrItems.length > 0 ? "Source Subtitle Tools" : "Subtitle Tools"}
+      </Toolbox.Button>
       <Toolbox.Button
         icon={faMagnifyingGlass}
         disabled={!active || !rows.every((row) => canSearch(row, kind))}

@@ -1,4 +1,10 @@
-import { FunctionComponent, ReactElement, useCallback, useMemo } from "react";
+import {
+  FunctionComponent,
+  ReactElement,
+  ReactNode,
+  useCallback,
+  useMemo,
+} from "react";
 import {
   Divider,
   List,
@@ -227,6 +233,9 @@ interface Props {
   children?: ReactElement;
   menu?: Omit<MenuProps, "children">;
   canSync?: boolean;
+  canTranslate?: boolean;
+  fileActions?: boolean;
+  extraActions?: ReactNode;
   allowSearchExisting?: boolean;
   onAction?: (
     action:
@@ -273,6 +282,9 @@ const SubtitleToolsMenu: FunctionComponent<Props> = ({
   children,
   menu,
   canSync = true,
+  canTranslate = true,
+  fileActions = true,
+  extraActions,
   allowSearchExisting = false,
   onAction,
   canCompareSyncOutputs = false,
@@ -326,7 +338,7 @@ const SubtitleToolsMenu: FunctionComponent<Props> = ({
           arr_instance_id: s.arr_instance_id,
           codec: s.codec,
         };
-        mutate({ action, form });
+        mutate({ action, form: s.type === "source" ? s : form });
       });
     },
     [mutate, actionSelections],
@@ -336,7 +348,8 @@ const SubtitleToolsMenu: FunctionComponent<Props> = ({
   const modals = useModals();
 
   // A manual score belongs to an existing subtitle file.
-  const hasScoreGroup = !isCombinedOutput && !missingLanguage;
+  const isSource = selections.some((selection) => selection.type === "source");
+  const hasScoreGroup = !isCombinedOutput && !missingLanguage && !isSource;
   const visibleGroups = toolGroups.filter(
     (group) => group.label !== "Score" || hasScoreGroup,
   );
@@ -384,7 +397,10 @@ const SubtitleToolsMenu: FunctionComponent<Props> = ({
               }
               // Translate doesn't make sense for combined-output files
               // (the file is already a composition, not a single language).
-              if (tool.key === "translation" && isCombinedOutput) {
+              if (
+                tool.key === "translation" &&
+                (isCombinedOutput || !canTranslate)
+              ) {
                 return null;
               }
               // An image-based track has no text for any tool. On a text
@@ -571,45 +587,51 @@ const SubtitleToolsMenu: FunctionComponent<Props> = ({
         )}
         {/* View, Edit and Download read an embedded text track out of the
             video (?source=embedded); an image-based one has no text. */}
-        <Menu.Item
-          disabled={
-            selections.length === 0 ||
-            onAction === undefined ||
-            embeddedMode === "bitmap"
-          }
-          leftSection={<FontAwesomeIcon icon={faEye}></FontAwesomeIcon>}
-          onClick={() => {
-            onAction?.("view");
-          }}
-        >
-          View
-        </Menu.Item>
-        <Menu.Item
-          disabled={onAction === undefined || embeddedMode === "bitmap"}
-          leftSection={<FontAwesomeIcon icon={faPencil}></FontAwesomeIcon>}
-          onClick={() => {
-            onAction?.("edit");
-          }}
-        >
-          {isCombinedOutput || selections.length > 0
-            ? "Edit"
-            : "Create / Upload"}
-        </Menu.Item>
-        {/* An embedded text track downloads as the file Save would write */}
-        <Menu.Item
-          disabled={
-            selections.length === 0 ||
-            onAction === undefined ||
-            embeddedMode === "bitmap"
-          }
-          leftSection={<FontAwesomeIcon icon={faDownload}></FontAwesomeIcon>}
-          onClick={() => {
-            onAction?.("download");
-          }}
-        >
-          Download
-        </Menu.Item>
-        {!isCombinedOutput && (
+        {fileActions && (
+          <>
+            <Menu.Item
+              disabled={
+                selections.length === 0 ||
+                onAction === undefined ||
+                embeddedMode === "bitmap"
+              }
+              leftSection={<FontAwesomeIcon icon={faEye}></FontAwesomeIcon>}
+              onClick={() => {
+                onAction?.("view");
+              }}
+            >
+              View
+            </Menu.Item>
+            <Menu.Item
+              disabled={onAction === undefined || embeddedMode === "bitmap"}
+              leftSection={<FontAwesomeIcon icon={faPencil}></FontAwesomeIcon>}
+              onClick={() => {
+                onAction?.("edit");
+              }}
+            >
+              {isCombinedOutput || selections.length > 0
+                ? "Edit"
+                : "Create / Upload"}
+            </Menu.Item>
+            {/* An embedded text track downloads as the file Save would write */}
+            <Menu.Item
+              disabled={
+                selections.length === 0 ||
+                onAction === undefined ||
+                embeddedMode === "bitmap"
+              }
+              leftSection={
+                <FontAwesomeIcon icon={faDownload}></FontAwesomeIcon>
+              }
+              onClick={() => {
+                onAction?.("download");
+              }}
+            >
+              Download
+            </Menu.Item>
+          </>
+        )}
+        {fileActions && !isSource && !isCombinedOutput && (
           <Menu.Item
             disabled={
               (selections.length !== 0 && !allowSearchExisting) ||
@@ -672,6 +694,7 @@ const SubtitleToolsMenu: FunctionComponent<Props> = ({
             Hide track...
           </Menu.Item>
         )}
+        {extraActions}
         {!isEmbedded && (
           <Menu.Item
             disabled={selections.length === 0 || onAction === undefined}

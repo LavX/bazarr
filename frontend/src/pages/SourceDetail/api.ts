@@ -1,13 +1,17 @@
 /* eslint-disable camelcase */
+import { showNotification } from "@mantine/notifications";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { isAxiosError } from "axios";
 import { refreshWhenJobFinishes } from "@/apis/hooks/jobWatch";
-import { useMediaSources } from "@/apis/hooks/mediaSources";
+import { mediaSourcesKey, useMediaSources } from "@/apis/hooks/mediaSources";
+import queryClient from "@/apis/queries";
 import { QueryKeys } from "@/apis/queries/keys";
 import BaseApi from "@/apis/raw/base";
 import { withInlineErrors } from "@/apis/raw/inlineWrites";
 import mediaSources from "@/apis/raw/mediaSources";
+import { notification } from "@/modules/notification";
 import type { QueuedSearch } from "@/utilities/jobs";
+import { buildSubtitleLanguageKey } from "@/utilities/subtitles";
 
 export interface IdentityCandidate {
   id: number;
@@ -45,7 +49,20 @@ export interface SourceItem extends Omit<SourceGroup, "kind"> {
   arr_shadow: boolean;
   audio_language?: (string | null)[];
   server_missing?: boolean;
+  upgradable?: boolean;
 }
+
+export type SourceItemTarget = Pick<
+  SourceItem,
+  | "id"
+  | "kind"
+  | "source_id"
+  | "library_id"
+  | "group_id"
+  | "path"
+  | "server_missing"
+  | "arr_shadow"
+>;
 
 type StoredSubtitle = [
   string,
@@ -133,13 +150,57 @@ class SourceDetailApi extends BaseApi {
     start: number,
     length: number,
     signal?: AbortSignal,
+    includeScores = false,
   ) {
     const page = await this.get<{ data: RawSourceItem[]; total: number }>(
       "/items",
-      { group_id: id, kind: "episode", start, length },
+      {
+        group_id: id,
+        kind: "episode",
+        start,
+        length,
+        scores: includeScores ? 1 : undefined,
+      },
       signal,
     );
     return { ...page, data: page.data.map(normalizeSourceItem) };
+  }
+
+  async requireCurrentItem(item: SourceItemTarget, subtitle?: Subtitle) {
+    if (item.kind === "sports" || !sourceItemHasFile(item)) {
+      throw new Error("The source item is no longer available.");
+    }
+    const current = await withInlineErrors(() =>
+      this.item(
+        item.id,
+        undefined,
+        item.kind === "episode" ? "episode" : "movie",
+      ),
+    );
+    if (!sourceItemHasFile(current) || !sameSourceItem(item, current)) {
+      throw new Error("The source item moved or is no longer available.");
+    }
+    if (
+      subtitle &&
+      !current.subtitles.some(
+        (row) =>
+          row.path === subtitle.path &&
+          buildSubtitleLanguageKey(row) === buildSubtitleLanguageKey(subtitle),
+      )
+    ) {
+      throw new Error("This subtitle is no longer listed for the source item.");
+    }
+    const owners = await queryClient.fetchQuery({
+      queryKey: mediaSourcesKey,
+      queryFn: ({ signal }) =>
+        withInlineErrors(() => mediaSources.list(signal)),
+      staleTime: 0,
+      retry: false,
+    });
+    if (!sourceOwnerAvailable(owners.data, current)) {
+      throw new Error("The source or library is no longer available.");
+    }
+    return current;
   }
 
   async updateProfile(
@@ -229,28 +290,56 @@ class SourceDetailApi extends BaseApi {
   }
 
   removeSubtitle(id: number, subtitle: Subtitle) {
-    return this.delete(`/items/${id}/subtitles`, {
-      subtitles_path: subtitle.path,
-      language: subtitle.code2,
-      hi: subtitle.hi,
-      forced: subtitle.forced,
-    });
+    return withInlineErrors(() =>
+      this.delete(`/items/${id}/subtitles`, {
+        subtitles_path: subtitle.path,
+        language: subtitle.code2,
+        hi: subtitle.hi,
+        forced: subtitle.forced,
+      }),
+    );
   }
 }
 
 export const sourceDetailApi = new SourceDetailApi();
 
+export function sameSourceItem(item: SourceItemTarget, current: SourceItem) {
+  return (
+    current.id === item.id &&
+    current.kind === item.kind &&
+    current.source_id === item.source_id &&
+    current.library_id === item.library_id &&
+    current.group_id === item.group_id &&
+    current.path === item.path
+  );
+}
+
+export function sourceItemHasFile(
+  item: Pick<SourceItemTarget, "path" | "server_missing" | "arr_shadow">,
+) {
+  return Boolean(item.path && !item.server_missing && !item.arr_shadow);
+}
+
 export function useSourceOwnerAvailable(
   item: Pick<SourceGroup, "source_id" | "library_id">,
 ) {
   const { data, isEnabled } = useMediaSources();
-  const source = data?.data.find((value) => value.id === item.source_id);
+  return isEnabled && sourceOwnerAvailable(data?.data, item);
+}
+
+export function sourceOwnerAvailable(
+  sources: Awaited<ReturnType<typeof mediaSources.list>>["data"] | undefined,
+  item: Pick<SourceGroup, "source_id" | "library_id">,
+) {
   return (
-    isEnabled &&
-    source?.enabled === true &&
-    source.libraries.some(
-      (library) => library.id === item.library_id && library.enabled,
-    )
+    sources?.some(
+      (source) =>
+        source.id === item.source_id &&
+        source.enabled &&
+        source.libraries.some(
+          (library) => library.id === item.library_id && library.enabled,
+        ),
+    ) === true
   );
 }
 
@@ -294,32 +383,36 @@ export function useRefreshSourceDetails() {
   return async () => {
     await Promise.all([
       client.invalidateQueries({ queryKey: sourceDetailKeys.root }),
-      client.invalidateQueries({ queryKey: [QueryKeys.Series, "library"] }),
-      client.invalidateQueries({ queryKey: [QueryKeys.Movies, "library"] }),
       client.invalidateQueries({
         queryKey: [QueryKeys.System, QueryKeys.Badges],
       }),
       client.invalidateQueries({
-        queryKey: [QueryKeys.Series, QueryKeys.Wanted],
-      }),
-      client.invalidateQueries({
-        queryKey: [QueryKeys.Movies, QueryKeys.Wanted],
-      }),
-      client.invalidateQueries({
-        queryKey: [QueryKeys.Series, QueryKeys.Episodes, QueryKeys.History],
-      }),
-      client.invalidateQueries({
-        queryKey: [QueryKeys.Movies, QueryKeys.History],
+        predicate: ({ queryKey }) =>
+          (queryKey[0] === QueryKeys.Series ||
+            queryKey[0] === QueryKeys.Movies) &&
+          queryKey.some(
+            (part) =>
+              typeof part === "object" &&
+              part !== null &&
+              "includeSources" in part &&
+              part.includeSources === true,
+          ),
       }),
     ]);
   };
 }
 
-export function useSourceWrite() {
+export function useSourceWrite({ notifyError = false } = {}) {
   const refresh = useRefreshSourceDetails();
   return useMutation({
     mutationFn: (write: () => Promise<unknown>) => withInlineErrors(write),
     onSuccess: refresh,
+    onError: notifyError
+      ? (error) =>
+          showNotification(
+            notification.error("Subtitle action failed", sourceError(error)),
+          )
+      : undefined,
   });
 }
 
@@ -350,10 +443,10 @@ export function useSourceScan() {
 }
 
 export function sourceError(error: unknown) {
-  if (
-    isAxiosError<{ message?: string }>(error) &&
-    error.response?.data?.message
-  )
-    return error.response.data.message;
+  if (isAxiosError<{ message?: string } | string>(error)) {
+    const data = error.response?.data;
+    if (typeof data === "string" && data) return data;
+    if (typeof data === "object" && data?.message) return data.message;
+  }
   return error instanceof Error ? error.message : "The request failed.";
 }

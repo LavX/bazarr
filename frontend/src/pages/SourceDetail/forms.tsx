@@ -13,6 +13,7 @@ import {
   TextInput,
 } from "@mantine/core";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { withInlineErrors } from "@/apis/raw/inlineWrites";
 import { ManualSearchView } from "@/components/modals/ManualSearchModal";
 import { useModals, withModal } from "@/modules/modals";
 import { searchAsJob, waitForJob } from "@/utilities/jobs";
@@ -23,6 +24,7 @@ import {
   sourceError,
   SourceGroup,
   SourceItem,
+  SourceItemTarget,
   useRefreshSourceDetails,
   useSourceWrite,
 } from "./api";
@@ -155,20 +157,31 @@ export const SourceIdentityModal = withModal(IdentityForm, "source-identity", {
 function SourceSearchForm({
   item,
 }: {
-  item: Pick<SourceItem, "id" | "path" | "scene_name">;
+  item: SourceItemTarget & Pick<SourceItem, "scene_name">;
 }) {
   const client = useQueryClient();
   const refresh = useRefreshSourceDetails();
   function useSearch() {
     const query = useQuery({
-      queryKey: [...sourceDetailKeys.root, "manual", item.id],
-      queryFn: () =>
-        searchAsJob<{
+      queryKey: [
+        ...sourceDetailKeys.root,
+        "manual",
+        item.kind,
+        item.id,
+        item.source_id,
+        item.library_id,
+        item.path,
+      ],
+      queryFn: async () => {
+        await sourceDetailApi.requireCurrentItem(item);
+        return searchAsJob<{
           data: SearchResultType[];
           providers?: System.ProviderSearchOutcome[];
-        }>(client, () => sourceDetailApi.manualSearch(item.id)),
+        }>(client, () => sourceDetailApi.manualSearch(item.id));
+      },
       enabled: false,
       retry: false,
+      placeholderData: undefined,
     });
     return {
       ...query,
@@ -187,6 +200,7 @@ function SourceSearchForm({
       query={useSearch}
       preventRepeatDownload
       download={async (_, result) => {
+        await sourceDetailApi.requireCurrentItem(item);
         const job = await sourceDetailApi.download(item.id, result);
         try {
           await waitForJob(client, job.job_id, job.session);
@@ -204,7 +218,7 @@ export const SourceManualSearchModal = withModal(
   { title: "Search Subtitles", size: "calc(100vw - 4rem)" },
 );
 
-function SourceUploadForm({ item }: { item: Pick<SourceItem, "id"> }) {
+function SourceUploadForm({ item }: { item: SourceItemTarget }) {
   const { data: languages } = useEnabledLanguages();
   const client = useQueryClient();
   const modals = useModals();
@@ -220,12 +234,9 @@ function SourceUploadForm({ item }: { item: Pick<SourceItem, "id"> }) {
         if (!file || !language) return;
         void write
           .mutateAsync(async () => {
-            const job = await sourceDetailApi.upload(
-              item.id,
-              file,
-              language,
-              hi,
-              forced,
+            await sourceDetailApi.requireCurrentItem(item);
+            const job = await withInlineErrors(() =>
+              sourceDetailApi.upload(item.id, file, language, hi, forced),
             );
             await waitForJob(client, job.job_id, job.session);
           })
@@ -235,7 +246,13 @@ function SourceUploadForm({ item }: { item: Pick<SourceItem, "id"> }) {
     >
       <Stack>
         {write.isError && <Alert color="red">{sourceError(write.error)}</Alert>}
-        <FileInput label="Subtitle" required value={file} onChange={setFile} />
+        <FileInput
+          label="Subtitle"
+          fileInputProps={{ "aria-label": "Subtitle file" }}
+          required
+          value={file}
+          onChange={setFile}
+        />
         <Select
           label="Language"
           required

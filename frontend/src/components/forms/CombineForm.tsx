@@ -9,17 +9,12 @@ import {
   Stack,
 } from "@mantine/core";
 import { showNotification } from "@mantine/notifications";
-import { useCombineSubtitles } from "@/apis/hooks/combine";
+import { CombineScope, useCombineSubtitles } from "@/apis/hooks/combine";
 import { useModals, withModal } from "@/modules/modals";
 import { notification } from "@/modules/notification";
 
-type Scope =
-  | { kind: "movie"; radarrId: number; arrInstanceId?: number }
-  | { kind: "episode"; episodeId: number; arrInstanceId?: number }
-  | { kind: "series"; seriesId: number; arrInstanceId?: number };
-
 interface Props {
-  scope: Scope;
+  scope: CombineScope;
   availableLanguages: string[];
   onSubmit?: () => void;
 }

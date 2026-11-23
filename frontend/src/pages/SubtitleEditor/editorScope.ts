@@ -102,7 +102,7 @@ export function createFieldsForLanguageKey(key: string): {
 /** Where View and Edit open a subtitle row. */
 export function subtitleEditorUrl(
   action: "preview" | "edit",
-  mediaType: "movie" | "episode" | "sports",
+  mediaType: "movie" | "episode" | "sports" | "source",
   mediaId: number,
   language: string,
   options: {

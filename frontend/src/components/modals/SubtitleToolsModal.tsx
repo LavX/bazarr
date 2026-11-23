@@ -42,7 +42,8 @@ export type SportsToolsItem = {
 
 type SupportType = Item.Episode | Item.Movie | SportsToolsItem;
 
-type TableColumnType = FormType.ModifySubtitle & {
+type TableColumnType = Omit<FormType.ModifySubtitle, "type"> & {
+  type: LocalisedType["type"];
   raw_language: Subtitle;
   seriesId: number;
   name: string;

@@ -1,6 +1,6 @@
 /* eslint-disable camelcase */
 import { useMemo, useState } from "react";
-import { Link, Navigate, useParams } from "react-router";
+import { Link, Navigate, useNavigate, useParams } from "react-router";
 import {
   Alert,
   Anchor,
@@ -9,7 +9,6 @@ import {
   Button,
   Container,
   Group,
-  Menu,
   Pagination,
   Stack,
   Text,
@@ -17,16 +16,16 @@ import {
 import { useDocumentTitle } from "@mantine/hooks";
 import {
   faCloudUploadAlt,
-  faEllipsis,
   faHardDrive,
   faLanguage,
   faSearch,
+  faToolbox,
   faWrench,
 } from "@fortawesome/free-solid-svg-icons";
 import { ColumnDef } from "@tanstack/react-table";
 import { useMediaSources } from "@/apis/hooks/mediaSources";
 import { useAppTitle } from "@/apis/hooks/site";
-import { Action, Toolbox } from "@/components";
+import { Toolbox } from "@/components";
 import { QueryOverlay } from "@/components/async";
 import Language from "@/components/bazarr/Language";
 import SourceBadge from "@/components/bazarr/SourceBadge";
@@ -36,10 +35,12 @@ import { useModals, withModal } from "@/modules/modals";
 import ItemOverview, { OverviewItem } from "@/pages/views/ItemOverview";
 import { basename } from "@/utilities/files";
 import {
+  sameSourceItem,
   sourceDetailApi,
   sourceError,
   SourceGroup,
   SourceItem,
+  sourceItemHasFile,
   useSourceEpisodes,
   useSourceGroup,
   useSourceItem,
@@ -53,6 +54,13 @@ import {
   SourceManualSearchModal,
   SourceUploadModal,
 } from "./forms";
+import { SourceHistoryButton, SourceUpgradeButton } from "./History";
+import {
+  OpenSourceEditor,
+  SourceCombineButton,
+  SourceSubtitleMenu,
+} from "./SubtitleActions";
+import { SourceToolsModal } from "./Tools";
 
 function asOverview(item: SourceGroup | SourceItem): OverviewItem {
   return {
@@ -134,18 +142,23 @@ export function SourceProfileAction({
   );
 }
 
-export function SourceMovieActions({ item }: { item: SourceItem }) {
+export function SourceMovieActions({
+  item,
+  openEditor,
+}: {
+  item: SourceItem;
+  openEditor: OpenSourceEditor;
+}) {
   const modals = useModals();
   const search = useSourceSearch();
   const scan = useSourceScan();
   const available = useSourceOwnerAvailable(item);
+  const hasFile = available && sourceItemHasFile(item);
   const ready =
     (item.effective_profile_id !== undefined
       ? item.effective_profile_id
       : item.profile_id) !== null &&
-    !item.server_missing &&
-    available &&
-    !item.arr_shadow &&
+    hasFile &&
     ["identified", "parsed"].includes(item.identity_state);
   return (
     <Stack gap="xs">
@@ -183,6 +196,25 @@ export function SourceMovieActions({ item }: { item: SourceItem }) {
           Upload
         </Toolbox.Button>
         <SourceProfileAction item={item} kind="items" />
+        <SourceHistoryButton item={item} />
+        <SourceUpgradeButton item={item} disabled={!ready} />
+        <SourceCombineButton item={item} disabled={!hasFile} />
+        <Toolbox.Button
+          icon={faToolbox}
+          disabled={
+            !hasFile || !item.subtitles.some((subtitle) => subtitle.path)
+          }
+          onClick={() => {
+            if (item.kind !== "sports") {
+              modals.openContextModal(SourceToolsModal, {
+                targets: [{ ...item, kind: item.kind }],
+                openEditor,
+              });
+            }
+          }}
+        >
+          Subtitle Tools
+        </Toolbox.Button>
         <Toolbox.Button
           icon={faWrench}
           onClick={() =>
@@ -203,6 +235,7 @@ export function SourceMovieActions({ item }: { item: SourceItem }) {
 
 export function SourceSeriesActions({ item }: { item: SourceGroup }) {
   const modals = useModals();
+  const openEditor = useNavigate();
   const scan = useSourceScan();
   const search = useSourceSearch("groups");
   const available = useSourceOwnerAvailable(item);
@@ -227,6 +260,18 @@ export function SourceSeriesActions({ item }: { item: SourceGroup }) {
         </Toolbox.Button>
         <SourceProfileAction item={item} kind="groups" />
         <Toolbox.Button
+          icon={faToolbox}
+          disabled={!available || item.kind !== "show"}
+          onClick={() =>
+            modals.openContextModal(SourceToolsModal, {
+              targets: [{ ...item, kind: "show" }],
+              openEditor,
+            })
+          }
+        >
+          Subtitle Tools
+        </Toolbox.Button>
+        <Toolbox.Button
           icon={faWrench}
           onClick={() =>
             modals.openContextModal(SourceIdentityModal, {
@@ -244,51 +289,13 @@ export function SourceSeriesActions({ item }: { item: SourceGroup }) {
   );
 }
 
-function SourceSubtitleMenu({
+export function SourceSubtitleTable({
   item,
-  subtitle,
+  openEditor,
 }: {
   item: SourceItem;
-  subtitle: Subtitle;
+  openEditor: OpenSourceEditor;
 }) {
-  const modals = useModals();
-  const write = useSourceWrite();
-  return (
-    <Stack gap="xs">
-      <Menu position="bottom-end">
-        <Menu.Target>
-          <Action
-            label="Actions"
-            icon={faEllipsis}
-            disabled={write.isPending}
-          />
-        </Menu.Target>
-        <Menu.Dropdown>
-          <Menu.Item
-            color="red"
-            onClick={() =>
-              modals.openConfirmModal({
-                title: "Delete Subtitle",
-                children: <Text>{basename(subtitle.path ?? "")}</Text>,
-                labels: { confirm: "Delete", cancel: "Cancel" },
-                confirmProps: { color: "red" },
-                onConfirm: () =>
-                  write.mutate(() =>
-                    sourceDetailApi.removeSubtitle(item.id, subtitle),
-                  ),
-              })
-            }
-          >
-            Delete
-          </Menu.Item>
-        </Menu.Dropdown>
-      </Menu>
-      {write.isError && <Alert color="red">{sourceError(write.error)}</Alert>}
-    </Stack>
-  );
-}
-
-export function SourceSubtitleTable({ item }: { item: SourceItem }) {
   const available = useSourceOwnerAvailable(item);
   const columns = useMemo<ColumnDef<Subtitle>[]>(
     () => [
@@ -320,12 +327,16 @@ export function SourceSubtitleTable({ item }: { item: SourceItem }) {
       {
         id: "actions",
         cell: ({ row }) =>
-          row.original.path && !item.arr_shadow && available ? (
-            <SourceSubtitleMenu item={item} subtitle={row.original} />
+          row.original.path && sourceItemHasFile(item) && available ? (
+            <SourceSubtitleMenu
+              item={item}
+              subtitle={row.original}
+              openEditor={openEditor}
+            />
           ) : null,
       },
     ],
-    [item, available],
+    [item, available, openEditor],
   );
   return (
     <Stack gap="xs">
@@ -351,15 +362,31 @@ export function SourceSubtitleTable({ item }: { item: SourceItem }) {
   );
 }
 
-function SourceEpisodeView({ item }: { item: SourceItem }) {
+function SourceEpisodeView({
+  item,
+  openEditor,
+}: {
+  item: SourceItem;
+  openEditor: OpenSourceEditor;
+}) {
   const query = useSourceItem(item.id, "episode");
-  const current = query.data ?? item;
+  const moved = query.data && !sameSourceItem(item, query.data);
+  const current = !query.isError && !moved ? query.data : undefined;
   return (
     <QueryOverlay result={query}>
       <Stack>
         {query.isError && <Alert color="red">{sourceError(query.error)}</Alert>}
-        <SourceMovieActions item={current} />
-        <SourceSubtitleTable item={current} />
+        {moved && (
+          <Alert color="red">
+            This episode moved or is no longer available.
+          </Alert>
+        )}
+        {current && (
+          <>
+            <SourceMovieActions item={current} openEditor={openEditor} />
+            <SourceSubtitleTable item={current} openEditor={openEditor} />
+          </>
+        )}
       </Stack>
     </QueryOverlay>
   );
@@ -374,6 +401,7 @@ function EpisodeList({ id }: { id: number }) {
   const [page, setPage] = useState(1);
   const query = useSourceEpisodes(id, page);
   const modals = useModals();
+  const openEditor = useNavigate();
   const columns = useMemo<ColumnDef<SourceItem>[]>(
     () => [
       {
@@ -394,7 +422,7 @@ function EpisodeList({ id }: { id: number }) {
             onClick={() =>
               modals.openContextModal(
                 SourceEpisodeModal,
-                { item: row.original },
+                { item: row.original, openEditor },
                 { title: row.original.title },
               )
             }
@@ -425,7 +453,7 @@ function EpisodeList({ id }: { id: number }) {
             onClick={() =>
               modals.openContextModal(
                 SourceEpisodeModal,
-                { item: row.original },
+                { item: row.original, openEditor },
                 { title: row.original.title },
               )
             }
@@ -435,7 +463,7 @@ function EpisodeList({ id }: { id: number }) {
         ),
       },
     ],
-    [modals],
+    [modals, openEditor],
   );
   return (
     <QueryOverlay result={query}>
@@ -469,8 +497,9 @@ function validId(value: string | undefined) {
 
 export function SourceMovieDetailView() {
   const id = validId(useParams().id);
+  const openEditor = useNavigate();
   const query = useSourceItem(id);
-  const item = query.data;
+  const item = !query.isError ? query.data : undefined;
   useDocumentTitle(
     `${item?.title ?? "Unknown Movie"} - ${useAppTitle()} (Movies)`,
   );
@@ -491,12 +520,12 @@ export function SourceMovieDetailView() {
         {item && (
           <>
             <Toolbox wrapOnPhone>
-              <SourceMovieActions item={item} />
+              <SourceMovieActions item={item} openEditor={openEditor} />
             </Toolbox>
             <Stack>
               <SourceDetailBadge item={item} />
               <ItemOverview item={asOverview(item)} />
-              <SourceSubtitleTable item={item} />
+              <SourceSubtitleTable item={item} openEditor={openEditor} />
             </Stack>
           </>
         )}

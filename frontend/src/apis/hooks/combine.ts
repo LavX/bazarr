@@ -7,14 +7,19 @@ import { refreshWhenJobFinishes } from "@/apis/hooks/jobWatch";
 import { QueryKeys } from "@/apis/queries/keys";
 import client from "@/apis/raw/client";
 
-type Scope =
+export type CombineScope =
   | { kind: "movie"; radarrId: number; arrInstanceId?: number }
   | { kind: "episode"; episodeId: number; arrInstanceId?: number }
   | { kind: "series"; seriesId: number; arrInstanceId?: number }
   | { kind: "sports"; eventId: number; arrInstanceId?: number }
-  | { kind: "sportsLeague"; leagueId: number; arrInstanceId?: number };
+  | { kind: "sportsLeague"; leagueId: number; arrInstanceId?: number }
+  | {
+      kind: "source";
+      itemId: number;
+      validate: (body: Api.CombineRequest) => Promise<void>;
+    };
 
-function buildPath(scope: Scope): string {
+function buildPath(scope: CombineScope): string {
   switch (scope.kind) {
     case "movie":
       return `/movies/${scope.radarrId}/subtitles/combine`;
@@ -26,18 +31,26 @@ function buildPath(scope: Scope): string {
       return `/sports/events/${scope.eventId}/subtitles/combine`;
     case "sportsLeague":
       return `/sports/leagues/${scope.leagueId}/subtitles/combine`;
+    case "source":
+      return `/sources/items/${scope.itemId}/subtitles/combine`;
   }
 }
 
 export function useCombineSubtitles() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: async (params: { scope: Scope; body: Api.CombineRequest }) => {
+    mutationFn: async (params: {
+      scope: CombineScope;
+      body: Api.CombineRequest;
+    }) => {
       const { scope, body } = params;
+      if (scope.kind === "source") await scope.validate(body);
       const response = await client.axios.post<Api.CombineResult>(
         buildPath(scope),
         body,
-        { params: { arr_instance_id: scope.arrInstanceId } },
+        scope.kind === "source"
+          ? undefined
+          : { params: { arr_instance_id: scope.arrInstanceId } },
       );
       return response.data;
     },
@@ -55,7 +68,7 @@ export function useCombineSubtitles() {
   });
 }
 
-function invalidateScope(qc: QueryClient, scope: Scope) {
+function invalidateScope(qc: QueryClient, scope: CombineScope) {
   switch (scope.kind) {
     case "movie":
       // The prefix alone. Movie queries are cached under the canonical
@@ -87,6 +100,9 @@ function invalidateScope(qc: QueryClient, scope: Scope) {
       // does not carry, so invalidate the whole sports tree the way the
       // episode case invalidates the series tree.
       void qc.invalidateQueries({ queryKey: [QueryKeys.Sports] });
+      break;
+    case "source":
+      void qc.invalidateQueries({ queryKey: ["source-detail"] });
       break;
   }
 }

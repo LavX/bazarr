@@ -1,6 +1,8 @@
+import type { QueuedSearch } from "@/utilities/jobs";
 import type { SubtitleSyncStatus } from "@/utilities/subtitles";
 import BaseApi from "./base";
 import client from "./client";
+import { withInlineErrors } from "./inlineWrites";
 
 export interface SubtitleContentResponse {
   exists?: boolean;
@@ -287,6 +289,17 @@ class SubtitlesApi extends BaseApi {
     return response.data;
   }
 
+  async getRefTracksBySourceItemId(
+    subtitlesPath: string,
+    sourceItemId: number,
+  ) {
+    const response = await this.get<DataWrapper<Item.RefTracks>>("", {
+      subtitlesPath,
+      sourceItemId,
+    });
+    return response.data;
+  }
+
   async info(names: string[]) {
     const response = await this.get<DataWrapper<SubtitleInfo[]>>(`/info`, {
       filenames: names,
@@ -295,11 +308,18 @@ class SubtitlesApi extends BaseApi {
   }
 
   async modify(action: string, form: FormType.ModifySubtitle) {
-    const response = await this.patch<{ job_id: number | null } | undefined>(
-      "",
-      form,
-      { action },
-    );
+    const { validateSource, ...payload } = form;
+    delete payload.sourceLanguage;
+    if (form.type === "source") {
+      await validateSource?.(action.startsWith("two_point_fit("));
+    }
+    const write = () =>
+      this.patch<QueuedSearch | undefined>("", payload, {
+        action,
+      });
+    const response = await (form.type === "source"
+      ? withInlineErrors(write)
+      : write());
     return response.data;
   }
 

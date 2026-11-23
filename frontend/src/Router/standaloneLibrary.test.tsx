@@ -13,7 +13,6 @@ import { openSelect } from "@/tests/select";
 import { useRoutes } from ".";
 
 function LibraryRoutes() {
-  // eslint-disable-next-line testing-library/no-node-access -- route definition, not DOM children.
   return useRouterRoutes(useRoutes()[0].children ?? []);
 }
 
@@ -75,6 +74,7 @@ describe.each([
         shadowed_by: null,
         needs_attention: attention,
         title: "Archive title",
+        path: kind === "movies" ? "/media/archive.mkv" : null,
       };
       const list = vi.fn();
       const saveArr = vi.fn();
@@ -274,7 +274,9 @@ describe.each([
         const user = userEvent.setup();
         renderLibrary("/series");
         await screen.findByRole("link", { name: "Archive title" });
-        await user.click(screen.getByRole("button", { name: "Toggle filters" }));
+        await user.click(
+          screen.getByRole("button", { name: "Toggle filters" }),
+        );
         const subtitles = screen.getByRole("combobox", { name: "Subtitles" });
         await user.click(subtitles);
         await user.click(
@@ -288,7 +290,9 @@ describe.each([
     }
 
     it("searches and scans mixed selections through their respective owners", async () => {
-      const { batchArr, searchSource, scanSource } = setup({ attention: false });
+      const { batchArr, searchSource, scanSource } = setup({
+        attention: false,
+      });
       const user = userEvent.setup();
       renderLibrary(`/${kind}`);
       await user.click(
@@ -319,6 +323,90 @@ describe.each([
         });
         expect(scanSource).toHaveBeenCalledOnce();
       });
+    });
+
+    it("applies a selected subtitle tool only to its physical source item", async () => {
+      const { batchArr } = setup({ attention: false });
+      const user = userEvent.setup();
+      const itemId = kind === "series" ? 71 : id;
+      const itemKind = kind === "series" ? "episode" : "movie";
+      const item = {
+        id: itemId,
+        kind: itemKind,
+        source_id: sourceId,
+        library_id: libraryId,
+        group_id: kind === "series" ? id : null,
+        title: "Archive video",
+        path: "/media/archive.mkv",
+        subtitles: [
+          ["en", "/media/archive.en.srt", null],
+          ["de", "/media/archive.de.srt", null],
+        ],
+        missing_subtitles: [],
+        arr_shadow: false,
+      };
+      const tools = vi.fn();
+      const episodes = vi.fn();
+      server.use(
+        http.get(`/api/sources/groups/${id}`, () =>
+          HttpResponse.json({
+            id,
+            source_id: sourceId,
+            library_id: libraryId,
+            kind: "show",
+          }),
+        ),
+        http.get("/api/sources/items", ({ request }) => {
+          episodes(new URL(request.url).searchParams.get("group_id"));
+          return HttpResponse.json({ data: [item], total: 1 });
+        }),
+        http.get(`/api/sources/items/${itemId}`, () => HttpResponse.json(item)),
+        http.patch("/api/subtitles", async ({ request }) => {
+          const form = await request.formData();
+          tools(
+            new URL(request.url).searchParams.get("action"),
+            Object.fromEntries(form),
+          );
+          return HttpResponse.json({ job_id: null }, { status: 202 });
+        }),
+      );
+      renderLibrary(`/${kind}`);
+      await user.click(
+        await screen.findByRole("checkbox", { name: "Select Archive title" }),
+      );
+      await user.click(
+        screen.getByRole("checkbox", { name: "Select Arr title" }),
+      );
+      await user.click(
+        screen.getByRole("button", { name: "Source Subtitle Tools" }),
+      );
+      const dialog = await screen.findByRole("dialog", {
+        name: "Subtitle Tools",
+      });
+      await user.click(
+        await within(dialog).findByRole("checkbox", {
+          name: /archive\.en\.srt/,
+        }),
+      );
+      await user.click(
+        within(dialog).getByRole("button", { name: "Select Action" }),
+      );
+      await user.click(
+        await screen.findByRole("menuitem", { name: "Common Fixes" }),
+      );
+      await waitFor(() => {
+        expect(tools).toHaveBeenCalledExactlyOnceWith("common", {
+          type: "source",
+          id: String(itemId),
+          language: "en",
+          path: "/media/archive.en.srt",
+          hi: "False",
+          forced: "False",
+        });
+      });
+      expect(batchArr).not.toHaveBeenCalled();
+      if (kind === "series") expect(episodes).toHaveBeenCalledWith(String(id));
+      else expect(episodes).not.toHaveBeenCalled();
     });
 
     it("opens a source-only library and targets source-owned search and scan", async () => {

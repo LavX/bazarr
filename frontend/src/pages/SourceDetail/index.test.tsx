@@ -88,6 +88,9 @@ beforeEach(() => {
     http.get("/api/system/status", () => HttpResponse.json({ data: {} })),
     http.get("/api/system/languages", () => HttpResponse.json([])),
     http.get("/api/sources/items/7", () => HttpResponse.json(movie)),
+    http.get("/api/sources/items/7/history", () =>
+      HttpResponse.json({ data: [], total: 0 }),
+    ),
   );
 });
 
@@ -373,7 +376,7 @@ it("allows a group search to select eligible children without a group profile", 
   await waitFor(() => expect(searches).toHaveBeenCalledTimes(1));
 });
 
-it("deletes only the selected source sidecar and offers no unsupported tools", async () => {
+it("deletes only the selected source sidecar and hides embedded track actions", async () => {
   const user = userEvent.setup();
   const deleted: unknown[] = [];
   server.use(
@@ -385,10 +388,14 @@ it("deletes only the selected source sidecar and offers no unsupported tools", a
   openPage("movie");
   await user.click(await screen.findByLabelText("Actions"));
   expect(
-    screen.queryByRole("menuitem", { name: /Sync|OCR|Extract|Hide/ }),
+    screen.queryByRole("menuitem", {
+      name: /OCR to text|Extract to file|Hide track/,
+    }),
   ).not.toBeInTheDocument();
-  await user.click(await screen.findByRole("menuitem", { name: "Delete" }));
-  const dialog = await screen.findByRole("dialog", { name: "Delete Subtitle" });
+  await user.click(await screen.findByRole("menuitem", { name: "Delete..." }));
+  const dialog = await screen.findByRole("dialog", {
+    name: "The following subtitles will be deleted",
+  });
   await user.click(within(dialog).getByRole("button", { name: "Delete" }));
   await waitFor(() =>
     expect(deleted).toEqual([
@@ -460,6 +467,30 @@ it("searches and downloads from the source manual routes", async () => {
   expect(searches).toHaveBeenCalledTimes(1);
 });
 
+it("does not start a manual search when the item moved after opening the dialog", async () => {
+  const user = userEvent.setup();
+  const search = vi.fn();
+  openPage("movie");
+  const manual = await screen.findByRole("button", { name: "Manual Search" });
+  await waitFor(() => expect(manual).toBeEnabled());
+  await user.click(manual);
+  const dialog = await screen.findByRole("dialog", {
+    name: "Search Subtitles",
+  });
+  server.use(
+    http.get("/api/sources/items/7", () =>
+      HttpResponse.json({ ...movie, path: "/media/replacement.mkv" }),
+    ),
+    http.post("/api/sources/items/7/manual/search", () => {
+      search();
+      return HttpResponse.json({ job_id: null });
+    }),
+  );
+  await user.click(within(dialog).getByRole("button", { name: "Search" }));
+  expect(await within(dialog).findByText(/source item moved/)).toBeVisible();
+  expect(search).not.toHaveBeenCalled();
+});
+
 it("uploads a subtitle to its source item with the selected language flags", async () => {
   const post = vi
     .spyOn(client.axios, "post")
@@ -486,4 +517,37 @@ it("uploads a subtitle to its source item with the selected language flags", asy
   } finally {
     post.mockRestore();
   }
+});
+
+it("does not upload to a replacement file after the upload dialog opens", async () => {
+  const user = userEvent.setup();
+  const upload = vi.fn();
+  server.use(
+    http.get("/api/system/languages", () =>
+      HttpResponse.json([{ code2: "en", name: "English", enabled: true }]),
+    ),
+    http.post("/api/sources/items/7/subtitles", () => {
+      upload();
+      return HttpResponse.json({ job_id: null });
+    }),
+  );
+  openPage("movie");
+  const open = await screen.findByRole("button", { name: "Upload" });
+  await waitFor(() => expect(open).toBeEnabled());
+  await user.click(open);
+  const dialog = await screen.findByRole("dialog", {
+    name: "Upload Subtitles",
+  });
+  const file = new File(["subtitle"], "movie.en.srt");
+  await user.upload(within(dialog).getByLabelText("Subtitle file"), file);
+  await user.click(within(dialog).getByRole("combobox", { name: "Language" }));
+  await user.click(await screen.findByRole("option", { name: "English" }));
+  server.use(
+    http.get("/api/sources/items/7", () =>
+      HttpResponse.json({ ...movie, path: "/media/replacement.mkv" }),
+    ),
+  );
+  await user.click(within(dialog).getByRole("button", { name: "Upload" }));
+  expect(await within(dialog).findByText(/source item moved/)).toBeVisible();
+  expect(upload).not.toHaveBeenCalled();
 });
