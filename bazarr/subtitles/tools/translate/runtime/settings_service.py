@@ -378,6 +378,17 @@ class TranslatorSettingsService:
         declared = {item["key"] for item in fields}
         return [dict(item) for item in HOST_FIELDS if item["key"] not in declared] + [dict(item) for item in fields]
 
+    @staticmethod
+    def _retained_secrets(plugin_id: str, backend_type: str | None = None) -> frozenset[str]:
+        from provider_hub.service import retained_settings_manifest
+        from .destinations import schema_for_backend, schema_for_engine
+
+        manifest = retained_settings_manifest(plugin_id)
+        if manifest is None:
+            return frozenset()
+        schema = schema_for_engine(manifest) if backend_type is None else schema_for_backend(manifest, backend_type)
+        return schema.secret_fields
+
     def _serving_plugin(self, instance, connection=None) -> InstalledPlugin | None:
         plugin_id = (connection.plugin_id if connection is not None and connection.plugin_id else instance.plugin_id)
         return self._plugin(plugin_id)
@@ -504,11 +515,13 @@ class TranslatorSettingsService:
 
     def _secret_view(self, owner, fields, destinations) -> dict[str, dict[str, Any]]:
         """What may be said about each stored secret: that it is set, stale, and a hint. Never a value."""
-        summary = self._store.secret_summary(owner, destinations)
+        secret_fields = DestinationSchema(fields=tuple(fields)).secret_fields
+        summary = self._store.secret_summary(owner, destinations, fields=secret_fields)
         lists = {item["key"] for item in fields if item.get("type") in ("key_list", "list")}
-        # frozenset() is covered by every binding, so this reads every secret this owner holds. The values
-        # are counted here and dropped; only the count leaves.
-        held = self._store.secrets_for_request(owner, frozenset()) if lists & set(summary) else {}
+        # An empty destination set is covered by every binding. This reads only the active fields, then
+        # counts the entries without including their values in the view.
+        held = (self._store.secrets_for_request(owner, frozenset(), fields=secret_fields)
+                if lists & set(summary) else {})
         view = {}
         for name, entry in summary.items():
             entry = dict(entry)
@@ -614,7 +627,7 @@ class TranslatorSettingsService:
             return
         schema = self._engine_schema(plugin)
         owner = (INSTANCE, instance.id)
-        stored = frozenset(self._store.secret_summary(owner, frozenset()))
+        stored = frozenset(self._store.secret_summary(owner, frozenset(), fields=schema.secret_fields))
         self._validate(schema, self._merged(self._store.settings_of(instance), {}, schema), stored, plugin.plugin_id,
                        "engine", "", contents=self._store.secret_contents(owner, schema.fields))
 
@@ -623,7 +636,7 @@ class TranslatorSettingsService:
         schema = self._engine_schema(plugin)
         owner = (INSTANCE, instance.id)
         before = self._store.settings_of(instance)
-        stored = frozenset(self._store.secret_summary(owner, frozenset())) - frozenset(clear)
+        stored = frozenset(self._store.secret_summary(owner, frozenset(), fields=schema.secret_fields)) - frozenset(clear)
         self._check_clear(clear, schema)
         # Every save is checked, one that only clears a secret included: the stored settings, with the values
         # sent laid over them and the secrets that remain after the clear, must still satisfy the manifest.
@@ -636,6 +649,7 @@ class TranslatorSettingsService:
         self._require_consent(schema, before, after, payload, new_owner=False)
         parsed = self._parsed(plugin)
         self._make_key_durable(validated)  # before the lock and the transaction, never inside them
+        retained_secrets = self._retained_secrets(plugin.plugin_id)
 
         def commit() -> None:
             # The revision claim, the settings and every secret write or clear commit together. A save that only
@@ -646,11 +660,11 @@ class TranslatorSettingsService:
                     self._store.save_instance_settings(
                         instance.id, after, schema=schema,
                         settings_version=parsed.settings_version if parsed else None,
-                        plugin_version=plugin.version, expected_revision=expected)
+                        plugin_version=plugin.version, expected_revision=expected, retained_secrets=retained_secrets)
                 except StoreStale as error:
                     raise StaleRevisionError("The engine settings changed since they were loaded.",
                                              revision=error.revision) from error
-                self._write_secrets(owner, validated, clear, effective_destinations(schema, after))
+                self._write_secrets(owner, validated, clear, effective_destinations(schema, after), schema.secret_fields)
 
         return commit
 
@@ -766,7 +780,7 @@ class TranslatorSettingsService:
                 price_input_per_million=host[PRICE_KEYS[0]], price_output_per_million=host[PRICE_KEYS[1]],
                 enabled=self._flag(payload, "enabled", True))
             self._write_secrets((CONNECTION, row.id), validated, [],
-                                effective_destinations(schema, validated.settings))
+                                effective_destinations(schema, validated.settings), schema.secret_fields)
         return {"connection": self.connection_view(instance, self._store.get_connection(row.id)), "notices": []}
 
     def update_connection(self, connection_id: int, payload: Mapping[str, Any]) -> dict[str, Any]:
@@ -790,7 +804,7 @@ class TranslatorSettingsService:
             return {"connection": self.connection_view(instance, connection), "notices": []}
         owner = (CONNECTION, connection_id)
         before = self._store.settings_of(connection)
-        stored = frozenset(self._store.secret_summary(owner, frozenset())) - frozenset(clear)
+        stored = frozenset(self._store.secret_summary(owner, frozenset(), fields=schema.secret_fields)) - frozenset(clear)
         self._check_clear(clear, schema)
         # Every save that changes what the connection holds, or turns it on, is checked, a clear-only one
         # included: the stored settings, the values sent and the secrets that remain must satisfy the manifest.
@@ -810,17 +824,18 @@ class TranslatorSettingsService:
         self._require_consent(schema, before, after, payload, new_owner=False)
         parsed = self._parsed(plugin)
         self._make_key_durable(validated)
+        retained_secrets = self._retained_secrets(plugin.plugin_id, connection.backend_type)
         with self._store.transaction():
             try:
                 self._store.update_connection(
                     connection_id, schema=schema, model=host[MODEL_KEY], settings=after,
                     settings_version=parsed.settings_version if parsed else None, plugin_version=plugin.version,
                     price_input_per_million=host[PRICE_KEYS[0]], price_output_per_million=host[PRICE_KEYS[1]],
-                    enabled=enabled, expected_revision=expected)
+                    enabled=enabled, expected_revision=expected, retained_secrets=retained_secrets)
             except StoreStale as error:
                 raise StaleRevisionError("The back end changed since it was loaded.",
                                          revision=error.revision) from error
-            self._write_secrets(owner, validated, clear, effective_destinations(schema, after))
+            self._write_secrets(owner, validated, clear, effective_destinations(schema, after), schema.secret_fields)
         return {"connection": self.connection_view(instance, self._connection(connection_id)), "notices": []}
 
     def delete_connection(self, connection_id: int, expected_revision: Any = None) -> None:
@@ -937,11 +952,11 @@ class TranslatorSettingsService:
         if any(item.startswith("invalid:") for item in destinations):
             return self._test_result(False, "The saved address is not a valid web address. Open this back end, "
                                             "correct the address and save it.", outcome=REFUSED)
-        summary = self._store.secret_summary(owner, destinations)
+        summary = self._store.secret_summary(owner, destinations, fields=schema.secret_fields)
         if connection.awaiting_secrets or any(entry.get("stale") for entry in summary.values()):
             return self._test_result(False, "The address changed after the key was saved, so the saved key is not "
                                             "sent to the new one. Enter the key again and save.", outcome=REFUSED)
-        secrets = self._store.secrets_for_request(owner, destinations)
+        secrets = self._store.secrets_for_request(owner, destinations, fields=schema.secret_fields)
         engine_values = dict(self._store.settings_of(instance))
         engine_refusal, engine_secrets = self._engine_secrets(instance, engine_values)
         if engine_refusal:
@@ -1039,18 +1054,15 @@ class TranslatorSettingsService:
         The same rule a translation keeps: a key entered for other addresses is never sent to these.
         """
         owner = (INSTANCE, instance.id)
-        if not self._store.secrets_for_request(owner, frozenset()):
+        schema = self._engine_schema(self._plugin(instance.plugin_id))
+        if not self._store.secrets_for_request(owner, frozenset(), fields=schema.secret_fields):
             return "", {}
-        parsed = self._parsed(self._plugin(instance.plugin_id))
-        if parsed is None:
-            return "", {}
-        destinations = effective_destinations(DestinationSchema(fields=parsed.settings_fields,
-                                                                endpoints=parsed.endpoints), engine_values)
-        if (instance.awaiting_secrets or self._store.has_stale_secrets(owner, destinations)
+        destinations = effective_destinations(schema, engine_values)
+        if (instance.awaiting_secrets or self._store.has_stale_secrets(owner, destinations, fields=schema.secret_fields)
                 or any(item.startswith("invalid:") for item in destinations)):
             return ("The address of the engine changed after its key was saved, so the saved key is not sent to "
                     "the new one. Enter the key again and save."), {}
-        return "", dict(self._store.secrets_for_request(owner, destinations))
+        return "", dict(self._store.secrets_for_request(owner, destinations, fields=schema.secret_fields))
 
     def _paid_test(self, connection, instance, values, destinations, secrets, held, where,
                    claim: _Claim, engine_values: Mapping[str, Any] | None = None) -> dict[str, Any]:
@@ -1404,14 +1416,14 @@ class TranslatorSettingsService:
         except ValueError:
             raise ServiceError("The encryption key could not be saved, so no secret was stored. Try again.") from None
 
-    def _write_secrets(self, owner, validated: ValidatedValues, clear: list[str], destinations) -> None:
+    def _write_secrets(self, owner, validated: ValidatedValues, clear: list[str], destinations, fields) -> None:
         for name in clear:
             # Clear, then type: a secret sent in the same request replaces the stored one instead of being dropped.
             if name not in validated.secrets:
-                self._store.clear_secret(owner, name, destinations=destinations)
+                self._store.clear_secret(owner, name, destinations=destinations, fields=fields)
         for name, value in validated.secrets.items():
             try:
-                self._store.set_secret(owner, name, _json_secret(value), destinations=destinations)
+                self._store.set_secret(owner, name, _json_secret(value), destinations=destinations, fields=fields)
             except TranslatorStoreError as error:
                 raise InvalidValuesError(str(error), field_errors={name: str(error)}) from error
 

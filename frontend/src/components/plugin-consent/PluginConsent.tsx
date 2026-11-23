@@ -343,9 +343,11 @@ const PluginConsent: FunctionComponent<PluginConsentProps> = ({
                   ) : (
                     <>
                       <p>
-                        This switches the plugin to the previous release. Older
-                        releases may not support all saved data or settings.
-                        Back up any important plugin data before continuing.
+                        This switches the plugin back to its previous release
+                        and its retained data.{" "}
+                        {rollbackPreview.restores_settings
+                          ? "It restores this plugin's previous settings and discards edits made since the update."
+                          : "No previous settings copy is available. The release checks the settings currently saved."}
                       </p>
                       <p className={styles.quiet}>
                         The release becomes active now if this plugin supports

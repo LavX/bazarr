@@ -166,6 +166,7 @@ export interface PluginRollbackAvailability {
 
 export interface PluginRollbackPreview extends PluginRollbackAvailability {
   confirmation_identity: string | null;
+  restores_settings?: boolean;
   consent: PluginUpdateDelta | null;
 }
 

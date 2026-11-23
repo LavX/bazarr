@@ -811,8 +811,9 @@ def test_a_plugin_update_drops_a_stored_mask_text_instead_of_failing(store, capl
 
 
 def test_a_renamed_destination_field_with_a_new_value_is_caught(store):
-    old = DestinationSchema(fields=({"key": "base_url", "type": "text", "destination": True},))
-    new = DestinationSchema(fields=({"key": "server_url", "type": "text", "destination": True},))
+    token = {"key": "token", "type": "secret"}
+    old = DestinationSchema(fields=({"key": "base_url", "type": "text", "destination": True}, token))
+    new = DestinationSchema(fields=({"key": "server_url", "type": "text", "destination": True}, token))
     instance = store.create_instance("example_engine", settings={"base_url": "http://a:1", "server_url": "http://evil:1"})
     store.set_secret((INSTANCE, instance.id), "token", KEY, destinations=effective_destinations(
         old, {"base_url": "http://a:1"}))
@@ -861,8 +862,9 @@ def test_a_changed_default_is_a_new_destination(store):
 
 
 def test_a_changed_endpoint_origin_is_a_new_destination_for_its_connections(store):
-    old = DestinationSchema(endpoints=("https://openrouter.ai:443",))
-    new = DestinationSchema(endpoints=("https://openrouter.example:443",))
+    fields = ({"key": "api_key", "type": "secret"},)
+    old = DestinationSchema(fields=fields, endpoints=("https://openrouter.ai:443",))
+    new = DestinationSchema(fields=fields, endpoints=("https://openrouter.example:443",))
     instance = _ai_engine(store, with_connection=False)
     connection = store.add_connection(instance.id, "openrouter", plugin_id=OFFICIAL_ENGINE_PLUGIN_ID)
     store.set_secret((CONNECTION, connection.id), "api_key", KEY, destinations=effective_destinations(old, {}))

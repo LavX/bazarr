@@ -36,7 +36,7 @@ from .manifest import ManifestValidationError, manifest_provider_id, validate_ma
 from .kinds import (ATTACH_LIVE, ATTACH_ON_RESTART, DETACH_LIVE, SUBTITLE_PROVIDER, TRANSLATOR, UnknownKindError,
                     catalog_kind_of, get_kind, kind_for_api, kind_of, known_kinds)
 from .kinds import subtitle_provider as provider_kind
-from . import catalog_feed, closure, consent, datadir, detach, dev_source, floor, releases, revocation, secret_paths, seed
+from . import catalog_feed, closure, consent, datadir, detach, dev_source, floor, release_settings, releases, revocation, secret_paths, seed
 from .bundle import verify_bundle_tree
 from .compatibility import (
     CATALOG_LIST_PLUGINS, CATALOG_LIST_PROVIDERS, HostFacts, current_host, entry_compatibility, refusal_text,
@@ -2201,6 +2201,7 @@ def _redact_installation(installation: dict[str, Any]) -> dict[str, Any]:
     if redacted.pop(releases.STAGED_ROLLBACK, None) and redacted.get("staged_version"):
         redacted["staged_action"] = "rollback"
     redacted.pop(_PENDING_ROLLBACK_HOOK, None)
+    redacted.pop(release_settings.RETAINED, None)
     redacted.pop("active_data_key", None)
     _clear_staged_data(redacted)
     redacted.pop("delete_release_data", None)
@@ -3954,6 +3955,7 @@ def _staged_installation(
         **({"active_data_key": existing["active_data_key"]} if existing.get("active_data_key") else {}),
         **({"google_seed_rollback": existing["google_seed_rollback"]} if existing.get("google_seed_rollback") else {}),
         **({_PENDING_ROLLBACK_HOOK: existing[_PENDING_ROLLBACK_HOOK]} if _PENDING_ROLLBACK_HOOK in existing else {}),
+        **({release_settings.RETAINED: existing[release_settings.RETAINED]} if release_settings.RETAINED in existing else {}),
         **({"delete_release_data": True} if existing.get("delete_release_data") else {}),
         **({"data_worker_cleanup_pending": True} if existing.get("data_worker_cleanup_pending") else {}),
         "python_path": existing.get("python_path"),
@@ -5611,9 +5613,9 @@ def _prepare_activation_data(plugin_id, row, active_data, same_owner, testing: P
 def activate_release(provider_id: str, *, at_boot: bool = False, _expected_staged=None) -> Activation:
     """The one way a staged release becomes the active one, at boot and while Bazarr+ runs.
 
-    The staged release is checked (not revoked, accepted by its kind, bundle matches its manifest, starts), the
-    kind's ``on_activated`` brings what it stores in line with the new manifest, and one write makes the
-    release active: the release it replaces is retired, or draining when a running process may still be
+    The staged release is checked (not revoked, accepted by its kind, bundle matches its manifest, starts).
+    The saved copy and the new release identity commit together before the translator settings are reconciled.
+    When the release becomes active, the release it replaces is retired, or draining when a running process may still be
     serving its calls, and the plugin's restart flag clears. A release that fails any step is dropped and the
     active one, if any, stays as it was, so a failed update never takes a working plugin away.
 
@@ -5722,7 +5724,25 @@ def activate_release(provider_id: str, *, at_boot: bool = False, _expected_stage
                 if target is not None:
                     # The saved stage stays available if this process exits before the promotion commits.
                     datadir.publish_activation_data(root, probe_data, target)
-            attention = None if rollback else activation_attention(manifest)
+            prior_settings = release_settings.record_for(installation, staged_release) if rollback else None
+            restored = release_settings.read(prior_settings)
+            translator_owners = {}
+            retained_owner_settings = None
+            translator_update = kind_of(installation) == TRANSLATOR and isinstance(previous_manifest, dict)
+            if translator_update and same_owner:
+                from .kinds.translator import _store
+                from subtitles.tools.translate.runtime.plugin_update import capture_release_settings
+
+                translator_owners = capture_release_settings(_store(), provider_id, previous_manifest, manifest.raw)
+                if restored.get("owners"):
+                    retained_owner_settings = release_settings.seal({
+                        "owners": restored["owners"],
+                        "revisions": {key: owner["revision"] for key, owner in translator_owners.items()},
+                    })
+            outgoing_settings = (release_settings.capture(state, provider_id, installation, active_release,
+                                                           translator_owners) if same_owner else None)
+            reconcile_after_commit = rollback or translator_update
+            attention = None if reconcile_after_commit else activation_attention(manifest)
         except Exception as error:
             message = refusal_text(error)
             if _fail_staged_activation(
@@ -5751,6 +5771,15 @@ def activate_release(provider_id: str, *, at_boot: bool = False, _expected_stage
                 # Replaced, removed, revoked or finished by someone else while it was being checked: theirs
                 # stands, and a revoked release is dropped by the next refresh.
                 return False, None
+            if outgoing_settings is not None and row.get("config") != installation.get("config"):
+                # The staged bundle is still valid. Re-read the owner's save before taking its release copy.
+                return False, None
+            if restored:
+                release_settings.restore_config(state, provider_id, row, restored)
+            if outgoing_settings is not None:
+                row[release_settings.RETAINED] = outgoing_settings
+            else:
+                row.pop(release_settings.RETAINED, None)
             row["active_version"] = row.get("staged_version")
             if row.get("staged_path"):
                 row["active_path"] = row.get("staged_path")
@@ -5782,9 +5811,11 @@ def activate_release(provider_id: str, *, at_boot: bool = False, _expected_stage
             row["last_error"] = None
             row.pop("needs_repair", None)
             row["activated_at"] = utcnow_iso()
-            if rollback:
+            if reconcile_after_commit:
                 identity = _rollback_artifact_identity(row, staged_release)
                 row[_PENDING_ROLLBACK_HOOK] = {"identity": identity, "previous_manifest": previous_manifest}
+                if retained_owner_settings is not None:
+                    row[_PENDING_ROLLBACK_HOOK]["settings_copy"] = retained_owner_settings
             else:
                 row.pop(_PENDING_ROLLBACK_HOOK, None)
             if provider_id == seed.GOOGLE_PLUGIN_ID:
@@ -5824,9 +5855,9 @@ def activate_release(provider_id: str, *, at_boot: bool = False, _expected_stage
         if isinstance(previous_manifest, dict):
             _archive_active_manifest(provider_id, previous_manifest)
         _archive_active_manifest(provider_id, manifest.raw)
-        if rollback:
-            # Run the kind's state transition only after the rollback identity was committed.
+        if reconcile_after_commit:
             _finish_rollback_activation(load_state_strict(), provider_id)
+        if rollback:
             job.update(message=f"Activated rollback {previous_version} -> {target_version}")
         elif previous_version:
             job.update(message=f"Activated update {previous_version} -> {target_version}")
@@ -5963,6 +5994,13 @@ def _finish_rollback_activation(state, provider_id: str) -> None:
         return
     marker = row[_PENDING_ROLLBACK_HOOK]
     try:
+        if marker.get("settings_copy") is not None:
+            from .kinds.translator import _store
+            from subtitles.tools.translate.runtime.plugin_update import restore_release_settings
+
+            settings_copy = release_settings.unseal(marker["settings_copy"])
+            restore_release_settings(_store(), provider_id, marker.get("previous_manifest"), row["manifest"],
+                                     settings_copy["owners"], settings_copy["revisions"])
         attention = get_kind(kind_of(row)).on_activated(provider_id, marker.get("previous_manifest"), row["manifest"])
     except Exception:
         logging.getLogger(__name__).exception("The kind's rollback activation step failed for %s", provider_id)
@@ -5987,7 +6025,7 @@ def _finish_rollback_activation(state, provider_id: str) -> None:
 
 @datadir.serialized
 def resume_rollback_activations() -> None:
-    """Finish settings reconciliation for rollbacks committed by an earlier run."""
+    """Finish settings reconciliation for releases committed by an earlier run."""
     state = load_state_strict()
     for provider_id in state.get("installations", {}):
         try:
@@ -6020,10 +6058,25 @@ def _rollback_owned(state, provider_id, row, target) -> bool:
             and (target.source_id, target.origin) == (row.get("source_id"), row.get("origin")))
 
 
+def retained_settings_manifest(provider_id: str) -> dict[str, Any] | None:
+    """The same-registration previous manifest whose saved settings may return."""
+    state = load_state()
+    row = (state.get("installations") or {}).get(provider_id)
+    target = _previous_release(provider_id)
+    if (target is not None and isinstance(row, dict) and row.get("state") != "removed"
+            and _rollback_owned(state, provider_id, row, target)):
+        return target.manifest
+    return None
+
+
 def _rollback_confirmation(state: dict[str, Any], row: dict[str, Any], target: releases.Release, *,
                            legacy_env=_UNSET) -> str:
-    return _rollback_hash((_rollback_release_identity(target, legacy_env=legacy_env),
-                           target.manifest, _rollback_source_binding(state, row)))
+    facts = (_rollback_release_identity(target, legacy_env=legacy_env), target.manifest,
+             _rollback_source_binding(state, row))
+    settings_copy = release_settings.record_for(row, target)
+    if settings_copy is not None:
+        facts += (settings_copy["content"],)
+    return _rollback_hash(facts)
 
 
 def _staged_rollback_refusal(state: dict[str, Any], provider_id: str, row: dict[str, Any]) -> str | None:
@@ -6051,7 +6104,7 @@ def _staged_rollback_refusal(state: dict[str, Any], provider_id: str, row: dict[
 def rollback_consent(provider_id: str, *, _state=None, _row=None, _target=None) -> dict[str, Any] | None:
     """What going back to the previous release adds to what the active release is allowed, or None.
 
-    Worked out from the two manifests alone, so it does not depend on the catalog still listing the old release.
+    Uses the retained manifest and settings rather than relying on the catalog to list the old release.
     The Subtitle Hub has no consent step for a provider without dependencies, as for an update. The digest in the
     result is what ``rollback_release`` takes as ``consent_digest``.
     """
@@ -6062,7 +6115,22 @@ def rollback_consent(provider_id: str, *, _state=None, _row=None, _target=None) 
         return None
     if kind_of(row) == SUBTITLE_PROVIDER and not closure.has_needs(target.manifest):
         return None
-    return consent.update_delta(state, row.get("manifest"), {"manifest": target.manifest}, closure.Closure())
+    delta = consent.update_delta(state, row.get("manifest"), {"manifest": target.manifest}, closure.Closure())
+    settings_copy = release_settings.record_for(row, target)
+    if settings_copy is None or kind_of(row) != TRANSLATOR:
+        return delta
+    from .kinds.translator import _store
+    from subtitles.tools.translate.runtime.plugin_update import rollback_settings_destinations
+
+    restored = rollback_settings_destinations(_store(), provider_id, target.manifest,
+                                              release_settings.read(settings_copy).get("owners", {}))
+    if restored:
+        # The consent pins the typed address, while the confirmation shows its origin without query or path data.
+        origins = {f"{parts.scheme}://{parts.netloc}" for parts in map(urlparse, restored)}
+        delta["added"]["destinations"] = sorted(set(delta["added"]["destinations"]) | origins)
+        delta["digest"] = consent.digest_of((delta["digest"], sorted(restored)))
+        delta["needs_consent"] = True
+    return delta
 
 
 def _checked_rollback_target(state, provider_id, target, *, verify_files=True):
@@ -6105,6 +6173,11 @@ def _checked_rollback_target(state, provider_id, target, *, verify_files=True):
         raise ProviderHubInstallError(
             f"{name} v{target.version} is no longer on disk, or no longer matches what it was, "
             f"so it cannot be restored ({refusal_text(error)})") from error
+    if verify_files:
+        try:
+            release_settings.read(release_settings.record_for(row, target))
+        except ValueError as error:
+            raise ProviderHubInstallError(str(error)) from None
     plugin = parse_plugin_manifest(target.manifest) if target.manifest.get("schema_version") == 2 else None
     # An early answer. The check that counts runs again inside the write that stages the release.
     refusal = _rollback_needs_refusal(state, plugin, provider_id, name, target)
@@ -6125,6 +6198,7 @@ def rollback_preview(provider_id: str, *, state=None, verify_files=True, include
     if include_consent:
         row = (state.get("installations") or {}).get(provider_id)
         result["consent"] = None
+        result["restores_settings"] = bool(isinstance(row, dict) and release_settings.record_for(row, target))
         result["confirmation_identity"] = (_rollback_confirmation(state, row, target)
                                            if isinstance(row, dict) and target is not None else None)
     try:

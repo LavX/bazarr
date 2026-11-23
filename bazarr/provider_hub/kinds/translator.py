@@ -152,9 +152,10 @@ class TranslatorKind(Kind):
 
     def on_activated(self, plugin_id: str, previous_manifest, manifest) -> str | None:
         """Bring the plugin's saved engines and back ends in line with the release that just became active."""
+        from provider_hub.service import retained_settings_manifest
         from subtitles.tools.translate.runtime.plugin_update import bring_up_to_date
 
-        message = bring_up_to_date(_store(), plugin_id, manifest)
+        message = bring_up_to_date(_store(), plugin_id, manifest, retained_settings_manifest(plugin_id))
         # A worker that is running was started from the release this one replaces.
         _retire_worker(plugin_id)
         return message

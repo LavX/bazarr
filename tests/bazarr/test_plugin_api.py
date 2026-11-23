@@ -639,7 +639,7 @@ def rollback_store(client, hub_store, tmp_path, monkeypatch):  # noqa: F811
     monkeypatch.setattr("provider_hub.consent.sandbox_status", lambda: {})
 
     def seed(plugin_id="exampleservice", *, previous=None, current=None, previous_supplied_by=None,
-             previous_payloads=None, draining_previous=False, source_id="official"):
+             previous_payloads=None, draining_previous=False, source_id="official", stage_current=False):
         factory = provider_manifest_v1 if plugin_id == "providerhub" else service_manifest
         previous = previous or factory(plugin_id, "1.0.0")
         current = current or factory(plugin_id, "2.0.0")
@@ -674,7 +674,13 @@ def rollback_store(client, hub_store, tmp_path, monkeypatch):  # noqa: F811
                 from provider_hub.releases import DRAIN_PREVIOUS
                 row[DRAIN_PREVIOUS] = True
             document = state.load_state()
-            document["installations"][plugin_id] = dict(row)
+            if stage_current and manifest is current:
+                stage = document["installations"][plugin_id]
+                stage.update(state="staged", pending_restart=True, staged_version=row["active_version"],
+                             staged_manifest=manifest, staged_path=row["active_path"],
+                             staged_python_path=row["python_path"])
+            else:
+                document["installations"][plugin_id] = dict(row)
             document["catalog_sources"] = {source_id: source}
             state.save_state(document)
         return row
@@ -754,7 +760,8 @@ def test_a_plugin_without_a_previous_release_reports_why_rollback_is_unavailable
 
     assert row["rollback"]["previous_version"] is None
     assert "no previous release" in row["rollback"]["blocked_reason"]
-    assert preview == {**row["rollback"], "consent": None, "confirmation_identity": None}
+    assert preview == {**row["rollback"], "consent": None, "confirmation_identity": None,
+                       "restores_settings": False}
     assert _rollback(client).status_code == 409
 
 
@@ -1667,3 +1674,143 @@ def test_rollback_checks_the_retained_snapshot_and_accepts_an_unchanged_set_of_m
         assert row["active_version"] == "2.0.0" and not row.get("staged_version")
     else:
         assert response.status_code == 200 and row["active_version"] == "1.0.0"
+
+
+def test_rollback_restores_the_exact_release_settings_and_keeps_unowned_values(
+        client, rollback_store, monkeypatch, service_kind):
+    from app.config import settings
+    from provider_hub import release_settings, service, state, state_store
+    from secret_store.crypto import is_encrypted
+
+    monkeypatch.setattr(settings.general, "secrets_encryption_key", "fixture-setting-encryption", raising=False)
+    from provider_hub.kinds import ATTACH_ON_RESTART
+
+    monkeypatch.setattr(service_kind, "attach_policy", ATTACH_ON_RESTART)
+    plugin_id = "exampleservice"
+    old = service_manifest(plugin_id, "1.0.0", config_schema={"properties": {"region": {"type": "string"}}})
+    new = service_manifest(plugin_id, "2.0.0", config_schema={"properties": {
+        "region": {"type": "string"}, "official_mode": {"type": "string"}}})
+    rollback_store(previous=old, current=new, stage_current=True)
+    assert service.activate_staged_installations() == [plugin_id]
+    retired = service._previous_release(plugin_id)
+    record = release_settings.record_for(state.load_state()["installations"][plugin_id], retired)
+    assert record is not None and is_encrypted(record["content"])
+    assert release_settings.read(record)["config"] == {"region": "eu"}
+    assert release_settings.RETAINED not in _get(client, f"/api/plugins/installations/{plugin_id}").json
+
+    def save_new_values(document):
+        row = document["installations"][plugin_id]
+        row["config"].update(region="us", official_mode="new", unrelated="keep me")
+
+    state.mutate_state(save_new_values)
+    preview = _get(client, f"/api/plugins/installations/{plugin_id}/rollback").json
+    assert preview["restores_settings"] is True
+    assert _rollback(client, plugin_id).json == {"status": "waiting", "version": "1.0.0"}
+    assert service.activate_staged_installations() == [plugin_id]
+    assert state.load_state()["installations"][plugin_id]["config"] == {"region": "eu", "unrelated": "keep me"}
+    assert state_store.list_releases(plugin_id, states=("active",))[0].id == retired.id
+    assert _rollback(client, plugin_id, version="2.0.0").json == {"status": "waiting", "version": "2.0.0"}
+    assert service.activate_staged_installations() == [plugin_id]
+    assert state.load_state()["installations"][plugin_id]["config"] == {
+        "region": "us", "official_mode": "new", "unrelated": "keep me"}
+
+
+@pytest.mark.parametrize("clear_secret", [False, True])
+def test_translator_rollback_restores_only_surviving_declared_owners(
+        client, rollback_store, hub_engine, monkeypatch, clear_secret):
+    from app.config import settings
+    from app.database import Base, TableTranslatorConnection, TableTranslatorEngineInstance, TableTranslatorSecret
+    from provider_hub import service, state
+    from provider_hub.kinds import _KINDS
+    from provider_hub.kinds.translator import TranslatorKind
+    from sqlalchemy.orm import scoped_session, sessionmaker
+    from subtitles.tools.translate.runtime.destinations import DestinationSchema
+    from subtitles.tools.translate.runtime.settings_service import InstalledPlugin, TranslatorSettingsService
+    from subtitles.tools.translate.runtime.store import INSTANCE, TranslatorStore
+
+    monkeypatch.setattr(settings.general, "secrets_encryption_key", "fixture-setting-encryption", raising=False)
+    monkeypatch.setitem(_KINDS, "translator", TranslatorKind())
+    monkeypatch.setattr(TranslatorKind, "smoke_test", lambda *args, **kwargs: None)
+    for model in (TableTranslatorEngineInstance, TableTranslatorConnection, TableTranslatorSecret):
+        Base.metadata.create_all(hub_engine, tables=[model.__table__])
+    session = scoped_session(sessionmaker(bind=hub_engine))
+    store = TranslatorStore(session)
+    monkeypatch.setattr("provider_hub.kinds.translator._store", lambda: store)
+    plugin_id = "translationfixture"
+    previous_address = "https://original.example.test/translate?option=fixture"
+    new_address = "https://current.example.test/translate"
+    secret = {"key": "passcode", "type": "secret"}
+    shared_fields = [{"key": "prompt", "type": "text"}, {"key": "server", "type": "text", "destination": True}]
+    previous_fields = [*shared_fields, secret]
+    next_fields = [*shared_fields, {"key": "subtitle_style", "type": "text"}]
+    if clear_secret:
+        next_fields.append(secret)
+
+    def manifest(version, fields, version_number):
+        return service_manifest(plugin_id, version, kind="translator", kind_api="bazarr.translator.v1",
+                                settings_version=version_number, settings={"fields": fields, "backend_types": {
+                                    "local": {"fields": fields}}})
+
+    try:
+        previous = manifest("1.0.0", previous_fields, 1)
+        current = manifest("2.0.0", next_fields, 2)
+        rollback_store(plugin_id, previous=previous, current=current, stage_current=True)
+        instance = store.create_instance(plugin_id, name="Operator name",
+                                         settings={"prompt": "old engine", "server": previous_address})
+        engine = (INSTANCE, instance.id)
+        store.set_secret(engine, "passcode", "fixture passcode", destinations=frozenset({previous_address}))
+        owned = store.add_connection(instance.id, "local", settings={"prompt": "old built-in"})
+        extension = store.add_connection(instance.id, "extension", plugin_id="unrelated",
+                                         settings={"prompt": "extension original"})
+        deleted = store.add_connection(instance.id, "local", settings={"prompt": "deleted"})
+        assert service.activate_staged_installations() == [plugin_id]
+        schema = DestinationSchema(fields=tuple(next_fields))
+        controller = TranslatorSettingsService(store, plugin_lookup=lambda _: InstalledPlugin(
+            plugin_id, "Fixture", "2.0.0", True, current, "official"), plugin_validator=lambda *args: {})
+        edits = {"values": {"prompt": "new engine", "subtitle_style": "compact", "server": new_address},
+                 "expected_revision": instance.revision, "accept_destinations": [new_address]}
+        if clear_secret:
+            edits["clear_secrets"] = ["passcode"]
+        saved = controller.save_engine(instance.id, edits)["engine"]
+        assert saved["secrets"] == {} and not saved["awaiting_secrets"]
+        assert store.secret_field_names(engine) == (set() if clear_secret else {"passcode"})
+        assert controller._engine_secrets(instance, store.settings_of(instance)) == ("", {})
+        store.update_connection(owned.id, settings={"prompt": "new built-in"}, schema=schema)
+        store.update_connection(extension.id, settings={"prompt": "extension edited"}, schema=schema)
+        store.delete_connection(deleted.id)
+        new_owner = store.add_connection(instance.id, "local", settings={"prompt": "new owner"})
+        preview = _get(client, f"/api/plugins/installations/{plugin_id}/rollback").json
+        assert preview["restores_settings"] is True
+        assert preview["consent"]["added"]["destinations"] == ["https://original.example.test"]
+        assert _rollback(client, plugin_id).status_code == 400
+        reply = _rollback(client, plugin_id, consent=preview["consent"]["digest"])
+        assert reply.json == {"status": "waiting", "version": "1.0.0"}, reply.json
+        active = DestinationSchema(fields=tuple(previous_fields))
+        if clear_secret:
+            real_activation = TranslatorKind.on_activated
+
+            def interrupt_before_reconciliation(*args):
+                raise RuntimeError("fixture interruption before reconciliation")
+
+            monkeypatch.setattr(TranslatorKind, "on_activated", interrupt_before_reconciliation)
+        assert service.activate_staged_installations() == [plugin_id]
+        prompt = "old engine"
+        assert store.settings_of(instance) == {"prompt": prompt, "server": previous_address}
+        if clear_secret:
+            assert service._PENDING_ROLLBACK_HOOK in state.load_state()["installations"][plugin_id]
+            prompt = "edited after restart"
+            store.save_instance_settings(instance.id, {"prompt": prompt, "server": previous_address}, schema=active)
+            monkeypatch.setattr(TranslatorKind, "on_activated", real_activation)
+            service.resume_rollback_activations()
+        owners = {row.id: store.settings_of(row) for row in store.list_connections(instance.id)}
+        assert owners == {owned.id: {"prompt": "old built-in"}, extension.id: {"prompt": "extension edited"},
+                          new_owner.id: {"prompt": "new owner"}}
+        assert store.settings_of(instance) == {"prompt": prompt, "server": previous_address}
+        assert set(store.secrets_for_request(engine, frozenset({previous_address}), fields=active.secret_fields)) == (
+            set() if clear_secret else {"passcode"})
+        assert store.secrets_for_request(engine, frozenset({new_address}), fields=active.secret_fields) == {}
+        assert instance.plugin_version == "1.0.0" and instance.settings_version == 1
+        assert instance.name == "Operator name"
+        assert service._PENDING_ROLLBACK_HOOK not in state.load_state()["installations"][plugin_id]
+    finally:
+        session.remove()

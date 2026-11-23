@@ -295,7 +295,8 @@ class TranslatorStore:
     def save_instance_settings(self, instance_id: int, settings: Mapping[str, Any], *,
                                schema: DestinationSchema, settings_version: int | None = None,
                                plugin_version: str | None = None,
-                               expected_revision: int | None = None) -> SaveResult:
+                               expected_revision: int | None = None,
+                               retained_secrets: Iterable[str] = ()) -> SaveResult:
         """Replace an instance's settings. Bumps the revision and checks the destinations."""
         instance = self._require_instance(instance_id)
         if expected_revision is not None and instance.revision != expected_revision:
@@ -322,8 +323,8 @@ class TranslatorStore:
             instance.updated_at = datetime.now()
             # A saved owner is judged by the secrets its manifest declares now; a leftover of a removed field
             # must not keep it waiting, and nothing else can clear it.
-            self._drop_undeclared_secrets(owner, schema)
-            instance.awaiting_secrets = 1 if self._stale_secrets(owner, after) else 0
+            self._drop_undeclared_secrets(owner, schema.secret_fields | set(retained_secrets))
+            instance.awaiting_secrets = 1 if self._stale_secrets(owner, after, schema.secret_fields) else 0
         return SaveResult(instance.revision, added_destinations(before, after), bool(instance.awaiting_secrets))
 
     def set_instance_enabled(self, instance_id: int, enabled: bool, *,
@@ -436,7 +437,8 @@ class TranslatorStore:
                           settings: Mapping[str, Any] | None = None, settings_version: int | None = None,
                           plugin_version: str | None = None, price_input_per_million: float | None = None,
                           price_output_per_million: float | None = None, enabled: bool | None = None,
-                          expected_revision: int | None = None) -> SaveResult:
+                          expected_revision: int | None = None,
+                          retained_secrets: Iterable[str] = ()) -> SaveResult:
         """Change a connection and bump its own revision. Never touches the instance's revision."""
         connection = self._require_connection(connection_id)
         if expected_revision is not None and connection.revision != expected_revision:
@@ -471,8 +473,9 @@ class TranslatorStore:
                 connection.enabled = 1 if enabled else 0
             connection.updated_at = datetime.now()
             if settings is not None:
-                self._drop_undeclared_secrets((CONNECTION, connection_id), schema)
-            connection.awaiting_secrets = 1 if self._stale_secrets((CONNECTION, connection_id), after) else 0
+                self._drop_undeclared_secrets((CONNECTION, connection_id), schema.secret_fields | set(retained_secrets))
+            connection.awaiting_secrets = int(self._stale_secrets(
+                (CONNECTION, connection_id), after, schema.secret_fields))
         return SaveResult(self._require_instance(connection.instance_id).revision,
                           added_destinations(before, after), bool(connection.awaiting_secrets))
 
@@ -516,7 +519,8 @@ class TranslatorStore:
         self.reorder_connections(instance_id, [row.id for row in rows])
 
     # ---------------------------------------------------------------- secrets
-    def set_secret(self, owner: Owner, field_name: str, value: str, *, destinations: frozenset[str]) -> None:
+    def set_secret(self, owner: Owner, field_name: str, value: str, *, destinations: frozenset[str],
+                   fields: Iterable[str] | None = None) -> None:
         """Store a secret, encrypted, bound to ``destinations``. An empty value keeps what is stored.
 
         The mask text is refused as a new value, the way the settings save refuses it: it stands for a hidden
@@ -544,7 +548,7 @@ class TranslatorStore:
                 row.destinations_json = payload
                 row.updated_at = datetime.now()
             self._session.flush()
-            self._refresh_awaiting(owner, destinations)
+            self._refresh_awaiting(owner, destinations, fields)
         self._scrub_after_commit()
 
     def _mask_refusal(self, owner: Owner, field_name: str, value: str) -> str | None:
@@ -570,15 +574,17 @@ class TranslatorStore:
                 return refusal
         return None
 
-    def clear_secret(self, owner: Owner, field_name: str, *, destinations: frozenset[str]) -> None:
+    def clear_secret(self, owner: Owner, field_name: str, *, destinations: frozenset[str],
+                     fields: Iterable[str] | None = None) -> None:
         with write_transaction(self._session):
             self._session.execute(delete(TableTranslatorSecret).where(
                 TableTranslatorSecret.owner_kind == owner[0], TableTranslatorSecret.owner_id == owner[1],
                 TableTranslatorSecret.field == field_name))
-            self._refresh_awaiting(owner, destinations)
+            self._refresh_awaiting(owner, destinations, fields)
         self._scrub_after_commit()
 
-    def secrets_for_request(self, owner: Owner, destinations: frozenset[str]) -> dict[str, str]:
+    def secrets_for_request(self, owner: Owner, destinations: frozenset[str], *,
+                            fields: Iterable[str] | None = None) -> dict[str, str]:
         """The decrypted secrets a request with these effective destinations may carry.
 
         A secret whose binding does not cover every destination is left out, so a key
@@ -587,7 +593,7 @@ class TranslatorStore:
         from secret_store import decrypt_secret
 
         granted: dict[str, str] = {}
-        for row in self._secret_rows(owner):
+        for row in self._secret_rows(owner, fields):
             if not covers(_loads(row.destinations_json, []), destinations):
                 continue
             try:
@@ -604,7 +610,7 @@ class TranslatorStore:
         put it in a response. A secret that will not decrypt is left out. ``leave_out`` names the ones a save is
         replacing or clearing."""
         skip = set(leave_out)
-        held = self.secrets_for_request(owner, frozenset())
+        held = self.secrets_for_request(owner, frozenset(), fields=DestinationSchema(fields=tuple(fields)).secret_fields)
         list_fields = {item["key"] for item in fields if item.get("type") in ("key_list", "list", "orderable_list")}
         contents: dict[str, Any] = {}
         for name, plain in held.items():
@@ -619,12 +625,13 @@ class TranslatorStore:
                 contents[name] = plain
         return contents
 
-    def secret_summary(self, owner: Owner, destinations: frozenset[str]) -> dict[str, dict[str, Any]]:
+    def secret_summary(self, owner: Owner, destinations: frozenset[str], *,
+                       fields: Iterable[str] | None = None) -> dict[str, dict[str, Any]]:
         """What the API may say about each stored secret: that it is set, and sometimes its last four characters."""
         from secret_store import decrypt_secret
 
         summary: dict[str, dict[str, Any]] = {}
-        for row in self._secret_rows(owner):
+        for row in self._secret_rows(owner, fields):
             entry: dict[str, Any] = {"configured": True,
                                      "stale": not covers(_loads(row.destinations_json, []), destinations)}
             try:
@@ -637,28 +644,33 @@ class TranslatorStore:
             summary[row.field] = entry
         return summary
 
-    def has_stale_secrets(self, owner: Owner, destinations: frozenset[str]) -> bool:
+    def has_stale_secrets(self, owner: Owner, destinations: frozenset[str], *,
+                          fields: Iterable[str] | None = None) -> bool:
         """A stored secret of the owner was entered for other destinations than these: it must not be sent."""
-        return self._stale_secrets(owner, destinations)
+        return self._stale_secrets(owner, destinations, fields)
 
     def refresh_awaiting(self, owner: Owner, destinations: frozenset[str]) -> bool:
         """Recompute and store whether the owner waits for its secrets. Returns the new flag."""
         with write_transaction(self._session):
             return self._refresh_awaiting(owner, destinations)
 
-    def _refresh_awaiting(self, owner: Owner, destinations: frozenset[str]) -> bool:
-        waiting = self._stale_secrets(owner, destinations)
+    def _refresh_awaiting(self, owner: Owner, destinations: frozenset[str], fields=None) -> bool:
+        waiting = self._stale_secrets(owner, destinations, fields)
         row = self._require_owner(owner)
         row.awaiting_secrets = 1 if waiting else 0
         return waiting
 
-    def _stale_secrets(self, owner: Owner, destinations: frozenset[str]) -> bool:
-        return any(not covers(_loads(row.destinations_json, []), destinations) for row in self._secret_rows(owner))
+    def _stale_secrets(self, owner: Owner, destinations: frozenset[str], fields=None) -> bool:
+        return any(not covers(_loads(row.destinations_json, []), destinations)
+                   for row in self._secret_rows(owner, fields))
 
-    def _secret_rows(self, owner: Owner):
-        return list(self._session.execute(select(TableTranslatorSecret).where(
-            TableTranslatorSecret.owner_kind == owner[0], TableTranslatorSecret.owner_id == owner[1])
-            .order_by(TableTranslatorSecret.field).execution_options(populate_existing=True)).scalars().all())
+    def _secret_rows(self, owner: Owner, fields=None):
+        statement = select(TableTranslatorSecret).where(TableTranslatorSecret.owner_kind == owner[0],
+                                                        TableTranslatorSecret.owner_id == owner[1])
+        if fields is not None:
+            statement = statement.where(TableTranslatorSecret.field.in_(fields))
+        return list(self._session.execute(statement.order_by(TableTranslatorSecret.field)
+                                          .execution_options(populate_existing=True)).scalars().all())
 
     def _secret_row(self, owner: Owner, field_name: str):
         return self._session.execute(select(TableTranslatorSecret).where(
@@ -759,8 +771,9 @@ class TranslatorStore:
                     row.plugin_version = plugin_version
                 if settings_version is not None:
                     row.settings_version = settings_version
-                if self._refresh_awaiting((kind, row.id), effective_destinations(new_schema(kind, row),
-                                                                                  self.settings_of(row))):
+                schema = new_schema(kind, row)
+                if self._refresh_awaiting((kind, row.id), effective_destinations(schema, self.settings_of(row)),
+                                          schema.secret_fields):
                     waiting.append((kind, row.id))
         return waiting
 
@@ -818,15 +831,15 @@ class TranslatorStore:
                                "so it was dropped and must be entered again", key)
                 continue
             self.set_secret(owner, key, value if isinstance(value, str) else json.dumps(value),
-                            destinations=destinations)
+                            destinations=destinations, fields=schema.secret_fields)
 
     def drop_undeclared_secrets(self, plugin_id: str, new_schema: Callable[[str, Any], DestinationSchema],
-                                skip: Iterable[Owner] = ()) -> int:
+                                skip: Iterable[Owner] = (),
+                                retained_schema: Callable[[str, Any], DestinationSchema] | None = None) -> int:
         """Remove the stored secrets of fields a release no longer declares secret. Returns how many went.
 
-        The release dropped or renamed the field, so nothing reads the value and the settings API cannot clear
-        it by name. Left in place it would keep the owner waiting for secrets for good as soon as its
-        destinations change. Owners in ``skip`` are left exactly as they were.
+        Fields still declared by the retained release stay bound to their original owner and destinations.
+        The active schema alone decides which fields a worker can receive. Owners in ``skip`` keep their rows.
         """
         skipped = set(skip)
         removed = 0
@@ -834,11 +847,13 @@ class TranslatorStore:
             for kind, row in self._owners_of_plugin(plugin_id):
                 if (kind, row.id) in skipped:
                     continue
-                removed += self._drop_undeclared_secrets((kind, row.id), new_schema(kind, row))
+                declared = new_schema(kind, row).secret_fields
+                if retained_schema is not None:
+                    declared |= retained_schema(kind, row).secret_fields
+                removed += self._drop_undeclared_secrets((kind, row.id), declared)
         return removed
 
-    def _drop_undeclared_secrets(self, owner: Owner, schema: DestinationSchema) -> int:
-        declared = {item["key"] for item in schema.fields if is_secret_field(item)}
+    def _drop_undeclared_secrets(self, owner: Owner, declared: Iterable[str]) -> int:
         removed = 0
         for secret in self._secret_rows(owner):
             if secret.field not in declared:
@@ -865,6 +880,22 @@ class TranslatorStore:
                     row.revision = int(row.revision) + 1
                     changed += 1
         return changed
+
+    def secret_field_names(self, owner: Owner) -> set[str]:
+        """The stored names only, without examining their values."""
+        return {item.field for item in self._secret_rows(owner)}
+
+    def restore_release_settings(self, kind, row, settings, host) -> None:
+        """Claim the observed owner revision before restoring just its release fields."""
+        if settings == self.settings_of(row) and all(getattr(row, key) == value for key, value in host.items()):
+            return
+        model = TableTranslatorEngineInstance if kind == INSTANCE else TableTranslatorConnection
+        claimed = self._session.execute(update(model).where(
+            model.id == row.id, model.created_at == row.created_at, model.revision == row.revision,
+        ).values(revision=row.revision + 1, settings_json=json.dumps(settings, sort_keys=True),
+                 updated_at=datetime.now(), **host).execution_options(synchronize_session=False)).rowcount
+        if claimed:
+            self._session.expire(row)
 
     def owners_of_plugin(self, plugin_id: str):
         """Every engine instance and connection a plugin serves, as ``(kind, row)``."""

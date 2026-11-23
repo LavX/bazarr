@@ -14,7 +14,7 @@ from typing import Any, Mapping
 
 from provider_hub.plugin_manifest import parse_plugin_manifest
 
-from .destinations import DestinationSchema
+from .destinations import DestinationSchema, effective_destinations
 from .field_schema import is_secret_field
 from .host_fields import HOST_KEYS, host_of, validate_owner
 from .store import INSTANCE, TranslatorStore
@@ -25,7 +25,8 @@ NEEDS_ATTENTION = ("Some saved translation settings no longer fit this version o
                    "off. Open Translation in the main menu to review them.")
 
 
-def bring_up_to_date(store: TranslatorStore, plugin_id: str, manifest: Mapping[str, Any]) -> str | None:
+def bring_up_to_date(store: TranslatorStore, plugin_id: str, manifest: Mapping[str, Any],
+                     retained_manifest: Mapping[str, Any] | None = None) -> str | None:
     """Migrate the plugin's owners to ``manifest``. Returns a message when some had to be held back."""
     parsed = parse_plugin_manifest(dict(manifest))
     backend_fields = dict(parsed.backend_fields)
@@ -66,8 +67,12 @@ def bring_up_to_date(store: TranslatorStore, plugin_id: str, manifest: Mapping[s
         kept = {key: value for key, value in stored.items() if key in known}
         return kept if kept != stored else None
 
-    # A dropped or renamed secret field takes its stored value with it, like a dropped plain field leaves the settings.
-    store.drop_undeclared_secrets(plugin_id, schema_for, skip=blocked)
+    retained = parse_plugin_manifest(dict(retained_manifest)) if retained_manifest else None
+
+    def retained_schema(kind: str, row) -> DestinationSchema:
+        return DestinationSchema(fields=tuple(_owner_fields(retained, kind, row))) if retained else DestinationSchema()
+
+    store.drop_undeclared_secrets(plugin_id, schema_for, skip=blocked, retained_schema=retained_schema)
     store.apply_plugin_update(plugin_id, schema_for, new_settings=prune, plugin_version=parsed.version,
                               settings_version=parsed.settings_version, skip=blocked)
     if blocked:
@@ -76,6 +81,88 @@ def bring_up_to_date(store: TranslatorStore, plugin_id: str, manifest: Mapping[s
                        len(blocked), plugin_id)
         return NEEDS_ATTENTION
     return None
+
+
+def _owner_fields(plugin, kind, row):
+    if kind == INSTANCE:
+        return plugin.settings_fields
+    return dict(plugin.backend_fields).get(row.backend_type, ())
+
+
+def _owner_identity(kind, row):
+    identity = [row.created_at.isoformat(), row.plugin_id]
+    if kind != INSTANCE:
+        identity.extend((row.instance_id, row.backend_type))
+    return identity
+
+
+def _secret_fields(fields):
+    return {item["key"] for item in fields if is_secret_field(item)}
+
+
+def capture_release_settings(store: TranslatorStore, plugin_id: str, manifest, next_manifest) -> dict:
+    """Capture just the prior release's settings for each owner it serves."""
+    old = parse_plugin_manifest(manifest)
+    new = parse_plugin_manifest(next_manifest)
+    snapshots = {}
+    for kind, row in store.owners_of_plugin(plugin_id):
+        fields = _owner_fields(old, kind, row)
+        future = _owner_fields(new, kind, row)
+        excluded = _secret_fields(fields) | _secret_fields(future) | store.secret_field_names((kind, row.id))
+        old_keys = {item["key"] for item in fields} - excluded
+        future_keys = {item["key"] for item in future} - excluded
+        if not old_keys and not future_keys:
+            continue
+        keys = _settings_keys(kind, fields) & old_keys
+        values = {key: value for key, value in store.settings_of(row).items() if key in keys}
+        if kind != INSTANCE:
+            values.update({key: value for key, value in host_of(row).items()
+                           if key in old_keys})
+        snapshots[f"{kind}:{row.id}"] = {"identity": _owner_identity(kind, row), "revision": row.revision,
+                                         "values": values}
+    return snapshots
+
+
+def rollback_settings_destinations(store: TranslatorStore, plugin_id: str, target_manifest, snapshots) -> set[str]:
+    """Previously approved typed addresses that the surviving settings copies contain."""
+    target = parse_plugin_manifest(target_manifest)
+    restored = set()
+    for kind, row in store.owners_of_plugin(plugin_id):
+        snapshot = snapshots.get(f"{kind}:{row.id}")
+        if snapshot is None or _owner_identity(kind, row) != snapshot["identity"]:
+            continue
+        stored = snapshot["values"]
+        fields = _owner_fields(target, kind, row)
+        held = store.secret_field_names((kind, row.id))
+        schema = DestinationSchema(fields=tuple(item for item in fields if item["key"] in stored
+                                                and item["key"] not in held and not is_secret_field(item)))
+        restored.update(destination for destination in effective_destinations(schema, stored)
+                        if not destination.startswith("invalid:"))
+    return restored
+
+
+def restore_release_settings(store: TranslatorStore, plugin_id, current_manifest, target_manifest,
+                             snapshots, revisions) -> None:
+    """Restore surviving owners at their cutover revisions. A replay cannot undo a later save."""
+    current = parse_plugin_manifest(current_manifest)
+    target = parse_plugin_manifest(target_manifest)
+    with store.transaction():
+        for kind, row in store.owners_of_plugin(plugin_id):
+            key = f"{kind}:{row.id}"
+            snapshot = snapshots.get(key)
+            if snapshot is None or row.revision != revisions.get(key) or _owner_identity(kind, row) != snapshot["identity"]:
+                continue
+            before = _owner_fields(current, kind, row)
+            after = _owner_fields(target, kind, row)
+            excluded = _secret_fields(before) | _secret_fields(after) | store.secret_field_names((kind, row.id))
+            owned = (_settings_keys(kind, before) | _settings_keys(kind, after)) - excluded
+            incoming = _settings_keys(kind, after) - excluded
+            settings = {key: value for key, value in store.settings_of(row).items() if key not in owned}
+            settings.update({key: value for key, value in snapshot["values"].items() if key in incoming})
+            host = ({key: value for key, value in snapshot["values"].items()
+                     if key in HOST_KEYS and key not in excluded and any(item["key"] == key for item in after)}
+                    if kind != INSTANCE else {})
+            store.restore_release_settings(kind, row, settings, host)
 
 
 def _settings_keys(kind: str, fields) -> set[str]:
@@ -97,7 +184,7 @@ def _fits(store: TranslatorStore, owner, row, fields) -> bool:
     secret_keys = {item["key"] for item in fields if is_secret_field(item)}
     known = _settings_keys(owner[0], fields)
     remaining = {key: value for key, value in settings.items() if key in known and key not in secret_keys}
-    held = frozenset(store.secret_summary(owner, frozenset()))
+    held = frozenset(store.secret_summary(owner, frozenset(), fields=secret_keys))
     # What the stored secrets hold is checked too, in memory, against the new limits (a key list that is now
     # too long, a key that is now too long), not just that they are there.
     contents = store.secret_contents(owner, fields)

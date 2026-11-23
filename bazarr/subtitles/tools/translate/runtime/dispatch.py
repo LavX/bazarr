@@ -663,13 +663,14 @@ class Dispatcher:
         try:
             engine_schema = schema_for_engine(info.manifest)
             engine_destinations = effective_destinations(engine_schema, store.settings_of(instance))
-            self._refuse_stale((INSTANCE, instance.id), engine_destinations)
-            granted = dict(store.secrets_for_request((INSTANCE, instance.id), engine_destinations))
+            self._refuse_stale((INSTANCE, instance.id), engine_destinations, engine_schema.secret_fields)
+            granted = dict(store.secrets_for_request((INSTANCE, instance.id), engine_destinations,
+                                                     fields=engine_schema.secret_fields))
             if connection is not None:
                 schema = schema_for_backend(serving.manifest, connection.backend_type)
                 destinations = effective_destinations(schema, store.settings_of(connection))
-                self._refuse_stale((CONNECTION, connection.id), destinations)
-                granted.update(store.secrets_for_request((CONNECTION, connection.id), destinations))
+                self._refuse_stale((CONNECTION, connection.id), destinations, schema.secret_fields)
+                granted.update(store.secrets_for_request((CONNECTION, connection.id), destinations, fields=schema.secret_fields))
         except AttemptFailure:
             raise
         except Exception:
@@ -685,10 +686,10 @@ class Dispatcher:
         hold = ledger.job_hold(state.ledger_id)
         return None if hold is None else hold / 1_000_000
 
-    def _refuse_stale(self, owner, destinations) -> None:
+    def _refuse_stale(self, owner, destinations, fields) -> None:
         """A key entered for other destinations is never sent to these. The owner's own flag normally keeps such
         a connection out of the list; this is the check at the point of sending."""
-        if self.store.has_stale_secrets(owner, destinations):
+        if self.store.has_stale_secrets(owner, destinations, fields=fields):
             raise AttemptFailure(fail.AUTH_REQUIRED, "The address changed after the key was saved, so the saved "
                                                      "key is not sent to the new one. Enter the key again.")
 

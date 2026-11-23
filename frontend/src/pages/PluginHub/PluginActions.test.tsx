@@ -241,6 +241,7 @@ describe("rolling back a plugin from its card", () => {
       previous_version: string | null;
       blocked_reason: string | null;
     } = availability,
+    restoresSettings = false,
   ) => {
     installed = [{ ...installedBackend, rollback }];
     server.use(
@@ -252,6 +253,7 @@ describe("rolling back a plugin from its card", () => {
         return HttpResponse.json({
           ...availability,
           confirmation_identity: confirmationIdentity,
+          restores_settings: restoresSettings,
           consent: null,
         });
       }),
@@ -393,26 +395,28 @@ describe("rolling back a plugin from its card", () => {
     );
   });
 
-  it("names the retained release and explains plugin data before the user confirms", async () => {
-    present();
-    const { user, dialog } = await openRollback();
-    expect(
-      within(dialog).getByText(
-        /older releases may not support all saved data or settings/i,
-      ),
-    ).toBeVisible();
-    expect(calls).toEqual([{ method: "get", path: "rollback", body: null }]);
-    await user.click(within(dialog).getByRole("button", { name: "Cancel" }));
-    await waitFor(() =>
-      expect(screen.queryByRole("dialog")).not.toBeInTheDocument(),
-    );
-    expect(calls).toHaveLength(1);
-    await waitFor(() =>
-      expect(
-        screen.getByRole("button", { name: `${name} actions` }),
-      ).toHaveFocus(),
-    );
-  });
+  it.each([
+    [true, /discards edits made since the update/i],
+    [false, /no previous settings copy is available/i],
+  ])(
+    "explains the settings available to restore (%s)",
+    async (restoresSettings, copy) => {
+      present(availability, restoresSettings);
+      const { user, dialog } = await openRollback();
+      expect(within(dialog).getByText(copy)).toBeVisible();
+      expect(calls).toEqual([{ method: "get", path: "rollback", body: null }]);
+      await user.click(within(dialog).getByRole("button", { name: "Cancel" }));
+      await waitFor(() =>
+        expect(screen.queryByRole("dialog")).not.toBeInTheDocument(),
+      );
+      expect(calls).toHaveLength(1);
+      await waitFor(() =>
+        expect(
+          screen.getByRole("button", { name: `${name} actions` }),
+        ).toHaveFocus(),
+      );
+    },
+  );
 
   it("asks the user to review a different release when the card is stale", async () => {
     present();
