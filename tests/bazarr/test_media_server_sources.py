@@ -134,6 +134,23 @@ def _indexed(saved, library_id):
     return {row.external_id: row for row in repository.library_items(library_id, saved.db)}
 
 
+def test_validate_new_server_roots_without_mutation(saved):
+    url = f'{SOURCES}/server-roots/validate'
+    roots = _library(saved)['roots']
+    payload = {'content_kind': 'movie', 'roots': roots}
+    assert saved.client.post(url, headers=HEADERS, json=payload).status_code == 200
+    missing = [{'server_path': '/remote', 'local_path': str(saved.root / 'missing')}]
+    assert saved.client.post(url, headers=HEADERS, json={**payload, 'roots': missing}).status_code == 400
+    duplicate = roots + [{'server_path': '/another', 'local_path': str(saved.root)}]
+    assert saved.client.post(url, headers=HEADERS, json={**payload, 'roots': duplicate}).status_code == 400
+    assert saved.client.post(url, headers=HEADERS, json={**payload, 'content_kind': 'invalid'}).status_code == 400
+    assert saved.client.get(SOURCES, headers=HEADERS).json == []
+    source = _register(saved, library=_library(saved))
+    before = saved.client.get(f"{SOURCES}/{source['id']}", headers=HEADERS).json
+    assert saved.client.post(url, headers=HEADERS, json=payload).status_code == 409
+    assert saved.client.get(f"{SOURCES}/{source['id']}", headers=HEADERS).json == before
+
+
 def test_scan_keeps_unseen_items_until_ids_confirm_and_restores_searchability(saved, monkeypatch):
     from media_servers import item_pages
     from media_sources import repository, service, wanted

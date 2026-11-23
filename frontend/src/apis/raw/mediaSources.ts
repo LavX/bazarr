@@ -135,14 +135,29 @@ class MediaSourcesApi extends BaseApi {
     return this.postRaw<SourceLibrary>(`/${id}/libraries`, payload);
   }
 
+  async validateServerRoots(
+    roots: ServerRootMapping[],
+    contentKind: SourceContentKind,
+    signal?: AbortSignal,
+  ) {
+    const { data } = await client.axios.post<Record<string, never>>(
+      `${this.prefix}/server-roots/validate`,
+      { roots, content_kind: contentKind },
+      { signal },
+    );
+    return data;
+  }
+
   async previewServerRoots(
     id: number,
     libraryId: number,
     roots: ServerRootMapping[],
+    signal?: AbortSignal,
   ) {
-    const { data } = await this.postRaw<{ removed_items: number }>(
-      `/${id}/libraries/${libraryId}/roots/preview`,
+    const { data } = await client.axios.post<{ removed_items: number }>(
+      `${this.prefix}/${id}/libraries/${libraryId}/roots/preview`,
       { roots },
+      { signal },
     );
     return data.removed_items;
   }

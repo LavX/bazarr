@@ -6,13 +6,18 @@ import type {
   MediaServerInstance,
   MediaServerKind,
 } from "@/apis/raw/mediaServers";
-import type { MediaSource, SourceLibrary } from "@/apis/raw/mediaSources";
+import type {
+  MediaSource,
+  ServerRootMapping,
+  SourceLibrary,
+} from "@/apis/raw/mediaSources";
 import SettingsConnectionsView from "@/pages/Settings/Connections";
-import { customRender, screen, waitFor, within } from "@/tests";
+import { act, customRender, screen, waitFor, within } from "@/tests";
 import server from "@/tests/mocks/node";
 
 const sourcesUrl = "/api/system/media-sources";
 const serversUrl = "/api/system/media-server-instances";
+const validationUrl = `${sourcesUrl}/server-roots/validate`;
 const connectionId = "2af88684-d7d2-4534-82bb-a6d839cc5c10";
 const siblingId = "66e883df-68c7-4d66-8217-8fc206c5a563";
 const movieLibrary: SourceLibrary = {
@@ -46,12 +51,13 @@ function setup(
   kind: MediaServerKind,
   initial: MediaSource[] = [],
   visible = true,
+  enabled = true,
 ) {
   let connection: MediaServerInstance | undefined = {
     id: connectionId,
     kind,
     name: "Living room",
-    enabled: true,
+    enabled,
     url: `https://${kind}.example`,
     verify_ssl: true,
     api_key_set: true,
@@ -84,6 +90,7 @@ function setup(
       reads.push("source list");
       return HttpResponse.json({ data: sources });
     }),
+    http.post(validationUrl, () => HttpResponse.json({})),
     http.get(`${sourcesUrl}/server-libraries`, ({ request }) => {
       reads.push(
         new URL(request.url).searchParams.get("media_server_instance_id") ?? "",
@@ -115,6 +122,231 @@ function setup(
 }
 
 afterEach(() => window.history.replaceState(null, "", "/"));
+
+it.each([
+  ["jellyfin", "create"],
+  ["emby", "create"],
+  ["jellyfin", "add"],
+  ["emby", "add"],
+  ["jellyfin", "roots"],
+  ["emby", "roots"],
+] as const)(
+  "blocks the %s %s editor until its current mappings pass live validation",
+  async (kind, mode) => {
+    setup(kind, mode === "create" ? [] : [source(kind)]);
+    const validated: {
+      roots: ServerRootMapping[];
+      content_kind?: string;
+    }[] = [];
+    let writes = 0;
+    server.use(
+      http.post(
+        mode === "roots"
+          ? `${sourcesUrl}/12/libraries/6/roots/preview`
+          : validationUrl,
+        async ({ request }) => {
+          const payload = (await request.json()) as (typeof validated)[number];
+          validated.push(payload);
+          if (
+            payload.roots.some(({ local_path }) => local_path === "/missing")
+          ) {
+            return HttpResponse.json(
+              { message: "The local folder does not exist." },
+              { status: 400 },
+            );
+          }
+          if (
+            payload.roots.some(({ local_path }) => local_path === "/overlap")
+          ) {
+            return HttpResponse.json(
+              { message: "This folder overlaps another library." },
+              { status: 409 },
+            );
+          }
+          if (
+            new Set(payload.roots.map(({ server_path }) => server_path)).size <
+              payload.roots.length ||
+            new Set(payload.roots.map(({ local_path }) => local_path)).size <
+              payload.roots.length
+          ) {
+            return HttpResponse.json(
+              { message: "Server and local roots must each be unique" },
+              { status: 400 },
+            );
+          }
+          return HttpResponse.json(
+            mode === "roots" ? { removed_items: 0 } : {},
+          );
+        },
+      ),
+      http.post(sourcesUrl, () => {
+        writes++;
+        return new HttpResponse(null, { status: 500 });
+      }),
+      http.post(`${sourcesUrl}/12/libraries`, () => {
+        writes++;
+        return new HttpResponse(null, { status: 500 });
+      }),
+      http.patch(`${sourcesUrl}/12/libraries/6`, () => {
+        writes++;
+        return new HttpResponse(null, { status: 500 });
+      }),
+    );
+    await userEvent.click(
+      await screen.findByRole("button", {
+        name:
+          mode === "create"
+            ? "Use as a library source"
+            : mode === "add"
+              ? "Add library"
+              : "Edit roots",
+      }),
+    );
+    const dialog = within(await screen.findByRole("dialog"));
+    if (mode !== "roots") {
+      const library = mode === "add" ? "Events" : "Cinema";
+      await dialog.findByRole("option", { name: library });
+      await userEvent.selectOptions(
+        dialog.getByRole("combobox", { name: "Server library" }),
+        mode === "add" ? "events" : "movies",
+      );
+      if (mode === "add") {
+        await userEvent.selectOptions(
+          dialog.getByRole("combobox", { name: "Content kind" }),
+          "sports",
+        );
+      }
+    }
+    const local = dialog.getByLabelText("Local path 1");
+    const submit = dialog.getByRole("button", {
+      name:
+        mode === "create"
+          ? "Add source"
+          : mode === "add"
+            ? "Add library"
+            : "Preview changes",
+    });
+    await userEvent.clear(local);
+    await userEvent.type(local, "/missing");
+    expect(submit).toBeDisabled();
+    expect(dialog.getByRole("status")).toHaveTextContent(
+      "Checking library roots",
+    );
+    await dialog.findByText("The local folder does not exist.");
+    expect(submit).toBeDisabled();
+    expect(writes).toBe(0);
+
+    await userEvent.clear(local);
+    await userEvent.type(local, "/overlap");
+    expect(submit).toBeDisabled();
+    await dialog.findByText("This folder overlaps another library.");
+    expect(submit).toBeDisabled();
+
+    await userEvent.clear(local);
+    await userEvent.type(local, "/local/valid");
+    expect(submit).toBeDisabled();
+    await waitFor(() => expect(submit).toBeEnabled());
+    expect(dialog.queryByRole("alert")).toBeNull();
+
+    await userEvent.click(dialog.getByRole("button", { name: "Add root" }));
+    expect(submit).toBeDisabled();
+    await userEvent.type(
+      dialog.getByLabelText("Server path 2"),
+      mode === "add" ? "D:\\Events" : "/server/movies",
+    );
+    await userEvent.type(dialog.getByLabelText("Local path 2"), "/local/extra");
+    await dialog.findByText("Server and local roots must each be unique");
+    expect(submit).toBeDisabled();
+    await userEvent.clear(dialog.getByLabelText("Server path 2"));
+    await userEvent.type(
+      dialog.getByLabelText("Server path 2"),
+      "/server/extra",
+    );
+    await waitFor(() => expect(submit).toBeEnabled());
+    await userEvent.clear(dialog.getByLabelText("Local path 2"));
+    await userEvent.type(dialog.getByLabelText("Local path 2"), "/local/valid");
+    await dialog.findByText("Server and local roots must each be unique");
+    expect(submit).toBeDisabled();
+    await userEvent.click(
+      dialog.getByRole("button", { name: "Remove root 2" }),
+    );
+    await waitFor(() => expect(submit).toBeEnabled());
+    expect(validated.at(-1)).toEqual({
+      roots: [
+        {
+          server_path: mode === "add" ? "D:\\Events" : "/server/movies",
+          local_path: "/local/valid",
+        },
+      ],
+      ...(mode === "roots"
+        ? {}
+        : { content_kind: mode === "add" ? "sports" : "movie" }),
+    });
+    expect(writes).toBe(0);
+  },
+);
+
+it.each(["jellyfin", "emby"] as const)(
+  "ignores late validation success and failure for changed %s mappings",
+  async (kind) => {
+    setup(kind);
+    const pending = new Map<string, () => void>();
+    const completed: string[] = [];
+    server.use(
+      http.post(validationUrl, async ({ request }) => {
+        const { roots } = (await request.json()) as {
+          roots: ServerRootMapping[];
+        };
+        const path = roots[0].local_path;
+        if (path === "/old-valid" || path === "/old-invalid") {
+          await new Promise<void>((resolve) => pending.set(path, resolve));
+        }
+        completed.push(path);
+        return path === "/missing" || path === "/old-invalid"
+          ? HttpResponse.json(
+              { message: `Invalid mapping: ${path}` },
+              { status: 400 },
+            )
+          : HttpResponse.json({});
+      }),
+    );
+    await userEvent.click(
+      await screen.findByRole("button", { name: "Use as a library source" }),
+    );
+    const dialog = within(await screen.findByRole("dialog"));
+    await dialog.findByRole("option", { name: "Cinema" });
+    await userEvent.selectOptions(
+      dialog.getByRole("combobox", { name: "Server library" }),
+      "movies",
+    );
+    const local = dialog.getByLabelText("Local path 1");
+    const submit = dialog.getByRole("button", { name: "Add source" });
+    await userEvent.type(local, "/old-valid");
+    await waitFor(() => expect(pending.has("/old-valid")).toBe(true));
+    expect(submit).toBeDisabled();
+    expect(local).toBeEnabled();
+    await userEvent.clear(local);
+    await userEvent.type(local, "/missing");
+    await dialog.findByText("Invalid mapping: /missing");
+    await act(async () => pending.get("/old-valid")?.());
+    await waitFor(() => expect(completed).toContain("/old-valid"));
+    expect(submit).toBeDisabled();
+    expect(dialog.getByText("Invalid mapping: /missing")).toBeInTheDocument();
+
+    await userEvent.clear(local);
+    await userEvent.type(local, "/old-invalid");
+    await waitFor(() => expect(pending.has("/old-invalid")).toBe(true));
+    await userEvent.clear(local);
+    await userEvent.type(local, "/local/current");
+    await waitFor(() => expect(submit).toBeEnabled());
+    await act(async () => pending.get("/old-invalid")?.());
+    await waitFor(() => expect(completed).toContain("/old-invalid"));
+    expect(submit).toBeEnabled();
+    expect(local).toHaveValue("/local/current");
+    expect(dialog.queryByText("Invalid mapping: /old-invalid")).toBeNull();
+    expect(dialog.queryByRole("alert")).toBeNull();
+  },
+);
 
 it.each(["jellyfin", "emby"] as const)(
   "uses the saved %s instance to add, map and scan its own server libraries",
@@ -177,6 +409,9 @@ it.each(["jellyfin", "emby"] as const)(
     );
     expect(first.getByRole("button", { name: "Add source" })).toBeDisabled();
     await userEvent.click(first.getByRole("button", { name: "Remove root 2" }));
+    await waitFor(() =>
+      expect(first.getByRole("button", { name: "Add source" })).toBeEnabled(),
+    );
     await userEvent.click(first.getByRole("button", { name: "Add source" }));
     await screen.findByText("Cinema");
     expect(writes).toEqual([
@@ -211,6 +446,9 @@ it.each(["jellyfin", "emby"] as const)(
     await userEvent.selectOptions(
       second.getByRole("combobox", { name: "Content kind" }),
       "sports",
+    );
+    await waitFor(() =>
+      expect(second.getByRole("button", { name: "Add library" })).toBeEnabled(),
     );
     await userEvent.click(second.getByRole("button", { name: "Add library" }));
     await screen.findByText("Events");
@@ -274,18 +512,26 @@ it("validates edited roots on the server and requires fresh confirmation after a
   expect(local).toHaveValue("/local/movies");
   await userEvent.clear(local);
   await userEvent.type(local, "/local/replacement");
-  await userEvent.click(
+  expect(
     dialog.getByRole("button", { name: "Preview changes" }),
-  );
+  ).toBeDisabled();
   await dialog.findByText("This folder overlaps another library.");
   expect(applied).toEqual([]);
   validPath = true;
+  await userEvent.click(dialog.getByRole("button", { name: "Retry" }));
+  await waitFor(() =>
+    expect(
+      dialog.getByRole("button", { name: "Preview changes" }),
+    ).toBeEnabled(),
+  );
+  const liveChecks = previewed.length;
   await userEvent.click(
     dialog.getByRole("button", { name: "Preview changes" }),
   );
   await dialog.findByText(
     "These root changes will remove 3 indexed items from this library.",
   );
+  expect(previewed).toHaveLength(liveChecks + 1);
   expect(
     dialog.getByText(
       /Subtitle history, blacklist entries, and files on disk are kept/,
@@ -296,6 +542,11 @@ it("validates edited roots on the server and requires fresh confirmation after a
     "/local/replacement",
   );
   expect(applied).toEqual([]);
+  await waitFor(() =>
+    expect(
+      dialog.getByRole("button", { name: "Preview changes" }),
+    ).toBeEnabled(),
+  );
   await userEvent.click(
     dialog.getByRole("button", { name: "Preview changes" }),
   );
@@ -308,11 +559,12 @@ it("validates edited roots on the server and requires fresh confirmation after a
   expect(
     dialog.queryByRole("button", { name: "Apply root changes" }),
   ).toBeNull();
-  expect(previewed).toHaveLength(3);
+  expect(previewed).toHaveLength(liveChecks + 2);
   await userEvent.click(
     dialog.getByRole("button", { name: "Preview changes" }),
   );
   await dialog.findByText(/remove 1 indexed item from this library/);
+  expect(previewed).toHaveLength(liveChecks + 3);
   await userEvent.click(
     dialog.getByRole("button", { name: "Apply root changes" }),
   );
@@ -367,17 +619,71 @@ it.each(["jellyfin", "emby"] as const)(
   },
 );
 
-it("leaves the normal Jellyfin connection form without root inputs and respects the media-source setting", async () => {
-  const fixture = setup("jellyfin", [source("jellyfin")], false);
-  await userEvent.click(await screen.findByRole("button", { name: "Edit" }));
-  const dialog = within(await screen.findByRole("dialog"));
-  expect(dialog.getByLabelText("Server URL")).toHaveValue(
-    "https://jellyfin.example",
-  );
-  expect(dialog.queryByText(/path mappings|library roots/i)).toBeNull();
-  expect(dialog.queryByLabelText(/local path|server path/i)).toBeNull();
-  expect(
-    screen.queryByRole("button", { name: "Use as a library source" }),
-  ).toBeNull();
-  expect(fixture.reads).toEqual([]);
-});
+it.each(["jellyfin", "emby"] as const)(
+  "hides the linked %s source panel when media sources are disabled and keeps its connection form unchanged",
+  async (kind) => {
+    const fixture = setup(kind, [source(kind)], false);
+    await screen.findByRole("region", { name: "Living room" });
+    expect(screen.queryByText("Library source")).toBeNull();
+    expect(screen.queryByText("Cinema")).toBeNull();
+    expect(screen.queryByText("/server/movies")).toBeNull();
+    expect(screen.queryByText("/local/movies")).toBeNull();
+    for (const name of [
+      "Use as a library source",
+      "Add library",
+      "Scan libraries",
+      "Edit roots",
+    ]) {
+      expect(screen.queryByRole("button", { name })).toBeNull();
+    }
+    await userEvent.click(screen.getByRole("button", { name: "Edit" }));
+    const dialog = within(await screen.findByRole("dialog"));
+    expect(dialog.getByLabelText("Server URL")).toHaveValue(
+      `https://${kind}.example`,
+    );
+    expect(dialog.queryByText("Library roots")).toBeNull();
+    expect(
+      dialog.queryByRole("combobox", { name: "Server library" }),
+    ).toBeNull();
+    if (kind === "jellyfin") {
+      expect(dialog.queryByText("Path mappings")).toBeNull();
+      expect(dialog.queryByLabelText(/local path|server path/i)).toBeNull();
+    } else {
+      expect(dialog.getByText("Path mappings")).toBeInTheDocument();
+    }
+    expect(fixture.reads).toEqual([]);
+  },
+);
+
+it.each([
+  ["jellyfin", false],
+  ["emby", false],
+  ["jellyfin", true],
+  ["emby", true],
+] as const)(
+  "disables library discovery and scans for a disabled %s connection with linked source %s",
+  async (kind, linked) => {
+    const fixture = setup(kind, linked ? [source(kind)] : [], true, false);
+    await screen.findByText("Library source");
+    const buttons = linked
+      ? ["Add library", "Scan libraries"]
+      : ["Use as a library source"];
+    for (const name of buttons) {
+      const button = await screen.findByRole("button", { name });
+      expect(button).toBeDisabled();
+      await userEvent.click(button);
+    }
+    if (linked) {
+      expect(screen.getByText("Cinema")).toBeInTheDocument();
+      expect(screen.getByText("/local/movies")).toBeInTheDocument();
+    } else {
+      expect(
+        screen.getByText(
+          "Enable the connection and save an API key to add libraries.",
+        ),
+      ).toBeInTheDocument();
+    }
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(new Set(fixture.reads)).toEqual(new Set(["source list"]));
+  },
+);

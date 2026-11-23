@@ -14,6 +14,7 @@ import {
   Text,
   TextInput,
 } from "@mantine/core";
+import { useDebouncedValue } from "@mantine/hooks";
 import { useLanguageProfiles } from "@/apis/hooks/languages";
 import {
   mediaSourceErrorMessage,
@@ -21,6 +22,7 @@ import {
   usePreviewServerSourceRoots,
   useScanMediaSource,
   useServerSourceLibraryChoices,
+  useValidateServerSourceRoots,
   useWriteMediaSource,
 } from "@/apis/hooks/mediaSources";
 import api from "@/apis/raw";
@@ -102,8 +104,32 @@ function SourceLibraryEditor({
         !checks[index].server &&
         !checks[index].local,
     );
+  const [debouncedRoots] = useDebouncedValue(roots, 300);
+  const currentRoots = roots === debouncedRoots;
+  const validationKind = library?.content_kind || content;
+  const validateRoots =
+    rootsValid && !!validationKind && (editingRoots || !!currentChoice);
+  const validation = useValidateServerSourceRoots(
+    {
+      instanceId: instance.id,
+      locator: library?.locator ?? selection,
+      sourceId: source?.id,
+      libraryId: library?.id,
+      roots: debouncedRoots,
+      contentKind: validationKind || "movie",
+    },
+    validateRoots && currentRoots,
+  );
+  const checkingRoots =
+    validateRoots &&
+    (!currentRoots || validation.isPending || validation.isFetching);
+  const validationError =
+    validateRoots && currentRoots && !checkingRoots && validation.isError;
   const canSubmit =
-    rootsValid &&
+    validateRoots &&
+    currentRoots &&
+    validation.isSuccess &&
+    !checkingRoots &&
     (editingRoots ||
       (!discovery.isFetching &&
         !discovery.isError &&
@@ -418,6 +444,35 @@ function SourceLibraryEditor({
                     Add root
                   </Button>
                 </Group>
+                {checkingRoots && (
+                  <Text role="status" size="sm" c="dimmed">
+                    Checking library roots…
+                  </Text>
+                )}
+                {validationError && (
+                  <Alert
+                    role="alert"
+                    color="red"
+                    title="Could not validate library roots"
+                  >
+                    <Stack align="flex-start" gap="xs">
+                      <Text size="sm">
+                        {mediaSourceErrorMessage(
+                          validation.error,
+                          "Check the paths and try again.",
+                        )}
+                      </Text>
+                      <Button
+                        type="button"
+                        variant="light"
+                        size="xs"
+                        onClick={() => void validation.refetch()}
+                      >
+                        Retry
+                      </Button>
+                    </Stack>
+                  </Alert>
+                )}
               </Stack>
             )}
             {(preview.isError || save.isError) && (

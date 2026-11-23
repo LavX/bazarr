@@ -159,6 +159,15 @@ def _checked_server_roots(roots, content_kind, session, library_id=None):
     return result
 
 
+def validate_server_roots(payload, session=None):
+    """Check root mappings for a new server library without changing it."""
+    _only(payload, ('roots', 'content_kind'), 'validating server roots')
+    content_kind = payload.get('content_kind')
+    if content_kind not in repository.CONTENT_KINDS:
+        raise SourceError(f"content_kind must be one of {', '.join(repository.CONTENT_KINDS)}")
+    _checked_server_roots(payload.get('roots'), content_kind, session)
+
+
 def _server_library_fields(saved, library, session):
     _only(library, ('server_library_id', 'content_kind', 'profile_id', 'roots'), 'adding a server library')
     locator = library.get('server_library_id')

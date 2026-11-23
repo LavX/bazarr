@@ -67,6 +67,60 @@ export function usePreviewServerSourceRoots() {
   });
 }
 
+export function useValidateServerSourceRoots(
+  {
+    instanceId,
+    locator,
+    roots,
+    contentKind,
+    sourceId,
+    libraryId,
+  }: {
+    instanceId: string;
+    locator: string;
+    roots: ServerRootMapping[];
+    contentKind: SourceContentKind;
+    sourceId?: number;
+    libraryId?: number;
+  },
+  enabled: boolean,
+) {
+  return useQuery({
+    queryKey: [
+      ...mediaSourcesKey,
+      "validate-server-roots",
+      instanceId,
+      sourceId,
+      libraryId,
+      locator,
+      contentKind,
+      roots,
+    ],
+    queryFn: ({ signal }) =>
+      withInlineErrors(async () => {
+        if (sourceId !== undefined && libraryId !== undefined) {
+          await api.mediaSources.previewServerRoots(
+            sourceId,
+            libraryId,
+            roots,
+            signal,
+          );
+        } else {
+          await api.mediaSources.validateServerRoots(
+            roots,
+            contentKind,
+            signal,
+          );
+        }
+        return true;
+      }),
+    enabled,
+    placeholderData: undefined,
+    staleTime: 0,
+    retry: false,
+  });
+}
+
 export function useSourceAvailability() {
   const { data, isEnabled, isLoading } = useMediaSources();
   return {

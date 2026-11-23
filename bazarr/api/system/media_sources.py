@@ -63,6 +63,18 @@ class MediaSourceServerLibraries(Resource):
             return _refused(error)
 
 
+@api_ns_system_media_sources.route("system/media-sources/server-roots/validate")
+class MediaSourceServerRootsValidate(Resource):
+    @authenticate
+    def post(self):
+        """Check mappings for a new server library without changing it."""
+        try:
+            service.validate_server_roots(_body())
+            return {}, 200
+        except SourceError as error:
+            return _refused(error)
+
+
 @api_ns_system_media_sources.route("system/media-sources/validate-path")
 class MediaSourceValidatePath(Resource):
     @authenticate
