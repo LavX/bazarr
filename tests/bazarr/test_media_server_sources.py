@@ -501,24 +501,37 @@ def test_partial_scan_preserves_the_identity_at_a_reused_path(saved, monkeypatch
 
 @pytest.mark.parametrize('original_first', [False, True], ids=['replacement-first', 'original-first'])
 def test_conflicting_server_paths_stay_out_of_search_until_confirmed(saved, monkeypatch, original_first):
+    from app import database
     from media_servers import item_pages
     from media_sources import repository, service
     from subtitles import download
+
+    monkeypatch.setattr(database, 'engine', saved.db.get_bind())
 
     source = _register(saved, library=_library(saved))
     source_id, lib = source['id'], source['libraries'][0]['id']
     movie = video(saved.root / 'Film.2000.mkv')
     control = video(saved.root / 'Control.2001.mkv')
     remote = f'/remote/Movie/{movie.name}'
-    original = _item(10, remote)
+    original = _item(10, remote, ProviderIds={'Tmdb': '42'})
     replacement = _item(20, remote)
-    other = _item(30, f'/remote/Movie/{control.name}')
+    other = _item(30, f'/remote/Movie/{control.name}', ProviderIds={'Tmdb': '42'})
     listing = ('movies', 'Movie')
     saved.rows[listing] = [original, other]
     assert _scan(saved, source_id, lib)[0]['last_scan_status'] == 'ok'
     before = _indexed(saved, lib)
     original_id, control_id = before['10'].id, before['30'].id
     repository.update_item(original_id, saved.db, identity_source='user', title='Keep this identity')
+
+    def discover_copies():
+        response = saved.client.get('/api/discover/copies', headers=HEADERS,
+                                    query_string={'media_type': 'movie', 'tmdb_id': 42})
+        assert response.status_code == 200, response.json
+        return response.json['items']
+
+    initial_copies = discover_copies()
+    assert {copy['local_id'] for copy in initial_copies if copy['selectable']} == {original_id, control_id}
+    original_copy = next(copy['copy_id'] for copy in initial_copies if copy['local_id'] == original_id)
     last_seen = repository.get_item(original_id, saved.db).last_seen_at
     history_id = repository.insert_history(saved.db, item_id=original_id, source_id=source_id,
                                            item_kind='movie', action=1, description='fixture download')
@@ -556,6 +569,13 @@ def test_conflicting_server_paths_stay_out_of_search_until_confirmed(saved, monk
     assert (item.title, item.last_seen_at) == ('Keep this identity', last_seen)
     history = saved.db.execute(sa.select(repository.History).where(repository.History.c.id == history_id)).one()
     assert history.item_id == original_id
+    assert movie.is_file()
+    assert [copy['local_id'] for copy in discover_copies()] == [control_id]
+    rejected = saved.client.post('/api/discover/search', headers=HEADERS,
+                                 json={'media_type': 'movie', 'tmdb_id': 42, 'language': 'eng',
+                                       'copy_id': original_copy})
+    assert rejected.status_code == 409, rejected.json
+    assert rejected.json['reason'] == 'copy_unavailable'
 
     monkeypatch.setattr(item_pages, 'PAGE_SIZE', 2)
     saved.pages[(*listing, 0)] = _body([original, other], 3)
@@ -579,6 +599,7 @@ def test_conflicting_server_paths_stay_out_of_search_until_confirmed(saved, monk
     assert _scan(saved, source_id, lib)[0]['last_scan_status'] == 'ok'
     restored = _indexed(saved, lib)['10']
     assert (restored.id, restored.path, restored.server_missing) == (original_id, str(movie), 0)
+    assert original_copy in {copy['copy_id'] for copy in discover_copies() if copy['selectable']}
     search(original_id)
     assert [call.args[0] for call in generate.call_args_list] == [str(control), str(movie)]
 

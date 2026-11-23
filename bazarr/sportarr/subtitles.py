@@ -129,7 +129,10 @@ def validate_candidate(candidate, context, session=None, cancel=None):
     try:
         signature = _signature(context, instance)
     except OSError as exc:
-        raise ValueError("Sports file is unavailable. Please search again.") from exc
+        raise ValueError(
+            "Sports file is unavailable. Check that the recording exists and is accessible, "
+            "and verify its path mappings."
+        ) from exc
     if signature != candidate.signature:
         raise ValueError("Sports file changed. Please search again.")
     if (
