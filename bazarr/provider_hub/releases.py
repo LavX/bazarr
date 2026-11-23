@@ -159,6 +159,7 @@ _DATA_KEY = "data:"
 _CATALOG_REGISTRATION = "catalog_registration:"
 _LEGACY_CATALOG_REGISTRATION = "legacy"
 _UNVERIFIED_LEGACY_CATALOG_REGISTRATION = "legacy-unverified"
+LEGACY_RESTAGED_REGISTRATION = "legacy-restaged"
 # What each key after the version is, in order, for the ``fields`` column.
 _FIELD_NAMES = ("path", "python_path", "manifest", "supplied_by", "activated_at")
 
@@ -252,6 +253,9 @@ def _legacy_cached_manifest_matches(data, source_id, source, plugin_id, version,
     expected_url = manifest["source"].get("catalog_url") or source["url"]
     installed = {**manifest, "source": {key: value for key, value in manifest["source"].items()
                                         if key not in ("catalog_url", "trusted")}}
+    # Schema 2 subtitle installs materialize the schema 1 provider ID for downstream callers.
+    if id_key == "id" and installed.get("provider_id") == plugin_id:
+        installed.pop("provider_id")
     matched = False
     for entry in entries.values():
         if not (isinstance(entry, dict) and entry.get("source") == source_id
@@ -259,15 +263,17 @@ def _legacy_cached_manifest_matches(data, source_id, source, plugin_id, version,
                 and entry.get("resolved_commit") == commit):
             continue
         cached = entry.get("manifest")
-        cached_source = cached.get("source") if isinstance(cached, dict) else None
-        if not isinstance(cached_source, dict) or cached_source.get("catalog_url") != expected_url:
-            continue
         # Every record for this source and release must agree on the artifact.
-        cached_digest = cached.get("bundle_sha256")
+        cached_digest = cached.get("bundle_sha256") if isinstance(cached, dict) else None
         if not isinstance(cached_digest, str) or cached_digest.lower() != digest:
             return False
+        cached_source = cached.get("source")
+        if not isinstance(cached_source, dict) or cached_source.get("catalog_url") != expected_url:
+            continue
         comparable = {**cached, "source": {key: value for key, value in cached_source.items()
                                            if key not in ("catalog_url", "trusted")}}
+        if id_key == "id" and comparable.get("provider_id") == plugin_id:
+            comparable.pop("provider_id")
         if comparable == installed:
             if matched:
                 return False
@@ -525,6 +531,13 @@ def backfill_legacy_registrations(data: dict[str, Any], rows: list[dict[str, Any
         # Keep the old source in the release history, including a stage that must now be refused.
         # An explicit nonmatching registration makes that decision stable across later refreshes.
         registration = (_LEGACY_CATALOG_REGISTRATION if attested else _UNVERIFIED_LEGACY_CATALOG_REGISTRATION)
+        if (is_selected and release["state"] == STAGED and _data_key(release) is None
+                and row.get("source_bound", True) is True and row.get("source_id") != source_id
+                and catalog_registration(data, source_id) == _LEGACY_CATALOG_REGISTRATION
+                and catalog_registration(data, row.get("source_id")) == _LEGACY_CATALOG_REGISTRATION):
+            # The old writer changed the selected source without changing the release's original source.
+            # This stage can proceed only after the new catalog's entry and actual bundle are verified.
+            registration = LEGACY_RESTAGED_REGISTRATION
         if is_selected and not attested and row.get("source_id") == source_id:
             row.update(source_bound=True, source_id=None, trusted=False, trust_note=UNKNOWN_CATALOG_SOURCE_NOTE)
         raw = release.get("fields")

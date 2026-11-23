@@ -146,6 +146,9 @@ def _legacy_cached_manifest_matches(document, source_id, source, plugin_id, vers
     expected_url = manifest["source"].get("catalog_url") or source["url"]
     installed = {**manifest, "source": {key: value for key, value in manifest["source"].items()
                                         if key not in ("catalog_url", "trusted")}}
+    # Schema 2 subtitle installs materialize the schema 1 provider ID for downstream callers.
+    if id_key == "id" and installed.get("provider_id") == plugin_id:
+        installed.pop("provider_id")
     matched = False
     for entry in entries.values():
         if not (isinstance(entry, dict) and entry.get("source") == source_id
@@ -153,15 +156,17 @@ def _legacy_cached_manifest_matches(document, source_id, source, plugin_id, vers
                 and entry.get("resolved_commit") == commit):
             continue
         cached = entry.get("manifest")
-        cached_source = cached.get("source") if isinstance(cached, dict) else None
-        if not isinstance(cached_source, dict) or cached_source.get("catalog_url") != expected_url:
-            continue
         # Every record for this source and release must agree on the artifact.
-        cached_digest = cached.get("bundle_sha256")
+        cached_digest = cached.get("bundle_sha256") if isinstance(cached, dict) else None
         if not isinstance(cached_digest, str) or cached_digest.lower() != digest:
             return False
+        cached_source = cached.get("source")
+        if not isinstance(cached_source, dict) or cached_source.get("catalog_url") != expected_url:
+            continue
         comparable = {**cached, "source": {key: value for key, value in cached_source.items()
                                            if key not in ("catalog_url", "trusted")}}
+        if id_key == "id" and comparable.get("provider_id") == plugin_id:
+            comparable.pop("provider_id")
         if comparable == installed:
             if matched:
                 return False

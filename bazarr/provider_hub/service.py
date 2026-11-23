@@ -5465,7 +5465,11 @@ def _keyless_stage_owner(
         return None, None
     if origin != stage.origin or origin != "catalog":
         return None, "the staged release has conflicting origins"
-    if stage.source_id == source_id or not _same_release_owner(state, stage, stage.source_id, stage.origin):
+    recorded_owner = _same_release_owner(state, stage, stage.source_id, stage.origin)
+    legacy_restage = (stage.catalog_registration == releases.LEGACY_RESTAGED_REGISTRATION
+                      and releases.catalog_registration(state, stage.source_id) == "legacy"
+                      and releases.catalog_registration(state, source_id) == "legacy")
+    if stage.source_id == source_id or not (recorded_owner or legacy_restage):
         return unknown
 
     manifest = row["staged_manifest"]

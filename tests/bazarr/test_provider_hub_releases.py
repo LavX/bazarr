@@ -1696,11 +1696,12 @@ def test_pre_key_provider_stage_reserves_data_identity_before_retry(hub, monkeyp
     assert state_store.list_releases(plugin_id, states=(releases.ACTIVE,))[0] == active
 
 
+@pytest.mark.parametrize("legacy_registry", [False, True])
 @pytest.mark.parametrize(("bundle_valid", "detach"),
                          [(True, None), (False, None), (True, "removed"), (True, "unbound")],
                          ids=["verified", "changed-bytes", "removed-catalogs", "unbound"])
 def test_reserving_data_does_not_activate_a_stage_replaced_by_another_catalogue(
-        hub, monkeypatch, bundle_valid, detach):
+        hub, monkeypatch, bundle_valid, detach, legacy_registry):
     from plugin_platform_helpers import provider_manifest_v2
     from provider_hub import datadir, releases, service, state_store
     from provider_hub.kinds import SUBTITLE_PROVIDER, get_kind
@@ -1771,6 +1772,23 @@ def test_reserving_data_does_not_activate_a_stage_replaced_by_another_catalogue(
     assert not row.get("staged_data_key")
     restaged, = state_store.list_releases(plugin_id, states=(releases.STAGED,))
     assert restaged.id == original.id and restaged.data_key is None
+    if legacy_registry:
+        def remove_registrations(state):
+            for catalog in ("catalog-a", "catalog-b"):
+                state["catalog_sources"][catalog].pop("registration")
+
+        mutate_state(remove_registrations)
+        with state_store.write_transaction(state_store.engine()) as connection:
+            rows = releases.read_rows(connection, plugin_id=plugin_id)
+            for saved in rows:
+                fields = [field for field in json.loads(saved["fields"])
+                          if not field.startswith("catalog_registration:")]
+                connection.execute(sa.update(releases.releases_table).where(
+                    releases.releases_table.c.id == saved["id"]).values(fields=json.dumps(fields)))
+        state_store._ready.clear()
+        restaged, = state_store.list_releases(plugin_id, states=(releases.STAGED,))
+        assert restaged.id == original.id
+        assert restaged.catalog_registration == releases.LEGACY_RESTAGED_REGISTRATION
     previous, = state_store.list_releases(plugin_id, states=(releases.ACTIVE,))
     if detach == "removed":
         assert service.remove_catalog_source("catalog-a")
