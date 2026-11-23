@@ -5,6 +5,7 @@ import { AxiosError } from "axios";
 import { QueryKeys } from "@/apis/queries/keys";
 import api from "@/apis/raw";
 import type {
+  ArrInstance,
   ArrInstanceCreate,
   ArrInstanceDeleteConflict,
   ArrInstanceTest,
@@ -46,11 +47,41 @@ export function getArrInstanceDeleteConflict(
     : null;
 }
 
-export function useArrInstances() {
+export function useArrInstances(enabled = true) {
   return useQuery({
     queryKey: arrKey,
     queryFn: () => api.arrInstances.list(),
+    enabled,
   });
+}
+
+// An absent list or kind leaves the connection's availability unknown.
+export function getArrInstanceAvailability(
+  kind: ArrKind,
+  instances: ArrInstance[] | undefined,
+) {
+  const records = instances?.filter((instance) => instance.kind === kind);
+  return records?.length
+    ? records.some((instance) => instance.enabled)
+    : undefined;
+}
+
+export function isArrMediaRouteEnabled(
+  kind: ArrKind,
+  settings: Settings | undefined,
+  instances: ArrInstance[] | undefined,
+) {
+  if (!settings?.general?.[`use_${kind}`]) return false;
+  if (!settings.media_sources?.visible) return true;
+  if (!instances) return false;
+
+  const available = getArrInstanceAvailability(kind, instances);
+  if (available !== undefined) return available;
+  if (kind === "sportarr") return false;
+
+  // A legacy Sonarr or Radarr connection can predate instance records.
+  const legacy = settings[kind];
+  return Boolean(legacy?.ip?.trim() && legacy.apikey?.trim());
 }
 
 /**
@@ -154,8 +185,21 @@ export function useUpdateArrInstance({
       ({ id, body }: { id: number; body: ArrInstanceUpdate }) =>
         api.arrInstances.update(id, body),
     ),
-    onSuccess: () => {
-      client.invalidateQueries({ queryKey: arrKey });
+    onSuccess: async (updated, { id, body }) => {
+      if (
+        typeof body.enabled === "boolean" &&
+        typeof updated?.enabled === "boolean"
+      ) {
+        const { enabled } = updated;
+        // A confirmed disable must reach route guards before a list refresh.
+        await client.cancelQueries({ queryKey: arrKey, exact: true });
+        client.setQueryData<ArrInstance[]>(arrKey, (instances) =>
+          instances?.map((instance) =>
+            instance.id === id ? { ...instance, enabled } : instance,
+          ),
+        );
+      }
+      void client.invalidateQueries({ queryKey: arrKey });
     },
     onError: (error) => {
       if (inlineErrors) {

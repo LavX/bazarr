@@ -198,6 +198,52 @@ it("shows the score as a percentage of what was available", async () => {
   ).toBeInTheDocument();
 });
 
+it("identifies the manually scored subtitle and filters by its action", async () => {
+  owners();
+  const user = userEvent.setup();
+  let actionFilter: string | null = null;
+  server.use(
+    http.get("/api/sports/history", ({ request }) => {
+      actionFilter = new URL(request.url).searchParams.get("action");
+      return HttpResponse.json({
+        data: [
+          {
+            ...record,
+            action: 9,
+            score: 0,
+            score_out_of: 100,
+            provider: null,
+            subs_id: null,
+            description: "Score set manually.",
+            subtitles_path: "/sports/final.en.srt",
+            upgradable: false,
+          },
+        ],
+        total: 1,
+      });
+    }),
+  );
+  customRender(<SportsHistoryView />);
+
+  expect(
+    await screen.findByText("0%", undefined, { timeout: 8000 }),
+  ).toBeInTheDocument();
+  expect(screen.getByLabelText("Manual Score")).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "Exclude" })).toBeNull();
+  // eslint-disable-next-line testing-library/no-node-access
+  expect(document.querySelector(".fa-recycle")).toBeNull();
+  // eslint-disable-next-line testing-library/no-node-access
+  const info = document.querySelector(".fa-circle-info");
+  expect(info).not.toBeNull();
+  await user.hover(info as Element);
+  expect(
+    await screen.findByText(/\/sports\/final\.en\.srt/),
+  ).toBeInTheDocument();
+  await user.click(screen.getByRole("combobox", { name: "Action" }));
+  await user.click(await screen.findByRole("option", { name: "Manual score" }));
+  await waitFor(() => expect(actionFilter).toBe("9"));
+});
+
 it("does not request history when every owner is disabled", async () => {
   owners(false);
   let calls = 0;
@@ -237,6 +283,53 @@ it("narrows the history to the league the toolbox opened the page for", async ()
   await screen.findByText("Final", undefined, { timeout: 8000 });
   expect(leagueFilter).toBe("7");
 });
+
+it.each([false, true])(
+  "only searches upgrades when the bookmarked owner is enabled (%s)",
+  async (enabled) => {
+    owners();
+    const user = userEvent.setup();
+    const upgrades: unknown[] = [];
+    server.use(
+      http.get("/api/system/arr-instances", () =>
+        HttpResponse.json([{ ...sportarr, enabled }, sportarrSibling]),
+      ),
+      http.get("/api/sports/history", () =>
+        HttpResponse.json({ data: [], total: 0 }),
+      ),
+      http.get("/api/system/jobs", () => HttpResponse.json({ data: [] })),
+      http.post("/api/sports/upgrade", async ({ request }) => {
+        upgrades.push(await request.json());
+        return HttpResponse.json({
+          queued: false,
+          job_id: null,
+          message: "No upgrades needed",
+        });
+      }),
+    );
+    const router = createMemoryRouter(
+      [{ path: "/history/sports", element: <SportsHistoryView /> }],
+      { initialEntries: ["/history/sports?instance=42"] },
+    );
+    rawRender(
+      <AllProviders>
+        <RouterProvider router={router} />
+      </AllProviders>,
+    );
+    const upgrade = await screen.findByRole("button", {
+      name: "Search upgrades",
+    });
+    if (enabled) {
+      expect(upgrade).toBeEnabled();
+      await user.click(upgrade);
+      await waitFor(() => expect(upgrades).toEqual([{ arr_instance_id: 42 }]));
+    } else {
+      expect(upgrade).toBeDisabled();
+      await user.click(upgrade);
+      expect(upgrades).toEqual([]);
+    }
+  },
+);
 
 it("renders the Match popover for a record with recorded criteria", async () => {
   owners();

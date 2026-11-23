@@ -7,6 +7,7 @@ import files from "./files";
 import history from "./history";
 import mediaServerLinks from "./mediaServerLinks";
 import mediaServers from "./mediaServers";
+import mediaSources from "./mediaSources";
 import movies from "./movies";
 import plex from "./plex";
 import plugins from "./plugins";
@@ -28,6 +29,7 @@ const api = {
   movies,
   mediaServers,
   mediaServerLinks,
+  mediaSources,
   series,
   sports,
   providers,

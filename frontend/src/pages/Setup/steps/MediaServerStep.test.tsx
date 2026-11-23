@@ -32,9 +32,7 @@ const mockedSettingsMutation = vi.mocked(useSettingsMutation);
 
 const onNext = vi.fn();
 const mutate = vi.fn();
-// The Plex re-enable is awaited, so the row needs the promise-returning half
-// of the mutation as well: a failure there is the one the reader has to hear
-// about.
+// Disconnect waits for the switch write, including when Plex is re-enabled.
 const mutateAsync = vi.fn();
 
 const row = (kind: MediaServerKind, name: string, id: string) => ({
@@ -611,10 +609,12 @@ describe("MediaServerStep", () => {
 
   it("Disconnect asks first, then deletes the row and clears the switch", async () => {
     const deleted: string[] = [];
-    setInstances({ emby: [row("emby", "Living room", "row-1")] });
+    const emby = [row("emby", "Living room", "row-1")];
+    setInstances({ emby });
     server.use(
       http.delete("/api/system/media-server-instances/row-1", () => {
         deleted.push("row-1");
+        emby.pop();
         return new HttpResponse(null, { status: 204 });
       }),
     );
@@ -632,9 +632,11 @@ describe("MediaServerStep", () => {
     );
 
     await waitFor(() => expect(deleted).toEqual(["row-1"]));
-    expect(mutate).toHaveBeenCalledWith({
-      "settings-general-use_emby": false,
-    });
+    await waitFor(() =>
+      expect(mutateAsync).toHaveBeenCalledWith({
+        "settings-general-use_emby": false,
+      }),
+    );
   });
 
   describe("before the instance lists settle", () => {

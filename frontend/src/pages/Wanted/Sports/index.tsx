@@ -24,6 +24,7 @@ import Language from "@/components/bazarr/Language";
 import { WantedItem } from "@/components/forms/MassTranslateForm";
 import { SportsSearchModal } from "@/components/modals/SportsSearchModal";
 import { useModals } from "@/modules/modals";
+import FolderMediaNotice from "@/pages/views/FolderMediaNotice";
 import WantedView from "@/pages/views/WantedView";
 import { BuildKey } from "@/utilities";
 import { buildSubtitleLanguageKey } from "@/utilities/subtitles";
@@ -86,7 +87,7 @@ const MissingLanguages: FunctionComponent<{ row: SportsWantedRow }> = ({
 };
 
 const WantedSportsView: FunctionComponent = () => {
-  const { enabled, isLoading } = useSportsAvailability();
+  const { activity, arrEnabled, isLoading } = useSportsAvailability();
   const [params] = useSearchParams();
   const owner = params.get("instance")
     ? Number(params.get("instance"))
@@ -113,7 +114,7 @@ const WantedSportsView: FunctionComponent = () => {
   // the Audio column speak code2, so both directions are mapped through this
   // catalogue: names become the codes the rows carry, and the column turns
   // those back into readable names.
-  const { data: audioLangs = [] } = useAudioLanguages();
+  const { data: audioLangs = [] } = useAudioLanguages(arrEnabled);
   const langOptions = useMemo(
     () => audioLangs.map((l) => ({ value: l.code2, label: l.name })),
     [audioLangs],
@@ -314,7 +315,8 @@ const WantedSportsView: FunctionComponent = () => {
   }, [owner, instanceIds, batch]);
 
   if (isLoading) return null;
-  if (!enabled) {
+  if (!arrEnabled && activity) return <FolderMediaNotice />;
+  if (!arrEnabled) {
     return (
       <Container px={0} fluid>
         <Text p="md">

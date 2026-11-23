@@ -43,25 +43,30 @@ describe("ScoreOverrideForm", () => {
     expect(bodies[0].get("subtitlesPath")).toBe("/movies/a.en.srt");
   });
 
-  it("clamps a score above 100 to 100 before it posts", async () => {
-    const user = userEvent.setup();
-    const bodies: FormData[] = [];
-    server.use(
-      http.post("/api/subtitles/score-override", async ({ request }) => {
-        bodies.push(await request.formData());
-        return new HttpResponse(null, { status: 204 });
-      }),
-    );
-    customRender(<ScoreOverrideForm selections={selections} />);
+  it.each(["movie", "sports"] as const)(
+    "clamps a %s score above 100 to 100 before it posts",
+    async (type) => {
+      const user = userEvent.setup();
+      const bodies: FormData[] = [];
+      server.use(
+        http.post("/api/subtitles/score-override", async ({ request }) => {
+          bodies.push(await request.formData());
+          return new HttpResponse(null, { status: 204 });
+        }),
+      );
+      customRender(
+        <ScoreOverrideForm selections={[{ ...selections[0], type }]} />,
+      );
 
-    const input = screen.getByRole("textbox", { name: "Score (%)" });
-    await user.clear(input);
-    await user.type(input, "101");
-    await user.click(screen.getByRole("button", { name: "Set score" }));
+      const input = screen.getByRole("textbox", { name: "Score (%)" });
+      await user.clear(input);
+      await user.type(input, "101");
+      await user.click(screen.getByRole("button", { name: "Set score" }));
 
-    await waitFor(() => expect(bodies).toHaveLength(1));
-    expect(bodies[0].get("score")).toBe("100");
-  });
+      await waitFor(() => expect(bodies).toHaveLength(1));
+      expect(bodies[0].get("score")).toBe("100");
+    },
+  );
 
   it("refuses an empty score without posting", async () => {
     const user = userEvent.setup();
@@ -83,21 +88,35 @@ describe("ScoreOverrideForm", () => {
     expect(posted).toBe(0);
   });
 
-  it("posts nothing for a sports selection", async () => {
-    const user = userEvent.setup();
-    let posted = 0;
-    server.use(
-      http.post("/api/subtitles/score-override", () => {
-        posted += 1;
-        return new HttpResponse(null, { status: 204 });
-      }),
-    );
-    customRender(
-      <ScoreOverrideForm selections={[{ ...selections[0], type: "sports" }]} />,
-    );
+  it.each([0, 100])(
+    "posts a sports score of %s for its owned file",
+    async (score) => {
+      const user = userEvent.setup();
+      const bodies: FormData[] = [];
+      server.use(
+        http.post("/api/subtitles/score-override", async ({ request }) => {
+          bodies.push(await request.formData());
+          return new HttpResponse(null, { status: 204 });
+        }),
+      );
+      customRender(
+        <ScoreOverrideForm
+          selections={[{ ...selections[0], type: "sports" }]}
+        />,
+      );
 
-    await user.click(screen.getByRole("button", { name: "Set score" }));
+      const input = screen.getByRole("textbox", { name: "Score (%)" });
+      await user.clear(input);
+      await user.type(input, String(score));
+      await user.click(screen.getByRole("button", { name: "Set score" }));
 
-    await waitFor(() => expect(posted).toBe(0));
-  });
+      await waitFor(() => expect(bodies).toHaveLength(1));
+      expect(bodies[0].get("sportsEventId")).toBe("42");
+      expect(bodies[0].get("arr_instance_id")).toBe("3");
+      expect(bodies[0].get("subtitlesPath")).toBe("/movies/a.en.srt");
+      expect(bodies[0].get("score")).toBe(String(score));
+      expect(bodies[0].has("radarrMovieId")).toBe(false);
+      expect(bodies[0].has("sonarrEpisodeId")).toBe(false);
+    },
+  );
 });

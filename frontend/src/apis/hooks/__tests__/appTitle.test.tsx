@@ -14,7 +14,7 @@ import { useAppTitle } from "@/apis/hooks/site";
 const systemSettings = vi.fn();
 const systemStatus = vi.fn();
 
-vi.mock("@/apis/hooks", () => ({
+vi.mock("@/apis/hooks/system", () => ({
   useSystemSettings: () => systemSettings(),
   useSystemStatus: () => systemStatus(),
 }));

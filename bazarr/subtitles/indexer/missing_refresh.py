@@ -11,6 +11,7 @@ now finishes on its own and this job does the recalculation after it.
 
 import logging
 import uuid
+from functools import partial
 
 from app.config import settings
 from app.event_handler import event_stream
@@ -38,8 +39,8 @@ def _job_label(series, movies):
     return f"{JOB_LABEL} for {' and '.join(parts)}" if parts else JOB_LABEL
 
 
-def _pending_job_for(series, movies):
-    """A queued, not yet started, recalculation of exactly this scope.
+def _pending_job_for(series, movies, source_scope):
+    """A queued, not yet started, recalculation that covers this scope.
 
     Only a pending one absorbs a new request: it has not read anything yet, so
     it will see what this save wrote. A running one may already have passed
@@ -50,16 +51,18 @@ def _pending_job_for(series, movies):
         if job.module != JOB_MODULE or job.func != JOB_FUNC or job.status != 'pending':
             continue
         if job.kwargs.get('series') == series and job.kwargs.get('movies') == movies:
-            return job.job_id
+            pending_scope = job.kwargs.get('source_scope')
+            if pending_scope == source_scope or (source_scope is not None and pending_scope in (None, {})):
+                return job.job_id
     return None
 
 
-def queue_missing_subtitles_recalculation(series=None, movies=None):
+def queue_missing_subtitles_recalculation(series=None, movies=None, *, source_scope=None):
     """Queue the recalculation and return its job id without waiting for it.
 
     With neither argument the whole library is recalculated. Otherwise
     ``series`` and ``movies`` are lists of ``(upstream id, owning instance)``
-    pairs, and only those items are.
+    pairs. ``source_scope`` limits the pass to source items, optionally within a library or group.
 
     Never raises: the save that called this has already been written, and
     failing its response now would report a save that did happen as one that
@@ -72,21 +75,35 @@ def queue_missing_subtitles_recalculation(series=None, movies=None):
         movies = _normalise(movies)
         if series is not None and movies is not None and not series and not movies:
             return None
-        existing = _pending_job_for(series, movies)
+        existing = _pending_job_for(series, movies, source_scope)
         if existing:
             return existing
+        kwargs = {'series': series, 'movies': movies, 'request': uuid.uuid4().hex}
+        label = _job_label(series, movies)
+        if source_scope is not None:
+            kwargs['source_scope'] = source_scope
+            label = f"{JOB_LABEL} for source items"
         return jobs_queue.feed_jobs_pending_queue(
-            job_name=_job_label(series, movies),
+            job_name=label,
             module=JOB_MODULE,
             func=JOB_FUNC,
             # The request token keeps the queue's own duplicate check, which also
             # matches running jobs, from dropping a pass that is still needed.
-            kwargs={'series': series, 'movies': movies, 'request': uuid.uuid4().hex},
+            kwargs=kwargs,
             is_progress=True,
         ) or None
     except Exception:
         logging.exception("BAZARR could not queue the missing subtitles recalculation")
         return None
+
+
+def _source_steps(source_scope=None):
+    from media_sources import repository
+
+    if not repository.has_sources():
+        return []
+    from media_sources.indexer import recalculate_missing_subtitles as recalculate_sources
+    return [("source items", partial(recalculate_sources, **(source_scope or {})))]
 
 
 def _library_steps():
@@ -103,10 +120,10 @@ def _library_steps():
     if settings.general.use_sportarr:
         from subtitles.indexer.sports import list_missing_subtitles_sports
         steps.append(("sports events", list_missing_subtitles_sports))
-    return steps
+    return steps + _source_steps()
 
 
-def recalculate_missing_subtitles(series=None, movies=None, request=None, job_id=None):
+def recalculate_missing_subtitles(series=None, movies=None, request=None, job_id=None, *, source_scope=None):
     from app.job_errors import reason_of
     from app.jobs_queue import JobCancelled, JobFailed
 
@@ -116,7 +133,7 @@ def recalculate_missing_subtitles(series=None, movies=None, request=None, job_id
         jobs_queue.update_job_progress(job_id=job_id)
 
     if series is None and movies is None:
-        steps = _library_steps()
+        steps = _library_steps() if source_scope is None else _source_steps(source_scope)
         jobs_queue.update_job_progress(job_id=job_id, progress_value=0, progress_max=max(len(steps), 1))
         failures = []
         for index, (name, recalculate) in enumerate(steps):

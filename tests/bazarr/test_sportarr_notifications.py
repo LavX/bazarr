@@ -13,6 +13,7 @@ from test_sportarr_kind_migration import migration_engine  # noqa: F401
 from test_sportarr_indexer import indexed_library, sports  # noqa: F401
 from test_sportarr_manual import manual_library  # noqa: F401
 from test_sportarr_events import library as library
+from test_sportarr_workflows import workflow_library  # noqa: F401
 
 
 def test_a_sports_notifier_exists_alongside_the_series_and_movie_ones():
@@ -305,16 +306,35 @@ def test_single_provider_publication_refreshes_even_when_processing_fails(manual
     assert [released for _, released in released_publications] == [True]
 
 
-def test_an_upgrade_reports_the_removed_file_once_the_save_let_go(manual_library, released_publications, monkeypatch):  # noqa: F811
+def test_an_upgrade_reports_the_removed_file_once_the_save_let_go(workflow_library, released_publications, monkeypatch):  # noqa: F811
     from contextlib import contextmanager
+
+    from app.config import settings
+    from app.database import TableHistorySports
     from media_servers import dispatcher
+    from sportarr.artifacts import capture_artifact
+    from sportarr.identity import resolve_event_in_session
+    from sportarr.subtitles import candidate_signature
 
-    service, session, folder = manual_library
+    _, _, workflows, _, session, folder = workflow_library
+    monkeypatch.setattr(settings.general, 'upgrade_subs', True)
+    monkeypatch.setattr(settings.general, 'days_to_upgrade_subs', 30)
     replaced = folder / '1' / 'event.en.ass'
+    replacement = folder / '1' / 'event.en.srt'
+    replaced.write_text(
+        '[Script Info]\nScriptType: v4.00+\n\n'
+        '[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n'
+        'Dialogue: 0,0:00:00.00,0:00:01.00,Default,,0,0,0,,Original subtitle\n',
+        encoding='utf-8',
+    )
+    context = resolve_event_in_session(session, 61, 1)
+    session.add(TableHistorySports(
+        event_id=61, league_id=51, arr_instance_id=1, action=1, language='en', score=1,
+        score_out_of=180, video_path=context.original_path, subtitles_path='/sports/event.en.ass',
+        artifact=capture_artifact(context, str(replaced), candidate_signature(context, session)),
+    ))
+    session.commit()
     batches = []
-
-    def remove_superseded(path, previous_artifact, written_paths, is_upgrade, on_publish=None):
-        on_publish(str(replaced))
 
     @contextmanager
     def queued_together():
@@ -322,13 +342,14 @@ def test_an_upgrade_reports_the_removed_file_once_the_save_let_go(manual_library
         yield
         batches.append(len(released_publications))
 
-    monkeypatch.setattr(service, '_remove_superseded_sports_subtitle', remove_superseded)
     monkeypatch.setattr(dispatcher, 'queued_together', queued_together)
-    result = service.manual_search_sports(61, 'en', arr_instance_id=1)[0]
-    service.manual_download_sports(61, result, 1)
+    result = workflows.upgrade_sports_subtitles(job_id='notification-upgrade', arr_instance_id=1)
+    assert result['data'][0]['downloads'] == 1
+    assert replacement.is_file()
+    assert not replaced.exists()
     video = str(folder / '1' / 'event.mkv')
     assert [_described(event) for event, _ in released_publications] == [
-        ('sports', video, 'download', 1, str(folder / '1' / 'event.en.srt')),
+        ('sports', video, 'download', 1, str(replacement)),
         ('sports', video, 'delete', 1, str(replaced)),
     ]
     assert [released for _, released in released_publications] == [True, True]

@@ -117,7 +117,7 @@ export default function DigitalReleases() {
         showTvdbId: undefined,
         episodeIdentity: undefined,
         manualConfirmed: false,
-        manualEntry: false,
+        manualEntry: undefined,
         season: "",
         episode: "",
       });

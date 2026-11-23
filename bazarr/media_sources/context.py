@@ -36,6 +36,7 @@ class SourceItemContext:
     series_tmdb_id: Optional[str] = None
     series_year: Optional[int] = None
     series_identity_source: str = 'filename'
+    pinned_file_identity: Optional[tuple[int, int]] = None  # device and inode from an explicit Discover copy
 
     @property
     def media_type(self):

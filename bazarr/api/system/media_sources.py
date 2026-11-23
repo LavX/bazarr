@@ -28,9 +28,15 @@ def _refused(error):
 @api_ns_system_media_sources.route("system/media-sources")
 class MediaSourcesList(Resource):
     @authenticate
+    @api_ns_system_media_sources.doc(params={
+        'availability': 'Set to 1 to include per-kind navigation availability alongside the source list',
+    })
     def get(self):
         """List the media sources with their libraries and roots"""
-        return service.list_sources(), 200
+        sources = service.list_sources()
+        if request.args.get('availability') == '1':
+            return {"data": sources, "availability": service.source_availability(sources)}, 200
+        return sources, 200
 
     @authenticate
     @api_ns_system_media_sources.response(201, 'The source was created, with its library')
