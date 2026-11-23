@@ -382,14 +382,30 @@ class SubtitleProviderKind(Kind):
         return validate_manifest(
             manifest, built_in_provider_ids=service._validation_built_in_provider_ids(manifest, trusted))
 
-    def smoke_test(self, validated, bundle_path, python_path, timeout=None) -> None:
+    def smoke_test(self, validated, bundle_path, python_path, timeout=None, *, data_dir=None) -> None:
         # Looked up at call time, so a test that patches the service function reaches it.
         from provider_hub import service
 
-        if timeout is None:
-            service._smoke_validate_worker(validated, bundle_path, python_path)
-        else:
-            service._smoke_validate_worker(validated, bundle_path, python_path, timeout=timeout)
+        arguments = {}
+        if timeout is not None:
+            arguments["timeout"] = timeout
+        if data_dir is not None:
+            arguments["data_dir"] = data_dir
+        service._smoke_validate_worker(validated, bundle_path, python_path, **arguments)
+
+    def settle_data(self, plugin_id: str, timeout: float) -> bool:
+        import time
+
+        from provider_hub.worker import _client_gone, live_workers
+
+        deadline = time.monotonic() + timeout
+        for client in live_workers(plugin_id):
+            # Admission has closed and requests have drained. The idle stop
+            # permits the existing client to start again when admission opens.
+            client.stop_if_idle(0, grace_seconds=min(1.0, max(0.0, deadline - time.monotonic())))
+            if not _client_gone(client, max(0.0, deadline - time.monotonic())):
+                return False
+        return True
 
 
 SUBTITLE_PROVIDER_KIND = register_kind(SubtitleProviderKind())

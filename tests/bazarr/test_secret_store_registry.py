@@ -1573,3 +1573,43 @@ def test_a_failed_scan_with_an_unresolvable_hub_directory_still_runs_the_fallbac
     persisted = json.loads(state_path.read_text(encoding="utf-8"))["plugin_secret_paths"]
     assert "ghostplugin.api_token" in persisted
     assert "sonarr.apikey" not in persisted
+
+
+def test_activated_manifest_keeps_plain_and_secret_leftovers_classified(
+        tmp_path, monkeypatch, plugin_secret_registry):
+    from provider_hub.secret_paths import archive_manifest
+
+    state_path = _write_hub_state(tmp_path, {"installations": {}})
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(state_path))
+    manifest = _hub_manifest("ghosthub", secret_fields=("api_token",))
+    manifest.update(version="1.0.0", bundle_sha256="a" * 64)
+    manifest.setdefault("config_schema", {}).setdefault("properties", {}).update(region={"type": "string"})
+    archive_manifest(state_path.parent, "ghosthub", manifest)
+    plugin_secret_registry.load_plugin_secret_paths(
+        _ScanSettings({"ghosthub": {"api_token": "synthetic token", "region": "synthetic region"}}))
+    assert plugin_secret_registry.is_plugin_secret("ghosthub.api_token")
+    assert not plugin_secret_registry.is_plugin_secret("ghosthub.region")
+
+
+def test_restored_manifest_history_preserves_the_fields_on_a_fresh_host(tmp_path):
+    from zipfile import ZipFile
+
+    from provider_hub import secret_paths
+
+    original, restored = tmp_path / "original", tmp_path / "restored"
+    manifest = _hub_manifest("ghosthub", secret_fields=("api_token",))
+    manifest.update(version="1.0.0", bundle_sha256="e" * 64)
+    manifest.setdefault("config_schema", {}).setdefault("properties", {}).update(region={"type": "string"})
+    document = {}
+    secret_paths.remember_manifest(document, "ghosthub", manifest)
+    path = tmp_path / "backup.zip"
+    with ZipFile(path, "w") as archive:
+        secret_paths.write_backup_history(archive, original, document)
+    with ZipFile(path) as archive:
+        extracted = archive.extract(secret_paths.HISTORY_ARCHIVE, tmp_path)
+    from pathlib import Path
+    secret_paths.restore_backup_history(Path(extracted), restored)
+
+    [record] = secret_paths.archived_manifests(restored, "ghosthub")
+    assert "region" in record["config_schema"]["properties"]
+    assert record["secret_fields"] == ["api_token"]

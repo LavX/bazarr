@@ -817,11 +817,12 @@ def resolve_copy(copy_id, target):
 
 
 def require_copy_revision(context):
-    """Check that an explicit choice still names the physical file it described."""
+    """Return the current copy after checking that its physical revision still matches."""
     if context.get("copy_id"):
         facts = resolve_copy(context["copy_id"], context)
         if facts["file_revision"] != context.get("file_revision"):
             raise CopyUnavailable(_RECOVERY)
+        return facts
 
 
 def source_context_for_copy(facts):
