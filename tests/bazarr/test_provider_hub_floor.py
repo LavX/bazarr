@@ -1880,12 +1880,18 @@ def test_failed_seed_smoke_keeps_the_data_of_a_concurrently_staged_release(
     row["staged_data_key"] = "a" * 32
     kept = datadir.release_path(root, plugin_id, row["staged_data_key"])
     failed_folders = []
+    replacement_rows = []
 
     def fail(*args, data_dir, **kwargs):
         failed_folders.append(data_dir)
-        kept.mkdir()
-        (kept / "state.txt").write_text("concurrent install")
+        assert data_dir.is_dir() and not kept.parent.exists()
+        # A concurrent stage publishes its verified probe data before recording its slot.
+        with datadir.smoke_workspace(root) as replacement:
+            replacement.mkdir()
+            (replacement / "state.txt").write_text("concurrent install")
+            datadir.publish_probe_data(replacement, kept)
         hub.mutate_state(lambda state: state["installations"].update({plugin_id: row}))
+        replacement_rows.append(hub.load_state()["installations"][plugin_id])
         raise RuntimeError("seed smoke failed")
 
     monkeypatch.setattr(get_kind(release.manifest.kind), "smoke_test", fail)
@@ -1894,7 +1900,10 @@ def test_failed_seed_smoke_keeps_the_data_of_a_concurrently_staged_release(
                              ready_release=release, expected_installation=None)
     failed, = failed_folders
     assert not failed.exists()
-    assert hub.load_state()["installations"][plugin_id]["staged_data_key"] == kept.name
+    (replacement_row,) = replacement_rows
+    saved = hub.load_state()["installations"][plugin_id]
+    assert saved == replacement_row
+    assert saved["staged_data_key"] == kept.name
     assert (kept / "state.txt").read_text() == "concurrent install"
 
 
