@@ -241,11 +241,14 @@ def _file_signature(stat):
     return stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns
 
 
-def index_item(item_id, target=None, ownership_index=None, *, keep_index_on_probe_failure=False):
+def index_item(item_id, target=None, ownership_index=None, *, keep_index_on_probe_failure=False, expected_path=None):
     """Analyze a source file and return its subtitle listing, or None if the index is unavailable."""
     item = repository.get_item(item_id, target)
     if item is None:
         logging.info('BAZARR source item %s no longer exists; its subtitles were not indexed', item_id)
+        return None
+    if expected_path is not None and item.path != expected_path:
+        logging.debug('BAZARR source item %s moved before its subtitles were indexed', item_id)
         return None
     stat = local_stat(item.path)
     if stat is None:

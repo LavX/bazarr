@@ -34,7 +34,7 @@ from .tools.translate.availability import translation_available
 class ProcessSubtitlesResult:
     def __init__(self, message, reversed_path, downloaded_language_code2, downloaded_provider, score, forced,
                  subtitle_id, reversed_subtitles_path, hearing_impaired, matched=None, not_matched=None,
-                 ai_translated=None):
+                 ai_translated=None, *, source_indexed=False):
         self.message = message
         self.path = reversed_path
         self.provider = downloaded_provider
@@ -44,6 +44,7 @@ class ProcessSubtitlesResult:
         self.matched = matched
         self.not_matched = not_matched
         self.ai_translated = ai_translated if type(ai_translated) is bool else None
+        self.source_indexed = source_indexed
 
         if hearing_impaired:
             self.language_code = f"{downloaded_language_code2}:hi"
@@ -480,13 +481,14 @@ def process_subtitle(subtitle, media_type, audio_language, path, max_score, is_u
             logging.debug(f"BAZARR post-processing skipped because subtitles score isn't below this "  # noqa: G004
                           f"threshold value: {pp_threshold}%")
 
+    source_indexed = False
     if source is not None:
         # The stored path is already the Bazarr-visible one: nothing is mapped, in either direction, and no arr
         # is told to rescan.
         from media_sources.indexer import index_item
         reversed_path = path
         reversed_subtitles_path = downloaded_path
-        index_item(source.item_id)
+        source_indexed = index_item(source.item_id, expected_path=path) is not None
     elif media_type == 'sports':
         from utilities.path_mappings import apply_sports_mapping, read_sports_mappings
         if validate is not None:
@@ -573,7 +575,8 @@ def process_subtitle(subtitle, media_type, audio_language, path, max_score, is_u
                                   hearing_impaired=subtitle.language.hi,
                                   matched=list(subtitle.matches or []),
                                   not_matched=_get_not_matched(subtitle, media_type),
-                                  ai_translated=getattr(subtitle, 'ai_translated', False) is True)
+                                  ai_translated=getattr(subtitle, 'ai_translated', False) is True,
+                                  source_indexed=source_indexed)
 
 
 def _get_not_matched(subtitle, media_type):

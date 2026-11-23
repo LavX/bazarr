@@ -55,8 +55,7 @@ def _supports_stream_probe(item):
 def index_matches_file(item, stat, *, allow_external_only=False):
     """Check the stored index, requiring streams for supported files unless using the sidecar fallback."""
     if not allow_external_only and _supports_stream_probe(item):
-        # NULL also occurs on pre-analysis rows. Both those rows and failed probes need a fresh attempt.
-        return bool(streams(cached_metadata(item, stat)))
+        return bool(cached_metadata(item, stat).get(settings.general.embedded_subtitles_parser))
     if item.ffprobe_cache is not None:
         # An external-only index can describe a replacement that the scanner has yet to admit.
         return bool(cached_metadata(item, stat))

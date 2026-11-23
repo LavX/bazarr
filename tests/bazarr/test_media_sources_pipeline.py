@@ -150,8 +150,10 @@ def test_a_search_saves_a_subtitle_next_to_the_file_and_writes_history_and_the_i
     assert world.published[0].video_path == context.path
 
 
-@pytest.mark.parametrize("admitted", [False, True], ids=["replacement", "admitted"])
-def test_a_failed_probe_is_retried_once_per_search_even_with_download_reindexing(world, monkeypatch, admitted):
+@pytest.mark.parametrize(("admitted", "listing_failure"), [(False, False), (True, False), (True, True)],
+                         ids=["replacement", "admitted", "admitted-with-listing-failure"])
+def test_a_failed_probe_is_retried_once_per_search_even_with_download_reindexing(
+        world, monkeypatch, admitted, listing_failure):
     from app.config import settings
     from media_sources import analysis, identity, indexer, repository, scanner, service
     from utilities import video_analyzer
@@ -186,7 +188,16 @@ def test_a_failed_probe_is_retried_once_per_search_even_with_download_reindexing
     assert initial.missing_subtitles == "['en']"
     assert not analysis.streams(analysis.read_metadata(initial.ffprobe_cache))
     probe.reset_mock()
-    external_listing = Mock(wraps=indexer.list_external_subtitles)
+    saved = path.with_suffix(".en.srt")
+    list_sidecars = indexer.list_external_subtitles
+
+    def list_after_save(*args, **kwargs):
+        if listing_failure and external_listing.call_count == 1:
+            assert saved.is_file()
+            raise FileNotFoundError("An old sidecar disappeared while reading its size")
+        return list_sidecars(*args, **kwargs)
+
+    external_listing = Mock(side_effect=list_after_save)
     monkeypatch.setattr(indexer, "list_external_subtitles", external_listing)
 
     def providers_after_probe():
@@ -199,11 +210,10 @@ def test_a_failed_probe_is_retried_once_per_search_even_with_download_reindexing
     service.search_source_item(item_id, job_id=3)
 
     probe.assert_called_once()
-    external_listing.assert_called_once()  # Only the downloaded sidecar needs a new listing.
-    saved = path.with_suffix(".en.srt")
     assert saved.read_bytes() == CONTENT
     item = repository.get_item(item_id)
     assert str(saved) in item.subtitles and item.missing_subtitles == "[]"
+    assert external_listing.call_count == (2 if listing_failure else 1)
     assert identity.stored_content_stamp(item) == identity.stored_content_stamp(initial)
     assert world.db.execute(sa.select(sa.func.count()).select_from(repository.History)).scalar_one() == 1
 
@@ -212,10 +222,62 @@ def test_a_failed_probe_is_retried_once_per_search_even_with_download_reindexing
     assert probe.call_count == 2
     item = repository.get_item(item_id)
     assert analysis.read_metadata(item.ffprobe_cache)["ffprobe"] == metadata["ffprobe"]
-    external_listing.reset_mock()
+    listing_count = external_listing.call_count
     service.search_source_item(item_id, job_id=5)
-    external_listing.assert_not_called()
+    assert external_listing.call_count == listing_count
     assert probe.call_count == 2
+
+
+def test_search_reindexes_a_saved_subtitle_from_a_custom_result(world, monkeypatch):
+    from media_sources import repository, service
+    from subtitles import download
+
+    context = _movie(world)
+    saved = Path(context.path).with_suffix(".en.srt")
+
+    def custom_download(*args, **kwargs):
+        saved.write_bytes(CONTENT)
+        yield SimpleNamespace(path=context.path, subs_path=str(saved), language_code="en", score=100,
+                              provider="fake", subs_id="sub-1", message="Downloaded", matched=None, not_matched=None)
+
+    monkeypatch.setattr(download, "generate_subtitles", custom_download)
+    monkeypatch.setattr(service.jobs_queue, "update_job_progress", lambda **_: None)
+
+    service.search_source_item(context.item_id, job_id=3)
+
+    assert saved.read_bytes() == CONTENT
+    item = repository.get_item(context.item_id)
+    assert str(saved) in item.subtitles and item.missing_subtitles == "[]"
+    (row,) = world.db.execute(sa.select(repository.History)).all()
+    assert row.subtitles_path == str(saved)
+
+
+def test_search_retries_the_active_parser_when_previous_parser_metadata_remains(world, monkeypatch):
+    from app.config import settings
+    from media_sources import analysis, repository, service
+    from utilities import video_analyzer
+
+    monkeypatch.setattr(settings.general, "embedded_subtitles_parser", "ffprobe")
+    monkeypatch.setattr(service.jobs_queue, "update_job_progress", lambda **_: None)
+    probe = Mock(return_value={"ffprobe": {"audio": [{"language": "eng"}]}, "mediainfo": {}})
+    monkeypatch.setattr(video_analyzer, "parse_video_metadata", probe)
+    context = _movie(world)
+    original = repository.get_item(context.item_id)
+    assert analysis.read_metadata(original.ffprobe_cache)["ffprobe"]
+
+    monkeypatch.setattr(settings.general, "embedded_subtitles_parser", "mediainfo")
+    probe.return_value = None
+    _download(monkeypatch)
+    service.search_source_item(context.item_id, job_id=3)
+    indexed = repository.get_item(context.item_id)
+    assert indexed.missing_subtitles == "[]" and indexed.ffprobe_cache == original.ffprobe_cache
+
+    probe.return_value = {"ffprobe": {}, "mediainfo": {"audio": [{"language": "hun"}]}}
+    service.search_source_item(context.item_id, job_id=4)
+
+    refreshed = repository.get_item(context.item_id)
+    assert analysis.read_metadata(refreshed.ffprobe_cache)["mediainfo"] == probe.return_value["mediainfo"]
+    assert refreshed.missing_subtitles == "[]"
 
 
 def test_a_search_with_nothing_missing_or_no_profile_does_not_ask_a_provider(world, monkeypatch):

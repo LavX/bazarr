@@ -466,7 +466,9 @@ def _search_source_item(item_id, job_id):
                                          job_id=job_id, source=context):
             if not result:
                 continue
-            # The shared download pipeline indexes the saved subtitle during processing.
+            if getattr(result, 'source_indexed', False) is not True:
+                # Retry an incomplete listing, including results from outside shared processing.
+                index_item(item_id, expected_path=context.path)
             history_log_source(1, context, result)
             downloaded += 1
     except OSError as error:
