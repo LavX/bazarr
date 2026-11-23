@@ -2129,31 +2129,76 @@ def test_startup_reconcile_keeps_its_environment_when_previous_worker_exit_is_un
 
 def test_probe_timeout_keeps_dispatch_closed_until_the_actual_worker_stop_finishes(
         isolated_probe_release, monkeypatch):
+    import time
     from concurrent.futures import ThreadPoolExecutor
     from threading import Event
+    from types import SimpleNamespace
 
     from provider_hub import datadir, worker
+    from provider_hub.sandbox import sweep
     from provider_hub.state import load_state
 
-    service, plugin_id, active, _, _ = isolated_probe_release
+    service, plugin_id, active, _, evidence = isolated_probe_release
     original = load_state()["installations"][plugin_id]
-    stopping, finish, attempted, dispatched = Event(), Event(), Event(), Event()
+    stopping, finish, stopped, waiting, dispatched = Event(), Event(), Event(), Event(), Event()
     live = worker.ProviderWorkerClient([], provider_id=plugin_id, env={"BAZARR_PLUGIN_DATA_DIR": str(active)})
     monkeypatch.setattr(service, "PROBE_TIMEOUT", 0.1)
 
-    def stop(*args, **kwargs):
+    # Start the short stop budget after cold provider/job setup and settle-thread startup.
+    # Only these modules use the clock; the real Future wait still expires normally.
+    started = None
+    origin = time.monotonic()
+
+    def monotonic():
+        return origin if started is None else origin + time.monotonic() - started
+
+    clock = SimpleNamespace(monotonic=monotonic, perf_counter=time.perf_counter, sleep=time.sleep)
+    for module in (service, datadir, sweep):
+        monkeypatch.setattr(module, "time", clock)
+
+    def stop(idle_seconds, *, grace_seconds):
+        nonlocal started
+        assert idle_seconds == 0 and 0 < grace_seconds <= 0.1
+        assert evidence["scans"] > 0
+        with datadir._gate:
+            assert plugin_id in datadir._paused and plugin_id not in datadir._entering
+        started = time.monotonic()
         stopping.set()
         assert finish.wait(5)
+        stopped.set()
+
+    settle_async = datadir._settle_async
+    settling = None
+
+    def start_settle(checked_id, settle, deadline):
+        nonlocal settling
+        assert checked_id == plugin_id
+        settling = settle_async(checked_id, settle, deadline)
+        assert stopping.wait(2), "the real worker stop did not start"
+        return settling
+
+    wait_for = datadir._gate.wait_for
+
+    def observe_wait(predicate, timeout=None):
+        def observed():
+            ready = predicate()
+            if not ready:
+                waiting.set()
+            return ready
+
+        return wait_for(observed, timeout)
 
     def unexpected(*args, **kwargs):
         pytest.fail("a timed-out stop must not copy data or spawn a probe")
 
-    def request():
-        attempted.set()
-        live.request("health", {})
+    def request(*_):
+        assert stopped.is_set()
+        dispatched.set()
 
     monkeypatch.setattr(live, "stop_if_idle", stop)
-    monkeypatch.setattr(live, "_request", lambda *_: dispatched.set())
+    monkeypatch.setattr(live, "_request", request)
+    monkeypatch.setattr(datadir, "_settle_async", start_settle)
+    monkeypatch.setattr(datadir._gate, "wait_for", observe_wait)
     monkeypatch.setattr(service, "ProviderWorkerClient", unexpected)
     monkeypatch.setattr(datadir, "copy_folder", unexpected)
     with worker._live_clients_lock:
@@ -2161,20 +2206,29 @@ def test_probe_timeout_keeps_dispatch_closed_until_the_actual_worker_stop_finish
     try:
         with ThreadPoolExecutor(max_workers=2) as pool:
             probe = pool.submit(service.test_provider_connection, plugin_id)
+            running = None
             try:
-                assert stopping.wait(2)
-                result = probe.result(timeout=1)
-                assert not result["ok"] and "busy" in result["message"].lower()
+                result = probe.result(timeout=3)
+                assert not result["ok"] and result["status"] == "failed", result
+                assert "busy" in result["message"].lower(), result
+                assert stopping.is_set() and not stopped.is_set() and not settling.done()
                 with datadir.quiesced(plugin_id, unexpected, 0.1, bounded=True) as settled:
                     assert not settled
-                running = pool.submit(request)
-                assert attempted.wait(1)
-                assert not dispatched.wait(0.03)
+                running = pool.submit(live.request, "health", {})
+                assert waiting.wait(1)
                 with datadir._gate:
                     assert plugin_id in datadir._paused
+                    assert plugin_id not in datadir._entering and not dispatched.is_set()
+                with datadir.dispatch("anotherhub"):
+                    assert not stopped.is_set()
             finally:
                 finish.set()
-            running.result(timeout=2)
+                try:
+                    if running is not None:
+                        running.result(timeout=2)
+                finally:
+                    datadir._resume_dispatch(plugin_id)
+            assert settling.result(timeout=2)
             assert dispatched.is_set()
     finally:
         finish.set()
@@ -2182,6 +2236,7 @@ def test_probe_timeout_keeps_dispatch_closed_until_the_actual_worker_stop_finish
             worker._live_clients.discard(live)
     assert load_state()["installations"][plugin_id] == original
     assert list(active.parent.iterdir()) == [active]
+    assert (active / "settings").read_text() == "before request"
 
 
 def test_staging_uses_private_data_and_switch_refreshes_work_done_since_staging(data_release, service_kind, monkeypatch):
