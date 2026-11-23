@@ -64,7 +64,7 @@ function* dialogueRows(eventSections: string[][], strict: boolean) {
       ? undefined
       : lines.find((line) => line.trim().startsWith("Format:"));
     let columns = firstFormat
-      ? formatColumns(firstFormat.replace(/^Format:\s*/, ""))
+      ? formatColumns(firstFormat.trim().replace(/^Format:\s*/, ""))
       : [];
     for (const line of lines) {
       if (strict && /^\s*Format\b/i.test(line)) {

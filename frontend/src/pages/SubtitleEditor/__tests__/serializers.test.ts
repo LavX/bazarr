@@ -325,6 +325,39 @@ describe("ASS serializer", () => {
       `Dialogue: 0:00:07.00,Default,0:00:05.00,${replyText}`,
     ].join("\n");
 
+    it.each([
+      {
+        name: "compact",
+        format: "Layer, Start, End, Style, Text",
+        edited: "3,0:00:01.00,0:00:04.00,Radio,Original",
+        untouched: "7,0:00:05.00,0:00:07.00,Default,Neighbor",
+        savedEdited: "3,0:00:01.00,0:00:04.00,Radio,,0,0,0,,Updated",
+        savedUntouched: "7,0:00:05.00,0:00:07.00,Default,,0,0,0,,Neighbor",
+      },
+      {
+        name: "canonical",
+        format: "Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text",
+        edited: "3,0:00:01.00,0:00:04.00,Radio,Speaker,0010,0020,0030,karaoke,Original",
+        untouched: "7,0:00:05.00,0:00:07.00,Default,Other,0040,0050,0060,scroll,Neighbor",
+        savedEdited: "3,0:00:01.00,0:00:04.00,Radio,Speaker,0010,0020,0030,karaoke,Updated",
+        savedUntouched: "7,0:00:05.00,0:00:07.00,Default,Other,0040,0050,0060,scroll,Neighbor",
+      },
+    ])("preserves fields under an indented $name declaration", (fixture) => {
+      const opened = parser.parse(
+        [
+          "[Events]",
+          `  Format: ${fixture.format}`,
+          `Dialogue: ${fixture.edited}`,
+          `Dialogue: ${fixture.untouched}`,
+        ].join("\n"),
+      );
+      opened.cues[0].text = "Updated";
+
+      const saved = serializer.serialize(opened);
+      expect(saved.split("\n")).toContain(`Dialogue: ${fixture.savedEdited}`);
+      expect(saved.split("\n")).toContain(`Dialogue: ${fixture.savedUntouched}`);
+    });
+
     it("writes the edited comma-rich cue and retains its formatted neighbor", () => {
       const opened = parser.parse(content);
       expect(opened.cues[0].text).toContain("Pack\rwater, maps, matches");
