@@ -733,6 +733,7 @@ describe.each([
     },
   ])("opens $mode source activity", async ({ availability, master }) => {
     const requests = vi.fn();
+    const contentKind = kind === "sonarr" ? "series" : "movie";
     server.use(
       http.get("/api/system/settings", () =>
         HttpResponse.json({
@@ -744,7 +745,17 @@ describe.each([
       http.get("/api/system/status", () => HttpResponse.json({ data: {} })),
       http.get("/api/system/media-sources", () =>
         HttpResponse.json({
-          data: [],
+          data: [
+            {
+              id: 8,
+              enabled: true,
+              name: "Archive",
+              kind: "folder",
+              libraries: availability.browsable
+                ? [{ enabled: true, content_kind: contentKind }]
+                : [],
+            },
+          ],
           availability: {
             series: kind === "sonarr" ? availability : ABSENT,
             movie: kind === "radarr" ? availability : ABSENT,
@@ -756,11 +767,13 @@ describe.each([
       http.get(endpoint, ({ request }) => {
         const params = new URL(request.url).searchParams;
         requests(params.get("sources"), params.getAll("source_key[]"));
+        if (params.get("sources") !== "1")
+          return HttpResponse.json({ data: [] });
         return HttpResponse.json({
           data: [
             {
               id: 9,
-              source_item_id: 9,
+              source_item_id: availability.browsable ? 9 : null,
               origin: "source",
               source_key: "source:8",
               source_id: 8,
@@ -1093,13 +1106,13 @@ it.each([
     expect(
       screen.queryByRole("combobox", { name: "Source" }),
     ).not.toBeInTheDocument();
-    expect(reads).toHaveBeenCalledWith("wanted", "1");
+    expect(reads).toHaveBeenCalledWith("wanted", null);
     expect(reads).toHaveBeenCalledWith("badges", "1");
-    expect(reads).toHaveBeenCalledWith("audio", "1");
+    expect(reads).toHaveBeenCalledWith("audio", null);
     expect(reads).toHaveBeenCalledWith("folder API");
     await user.click(screen.getByRole("button", { name: "Search All" }));
     await waitFor(() =>
-      expect(writes).toHaveBeenCalledWith("search-wanted", "1"),
+      expect(writes).toHaveBeenCalledWith("search-wanted", null),
     );
   },
 );
