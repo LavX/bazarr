@@ -121,12 +121,13 @@ def _provider_credentials_present(plugin_id, names, section, hub_config) -> bool
                or _credential_present(hub_config.get(key)) for key in names)
 
 
-def _provider_destinations(manifest, section, hub, fields) -> dict:
-    from .kinds.subtitle_provider import overlay_provider_settings
+def _provider_destinations(manifest, section, hub, fields, private) -> dict:
+    from .kinds.subtitle_provider import overlay_provider_settings, visible_hub_config
 
     schema = manifest.get("config_schema")
     properties = schema.get("properties") if isinstance(schema, dict) else None
-    config = overlay_provider_settings(properties if isinstance(properties, dict) else {}, section, hub)
+    config = overlay_provider_settings(properties if isinstance(properties, dict) else {}, section,
+                                       visible_hub_config(hub, manifest, private))
     destinations = {}
     for key in fields:
         value = config.get(key)
@@ -166,13 +167,16 @@ def provider_restore_plan(state, plugin_id, row, target_manifest, snapshot, *, s
     restore_config(state, plugin_id, proposed, snapshot)
     next_hub = proposed.get("config") or {}
     fields = _destination_fields(current, target_manifest)
-    prior_addresses = _provider_destinations(current, section, current_hub, fields)
-    addresses = _provider_destinations(target_manifest, projected_section, next_hub, fields)
-    changed = {key: values for key, values in addresses.items() if values != prior_addresses[key]}
+    prior_addresses = _provider_destinations(current, section, current_hub, fields, private)
+    addresses = _provider_destinations(target_manifest, projected_section, next_hub, fields, private)
+    changed = {key for key, values in addresses.items() if values != prior_addresses[key]}
     if changed and _provider_credentials_present(plugin_id, private, section, current_hub):
         raise ValueError("Remove the saved provider credential before rolling back to a different address")
+    # Protected values are used only to compare effective settings in memory, never as consent data.
+    addresses = {key: [] if key in private else values for key, values in addresses.items()}
     return {"fields": sorted(owned), "before": before, "after": desired,
-            "changed": changed, "addresses": addresses, "secret_fields": sorted(private)}
+            "changed": {key: addresses[key] for key in changed}, "addresses": addresses,
+            "secret_fields": sorted(private)}
 
 
 def restore_provider_section(plugin_id: str, plan: dict, hub_config: dict, manifest: dict,
@@ -190,15 +194,16 @@ def restore_provider_section(plugin_id: str, plan: dict, hub_config: dict, manif
             raise ValueError("The provider settings section changed before it could be restored")
         projected = {key: value for key, value in current.items() if key not in owned} | plan["after"]
         fields = _destination_fields(manifest, manifest)
-        before = _provider_destinations(manifest, current, hub_config, fields)
-        after = _provider_destinations(manifest, projected, hub_config, fields)
+        private = set(plan["secret_fields"])
+        before = _provider_destinations(manifest, current, hub_config, fields, private)
+        after = _provider_destinations(manifest, projected, hub_config, fields, private)
         moved = {key: values for key, values in after.items() if values != before[key]}
         # Startup calls the first attempt during the same activation, whose paired address check already ran.
         # A retry may see a later credential, so it must use the current effective address again.
         if moved and not just_promoted and _provider_credentials_present(
                 plugin_id, plan["secret_fields"], current, hub_config):
             raise ValueError("Remove the saved provider credential before restoring its previous address")
-        if any(plan["addresses"].get(key) != values for key, values in moved.items()):
+        if any(plan["addresses"].get(key) != ([] if key in private else values) for key, values in moved.items()):
             raise ValueError("The provider address changed after the rollback was approved")
         settings[plugin_id] = projected
         try:

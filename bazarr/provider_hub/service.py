@@ -2268,9 +2268,9 @@ def _effective_installation_config(installation: dict[str, Any],
     active_manifest = installation.get("manifest")
     if not isinstance(active_manifest, dict):
         active_manifest = {}
-    from secret_store.registry import _manifest_field_names, manifest_secret_fields
+    from secret_store.registry import manifest_secret_fields
     secret_fields = manifest_secret_fields(active_manifest) | retained
-    effective = dict(config)
+    effective = provider_kind.visible_hub_config(config, active_manifest, retained)
     undecryptable = set()
     for field in secret_fields:
         if field in effective:
@@ -2279,12 +2279,6 @@ def _effective_installation_config(installation: dict[str, Any],
             except Exception:
                 del effective[field]
                 undecryptable.add(field)
-    declared = _manifest_field_names(active_manifest)
-    if retained:
-        for field in sorted(retained):
-            if field not in declared:
-                effective.pop(field, None)
-                undecryptable.discard(field)
     return effective, undecryptable
 
 

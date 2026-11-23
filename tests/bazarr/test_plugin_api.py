@@ -1822,6 +1822,33 @@ def test_legacy_provider_rollback_checks_renamed_destination_fields(client, roll
     assert config.settings[plugin_id].get("base_url") == "https://current.example.test"
 
 
+def test_provider_rollback_counts_a_retained_destination_its_target_declares_again(
+        client, rollback_store, monkeypatch):
+    from app import config
+    from provider_hub import service, state
+    from secret_store.crypto import encrypt_secret
+
+    plugin_id = "providerhub"
+    monkeypatch.setattr(config.settings.general, "secrets_encryption_key", "fixture-setting-encryption", raising=False)
+    monkeypatch.setitem(config.settings, plugin_id, {})
+    previous = provider_manifest_v1(plugin_id, "1.0.0", config_schema={"type": "object", "properties": {
+        "api_key": {"type": "string"}, "endpoint": {"type": "string", "format": "uri", "secret": True}}})
+    current = provider_manifest_v1(plugin_id, "2.0.0")
+    rollback_store(plugin_id, previous=previous, current=current)
+
+    def keep_the_earlier_field(document):
+        document["plugin_secret_paths"] = [f"{plugin_id}.endpoint"]
+        document["installations"][plugin_id]["config"]["endpoint"] = encrypt_secret("fixture endpoint")
+
+    state.mutate_state(keep_the_earlier_field)
+    before = state.load_state()
+    assert "endpoint" not in service._effective_installation_config(before["installations"][plugin_id], before)[0]
+    reply = _get(client, f"/api/plugins/installations/{plugin_id}/rollback").json
+    assert reply["consent"] is None and "Remove the saved provider credential" in reply["blocked_reason"]
+    assert _rollback(client, plugin_id).status_code == 400
+    assert state.load_state() == before
+
+
 @pytest.mark.parametrize("hub_retains_address", [False, True])
 def test_legacy_provider_rollback_keeps_an_unchanged_effective_address(
         client, rollback_store, monkeypatch, hub_retains_address):

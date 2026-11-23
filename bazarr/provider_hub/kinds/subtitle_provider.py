@@ -165,6 +165,14 @@ def settings_section_plugin_ids() -> set[str]:
         return set()
 
 
+def visible_hub_config(stored, manifest, retained_secrets):
+    """Only a currently declared field can use a retained credential."""
+    from secret_store.registry import _manifest_field_names
+
+    hidden = retained_secrets - _manifest_field_names(manifest)
+    return {key: value for key, value in stored.items() if key not in hidden}
+
+
 def overlay_provider_settings(properties, section, stored):
     """The worker starts with Hub values, then applies declared defaults and section values."""
     config = dict(stored)
