@@ -1,33 +1,41 @@
 import { FunctionComponent, ReactNode } from "react";
 import { Alert, Button, Center, LoadingOverlay, Stack } from "@mantine/core";
-import { useSystemStatus } from "@/apis/hooks/system";
+import { useTranslationRouteStatus } from "@/apis/hooks/translation";
 
 interface SystemStatusGateProps {
-  children: (status: System.Status) => ReactNode;
+  children: (runtime: "ready" | "legacy") => ReactNode;
+  unavailableFallback?: ReactNode;
 }
 
 const SystemStatusGate: FunctionComponent<SystemStatusGateProps> = ({
   children,
+  unavailableFallback,
 }) => {
-  const { data, isError, error, isFetching, refetch } = useSystemStatus();
+  const { runtime, isError, error, isFetching, refetch } =
+    useTranslationRouteStatus();
+  const unavailable = runtime === "unavailable";
 
-  if (data !== undefined) {
-    return children(data);
+  if (unavailable && unavailableFallback !== undefined) {
+    return unavailableFallback;
   }
 
-  if (isError) {
+  if (isError || unavailable) {
+    const title = unavailable
+      ? "Translation runtime unavailable"
+      : "Bazarr+ did not answer";
+    let message =
+      "The system status request failed, so we cannot tell which translation page to open.";
+    if (unavailable) {
+      message = "Translation is enabled. Try again to check if it is ready.";
+    } else if (error instanceof Error && error.message.length > 0) {
+      message = error.message;
+    }
+
     return (
       <Center mih="60vh" p="md">
-        <Alert
-          color="red"
-          title="Bazarr+ did not answer"
-          role="alert"
-          maw={520}
-        >
+        <Alert color="red" title={title} role="alert" maw={520}>
           <Stack gap="sm" align="flex-start">
-            {error instanceof Error && error.message.length > 0
-              ? error.message
-              : "The system status request failed, so we cannot tell which translation page to open."}
+            {message}
             <Button
               variant="default"
               loading={isFetching}
@@ -39,6 +47,10 @@ const SystemStatusGate: FunctionComponent<SystemStatusGateProps> = ({
         </Alert>
       </Center>
     );
+  }
+
+  if (runtime !== undefined) {
+    return children(runtime);
   }
 
   return <LoadingOverlay visible />;

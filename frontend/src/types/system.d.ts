@@ -127,11 +127,12 @@ declare namespace System {
      */
     translation_availability?: System.TranslationAvailability;
     /**
-     * Whether the v2 translation runtime is switched on, which is what makes
-     * the Translation page exist. Present, and true, only while the runtime is
-     * switched on; absent otherwise and on responses from before the field.
+     * True only when the v2 translation runtime is switched on and ready.
+     * Absent otherwise and on responses from before the field.
      */
     translation_runtime_v2?: boolean;
+    /** True only when the v2 runtime is switched on but cannot serve requests. */
+    translation_runtime_v2_unavailable?: boolean;
     /**
      * The editor's own answer to the same question: it translates through the
      * AI Subtitle Translator service whatever the settings page has selected,

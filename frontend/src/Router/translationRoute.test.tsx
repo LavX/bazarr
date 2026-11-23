@@ -3,6 +3,9 @@ import { FunctionComponent } from "react";
 import { http, HttpResponse } from "msw";
 import { afterEach, describe, expect, it } from "vitest";
 import { useSystemStatus } from "@/apis/hooks/system";
+import queryClient from "@/apis/queries";
+import { QueryKeys } from "@/apis/queries/keys";
+import api from "@/apis/raw";
 import { groupRoutes } from "@/App/Navbar";
 import { latestWhatsNewVersion } from "@/data/whatsNew";
 import { engine, engineInstallations } from "@/pages/Translation/fixtures";
@@ -165,6 +168,10 @@ describe("Translation addresses in the mounted application router", () => {
     { path: "translation", base: "/bazarr" },
   ];
   const deepLink = "?tab=defaults&from=bookmark#backend-2";
+  const statusKey = [QueryKeys.System, "status"];
+
+  const pendingPath = (path: string) =>
+    path === "translation" ? "/translation" : "/settings/translator";
 
   afterEach(() => {
     cleanup();
@@ -286,7 +293,7 @@ describe("Translation addresses in the mounted application router", () => {
   );
 
   it.each(bookmarks)(
-    "retains $base/settings/$path while waiting for status without mounting a page",
+    "keeps $base/settings/$path gated while waiting for status",
     async ({ path, base }) => {
       showStatus(true);
       const status = Promise.withResolvers<void>();
@@ -304,7 +311,9 @@ describe("Translation addresses in the mounted application router", () => {
         await requested.promise;
         // The shell proves settings have arrived while system status is still pending.
         await screen.findByRole("button", { name: "Settings" });
-        expect(window.location.pathname).toBe(`${base}/settings/${path}`);
+        await waitFor(() =>
+          expect(window.location.pathname).toBe(`${base}${pendingPath(path)}`),
+        );
         expect(window.location.search).toBe("?tab=defaults&from=bookmark");
         expect(window.location.hash).toBe("#backend-2");
         expect(screen.queryByText("Translator Engine")).not.toBeInTheDocument();
@@ -326,7 +335,7 @@ describe("Translation addresses in the mounted application router", () => {
   );
 
   it.each(bookmarks)(
-    "keeps $base/settings/$path closed after an uncached status failure and retries before redirecting",
+    "keeps $base/settings/$path gated after an uncached status failure and can retry",
     async ({ path, base }) => {
       showStatus(true);
       server.use(
@@ -338,7 +347,7 @@ describe("Translation addresses in the mounted application router", () => {
 
       const retry = await screen.findByRole("button", { name: "Try again" });
       expect(screen.getByRole("alert")).toBeVisible();
-      expect(window.location.pathname).toBe(`${base}/settings/${path}`);
+      expect(window.location.pathname).toBe(`${base}${pendingPath(path)}`);
       expect(window.location.search).toBe("?tab=defaults&from=bookmark");
       expect(window.location.hash).toBe("#backend-2");
       expect(screen.queryByText("Translator Engine")).not.toBeInTheDocument();
@@ -359,4 +368,86 @@ describe("Translation addresses in the mounted application router", () => {
       expect(screen.queryByText("Translator Engine")).not.toBeInTheDocument();
     },
   );
+
+  it.each(["translator", "translation"])(
+    "redirects /settings/%s to a recoverable error when v2 is enabled but unavailable",
+    async (path) => {
+      showStatus(true);
+      server.use(
+        http.get("/api/system/status", () =>
+          HttpResponse.json({
+            data: { translation_runtime_v2_unavailable: true },
+          }),
+        ),
+      );
+      showApplication(`/settings/${path}${deepLink}`, "/bazarr");
+
+      const retry = await screen.findByRole("button", { name: "Try again" });
+      expect(screen.getByRole("alert")).toHaveTextContent(
+        "Translation runtime unavailable",
+      );
+      expect(window.location.pathname).toBe("/bazarr/translation");
+      expect(window.location.search).toBe("?tab=defaults&from=bookmark");
+      expect(window.location.hash).toBe("#backend-2");
+      expect(screen.queryByText("Translator Engine")).not.toBeInTheDocument();
+      expect(screen.queryByText(/Page not found/)).not.toBeInTheDocument();
+      expect(
+        screen.queryByRole("tab", { name: "Defaults" }),
+      ).not.toBeInTheDocument();
+
+      showStatus(true);
+      fireEvent.click(retry);
+
+      expect(
+        await screen.findByRole("tab", { name: "Defaults" }),
+      ).toHaveAttribute("aria-selected", "true");
+    },
+  );
+
+  it("keeps cached legacy settings closed during a stale status refresh and its failure", async () => {
+    showStatus(false);
+    await queryClient.fetchQuery({
+      queryKey: statusKey,
+      queryFn: () => api.system.status(),
+    });
+    await queryClient.invalidateQueries({ queryKey: statusKey });
+
+    const requested = Promise.withResolvers<void>();
+    const fail = Promise.withResolvers<void>();
+    server.use(
+      http.get("/api/system/status", async () => {
+        requested.resolve();
+        await fail.promise;
+        return HttpResponse.json(
+          { message: "Status unavailable" },
+          { status: 503 },
+        );
+      }),
+    );
+    showApplication(`/settings/translator${deepLink}`);
+
+    try {
+      await requested.promise;
+      await screen.findByRole("button", { name: "Settings" });
+      expect(screen.queryByText("Translator Engine")).not.toBeInTheDocument();
+
+      fail.resolve();
+      const retry = await screen.findByRole("button", { name: "Try again" });
+      expect(queryClient.getQueryData(statusKey)).toEqual({
+        translation_runtime_v2: false,
+      });
+      expect(screen.queryByText("Translator Engine")).not.toBeInTheDocument();
+      expect(window.location.pathname).toBe("/settings/translator");
+
+      showStatus(true);
+      fireEvent.click(retry);
+
+      expect(
+        await screen.findByRole("tab", { name: "Defaults" }),
+      ).toHaveAttribute("aria-selected", "true");
+      expect(window.location.pathname).toBe("/translation");
+    } finally {
+      fail.resolve();
+    }
+  });
 });

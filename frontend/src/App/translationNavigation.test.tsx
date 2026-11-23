@@ -34,92 +34,198 @@ afterEach(() => {
   setAuthenticated(false);
 });
 
-it.each([
-  { surface: "desktop", runtime: true },
-  { surface: "desktop", runtime: false },
-  { surface: "mobile", runtime: true },
-  { surface: "mobile", runtime: false },
-])(
-  "keeps translation in its runtime's navigation on $surface with v2 $runtime",
-  async ({ surface, runtime }) => {
-    vi.mocked(window.matchMedia).mockImplementation((query) => ({
-      matches: surface === "mobile" && query === "(max-width: 47.99em)",
-      media: query,
-      onchange: null,
-      addListener: vi.fn(),
-      removeListener: vi.fn(),
-      addEventListener: vi.fn(),
-      removeEventListener: vi.fn(),
-      dispatchEvent: vi.fn(),
-    }));
-    server.use(
-      http.get("/api/system/settings", () =>
-        HttpResponse.json({
-          general: { theme: "light", setup_complete: true },
-          auth: { type: "form" },
-        }),
-      ),
-      http.get("/api/system/status", () =>
-        HttpResponse.json({ data: { translation_runtime_v2: runtime } }),
-      ),
-      http.get("/api/system/jobs", () => HttpResponse.json({ data: [] })),
-      http.get("/api/badges", () => HttpResponse.json({})),
-    );
-    window.Bazarr = { baseUrl: "", canUpdate: false, hasUpdate: false };
-    window.history.replaceState(null, "", "/settings");
-    setAuthenticated(true);
-    localStorage.setItem(WHATS_NEW_SEEN_KEY, latestWhatsNewVersion);
-    rawRender(
-      <AllProviders>
-        <Router />
-      </AllProviders>,
-    );
-    const user = userEvent.setup();
-    await waitFor(() =>
-      expect(
-        queryClient.getQueryState([QueryKeys.System, "status"])?.status,
-      ).toBe("success"),
-    );
+type Surface = "desktop" | "mobile";
 
-    if (surface === "mobile") {
-      await user.click(
-        await screen.findByRole("button", { name: "Open navigation" }),
-      );
-      await screen.findByRole("dialog", { name: "Navigation" });
-    }
-    const nav = await screen.findByRole("navigation", {
-      name: "Main navigation",
-    });
-    const translation = within(nav).queryByRole("link", {
-      name: "Translation",
-    });
-    if (runtime) {
-      expect(translation).toHaveAttribute("href", "/translation");
-    } else {
-      expect(translation).not.toBeInTheDocument();
-    }
+const statusKey = [QueryKeys.System, "status"];
+const surfaces: Surface[] = ["desktop", "mobile"];
+const successfulStatuses = [
+  {
+    name: "ready",
+    data: { translation_runtime_v2: true },
+    runtime: true,
+    legacy: false,
+  },
+  {
+    name: "explicitly off",
+    data: { translation_runtime_v2: false },
+    runtime: false,
+    legacy: true,
+  },
+  { name: "older server", data: {}, runtime: false, legacy: true },
+  {
+    name: "enabled but unavailable",
+    data: { translation_runtime_v2_unavailable: true },
+    runtime: false,
+    legacy: false,
+  },
+];
 
-    const role = surface === "desktop" ? "button" : "link";
-    await user.click(within(nav).getByRole(role, { name: "Settings" }));
-    const settings =
-      surface === "desktop" ? await screen.findByRole("menu") : nav;
-    const itemRole = surface === "desktop" ? "menuitem" : "link";
+function renderNavigation(surface: Surface) {
+  vi.mocked(window.matchMedia).mockImplementation((query) => ({
+    matches: surface === "mobile" && query === "(max-width: 47.99em)",
+    media: query,
+    onchange: null,
+    addListener: vi.fn(),
+    removeListener: vi.fn(),
+    addEventListener: vi.fn(),
+    removeEventListener: vi.fn(),
+    dispatchEvent: vi.fn(),
+  }));
+  server.use(
+    http.get("/api/system/settings", () =>
+      HttpResponse.json({
+        general: { theme: "light", setup_complete: true },
+        auth: { type: "form" },
+      }),
+    ),
+    http.get("/api/system/jobs", () => HttpResponse.json({ data: [] })),
+    http.get("/api/badges", () => HttpResponse.json({})),
+    http.get("/api/discover/metadata/status", () =>
+      HttpResponse.json({ data: { configured: false } }),
+    ),
+  );
+  window.Bazarr = { baseUrl: "", canUpdate: false, hasUpdate: false };
+  window.history.replaceState(null, "", "/settings");
+  setAuthenticated(true);
+  localStorage.setItem(WHATS_NEW_SEEN_KEY, latestWhatsNewVersion);
+  rawRender(
+    <AllProviders>
+      <Router />
+    </AllProviders>,
+  );
+  return { user: userEvent.setup() };
+}
+
+async function expectTranslationNavigation(
+  surface: Surface,
+  user: ReturnType<typeof userEvent.setup>,
+  { runtime, legacy }: { runtime: boolean; legacy: boolean },
+) {
+  if (surface === "mobile") {
+    await user.click(
+      await screen.findByRole("button", { name: "Open navigation" }),
+    );
+    await screen.findByRole("dialog", { name: "Navigation" });
+  }
+  const nav = await screen.findByRole("navigation", {
+    name: "Main navigation",
+  });
+  const translation = within(nav).queryByRole("link", {
+    name: "Translation",
+  });
+  if (runtime) {
+    expect(translation).toHaveAttribute("href", "/translation");
+  } else {
+    expect(translation).not.toBeInTheDocument();
+  }
+
+  const role = surface === "desktop" ? "button" : "link";
+  await user.click(within(nav).getByRole(role, { name: "Settings" }));
+  const settings =
+    surface === "desktop" ? await screen.findByRole("menu") : nav;
+  const itemRole = surface === "desktop" ? "menuitem" : "link";
+  await waitFor(() =>
     expect(
-      await within(settings).findByRole(itemRole, { name: "Connections" }),
-    ).toBeVisible();
-    const translator = within(settings).queryByRole(itemRole, {
-      name: "AI Translator",
-      hidden: true,
+      within(settings).getByRole(itemRole, { name: "Connections" }),
+    ).toBeVisible(),
+  );
+  const translator = within(settings).queryByRole(itemRole, {
+    name: "AI Translator",
+    hidden: true,
+  });
+  if (legacy) {
+    expect(translator).toHaveAttribute("href", "/settings/translator");
+  } else {
+    expect(translator).not.toBeInTheDocument();
+  }
+  if (surface === "desktop") {
+    expect(
+      within(settings).queryByRole("menuitem", { name: "Translation" }),
+    ).not.toBeInTheDocument();
+  }
+}
+
+it.each(
+  surfaces.flatMap((surface) =>
+    successfulStatuses.map((status) => ({ surface, ...status })),
+  ),
+)(
+  "shows the expected translation navigation on $surface for $name status",
+  async ({ surface, data, runtime, legacy }) => {
+    server.use(
+      http.get("/api/system/status", () => HttpResponse.json({ data })),
+    );
+    const { user } = renderNavigation(surface);
+    await waitFor(() =>
+      expect(queryClient.getQueryState(statusKey)?.status).toBe("success"),
+    );
+    await expectTranslationNavigation(surface, user, {
+      runtime,
+      legacy,
     });
-    if (runtime) {
-      expect(translator).not.toBeInTheDocument();
-    } else {
-      expect(translator).toHaveAttribute("href", "/settings/translator");
+  },
+);
+
+it.each(surfaces)(
+  "hides legacy translation while status is unresolved on %s",
+  async (surface) => {
+    const response = Promise.withResolvers<Response>();
+    server.use(http.get("/api/system/status", () => response.promise));
+    const { user } = renderNavigation(surface);
+    try {
+      await waitFor(() =>
+        expect(queryClient.getQueryState(statusKey)).toMatchObject({
+          status: "pending",
+          fetchStatus: "fetching",
+        }),
+      );
+      await expectTranslationNavigation(surface, user, {
+        runtime: false,
+        legacy: false,
+      });
+      expect(queryClient.getQueryState(statusKey)?.status).toBe("pending");
+    } finally {
+      response.resolve(
+        HttpResponse.json({ data: { translation_runtime_v2: true } }),
+      );
     }
-    if (surface === "desktop") {
-      expect(
-        within(settings).queryByRole("menuitem", { name: "Translation" }),
-      ).not.toBeInTheDocument();
+    await waitFor(() =>
+      expect(queryClient.getQueryState(statusKey)?.status).toBe("success"),
+    );
+  },
+);
+
+it.each(
+  surfaces.flatMap((surface) =>
+    [false, true].map((cachedOff) => ({ surface, cachedOff })),
+  ),
+)(
+  "hides legacy translation after status fails on $surface with cached off $cachedOff",
+  async ({ surface, cachedOff }) => {
+    if (cachedOff) {
+      queryClient.setQueryData(
+        statusKey,
+        { translation_runtime_v2: false },
+        { updatedAt: 1 },
+      );
     }
+    server.use(
+      http.get("/api/system/status", () =>
+        HttpResponse.json({ message: "Status unavailable" }, { status: 503 }),
+      ),
+    );
+    const { user } = renderNavigation(surface);
+    await waitFor(() =>
+      expect(queryClient.getQueryState(statusKey)?.status).toBe("error"),
+    );
+    if (cachedOff) {
+      expect(queryClient.getQueryData(statusKey)).toEqual({
+        translation_runtime_v2: false,
+      });
+    }
+    await expectTranslationNavigation(surface, user, {
+      runtime: false,
+      legacy: false,
+    });
   },
 );

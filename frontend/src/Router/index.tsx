@@ -23,7 +23,7 @@ import {
 } from "@fortawesome/free-solid-svg-icons";
 import { useBadges } from "@/apis/hooks";
 import { useMediaNavigation } from "@/apis/hooks/site";
-import { useTranslationRuntime } from "@/apis/hooks/translation";
+import { useTranslationRouteStatus } from "@/apis/hooks/translation";
 import App from "@/App";
 import { Lazy } from "@/components/async";
 import Authentication from "@/pages/Authentication";
@@ -94,8 +94,9 @@ export function useRoutes(): CustomRouteObject[] {
     radarrBadges,
     sportarrBadges,
   } = useMediaNavigation();
-  // The Translation page exists only while the v2 translation runtime is on.
-  const translationRuntime = useTranslationRuntime();
+  const { runtime } = useTranslationRouteStatus();
+  const translationReady = runtime === "ready";
+  const showLegacyTranslator = runtime === "legacy";
 
   return useMemo(
     () => [
@@ -308,7 +309,7 @@ export function useRoutes(): CustomRouteObject[] {
             // Out of the navigation while the runtime is off; the gate makes
             // its address Not Found. See TranslationGate for why the route
             // itself is always here.
-            hidden: !translationRuntime,
+            hidden: !translationReady,
             element: (
               <TranslationGate>
                 <TranslationView />
@@ -382,7 +383,7 @@ export function useRoutes(): CustomRouteObject[] {
               {
                 path: "translator",
                 name: "AI Translator",
-                hidden: translationRuntime,
+                hidden: !showLegacyTranslator,
                 element: <TranslationSettingsRoute />,
               },
               {
@@ -551,7 +552,8 @@ export function useRoutes(): CustomRouteObject[] {
       sonarrBadges,
       radarrBadges,
       sportarrBadges,
-      translationRuntime,
+      translationReady,
+      showLegacyTranslator,
     ],
   );
 }

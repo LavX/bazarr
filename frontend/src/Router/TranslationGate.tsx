@@ -18,9 +18,7 @@ const TranslationGate: FunctionComponent<PropsWithChildren> = ({
   children,
 }) => (
   <SystemStatusGate>
-    {(status) =>
-      status.translation_runtime_v2 === true ? children : <NotFound />
-    }
+    {(runtime) => (runtime === "ready" ? children : <NotFound />)}
   </SystemStatusGate>
 );
 

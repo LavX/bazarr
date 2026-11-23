@@ -30,6 +30,25 @@ export function useTranslationRuntime(): boolean {
   return data?.translation_runtime_v2 === true;
 }
 
+export function useTranslationRouteStatus() {
+  const { data, isSuccess, fetchStatus, isError, error, isFetching, refetch } =
+    useSystemStatus();
+  let runtime: "ready" | "unavailable" | "legacy" | undefined;
+
+  if (isSuccess) {
+    if (data.translation_runtime_v2 === true) {
+      runtime = "ready";
+    } else if (data.translation_runtime_v2_unavailable === true) {
+      runtime = "unavailable";
+    } else if (fetchStatus === "idle") {
+      // A refresh may invalidate a cached answer that previously allowed edits.
+      runtime = "legacy";
+    }
+  }
+
+  return { runtime, isError, error, isFetching, refetch };
+}
+
 /**
  * The page's state. `enabled` is for a caller outside the page that reads it
  * only while the runtime is on: the route does not exist with it off.
