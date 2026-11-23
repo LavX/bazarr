@@ -50,12 +50,19 @@ def _insert(target, table, values):
 
 # Sources, libraries and roots
 
-def get_source(source_id, target=None):
-    return _target(target).execute(sa.select(Sources).where(Sources.c.id == source_id)).first()
+def get_source(source_id, target=None, *, lock_key=False):
+    statement = sa.select(Sources).where(Sources.c.id == source_id)
+    if lock_key:
+        statement = statement.with_for_update(read=True, key_share=True)
+    return _target(target).execute(statement).first()
 
 
 def list_sources(target=None):
     return _target(target).execute(sa.select(Sources).order_by(Sources.c.id)).all()
+
+
+def has_sources(target=None):
+    return Sources is not None and bool(_target(target).execute(sa.select(sa.exists().select_from(Sources))).scalar())
 
 
 def name_taken(name, target=None):
@@ -223,10 +230,10 @@ def create_group(*, source_id, library_id, kind, group_key, title, identity_sour
 
 # Items
 
-def get_item(item_id, target=None, *, for_update=False):
+def get_item(item_id, target=None, *, for_update=False, nowait=False):
     statement = sa.select(Items).where(Items.c.id == item_id)
     if for_update:
-        statement = statement.with_for_update()
+        statement = statement.with_for_update(nowait=nowait)
     return _target(target).execute(statement).first()
 
 
@@ -427,12 +434,14 @@ def delete_items(item_ids, target=None, *, owner_library_id=None):
     return deleted
 
 
-def write_item_index(item_id, subtitles, missing_subtitles, target=None):
+def write_item_index(item_id, subtitles, missing_subtitles, target=None, *, indexed=True, **metadata):
     """Store an item's subtitle listing and its missing languages. The update is by id and must change exactly
     one row: the arr indexers update by path, and an UPDATE that matches nothing succeeds silently, which is how
     a listing for a vanished item gets lost without a trace."""
+    if indexed:
+        metadata['indexed_at'] = datetime.now()
     changed = _target(target).execute(sa.update(Items).where(Items.c.id == item_id).values(
-        subtitles=subtitles, missing_subtitles=missing_subtitles, indexed_at=datetime.now())).rowcount
+        subtitles=subtitles, missing_subtitles=missing_subtitles, **metadata)).rowcount
     if changed != 1:
         logging.warning('BAZARR the subtitle index of source item %s changed %s rows instead of one',
                         item_id, changed)

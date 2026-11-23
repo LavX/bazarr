@@ -496,14 +496,14 @@ export function useWantedPreview(limit: number) {
   });
   const series = useQuery({
     queryKey: [QueryKeys.Series, QueryKeys.Wanted, "preview", limit],
-    queryFn: () => api.episodes.wanted({ start: 0, length: limit }),
+    queryFn: () => api.episodes.wanted({ start: 0, length: limit }, false),
     enabled: settings.data?.general.use_sonarr ?? false,
     staleTime: 30_000,
     retry: false,
   });
   const movies = useQuery({
     queryKey: [QueryKeys.Movies, QueryKeys.Wanted, "preview", limit],
-    queryFn: () => api.movies.wanted({ start: 0, length: limit }),
+    queryFn: () => api.movies.wanted({ start: 0, length: limit }, false),
     enabled: settings.data?.general.use_radarr ?? false,
     staleTime: 30_000,
     retry: false,

@@ -468,6 +468,7 @@ validators = [
 
     # The folder source screens are opt-in while source pages are being added.
     Validator('media_sources.visible', must_exist=True, default=False, is_type_of=bool),
+    Validator('media_sources.wanted_search_frequency', must_exist=True, default=6, is_type_of=int, gte=1),
 
     # translating section
     Validator('translator.min_source_score', must_exist=True, default=90, is_type_of=int, gte=0, lte=100),
@@ -3218,7 +3219,7 @@ def _save_settings(settings_items, native_configuration=None, *, strict_metadata
                    'settings-sportarr-full_update', 'settings-sportarr-full_update_day',
                    'settings-sportarr-full_update_hour',
                    'settings-general-wanted_search_frequency', 'settings-general-wanted_search_frequency_movie',
-                   'settings-general-wanted_search_frequency_sports',
+                   'settings-general-wanted_search_frequency_sports', 'settings-media_sources-wanted_search_frequency',
                    'settings-general-upgrade_frequency', 'settings-backup-frequency', 'settings-backup-day',
                    'settings-backup-hour']:
             update_schedule = True
@@ -3595,7 +3596,16 @@ def _save_settings(settings_items, native_configuration=None, *, strict_metadata
             # changed nothing that needs recalculating.
             with follow_ups.step():
                 from subtitles.indexer.missing_refresh import queue_missing_subtitles_recalculation
-                queue_missing_subtitles_recalculation()
+                if queue_missing_subtitles_recalculation() is None:
+                    raise RuntimeError("Could not queue the missing subtitles recalculation")
+        elif undefined_subtitles_track_default_changed:
+            # Arr indexers above refresh their own listings. Sources can rebuild
+            # the undefined-language entries from their existing probe cache.
+            with follow_ups.step():
+                from media_sources.repository import has_sources
+                from subtitles.indexer.missing_refresh import queue_missing_subtitles_recalculation
+                if has_sources() and queue_missing_subtitles_recalculation(source_scope={}) is None:
+                    raise RuntimeError("Could not queue the source missing subtitles recalculation")
 
         if clear_disabled_provider_hub_statuses:
             with follow_ups.step():

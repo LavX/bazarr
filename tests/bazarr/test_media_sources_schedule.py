@@ -1,5 +1,8 @@
 """The hourly scan task, and the two hooks that queue a shadow refresh when an arr instance or a master toggle
 changes."""
+import ast
+import shutil
+import subprocess
 import sys
 from datetime import datetime, timedelta
 from types import ModuleType, SimpleNamespace
@@ -7,7 +10,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from media_source_helpers import add_source, pristine_media_source_modules, stamped_video  # noqa: F401
+from media_source_helpers import add_source, pristine_media_source_modules  # noqa: F401
 
 
 @pytest.fixture
@@ -90,6 +93,10 @@ def test_the_task_registers_while_an_enabled_source_exists_and_unregisters_when_
     function, trigger, kwargs = jobs[schedule.JOB_ID]
     assert function is schedule.scan_due_media_sources and trigger == "interval" and kwargs["hours"] == 1
     assert kwargs["replace_existing"] is True and kwargs["max_instances"] == 1
+    wanted, trigger, options = jobs[schedule.WANTED_JOB_ID]
+    assert wanted is schedule.wanted_search_missing_subtitles_sources
+    assert trigger == "interval" and options["hours"] == 6
+    assert options["kwargs"] == {"wait_for_completion": True}
 
     _set(source, enabled=0)
     schedule.configure_source_jobs(aps, source.session)
@@ -100,7 +107,7 @@ def test_the_task_registers_while_an_enabled_source_exists_and_unregisters_when_
 
     _set(source, enabled=1)
     schedule.configure_source_jobs(aps, source.session)
-    assert schedule.JOB_ID in jobs
+    assert schedule.JOB_ID in jobs and schedule.WANTED_JOB_ID in jobs
     repository.delete_source(source.id, source.session)
     schedule.configure_source_jobs(aps, source.session)
     assert jobs == {}
@@ -146,7 +153,7 @@ def test_a_failure_configuring_the_scan_task_never_stops_the_rest_of_the_schedul
 
     monkeypatch.setattr(schedule, "configure_source_jobs", broken)
     scheduler.update_configurable_tasks()
-    assert "could not configure the media source scan task" in caplog.text
+    assert "could not configure the media source tasks" in caplog.text
     assert "provider_hub_update_check" in jobs
 
 
@@ -171,14 +178,45 @@ def test_changes_refresh_the_scheduled_tasks_only_once_the_scheduler_exists(monk
 # The two hooks
 
 def test_creating_enabling_or_disabling_an_arr_instance_queues_a_refresh_for_its_kind(source, monkeypatch):
+    from app.config import settings
     from arr_instances import service
+    from languages import custom_lang, get_languages
+    from media_sources import analysis
+    from media_sources import repository
     from media_sources import shadows
+    from sqlalchemy.dialects.postgresql import insert as pg_insert
+    from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
+    # The application loads the language table at boot, after the database exists.
+    # This isolated database bypasses boot, so run the same loader against it.
+    monkeypatch.setattr(get_languages, "database", source.session)
+    monkeypatch.setattr(custom_lang, "database", source.session)
+    insert = pg_insert if source.session.get_bind().dialect.name == "postgresql" else sqlite_insert
+    monkeypatch.setattr(get_languages, "insert", insert)
+    monkeypatch.setattr(custom_lang, "insert", insert)
+    monkeypatch.setattr(get_languages, "languages_dict", None, raising=False)
+    get_languages.load_language_in_db()
+    monkeypatch.setattr(settings.general, "use_embedded_subs", True)
+    monkeypatch.setattr(settings.general, "embedded_subtitles_parser", "ffprobe")
+    monkeypatch.setattr(settings.general, "default_und_embedded_subtitles_lang", "")
+
+    ffmpeg = shutil.which("ffmpeg")
+    assert ffmpeg and shutil.which("ffprobe"), "this test needs ffmpeg and ffprobe on PATH"
+    subtitle = source.root.parent / "track.srt"
+    subtitle.write_text("1\n00:00:00,000 --> 00:00:00,800\nHello\n", encoding="utf-8")
+    subprocess.run([ffmpeg, "-nostdin", "-loglevel", "error", "-y", "-f", "lavfi", "-i",
+                    "color=size=32x32:rate=1:duration=1", "-i", str(subtitle), "-i", str(subtitle),
+                    "-map", "0:v", "-map", "1:0", "-map", "2:0", "-c:v", "mpeg4", "-c:s", "srt",
+                    "-metadata:s:s:1", "language=eng", str(source.root / "Film.2001.mkv")], check=True, timeout=30)
     queued = []
     monkeypatch.setattr(shadows, "refresh_shadows", lambda kind=None, job_id=None: queued.append(kind) or 4)
-    stamped_video(source.root / "Film.2001.mkv")
     from media_sources.scanner import run_scan
     run_scan(source.id)
+    (item,) = repository.list_items(library_id=source.library_id)
+    assert item.ffprobe_cache
+    tracks = analysis.read_metadata(item.ffprobe_cache)["ffprobe"]["subtitle"]
+    assert len(tracks) == 2 and not tracks[0].get("language")
+    assert ast.literal_eval(item.subtitles) == [["en", None, None, "subrip"]]
     # refresh_runtime follows a committed create or update; the rest of it needs the scheduler and the feeds.
     monkeypatch.setattr(service, "mirror_scalar_config_from_default", lambda session, kind: None)
 

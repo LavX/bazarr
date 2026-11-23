@@ -4,6 +4,7 @@ import operator
 import ast
 
 from functools import reduce
+from flask import request
 from flask_restx import Resource, Namespace, fields, marshal
 
 from app.database import (
@@ -56,11 +57,22 @@ class Badges(Resource):
     @api_ns_badges.doc(parser=None)
     def get(self):
         """Get badges count to update the UI"""
+        include_sources = request.args.get('sources') == '1'
+        arr_conditions = {}
+        if include_sources:
+            from media_sources.wanted import arr_wanted_condition, configured_item_kinds, wanted_language_count
+
+            kinds = configured_item_kinds(database)
+            if 'episode' in kinds:
+                arr_conditions['episode'] = [arr_wanted_condition('sonarr', TableEpisodes.arr_instance_id)]
+            if 'movie' in kinds:
+                arr_conditions['movie'] = [arr_wanted_condition('radarr', TableMovies.arr_instance_id)]
+
         episodes_conditions = [
             (TableEpisodes.missing_subtitles.is_not(None)),
             (TableEpisodes.missing_subtitles != "[]"),
         ]
-        episodes_conditions += get_exclusion_clause("series")
+        episodes_conditions += get_exclusion_clause("series") + arr_conditions.get("episode", [])
         missing_episodes = database.execute(
             select(TableEpisodes.missing_subtitles)
             .select_from(TableEpisodes)
@@ -75,7 +87,7 @@ class Badges(Resource):
             (TableMovies.missing_subtitles.is_not(None)),
             (TableMovies.missing_subtitles != "[]"),
         ]
-        movies_conditions += get_exclusion_clause("movie")
+        movies_conditions += get_exclusion_clause("movie") + arr_conditions.get("movie", [])
         missing_movies = database.execute(
             select(TableMovies.missing_subtitles)
             .select_from(TableMovies)
@@ -92,6 +104,16 @@ class Badges(Resource):
         # was queried on every badge poll and then never displayed.
         missing_sports_count = (
             wanted_badge(database) if settings.general.use_sportarr else 0)
+
+        # The folder-only sidebar uses the source contribution when the Arr route is disabled.
+        source_counts = {}
+        if include_sources:
+            if 'episode' in kinds:
+                source_counts['source_episodes'] = wanted_language_count('episode', database)
+                missing_episodes_count += source_counts['source_episodes']
+            if 'movie' in kinds:
+                source_counts['source_movies'] = wanted_language_count('movie', database)
+                missing_movies_count += source_counts['source_movies']
 
         throttled_providers = len(get_throttled_providers())
 
@@ -110,4 +132,4 @@ class Badges(Resource):
             "sportarr_sse": live_str if all_sportarr_sse_connected() else "DOWN",
             "announcements": len(get_all_announcements()),
         }
-        return marshal(result, self.get_model)
+        return {**marshal(result, self.get_model), **source_counts}
