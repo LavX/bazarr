@@ -1738,11 +1738,18 @@ def test_stage_install_refuses_a_snapshot_when_active_data_does_not_settle(
 
     def settle(checked_id, timeout):
         settled.append(checked_id)
-        assert 0 <= timeout <= 0.03
+        assert 0 < timeout <= 10.0
         return False
 
-    monkeypatch.setattr(datadir, "QUIESCE_TIMEOUT", 0.03)
+    def unexpected_install(*args, **kwargs):
+        pytest.fail("the refused snapshot must not start an environment install")
+
+    monkeypatch.setattr(datadir, "QUIESCE_TIMEOUT", 10.0)
     monkeypatch.setattr(service_kind, "settle_data", settle)
+    monkeypatch.setattr(service.PluginEnvironment, "install", unexpected_install)
+    if busy_at == "dispatch":
+        # Report a drain timeout while the in-flight dispatch still owns the gate.
+        monkeypatch.setattr(datadir._gate, "wait_for", lambda predicate, timeout=None: predicate())
     dispatch = datadir.dispatch(plugin_id) if busy_at == "dispatch" else nullcontext()
     with dispatch, pytest.raises(service.ProviderHubInstallError, match="busy"):
         service.stage_install(manifest, source_id="official")
@@ -1752,6 +1759,62 @@ def test_stage_install_refuses_a_snapshot_when_active_data_does_not_settle(
     assert row["active_version"] == "1.0.0" and row["staged_version"] is None
     assert list(active.parent.iterdir()) == [active]
     assert (active / "settings").read_text() == "from v1"
+
+
+@pytest.mark.parametrize("reason", ["previous workers", "release changed"])
+def test_stage_install_checks_snapshot_preconditions_before_environment_install(
+        catalog_data_release, service_kind, probe_process_evidence, monkeypatch, reason):
+    from provider_hub.state import load_state, mutate_state
+
+    service, manifest, active = catalog_data_release
+    plugin_id = manifest["id"]
+    expected = load_state()["installations"][plugin_id]
+    if reason == "previous workers":
+        probe_process_evidence["partial"] = True
+        message = "previous plugin workers stopped"
+    else:
+        changed_key = "b" * 32
+
+        def settle(*_):
+            mutate_state(lambda state: state["installations"][plugin_id].update(active_data_key=changed_key))
+            return True
+
+        monkeypatch.setattr(service_kind, "settle_data", settle)
+        expected = {**expected, "active_data_key": changed_key}
+        message = "release changed"
+
+    def unexpected_install(*args, **kwargs):
+        pytest.fail("the refused snapshot must not start an environment install")
+
+    monkeypatch.setattr(service.PluginEnvironment, "install", unexpected_install)
+    with pytest.raises(service.ProviderHubInstallError, match=message):
+        service.stage_install(manifest, source_id="official")
+
+    assert load_state()["installations"][plugin_id] == expected
+    assert list(active.parent.iterdir()) == [active]
+
+
+def test_fresh_stage_install_needs_no_active_writer_proof(
+        catalog_data_release, service_kind, probe_process_evidence, monkeypatch):
+    from provider_hub.state import mutate_state
+
+    service, manifest, previous = catalog_data_release
+    plugin_id = manifest["id"]
+    mutate_state(lambda state: state["installations"].pop(plugin_id))
+    probe_process_evidence["partial"] = True
+    checked = []
+
+    def smoke(validated, bundle, interpreter, *, data_dir, timeout):
+        assert data_dir.is_dir() and not list(data_dir.iterdir())
+        checked.append(data_dir)
+
+    monkeypatch.setattr(service_kind, "smoke_test", smoke)
+    staged = service.stage_install(manifest, source_id="official")
+    assert staged["staged_version"] == manifest["version"]
+    assert staged["active_version"] is None
+    assert len(checked) == 1 and checked[0].exists()
+    assert probe_process_evidence["scans"] == 0
+    assert (previous / "settings").read_text() == "from v1"
 
 
 def test_stage_install_does_not_copy_when_the_install_budget_expires_while_settling(
@@ -1801,8 +1864,6 @@ def test_connection_probe_waits_for_active_data_and_reopens_dispatch(hub, monkey
     _seed(examplehub=_row(plugin_id, active="1.0.0", active_data_key=active.name,
                           manifest=provider_manifest_v2(permissions=["data_dir"])))
     monkeypatch.setattr(service, "verify_bundle_tree", lambda *_: None)
-    monkeypatch.setattr(datadir, "QUIESCE_TIMEOUT", 0.5)
-    monkeypatch.setattr(service, "PROBE_TIMEOUT", 0.5, raising=False)
 
     attempted, dispatched = Event(), Event()
     live = ProviderWorkerClient([], provider_id=plugin_id, env={"BAZARR_PLUGIN_DATA_DIR": str(active)})
@@ -1816,19 +1877,19 @@ def test_connection_probe_waits_for_active_data_and_reopens_dispatch(hub, monkey
 
     def settle(checked_id, timeout):
         assert checked_id == plugin_id
-        assert 0 < timeout <= 0.5
+        assert 0 < timeout <= service.PROBE_TIMEOUT
         if can_settle:
             settings.write_text("settled")
         return can_settle
 
     copy_folder = datadir.copy_folder
 
-    def copy(source, target):
+    def copy(source, target, **kwargs):
         assert source == active
         executor.submit(call_worker)
         assert attempted.wait(2)
         assert not dispatched.wait(0.05)
-        return copy_folder(source, target)
+        return copy_folder(source, target, **kwargs)
 
     probed = []
 
@@ -1871,13 +1932,14 @@ def probe_process_evidence(monkeypatch):
     monkeypatch.setattr(sweep, "_has_proc", lambda: True)
     monkeypatch.setattr(sweep, "_proc_is_ours", lambda: True)
     monkeypatch.setattr(sweep, "_pidfd_available", lambda: True)
-    evidence = {"partial": False, "unreadable": 0, "sessions": [], "scans": 0}
+    evidence = {"partial": False, "unreadable": 0, "sessions": [], "launchers": {}, "scans": 0}
 
     def scan(instance, deadline, result):
         evidence["scans"] += 1
         result.truncated = evidence["partial"]
         result.unreadable = evidence["unreadable"]
         result.sessions.extend(evidence["sessions"])
+        result.launchers.update(evidence["launchers"])
         return {}, {}
 
     monkeypatch.setattr(sweep, "_scan", scan)
@@ -1891,6 +1953,8 @@ def isolated_probe_release(hub, monkeypatch, probe_process_evidence):
 
     from plugin_platform_helpers import provider_manifest_v2
     from provider_hub import datadir, service
+    from provider_hub.kinds import DETACH_ON_RESTART
+    from provider_hub.kinds.subtitle_provider import SUBTITLE_PROVIDER_KIND
     from provider_hub.state import provider_hub_dir
 
     plugin_id = "examplehub"
@@ -1900,6 +1964,10 @@ def isolated_probe_release(hub, monkeypatch, probe_process_evidence):
     _seed(examplehub=_row(plugin_id, active="1.0.0", active_data_key=active.name,
                           manifest=provider_manifest_v2(permissions=["data_dir"])))
     monkeypatch.setattr(service, "verify_bundle_tree", lambda *_: None)
+    # Keep public removal tests on the release store without loading app settings or search pools.
+    monkeypatch.setattr(SUBTITLE_PROVIDER_KIND, "is_enabled", lambda *_: False)
+    monkeypatch.setattr(SUBTITLE_PROVIDER_KIND, "on_removed", lambda *_: True)
+    monkeypatch.setattr(SUBTITLE_PROVIDER_KIND, "detach_policy", DETACH_ON_RESTART)
     waiting = Event()
     wait_for = datadir._gate.wait_for
 
@@ -1933,10 +2001,10 @@ def test_connection_probe_drains_a_request_already_in_flight(isolated_probe_rele
     copied = Event()
     copy_folder = datadir.copy_folder
 
-    def copy(source, target):
+    def copy(source, target, **kwargs):
         assert source == active and finish.is_set()
         copied.set()
-        return copy_folder(source, target)
+        return copy_folder(source, target, **kwargs)
 
     class ProbeClient(ProviderWorkerClient):
         def _request(self, *_):
@@ -2021,38 +2089,249 @@ def test_probe_release_change_during_drain_refuses_before_spawn_or_environment_b
 def test_a_waiting_connection_probe_allows_another_plugin_to_be_removed(isolated_probe_release, monkeypatch):
     from concurrent.futures import ThreadPoolExecutor
     from threading import Event
+    from types import SimpleNamespace
 
     from provider_hub.state import load_state
     from provider_hub.worker import ProviderWorkerClient
 
     service, plugin_id, active, waiting, _ = isolated_probe_release
     _seed(beta=_row("beta", active="1.0.0"))
+    monkeypatch.setattr(service, "PROBE_TIMEOUT", 30.0)
     entered, finish = Event(), Event()
     live = ProviderWorkerClient([], provider_id=plugin_id, env={"BAZARR_PLUGIN_DATA_DIR": str(active)})
 
     def request(*_):
         entered.set()
-        assert finish.wait(5)
+        assert finish.wait(10)
 
     monkeypatch.setattr(live, "_request", request)
-    monkeypatch.setattr(service, "ProviderWorkerClient", lambda *a, **k: pytest.fail("stale probe spawned"))
+
+    class ProbeClient(ProviderWorkerClient):
+        def _request(self, *_):
+            assert (Path(self.env["BAZARR_PLUGIN_DATA_DIR"]) / "settings").read_text() == "before request"
+            return SimpleNamespace(payload={"initialized": True})
+
+    monkeypatch.setattr(service, "ProviderWorkerClient", ProbeClient)
     with ThreadPoolExecutor(max_workers=3) as pool:
         running = pool.submit(live.request, "health", {})
         try:
             assert entered.wait(2)
             probe = pool.submit(service.test_provider_connection, plugin_id)
-            assert waiting.wait(2)
+            assert waiting.wait(5)
             removal = pool.submit(service.remove_installation, "beta")
-            assert removal.result(timeout=1)
+            assert removal.result(timeout=5)
             assert load_state()["installations"]["beta"]["state"] == "removed"
             assert not probe.done()
-            # Invalidate the selected release so the resumed probe stops before spawn.
-            from provider_hub.state import mutate_state
-            mutate_state(lambda state: state["installations"][plugin_id].update(active_data_key="b" * 32))
         finally:
             finish.set()
         running.result(timeout=3)
-        assert not probe.result(timeout=3)["ok"]
+        assert probe.result(timeout=10)["ok"]
+
+
+@pytest.mark.parametrize("outcome", ["success", "deadline", "filesystem"])
+def test_probe_copy_fences_only_its_release_and_does_not_publish_partial_data(
+        isolated_probe_release, monkeypatch, outcome):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Event
+    from types import SimpleNamespace
+
+    from provider_hub import datadir
+    from provider_hub.sandbox import sweep
+    from provider_hub.state import load_state, provider_hub_dir
+    from provider_hub.worker import ProviderWorkerClient
+
+    service, plugin_id, active, _, _ = isolated_probe_release
+    (active / "first").write_text("first file")
+    _seed(beta=_row("beta", active="1.0.0"))
+    original = load_state()["installations"][plugin_id]
+    copying, finish_copy, dispatched = Event(), Event(), Event()
+    live = ProviderWorkerClient([], provider_id=plugin_id, env={"BAZARR_PLUGIN_DATA_DIR": str(active)})
+    monkeypatch.setattr(live, "_request", lambda *_: dispatched.set())
+
+    now = 0.0
+    clock = SimpleNamespace(monotonic=lambda: now, perf_counter=service.time.perf_counter)
+    for module in (service, datadir, sweep):
+        monkeypatch.setattr(module, "time", clock)
+    open_regular = datadir._open_regular
+
+    def open_file(path, entry, fd):
+        nonlocal now
+        if Path(path).name == "settings":
+            copying.set()
+            assert finish_copy.wait(20)
+            if outcome == "deadline":
+                now = service.PROBE_TIMEOUT
+            if outcome == "filesystem":
+                raise OSError("copy read failed")
+        return open_regular(path, entry, fd)
+
+    checks = []
+
+    class ProbeClient(ProviderWorkerClient):
+        def _request(self, *_):
+            folder = Path(self.env["BAZARR_PLUGIN_DATA_DIR"])
+            assert (folder / "first").read_text() == "first file"
+            assert (folder / "settings").read_text() == "before request"
+            checks.append(folder)
+            return SimpleNamespace(payload={"initialized": True})
+
+    monkeypatch.setattr(datadir, "_open_regular", open_file)
+    monkeypatch.setattr(service, "ProviderWorkerClient", ProbeClient)
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        probe = pool.submit(service.test_provider_connection, plugin_id)
+        try:
+            assert copying.wait(10)
+            [temporary] = list(provider_hub_dir().glob(".probe-*"))
+            assert not (temporary / "data").exists()
+            assert not checks
+            assert pool.submit(service.remove_installation, "beta").result(timeout=10)
+            with pytest.raises(service.ProviderHubInstallError, match="busy"):
+                pool.submit(service.remove_installation, plugin_id, keep_data=False).result(timeout=5)
+            running = pool.submit(live.request, "health", {})
+            with datadir._gate:
+                assert plugin_id in datadir._paused
+            assert not dispatched.is_set()
+        finally:
+            finish_copy.set()
+        result = probe.result(timeout=10)
+        running.result(timeout=5)
+
+    assert result["status"] == {"success": "ready", "deadline": "busy", "filesystem": "failed"}[outcome]
+    assert len(checks) == (outcome == "success")
+    assert not temporary.exists() and dispatched.is_set()
+    assert (active / "settings").read_text() == "before request"
+    state = load_state()
+    assert state["installations"][plugin_id] == original
+    assert state["installations"]["beta"]["state"] == "removed"
+
+
+@pytest.mark.parametrize("limit", ["entries", "bytes", "depth"])
+def test_connection_probe_caps_data_copy_work(isolated_probe_release, monkeypatch, limit):
+    from provider_hub import datadir
+    from provider_hub.state import load_state, provider_hub_dir
+
+    service, plugin_id, active, _, _ = isolated_probe_release
+    original = load_state()["installations"][plugin_id]
+    if limit == "entries":
+        monkeypatch.setattr(datadir, "PROBE_COPY_MAX_ENTRIES", 1)
+        (active / "another file").touch()
+    elif limit == "bytes":
+        monkeypatch.setattr(datadir, "PROBE_COPY_MAX_BYTES", 1)
+    else:
+        monkeypatch.setattr(datadir, "PROBE_COPY_MAX_DEPTH", 1)
+        (active / "folder" / "nested").mkdir(parents=True)
+
+    def unexpected(*args, **kwargs):
+        pytest.fail("a refused copy must not start the worker")
+
+    monkeypatch.setattr(service, "ProviderWorkerClient", unexpected)
+    result = service.test_provider_connection(plugin_id)
+    assert not result["ok"] and result["status"] == "busy"
+    assert load_state()["installations"][plugin_id] == original
+    assert not list(provider_hub_dir().glob(".probe-*"))
+
+
+@pytest.mark.parametrize(("remaining", "worker_start_expires"), [(0.01, False), (6.0, False), (6.0, True)])
+def test_connection_probe_admission_delay_does_not_mark_healthy_environment_for_repair(
+        isolated_probe_release, monkeypatch, remaining, worker_start_expires):
+    from types import SimpleNamespace
+
+    from provider_hub import datadir
+    from provider_hub.sandbox import sweep
+    from provider_hub.state import load_state
+    from provider_hub.worker import ProviderWorkerClient, WorkerError
+
+    service, plugin_id, _, _, _ = isolated_probe_release
+    original = load_state()["installations"][plugin_id]
+    now = 0.0
+    clock = SimpleNamespace(monotonic=lambda: now, perf_counter=service.time.perf_counter)
+    for module in (service, datadir, sweep):
+        monkeypatch.setattr(module, "time", clock)
+    copy_folder = datadir.copy_folder
+
+    def copy(*args, **kwargs):
+        nonlocal now
+        result = copy_folder(*args, **kwargs)
+        now = service.PROBE_TIMEOUT - remaining
+        return result
+
+    health_timeouts = []
+
+    class ProbeClient(ProviderWorkerClient):
+        def _request(self, op, payload, timeout, *_):
+            nonlocal now
+            health_timeouts.append(timeout)
+            if timeout < service.PROBE_TIMEOUT - 1:
+                if worker_start_expires:
+                    now += timeout
+                    raise WorkerError("worker process did not start")
+                raise WorkerError("worker response timed out", code="timeout")
+            return SimpleNamespace(payload={"initialized": True})
+
+    monkeypatch.setattr(datadir, "copy_folder", copy)
+    monkeypatch.setattr(service, "ProviderWorkerClient", ProbeClient)
+    result = service.test_provider_connection(plugin_id)
+    assert not result["ok"] and result["status"] == "busy"
+    assert health_timeouts == ([remaining] if remaining > 1 else [])
+    assert load_state()["installations"][plugin_id] == original
+
+    now = 0.0
+    monkeypatch.setattr(datadir, "copy_folder", copy_folder)
+    assert service.test_provider_connection(plugin_id)["ok"]
+
+
+def test_connection_probe_without_data_can_use_the_remaining_health_time(
+        hub, monkeypatch, probe_process_evidence):
+    from types import SimpleNamespace
+
+    from provider_hub import service
+    from provider_hub.worker import ProviderWorkerClient
+
+    plugin_id = "examplehub"
+    _seed(examplehub=_row(plugin_id, active="1.0.0"))
+    probe_process_evidence["partial"] = True
+    now = 0.0
+    monkeypatch.setattr(service, "time", SimpleNamespace(monotonic=lambda: now, perf_counter=service.time.perf_counter))
+
+    def verify(*_):
+        nonlocal now
+        now = service.PROBE_TIMEOUT - 2.0
+
+    class ProbeClient(ProviderWorkerClient):
+        def _request(self, op, payload, timeout, *_):
+            assert op == "health" and timeout == 2.0
+            assert "BAZARR_PLUGIN_DATA_DIR" not in self.env
+            return SimpleNamespace(payload={"initialized": True})
+
+    monkeypatch.setattr(service, "verify_bundle_tree", verify)
+    monkeypatch.setattr(service, "ProviderWorkerClient", ProbeClient)
+
+    result = service.test_provider_connection(plugin_id)
+    assert result["ok"] and result["status"] == "ready"
+    assert probe_process_evidence["scans"] == 0
+
+
+def test_connection_probe_keeps_refusing_a_former_launcher_without_terminal_proof(
+        isolated_probe_release, monkeypatch):
+    from provider_hub import datadir
+    from provider_hub.state import load_state
+
+    service, plugin_id, active, _, evidence = isolated_probe_release
+    original = load_state()["installations"][plugin_id]
+    evidence["launchers"][12345] = "4321"
+
+    def unexpected(*args, **kwargs):
+        pytest.fail("a missing terminal cleanup result must prevent a probe")
+
+    monkeypatch.setattr(datadir, "copy_folder", unexpected)
+    monkeypatch.setattr(service, "ProviderWorkerClient", unexpected)
+    for _ in range(2):
+        result = service.test_provider_connection(plugin_id)
+        assert not result["ok"] and "previous plugin workers stopped" in result["message"]
+        evidence["launchers"].clear()
+
+    assert load_state()["installations"][plugin_id] == original
+    assert list(active.parent.iterdir()) == [active]
 
 
 @pytest.mark.parametrize("operation", ["connection", "repair"])
@@ -2209,7 +2488,7 @@ def test_probe_timeout_keeps_dispatch_closed_until_the_actual_worker_stop_finish
             running = None
             try:
                 result = probe.result(timeout=3)
-                assert not result["ok"] and result["status"] == "failed", result
+                assert not result["ok"] and result["status"] == "busy", result
                 assert "busy" in result["message"].lower(), result
                 assert stopping.is_set() and not stopped.is_set() and not settling.done()
                 with datadir.quiesced(plugin_id, unexpected, 0.1, bounded=True) as settled:

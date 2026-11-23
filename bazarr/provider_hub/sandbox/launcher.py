@@ -47,6 +47,10 @@ over a close-on-exec pipe that the worker never inherits and that closes
 silently when ``execve`` succeeds. A line starting with ``bazarr-sandbox:`` on
 stderr repeats the reason for logs.
 
+Only the host holding that private status socket can consume the cleanup
+reply. A later host observing this launcher's exit through ``/proc`` cannot
+recover it or infer that descendants stopped.
+
 Spec layout (JSON object)::
 
     {

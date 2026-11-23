@@ -22,6 +22,10 @@ ARCHIVE_DIR = "plugin_data"
 OMISSIONS_ARCHIVE = "plugin_data_omitted.json"
 RESTORE_APPLIED_MARKER = ".applied"
 QUIESCE_TIMEOUT = 15 * 60
+PROBE_COPY_MAX_ENTRIES = 4096
+PROBE_COPY_MAX_BYTES = 64 * 1024 * 1024
+PROBE_COPY_MAX_DEPTH = 64
+PROBE_COPY_CHUNK_BYTES = 256 * 1024
 # Keep an archive's database snapshot and data folders on the same side of an activation or removal.
 release_lock = threading.RLock()
 _PLUGIN_ID = re.compile(r"[a-z0-9][a-z0-9_.-]{0,63}")
@@ -36,6 +40,41 @@ class DataFolderError(ValueError):
 
 class SnapshotRefused(DataFolderError):
     """A release snapshot could not be taken safely at this time."""
+
+
+class SnapshotBusy(SnapshotRefused):
+    """Contention or a time or work limit deferred a snapshot."""
+
+
+class _ProbeCopyBudget:
+    def __init__(self, deadline: float):
+        self.deadline = deadline
+        self.entries_left = PROBE_COPY_MAX_ENTRIES
+        self.bytes_left = PROBE_COPY_MAX_BYTES
+
+    def check(self) -> None:
+        if time.monotonic() >= self.deadline:
+            raise SnapshotBusy("The plugin data copy timed out. Try again.")
+
+    def entry(self) -> None:
+        self.check()
+        self.entries_left -= 1
+        if self.entries_left < 0:
+            raise SnapshotBusy("The plugin data has too many entries for this check.")
+
+    def directory(self, relative: Path) -> None:
+        self.check()
+        if len(relative.parts) > PROBE_COPY_MAX_DEPTH:
+            raise SnapshotBusy("The plugin data is too deeply nested for this check.")
+
+    def file(self, size: int) -> None:
+        self.check()
+        if size > self.bytes_left:
+            raise SnapshotBusy("The plugin data is too large for this check.")
+
+    def consume(self, size: int) -> None:
+        self.file(size)
+        self.bytes_left -= size
 
 
 def declared(manifest) -> bool:
@@ -111,8 +150,11 @@ def _open_regular(path: Path | str, recorded, parent_fd: int | None):
     return os.fdopen(fd, "rb")
 
 
-def _transfer(source: Path, target: Path | None, *, backup: bool = False, excluded=()) -> str | None:
+def _transfer(source: Path, target: Path | None, *, backup: bool = False, excluded=(),
+              budget: _ProbeCopyBudget | None = None) -> str | None:
     """Hash and optionally copy one tree. Open files relative to checked directories where supported."""
+    if budget is not None:
+        budget.check()
     try:
         root_stat = source.lstat()
     except FileNotFoundError:
@@ -127,6 +169,8 @@ def _transfer(source: Path, target: Path | None, *, backup: bool = False, exclud
                       + hashlib.sha256(data).digest())
 
     def walk(relative, recorded, parent_fd=None):
+        if budget is not None:
+            budget.directory(relative)
         path = source / relative
         if _DIR_FDS:
             fd = os.open(relative.name if parent_fd is not None else path,
@@ -137,7 +181,21 @@ def _transfer(source: Path, target: Path | None, *, backup: bool = False, exclud
         else:
             fd = None
         try:
-            for name in sorted(os.listdir(path if fd is None else fd)):
+            if budget is None:
+                names = os.listdir(path if fd is None else fd)
+            else:
+                # Bound enumeration before sorting, including omitted entries.
+                # These checks cannot interrupt an individual OS operation.
+                names = []
+                budget.check()
+                with os.scandir(path if fd is None else fd) as entries:
+                    for entry in entries:
+                        budget.entry()
+                        names.append(entry.name)
+                budget.check()
+            for name in sorted(names):
+                if budget is not None:
+                    budget.check()
                 child = relative / name
                 parts = tuple(part.casefold() for part in child.parts) if excluded else ()
                 if any(parts[i:i + len(rule)] == rule
@@ -156,18 +214,34 @@ def _transfer(source: Path, target: Path | None, *, backup: bool = False, exclud
                         out.symlink_to(portable)
                     record(b"L", child, os.fsencode(portable))
                 elif stat.S_ISDIR(entry.st_mode):
+                    if budget is not None:
+                        budget.directory(child)
                     if out is not None:
                         out.mkdir(mode=0o700)
                     record(b"D", child)
                     walk(child, entry, fd)
                 elif stat.S_ISREG(entry.st_mode) and entry.st_nlink == 1:
+                    if budget is not None:
+                        budget.file(entry.st_size)
                     content = hashlib.sha256()
                     with _open_regular(path_to_open, entry, fd) as contents, contextlib.ExitStack() as stack:
                         output = stack.enter_context(out.open("xb")) if out is not None else None
-                        while chunk := contents.read(1024 * 1024):
+                        while True:
+                            if budget is not None:
+                                budget.check()
+                                chunk_size = min(PROBE_COPY_CHUNK_BYTES, budget.bytes_left + 1)
+                            else:
+                                chunk_size = 1024 * 1024
+                            chunk = contents.read(chunk_size)
+                            if budget is not None:
+                                budget.consume(len(chunk))
+                            if not chunk:
+                                break
                             content.update(chunk)
                             if output is not None:
                                 output.write(chunk)
+                            if budget is not None:
+                                budget.check()
                     if out is not None:
                         out.chmod(0o600 | (entry.st_mode & 0o100))
                     record(b"F", child, content.digest() + bytes([bool(entry.st_mode & 0o100)]))
@@ -178,6 +252,8 @@ def _transfer(source: Path, target: Path | None, *, backup: bool = False, exclud
                 os.close(fd)
 
     walk(Path(), root_stat)
+    if budget is not None:
+        budget.check()
     return digest.hexdigest()
 
 
@@ -185,15 +261,26 @@ def fingerprint(root: Path | None) -> str | None:
     return _transfer(root, None) if root is not None else None
 
 
-def copy_folder(source: Path | None, target: Path, *, backup: bool = False, excluded=()) -> str | None:
-    """Replace the destination only after the complete copy succeeds."""
+def copy_folder(source: Path | None, target: Path, *, backup: bool = False, excluded=(),
+                probe_deadline: float | None = None) -> str | None:
+    """Replace the destination only after the complete copy succeeds.
+
+    A probe deadline enables cooperative checks and finite copy limits. It
+    cannot interrupt filesystem calls or guarantee a wall-clock bound.
+    """
+    budget = _ProbeCopyBudget(probe_deadline) if probe_deadline is not None else None
+    if budget is not None:
+        budget.check()
     target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     temporary = Path(tempfile.mkdtemp(prefix=".copy-", dir=target.parent))
     staged, old = temporary / "new", temporary / "old"
     retain_old = False
     try:
         staged.mkdir(mode=0o700)
-        result = _transfer(source, staged, backup=backup, excluded=excluded) if source is not None else None
+        result = (_transfer(source, staged, backup=backup, excluded=excluded, budget=budget)
+                  if source is not None else None)
+        if budget is not None:
+            budget.check()
         if target.exists() or target.is_symlink():
             target.rename(old)
         try:

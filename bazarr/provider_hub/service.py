@@ -65,7 +65,7 @@ from .venv import (
     _ENV_LOCK, PluginEnvironment, environment_fingerprint, hold_environment, pin_scope, python_executable,
     release_pins, validated_bundle_path, validated_interpreter,
 )
-from .worker import ProviderWorkerClient, release_when_gone, worker_command
+from .worker import ProviderWorkerClient, WorkerBusy, WorkerError, release_when_gone, worker_command
 
 
 class CatalogSourceError(ValueError):
@@ -97,6 +97,9 @@ ENABLED_PROVIDERS_NOT_SAVED = "the enabled providers list could not be saved to 
 
 SECRET_PLACEHOLDER = "********"
 PROBE_TIMEOUT = 10.0
+_PROBE_COPIES_LOCK = threading.Lock()
+_PROBE_COPIES: set[str] = set()
+_PLUGIN_BUSY = "The plugin is busy. Try again."
 _JOB_LOG_LIMIT = 200
 # A job that has not reported for this long is taken as dead. An install or a repair has time limits far below it.
 JOB_TIME_LIMIT_SECONDS = 2 * 60 * 60
@@ -2991,6 +2994,9 @@ def test_provider_connection(provider_id: str) -> dict[str, Any] | None:
 
             data = probe_files.enter_context(_probe_release_data(provider_id, provider, deadline=deadline))
             timeout = _snapshot_time_left(deadline)
+            # A late data snapshot leaves too little time to judge worker health.
+            if data is not None and timeout < PROBE_TIMEOUT / 2:
+                raise datadir.SnapshotBusy(_PLUGIN_BUSY)
             runner = Path(__file__).with_name("worker_runner.py")
             client = ProviderWorkerClient(
                 worker_command(interpreter, runner),
@@ -3003,7 +3009,10 @@ def test_provider_connection(provider_id: str) -> dict[str, Any] | None:
             )
             try:
                 result = client.request("health", {}, timeout=timeout)
-            except Exception:
+            except Exception as error:
+                if (time.monotonic() >= deadline or isinstance(error, (WorkerBusy, TimeoutError))
+                        or isinstance(error, WorkerError) and error.code == "timeout"):
+                    raise datadir.SnapshotBusy(_PLUGIN_BUSY) from error
                 # The worker could not start or answer here, which is what a
                 # missing, stale or foreign environment looks like.
                 env_registry.mark_needs_repair(provider_id, python_path)
@@ -3027,18 +3036,19 @@ def test_provider_connection(provider_id: str) -> dict[str, Any] | None:
             }
         except Exception as error:
             message = scrub_text(str(error) or error.__class__.__name__)
+            status = "busy" if isinstance(error, datadir.SnapshotBusy) else "failed"
             if not isinstance(error, datadir.SnapshotRefused):
                 _record_provider_last_error(provider_id, message, python_path)
             job.data["state"] = "failed"
             job.update(
                 error=message,
                 message=message,
-                details={"status": "failed"},
+                details={"status": status},
             )
             return {
                 "provider_id": provider_id,
                 "ok": False,
-                "status": "failed",
+                "status": status,
                 "message": message,
             }
         finally:
@@ -3937,19 +3947,20 @@ def _stage_validated(
             step("Downloading the provider")
             bundle_path = bundle_stager(validated, deadline)
             staged.append(bundle_path)
-            step("Installing the provider's dependencies")
-            install_remaining = None if deadline is None else max(0.0, deadline - time.monotonic())
-            env_path = PluginEnvironment(provider_hub_dir()).install(
-                validated, timeout=install_remaining, **_bundled_wheels_argument(validated, bundle_path))
-            staged.append(env_path)
-            staged_python_path = python_executable(env_path)
-            step("Checking that the provider starts")
             if datadir.declared(validated.raw):
+                step("Preparing the plugin's data")
                 data_key = uuid.uuid4().hex
                 data_path = datadir.release_path(provider_hub_dir(), validated.provider_id, data_key)
                 snapshot_deadline = time.monotonic() + min(datadir.QUIESCE_TIMEOUT, time_left())
                 data_fingerprint, data_from_active = _copy_staged_release_data(
                     validated, existing or {}, source_id, origin, data_path, snapshot_deadline)
+            step("Installing the provider's dependencies")
+            install_remaining = None if deadline is None else time_left()
+            env_path = PluginEnvironment(provider_hub_dir()).install(
+                validated, timeout=install_remaining, **_bundled_wheels_argument(validated, bundle_path))
+            staged.append(env_path)
+            staged_python_path = python_executable(env_path)
+            step("Checking that the provider starts")
             # The check shares what is left of the install's budget after the snapshot.
             smoke_timeout = None if deadline is None else min(10.0, time_left())
             get_kind(validated.kind).smoke_test(
@@ -3983,6 +3994,7 @@ def _stage_validated(
                 return current, dict(installation)
 
             with datadir.release_lock:
+                _require_release_available(validated.provider_id)
                 previous, failed = mutate_state(record_failed_install)
                 _discard_superseded_data(validated.provider_id, previous, failed.get("staged_data_key"))
             raise ProviderHubInstallError(str(install_error)) from install_error
@@ -4031,8 +4043,16 @@ def _stage_validated(
             return dict(installation)
 
         try:
-            with datadir.release_lock, env_registry.recording_environment(env_path):
-                installation = mutate_state(record_staged_install)
+            with datadir.release_lock:
+                _require_release_available(validated.provider_id)
+                with env_registry.recording_environment(env_path):
+                    installation = mutate_state(record_staged_install)
+                if is_fresh:
+                    try:
+                        claim_kept_data(validated.provider_id, source_id, validated.kind, origin)
+                    except ProviderHubInstallError:
+                        _undo_staging(validated.provider_id, before_staging.get("row"))
+                        raise
         except env_registry.EnvironmentGone as error:
             if data_path is not None:
                 datadir.remove(data_path)
@@ -4040,19 +4060,9 @@ def _stage_validated(
         except ProviderHubInstallError:
             if data_path is not None:
                 datadir.remove(data_path)
-            # Refused in the write: another plugin's need would no longer be met. Nothing was recorded.
             _discard_stopped_install(staged, existing)
             raise
         if is_fresh:
-            try:
-                claim_kept_data(validated.provider_id, source_id, validated.kind, origin)
-            except ProviderHubInstallError:
-                # Refused, so nothing of this install may be left to activate at the next restart.
-                _undo_staging(validated.provider_id, before_staging.get("row"))
-                if data_path is not None:
-                    datadir.remove(data_path)
-                _discard_stopped_install(staged, existing)
-                raise
             # The saved settings may have come back with the kept data, so the row is read again before the
             # required fields are judged.
             installation = dict((load_state().get("installations") or {}).get(validated.provider_id) or installation)
@@ -5120,6 +5130,8 @@ def activate_release(provider_id: str, *, at_boot: bool = False) -> Activation:
     previous_version = installation.get("active_version")
     previous_manifest = installation.get("manifest") if previous_version else None
     target_version = installation.get("staged_version")
+    if _probe_copy_in_progress(provider_id):
+        return Activation(provider_id, ACTIVATION_WAITING, target_version, previous_version, _PLUGIN_BUSY)
     target_name = installation.get("name") or provider_id
     try:
         live = get_kind(kind_of(installation)).attach_policy == ATTACH_LIVE
@@ -5341,6 +5353,7 @@ def rollback_release(provider_id: str, consent_digest: str | None = None) -> Act
     now. Raises ``ProviderHubInstallError`` when there is nothing to go back to or the rules refuse it, and then
     changes nothing: the previous release stays recorded.
     """
+    _require_release_available(provider_id)
     state = load_state()
     row = (state.get("installations") or {}).get(provider_id)
     if not isinstance(row, dict) or not row.get("active_version") or row.get("state") == "removed":
@@ -5534,14 +5547,14 @@ def _retire_stale_draining() -> None:
 def _snapshot_time_left(deadline: float) -> float:
     remaining = deadline - time.monotonic()
     if remaining <= 0:
-        raise datadir.SnapshotRefused("The plugin check timed out. Try again.")
+        raise datadir.SnapshotBusy("The plugin check timed out. Try again.")
     return remaining
 
 
 @contextlib.contextmanager
 def _snapshot_lock(deadline: float, lock=datadir.release_lock):
     if not lock.acquire(timeout=_snapshot_time_left(deadline)):
-        raise datadir.SnapshotRefused("The plugin is busy. Try again.")
+        raise datadir.SnapshotBusy(_PLUGIN_BUSY)
     try:
         _snapshot_time_left(deadline)
         yield
@@ -5554,26 +5567,66 @@ def _same_data_release(current, expected, slot: str) -> bool:
                for field in ("version", "path", "data_key"))
 
 
-def _copy_release_data(plugin_id: str, kind: str, deadline: float, select_source, copy_data):
-    """Copy a release source under the release lock and any required writer fence."""
-    with _snapshot_lock(deadline):
-        source, active = select_source()
-        if not active:
-            _snapshot_time_left(deadline)
-            return copy_data(source), False
+def _probe_copy_in_progress(plugin_id: str) -> bool:
+    with _PROBE_COPIES_LOCK:
+        return plugin_id in _PROBE_COPIES
 
-    # Prove the previous host is gone, then close admission and drain this
-    # host's writers. Neither wait needs the global release lock.
-    if not _previous_workers_stopped(deadline=deadline):
-        raise datadir.SnapshotRefused("Could not confirm the previous plugin workers stopped. Try again.")
-    with datadir.quiesced(plugin_id, get_kind(kind).settle_data, _snapshot_time_left(deadline), bounded=True) as settled:
-        if not settled:
-            raise datadir.SnapshotRefused("The active plugin data is busy. Try again.")
+
+def _require_release_available(plugin_id: str) -> None:
+    # Release mutations check while holding release_lock, as does reservation.
+    if _probe_copy_in_progress(plugin_id):
+        raise ProviderHubInstallError(_PLUGIN_BUSY)
+
+
+@contextlib.contextmanager
+def _reserve_probe_copy(plugin_id: str):
+    with _PROBE_COPIES_LOCK:
+        if plugin_id in _PROBE_COPIES:
+            raise datadir.SnapshotBusy(_PLUGIN_BUSY)
+        _PROBE_COPIES.add(plugin_id)
+    try:
+        yield
+    finally:
+        with _PROBE_COPIES_LOCK:
+            _PROBE_COPIES.remove(plugin_id)
+
+
+@contextlib.contextmanager
+def _release_data_source(plugin_id: str, kind: str, deadline: float, select_source, *, probe: bool = False):
+    """Keep the selected source stable while it is copied."""
+    with contextlib.ExitStack() as held:
+        def hold_source():
+            if probe:
+                held.enter_context(_reserve_probe_copy(plugin_id))
+            else:
+                held.enter_context(datadir.release_lock)
+
         with _snapshot_lock(deadline):
-            if select_source() != (source, active):
-                raise datadir.SnapshotRefused("The plugin release changed. Try again.")
-            _snapshot_time_left(deadline)
-            return copy_data(source), True
+            if _probe_copy_in_progress(plugin_id):
+                raise datadir.SnapshotBusy(_PLUGIN_BUSY)
+            source, active = select_source()
+            if not active:
+                hold_source()
+
+        if active:
+            # Neither checking the previous host nor draining this host's writers
+            # needs the release lock.
+            previous_stopped = _previous_workers_stopped(deadline=deadline)
+            remaining = _snapshot_time_left(deadline)
+            if not previous_stopped:
+                raise datadir.SnapshotRefused("Could not confirm the previous plugin workers stopped.")
+            settled = held.enter_context(datadir.quiesced(
+                plugin_id, get_kind(kind).settle_data, remaining, bounded=True))
+            if not settled:
+                raise datadir.SnapshotBusy("The active plugin data is busy. Try again.")
+            with _snapshot_lock(deadline):
+                if select_source() != (source, active):
+                    raise datadir.SnapshotRefused("The plugin release changed. Try again.")
+                if _probe_copy_in_progress(plugin_id):
+                    raise datadir.SnapshotBusy(_PLUGIN_BUSY)
+                hold_source()
+        _snapshot_time_left(deadline)
+        yield source, active
 
 
 def _copy_staged_release_data(validated, expected, source_id, origin, target: Path, deadline: float):
@@ -5588,8 +5641,8 @@ def _copy_staged_release_data(validated, expected, source_id, origin, target: Pa
                                     source_id, validated.kind, origin, validated.raw)
         return source, source is not None and source == _active_data_path(plugin_id, current)
 
-    return _copy_release_data(plugin_id, validated.kind, deadline, select_source,
-                              lambda source: datadir.copy_folder(source, target))
+    with _release_data_source(plugin_id, validated.kind, deadline, select_source) as (source, active):
+        return datadir.copy_folder(source, target), active
 
 
 def _same_probe_release(current, expected, slot: str) -> bool:
@@ -5620,22 +5673,23 @@ def _probe_release_data(plugin_id: str, row, *, staged: bool = False, deadline: 
         return source, source is not None and (not staged or source == _active_data_path(plugin_id, current))
 
     with contextlib.ExitStack() as files:
-        def copy_data(source):
-            parent = datadir.plugin_root(root, plugin_id)
-            parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-            temporary = files.enter_context(tempfile.TemporaryDirectory(prefix=".probe-", dir=parent))
-            target = Path(temporary) / "data"
-            datadir.copy_folder(source, target)
-            return target
-
         try:
-            target, _ = _copy_release_data(plugin_id, kind_of(row), deadline, select_source, copy_data)
+            with _release_data_source(plugin_id, kind_of(row), deadline, select_source, probe=True) as (
+                    source, active):
+                with contextlib.ExitStack() as copy_files:
+                    # A later release removal can delete the plugin's data root.
+                    temporary = copy_files.enter_context(tempfile.TemporaryDirectory(prefix=".probe-", dir=root))
+                    target = Path(temporary) / "data"
+                    datadir.copy_folder(source, target, probe_deadline=deadline)
+                    if select_source() != (source, active):
+                        raise datadir.SnapshotRefused("The plugin release changed. Try again.")
+                    _snapshot_time_left(deadline)
+                    files.enter_context(copy_files.pop_all())
         except datadir.SnapshotRefused:
             raise
         except (OSError, datadir.DataFolderError):
             # A filesystem error can contain names from the plugin's private data.
-            raise datadir.DataFolderError("Could not copy the plugin data for the check.") from None
-        _snapshot_time_left(deadline)
+            raise datadir.SnapshotRefused("Could not copy the plugin data for the check.") from None
         # The probe uses its own folder. Live dispatch can resume before it starts.
         yield target
 
@@ -5760,11 +5814,17 @@ def _repair_environment(provider_id: str, row, deadline: float, checkpoint=None)
             return dict(current)
 
         try:
-            with env_registry.recording_environment(env_path):
-                repaired = mutate_state(record_repair)
+            with datadir.release_lock:
+                _require_release_available(provider_id)
+                with env_registry.recording_environment(env_path):
+                    repaired = mutate_state(record_repair)
         except env_registry.EnvironmentGone as error:
             release_pins()
             raise ProviderHubInstallError(str(error)) from error
+        except ProviderHubInstallError:
+            release_pins()
+            env_registry.discard_if_unused(provider_hub_dir(), env_path)
+            raise
         if repaired is None:
             raise ProviderHubInstallError(f"{provider_id} was removed while it was being repaired")
         if repaired == {}:
@@ -5844,6 +5904,7 @@ def remove_installation(provider_id: str, *, ignoring_dependents: frozenset[str]
     data an earlier removal kept (it has a record), and the settings of a subtitle provider, which may be older than
     the install, are left exactly as they were, and no record is written or changed.
     """
+    _require_release_available(provider_id)
     state = load_state()
     installations = state.setdefault("installations", {})
     if provider_id not in installations:
@@ -6052,6 +6113,7 @@ def _settle_release_data(provider_id: str, installation, keep_data: bool) -> Non
 def _drop_removed_row(provider_id: str, *, previous_stopped: bool | None = None) -> bool:
     """Delete the row of a removed plugin, and with it its releases. A row that is not marked removed any more (it
     was installed again meanwhile) stays."""
+    _require_release_available(provider_id)
     row = (load_state().get("installations") or {}).get(provider_id)
     if isinstance(row, dict) and row.get("state") == "removed":
         if row.get("data_worker_cleanup_pending") and _has_removable_data(provider_id, row):

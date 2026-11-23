@@ -1,7 +1,8 @@
 # coding=utf-8
 """Boot sweep of launcher process groups a previous run left behind.
 
-Real processes throughout: a leftover is a tree whose owner (the process named in its
+Process-tree cleanup uses real processes. Data admission uses mocked process identities.
+A leftover is a tree whose owner (the process named in its
 marker) is gone, started in a session of its own and orphaned the way a hard kill of the
 host orphans a worker. The tests assert what dies, and just as much what does not.
 """
@@ -112,9 +113,14 @@ def wait_until(check, timeout=15.0):
 
 @pytest.fixture(autouse=True)
 def no_owner_marker():
-    spawn.set_owner_marker(None)
-    yield
-    spawn.set_owner_marker(None)
+    # Keep the case's own monkeypatch teardown ahead of started-process cleanup.
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(sweep, "_previous_worker_uncertainty", set())
+        spawn.set_owner_marker(None)
+        try:
+            yield
+        finally:
+            spawn.set_owner_marker(None)
 
 
 @pytest.fixture
@@ -959,11 +965,14 @@ def test_the_second_scan_loop_honours_the_deadline(tmp_path, instance, started, 
 
 
 @pytest.mark.parametrize("namespace_readable", [True, False])
-def test_data_waits_for_a_launcher_without_any_marked_children(tmp_path, monkeypatch, namespace_readable):
+def test_boot_sweep_remembers_a_launcher_without_any_marked_children(tmp_path, monkeypatch, namespace_readable):
     config = tmp_path / "config"
     instance = sweep.instance_key(config)
     launcher = sweep._Proc(pid=321, state="S", ppid=1, pgrp=321, session=321, start="20")
     marker = f"{instance}:123:10"
+    monkeypatch.setattr(sweep, "_has_proc", lambda: True)
+    monkeypatch.setattr(sweep, "_proc_is_ours", lambda: True)
+    monkeypatch.setattr(sweep, "_pidfd_available", lambda: True)
     monkeypatch.setattr(sweep, "_list_pids", lambda: ([launcher.pid], False))
     monkeypatch.setattr(sweep, "_read_proc", lambda pid: launcher)
     monkeypatch.setattr(sweep, "_ours", lambda *args: True)
@@ -976,7 +985,7 @@ def test_data_waits_for_a_launcher_without_any_marked_children(tmp_path, monkeyp
         raise PermissionError
 
     monkeypatch.setattr(sweep, "_bound_marker", hidden)
-    result = sweep.sweep_leftovers(config, verify_writers=True)
+    result = sweep.sweep_leftovers(config)
     assert not result.sessions
     assert result.launchers == {launcher.pid: launcher.start}
 
@@ -985,10 +994,96 @@ def test_data_waits_for_a_launcher_without_any_marked_children(tmp_path, monkeyp
     monkeypatch.setattr(spawn, "LAUNCHER_CLEANUP_SECONDS", 0)
     assert not sweep.previous_workers_stopped(config)
     state[0] = "Z"
-    assert sweep.previous_workers_stopped(config)
+    assert not sweep.previous_workers_stopped(config)
+    monkeypatch.setattr(sweep, "_list_pids", lambda: ([], False))
+    assert not sweep.previous_workers_stopped(config)
 
 
 def test_an_empty_but_unreadable_sweep_does_not_release_plugin_data(tmp_path, monkeypatch):
     result = sweep.SweepResult(unreadable=1)
     monkeypatch.setattr(sweep, "sweep_leftovers", lambda config, **kwargs: result)
     assert not sweep.previous_workers_stopped(tmp_path / "config")
+
+
+@pytest.mark.parametrize("terminal", ["gone", "Z", "X", "reused"])
+def test_a_previous_launchers_exit_does_not_prove_its_tree_stopped(tmp_path, monkeypatch, terminal):
+    config = tmp_path / "config"
+    results = iter([sweep.SweepResult(launchers={321: "20"}), sweep.SweepResult()])
+    monkeypatch.setattr(sweep, "sweep_leftovers", lambda config, **kwargs: next(results))
+
+    def stat_fields(pid):
+        if terminal == "gone":
+            raise FileNotFoundError
+        return ("S", "21") if terminal == "reused" else (terminal, "20")
+
+    monkeypatch.setattr(spawn, "_stat_fields", stat_fields)
+    assert not sweep.previous_workers_stopped(config)
+    # A later empty scan has no terminal reply from the former supervisor either.
+    assert not sweep.previous_workers_stopped(config)
+
+
+def test_ending_scanned_members_does_not_prove_the_previous_tree_stopped(tmp_path, monkeypatch):
+    config = tmp_path / "config"
+    results = iter([
+        sweep.SweepResult(sessions=[sweep.SweptSession(321, (321, 322), "ended")]),
+        sweep.SweepResult(),
+    ])
+    monkeypatch.setattr(sweep, "sweep_leftovers", lambda config, **kwargs: next(results))
+    assert not sweep.previous_workers_stopped(config)
+    assert not sweep.previous_workers_stopped(config)
+
+
+def test_a_complete_scan_without_previous_activity_allows_plugin_data(tmp_path, monkeypatch):
+    monkeypatch.setattr(sweep, "sweep_leftovers", lambda config, **kwargs: sweep.SweepResult())
+    assert sweep.previous_workers_stopped(tmp_path / "config")
+
+
+def test_previous_tree_uncertainty_is_scoped_to_its_config(tmp_path, monkeypatch):
+    monkeypatch.setattr(sweep, "sweep_leftovers", lambda config, **kwargs: sweep.SweepResult(launchers={321: "20"}))
+    assert not sweep.previous_workers_stopped(tmp_path / "first")
+    monkeypatch.setattr(sweep, "sweep_leftovers", lambda config, **kwargs: sweep.SweepResult())
+    assert sweep.previous_workers_stopped(tmp_path / "second")
+
+
+@pytest.mark.parametrize("kind", ["worker", "launcher"])
+def test_current_host_processes_do_not_poison_previous_worker_checks(tmp_path, monkeypatch, kind):
+    config = tmp_path / "config"
+    marker = f"{sweep.instance_key(config)}:123:10"
+    spawn.set_owner_marker(marker)
+    entry = sweep._Proc(pid=321, state="S", ppid=123, pgrp=321, session=321, start="20")
+    monkeypatch.setattr(sweep, "_has_proc", lambda: True)
+    monkeypatch.setattr(sweep, "_proc_is_ours", lambda: True)
+    monkeypatch.setattr(sweep, "_pidfd_available", lambda: True)
+    monkeypatch.setattr(sweep, "_list_pids", lambda: ([entry.pid], False))
+    monkeypatch.setattr(sweep, "_read_proc", lambda pid: entry)
+    monkeypatch.setattr(sweep, "_ours", lambda *args: True)
+    monkeypatch.setattr(sweep, "_same_pid_namespace", lambda pid: True)
+    monkeypatch.setattr(sweep, "_bound_marker", lambda proc: marker if kind == "worker" else None)
+    monkeypatch.setattr(sweep, "_read_cmdline", lambda pid: [
+        "python", "-I", "-S", "-B", str(spawn.LAUNCHER_PATH), "1", "2", "3", "--owner=" + marker
+    ])
+    assert sweep.previous_workers_stopped(config)
+    assert sweep.previous_workers_stopped(config)
+
+
+def test_boot_sweep_remembers_a_previous_marked_tree_after_ending_scanned_members(tmp_path, monkeypatch):
+    config = tmp_path / "config"
+    marker = f"{sweep.instance_key(config)}:123:10"
+    entry = sweep._Proc(pid=321, state="S", ppid=1, pgrp=321, session=321, start="20")
+    monkeypatch.setattr(sweep, "_has_proc", lambda: True)
+    monkeypatch.setattr(sweep, "_proc_is_ours", lambda: True)
+    monkeypatch.setattr(sweep, "_pidfd_available", lambda: True)
+    monkeypatch.setattr(sweep, "_list_pids", lambda: ([entry.pid], False))
+    monkeypatch.setattr(sweep, "_read_proc", lambda pid: entry)
+    monkeypatch.setattr(sweep, "_ours", lambda *args: True)
+    monkeypatch.setattr(sweep, "_same_pid_namespace", lambda pid: True)
+    monkeypatch.setattr(sweep, "_bound_marker", lambda proc: marker)
+    monkeypatch.setattr(sweep, "_refusal", lambda *args: None)
+
+    def end(item, result, term_wait):
+        result.sessions.append(sweep.SweptSession(item.session, (entry.pid,), "ended"))
+
+    monkeypatch.setattr(sweep, "_end", end)
+    assert sweep.sweep_leftovers(config).ended == 1
+    monkeypatch.setattr(sweep, "_list_pids", lambda: ([], False))
+    assert not sweep.previous_workers_stopped(config)
