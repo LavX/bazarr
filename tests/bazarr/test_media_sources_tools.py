@@ -1,6 +1,8 @@
 """Use the public subtitle toolbox and editor on source items on SQLite and PostgreSQL."""
 import ast
+import os
 import re
+from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -174,6 +176,102 @@ def test_source_tools_write_files_history_and_index_for_each_media_kind(toolbox,
     assert {entry[0] for entry in ast.literal_eval(repository.get_item(context.item_id).subtitles)} == {'en', 'de', 'hu'}
     status = toolbox.client.get(f'/api/sources/items/{context.item_id}/subtitles/en/sync-status', headers=HEADERS)
     assert status.status_code == 200 and status.json['synced'] is True
+
+
+def test_source_sync_status_uses_edit_history_within_mtime_tolerance(toolbox):
+    from media_sources import repository
+    from media_sources.subtitle_tools import SOURCE_SUBTITLE_EDITED_ACTION
+
+    context = pipeline._movie(toolbox.world)
+    path, _ = _sidecars(toolbox, context)
+    history = dict(item_id=context.item_id, item_kind=context.kind, subtitles_path=str(path),
+                   timestamp=datetime.fromtimestamp(path.stat().st_mtime), description='Test history')
+    url = f'/api/sources/items/{context.item_id}/subtitles/en/sync-status'
+    repository.insert_history(toolbox.db, action=5, **history)
+    assert toolbox.client.get(url, headers=HEADERS).json['confirmed'] is True
+
+    saved = toolbox.client.put(url.replace('sync-status', 'content'), headers=HEADERS, json={'content': SYNCED})
+    assert saved.status_code == 204
+    # Equal timestamps still preserve the order of the two recorded operations.
+    toolbox.db.execute(sa.update(repository.History).where(repository.History.c.action == SOURCE_SUBTITLE_EDITED_ACTION)
+                       .values(timestamp=history['timestamp']))
+    timestamp = history['timestamp'].timestamp()
+    os.utime(path, (timestamp, timestamp))
+    status = toolbox.client.get(url, headers=HEADERS).json
+    assert status['synced'] is True and status['editedAfterSync'] is True and status['confirmed'] is False
+    assert status['lastSyncTimestamp'] == history['timestamp'].isoformat()
+
+    repository.insert_history(toolbox.db, action=5, **history)
+    assert toolbox.client.get(url, headers=HEADERS).json['confirmed'] is True
+
+
+@pytest.mark.parametrize('changed', [None, 'video', 'reference', 'sidecar', 'during alignment'])
+def test_source_editor_sync_previews_only_with_current_indexed_files(toolbox, monkeypatch, changed):
+    from api.editor import editor
+    from media_sources import repository
+    from subtitles.tools import subsyncer
+
+    context = pipeline._movie(toolbox.world)
+    path, reference = _sidecars(toolbox, context)
+    aligned = []
+
+    def align(self, engine, output_path, video_path, no_fix_framerate):
+        aligned.append(self.reference)
+        assert video_path == context.path
+        assert Path(self.srtin).read_text() == 'Editor draft'
+        if changed == 'during alignment':
+            reference.write_text('Reference edited while running')
+        output_path.write_text(SYNCED)
+        return {'offset_seconds': 0.25}
+
+    monkeypatch.setattr(subsyncer.SubSyncer, '_run_external_engine', align)
+    monkeypatch.setattr(toolbox.jobs, 'force_start_pending_job', Mock())
+    cleanup = []
+    monkeypatch.setattr(editor.threading, 'Timer', lambda _delay, callback: SimpleNamespace(
+        start=lambda: cleanup.append(callback)))
+    url = '/api/editor/sync'
+    body = dict(mediaType='source', mediaId=context.item_id, language='en', content='Editor draft',
+                outputMode='overwrite', enabledEngines=['alass'])
+    response = toolbox.client.post(url, headers=HEADERS, json={**body, 'reference': str(reference)})
+    assert response.status_code == 202
+    job = toolbox.jobs._reserve_next_job()
+    assert job.job_id == response.json['jobId']
+    if changed in ('video', 'reference', 'sidecar'):
+        changed_path = {'video': Path(context.path), 'reference': reference, 'sidecar': path}[changed]
+        changed_path.write_text('File edited after enqueue')
+    try:
+        toolbox.jobs._run_job(job)
+        poll = toolbox.client.get(url, headers=HEADERS, query_string={'jobKey': response.json['jobKey']})
+        assert poll.status_code == 200
+        if changed is None:
+            assert poll.json['status'] == 'completed' and poll.json['content'] == SYNCED
+            assert toolbox.jobs.get_job_status(job.job_id) == 'completed'
+        else:
+            assert poll.json['status'] == 'failed' and 'changed' in poll.json['message']
+            assert toolbox.jobs.get_job_status(job.job_id) == 'failed'
+        assert aligned == ([str(reference)] if changed in (None, 'during alignment') else [])
+        assert path.read_text() == ('File edited after enqueue' if changed == 'sidecar' else SRT)
+        assert not toolbox.db.execute(sa.select(repository.History)).all()
+    finally:
+        for callback in cleanup:
+            callback()
+
+
+def test_source_editor_sync_refuses_reference_from_another_item(toolbox, monkeypatch):
+    from api.editor import editor
+
+    context = pipeline._movie(toolbox.world)
+    _sidecars(toolbox, context)
+    other_subtitle, _ = _sidecars(toolbox, pipeline._episode(toolbox.world))
+    workspace = Mock(side_effect=AssertionError('Rejected requests do not need a workspace'))
+    monkeypatch.setattr(editor, 'create_preview_workspace', workspace)
+    body = dict(mediaType='source', mediaId=context.item_id, language='en', content=SRT,
+                reference=str(other_subtitle))
+
+    response = toolbox.client.post('/api/editor/sync', headers=HEADERS, json=body)
+
+    assert response.status_code == 403 and not toolbox.jobs.jobs_pending_queue
+    workspace.assert_not_called()
 
 
 def test_source_tools_refuse_unindexed_sidecars_and_foreign_instances(toolbox):

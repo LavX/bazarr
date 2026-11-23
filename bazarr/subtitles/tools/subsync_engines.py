@@ -2,6 +2,7 @@
 
 import logging
 import os
+import re
 import stat
 import shutil
 import tempfile
@@ -894,6 +895,10 @@ def sync_engine_from_output_path(path):
 
 def is_sync_engine_output(path):
     return sync_engine_from_output_path(path) is not None
+
+
+def is_sync_stream_reference(reference):
+    return isinstance(reference, str) and re.fullmatch(r'[as]:[0-9]+', reference) is not None
 
 
 def is_sync_engine_language_key(language):

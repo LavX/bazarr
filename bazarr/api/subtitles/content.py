@@ -690,11 +690,19 @@ def _latest_sync_history_for_path(media_type, media_id, subtitle_path, arr_insta
     if media_type == 'source':
         from media_sources.db import handle
         from media_sources.repository import History
+        from media_sources.subtitle_tools import SOURCE_SUBTITLE_EDITED_ACTION
 
         history = History.c
-        return handle().execute(select(history.timestamp).where(
+        edit = History.alias('source_subtitle_edit').c
+        edited_after_sync = select(edit.id).where(
+            edit.item_id == history.item_id, edit.subtitles_path == history.subtitles_path,
+            edit.action == SOURCE_SUBTITLE_EDITED_ACTION,
+            (edit.timestamp > history.timestamp)
+            | ((edit.timestamp == history.timestamp) & (edit.id > history.id)),
+        ).exists()
+        return handle().execute(select(history.timestamp, edited_after_sync.label('edited_after_sync')).where(
             history.item_id == media_id, history.action == 5, history.subtitles_path == subtitle_path,
-        ).order_by(history.timestamp.desc()).limit(1)).first()
+        ).order_by(history.timestamp.desc(), history.id.desc()).limit(1)).first()
     history_paths = _history_paths_for_local_subtitle(media_type, subtitle_path, arr_instance_id)
     if media_type == 'sports':
         query = (
@@ -788,6 +796,8 @@ def get_subtitle_sync_status(media_type, media_id, language_code, arr_instance_i
     edited_after_sync = bool(
         last_sync_timestamp and last_modified > last_sync_timestamp + SYNC_STATUS_MTIME_SKEW
     )
+    if media_type == 'source' and latest_sync:
+        edited_after_sync = edited_after_sync or latest_sync.edited_after_sync
     active_job = _active_sync_job_for_path(subtitle_path)
 
     return {

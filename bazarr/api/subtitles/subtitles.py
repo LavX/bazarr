@@ -2,7 +2,6 @@
 
 import logging
 import os
-import re
 from contextlib import nullcontext
 import sys
 
@@ -785,26 +784,18 @@ def _source_subtitle_action(args, subtitles_path, language, hi, forced, pin):
             return queued_job_response(job_id or None), 202
 
         if action == 'sync':
-            if is_sync_engine_output(subtitle.path):
-                return 'Generated sync output files cannot be synchronized again.', 400
-            requested_reference = args['reference']
-            reference = None
-            if requested_reference in empty_values or requested_reference == source.path:
-                requested_reference = source.path
-            elif not re.fullmatch(r'[as]:[0-9]+', requested_reference):
-                reference = indexed_sidecar(source, item, path=requested_reference)
-                requested_reference = reference.path
+            source_tool, reference = SourceSubtitleTool.capture_sync(source, item, subtitle, args['reference'])
             code, *flags = subtitle.language.split(':')
             job_id = sync_subtitles(
                 video_path=source.path, srt_path=subtitle.path, srt_lang=code,
                 hi=any(flag.lower() == 'hi' for flag in flags), forced='forced' in flags,
-                percent_score=0, reference=requested_reference,
+                percent_score=0, reference=reference,
                 max_offset_seconds=args['max_offset_seconds'] if args['max_offset_seconds'] not in empty_values else None,
                 no_fix_framerate=args['no_fix_framerate'] == 'True', gss=args['gss'] == 'True',
                 output_mode=args['output_mode'] if args['output_mode'] not in empty_values else None,
                 enabled_engines=args['enabled_engines'] if args['enabled_engines'] not in empty_values else None,
                 force_sync=True, return_job_id=True, source=source,
-                source_tool=SourceSubtitleTool.capture(source, subtitle, reference),
+                source_tool=source_tool,
             )
             return {'job_id': job_id or None}, 202
 

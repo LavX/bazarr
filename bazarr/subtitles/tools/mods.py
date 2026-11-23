@@ -111,7 +111,7 @@ def apply_subtitle_mods(language, subtitle_path, mods, video_path,
     mod_label = MOD_LABELS.get(mods[0], mods[0]) if mods else 'Apply Mods'
     filename = os.path.basename(subtitle_path)
 
-    if require_within_area and not subtitle_path_within_area(
+    if require_within_area and source_tool is None and not subtitle_path_within_area(
             subtitle_path, video_path, subfolder_mode=settings.general.subfolder,
             custom_subfolder=settings.general.subfolder_custom):
         logging.warning('BAZARR %s refused: reason=outside_media_library file=%s', mod_label, filename)

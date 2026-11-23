@@ -212,11 +212,26 @@ export interface ArchiveExtractResponse {
 // One place mapping a media type to its subtitle route segment. It used to be
 // an inline "episode ? episodes : movies" in each caller, which silently sent
 // a sports event to the movies route.
-const SUBTITLE_ROUTE_BASE: Record<string, string> = {
+type SubtitleMediaType = "episode" | "movie" | "sports" | "source";
+
+const SUBTITLE_ROUTE_BASE: Record<SubtitleMediaType, string> = {
   episode: "episodes",
   movie: "movies",
   sports: "sports/events",
+  source: "sources/items",
 };
+
+function subtitleRouteBase(mediaType: string): string {
+  if (
+    mediaType === "episode" ||
+    mediaType === "movie" ||
+    mediaType === "sports" ||
+    mediaType === "source"
+  ) {
+    return SUBTITLE_ROUTE_BASE[mediaType];
+  }
+  throw new Error(`Unsupported subtitle media type: ${mediaType}`);
+}
 
 class SubtitlesApi extends BaseApi {
   constructor() {
@@ -371,7 +386,7 @@ class SubtitlesApi extends BaseApi {
     source?: SubtitleSource,
     codec?: string,
   ) {
-    const base = SUBTITLE_ROUTE_BASE[mediaType] ?? "movies";
+    const base = subtitleRouteBase(mediaType);
     const url = `/${base}/${mediaId}/subtitles/${encodeURIComponent(language)}/content`;
     const response = await client.axios.get<SubtitleContentResponse>(url, {
       // undefined params are dropped, so a file read is unchanged.
@@ -392,7 +407,7 @@ class SubtitlesApi extends BaseApi {
     etag?: string,
     arrInstanceId?: number,
   ) {
-    const base = SUBTITLE_ROUTE_BASE[mediaType] ?? "movies";
+    const base = subtitleRouteBase(mediaType);
     const url = `/${base}/${mediaId}/subtitles/${encodeURIComponent(language)}/content`;
     const headers: Record<string, string> = {};
     if (etag) {
@@ -413,7 +428,7 @@ class SubtitlesApi extends BaseApi {
     sourceLanguage: string,
     arrInstanceId?: number,
   ) {
-    const base = SUBTITLE_ROUTE_BASE[mediaType] ?? "movies";
+    const base = subtitleRouteBase(mediaType);
     const url = `/${base}/${mediaId}/subtitles/${encodeURIComponent(targetLanguage)}/promote`;
     const response = await client.axios.post<{
       sourceLanguage: string;
@@ -429,7 +444,7 @@ class SubtitlesApi extends BaseApi {
     language: string,
     arrInstanceId?: number,
   ): Promise<SubtitleSyncStatus> {
-    const base = SUBTITLE_ROUTE_BASE[mediaType] ?? "movies";
+    const base = subtitleRouteBase(mediaType);
     const url = `/${base}/${mediaId}/subtitles/${encodeURIComponent(language)}/sync-status`;
     const response = await client.axios.get<SubtitleSyncStatus>(url, {
       params: { arr_instance_id: arrInstanceId },
@@ -448,7 +463,10 @@ class SubtitlesApi extends BaseApi {
     arrInstanceId?: number,
     overwrite = false,
   ) {
-    const base = SUBTITLE_ROUTE_BASE[mediaType] ?? "movies";
+    if (mediaType === "source") {
+      throw new Error("Creating subtitles for source items is not supported");
+    }
+    const base = subtitleRouteBase(mediaType);
     // /sports/events/<id>/subtitles is the indexer's own POST, so creating a
     // subtitle there needs its own path rather than a second handler on that one.
     const suffix = mediaType === "sports" ? "subtitles/create" : "subtitles";

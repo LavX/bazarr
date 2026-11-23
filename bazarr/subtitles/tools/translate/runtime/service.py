@@ -157,6 +157,11 @@ class RuntimeTranslatorService:
             expected_destination_versions=self.expected_destination_versions,
             **({"sports_operation": self.sports_operation, "cancel": self.cancel} if self.sports_operation else {}),
             **({"source": self.source} if self.source is not None else {}))
+        if self.source is not None:
+            # The legacy service reopens the input and publishes it itself. Keep
+            # the source selection and this job's input and destination versions.
+            service.source_tool = getattr(self, "source_tool", None)
+            service.expected_runtime_versions = self._versions
         try:
             published = service.translate(job_id=self._job_id)
         except Exception as error:

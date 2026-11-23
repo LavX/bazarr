@@ -1476,7 +1476,7 @@ _editor_sync_jobs = {}  # job_key -> {status, content, message}
 
 def run_editor_sync(job_key, video_path, tmp_in, tmp_out, encoding, max_offset, gss, reference,
                     no_fix_framerate=True, vad=None, job_id=None, output_mode='keep_all', enabled_engines=None,
-                    preview_workspace=None):
+                    preview_workspace=None, source_tool=None):
     """Background sync worker. Called by jobs_queue."""
     from app.jobs_queue import jobs_queue, JobCancelled
 
@@ -1487,6 +1487,8 @@ def run_editor_sync(job_key, video_path, tmp_in, tmp_out, encoding, max_offset, 
 
     cleanup_paths = [tmp_in, tmp_out]
     try:
+        if source_tool is not None:
+            source_tool.validate()
         update_progress('Extracting audio...', 0, 3)
         logger.info('Editor sync starting: video=%s, srt=%s, max_offset=%s, gss=%s, ref=%s, vad=%s, no_fix_framerate=%s',
                      video_path, tmp_in, max_offset, gss, reference, vad, no_fix_framerate)
@@ -1510,12 +1512,15 @@ def run_editor_sync(job_key, video_path, tmp_in, tmp_out, encoding, max_offset, 
                 output_mode=output_mode,
                 enabled_engines=enabled_engines,
                 write_history=False,
+                **({'validate': source_tool.validate} if source_tool is not None else {}),
             )
         finally:
             del subsync
 
         logger.info('Editor sync finished, reading result...')
         update_progress('Reading result...', 2, 3)
+        if source_tool is not None:
+            source_tool.validate()
 
         if sync_result is not None and getattr(sync_result, 'success', True) is False:
             messages = []
@@ -1651,12 +1656,26 @@ class EditorSync(Resource):
         if isinstance(arr_instance_id, tuple):
             return arr_instance_id
 
-        video_path = _resolve_video_path(media_type, media_id, arr_instance_id=arr_instance_id)
-        if isinstance(video_path, tuple):
-            return video_path
+        source_kwargs = {}
+        if media_type == 'source':
+            from media_sources.subtitle_tools import SourceSubtitleTool, SourceToolError, indexed_sidecar, tool_item
 
-        if not os.path.isfile(video_path):
-            return 'Video file not found', 404
+            if not isinstance(language, str) or not language:
+                return 'language is required for source sync', 400
+            try:
+                source, item = tool_item(media_id, arr_instance_id)
+                subtitle = indexed_sidecar(source, item, language=language)
+                source_tool, reference = SourceSubtitleTool.capture_sync(source, item, subtitle, reference)
+            except SourceToolError as error:
+                return str(error), error.status
+            video_path = source.path
+            source_kwargs['source_tool'] = source_tool
+        else:
+            video_path = _resolve_video_path(media_type, media_id, arr_instance_id=arr_instance_id)
+            if isinstance(video_path, tuple):
+                return video_path
+            if not os.path.isfile(video_path):
+                return 'Video file not found', 404
 
         import threading
 
@@ -1700,6 +1719,7 @@ class EditorSync(Resource):
                     'output_mode': output_mode,
                     'enabled_engines': enabled_engines,
                     'preview_workspace': preview_workspace,
+                    **source_kwargs,
                 },
                 is_progress=True,
                 progress_max=3,

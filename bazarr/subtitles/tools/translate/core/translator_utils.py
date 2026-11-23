@@ -122,7 +122,10 @@ def translation_write_kwargs(translator, job_id):
 
         return dict(sports_write_kwargs(translator, job_id))
     captured = getattr(translator, 'expected_destination_versions', ())
-    kwargs = {'expected_versions': captured} if captured else {}
+    # Runtime legacy dispatch retains its input and destination snapshots. These
+    # must not turn a manual source request into an automatic profile request.
+    expected = tuple(captured or ()) + tuple(getattr(translator, 'expected_runtime_versions', ()))
+    kwargs = {'expected_versions': expected} if expected else {}
     source = getattr(translator, 'source', None)
     if source is not None:
         from media_sources.indexer import SourcePublicationOwnerIndex, SourcePublicationOwnersChanged

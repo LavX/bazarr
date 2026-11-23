@@ -5,15 +5,15 @@ import os
 from contextlib import contextmanager
 from dataclasses import dataclass
 
-from app.config import settings
+from app.config import empty_values
 from subtitles.tools.subsync_engines import (SubtitleSourceChanged, read_regular_subtitle, regular_subtitle_version,
-                                             sync_output_owner_is_unique)
-from utilities.security_guards import SUBTITLE_FILE_EXTENSIONS, subtitle_path_within_area
+                                             is_sync_engine_output, is_sync_stream_reference, sync_output_owner_is_unique)
+from utilities.security_guards import SUBTITLE_FILE_EXTENSIONS
 
 from . import repository
 from .analysis import _content_stamp, local_stat
 from .context import SourceItemContext, SourceItemGone, resolve_item
-from .indexer import SourcePublicationOwnerIndex
+from .indexer import SourcePublicationOwnerIndex, source_subtitle_directories
 from .translation import live_source
 
 SOURCE_SUBTITLE_EDITED_ACTION = 10
@@ -70,9 +70,11 @@ def indexed_subtitles(item):
 
 
 def _in_area(source, path):
-    return (os.path.isabs(path) and os.path.splitext(path)[1].lower() in SUBTITLE_FILE_EXTENSIONS
-            and subtitle_path_within_area(path, source.path, settings.general.subfolder,
-                                          settings.general.subfolder_custom))
+    if not os.path.isabs(path) or os.path.splitext(path)[1].lower() not in SUBTITLE_FILE_EXTENSIONS:
+        return False
+    directories = {os.path.normcase(os.path.realpath(directory))
+                   for directory in source_subtitle_directories(source.path)}
+    return os.path.normcase(os.path.realpath(os.path.dirname(path))) in directories
 
 
 def _path_key(path):
@@ -126,6 +128,21 @@ class SourceSubtitleTool:
             raise SourceToolError('The source video is unavailable', 404)
         return cls(source, sidecar, stamp, reference)
 
+    @classmethod
+    def capture_sync(cls, source, item, sidecar, reference):
+        """Resolve the reference and capture the identities used by either sync entry point."""
+        if is_sync_engine_output(sidecar.path):
+            raise SourceToolError('Generated sync output files cannot be synchronized again.', 400)
+        external = None
+        if reference in empty_values or reference == source.path:
+            reference = source.path
+        elif not is_sync_stream_reference(reference):
+            if not isinstance(reference, str):
+                raise SourceToolError('Invalid sync reference', 400)
+            external = indexed_sidecar(source, item, path=reference)
+            reference = external.path
+        return cls.capture(source, sidecar, external), reference
+
     def check_current(self, current, target=None):
         if (current is None or source_video_stamp(self.source.path) != self.video_stamp
                 or not _video_in_roots(current, target)):
@@ -137,6 +154,12 @@ class SourceSubtitleTool:
 
     def validate(self):
         self.check_current(live_source(self.source))
+        owners = SourcePublicationOwnerIndex()
+        paths = [self.sidecar.path]
+        if self.reference is not None:
+            paths.append(self.reference.path)
+        if not all(_owned(self.source, path, owners) for path in paths):
+            raise SubtitleSourceChanged('The source subtitle or reference has ambiguous ownership')
 
     @contextmanager
     def publication(self, output_path):

@@ -22,6 +22,7 @@ from subtitles.tools.subsync_engines import (
     SyncEngineResult,
     SyncRunResult,
     is_sync_engine_output,
+    is_sync_stream_reference,
     UNCONSTRAINED_MAX_OFFSET_SECONDS,
     SubsyncEngineRunner,
     MissingSyncEngineError,
@@ -311,7 +312,7 @@ class SubSyncer:
             settings.subsync.auto_use_original_language,
             force_sync,
         )
-        if reference and isinstance(reference, str) and len(reference) == 3 and reference[:2] in ['a:', 's:']:
+        if is_sync_stream_reference(reference):
             unparsed_args.append('--reference-stream')
             unparsed_args.append(reference)
         elif settings.subsync.force_audio and not force_sync:
@@ -611,7 +612,7 @@ class SubSyncer:
         self.args = None
         self.job_id = job_id
 
-        if reference and reference != video_path and os.path.isfile(reference):
+        if reference and reference != video_path and not is_sync_stream_reference(reference) and os.path.isfile(reference):
             # subtitles path provided
             self.reference = reference
 

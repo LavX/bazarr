@@ -1029,6 +1029,8 @@ jobs:
             tests/bazarr/test_media_sources_schema.py \
             tests/bazarr/test_media_sources_pipeline.py \
             tests/bazarr/test_media_sources_tools.py \
+            tests/bazarr/test_source_subtitle_ownership.py \
+            tests/bazarr/test_source_legacy_translation.py \
             tests/bazarr/test_media_sources_analysis.py \
             tests/bazarr/test_media_sources_api.py \
             tests/bazarr/test_media_sources_no_change.py \
