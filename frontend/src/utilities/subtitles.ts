@@ -83,6 +83,19 @@ export function hiddenTrackCodecs(codec: string | null): string[] {
     .filter((value) => value.length > 0);
 }
 
+function describeIndexedSubtitles(
+  subtitles: HideTrackResult["remaining_subtitles"],
+): string {
+  return subtitles
+    .map(
+      (subtitle) =>
+        `${embeddedTrackLabel(subtitle)} (${
+          subtitle.embedded ? "embedded track" : "subtitle file"
+        })`,
+    )
+    .join(", ");
+}
+
 /** Describe the indexer's Wanted result for a hide. */
 export function hiddenTrackOutcome(result: HideTrackResult): string {
   const messages: string[] = [];
@@ -100,16 +113,14 @@ export function hiddenTrackOutcome(result: HideTrackResult): string {
   }
 
   const language = embeddedTrackLabel(result.hidden);
+  if (result.covering_subtitles.length > 0) {
+    const covering = describeIndexedSubtitles(result.covering_subtitles);
+    return `${language} is still covered by ${covering}.`;
+  }
+
   messages.push(`Hiding ${language} added no subtitles to Wanted.`);
   if (result.remaining_subtitles.length > 0) {
-    const remaining = result.remaining_subtitles
-      .map(
-        (subtitle) =>
-          `${embeddedTrackLabel(subtitle)} (${
-            subtitle.embedded ? "embedded track" : "subtitle file"
-          })`,
-      )
-      .join(", ");
+    const remaining = describeIndexedSubtitles(result.remaining_subtitles);
     messages.push(`Bazarr+ still lists ${remaining}.`);
   }
   return messages.join(" ");

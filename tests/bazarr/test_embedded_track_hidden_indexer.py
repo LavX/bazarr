@@ -230,7 +230,13 @@ def test_sports_hidden_track_is_skipped_for_that_owner_only(indexed_library, mon
     assert ast.literal_eval(row(session, 61).missing_subtitles) == []
 
 
-def test_sports_hide_leaves_plain_wanted_when_the_track_has_both_flags(indexed_library, monkeypatch):  # noqa: F811
+@pytest.mark.parametrize("language,hi,forced,missing,covered", [
+    pytest.param("fr", True, True, ["fr"], False, id="dual-flag-track-leaves-plain-wanted"),
+    pytest.param("en", False, False, [], True, id="hi-file-covers-plain"),
+    pytest.param("en", True, True, [], False, id="plain-hi-file-does-not-cover-dual-flag-track"),
+])
+def test_sports_hide_reports_actual_indexed_coverage(
+        indexed_library, monkeypatch, language, hi, forced, missing, covered):  # noqa: F811
     from flask import Flask
     from api import api_bp
     from api.subtitles import embedded_hidden
@@ -243,27 +249,34 @@ def test_sports_hide_leaves_plain_wanted_when_the_track_has_both_flags(indexed_l
     monkeypatch.setattr(embedded_hidden, "database", session)
     monkeypatch.setattr(embedded_hidden, "event_stream", lambda **kw: None)
     monkeypatch.setitem(settings.auth, "apikey", "synthetic-bazarr-key")
-    monkeypatch.setattr(module, "embedded_subtitles_from_metadata", lambda data: [["fra", True, True, "subrip"]])
-    profile = [{**PROFILE[1], "id": 1}]
-    session.execute(sa.insert(TableLanguagesProfiles).values(profileId=5, name="French", items=json.dumps(profile)))
+    alpha3 = {"fr": "fra", "en": "eng"}[language]
+    monkeypatch.setattr(module, "embedded_subtitles_from_metadata", lambda data: [[alpha3, forced, hi, "subrip"]])
+    profile = [{**PROFILE[0], "language": language}]
+    session.execute(sa.insert(TableLanguagesProfiles).values(profileId=5, name="Sports", items=json.dumps(profile)))
     update_profile_id_list.invalidate()
     assert library.assign_profile(session, 51, 1, 5)
-    assert "fr:hi:forced" in [entry[0] for entry in module.store_subtitles_sports(61, 1)]
-    assert ast.literal_eval(row(session, 61).missing_subtitles) == ["fr"]
+    key = embedded_hidden.language_key(language, hi=hi, forced=forced)
+    assert key in [entry[0] for entry in module.store_subtitles_sports(61, 1)]
+    assert ast.literal_eval(row(session, 61).missing_subtitles) == missing
 
     app = Flask(__name__)
     app.register_blueprint(api_bp)
     response = app.test_client().post(
         "/api/subtitles/embedded-hidden",
-        data={"media_type": "sports", "media_id": 61, "arr_instance_id": 1, "language": "fr",
-              "hi": "True", "forced": "True"},
+        data={"media_type": "sports", "media_id": 61, "arr_instance_id": 1, "language": language,
+              "hi": str(hi), "forced": str(forced)},
         headers={"X-API-KEY": "synthetic-bazarr-key"},
     )
     assert response.status_code == 200
-    assert ast.literal_eval(row(session, 61).missing_subtitles) == ["fr"]
-    assert response.json["data"]["newly_wanted"] == []
+    assert ast.literal_eval(row(session, 61).missing_subtitles) == missing
+    data = response.json["data"]
+    assert data["wanted"] is False
+    assert data["newly_wanted"] == []
     assert [(variant["code2"], variant["hi"], variant["forced"])
-            for variant in response.json["data"]["still_wanted"]] == [("fr", False, False)]
+            for variant in data["still_wanted"]] == [(code, False, False) for code in missing]
+    inventory = [{"code2": "en", "name": "English", "hi": True, "forced": False, "embedded": False}]
+    assert data["remaining_subtitles"] == (inventory if language == "en" else [])
+    assert data["covered_by"] == data["covering_subtitles"] == (inventory if covered else [])
 
 
 def test_sports_hiding_a_track_takes_its_embedded_source_row(indexed_library, monkeypatch):  # noqa: F811

@@ -184,6 +184,10 @@ export interface TrackLanguage {
 
 /** The stored Wanted and subtitle results after a hide re-indexes the title. */
 export interface HideTrackResult {
+  /** Legacy flag for a newly missing variant of the same language and forced status. */
+  wanted: boolean;
+  /** Legacy list of remaining standalone subtitles of the same language and forced status. */
+  covered_by: (TrackLanguage & { embedded: boolean })[];
   hidden: TrackLanguage;
   /** The variants added to Wanted by the re-index. */
   newly_wanted: TrackLanguage[];
@@ -191,6 +195,8 @@ export interface HideTrackResult {
   still_wanted: TrackLanguage[];
   /** Other standalone subtitles of the hidden track's language that remain indexed. */
   remaining_subtitles: (TrackLanguage & { embedded: boolean })[];
+  /** Remaining subtitles the indexer counts toward the hidden track's variant. */
+  covering_subtitles: (TrackLanguage & { embedded: boolean })[];
 }
 
 /**

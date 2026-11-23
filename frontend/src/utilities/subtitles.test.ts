@@ -480,14 +480,22 @@ describe("hiddenTrackOutcome", () => {
   const english = { code2: "en", name: "English", hi: false, forced: false };
   const hi = { ...english, hi: true };
   const forced = { ...english, forced: true };
+  const result = {
+    wanted: false,
+    covered_by: [],
+    hidden: english,
+    newly_wanted: [],
+    still_wanted: [],
+    remaining_subtitles: [],
+    covering_subtitles: [],
+  };
 
   it("names each variant added to Wanted", () => {
     expect(
       hiddenTrackOutcome({
+        ...result,
         hidden: { ...hi, forced: true },
         newly_wanted: [english, forced],
-        still_wanted: [],
-        remaining_subtitles: [],
       }),
     ).toBe("Bazarr+ added English, English (forced) to Wanted.");
   });
@@ -495,21 +503,22 @@ describe("hiddenTrackOutcome", () => {
   it("keeps already wanted HI separate from newly wanted English", () => {
     expect(
       hiddenTrackOutcome({
-        hidden: english,
+        ...result,
+        wanted: true,
         newly_wanted: [english],
         still_wanted: [hi],
-        remaining_subtitles: [],
       }),
     ).toBe("Bazarr+ added English to Wanted. English (HI) is still in Wanted.");
   });
 
   it("reports remaining subtitles without claiming that they satisfy the hidden variant", () => {
+    const plainFile = { ...english, embedded: false };
     expect(
       hiddenTrackOutcome({
+        ...result,
         hidden: hi,
-        newly_wanted: [],
-        still_wanted: [],
-        remaining_subtitles: [{ ...english, embedded: false }],
+        covered_by: [plainFile],
+        remaining_subtitles: [plainFile],
       }),
     ).toBe(
       "Hiding English (HI) added no subtitles to Wanted. Bazarr+ still lists English (subtitle file).",
@@ -517,14 +526,9 @@ describe("hiddenTrackOutcome", () => {
   });
 
   it("states the Wanted result when no subtitle is listed", () => {
-    expect(
-      hiddenTrackOutcome({
-        hidden: english,
-        newly_wanted: [],
-        still_wanted: [],
-        remaining_subtitles: [],
-      }),
-    ).toBe("Hiding English added no subtitles to Wanted.");
+    expect(hiddenTrackOutcome(result)).toBe(
+      "Hiding English added no subtitles to Wanted.",
+    );
   });
 });
 /* eslint-enable camelcase */

@@ -13,6 +13,7 @@ import os
 
 from flask_restx import Namespace, Resource, reqparse
 
+from app.config import settings
 from app.database import TableEpisodes, TableMovies, database, select
 from app.event_handler import event_stream
 from languages.get_languages import language_from_alpha2
@@ -98,6 +99,13 @@ def _track_language(key):
     return {'code2': base, 'name': _language_name(base), 'hi': hi, 'forced': forced}
 
 
+def _coverage_variant(media_type, key):
+    # Movie and episode Wanted read only the first modifier. Sports reads both flags.
+    if media_type != 'sports':
+        key = ':'.join(key.split(':', 2)[:2])
+    return _variant(key)
+
+
 def _table(media_type):
     if media_type == 'sports':
         from app.database import TableSportsEvents
@@ -124,14 +132,23 @@ def _outcome(media_type, media_id, key, previous_missing):
                            .where(table.id == media_id)).first()
     hidden = _track_language(key)
     base = hidden['code2']
+    forced = hidden['forced']
     before = {item for item in _listing(previous_missing) if isinstance(item, str)}
     after = dict.fromkeys(item for item in _listing(row.missing_subtitles if row else None)
                           if isinstance(item, str))
+    before_variants = {_variant(item) for item in before}
+    after_variants = {_variant(item) for item in after}
+    # Keep the public response's same-language, same-forced-status comparison.
+    wanted = any(code == base and is_forced == forced
+                 for code, _hi, is_forced in after_variants - before_variants)
     # The stored missing keys capture the indexer's own HI, forced, and cutoff
     # rules. Hiding a cutoff track can add other languages to Wanted as well.
     newly_wanted = [_track_language(item) for item in after if item not in before]
     still_wanted = [_track_language(item) for item in after
                     if item in before and item.partition(':')[0] == base]
+    target = _coverage_variant(media_type, key)
+    covered_by = []
+    covering_subtitles = []
     remaining_subtitles = []
     for entry in _listing(row.subtitles if row else None):
         if not (isinstance(entry, (list, tuple)) and entry and isinstance(entry[0], str)):
@@ -139,9 +156,18 @@ def _outcome(media_type, media_id, key, previous_missing):
         entry_base, *modifiers = entry[0].split(':')
         if entry_base != base or any(part.startswith('combined-') for part in modifiers):
             continue
-        remaining_subtitles.append({**_track_language(entry[0]), 'embedded': not (len(entry) > 1 and entry[1])})
-    return {'hidden': hidden, 'newly_wanted': newly_wanted, 'still_wanted': still_wanted,
-            'remaining_subtitles': remaining_subtitles}
+        subtitle = {**_track_language(entry[0]), 'embedded': not (len(entry) > 1 and entry[1])}
+        remaining_subtitles.append(subtitle)
+        if subtitle['forced'] == forced:
+            covered_by.append(subtitle)
+        if target in after_variants or (subtitle['embedded'] and not settings.general.use_embedded_subs):
+            continue
+        actual = _coverage_variant(media_type, entry[0])
+        if actual == target or (target == (base, False, False) and actual == (base, True, False)):
+            covering_subtitles.append(subtitle)
+    return {'wanted': wanted, 'covered_by': covered_by, 'hidden': hidden, 'newly_wanted': newly_wanted,
+            'still_wanted': still_wanted, 'remaining_subtitles': remaining_subtitles,
+            'covering_subtitles': covering_subtitles}
 
 
 def _reindex(media_type, media_id, original_path, mapped_path, owner, ids):
