@@ -172,7 +172,8 @@ def load_translation_input(translator, loader):
             raise SourceTranslationChanged('The source subtitle now resolves to a different file')
         path = captured_input
     source_tool = getattr(translator, 'source_tool', None)
-    if source is None and source_tool is None:
+    automatic_source = source is not None and bool(getattr(translator, 'expected_destination_versions', ()))
+    if source_tool is None and not automatic_source:
         return loader(path, encoding='utf-8')
     try:
         if source_tool is not None:

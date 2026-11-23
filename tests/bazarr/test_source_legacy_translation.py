@@ -166,7 +166,6 @@ def test_source_legacy_translation_skips_when_the_configured_input_folder_moves(
     from app.config import settings
     from media_sources import repository
     from media_sources.indexer import index_item
-    from subtitles.tools import subsync_engines
     from subtitles.tools.translate import main
     from subtitles.tools.translate.runtime import service
     from subtitles.tools.translate.services import lingarr_translator
@@ -192,7 +191,7 @@ def test_source_legacy_translation_skips_when_the_configured_input_folder_moves(
     original = service.RuntimeTranslatorService._legacy
     translated = []
     loaded = []
-    original_read = subsync_engines.read_regular_subtitle
+    original_load = lingarr_translator.pysubs2.load
 
     def legacy(self, engine, instance):
         if change == 'setting':
@@ -204,9 +203,9 @@ def test_source_legacy_translation_skips_when_the_configured_input_folder_moves(
             folder.symlink_to(second, target_is_directory=True)
         return original(self, engine, instance)
 
-    def read(path, version, **kwargs):
+    def load(path, **kwargs):
         loaded.append(str(path))
-        return original_read(path, version, **kwargs)
+        return original_load(path, **kwargs)
 
     def translate(self, lines, job_id):
         translated.extend(lines)
@@ -214,7 +213,7 @@ def test_source_legacy_translation_skips_when_the_configured_input_folder_moves(
 
     monkeypatch.setattr(service.RuntimeTranslatorService, '_legacy', legacy)
     monkeypatch.setattr(lingarr_translator.LingarrTranslatorService, '_translate_content', translate)
-    monkeypatch.setattr(subsync_engines, 'read_regular_subtitle', read)
+    monkeypatch.setattr(lingarr_translator.pysubs2, 'load', load)
     job_id = main.translate_subtitles_file(context.path, str(path), 'en', 'hu', False, False, 'episode',
                                             None, None, None, None, source=context)
     job = toolbox.jobs._reserve_next_job()
