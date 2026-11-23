@@ -21,7 +21,7 @@ from __future__ import annotations
 import logging
 from typing import Any, Mapping
 
-from provider_hub.runtime.errors import RequestFailed
+from provider_hub.runtime.errors import RequestCancelled, RequestFailed
 
 from . import wire, workers
 from .host_calls import ProbeUsage
@@ -79,7 +79,7 @@ def worker_probe(request: ProbeRequest) -> Mapping[str, Any]:
             minutes = max(1, round(refused.retry_after / 60))
             return {"ok": False, "sent": False, "message": PAUSED_TEST.format(minutes=minutes)}
         return {"ok": False, "sent": False, "message": BUSY_TEST if refused.busy else UNSTARTED_TEST}
-    except RequestFailed:
+    except (RequestCancelled, RequestFailed):
         if not meter.refused_before_send:
             raise
     if meter.refused_before_send:

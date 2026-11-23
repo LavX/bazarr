@@ -268,10 +268,10 @@ def test_a_plugin_with_no_worker_to_start_is_not_sent():
         port.call("engine", "test", {}, {}, timeout=5)
 
 
-@pytest.mark.parametrize("scenario", ["free", "priced", "over_budget", "unsettled"])
+@pytest.mark.parametrize("scenario", ["free", "priced", "over_budget", "cancelled", "unsettled"])
 def test_the_short_worker_reports_usage_inside_the_saved_test_reservation(app_service, scenario):
     from app.database import TableTranslationBudget, TableTranslationUsage
-    from provider_hub.runtime.errors import HostCallError, RequestFailed
+    from provider_hub.runtime.errors import HostCallError, RequestCancelled
     from subtitles.tools.translate.runtime.host_calls import reserve, usage
 
     class Metered(_Pool):
@@ -281,9 +281,11 @@ def test_the_short_worker_reports_usage_inside_the_saved_test_reservation(app_se
             if scenario == "over_budget":
                 with pytest.raises(HostCallError) as refused:
                     reserve(SimpleNamespace(context=context, params={"amount": 0.01}))
-                raise RequestFailed(str(refused.value), code="budget_exhausted")
+                raise RequestCancelled(str(refused.value))
             if scenario != "free":
                 holds = [reserve(SimpleNamespace(context=context, params={"amount": 0.000032}))["hold"]]
+            if scenario == "cancelled":
+                raise RequestCancelled("cancelled after reserving the request")
             if scenario != "unsettled":
                 usage(SimpleNamespace(context=context, params={"tokens": 24, "cost": 0 if scenario == "free"
                                                                     else 0.000008, "reservations": holds}))
