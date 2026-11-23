@@ -25,6 +25,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import { useSettingsMutation } from "@/apis/hooks";
 import { useInstanceName } from "@/apis/hooks/site";
 import { useTranslationRuntime } from "@/apis/hooks/translation";
+import { useMediaServerDisconnectPending } from "./steps/mediaServer/operations";
 import { PHASE_LABELS, type StepOutcome, WIZARD_PHASES } from "./steps/types";
 import { clearPersistedConnectionTests } from "./connectionTests";
 import { settleSetupComplete } from "./setupCompleteCache";
@@ -63,6 +64,7 @@ const OnboardingWizardBody: FunctionComponent = () => {
   const { drafts, clearSelection } = useOnboardingSelection();
   const clearStepDrafts = useClearStepDrafts();
   const stepBusy = useStepBusy();
+  const disconnecting = useMediaServerDisconnectPending();
   const {
     skipped,
     writtenPhases,
@@ -424,7 +426,7 @@ const OnboardingWizardBody: FunctionComponent = () => {
   // also fail, and a failed write used to produce nothing at all: no spinner,
   // no message, no navigation, just a button that had apparently done nothing.
   const handleLeave = () => {
-    if (leavePending) {
+    if (leavePending || disconnecting) {
       return;
     }
     setLeaveError(null);
@@ -480,7 +482,7 @@ const OnboardingWizardBody: FunctionComponent = () => {
               // waits for a step that is in the middle of work it has to
               // finish. An install left this way kept going into nothing and
               // restarted Bazarr+ at a reader who was already somewhere else.
-              disabled={stepBusy}
+              disabled={stepBusy || disconnecting}
               onClick={() => {
                 setLeaveError(null);
                 setLeaving(true);
@@ -530,7 +532,12 @@ const OnboardingWizardBody: FunctionComponent = () => {
               >
                 Keep going
               </Button>
-              <Button color="red" onClick={handleLeave} loading={leavePending}>
+              <Button
+                color="red"
+                onClick={handleLeave}
+                loading={leavePending}
+                disabled={disconnecting}
+              >
                 Leave setup
               </Button>
             </Group>

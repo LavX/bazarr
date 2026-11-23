@@ -2,7 +2,7 @@
 
 import { useCallback, useState } from "react";
 import { AxiosError } from "axios";
-import { isSettingsFollowupError, useSettingsMutation } from "@/apis/hooks";
+import { isSettingsFollowupError } from "@/apis/hooks";
 import {
   SaveMediaServerInput,
   useSaveMediaServerInstance,
@@ -11,6 +11,7 @@ import type { MediaServerKind } from "@/apis/raw/mediaServers";
 import { KINDS_WITH_PATH_MAPPINGS } from "@/apis/raw/mediaServers";
 import { SETUP_CREDENTIAL_LABELS } from "@/pages/Settings/MediaServers/kinds";
 import type { MediaServerDraft } from "@/pages/Setup/useOnboardingSelection";
+import { useSetupMediaServerRefreshes } from "./operations";
 import { validateServerUrl } from "./validation";
 
 /** One message per field, so it lands on the field that is wrong. */
@@ -137,7 +138,7 @@ export function useMediaServerSubmit() {
   const save = useSaveMediaServerInstance(undefined, undefined, undefined, {
     inlineErrors: true,
   });
-  const settings = useSettingsMutation(false, { inlineErrors: true });
+  const settings = useSetupMediaServerRefreshes(true);
   const [isPending, setPending] = useState(false);
 
   const submit = useCallback(
@@ -208,14 +209,14 @@ export function useMediaServerSubmit() {
           // reached the disk and only applying it failed, so the switches count
           // as on and the step advances without the warning.
           switchesFailed = await settings
-            .mutateAsync(
-              Object.fromEntries(
+            .mutateAsync({
+              switches: Object.fromEntries(
                 [...kinds].map((kind) => [
                   `settings-general-use_${kind}`,
                   true,
                 ]),
               ),
-            )
+            })
             .then(() => false)
             .catch((error) => !isSettingsFollowupError(error));
         }
@@ -239,7 +240,7 @@ export function useMediaServerSubmit() {
       setPending(true);
       try {
         await settings.mutateAsync({
-          [`settings-general-use_${kind}`]: true,
+          switches: { [`settings-general-use_${kind}`]: true },
         });
         return null;
       } catch (error) {

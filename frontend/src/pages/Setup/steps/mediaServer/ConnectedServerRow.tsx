@@ -1,7 +1,11 @@
 import { FC, useState } from "react";
 import { Alert, Badge, Button, Group, Stack, Text } from "@mantine/core";
 import { showNotification } from "@mantine/notifications";
-import { useMutation } from "@tanstack/react-query";
+import {
+  useIsMutating,
+  useMutation,
+  useQueryClient,
+} from "@tanstack/react-query";
 import { useSettingsMutation } from "@/apis/hooks";
 import { useDeleteMediaServerInstance } from "@/apis/hooks/mediaServers";
 import { usePlexLogoutMutation } from "@/apis/hooks/plex";
@@ -12,6 +16,10 @@ import type {
 import { notification } from "@/modules/notification";
 import { kindName } from "@/pages/Settings/MediaServers/kinds";
 import { readMediaServerTest } from "@/pages/Setup/connectionTests";
+import {
+  MEDIA_SERVER_DISCONNECT_KEY,
+  useSetupMediaServerRefreshes,
+} from "./operations";
 
 // What a row that refreshes is called. It says what Finish will say: saving
 // proves the values were written, and only a passing Test proves they connect.
@@ -23,8 +31,6 @@ const SAVED_LABEL = {
   failed: "Test failed",
   untested: "Not tested",
 } as const;
-
-export const MEDIA_SERVER_DISCONNECT_KEY = "setup-media-server-disconnect";
 
 interface Props {
   instance: MediaServerInstance;
@@ -70,12 +76,16 @@ const ConnectedServerRow: FC<Props> = ({
 }) => {
   const [confirming, setConfirming] = useState(false);
   const [failed, setFailed] = useState(false);
+  const client = useQueryClient();
+  const mutationKey = [MEDIA_SERVER_DISCONNECT_KEY, kind, instance.id];
+  const matchingDisconnect = { mutationKey, exact: true };
+  const pending = useIsMutating(matchingDisconnect) > 0;
   // Both report a failure under the row, so the client's toast stays away.
   const remove = useDeleteMediaServerInstance(kind, instance.id, {
     inlineErrors: true,
   });
   const logout = usePlexLogoutMutation({ inlineErrors: true });
-  const settings = useSettingsMutation();
+  const refreshesOff = useSetupMediaServerRefreshes();
   // The restore below reports its own failure, so it takes a mutation of its
   // own with the hook's and the client's toasts off; with the shared one it
   // said "Save failed" beside its own message. The switch-off write keeps the
@@ -88,7 +98,7 @@ const ConnectedServerRow: FC<Props> = ({
   // Record writes in the operation itself, since per-call mutation callbacks
   // are dropped on unmount.
   const disconnect = useMutation({
-    mutationKey: [MEDIA_SERVER_DISCONNECT_KEY],
+    mutationKey,
     mutationFn: async (enabledBefore: boolean) => {
       if (accountOwned) {
         // Remove the credential first so a failed delete cannot reconnect the row.
@@ -102,8 +112,10 @@ const ConnectedServerRow: FC<Props> = ({
       // clearing it while a sibling remains would silence a server the
       // reader never touched. Nothing of this kind is left to refresh once
       // that write lands, so its failure costs the reader nothing.
-      if (last && !accountOwned) {
-        settings.mutate({ [`settings-general-use_${kind}`]: false });
+      if (!accountOwned) {
+        await refreshesOff
+          .mutateAsync({ disableIfEmpty: kind })
+          .catch(() => undefined);
       } else if (!last && accountOwned && enabledBefore) {
         // Signing out clears use_plex for the whole kind, and the dispatcher
         // reads it before any row. The Plex servers the reader added by hand
@@ -155,7 +167,7 @@ const ConnectedServerRow: FC<Props> = ({
             size="compact-sm"
             // Which Plex row the account owns decides whether this signs out
             // or only deletes, so it waits rather than guessing.
-            disabled={ownershipPending}
+            disabled={ownershipPending || pending}
             onClick={() => setConfirming(true)}
           >
             Disconnect
@@ -186,8 +198,9 @@ const ConnectedServerRow: FC<Props> = ({
               <Button
                 color="red"
                 size="compact-sm"
-                loading={disconnect.isPending}
+                loading={pending}
                 onClick={() => {
+                  if (client.isMutating(matchingDisconnect) > 0) return;
                   setFailed(false);
                   disconnect.mutate(kindEnabled, {
                     onError: () => setFailed(true),

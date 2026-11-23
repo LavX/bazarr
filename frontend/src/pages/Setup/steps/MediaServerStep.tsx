@@ -1,6 +1,5 @@
 import { FC, useMemo, useState } from "react";
 import { Alert, Button, Checkbox, Group, Text } from "@mantine/core";
-import { useIsMutating } from "@tanstack/react-query";
 import {
   isSettingsFollowupError,
   useSettingsMutation,
@@ -16,9 +15,8 @@ import { readMediaServerTest } from "@/pages/Setup/connectionTests";
 import StepLayout from "@/pages/Setup/StepLayout";
 import { useOnboardingSelection } from "@/pages/Setup/useOnboardingSelection";
 import { useReportStepBusy } from "@/pages/Setup/useStepBusy";
-import ConnectedServerRow, {
-  MEDIA_SERVER_DISCONNECT_KEY,
-} from "./mediaServer/ConnectedServerRow";
+import ConnectedServerRow from "./mediaServer/ConnectedServerRow";
+import { useMediaServerDisconnectPending } from "./mediaServer/operations";
 import StepActions from "./mediaServer/StepActions";
 import { NOTHING_WRITTEN, type WizardStepProps } from "./types";
 import styles from "./MediaServerStep.module.scss";
@@ -64,9 +62,7 @@ const MediaServerStep: FC<WizardStepProps> = ({
 
   const { data: settings, isPending: settingsPending } = useSystemSettings();
   const settingsMutation = useSettingsMutation(false, { inlineErrors: true });
-  const disconnecting = useIsMutating({
-    mutationKey: [MEDIA_SERVER_DISCONNECT_KEY],
-  });
+  const disconnecting = useMediaServerDisconnectPending();
   useReportStepBusy(settingsMutation.isPending);
   // Which kind's switch write failed. The client keeps a restarting or
   // unreachable Bazarr+ out of its toasts, so it is said here or not at all.
@@ -225,7 +221,7 @@ const MediaServerStep: FC<WizardStepProps> = ({
         <StepActions
           onNext={() => onNext(NOTHING_WRITTEN)}
           onBack={onBack}
-          continuePending={settingsMutation.isPending || disconnecting > 0}
+          continuePending={settingsMutation.isPending || disconnecting}
           continueLabel={
             pendingTotal > 0
               ? `Set up ${pendingTotal} ${pendingTotal === 1 ? "server" : "servers"}`
