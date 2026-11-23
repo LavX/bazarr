@@ -6,6 +6,7 @@ import os
 from discover import metadata
 
 from .parse import parse_episode_file, parse_movie_file, parse_show_directory
+from .sports_parse import parse_sports_file
 
 
 _EMPTY_IDENTITY = dict(identity_source='filename', identity_candidates=None, tmdb_id=None, imdb_id=None,
@@ -55,6 +56,11 @@ def identify_group(directory, paths=(), *, directory_key=True):
             'identity_state': 'parsed' if title else 'unmatched', 'identify_pending': int(bool(title))}
 
 
+def identify_league(directory):
+    name = os.path.basename(directory.rstrip('/\\')) or directory
+    return {**_EMPTY_IDENTITY, **_named(name, None), 'parsed_title': name, 'identity_state': 'parsed'}
+
+
 def has_provider_id(hints):
     return bool(hints and (hints.imdb_id or hints.tmdb_id or hints.tvdb_id))
 
@@ -86,6 +92,13 @@ def identify_item(content_kind, path, group_directory=None, group_state='parsed'
                   'identity_state': parsed.identity_state, 'scene_name': parsed.scene_name,
                   'identify_pending': int(bool(parsed.parsed_title))}
         return _apply_hints(values, hints)
+
+    if content_kind == 'sports':
+        parsed = parse_sports_file(path, group_directory)
+        return {**_EMPTY_IDENTITY, **_named(parsed.title, parsed.year), 'parsed_title': parsed.parsed_title,
+                'identity_state': parsed.identity_state, 'scene_name': parsed.scene_name,
+                'season': parsed.season, 'episode': parsed.round, 'event_date': parsed.event_date,
+                'part_name': parsed.part_name, 'part_number': parsed.part_number or 0}
 
     parsed = parse_episode_file(path, group_directory)
     values = {**_EMPTY_IDENTITY, **_named(parsed.title, parsed.year), 'parsed_title': parsed.parsed_title,

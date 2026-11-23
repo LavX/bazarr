@@ -22,6 +22,7 @@ import {
 } from "@/apis/hooks/discover";
 import { useSportsAvailability } from "@/apis/hooks/sports";
 import { useServerSearch } from "@/apis/hooks/system";
+import { sourceSearchRoute } from "@/apis/raw/system";
 import { useDiscover } from "@/contexts/Discover";
 import { useSearchSources } from "@/contexts/UniversalSearch";
 import MediaPoster from "@/pages/Discover/MediaPoster";
@@ -88,7 +89,8 @@ export default function UniversalSearch() {
         .filter(
           (item) =>
             item.id != null &&
-            (item.sonarrSeriesId != null ||
+            (item.origin === "source" ||
+              item.sonarrSeriesId != null ||
               item.radarrId != null ||
               (item.sportarrLeagueId != null &&
                 sports.enabled &&
@@ -467,15 +469,19 @@ export default function UniversalSearch() {
                 <Text className={styles.groupLabel}>In your library</Text>
                 {localMatches.map((item) => {
                   const kind =
-                    item.sportarrLeagueId != null
-                      ? "sports"
-                      : item.sonarrSeriesId != null
-                        ? "series"
-                        : "movies";
+                    item.origin === "source"
+                      ? sourceSearchRoute[item.source_kind]
+                      : item.sportarrLeagueId != null
+                        ? "sports"
+                        : item.sonarrSeriesId != null
+                          ? "series"
+                          : "movies";
                   const path =
-                    kind === "sports"
-                      ? `/sports/${item.id}?instance=${item.arr_instance_id}`
-                      : `/${kind}/${item.id}`;
+                    item.origin === "source"
+                      ? `/${kind}/source/${item.id}`
+                      : kind === "sports"
+                        ? `/sports/${item.id}?instance=${item.arr_instance_id}`
+                        : `/${kind}/${item.id}`;
                   return (
                     <Link
                       className={styles.quickMatch}

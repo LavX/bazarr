@@ -7,6 +7,7 @@ import { describe, expect, it, vi } from "vitest";
 import { useArrInstances } from "@/apis/hooks/arrInstances";
 import { mediaSourcesKey } from "@/apis/hooks/mediaSources";
 import { useSportsAvailability } from "@/apis/hooks/sports";
+import { useBadges } from "@/apis/hooks/system";
 import queryClient from "@/apis/queries";
 import { QueryKeys } from "@/apis/queries/keys";
 import type { SourceAvailability } from "@/apis/raw/mediaSources";
@@ -57,14 +58,16 @@ const DISABLED = { ...ABSENT, browsable: true };
 const RETAINED = { ...ABSENT, retained: true };
 
 it.each([
-  { visible: true, status: 200, sibling: false },
-  { visible: true, status: 503, sibling: false },
-  { visible: false, status: 200, sibling: false },
-  { visible: false, status: 503, sibling: false },
-  { visible: false, status: 200, sibling: true },
+  { visible: true, status: 200, sibling: false, folder: "disabled" },
+  { visible: true, status: 200, sibling: false, folder: "populated" },
+  { visible: true, status: 200, sibling: false, folder: "empty" },
+  { visible: true, status: 503, sibling: false, folder: "disabled" },
+  { visible: false, status: 200, sibling: false, folder: "disabled" },
+  { visible: false, status: 503, sibling: false, folder: "disabled" },
+  { visible: false, status: 200, sibling: true, folder: "disabled" },
 ])(
-  "updates Radarr badges on disable (folders visible: $visible, PATCH $status, enabled sibling: $sibling)",
-  async ({ visible, status, sibling }) => {
+  "updates Radarr badges on disable (folders visible: $visible, PATCH $status, enabled sibling: $sibling, folder: $folder)",
+  async ({ visible, status, sibling, folder }) => {
     const user = userEvent.setup();
     const movie = makeInstance({ kind: "radarr", name: "Radarr" });
     const series = makeInstance({ id: 1 });
@@ -75,7 +78,9 @@ it.each([
     }
     const patch = Promise.withResolvers<void>();
     const refresh = Promise.withResolvers<void>();
+    const badgeRefresh = Promise.withResolvers<void>();
     const patchStarted = vi.fn();
+    const badgeRefreshStarted = vi.fn();
     const list = vi.fn();
     const sources = vi.fn();
     const excluded = vi.fn();
@@ -113,22 +118,32 @@ it.each([
         return HttpResponse.json({
           data: [],
           availability: {
-            movie: { ...DISABLED, retained: true },
+            movie: {
+              ...(folder === "disabled" ? DISABLED : ENABLED),
+              retained: true,
+            },
             series: ABSENT,
             sports: ABSENT,
           },
         });
       }),
-      http.get("/api/badges", () =>
-        HttpResponse.json({
-          movies: 9,
+      http.get("/api/badges", async ({ request }) => {
+        const mixed = new URL(request.url).searchParams.has("sources");
+        if (confirmed && mixed) {
+          badgeRefreshStarted();
+          await badgeRefresh.promise;
+        }
+        const sourceCount = folder === "populated" && mixed;
+        return HttpResponse.json({
+          movies: sourceCount && confirmed ? 3 : 9,
+          ...(sourceCount ? { source_movies: confirmed ? 3 : 1 } : {}),
           episodes: 4,
           sports: 2,
           radarr_signalr: "DOWN",
           sonarr_signalr: "LIVE",
           sportarr_sse: "LIVE",
-        }),
-      ),
+        });
+      }),
       http.get("/api/system/status", () => HttpResponse.json({ data: {} })),
       http.get("/api/system/jobs", () => HttpResponse.json({ data: [] })),
       http.get("/api/system/searches", () => HttpResponse.json([])),
@@ -136,7 +151,10 @@ it.each([
         HttpResponse.json({ data: { configured: false } }),
       ),
       http.all("/api/movies/blacklist", ({ request }) => {
-        excluded(request.method);
+        excluded(
+          request.method,
+          new URL(request.url).searchParams.get("sources"),
+        );
         return HttpResponse.json({ data: [] });
       }),
     );
@@ -170,7 +188,7 @@ it.each([
       );
       expect(wanted()).toHaveAttribute("aria-description", initialCounts);
       expect(list).toHaveBeenCalledOnce();
-      if (!visible) expect(sources).not.toHaveBeenCalled();
+      expect(sources).toHaveBeenCalled();
 
       await user.click(toggle());
       await waitFor(() =>
@@ -201,6 +219,23 @@ it.each([
       expect(
         await screen.findByRole("switch", { name: "Enable instance" }),
       ).not.toBeChecked();
+      {
+        await waitFor(() => expect(badgeRefreshStarted).toHaveBeenCalledOnce());
+        expect(wanted()).toHaveAttribute(
+          "aria-description",
+          "Sports: 2, Episodes: 4",
+        );
+        badgeRefresh.resolve();
+        await waitFor(() =>
+          expect(
+            queryClient.getQueryState([
+              QueryKeys.System,
+              QueryKeys.Badges,
+              true,
+            ])?.fetchStatus,
+          ).toBe("idle"),
+        );
+      }
 
       const expectBadges = () => {
         expect(moviesLink()).toHaveAttribute("href", "/movies");
@@ -214,7 +249,11 @@ it.each([
         }
         expect(wanted()).toHaveAttribute(
           "aria-description",
-          sibling ? initialCounts : "Sports: 2, Episodes: 4",
+          sibling
+            ? initialCounts
+            : folder === "populated"
+              ? "Sports: 2, Episodes: 4, Movies: 3"
+              : "Sports: 2, Episodes: 4",
         );
         expect(screen.getByRole("link", { name: "Series" })).toHaveAttribute(
           "aria-description",
@@ -225,28 +264,20 @@ it.each([
           "Connection live",
         );
       };
-      expectBadges();
+      await waitFor(expectBadges);
       await user.click(screen.getByRole("button", { name: "Excluded" }));
       await user.click(await screen.findByRole("menuitem", { name: "Movies" }));
-      if (visible) {
-        expect(
-          await screen.findByRole("link", { name: "Connections" }),
-        ).toHaveAttribute("href", "/settings/connections#folders");
-      } else {
-        await waitFor(() => expect(excluded).toHaveBeenCalledWith("GET"));
-      }
+      await waitFor(() => expect(excluded).toHaveBeenCalledWith("GET", "1"));
+      await screen.findByRole("button", { name: "Remove All" });
 
       const expectExcluded = () => {
         expect(window.location.pathname).toBe("/blacklist/movies");
         expect(
           screen.getByRole("button", { name: "Excluded" }),
         ).toHaveAttribute("aria-current", "page");
-        if (visible) {
-          expect(
-            screen.queryByRole("button", { name: "Remove All" }),
-          ).not.toBeInTheDocument();
-          expect(excluded).not.toHaveBeenCalled();
-        }
+        expect(
+          screen.getByRole("button", { name: "Remove All" }),
+        ).toBeInTheDocument();
         expect(list).toHaveBeenCalledTimes(2);
       };
       expectExcluded();
@@ -259,10 +290,11 @@ it.each([
       );
       expectBadges();
       expectExcluded();
-      if (!visible) expect(sources).not.toHaveBeenCalled();
+      expect(sources).toHaveBeenCalled();
     } finally {
       patch.resolve();
       refresh.resolve();
+      badgeRefresh.resolve();
       unmount();
       bounds.mockRestore();
       window.history.replaceState(null, "", "/");
@@ -287,7 +319,8 @@ it.each([true, false])(
         }),
       ),
       http.get("/api/system/arr-instances", async () => {
-        if (recovered) return HttpResponse.json([makeInstance()]);
+        if (recovered)
+          return HttpResponse.json([makeInstance({ kind: "radarr" })]);
         await list.promise;
         return new HttpResponse(null, { status: 503 });
       }),
@@ -297,6 +330,7 @@ it.each([true, false])(
           availability: { movie: ABSENT, series: ABSENT, sports: ABSENT },
         }),
       ),
+      http.get("/api/system/status", () => HttpResponse.json({ data: {} })),
       http.get("/api/badges", () =>
         HttpResponse.json({ movies: 9, radarr_signalr: "DOWN" }),
       ),
@@ -316,12 +350,8 @@ it.each([true, false])(
       );
     };
     const expectCold = async () => {
-      if (visible) {
-        expect(screen.queryByText("My movies")).not.toBeInTheDocument();
-        expect(screen.queryByText("Missing / Movies")).not.toBeInTheDocument();
-      } else {
-        await expectBadges();
-      }
+      expect(screen.queryByText("My movies")).not.toBeInTheDocument();
+      expect(screen.queryByText("Missing / Movies")).not.toBeInTheDocument();
     };
     try {
       await waitFor(() =>
@@ -449,16 +479,11 @@ it.each([
       expect(screen.getByText(`History / ${activity}`)).toBeInTheDocument();
 
     await refresh(ENABLED, false, false);
-    await waitFor(() =>
-      expect(
-        screen.queryByText(`Missing / ${activity}`),
-      ).not.toBeInTheDocument(),
-    );
-    expect(screen.queryByText(title, { exact: true })).not.toBeInTheDocument();
-    expect(
-      screen.queryByText(`Excluded / ${activity}`),
-    ).not.toBeInTheDocument();
-    expect(screen.queryByText(`History / ${activity}`)).not.toBeInTheDocument();
+    expect(await screen.findByText(title, { exact: true })).toBeInTheDocument();
+    expect(screen.getByText(`Missing / ${activity}`)).toBeInTheDocument();
+    expect(screen.getByText(`Excluded / ${activity}`)).toBeInTheDocument();
+    if (kind === "sports")
+      expect(screen.getByText(`History / ${activity}`)).toBeInTheDocument();
 
     await refresh(RETAINED, true, false);
     expect(await screen.findByText(title, { exact: true })).toBeInTheDocument();
@@ -540,7 +565,7 @@ it.each(["succeeds", "fails"] as const)(
       http.get("/api/system/media-sources", () =>
         HttpResponse.json({
           data: [],
-          availability: { series: RETAINED, movie: ABSENT, sports: ABSENT },
+          availability: { series: ABSENT, movie: ABSENT, sports: ABSENT },
         }),
       ),
       http.all("/api/episodes/blacklist", () => {
@@ -591,8 +616,6 @@ it.each(["succeeds", "fails"] as const)(
 );
 
 it.each([
-  ["series", undefined, "sonarr", "/api/series"],
-  ["movies", undefined, "radarr", "/api/movies"],
   ["sports", undefined, "sportarr", "/api/sports/leagues"],
   ["wanted", "series", "sonarr", "/api/episodes/wanted"],
   ["wanted", "movies", "radarr", "/api/movies/wanted"],
@@ -605,6 +628,7 @@ it.each([
   "opens %s %s for folders without calling inactive %s",
   async (group, path, arr, endpoint) => {
     const requests = vi.fn();
+    const sports = arr === "sportarr";
     server.use(
       http.get("/api/system/settings", () =>
         HttpResponse.json({
@@ -616,11 +640,26 @@ it.each([
         HttpResponse.json([makeInstance({ kind: arr, enabled: true })]),
       ),
       http.get("/api/system/status", () => HttpResponse.json({ data: {} })),
+      http.get("/api/system/jobs", () => HttpResponse.json({ data: [] })),
       http.get("/api/system/media-sources", () => {
         const state = path ? RETAINED : ENABLED;
         return HttpResponse.json({
-          data: [],
-          availability: { series: state, movie: state, sports: state },
+          data: sports
+            ? [
+                {
+                  id: 8,
+                  name: "Local sports",
+                  kind: "folder",
+                  enabled: true,
+                  libraries: [{ id: 9, enabled: true, content_kind: "sports" }],
+                },
+              ]
+            : [],
+          availability: {
+            series: group === "blacklist" && path === "series" ? ABSENT : state,
+            movie: group === "blacklist" && path === "movies" ? ABSENT : state,
+            sports: state,
+          },
         });
       }),
       http.get("/api/badges", () =>
@@ -635,6 +674,15 @@ it.each([
         return HttpResponse.json([]);
       }),
       http.all(endpoint, ({ request }) => {
+        if (sports) {
+          const params = new URL(request.url).searchParams;
+          requests(
+            "source sports",
+            params.get("sources"),
+            params.get("arr_instance_id"),
+          );
+          return HttpResponse.json({ data: [], total: 0 });
+        }
         requests(request.method);
         return HttpResponse.json({
           data: [{ id: 72, title: "Inactive Arr title" }],
@@ -643,6 +691,16 @@ it.each([
       }),
     );
     customRender(<MediaPage group={group} path={path} />);
+    if (sports) {
+      await waitFor(() =>
+        expect(requests).toHaveBeenCalledWith("source sports", "1", null),
+      );
+      expect(screen.queryByText("Inactive Arr title")).not.toBeInTheDocument();
+      expect(
+        screen.queryByRole("button", { name: "Sync Leagues" }),
+      ).not.toBeInTheDocument();
+      return;
+    }
     expect(
       await screen.findByRole("link", { name: "Connections" }),
     ).toHaveAttribute("href", "/settings/connections#folders");
@@ -655,6 +713,105 @@ it.each([
     expect(requests).not.toHaveBeenCalled();
   },
 );
+
+describe.each([
+  ["sonarr", "series", "/api/episodes/blacklist"],
+  ["radarr", "movies", "/api/movies/blacklist"],
+] as const)("%s source exclusions", (kind, path, endpoint) => {
+  it.each([
+    { mode: "browsable", availability: ENABLED, master: false },
+    { mode: "retained", availability: RETAINED, master: false },
+    {
+      mode: "browsable with no Arr connection",
+      availability: ENABLED,
+      master: true,
+    },
+    {
+      mode: "retained with no Arr connection",
+      availability: RETAINED,
+      master: true,
+    },
+  ])("opens $mode source activity", async ({ availability, master }) => {
+    const requests = vi.fn();
+    const contentKind = kind === "sonarr" ? "series" : "movie";
+    server.use(
+      http.get("/api/system/settings", () =>
+        HttpResponse.json({
+          general: { [`use_${kind}`]: master },
+          media_sources: { visible: true },
+        }),
+      ),
+      http.get("/api/system/arr-instances", () => HttpResponse.json([])),
+      http.get("/api/system/status", () => HttpResponse.json({ data: {} })),
+      http.get("/api/system/media-sources", () =>
+        HttpResponse.json({
+          data: [
+            {
+              id: 8,
+              enabled: true,
+              name: "Archive",
+              kind: "folder",
+              libraries: availability.browsable
+                ? [{ enabled: true, content_kind: contentKind }]
+                : [],
+            },
+          ],
+          availability: {
+            series: kind === "sonarr" ? availability : ABSENT,
+            movie: kind === "radarr" ? availability : ABSENT,
+            sports: ABSENT,
+          },
+        }),
+      ),
+      http.get("/api/badges", () => HttpResponse.json({})),
+      http.get(endpoint, ({ request }) => {
+        const params = new URL(request.url).searchParams;
+        requests(params.get("sources"), params.getAll("source_key[]"));
+        if (params.get("sources") !== "1")
+          return HttpResponse.json({ data: [] });
+        return HttpResponse.json({
+          data: [
+            {
+              id: 9,
+              source_item_id: availability.browsable ? 9 : null,
+              origin: "source",
+              source_key: "source:8",
+              source_id: 8,
+              source_name: "Archive",
+              source_kind: "folder",
+              arr_instance_id: null,
+              title: "Archive movie",
+              seriesTitle: "Archive series",
+              episodeTitle: "Archive episode",
+              episode_number: "1x1",
+              provider: "fixture-provider",
+              subs_id: "fixture-release",
+              language: {
+                name: "English",
+                code2: "en",
+                code3: "eng",
+                forced: false,
+                hi: false,
+              },
+              timestamp: "now",
+              parsed_timestamp: "01/24/25 01:38:03",
+            },
+          ],
+        });
+      }),
+    );
+
+    customRender(<MediaPage group="blacklist" path={path} />);
+    const title = kind === "sonarr" ? "Archive series" : "Archive movie";
+    expect(await screen.findByText(title)).toBeInTheDocument();
+    expect(requests).toHaveBeenCalledWith("1", []);
+    expect(screen.getByRole("button", { name: "Remove All" })).toBeEnabled();
+    expect(screen.queryByRole("link", { name: title })).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("link", { name: "Connections" }),
+    ).not.toBeInTheDocument();
+  });
+});
 
 describe.each([
   ["sonarr", "series", "/api/episodes/blacklist"],
@@ -692,17 +849,18 @@ describe.each([
         accessible: true,
       },
       {
-        mode: "hidden folder feature",
+        mode: "old setting without an owner",
         record: null,
         legacy: false,
         visible: false,
-        accessible: true,
+        accessible: false,
       },
     ])(
       "handles $mode without granting folder sources Arr privileges",
       async ({ record, legacy, visible, accessible }) => {
         const user = userEvent.setup();
         const requestArr = vi.fn();
+        const requestSources = vi.fn();
         const requestExcluded = vi.fn();
         const removeAll = vi.fn();
         server.use(
@@ -730,19 +888,23 @@ describe.each([
             ]);
           }),
           http.get("/api/system/status", () => HttpResponse.json({ data: {} })),
-          http.get("/api/system/media-sources", () =>
-            HttpResponse.json({
+          http.get("/api/system/media-sources", () => {
+            requestSources();
+            return HttpResponse.json({
               data: [],
               availability: {
-                series: RETAINED,
-                movie: RETAINED,
+                series: ABSENT,
+                movie: ABSENT,
                 sports: ABSENT,
               },
-            }),
-          ),
+            });
+          }),
           http.get("/api/badges", () => HttpResponse.json({})),
           http.all(endpoint, ({ request }) => {
-            requestExcluded(request.method);
+            requestExcluded(
+              request.method,
+              new URL(request.url).searchParams.get("sources"),
+            );
             if (request.method === "DELETE") {
               removeAll(new URL(request.url).searchParams.get("all"));
               return new HttpResponse(null, { status: 204 });
@@ -779,6 +941,11 @@ describe.each([
           expect(
             await screen.findByText("fixture-provider"),
           ).toBeInTheDocument();
+          expect(
+            screen.getByRole("link", {
+              name: kind === "sonarr" ? "Fixture series" : "Fixture movie",
+            }),
+          ).toHaveAttribute("href", expect.stringContaining(`/${path}/72`));
           const action = screen.getByRole("button", { name: "Remove All" });
           expect(action).toBeEnabled();
           await user.click(action);
@@ -792,8 +959,182 @@ describe.each([
           ).not.toBeInTheDocument();
           expect(requestExcluded).not.toHaveBeenCalled();
         }
-        if (!visible) expect(requestArr).not.toHaveBeenCalled();
+        expect(requestSources).toHaveBeenCalled();
       },
     );
   },
 );
+
+it.each([
+  ["series", "sonarr", "/api/episodes/wanted", "seriesTitle"],
+  ["movies", "radarr", "/api/movies/wanted", "title"],
+] as const)(
+  "shows folder-only Wanted %s with a badge count and no Arr actions",
+  async (kind, arr, path, titleKey) => {
+    const requests = vi.fn();
+    server.use(
+      http.get("/api/system/settings", () =>
+        HttpResponse.json({
+          general: { [`use_${arr}`]: false },
+          media_sources: { visible: true },
+        }),
+      ),
+      http.get("/api/system/arr-instances", () => HttpResponse.json([])),
+      http.get("/api/system/status", () => HttpResponse.json({ data: {} })),
+      http.get("/api/system/languages/audio", () => HttpResponse.json([])),
+      http.get("/api/system/media-sources", () =>
+        HttpResponse.json({
+          data: [
+            {
+              id: 8,
+              enabled: true,
+              name: "Archive",
+              kind: "folder",
+              libraries: [
+                {
+                  enabled: true,
+                  content_kind: kind === "series" ? "series" : "movie",
+                },
+              ],
+            },
+          ],
+          availability: {
+            series: kind === "series" ? ENABLED : ABSENT,
+            movie: kind === "movies" ? ENABLED : ABSENT,
+            sports: ABSENT,
+          },
+        }),
+      ),
+      http.get("/api/badges", () =>
+        HttpResponse.json({
+          episodes: 2,
+          movies: 2,
+          source_episodes: 2,
+          source_movies: 2,
+        }),
+      ),
+      http.get(path, ({ request }) => {
+        const params = new URL(request.url).searchParams;
+        requests(params.get("sources"), params.get("source_key[]"));
+        return HttpResponse.json({
+          data: [
+            {
+              id: 9,
+              [titleKey]: "Archive title",
+              origin: "source",
+              source_key: "source:8",
+              missing_subtitles: [],
+            },
+          ],
+          total: 1,
+        });
+      }),
+    );
+
+    customRender(<MediaPage group="wanted" path={kind} />);
+    expect(await screen.findByText("Archive title")).toBeInTheDocument();
+    expect(requests).toHaveBeenCalledWith("1", "source:8");
+    expect(screen.getByRole("button", { name: "Search All" })).toBeEnabled();
+    expect(
+      screen.queryByRole("button", { name: "Scan All" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("combobox", { name: "Source" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("columnheader", { name: "Source" }),
+    ).not.toBeInTheDocument();
+  },
+);
+
+it.each([
+  ["series", "sonarr", "/api/episodes/wanted", "/api/series", "seriesTitle"],
+  ["movies", "radarr", "/api/movies/wanted", "/api/movies", "title"],
+] as const)(
+  "keeps the Arr-only %s Wanted controls with an old config",
+  async (kind, arr, wanted, action, titleKey) => {
+    const user = userEvent.setup();
+    const reads = vi.fn();
+    const writes = vi.fn();
+    server.use(
+      http.get("/api/system/settings", () =>
+        HttpResponse.json({
+          general: { [`use_${arr}`]: true },
+          media_sources: { visible: false },
+        }),
+      ),
+      http.get("/api/system/arr-instances", () =>
+        HttpResponse.json([makeInstance({ kind: arr })]),
+      ),
+      http.get("/api/system/status", () => HttpResponse.json({ data: {} })),
+      http.get("/api/system/media-sources", () => {
+        reads("folder API");
+        return HttpResponse.json({ data: [] });
+      }),
+      http.get("/api/system/languages/audio", ({ request }) => {
+        reads("audio", new URL(request.url).searchParams.get("sources"));
+        return HttpResponse.json([]);
+      }),
+      http.get("/api/badges", ({ request }) => {
+        reads("badges", new URL(request.url).searchParams.get("sources"));
+        return HttpResponse.json({});
+      }),
+      http.get(wanted, ({ request }) => {
+        const sources = new URL(request.url).searchParams.get("sources");
+        reads("wanted", sources);
+        return HttpResponse.json({
+          data: [
+            {
+              id: 42,
+              series_id: 42,
+              [titleKey]: "Arr title",
+              missing_subtitles: [],
+            },
+          ],
+          total: 1,
+        });
+      }),
+      http.patch(action, async ({ request }) => {
+        const form = await request.formData();
+        writes(form.get("action"), form.get("sources"));
+        return new HttpResponse(null, { status: 204 });
+      }),
+    );
+    customRender(<MediaPage group="wanted" path={kind} />);
+    expect(await screen.findByText("Arr title")).toBeInTheDocument();
+    expect(screen.queryByText("Hidden folder title")).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("combobox", { name: "Source" }),
+    ).not.toBeInTheDocument();
+    expect(reads).toHaveBeenCalledWith("wanted", null);
+    expect(reads).toHaveBeenCalledWith("badges", "1");
+    expect(reads).toHaveBeenCalledWith("audio", null);
+    expect(reads).toHaveBeenCalledWith("folder API");
+    await user.click(screen.getByRole("button", { name: "Search All" }));
+    await waitFor(() =>
+      expect(writes).toHaveBeenCalledWith("search-wanted", null),
+    );
+  },
+);
+
+it("continues to request source-aware badges with an old config", async () => {
+  const requested = vi.fn();
+  function MovieBadge() {
+    return <output>{useBadges().data?.movies ?? "No count"}</output>;
+  }
+  server.use(
+    http.get("/api/system/settings", () =>
+      HttpResponse.json({
+        general: { use_radarr: true },
+        media_sources: { visible: false },
+      }),
+    ),
+    http.get("/api/badges", ({ request }) => {
+      requested(new URL(request.url).searchParams.get("sources"));
+      return HttpResponse.json({ movies: 7 });
+    }),
+  );
+  customRender(<MovieBadge />);
+  expect(await screen.findByText("7")).toBeInTheDocument();
+  expect(requested).toHaveBeenCalledWith("1");
+});

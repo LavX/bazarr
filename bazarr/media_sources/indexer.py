@@ -9,32 +9,44 @@ import ast
 import logging
 import os
 import sqlite3
+from contextlib import contextmanager, nullcontext
+from functools import partial
+from time import sleep
 
 import sqlalchemy as sa
 from babelfish.exceptions import LanguageError
 from sqlalchemy.orm import Session
 
-from subliminal_patch import core, search_external_subtitles
+from subliminal_patch import core
 
-from app.config import settings
+from app.config import pin_subtitle_settings, settings
 from app.database import get_audio_profile_languages, get_profile_cutoff, get_profiles_list
+from constants import MAXIMUM_SUBTITLE_SIZE
+from languages import get_languages
 from languages.custom_lang import CustomLanguage
 from languages.get_languages import alpha2_from_alpha3, get_language_set
 from subtitles.adaptive_searching import is_search_given_up
 from subtitles.indexer.entries import embedded_entry, normalize_codec
 from subtitles.indexer.utils import (_get_lang_from_str, add_combined_outputs, add_sync_engine_outputs,
-                                     get_external_subtitles_path, guess_external_subtitles,
-                                     normalize_subtitle_language_variant,
-                                     partition_embedded_entries, subtitle_language_with_combined_modifier,
+                                     guess_external_subtitles,
+                                     normalize_subtitle_language_variant, partition_embedded_entries,
+                                     subtitle_language_with_combined_modifier,
                                      subtitle_language_with_sync_modifier)
-from subtitles.tools.subsync_engines import (SYNC_ENGINE_LANGUAGE_MODIFIERS, SyncOutputOwnerIndex,
-                                             _normalized_media_stem, subtitle_write_locks)
+from subtitles.tools.combine.naming import parse_combined_filename
+from subtitles.tools.combine.rules import _dotted_custom_aliases
+from subtitles.tools.subsync_engines import (SYNC_ENGINE_LANGUAGE_MODIFIERS, SubtitleDestinationChanged,
+                                             SubtitleSourceChanged, SyncOutputOwnerIndex, _normalized_media_stem,
+                                             local_subtitle_owner_is_clear, plan_sync_output_cleanup,
+                                             quarantine_sync_outputs_after_mutation,
+                                             read_regular_subtitle, regular_subtitle_version, subtitle_write_locks,
+                                             sync_engine_from_output_path, sync_output_owner_is_unique)
 from utilities.helper import get_subtitle_destination_folder, get_target_folder
 from utilities.video_analyzer import audio_languages_from_metadata, embedded_subtitles_from_metadata
 
 from . import repository
 from .analysis import (cached_metadata, failed_probe_values, index_matches_file, local_stat, probe_item,
                        read_metadata, streams)
+from .context import resolve_same_item, source_item_publication
 from .db import handle, source_transaction
 
 
@@ -51,89 +63,273 @@ class SourceOutputOwnerIndex(SyncOutputOwnerIndex):
         # Post-save indexing needs the original failure to discard an incomplete listing.
         self.propagate_errors = target is not None
 
+    def conflicting_stems(self, video, subtitle_path):
+        """Include media whose stem consumes only part of the subtitle suffix."""
+        stems = super().conflicting_stems(video, subtitle_path)
+        stem = _normalized_media_stem(subtitle_path)
+        if sync_engine_from_output_path(subtitle_path):
+            if stem == _normalized_media_stem(video):
+                return stems
+            stem = stem.rsplit('.', 1)[0]
+            stems.add(stem)
+            subtitle_path = stem + os.path.splitext(subtitle_path)[1]
+        base, _, tail = stem.rpartition('.')
+        modifier = f'.{tail}' if tail in core.EXTERNAL_SUBTITLE_MODIFIERS else ''
+        if modifier or parse_combined_filename(subtitle_path):
+            stems.add(base)
+            stem = base
+        stems.add(core.external_subtitle_base(stem))
+        base, _, tag = stem.rpartition('.')
+        if base and CustomLanguage.found_external(f'.{tag}{modifier}.srt', None):
+            stems.add(base)
+        for alias in _dotted_custom_aliases():
+            if stem.endswith('.' + alias):
+                stems.add(stem[:-len(alias) - 1])
+        return stems
+
+    @staticmethod
+    def _source_owner_paths(target):
+        return tuple(handle(target).execute(sa.select(repository.Items.c.path).order_by(repository.Items.c.path)).scalars())
+
     def _load_owners(self):
-        custom_folder = get_subtitle_destination_folder()
-        subfolder = settings.general.subfolder
-        absolute_folder = os.path.normcase(os.path.realpath(custom_folder)) if subfolder == 'absolute' else None
+        return self._map_source_owners(self._source_owner_paths(self._target))
+
+    @staticmethod
+    def _map_source_owners(paths, destination=None):
+        if destination is None:
+            destination = settings.general.subfolder, get_subtitle_destination_folder()
         owners = {}
-        for row in handle(self._target).execute(sa.select(repository.Items.c.path)).all():
-            mapped = os.path.normcase(os.path.realpath(row.path))
-            folders = {os.path.dirname(mapped)}
-            if absolute_folder:
-                folders.add(absolute_folder)
-            elif subfolder == 'relative' and custom_folder:
-                folders.add(os.path.normcase(os.path.realpath(os.path.join(os.path.dirname(mapped),
-                                                                         custom_folder))))
-            stem = _normalized_media_stem(mapped)
-            for folder in folders:
-                owners.setdefault((folder, stem), set()).add(mapped)
+        for path in paths:
+            SyncOutputOwnerIndex._record_owner(owners, path, destination)
         return owners
 
 
-def list_external_subtitles(path, previous=None, ownership_index=None):
-    """``[[language, subtitle path, size], ...]`` beside ``path``, or None when cache recovery is incomplete.
+class SourcePublicationOwnersChanged(SubtitleDestinationChanged):
+    """The prepared shared ownership could not be pinned for publication."""
 
-    The caller holds the subtitle write locks. A scan shares ``ownership_index`` across its items; a call
-    without one builds its own source index."""
+
+class SourcePublicationOwnerIndex(SourceOutputOwnerIndex):
+    """Source writes in shared subtitle folders must account for all media stored there."""
+
+    def __init__(self):
+        super().__init__()
+        self._prepared_owners = None
+        self._publication_settings = None
+
+    @staticmethod
+    def _settings_snapshot():
+        from utilities.path_mappings import global_sports_mappings, path_mappings
+
+        destination = settings.general.subfolder, get_subtitle_destination_folder()
+        mappings = tuple(tuple(tuple(pair) for pair in rows) for rows in (
+            path_mappings.path_mapping_series, path_mappings.path_mapping_movies, global_sports_mappings()))
+        return destination, mappings
+
+    @staticmethod
+    @contextmanager
+    def _settings_guard():
+        from discover.metadata import CONFIG_LOCK
+
+        # A settings save may need a subtitle coordinator in one of its follow-ups.
+        # A publisher holding that coordinator cannot wait for the settings lock.
+        if not CONFIG_LOCK.acquire(blocking=False):
+            raise SourcePublicationOwnersChanged('Subtitle destinations or path mappings are being saved')
+        try:
+            yield
+        finally:
+            CONFIG_LOCK.release()
+
+    @staticmethod
+    @contextmanager
+    def _keyed_settings_guard(pin):
+        if not pin:
+            yield
+            return
+        with pin_subtitle_settings() as pinned:
+            if not pinned:
+                raise SourcePublicationOwnersChanged('Subtitle destinations or path mappings are being saved')
+            yield
+
+    def _registry_snapshot(self, target=None):
+        return self._source_owner_paths(target), self._registry_rows(target)
+
+    def _load_owners(self):
+        source_paths, registry_rows = self._registry_snapshot()
+        self._prepared_owners = source_paths, registry_rows
+        destination, mappings = self._publication_settings or self._settings_snapshot()
+        owners = self._map_source_owners(source_paths, destination)
+        for key, paths in self._map_registry_rows(registry_rows, mappings=mappings, destination=destination).items():
+            owners.setdefault(key, set()).update(paths)
+        return owners
+
+    def subtitle_destination(self):
+        if self._publication_settings is not None:
+            return self._publication_settings[0]
+        return super().subtitle_destination()
+
+    def folder_is_shared(self, directory):
+        # A relative custom path can also resolve into another video's directory.
+        return bool(self.subtitle_destination()[1])
+
+    @staticmethod
+    def _needs_registry_guard(source, destination, custom_folder):
+        # Another media directory can resolve its relative subtitle folder to
+        # this directory, even before the first video there is admitted.
+        if custom_folder:
+            return True
+        if destination is None:
+            return False
+        media_directory = os.path.normcase(os.path.realpath(os.path.dirname(source.path)))
+        directory = os.path.normcase(os.path.realpath(os.path.dirname(destination)))
+        return directory != media_directory
+
+    @contextmanager
+    def publication(self, source, prepare=None, *, destination=None, cleanup_outputs=False, release=None):
+        """Keep slow ownership and subtitle discovery outside the writer transaction."""
+        for _ in range(2):
+            self._loaded = False
+            self._owners = {}
+            self._prepared_owners = None
+            self._publication_settings = self._settings_snapshot()
+            shared = self._needs_registry_guard(source, destination, self._publication_settings[0][1])
+            # Keyed mutations wait on their release before pinning destination settings.
+            pin_settings = release is None
+            if pin_settings:
+                with self._settings_guard():
+                    self._publication_settings = self._settings_snapshot()
+                shared = self._needs_registry_guard(source, destination, self._publication_settings[0][1])
+            prepared = prepare() if prepare is not None else None
+            outputs = (plan_sync_output_cleanup(source.path, destination, self, include_combined=True)
+                       if cleanup_outputs else ())
+            if shared and self._prepared_owners is None:
+                raise SourcePublicationOwnersChanged('The shared subtitle owners could not be verified')
+            # A scanner with the conflicting lock finishes outside this transaction.
+            # Retrying after rollback leaves it free to finish any remaining row writes.
+            for delay in (0, 0.025, 0.05, 0.10, 0.20, 0.40, 0.40):
+                if delay:
+                    sleep(delay)
+                publishing = False
+                try:
+                    options = {'release': release} if release is not None else {}
+                    settings_guard = self._settings_guard() if pin_settings else nullcontext()
+                    with (settings_guard,
+                          source_item_publication(source, shared=shared, **options) as (current, connection),
+                          self._keyed_settings_guard(not pin_settings)):
+                        if shared and current is not None and self._prepared_owners != self._registry_snapshot(connection):
+                            break
+                        if self._publication_settings != self._settings_snapshot():
+                            break
+                        if current is not None:
+                            state = repository.item_state(current.item_id, connection)
+                            if (state is None or not state.source_enabled or not state.library_enabled
+                                    or not os.path.isfile(current.path)):
+                                current = None
+                        if (current is not None and destination is not None
+                                and not local_subtitle_owner_is_clear(current.path, destination, self)):
+                            raise SourcePublicationOwnersChanged('Another video now owns the subtitle destination')
+                        publishing = True
+                        yield current, connection, prepared
+                        if current is not None and outputs:
+                            quarantine_sync_outputs_after_mutation(current.path, destination, self, prepared=outputs)
+                        return
+                except sa.exc.OperationalError as error:
+                    sqlstate = getattr(error.orig, 'sqlstate', None) or getattr(error.orig, 'pgcode', None)
+                    if publishing or sqlstate != '55P03':
+                        raise
+            else:
+                raise SourcePublicationOwnersChanged('The shared subtitle owners are being updated')
+        raise SourcePublicationOwnersChanged('The shared subtitle owners changed while preparing publication')
+
+
+def list_external_subtitles(path, previous=None, ownership_index=None, *, publication=False, written_paths=()):
+    """List sidecars beside ``path``. An unrecovered cached language leaves the index incomplete.
+
+    The caller holds the subtitle write locks. Publication checks fresh ownership before counting a sidecar.
+    Previously indexed paths supply language guesses. A bare upload can also carry the exact version
+    of the file whose language and role the user supplied.
+    """
     if ownership_index is None:
         ownership_index = SourceOutputOwnerIndex()
-    actual = []
-    dest_folder = get_subtitle_destination_folder()
-    core.CUSTOM_PATHS = [dest_folder] if dest_folder else []
-
-    previously_indexed = []
-    rejected_paths = set()
+    media_directory, filename = os.path.split(path)
+    target = get_target_folder(path, create=False) or media_directory
+    directories = dict.fromkeys((media_directory, target))
+    excluded = {os.path.normcase(os.path.abspath(subtitle_path)) for subtitle_path in written_paths}
+    indexed, rejected_paths = {}, set()
     for entry in previous or []:
-        if len(entry) != 3 or not entry[1]:
+        if len(entry) not in (3, 4) or not entry[1]:
             continue
-        if not _can_borrow_language(entry[0]):
-            rejected_paths.add(os.path.normcase(os.path.abspath(entry[1])))
-        elif os.path.isfile(entry[1]) and os.stat(entry[1]).st_size == entry[2]:
-            previously_indexed.append(entry)
-    subtitles = search_external_subtitles(path, languages=get_language_set(),
-                                          only_one=settings.general.single_language)
-    full_dest_folder_path = os.path.dirname(path)
-    if dest_folder:
-        if settings.general.subfolder == "absolute":
-            full_dest_folder_path = dest_folder
-        elif settings.general.subfolder == "relative":
-            full_dest_folder_path = os.path.join(os.path.dirname(path), dest_folder)
-    subtitles = add_sync_engine_outputs(full_dest_folder_path, subtitles, video_path=path,
-                                        ownership_index=ownership_index)
-    subtitles = add_combined_outputs(full_dest_folder_path, subtitles, video_filename=os.path.basename(path))
-    subtitles = guess_external_subtitles(full_dest_folder_path, subtitles, "movie", previously_indexed,
-                                         path_reverse=lambda subtitle_path: subtitle_path)
-
-    for subtitle, language in subtitles.items():
-        subtitle_path = get_external_subtitles_path(path, subtitle)
-        valid_language = False
-        if language:
-            if hasattr(language, 'alpha3'):
-                valid_language = alpha2_from_alpha3(language.alpha3)
-        if not valid_language:
-            if subtitle_path and os.path.normcase(os.path.abspath(subtitle_path)) in rejected_paths:
+        key = os.path.normcase(os.path.abspath(entry[1]))
+        valid_language = (_is_configured_upload_variant(entry[0]) if len(entry) == 4
+                          else _can_borrow_language(entry[0]))
+        if valid_language:
+            indexed[key] = entry
+        else:
+            rejected_paths.add(key)
+    languages = get_language_set() if settings.general.single_language else None
+    actual = {}
+    for directory in directories:
+        try:
+            found = core.search_external_subtitles_in_directory(
+                os.path.join(directory, filename), languages=languages, only_one=bool(languages))
+            found = add_sync_engine_outputs(directory, found, video_path=path, ownership_index=ownership_index)
+            found = add_combined_outputs(directory, found, video_filename=filename)
+        except (FileNotFoundError, NotADirectoryError):
+            continue
+        for subtitle, language in found.items():
+            subtitle_path = os.path.join(directory, subtitle)
+            path_key = os.path.normcase(os.path.abspath(subtitle_path))
+            if path_key in actual or path_key in excluded:
+                continue
+            if publication and not sync_output_owner_is_unique(path, subtitle_path, ownership_index=ownership_index):
+                continue
+            version = regular_subtitle_version(subtitle_path, strict=publication)
+            if version is None:
+                continue
+            previous_entry = indexed.get(path_key)
+            if previous_entry and len(previous_entry) == 4:
+                # A bare upload has an explicit role, even when its contents are too large to guess.
+                if previous_entry[3] == version:
+                    actual[path_key] = previous_entry
+                    continue
+                previous_entry = None
+            if version[2] <= MAXIMUM_SUBTITLE_SIZE:
+                try:
+                    read_sample = partial(read_regular_subtitle, expected_version=version,
+                                          max_bytes=MAXIMUM_SUBTITLE_SIZE)
+                    language = guess_external_subtitles(
+                        directory, {subtitle: language}, 'movie', (previous_entry,) if previous_entry else None,
+                        path_reverse=os.fspath, read_bytes=read_sample)[subtitle]
+                except SubtitleSourceChanged as error:
+                    if publication:
+                        raise OSError('A candidate subtitle changed while verifying its language') from error
+                    continue
+                except UnicodeError as error:
+                    if publication:
+                        raise OSError('A candidate subtitle could not be decoded') from error
+                    raise
+            entry = _external_subtitle_entry(subtitle, language, subtitle_path, version[2])
+            if entry is not None:
+                actual[path_key] = entry
+            elif not publication and path_key in rejected_paths:
                 logging.warning('BAZARR unable to reclassify a cached subtitle for this file %s', path)
                 return None
-            logging.debug('BAZARR unable to define a supported subtitle language: %s', subtitle)
-            continue
+    return list(actual.values())
 
-        try:
-            subtitle_size = os.stat(subtitle_path).st_size
-        except FileNotFoundError:
-            logging.debug("BAZARR skipping missing subtitle file: %s", subtitle_path)
-            continue
 
-        custom = CustomLanguage.found_external(subtitle, subtitle_path)
-        if custom is not None:
-            actual.append([custom, subtitle_path, subtitle_size])
-        elif str(language.basename) != 'und':
-            # Match the movie indexer's forced-first classification for sidecars.
-            language_str = normalize_subtitle_language_variant(language.basename, forced=language.forced,
-                                                               hi=language.hi and not language.forced)
-            language_str = subtitle_language_with_sync_modifier(language_str, subtitle)
-            language_str = subtitle_language_with_combined_modifier(language_str, subtitle)
-            actual.append([language_str, subtitle_path, subtitle_size])
-    return actual
+def _external_subtitle_entry(subtitle, language, subtitle_path, size):
+    if not hasattr(language, 'alpha3') or not alpha2_from_alpha3(language.alpha3):
+        return None
+    custom = CustomLanguage.found_external(subtitle, subtitle_path)
+    if custom is not None:
+        language_str = normalize_subtitle_language_variant(custom)
+    elif str(language.basename) == 'und':
+        return None
+    else:
+        language_str = normalize_subtitle_language_variant(
+            language.basename, forced=language.forced, hi=language.hi and not language.forced)
+    language_str = subtitle_language_with_sync_modifier(language_str, subtitle)
+    language_str = subtitle_language_with_combined_modifier(language_str, subtitle)
+    return [language_str, subtitle_path, size]
 
 
 def compute_missing_subtitles(profile, cutoff_items, subtitles, failed_attempts=None,
@@ -161,7 +357,7 @@ def compute_missing_subtitles(profile, cutoff_items, subtitles, failed_attempts=
 
     present = []
     for entry in (subtitles if use_embedded_subs else [x for x in subtitles if x[1]]):
-        parts = str(entry[0]).split(':')
+        parts = str(entry[0]).lower().split(':')
         # A combined artifact is a bilingual stacked file, not a standalone subtitle of its base language.
         if any(part.startswith('combined-') for part in parts[1:]):
             continue
@@ -196,14 +392,13 @@ def compute_missing_subtitles(profile, cutoff_items, subtitles, failed_attempts=
 
     result = []
     for item in missing:
-        if is_search_given_up(item['language'], failed_attempts):
-            continue
         code = item['language']
         if item['forced'] == 'True':
             code += ':forced'
         elif item['hi'] == 'True':
             code += ':hi'
-        result.append(code)
+        if not is_search_given_up(code, failed_attempts):
+            result.append(code)
     return result
 
 
@@ -216,7 +411,7 @@ def effective_profile_id(item, group=None, library=None):
 
 
 def _missing(item, listing, audio_language, target):
-    group = repository.get_group(item.group_id, target) if item.group_id is not None else None
+    group = repository.get_item_group(item, target)
     library = repository.get_library(item.library_id, target)
     profile_id = effective_profile_id(item, group, library)
     if profile_id is None:
@@ -245,13 +440,23 @@ def _embedded_listing(data):
 
 
 def _file_version(item):
-    return item.path, item.file_dev, item.file_ino, item.file_size, item.file_mtime_ns
+    return (item.created_at, item.source_id, item.library_id, item.path,
+            item.file_dev, item.file_ino, item.file_size, item.file_mtime_ns)
 
 
 def _file_signature(stat):
     if stat is None:
         return None
     return stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns
+
+
+def _is_configured_upload_variant(key):
+    """An upload records Bazarr's configured language code and an optional role."""
+    if not isinstance(key, str) or not key:
+        return False
+    code, separator, role = key.partition(':')
+    return (not separator or role in ('forced', 'hi')) and any(
+        row['code2'] == code for row in get_languages.languages_dict)
 
 
 def _can_borrow_language(key):
@@ -270,11 +475,16 @@ def _can_borrow_language(key):
         return False
 
 
-def index_item(item_id, target=None, ownership_index=None, *, keep_index_on_probe_failure=False, expected_path=None):
+def index_item(item_id, target=None, ownership_index=None, *, keep_index_on_probe_failure=False, expected_path=None,
+               expected_source=None, uploaded_entry=None):
     """Analyze a source file and return its subtitle listing, or None if the index is unavailable."""
     item = repository.get_item(item_id, target)
     if item is None:
         logging.info('BAZARR source item %s no longer exists; its subtitles were not indexed', item_id)
+        return None
+    if expected_source is not None and (not expected_source.same_item(item)
+                                       or item.source_id != expected_source.source_id
+                                       or item.library_id != expected_source.library_id):
         return None
     if expected_path is not None and item.path != expected_path:
         logging.debug('BAZARR source item %s moved before its subtitles were indexed', item_id)
@@ -302,16 +512,19 @@ def index_item(item_id, target=None, ownership_index=None, *, keep_index_on_prob
             return None
         if not isinstance(previous, (list, tuple)) or any(
                 not isinstance(entry, (list, tuple))
-                or (len(entry) == 3 and (entry[0] is not None and not isinstance(entry[0], str)
+                or (len(entry) in (3, 4) and (entry[0] is not None and not isinstance(entry[0], str)
                                          or entry[1] is not None and not isinstance(entry[1], str)))
                 for entry in previous):
             logging.warning('BAZARR invalid stored subtitle listing for this file %s', item.path)
             return None
-        if (keep_index_on_probe_failure and blob is None
-                and all(len(entry) != 3 or not entry[1] or _can_borrow_language(entry[0]) for entry in previous)
+        if (keep_index_on_probe_failure and blob is None and uploaded_entry is None
+                and all(len(entry) < 2 or not entry[1] or (len(entry) == 3 and _can_borrow_language(entry[0]))
+                        for entry in previous)
                 and latest.subtitles is not None and latest.missing_subtitles is not None
                 and index_matches_file(latest, stat, allow_external_only=True)):
             return previous
+        if uploaded_entry is not None and regular_subtitle_version(uploaded_entry[1]) == uploaded_entry[3]:
+            previous = (*previous, uploaded_entry)
         try:
             external = list_external_subtitles(item.path, previous, ownership_index)
         except (OSError, UnicodeDecodeError):
@@ -349,6 +562,28 @@ def index_item(item_id, target=None, ownership_index=None, *, keep_index_on_prob
     return None
 
 
+def remember_single_language_upload(source, entry):
+    """Preserve the language and variant omitted by a single-language filename."""
+    _, path, _, version = entry
+    with source_transaction() as connection:
+        item = repository.get_item(source.item_id, connection, for_update=True)
+        if (item is None or not source.same_item(item)
+                or (item.path, item.source_id, item.library_id, item.kind) != (
+                    source.path, source.source_id, source.library_id, source.kind)
+                or regular_subtitle_version(path) != version):
+            return
+        try:
+            listing = ast.literal_eval(item.subtitles or '[]')
+        except (SyntaxError, ValueError):
+            logging.warning('BAZARR could not retain upload language for source item %s', source.item_id)
+            return
+        if not isinstance(listing, (list, tuple)) or any(not isinstance(entry, (list, tuple)) for entry in listing):
+            return
+        listing = [existing for existing in listing if len(existing) < 2 or existing[1] != path]
+        listing.append(entry)
+        repository.write_item_index(item.id, str(listing), item.missing_subtitles, connection, indexed=False)
+
+
 def _recoverable_index_database_error(error):
     """Recognize operational failures without hiding SQL defects reported as OperationalError by SQLite."""
     if isinstance(error, (sa.exc.ProgrammingError, sa.exc.IntegrityError)):
@@ -375,14 +610,15 @@ def _recoverable_index_database_error(error):
     return error.connection_invalidated
 
 
-def index_saved_subtitle(item_id, *, expected_path):
+def index_saved_subtitle(item_id, *, expected_path, expected_source=None, uploaded_entry=None):
     """Index after a save without letting recoverable failures discard the saved result or its history."""
     try:
         # Keep repository and ownership reads in the same isolated session. The index write has
         # its own transaction, which rolls back before a failure reaches this boundary.
         with Session(bind=handle().get_bind()) as session:
             listing = index_item(item_id, target=session, ownership_index=SourceOutputOwnerIndex(session),
-                                 expected_path=expected_path)
+                                 expected_path=expected_path, expected_source=expected_source,
+                                 uploaded_entry=uploaded_entry)
     except (sa.exc.DBAPIError, OSError) as error:
         if isinstance(error, sa.exc.DBAPIError):
             if not _recoverable_index_database_error(error):
@@ -399,24 +635,43 @@ def index_saved_subtitle(item_id, *, expected_path):
     return listing is not None
 
 
-def recalculate_missing_subtitles(*, library_id=None, group_id=None, cancel=None):
+def index_and_notify_item(source, *, uploaded_entry=None):
+    """Refresh a source item's subtitles and the views that show it after a save."""
+    from app.event_handler import event_stream
+
+    indexed = index_saved_subtitle(source.item_id, expected_path=source.path, expected_source=source,
+                                   uploaded_entry=uploaded_entry)
+    current = resolve_same_item(source) if indexed else None
+    if current is not None:
+        for event_type, row_id in (('source-item', current.item_id), ('source-group', current.group_id)):
+            if row_id is not None:
+                try:
+                    event_stream(type=event_type, payload=row_id)
+                except Exception:
+                    logging.exception('BAZARR could not notify %s %s after indexing a saved subtitle',
+                                      event_type, row_id)
+    return indexed
+
+
+def recalculate_missing_subtitles(*, library_id=None, group_id=None, item_id=None, cancel=None):
     """Re-evaluate profile and settings rules against stored tracks, without a folder walk or probe."""
     items = repository.Items
     scope = []
     if library_id is not None:
         scope.append(items.c.library_id == library_id)
     if group_id is not None:
-        scope.append(items.c.group_id == group_id)
+        scope.append(repository.group_item_scope(group_id))
+    if item_id is not None:
+        scope.append(items.c.id == item_id)
     item_ids = handle().execute(sa.select(items.c.id).where(*scope, items.c.subtitles.is_not(None))).scalars().all()
-    for item_id in item_ids:
+    for current_id in item_ids:
         if cancel is not None:
             cancel()
         with source_transaction() as connection:
-            item = repository.get_item(item_id, connection, for_update=True)
+            item = repository.get_item(current_id, connection, group_id=group_id, for_update=True)
             if item is None or item.subtitles is None:
                 continue
-            if ((library_id is not None and library_id != item.library_id)
-                    or (group_id is not None and group_id != item.group_id)):
+            if library_id is not None and library_id != item.library_id:
                 continue
             external = [entry for entry in ast.literal_eval(item.subtitles) if entry[1]]
             data = read_metadata(item.ffprobe_cache)
@@ -427,4 +682,13 @@ def recalculate_missing_subtitles(*, library_id=None, group_id=None, cancel=None
             subtitles = str(listing)
             missing = str(_missing(item, listing, item.audio_language, connection))
             if (subtitles, missing) != (item.subtitles, item.missing_subtitles):
-                repository.write_item_index(item_id, subtitles, missing, connection, indexed=False)
+                repository.write_item_index(current_id, subtitles, missing, connection, indexed=False)
+    from app.event_handler import event_stream, socketio
+
+    if socketio.server is not None:
+        # A broad pass can consume pending item and group refreshes in the job queue.
+        broad = item_id is None and group_id is None
+        if broad or item_id is not None:
+            event_stream(type='source-item', payload=item_id)
+        if broad or group_id is not None:
+            event_stream(type='source-group', payload=group_id)

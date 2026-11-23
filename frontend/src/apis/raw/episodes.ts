@@ -1,4 +1,5 @@
 import BaseApi from "./base";
+import { blacklistParams, blacklistRemovalRequest } from "./blacklist";
 
 class EpisodeApi extends BaseApi {
   constructor() {
@@ -22,9 +23,20 @@ class EpisodeApi extends BaseApi {
     return response.data;
   }
 
-  async wanted(params: Parameter.Range) {
-    const response = await this.get<Wanted.EpisodePage>("/wanted", params);
-    return response;
+  async wanted(
+    params: Parameter.Range,
+    includeSources: false,
+  ): Promise<Wanted.EpisodePage>;
+  async wanted(
+    params: Wanted.Range,
+    includeSources?: boolean,
+  ): Promise<Wanted.EpisodePage<Wanted.EpisodeRow>>;
+  async wanted({ sourceKeys, ...params }: Wanted.Range, includeSources = true) {
+    return this.get<Wanted.EpisodePage<Wanted.EpisodeRow>>("/wanted", {
+      ...params,
+      sources: includeSources ? 1 : undefined,
+      source_key: sourceKeys,
+    });
   }
 
   async wantedBy(episodeid: number[]) {
@@ -145,10 +157,20 @@ class EpisodeApi extends BaseApi {
     });
   }
 
-  async blacklist() {
-    const response =
-      await this.get<DataWrapper<Blacklist.Episode[]>>("/blacklist");
+  async blacklist(scope: Blacklist.Scope = {}, signal?: AbortSignal) {
+    const response = await this.get<DataWrapper<Blacklist.Episode[]>>(
+      "/blacklist",
+      blacklistParams(scope),
+      signal,
+    );
     return response.data;
+  }
+
+  async blacklistSourceOptions(signal?: AbortSignal) {
+    const response = await this.get<{
+      source_filters?: Blacklist.SourceOption[];
+    }>("/blacklist", { sources: 1, length: 1 }, signal);
+    return response.source_filters ?? [];
   }
 
   async addBlacklist(
@@ -164,8 +186,9 @@ class EpisodeApi extends BaseApi {
     return response.data;
   }
 
-  async deleteBlacklist(all?: boolean, form?: FormType.DeleteBlacklist) {
-    await this.delete("/blacklist", form, { all });
+  async deleteBlacklist(removal: Blacklist.Removal) {
+    const { form, params } = blacklistRemovalRequest(removal);
+    await this.delete("/blacklist", form, params);
   }
 }
 

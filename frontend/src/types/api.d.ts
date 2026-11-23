@@ -1,6 +1,8 @@
 interface Badge {
   episodes: number;
   movies: number;
+  source_episodes?: number;
+  source_movies?: number;
   sports?: number;
   providers: number;
   status: number;
@@ -223,7 +225,31 @@ declare namespace Item {
   };
 }
 
+type MediaSourceKey = `arr:${number}` | `source:${number}` | "source:removed";
+type MediaSourceKind = "folder" | "jellyfin" | "emby";
+
+type ArrRowOwner = {
+  origin?: "arr";
+  source_key?: MediaSourceKey | null;
+  arr_instance_id?: number;
+};
+
+type MediaSourceOwner = {
+  origin: "source";
+  source_key: MediaSourceKey;
+  source_name: string | null;
+  source_kind?: MediaSourceKind | null;
+};
+
 declare namespace Wanted {
+  type SourceRow = MediaSourceOwner & {
+    arr_instance_id: null;
+    source_id: number;
+    source_kind: MediaSourceKind;
+    identity_state: "identified" | "parsed" | "ambiguous" | "unmatched";
+  };
+  type RowOwner = ArrRowOwner | SourceRow;
+  type Range = Parameter.Range & { sourceKeys?: MediaSourceKey[] };
   type Base = MonitoredType &
     TagType &
     SceneNameType & {
@@ -244,9 +270,25 @@ declare namespace Wanted {
 
   type Movie = Base & MovieIdType & TitleType & AudioLanguageType;
 
+  type EpisodeRow =
+    | (Episode & ArrRowOwner)
+    | (Omit<
+        Episode,
+        "sonarrEpisodeId" | "sonarrSeriesId" | "arr_instance_id" | "seriesType"
+      > &
+        SourceRow & {
+          sonarrEpisodeId: null;
+          sonarrSeriesId: null;
+          seriesType: null;
+        });
+  type MovieRow =
+    | (Movie & ArrRowOwner)
+    | (Omit<Movie, "radarrId" | "arr_instance_id"> &
+        SourceRow & { radarrId: null });
+
   // The wanted episodes page. `forced_pending` counts episodes with a pending
   // duplicate search; they are not in `data` unless something is also missing.
-  type EpisodePage = DataWrapperWithTotal<Episode> & {
+  type EpisodePage<Row = Episode> = DataWrapperWithTotal<Row> & {
     forced_pending?: number;
   };
 }
@@ -258,13 +300,40 @@ declare namespace Blacklist {
     subs_id: string;
   };
 
-  type Movie = Base & MovieIdType & TitleType;
+  type SourceRow = MediaSourceOwner & {
+    id: number;
+    removal_key: string;
+    source_id: number | null;
+    source_item_id: number | null;
+    video_path: string | null;
+  };
+
+  type Movie = Base &
+    (
+      | (MovieIdType & TitleType & ArrRowOwner)
+      | (SourceRow & { title: string | null })
+    );
 
   type Episode = Base &
-    EpisodeTitleType &
-    SeriesIdType & {
-      episode_number: string;
-    };
+    (
+      | (EpisodeTitleType &
+          SeriesIdType &
+          ArrRowOwner & { episode_number: string })
+      | (SourceRow & {
+          seriesTitle: string | null;
+          episodeTitle: string | null;
+          episode_number: string | null;
+        })
+    );
+
+  type Scope = { includeSources?: boolean; sourceKeys?: MediaSourceKey[] };
+
+  type SourceOption = { key: MediaSourceKey; name: string };
+
+  type Removal =
+    | ({ all: true } & Scope)
+    | { all: false; form: FormType.DeleteBlacklist }
+    | { sourceBlacklistId: number; sourceBlacklistKey: string };
 }
 
 declare namespace History {
@@ -530,7 +599,18 @@ type ItemSearchResult = Partial<SeriesIdType> &
     /** Present on a sports league. A league has a sport, not a year. */
     sportarrLeagueId?: number;
     sport?: string | null;
-  };
+  } & (
+    | { origin?: "arr"; source_kind?: never }
+    | {
+        origin: "source";
+        source_kind: "show" | "movie" | "league";
+        id: number;
+        arr_instance_id?: never;
+        sonarrSeriesId?: never;
+        radarrId?: never;
+        sportarrLeagueId?: never;
+      }
+  );
 
 type BackendError = {
   code: number;

@@ -317,7 +317,7 @@ class Scheduler:
             from media_sources.schedule import configure_source_jobs
             configure_source_jobs(self.aps_scheduler, database)
         except Exception:
-            logging.exception("BAZARR could not configure the media source scan task")
+            logging.exception("BAZARR could not configure the media source tasks")
 
     def __sportarr_update_task(self):
         from sportarr.scheduler import configure_sports_jobs

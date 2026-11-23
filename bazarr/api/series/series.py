@@ -19,7 +19,10 @@ from app.event_handler import event_stream
 from api.queued_job import queued_job_model, queued_job_response
 from api.swaggerui import subtitles_model, subtitles_language_model, audio_language_model, job_queued_model
 
-from api.utils import authenticate, None_Keys, postprocess, lowest_subtitle_scores, chunked
+from api.utils import authenticate, None_Keys, lowest_subtitle_scores, chunked
+from media_sources import repository
+from media_sources.library_rows import library_page, library_row, library_row_fields, show_rows
+from media_sources.union import SourceKeyFilter, add_source_arguments, includes_sources
 
 api_ns_series = Namespace('Series', description='List series metadata, update series languages profile or run actions '
                                                 'for specific series.')
@@ -36,6 +39,10 @@ class Series(Resource):
                                     help='Canonical local series IDs (#156; preferred, unique across instances)')
     get_request_parser.add_argument('scores', type=inputs.boolean, required=False, default=False,
                                     help='Add lowest_subtitle_score per series (opt-in; absent = unchanged response)')
+
+    add_source_arguments(get_request_parser)
+    get_request_parser.add_argument('needs_attention', type=inputs.boolean, location='args', default=False,
+                                    help='Only source rows with unresolved identity or no effective profile')
 
     get_subtitles_model = api_ns_series.model('subtitles_model', subtitles_model)
     get_subtitles_language_model = api_ns_series.model('subtitles_language_model', subtitles_language_model)
@@ -84,6 +91,10 @@ class Series(Resource):
         'total': fields.Integer(),
     })
 
+    mixed_data_model = api_ns_series.clone('series_mixed_data', data_model, library_row_fields)
+    mixed_data_model_with_scores = api_ns_series.clone(
+        'series_mixed_data_scores', data_model_with_scores, library_row_fields)
+
     @authenticate
     @api_ns_series.doc(parser=get_request_parser)
     @api_ns_series.response(200, 'Success')
@@ -96,6 +107,14 @@ class Series(Resource):
         seriesId = args.get('seriesid[]')
         localId = args.get('id[]')
         scores = args.get('scores')
+        needs_attention = args.get('needs_attention')
+        owner_filter = SourceKeyFilter(tuple(args.get('source_key[]') or ()))
+        explicit_ids = bool(localId or seriesId)
+        source_table = repository.Groups
+        mixed = (not explicit_ids and args.get('sources') == '1' and includes_sources(
+            args, database, source_table, source_table.c.kind == 'show'))
+        if needs_attention and not mixed:
+            return {'data': [], 'total': 0}
 
         episodeFileCount = select(TableEpisodes.series_id,
                                   func.count(TableEpisodes.id).label('episodeFileCount')) \
@@ -163,50 +182,34 @@ class Series(Resource):
             stmt = stmt.where(TableShows.id.in_(localId))
         elif len(seriesId) != 0:
             stmt = stmt.where(TableShows.sonarrSeriesId.in_(seriesId))
-        elif length > 0:
-            stmt = stmt.limit(length).offset(start)
 
-        rows = database.execute(stmt).all()
-        results = [postprocess({
-            'id': x.id,
-            'arr_instance_id': x.arr_instance_id,
-            'tvdbId': x.tvdbId,
-            'alternativeTitles': x.alternativeTitles,
-            'audio_language': x.audio_language,
-            'fanart': x.fanart,
-            'imdbId': x.imdbId,
-            'monitored': x.monitored,
-            'overview': x.overview,
-            'path': x.path,
-            'poster': x.poster,
-            'profileId': x.profileId,
-            'seriesType': x.seriesType,
-            'sonarrSeriesId': x.sonarrSeriesId,
-            'tags': x.tags,
-            'title': x.title,
-            'year': x.year,
-            'ended': x.ended,
-            'lastAired': x.lastAired,
-            'episodeFileCount': x.episodeFileCount,
-            'episodeMissingCount': x.episodeMissingCount,
-        }) for x in rows]
-
-        count = database.execute(
-            select(func.count())
-            .select_from(TableShows)) \
-            .scalar()
+        if owner_filter.keys:
+            stmt = stmt.where(owner_filter.arr(TableShows.arr_instance_id))
+        if mixed:
+            rows, count = library_page(database, stmt, show_rows(owner_filter, database), TableShows.sortTitle,
+                                       start=start, length=length, needs_attention=needs_attention)
+        else:
+            count_query = select(func.count()).select_from(TableShows)
+            if owner_filter.keys:
+                count_query = select(func.count()).select_from(stmt.order_by(None).subquery())
+            if length > 0 and not explicit_ids:
+                stmt = stmt.limit(length).offset(start)
+            rows = database.execute(stmt).all()
+            count = database.execute(count_query).scalar()
+        results = [library_row(row, mixed) for row in rows]
 
         if scores:
-            # Two extra queries for the page: one for the series' episodes and one
-            # grouped/ordered history query. The lowest score is computed per
-            # episode, then reduced to the minimum across each series' episodes.
-            series_ids = [x.id for x in rows]
-            series_lowest = self._series_lowest_subtitle_scores(series_ids)
+            arr_rows = [row for row in rows if not mixed or row.origin == 'arr']
+            score_map = self._series_lowest_subtitle_scores([x.id for x in arr_rows])
             for item in results:
-                item['lowest_subtitle_score'] = series_lowest.get(item['id'])
-            return marshal({'data': results, 'total': count}, self.get_response_model_with_scores)
+                item['lowest_subtitle_score'] = score_map.get(item['id']) if item.get('origin') != 'source' else None
 
-        return marshal({'data': results, 'total': count}, self.get_response_model)
+        if mixed:
+            model = self.mixed_data_model_with_scores if scores else self.mixed_data_model
+            response_model = {**self.get_response_model, 'data': fields.Nested(model)}
+        else:
+            response_model = self.get_response_model_with_scores if scores else self.get_response_model
+        return marshal({'data': results, 'total': count}, response_model)
 
     @staticmethod
     def _series_lowest_subtitle_scores(series_ids):
@@ -334,6 +337,8 @@ class Series(Resource):
     patch_request_parser.add_argument('seriesid', type=int, required=False, help='Sonarr series ID')
     patch_request_parser.add_argument('arr_instance_id', type=int, required=False,
                                       help='Owning Sonarr instance id (#156)')
+    patch_request_parser.add_argument('sources', type=int, required=False,
+                                      help='Set to 1 to include media sources in Search All')
     patch_request_parser.add_argument('action', type=str, required=False, help='Action to perform from ["scan-disk", '
                                                                                '"search-missing", "search-wanted", "sync"]')
 
@@ -363,7 +368,14 @@ class Series(Resource):
             else:
                 return queued_job_response(job_id or None), 202
         elif action == "search-wanted":
-            wanted_search_missing_subtitles_series()
+            from media_sources.wanted import arr_wanted_condition, queue_wanted_search
+
+            source_job = queue_wanted_search('episode') if args.get("sources") == 1 else None
+            if not source_job:
+                wanted_search_missing_subtitles_series()
+            elif database.scalar(select(select(TableEpisodes.id).where(
+                    arr_wanted_condition('sonarr', TableEpisodes.arr_instance_id)).exists())):
+                wanted_search_missing_subtitles_series(active_owners_only=True)
             return '', 204
         elif action == "scan-wanted":
             wanted_scan_subtitles_series()
