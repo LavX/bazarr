@@ -240,6 +240,141 @@ it("refreshes a stale Sports exclusion and retries with the replacement row key"
   expect(keys).toEqual(["listed-entry", "replacement-entry"]);
 });
 
+it.each([
+  ["one native owner", [sportarr]],
+  ["multiple native owners", [sportarr, sportarrSibling]],
+] as const)(
+  "clears native exclusions from the unfiltered picker after the last retained source disappears with %s",
+  async (_, instances) => {
+    window.history.replaceState(null, "", "/");
+    const user = userEvent.setup();
+    let retained = true;
+    const nativeOwners = new Set<number>(instances.map(({ id }) => id));
+    const clears: URLSearchParams[] = [];
+    server.use(
+      http.get("/api/system/settings", () =>
+        HttpResponse.json({ general: { use_sportarr: true } }),
+      ),
+      http.get("/api/system/status", () => HttpResponse.json({ data: {} })),
+      http.get("/api/system/arr-instances", () => HttpResponse.json(instances)),
+      http.get("/api/system/media-sources", () =>
+        HttpResponse.json({
+          data: [
+            {
+              id: 8,
+              name: "Local archive",
+              kind: "folder",
+              enabled: true,
+              libraries: [{ id: 9, enabled: true, content_kind: "movie" }],
+            },
+          ],
+          availability: {
+            sports: {
+              browsable: false,
+              searchable: false,
+              retained,
+              ...(retained ? { retained_source_ids: [8] } : {}),
+            },
+          },
+        }),
+      ),
+      http.get("/api/sports/blacklist", ({ request }) => {
+        const params = new URL(request.url).searchParams;
+        const keys = params.getAll("source_key[]");
+        const owner = params.get("arr_instance_id");
+        const data = [
+          ...instances
+            .filter(({ id }) => nativeOwners.has(id))
+            .map(({ id }) => ({
+              ...arr,
+              id,
+              arr_instance_id: id,
+              source_key: `arr:${id}`,
+              title: `Native final ${id}`,
+            })),
+          ...(retained ? [{ ...source, source_group_id: null }] : []),
+        ].filter(
+          (row) =>
+            (!owner || row.arr_instance_id === Number(owner)) &&
+            (keys.length === 0 || keys.includes(row.source_key)),
+        );
+        return HttpResponse.json({ data, total: data.length });
+      }),
+      http.delete("/api/sports/blacklist", ({ request }) => {
+        const params = new URL(request.url).searchParams;
+        clears.push(params);
+        if (params.getAll("source_key[]").includes("source:8")) {
+          retained = false;
+          return HttpResponse.json({ removed: 1 });
+        }
+        const owner = params.get("arr_instance_id");
+        if (owner) nativeOwners.delete(Number(owner));
+        else if (
+          params.get("sources") === "1" &&
+          params.getAll("source_key[]").length === 0
+        ) {
+          nativeOwners.clear();
+        }
+        return HttpResponse.json({ removed: instances.length });
+      }),
+    );
+    customRender(<BlacklistSportsView />);
+    await screen.findByRole("row", { name: /Source Final/ });
+    const choices = await openSelect(user, "All sources");
+    await user.click(
+      within(choices).getByRole("option", { name: "Local archive" }),
+    );
+    await waitFor(() =>
+      expect(screen.queryByRole("row", { name: /Native final/ })).toBeNull(),
+    );
+    await user.click(screen.getByRole("button", { name: "Remove All" }));
+    const sourceDialog = within(await screen.findByRole("dialog"));
+    await waitFor(() =>
+      expect(sourceDialog.getByText(/for this source again/)).toBeVisible(),
+    );
+    await user.click(
+      sourceDialog.getByRole("button", { name: "Clear exclusions" }),
+    );
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    await screen.findByRole("combobox", { name: "Instance" });
+    await user.click(
+      screen.getByRole("button", { name: "Clear instance filter" }),
+    );
+    for (const { id } of instances) {
+      expect(
+        await screen.findByRole("row", {
+          name: new RegExp(`Native final ${id}`),
+        }),
+      ).toBeVisible();
+    }
+    expect(clears[0].getAll("source_key[]")).toEqual(["source:8"]);
+    expect(clears[0].has("arr_instance_id")).toBe(false);
+
+    await user.click(screen.getByRole("button", { name: "Remove All" }));
+    const nativeDialog = within(await screen.findByRole("dialog"));
+    await waitFor(() =>
+      expect(
+        nativeDialog.getByText(
+          instances.length > 1
+            ? /across all sports libraries again/
+            : /for this instance again/,
+        ),
+      ).toBeVisible(),
+    );
+    await user.click(
+      nativeDialog.getByRole("button", { name: "Clear exclusions" }),
+    );
+    expect(
+      await screen.findByText("Nothing Excluded for Sports"),
+    ).toBeVisible();
+    expect(clears[1].getAll("source_key[]")).toEqual([]);
+    expect(clears[1].get("arr_instance_id")).toBe(
+      instances.length === 1 ? "42" : null,
+    );
+    expect(clears[1].get("sources")).toBe(instances.length > 1 ? "1" : null);
+  },
+);
+
 it.each(pages.slice(1))(
   "keeps both kinds of retained owner on source-only %s",
   async (route, Page) => {
@@ -420,7 +555,9 @@ it("confirms the complete mixed bulk scope when a text filter matches only the s
   const dialog = within(
     await screen.findByRole("dialog", { name: "Clear sports exclusions" }),
   );
-  expect(dialog.getByText(/across all sports libraries/)).toBeVisible();
+  await waitFor(() =>
+    expect(dialog.getByText(/across all sports libraries/)).toBeVisible(),
+  );
   try {
     await user.click(dialog.getByRole("button", { name: "Clear exclusions" }));
     await waitFor(() =>

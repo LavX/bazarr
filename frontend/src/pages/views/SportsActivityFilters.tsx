@@ -52,7 +52,7 @@ const SportsActivityFilters: FunctionComponent<Props> = ({
   // against it without making the user pick it first.
   const source = scope.selected?.startsWith("source:") ? scope.selected : null;
   const allSources =
-    sourceActivity &&
+    (sourceActivity || instances.length > 1) &&
     owner === undefined &&
     scope.selected === null &&
     onAllSourcesAction;

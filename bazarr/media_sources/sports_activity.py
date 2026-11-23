@@ -247,6 +247,8 @@ def exclude_history_release(session, history_id, source_id, item_id, provider, s
 
 def clear_blacklist(session, scope):
     source = repository.Blacklist
+    enabled = sa.select(TableArrInstances.id).where(
+        TableArrInstances.kind == 'sportarr', TableArrInstances.enabled == 1)
     removed = 0
     with source_transaction(session) as connection:
         if scope.includes('source'):
@@ -258,11 +260,10 @@ def clear_blacklist(session, scope):
                 sa.exists().where(repository.Libraries.c.content_kind == 'sports'),
                 sa.exists().where(repository.History.c.item_kind == _KIND),
             )
-            if not connection.scalar(sa.select(source_sports)):
+            if not connection.scalar(sa.select(source_sports)) and not (
+                    settings.general.use_sportarr and connection.scalar(sa.select(enabled.exists()))):
                 raise ValueError('arr_instance_id is required and must be a positive integer')
         if settings.general.use_sportarr and scope.includes('arr'):
-            enabled = sa.select(TableArrInstances.id).where(
-                TableArrInstances.kind == 'sportarr', TableArrInstances.enabled == 1)
             removed += connection.execute(sa.delete(TableBlacklistSports).where(
                 TableBlacklistSports.arr_instance_id.in_(enabled), scope.arr(TableBlacklistSports.arr_instance_id),
             )).rowcount

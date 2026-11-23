@@ -247,7 +247,7 @@ const SettingsConnectionsView: FunctionComponent = () => {
     const removedName = deleteTarget.name;
     setRefusal(null);
     deleteInstance.mutate(
-      { id: deleteTarget.id, removeLibrary },
+      { id: deleteTarget.id, kind: deleteTarget.kind, removeLibrary },
       {
         onSuccess: () => {
           // Nothing about the kind switching off: the dialog said it would,

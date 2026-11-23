@@ -35,6 +35,10 @@ export default function SourceFilter({
       allowDeselect
       searchable
       clearable
+      clearButtonProps={{
+        "aria-label": `Clear ${label.toLowerCase()} filter`,
+        "aria-hidden": false,
+      }}
       size="sm"
       w={156}
     />

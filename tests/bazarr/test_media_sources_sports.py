@@ -242,7 +242,7 @@ def test_sports_activity_unions_keep_legacy_shape_filter_and_page(client, arr_li
 
     previous = {endpoint: get(endpoint).data for endpoint in endpoints}
     assert {endpoint: get(endpoint, sources=1).data for endpoint in endpoints} == previous
-    ownerless = client.delete('/api/sports/blacklist?sources=1', headers=HEADERS)
+    ownerless = client.delete('/api/sports/blacklist', headers=HEADERS)
     assert ownerless.status_code == 400
     assert get('blacklist').data == previous['blacklist']
     owner, league, dated, round_id = _events(arr_library, tmp_path)
@@ -319,6 +319,61 @@ def test_sports_activity_unions_keep_legacy_shape_filter_and_page(client, arr_li
     arr_library.execute(sa.delete(repository.Items).where(repository.Items.c.id == dated))
     retained = get('blacklist', sources=1, **{'source_key[]': f'source:{owner}'}).get_json()['data']
     assert len(retained) == 1 and retained[0]['title'] == 'Race Day Race'
+
+
+@pytest.mark.parametrize('master,primary_enabled,secondary_enabled,expected_status,remaining', [
+    (True, True, True, 200, [5]),
+    (True, True, False, 200, [4, 5]),
+    (True, False, False, 400, [3, 4, 5]),
+    (False, True, True, 400, [3, 4, 5]),
+])
+def test_unfiltered_clear_after_last_retained_source_exclusion_keeps_native_owner_guards(
+        client, arr_library, tmp_path, monkeypatch, master, primary_enabled, secondary_enabled,
+        expected_status, remaining):
+    import sqlalchemy as sa
+    from app.config import settings
+    from app.database import TableArrInstances, TableBlacklistSports, TableSportsEvents, TableSportsLeagues
+    from media_sources import repository
+
+    monkeypatch.setattr('app.event_handler.socketio.emit', lambda *args, **kwargs: None)
+    monkeypatch.setattr(settings.general, 'use_sportarr', master)
+    arr_library.execute(sa.update(TableArrInstances).where(TableArrInstances.id == 3).values(
+        enabled=primary_enabled, is_default=primary_enabled))
+    for owner, enabled in ((4, secondary_enabled), (5, False)):
+        arr_library.execute(sa.insert(TableArrInstances).values(
+            id=owner, kind='sportarr', name=f'Sportarr {owner}', stable_key=f'sportarr-{owner}',
+            enabled=enabled, is_default=0, port=9000 + owner, path_mappings='[]'))
+        arr_library.execute(sa.insert(TableSportsLeagues).values(
+            id=owner, arr_instance_id=owner, sportarrLeagueId=31, title=f'League {owner}', monitored='True'))
+        arr_library.execute(sa.insert(TableSportsEvents).values(
+            id=owner, arr_instance_id=owner, league_id=owner, sportarrEventId=41, file_id=51,
+            path=f'/sports/{owner}.mkv', title='Final', monitored='True'))
+        arr_library.execute(sa.insert(TableBlacklistSports).values(
+            arr_instance_id=owner, league_id=owner, event_id=owner, provider='alpha', subs_id='release', language='en'))
+    source, _, _ = add_source(arr_library, tmp_path, content_kind='movie')
+    repository.insert_blacklist(arr_library, source_id=source, item_kind='sports_event', source_name='Former Sports')
+
+    def clear(**scope):
+        return client.delete('/api/sports/blacklist', headers=HEADERS, query_string={'sources': 1, **scope})
+
+    response = clear(**{'source_key[]': f'source:{source}'})
+    assert response.status_code == 200 and response.json == {'removed': 1}
+    assert arr_library.scalar(sa.select(sa.func.count()).select_from(repository.Blacklist)) == 0
+    assert arr_library.scalar(sa.select(sa.func.count()).select_from(repository.History)) == 0
+    assert arr_library.scalar(sa.select(sa.func.count()).select_from(repository.Libraries).where(
+        repository.Libraries.c.content_kind == 'sports')) == 0
+    for key in (f'source:{source}', 'source:removed'):
+        response = clear(**{'source_key[]': key})
+        assert response.status_code == 200 and response.json == {'removed': 0}
+        assert arr_library.scalars(sa.select(TableBlacklistSports.arr_instance_id).order_by(
+            TableBlacklistSports.arr_instance_id)).all() == [3, 4, 5]
+
+    response = clear()
+    assert response.status_code == expected_status, response.json
+    if expected_status == 200:
+        assert response.json == {'removed': 3 - len(remaining)}
+    assert arr_library.scalars(sa.select(TableBlacklistSports.arr_instance_id).order_by(
+        TableBlacklistSports.arr_instance_id)).all() == remaining
 
 
 def test_source_sports_history_exclusion_preserves_a_replacement_subtitle(client, arr_library, tmp_path, monkeypatch):

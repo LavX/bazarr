@@ -16,7 +16,11 @@ import sports, {
 import { isSameRun } from "@/utilities/jobs";
 import { useArrKindAvailability } from "./arrInstances";
 import { refreshWhenJobFinishes } from "./jobWatch";
-import { useSourceAvailability, useSourceFilter } from "./mediaSources";
+import {
+  mediaSourcesKey,
+  useSourceAvailability,
+  useSourceFilter,
+} from "./mediaSources";
 import { useSystemJobs } from "./system";
 
 export function useSportsAvailability() {
@@ -500,7 +504,10 @@ export function useSportsAction() {
 export function useRemoveSportsExclusion() {
   const client = useQueryClient();
   const refresh = () =>
-    client.invalidateQueries({ queryKey: [QueryKeys.Sports] });
+    Promise.all([
+      client.invalidateQueries({ queryKey: [QueryKeys.Sports] }),
+      client.invalidateQueries({ queryKey: mediaSourcesKey, exact: true }),
+    ]);
   return useMutation({
     mutationFn: (
       scope:

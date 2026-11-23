@@ -248,16 +248,27 @@ export function useDeleteArrInstance({
     mutationKey: [...arrKey, QueryKeys.Actions, "delete"],
     mutationFn: inlineWhen(
       inlineErrors,
-      ({ id, removeLibrary }: { id: number; removeLibrary?: boolean }) =>
-        api.arrInstances.remove(id, removeLibrary),
+      ({
+        id,
+        removeLibrary,
+      }: {
+        id: number;
+        kind: ArrKind;
+        removeLibrary?: boolean;
+      }) => api.arrInstances.remove(id, removeLibrary),
     ),
-    onSuccess: () => {
+    onSuccess: async (_, { kind }) => {
       showNotification({ color: "green", message: "Instance deleted" });
-      client.invalidateQueries({ queryKey: arrKey });
       // Deleting a kind's last instance switches that kind off on the server.
-      void client.invalidateQueries({
-        queryKey: [QueryKeys.System, QueryKeys.Settings],
-      });
+      await Promise.all([
+        client.invalidateQueries({ queryKey: arrKey }),
+        client.invalidateQueries({
+          queryKey: [QueryKeys.System, QueryKeys.Settings],
+        }),
+        ...(kind === "sportarr"
+          ? [client.invalidateQueries({ queryKey: [QueryKeys.Sports] })]
+          : []),
+      ]);
     },
     onError: (error) => {
       // A 409 (the instance still owns synced media, or its library sync is

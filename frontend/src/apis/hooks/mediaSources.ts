@@ -5,7 +5,11 @@ import { isAxiosError } from "axios";
 import { QueryKeys } from "@/apis/queries/keys";
 import api from "@/apis/raw";
 import { withInlineErrors } from "@/apis/raw/inlineWrites";
-import type { SourceContentKind } from "@/apis/raw/mediaSources";
+import type {
+  MediaSource,
+  SourceContentKind,
+  SourceLibrary,
+} from "@/apis/raw/mediaSources";
 import { useArrInstanceLabels } from "./arrInstances";
 import { refreshWhenJobFinishes } from "./jobWatch";
 import { useSystemSettings } from "./system";
@@ -51,6 +55,34 @@ export function useWriteMediaSource() {
     mutationFn: (write: () => Promise<unknown>) => withInlineErrors(write),
     onSuccess: () =>
       client.invalidateQueries({ queryKey: mediaSourcesKey, exact: true }),
+  });
+}
+
+export function useRemoveMediaSource() {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: ({
+      source,
+      library,
+    }: {
+      source: MediaSource;
+      library?: SourceLibrary;
+    }) =>
+      withInlineErrors(() =>
+        library
+          ? api.mediaSources.removeLibrary(source.id, library.id)
+          : api.mediaSources.remove(source.id),
+      ),
+    onSuccess: async (_, { library }) => {
+      // A source can own retained activity after its last sports library is gone.
+      const refreshSports = !library || library.content_kind === "sports";
+      await Promise.all([
+        client.invalidateQueries({ queryKey: mediaSourcesKey, exact: true }),
+        ...(refreshSports
+          ? [client.invalidateQueries({ queryKey: [QueryKeys.Sports] })]
+          : []),
+      ]);
+    },
   });
 }
 
