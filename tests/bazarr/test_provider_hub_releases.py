@@ -3610,6 +3610,55 @@ def test_discarding_a_stage_restores_only_the_active_official_trust_refresh_acce
                                    saved_source, active_trusted, staged_trusted)
 
 
+@pytest.mark.parametrize("active_decision", [
+    "legacy-unanswered", "legacy-never-trusted", "saved-trusted", "saved-demoted", "saved-never-trusted",
+])
+def test_revoked_stage_leaves_only_the_active_releases_trust_decision(hub, monkeypatch, active_decision):
+    from provider_hub import releases, revocation, service, state_store
+    from provider_hub.state import OFFICIAL_CATALOG_REPO, load_state, mutate_state
+
+    plugin_id = "examplehub"
+    old_commit, new_commit = "a" * 40, "b" * 40
+    old_version, new_version = "1.0.0", "1.1.0"
+    never_trusted = active_decision.endswith("never-trusted")
+    active = _row(plugin_id, active=old_version, trusted=not never_trusted)
+    active["manifest"]["source"] = {
+        "repo": OFFICIAL_CATALOG_REPO, "commit": old_commit, "trusted": not never_trusted,
+    }
+    _seed(examplehub=active)
+    original, = state_store.list_releases(plugin_id, states=(releases.ACTIVE,))
+
+    decision = {"source_id": "official", "origin": "catalog", "source_bound": True,
+                "trusted": active_decision == "saved-trusted"}
+    if active_decision == "saved-demoted":
+        decision.update(source_id=None, demoted_commit=True, trust_note="Active commit was previously rejected.")
+    staged = _row(plugin_id, active=old_version, staged=new_version, manifest=active["manifest"])
+    staged["staged_manifest"]["source"] = {"repo": OFFICIAL_CATALOG_REPO, "commit": new_commit, "trusted": True}
+    if active_decision.startswith("saved-"):
+        staged["previous_source"] = decision.copy()
+    _seed(examplehub=staged)
+    discarded, = state_store.list_releases(plugin_id, states=(releases.STAGED,))
+
+    verdicts = {old_commit: (True, "main") if never_trusted else (None, "comparison unavailable"),
+                new_commit: (False, "outside main and beta")}
+    monkeypatch.setattr(service._OfficialAncestry, "check", lambda self, commit: verdicts[commit])
+    monkeypatch.setattr(service, "_revocations", lambda state: (revocation.Revocation(plugin_id, new_version),))
+
+    def reconcile(state):
+        service._recheck_installed_trust(state, service._OfficialAncestry(state))
+        service._hold_revoked_installations(state)
+
+    mutate_state(reconcile)
+
+    row = load_state()["installations"][plugin_id]
+    assert (row["state"], row["active_version"], row["staged_version"]) == ("active", old_version, None)
+    assert service._installation_source(row) == decision
+    assert "previous_source" not in row
+    assert state_store.list_releases(plugin_id, states=(releases.ACTIVE,)) == [original]
+    failed, = state_store.list_releases(plugin_id, states=(releases.FAILED,))
+    assert failed.id == discarded.id
+
+
 def test_a_revoked_legacy_stage_preserves_the_active_official_trust_on_the_same_refresh(
         catalog_data_owner, monkeypatch, tmp_path):
     _check_discarded_official_stage(catalog_data_owner, monkeypatch, tmp_path,

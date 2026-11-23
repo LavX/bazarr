@@ -3818,22 +3818,17 @@ def _restore_active_source(state, plugin_id, row) -> None:
         row.pop("demoted_commit", None)
         return
     owner = active.source_id, active.origin
+    row.pop("demoted_commit", None)
+    row.pop("trust_note", None)
     if isinstance(previous, dict) and (
             (previous.get("source_id"), previous.get("origin")) == owner or (
                 active.source_id == OFFICIAL_CATALOG_SOURCE_ID and previous.get("source_id") is None
                 and previous.get("trust_note") and previous.get("source_bound"))):
-        row.pop("demoted_commit", None)
-        row.pop("trust_note", None)
         row.update(_installation_source(previous))
         row["trusted"] = bool(previous.get("trusted"))
     else:
-        # Old stages did not save the active release's trust decision.
-        if (row.get("source_id"), row.get("origin")) != owner and not (
-                active.source_id == OFFICIAL_CATALOG_SOURCE_ID and row.get("demoted_commit")):
-            row.update(source_id=active.source_id, origin=active.origin)
-            row.pop("demoted_commit", None)
-            row.pop("trust_note", None)
-        row["trusted"] = False
+        # With no saved decision, only the active release's recorded ownership can be restored.
+        row.update(source_id=active.source_id, origin=active.origin, trusted=False)
     row["source_bound"] = True
     if active.source_id != OFFICIAL_CATALOG_SOURCE_ID:
         row["trusted"] = False
