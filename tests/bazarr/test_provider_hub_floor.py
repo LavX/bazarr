@@ -1455,7 +1455,7 @@ def test_opt_in_provider_activates_after_the_real_application_migration(
     from provider_hub import registry, releases, sandbox, state
     from sqlalchemy import create_engine, select
     from sqlalchemy.orm import scoped_session, sessionmaker
-    from subliminal_patch.extensions import provider_registry
+    from subliminal_patch import extensions
 
     _unreachable(monkeypatch)
     _no_network(monkeypatch, hub)
@@ -1470,10 +1470,17 @@ def test_opt_in_provider_activates_after_the_real_application_migration(
     monkeypatch.setattr(settings.translator, "runtime_v2", False)
     monkeypatch.setattr("app.config.write_config", lambda: True)
     monkeypatch.setattr(hub.PluginEnvironment, "install", lambda *_args, **_kw: pytest.fail("unexpected pip"))
-    original_provider = provider_registry["exampleother"]
-    monkeypatch.setattr(provider_registry, "_ownership", provider_registry._ownership.copy())
+    original_registry = extensions.provider_registry
+    provider_registry = extensions.ProviderRegistry()
+    for name in original_registry.names():
+        if name != "exampleother":
+            provider_registry.register(name, original_registry[name])
+    monkeypatch.setattr(extensions, "provider_registry", provider_registry)
+    monkeypatch.setattr(registry, "provider_registry", provider_registry)
+    monkeypatch.setattr(hub, "provider_registry", provider_registry)
     monkeypatch.setattr(registry, "_REGISTERED_PROVIDER_HUB_IDS", set())
     monkeypatch.setattr(registry, "_REGISTRATION_INCOMPLETE", set())
+    monkeypatch.setattr(registry, "_WITHDRAWN_PROVIDER_IDS", set())
 
     url = f"sqlite:///{tmp_path / 'boot.db'}"
     engine = create_engine(url, isolation_level="AUTOCOMMIT")
@@ -1515,9 +1522,6 @@ def test_opt_in_provider_activates_after_the_real_application_migration(
         assert settings.general.disabled_providers == ["embeddedsubtitles"]
         assert settings.general.provider_priorities == {"exampleother": 60}
     finally:
-        provider_registry.unregister("exampleother")
-        if original_provider is not None:
-            provider_registry.register("exampleother", original_provider)
         session.remove()
         engine.dispose()
 
