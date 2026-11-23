@@ -272,8 +272,10 @@ def test_sports_activity_unions_keep_legacy_shape_filter_and_page(client, arr_li
     assert rows_after[0]['source_item_id'] is None and rows_after[0]['source_group_id'] is None
     assert rows_after[0]['title'] == 'Championship'
     assert rows_after[0]['video_path'] == '/retained/Championship.mkv'
+    removal_key = next(row['removal_key'] for row in rows_after if row['id'] == rows[dated]
+                       and row['origin'] == 'source')
     response = client.delete(f'/api/sports/blacklist/{rows[dated]}', headers=HEADERS,
-                             query_string={'sources': 1, 'origin': 'source'})
+                             query_string={'sources': 1, 'origin': 'source', 'source_blacklist_key': removal_key})
     assert response.status_code == 200 and response.get_json() == {'removed': True}
     assert arr_library.scalar(sa.select(sa.func.count()).select_from(TableBlacklistSports)) == 1
     response = client.delete('/api/sports/blacklist', headers=HEADERS,
@@ -305,6 +307,46 @@ def test_sports_activity_unions_keep_legacy_shape_filter_and_page(client, arr_li
     arr_library.execute(sa.delete(repository.Items).where(repository.Items.c.id == dated))
     retained = get('blacklist', sources=1, **{'source_key[]': f'source:{owner}'}).get_json()['data']
     assert len(retained) == 1 and retained[0]['title'] == 'Race Day Race'
+
+
+def test_sports_exclusion_removal_keeps_a_replacement_for_another_source(client, arr_library, tmp_path, monkeypatch):
+    import sqlalchemy as sa
+    from media_sources import repository
+
+    monkeypatch.setattr('app.event_handler.socketio.emit', lambda *args, **kwargs: None)
+    first, _, first_event, _ = _events(arr_library, tmp_path)
+    second, _, second_event, _ = _events(arr_library, tmp_path, name='Other Source')
+    blacklist = repository.Blacklist
+    root_url = '/api/sports/blacklist'
+    native = client.get(root_url, headers=HEADERS).data
+
+    def listed():
+        return next(row for row in client.get(root_url, headers=HEADERS, query_string={'sources': 1}).json['data']
+                    if row['origin'] == 'source')
+
+    def remove(row):
+        return client.delete(f'{root_url}/{row["id"]}', headers=HEADERS, query_string={
+            'sources': 1, 'origin': 'source', 'source_blacklist_key': row['removal_key'],
+        })
+
+    old_id = repository.insert_blacklist(
+        arr_library, item_kind='sports_event', source_id=first, item_id=first_event, subs_id='original')
+    stale = listed()
+    missing = client.delete(f'{root_url}/{old_id}', headers=HEADERS, query_string={'sources': 1, 'origin': 'source'})
+    assert missing.status_code == 400
+    assert remove(stale).status_code == 200
+    # SQLite naturally reuses the highest deleted ID. Force the same case on PostgreSQL.
+    identity = {} if arr_library.get_bind().dialect.name == 'sqlite' else {'id': old_id}
+    replacement_id = repository.insert_blacklist(
+        arr_library, item_kind='sports_event', source_id=second, item_id=second_event, subs_id='replacement', **identity)
+    assert replacement_id == old_id
+    current = listed()
+    assert stale['removal_key'] != current['removal_key']
+    assert remove(stale).status_code == 409
+    assert arr_library.scalar(sa.select(blacklist.c.source_id)) == second
+    assert remove(current).status_code == 200
+    assert arr_library.execute(sa.select(blacklist)).first() is None
+    assert client.get(root_url, headers=HEADERS).data == native
 
 
 def test_source_only_sports_badge_and_search_do_not_require_a_sportarr_owner(

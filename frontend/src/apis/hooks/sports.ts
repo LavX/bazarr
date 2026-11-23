@@ -1,5 +1,6 @@
 import { useSearchParams } from "react-router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { isAxiosError } from "axios";
 import { usePaginationQuery } from "@/apis/queries/hooks";
 import { QueryKeys } from "@/apis/queries/keys";
 import sports, {
@@ -496,17 +497,26 @@ export function useSportsAction() {
 }
 export function useRemoveSportsExclusion() {
   const client = useQueryClient();
+  const refresh = () =>
+    client.invalidateQueries({ queryKey: [QueryKeys.Sports] });
   return useMutation({
     mutationFn: (
       scope:
         | { owner: number; id?: number }
-        | { origin: "source"; id?: number; sourceKey?: MediaSourceKey },
+        | { origin: "source"; id: number; removalKey: string }
+        | { origin: "source"; sourceKey: MediaSourceKey },
     ) =>
       "origin" in scope
-        ? sports.removeSourceExclusion(scope.id, scope.sourceKey)
+        ? sports.removeSourceExclusion(scope)
         : sports.removeExclusion(scope.owner, scope.id),
-    onSuccess: () => {
-      void client.invalidateQueries({ queryKey: [QueryKeys.Sports] });
+    onSuccess: refresh,
+    onError: (error, scope) => {
+      if (
+        "removalKey" in scope &&
+        isAxiosError(error) &&
+        error.response?.status === 409
+      )
+        return refresh();
     },
   });
 }

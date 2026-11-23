@@ -109,6 +109,7 @@ export interface SportsDownloadResult {
 
 export interface SportsRecord extends SportsSourceFields {
   id: number;
+  removal_key?: string;
   arr_instance_id: number;
   league_id: number;
   event_id: number;
@@ -235,18 +236,23 @@ class SportsApi extends BaseApi {
       )
     ).data;
   }
-  async removeSourceExclusion(id?: number, sourceKey?: MediaSourceKey) {
-    if (!id && !sourceKey?.startsWith("source:"))
+  async removeSourceExclusion(
+    scope: { id: number; removalKey: string } | { sourceKey: MediaSourceKey },
+  ) {
+    if ("sourceKey" in scope && !scope.sourceKey.startsWith("source:"))
       throw new Error("Select a source first");
+    const entry = "id" in scope;
     return (
       await this.delete<{ removed: boolean | number }>(
-        id ? `/blacklist/${id}` : "/blacklist",
+        entry ? `/blacklist/${scope.id}` : "/blacklist",
         undefined,
-        {
-          sources: 1,
-          origin: id ? "source" : undefined,
-          "source_key[]": sourceKey ? [sourceKey] : undefined,
-        },
+        entry
+          ? {
+              sources: 1,
+              origin: "source",
+              source_blacklist_key: scope.removalKey,
+            }
+          : { sources: 1, "source_key[]": [scope.sourceKey] },
       )
     ).data;
   }

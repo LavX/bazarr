@@ -161,3 +161,69 @@ it.each(pages)(
     expect(query.getAll("source_key[]")).toEqual(["arr:43"]);
   },
 );
+
+it("refreshes a stale Sports exclusion and retries with the replacement row key", async () => {
+  window.history.replaceState(null, "", "/");
+  const user = userEvent.setup();
+  const keys: (string | null)[] = [];
+  server.use(
+    http.get("/api/system/settings", () =>
+      HttpResponse.json({ general: { use_sportarr: true } }),
+    ),
+    http.get("/api/system/status", () => HttpResponse.json({ data: {} })),
+    http.get("/api/system/arr-instances", () => HttpResponse.json([sportarr])),
+    http.get("/api/system/media-sources", () =>
+      HttpResponse.json({
+        data: [],
+        availability: {
+          movie: availability,
+          series: availability,
+          sports: availability,
+        },
+      }),
+    ),
+    http.get("/api/sports/blacklist", () => {
+      const data =
+        keys.length === 0
+          ? [{ ...source, removal_key: "listed-entry" }]
+          : keys.length === 1
+            ? [
+                {
+                  ...source,
+                  source_key: "source:9",
+                  source_name: "Other folder",
+                  title: "Replacement Final",
+                  removal_key: "replacement-entry",
+                },
+              ]
+            : [];
+      return HttpResponse.json({ data, total: data.length });
+    }),
+    http.delete(`/api/sports/blacklist/${source.id}`, ({ request }) => {
+      const params = new URL(request.url).searchParams;
+      expect(params.get("origin")).toBe("source");
+      expect(params.get("sources")).toBe("1");
+      keys.push(params.get("source_blacklist_key"));
+      return keys.length === 1
+        ? HttpResponse.json(
+            { message: "This exclusion changed." },
+            { status: 409 },
+          )
+        : HttpResponse.json({ removed: true });
+    }),
+  );
+  customRender(<BlacklistSportsView />);
+  const first = await screen.findByRole("row", { name: /Source Final/ });
+  await user.click(
+    within(first).getByRole("button", { name: "Remove exclusion" }),
+  );
+  const replacement = await screen.findByRole("row", {
+    name: /Replacement Final/,
+  });
+  expect(within(replacement).getByText("Other folder")).toBeVisible();
+  await user.click(
+    within(replacement).getByRole("button", { name: "Remove exclusion" }),
+  );
+  expect(await screen.findByText("Nothing Excluded for Sports")).toBeVisible();
+  expect(keys).toEqual(["listed-entry", "replacement-entry"]);
+});

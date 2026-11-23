@@ -151,14 +151,19 @@ const BlacklistSportsView: FunctionComponent = () => {
             label="Remove exclusion"
             icon={faTrash}
             mutation={remove}
+            disabled={original.origin === "source" && !original.removal_key}
             args={() => {
               setRemovedNotice(false);
-              return original.origin === "source"
-                ? { origin: "source" as const, id: original.id }
-                : {
-                    owner: original.arr_instance_id,
-                    id: original.id,
-                  };
+              if (original.origin === "source") {
+                return original.removal_key
+                  ? {
+                      origin: "source" as const,
+                      id: original.id,
+                      removalKey: original.removal_key,
+                    }
+                  : null;
+              }
+              return { owner: original.arr_instance_id, id: original.id };
             }}
             onSuccess={() => setRemovedNotice(true)}
           ></MutateAction>
