@@ -7,6 +7,7 @@ case runs on SQLite and on PostgreSQL, both on an AUTOCOMMIT engine, because
 the undo after a failed re-index is hand-written for that engine.
 """
 import ast
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -38,7 +39,8 @@ def hidden_api(hidden_db, monkeypatch, tmp_path):  # noqa: F811
     # "indexed" stands in for what the real indexer writes back. By default it
     # applies the recorded hides to the listings; a test that reads the POST's
     # answer, or needs the indexer to misbehave, sets its own.
-    calls = {"reindex": [], "events": [], "indexed": lambda: _apply_hides(session)}
+    calls = {"reindex": [], "events": [], "indexed": lambda: _apply_hides(session),
+             "movie_indexer": mv.store_subtitles_movie}
     monkeypatch.setattr(api_mod, "event_stream", lambda **kw: calls["events"].append(kw))
 
     def reindexed(*call):
@@ -195,6 +197,89 @@ def test_hide_says_when_another_subtitle_still_covers_the_language(hidden_api):
     }
     # Still recorded: the track is hidden, whatever else covers the language.
     assert _hidden(session) == [("movie", 1, 2, "en", None)]
+
+
+@pytest.fixture
+def indexed_movie_api(hidden_api, monkeypatch):
+    """Use the real indexer and profile lookup, replacing file discovery only."""
+    import app.database as db
+    import subtitles.indexer.movies as mv
+
+    client, session, calls = hidden_api
+    monkeypatch.setattr(db, "database", session)
+    monkeypatch.setattr(mv, "database", session)
+    monkeypatch.setattr(mv, "store_subtitles_movie", calls["movie_indexer"])
+    monkeypatch.setattr(mv, "alpha2_from_alpha3", {"eng": "en"}.get)
+    monkeypatch.setattr(mv, "embedded_subs_reader", lambda *a, **kw: calls["tracks"])
+    monkeypatch.setattr(mv, "get_language_set", lambda: set())
+    monkeypatch.setattr(mv, "search_external_subtitles", lambda *a, **kw: {})
+    monkeypatch.setattr(mv, "add_sync_engine_outputs", lambda folder, subs, **kw: subs)
+    monkeypatch.setattr(mv, "add_combined_outputs", lambda folder, subs, **kw: subs)
+    monkeypatch.setattr(mv, "guess_external_subtitles", lambda *a, **kw: {})
+    monkeypatch.setattr(mv, "event_stream", lambda *a, **kw: None)
+    monkeypatch.setattr(mv, "_log_embedded_history_movie", lambda *a, **kw: None)
+    monkeypatch.setattr(mv, "prune_mismatches_for_media", lambda *a, **kw: None)
+    monkeypatch.setattr(mv, "is_search_given_up", lambda *a, **kw: False)
+    for setting, value in (("use_embedded_subs", True), ("ignore_pgs_subs", False),
+                           ("ignore_vobsub_subs", False), ("ignore_ass_subs", False)):
+        monkeypatch.setitem(mv.settings.general, setting, value)
+    db.update_profile_id_list.invalidate()
+    try:
+        yield client, session, calls
+    finally:
+        db.update_profile_id_list.invalidate()
+
+
+@pytest.mark.parametrize("track_hi,track_forced,profile_variants,before,after,wanted", [
+    pytest.param(False, False, [(True, False)], ["en:hi"], ["en:hi"], False,
+                 id="plain-hide-keeps-already-missing-hi"),
+    pytest.param(False, False, [(False, False)], [], ["en"], True,
+                 id="plain-hide-newly-wants-plain"),
+    pytest.param(True, False, [(True, False)], [], ["en:hi"], True,
+                 id="hi-hide-newly-wants-hi"),
+    pytest.param(True, False, [(False, False)], [], ["en"], True,
+                 id="hi-hide-newly-wants-equivalent-plain"),
+    pytest.param(False, True, [(False, True)], [], ["en:forced"], True,
+                 id="forced-hide-newly-wants-forced"),
+    pytest.param(False, False, [(False, True)], ["en:forced"], ["en:forced"], False,
+                 id="plain-hide-keeps-already-missing-forced"),
+    pytest.param(False, True, [(False, False)], ["en"], ["en"], False,
+                 id="forced-hide-keeps-already-missing-plain"),
+    pytest.param(False, False, [(False, False), (True, False)], ["en:hi"], ["en", "en:hi"], True,
+                 id="plain-hide-newly-wants-plain-with-hi-already-missing"),
+])
+def test_hide_reports_only_newly_wanted_profile_variants(
+        indexed_movie_api, tmp_path, track_hi, track_forced, profile_variants, before, after, wanted):
+    """Compute both states from the stored profile instead of supplying missing values."""
+    from app.database import TableLanguagesProfiles
+    import subtitles.indexer.movies as mv
+
+    client, session, calls = indexed_movie_api
+    calls["tracks"] = [["eng", track_forced, track_hi, "subrip"]]
+    profile = [{"id": item_id, "language": "en", "hi": str(hi), "forced": str(forced),
+                "audio_exclude": "False", "audio_only_include": "False"}
+               for item_id, (hi, forced) in enumerate(profile_variants, 1)]
+    session.add(TableLanguagesProfiles(profileId=1, name="English", items=json.dumps(profile)))
+    session.flush()
+    session.execute(sa.update(TableMovies).where(TableMovies.id == 1).values(profileId=1, subtitles="[]"))
+    session.commit()
+
+    mv.store_subtitles_movie("/movies/m.mkv", str(tmp_path / "movies" / "m.mkv"), arr_instance_id=2)
+    assert ast.literal_eval(session.execute(sa.select(TableMovies.missing_subtitles)
+                                           .where(TableMovies.id == 1)).scalar_one()) == before
+
+    hidden = client.post(ROOT, data={"media_type": "movie", "media_id": 1, "language": "en",
+                                     "hi": str(track_hi), "forced": str(track_forced)}, headers=HEADERS)
+    assert hidden.status_code == 200
+    row = session.execute(sa.select(TableMovies.subtitles, TableMovies.missing_subtitles)
+                          .where(TableMovies.id == 1)).one()
+    assert ast.literal_eval(row.subtitles) == []
+    assert ast.literal_eval(row.missing_subtitles) == after
+    assert hidden.json["data"] == {
+        "wanted": wanted,
+        "hidden": {"code2": "en", "name": "English", "hi": track_hi, "forced": track_forced},
+        "covered_by": [],
+    }
 
 
 @pytest.mark.parametrize("form,status", [
