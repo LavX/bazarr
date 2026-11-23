@@ -39,18 +39,24 @@ export function useMediaNavigation() {
   const showBadges = (kind: ArrKind, routeEnabled: boolean) =>
     routeEnabled &&
     (visible || getArrInstanceAvailability(kind, instances) !== false);
+  const sonarrBadges = showBadges("sonarr", sonarr);
+  const radarrBadges = showBadges("radarr", radarr);
   return {
     series,
     movies,
     sports,
+    folderSeries: availability?.series.browsable === true,
+    folderMovies: availability?.movie.browsable === true,
     seriesActivity: series || availability?.series.retained === true,
     movieActivity: movies || availability?.movie.retained === true,
     sportsActivity: sports || availability?.sports.retained === true,
     sonarr,
     radarr,
-    sonarrBadges: showBadges("sonarr", sonarr),
-    radarrBadges: showBadges("radarr", radarr),
+    sonarrBadges,
+    radarrBadges,
     sportarrBadges: showBadges("sportarr", sportarr),
+    folderSeriesSearchable: availability?.series.searchable === true,
+    folderMoviesSearchable: availability?.movie.searchable === true,
   };
 }
 

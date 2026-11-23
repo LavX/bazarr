@@ -50,8 +50,11 @@ def _insert(target, table, values):
 
 # Sources, libraries and roots
 
-def get_source(source_id, target=None):
-    return _target(target).execute(sa.select(Sources).where(Sources.c.id == source_id)).first()
+def get_source(source_id, target=None, *, lock_key=False):
+    statement = sa.select(Sources).where(Sources.c.id == source_id)
+    if lock_key:
+        statement = statement.with_for_update(read=True, key_share=True)
+    return _target(target).execute(statement).first()
 
 
 def list_sources(target=None):
@@ -227,10 +230,10 @@ def create_group(*, source_id, library_id, kind, group_key, title, identity_sour
 
 # Items
 
-def get_item(item_id, target=None, *, for_update=False):
+def get_item(item_id, target=None, *, for_update=False, nowait=False):
     statement = sa.select(Items).where(Items.c.id == item_id)
     if for_update:
-        statement = statement.with_for_update()
+        statement = statement.with_for_update(nowait=nowait)
     return _target(target).execute(statement).first()
 
 
@@ -483,9 +486,10 @@ def retained_activity_by_kind(target=None):
 # Enabled flags, overlap and holders
 
 def item_state(item_id, target=None):
-    """The id, title, source name and the two enabled flags of an item's library and source, or None."""
+    """The availability and owner details of an item, or None."""
     row = _target(target).execute(
-        sa.select(Items.c.id, Items.c.title, Libraries.c.enabled.label('library_enabled'),
+        sa.select(Items.c.id, Items.c.title, Items.c.server_missing, Items.c.file_dev, Items.c.file_ino,
+                  Libraries.c.enabled.label('library_enabled'),
                   Sources.c.enabled.label('source_enabled'), Sources.c.name.label('source_name'))
         .select_from(Items.join(Libraries, Items.c.library_id == Libraries.c.id)
                      .join(Sources, Items.c.source_id == Sources.c.id))
