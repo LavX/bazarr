@@ -230,6 +230,15 @@ def test_sports_activity_unions_keep_legacy_shape_filter_and_page(client, arr_li
     from media_sources.history import blacklist_log_source
 
     blacklist_log_source(resolve_item(dated), 'fake', 'race-release', 'en')
+    source_filter = {'source_key[]': f'source:{owner}'}
+    before_correction = get('blacklist', sources=1, **source_filter).get_json()['data']
+    assert before_correction[0]['title'] == 'Race Day Race'
+    correction = client.patch(f'/api/sources/items/{dated}', headers=HEADERS, json={
+        'title': 'Corrected Race Day', 'part_name': 'Qualifying',
+    })
+    assert correction.status_code == 200
+    after_correction = get('blacklist', sources=1, **source_filter).get_json()['data']
+    assert after_correction[0]['title'] == before_correction[0]['title']
     arr_library.execute(sa.delete(repository.Items).where(repository.Items.c.id == dated))
     retained = get('blacklist', sources=1, **{'source_key[]': f'source:{owner}'}).get_json()['data']
     assert len(retained) == 1 and retained[0]['title'] == 'Race Day Race'
@@ -463,3 +472,66 @@ def test_manual_sports_uses_the_same_floor_and_rechecks_it_at_download(
     job = isolated_jobs._reserve_next_job()
     assert job.job_id == response.get_json()['job_id'] and not isolated_jobs._run_job(job)
     assert job.error['reason'] == 'below_minimum_score'
+
+
+def test_sportarr_search_all_intersects_the_explicit_owner_with_the_filter(client, monkeypatch):
+    from sportarr import workflows
+
+    queued = []
+
+    def queue(arr_instance_id):
+        queued.append(arr_instance_id)
+        return 91
+
+    monkeypatch.setattr(workflows, 'wanted_search_missing_subtitles_sports', queue)
+    for key in ('arr:4', 'source:1', 'source:removed'):
+        response = client.post('/api/sports/wanted', headers=HEADERS, json={'arr_instance_id': 3},
+                               query_string={'sources': 1, 'source_key[]': key})
+        assert response.status_code == 200 and response.get_json()['job_id'] is None
+    assert queued == []
+    response = client.post('/api/sports/wanted', headers=HEADERS, json={'arr_instance_id': 3},
+                           query_string=[('sources', 1), ('source_key[]', 'source:1'), ('source_key[]', 'arr:3')])
+    assert response.status_code == 202 and response.get_json()['job_id'] == 91
+    assert queued == [3]
+
+
+def test_a_sports_identity_edit_during_download_refuses_publication(
+        client, arr_library, writes, isolated_jobs, tmp_path, monkeypatch):
+    import sqlalchemy as sa
+    from media_sources import repository
+    from subtitles import manual
+    from subliminal_patch.score import MAX_SCORES
+
+    _, _, dated, _ = _events(arr_library, tmp_path)
+    path = Path(repository.get_item(dated, arr_library).path)
+    candidate = pipeline.FakeSubtitle(score=MAX_SCORES['movie'])
+    candidate.matches = {'title', 'year'}
+    candidate.page_link = 'https://example.invalid/release'
+    corrections = []
+
+    def search(videos, languages, pool, **kwargs):
+        (recording,) = videos
+        return {recording: [candidate]}
+
+    def edit_during_download(subtitles, pool):
+        (subtitle,) = subtitles
+        assert subtitle.source_context.title == 'Race Day Race'
+        correction = client.patch(f'/api/sources/items/{dated}', headers=HEADERS, json={
+            'title': 'Race Day', 'part_name': 'Qualifying',
+        })
+        assert correction.status_code == 200
+        corrections.append(correction.get_json()['part_name'])
+
+    monkeypatch.setattr(manual, 'list_all_subtitles', search)
+    monkeypatch.setattr(manual, 'compute_score', lambda *args, **kwargs: (candidate.score, candidate.score))
+    monkeypatch.setattr(manual, 'download_subtitles', edit_during_download)
+    url = f'/api/sources/items/{dated}/manual'
+    (choice,) = client.get(url, headers=HEADERS).get_json()['data']
+    response = client.post(url, headers=HEADERS, json={'provider': 'fake', 'subtitle': choice['subtitle']})
+    job = isolated_jobs._reserve_next_job()
+    assert job.job_id == response.get_json()['job_id']
+    assert not isolated_jobs._run_job(job)
+    assert corrections == ['Qualifying'] and job.error['reason'] == 'identity_changed'
+    assert not path.with_suffix('.en.srt').exists()
+    assert writes == []
+    assert arr_library.scalar(sa.select(sa.func.count()).select_from(repository.History)) == 0

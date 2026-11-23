@@ -113,8 +113,7 @@ def _source_activity(session, table, query, ids):
     items, sources = repository.Items, repository.Sources
     joined = table.outerjoin(items, table.c.item_id == items.c.id).outerjoin(sources, table.c.source_id == sources.c.id)
     details = query.with_only_columns(
-        *table.c, items.c.title.label('live_title'), items.c.group_id.label('source_group_id'),
-        items.c.season, items.c.episode,
+        *table.c, items.c.group_id.label('source_group_id'), items.c.season, items.c.episode,
         items.c.part_number, items.c.part_name, sources.c.kind.label('source_kind'),
     ).select_from(joined).where(table.c.id.in_(ids))
     is_history = table is repository.History
@@ -122,9 +121,8 @@ def _source_activity(session, table, query, ids):
     rows = {}
     for row in session.execute(details):
         data = dict(row._mapping)
-        title = data.pop('item_title')
         data.update(arr_instance_id=None, event_id=None, league_id=None, source_item_id=data.pop('item_id'),
-                    title=data.pop('live_title') or title, leagueTitle=data.pop('group_title'),
+                    title=data.pop('item_title'), leagueTitle=data.pop('group_title'),
                     partNumber=data.pop('part_number') or None, partName=data.pop('part_name'))
         data.pop('item_kind')
         if is_history:

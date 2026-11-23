@@ -25,13 +25,13 @@ class SourceCandidate:
     subtitle: object
 
 
-def validate_source_candidate(candidate, source, provider):
+def validate_source_candidate(candidate, source, provider, *, target=None):
     if (not isinstance(candidate, SourceCandidate) or not candidate.source.same_item(source)
             or candidate.source.path != source.path or candidate.source.source_id != source.source_id
-            or candidate.source.library_id != source.library_id
+            or candidate.source.library_id != source.library_id or candidate.source.kind != source.kind
             or candidate.subtitle.provider_name != provider):
         raise JobFailed('This search result does not match the selected item or provider. Search again.')
-    if (provider, str(candidate.subtitle.id)) in get_blacklist_source(source.kind):
+    if (provider, str(candidate.subtitle.id)) in get_blacklist_source(source.kind, target):
         raise JobFailed('This release has been excluded. Search again.')
     if source.kind == 'sports_event':
         from subtitles.utils import _get_scores
@@ -107,11 +107,16 @@ def manual_source_publication(source, destination, ownership_index):
         yield current, connection
 
 
-def write_source_subtitle(source, destination, content, *, written_paths, on_publish):
+def write_source_subtitle(source, destination, content, *, written_paths, on_publish, candidate=None):
     ownership_index = SourcePublicationOwnerIndex()
 
+    @contextmanager
     def publication():
-        return manual_source_publication(source, destination, ownership_index)
+        with manual_source_publication(source, destination, ownership_index) as (current, connection):
+            if candidate is not None:
+                # Exclusion uses the same publication lock and commits before a waiting writer proceeds.
+                validate_source_candidate(candidate, current, candidate.subtitle.provider_name, target=connection)
+            yield
 
     write_subtitle_file(source.path, destination, content, written_paths=written_paths, on_publish=on_publish,
                         publication_guard=publication, ownership_index=ownership_index)
