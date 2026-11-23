@@ -84,7 +84,7 @@ def _target_code(to_lang, forced, hi):
 def _current_missing(item, profile_id, profile, *, ownership_index=None, written_paths=()):
     # Profile saves queue an index refresh. While that work waits, evaluate the live
     # policy against the indexed tracks instead of trusting its old missing list.
-    from .indexer import compute_missing_subtitles, list_current_external_subtitles
+    from .indexer import compute_missing_subtitles, list_external_subtitles
 
     ignored = {'pgs': settings.general.ignore_pgs_subs, 'vobsub': settings.general.ignore_vobsub_subs,
                'ass': settings.general.ignore_ass_subs}
@@ -93,7 +93,8 @@ def _current_missing(item, profile_id, profile, *, ownership_index=None, written
     if ownership_index is None:
         listing.extend(entry for entry in indexed if entry[1] and os.path.isfile(entry[1]))
     else:
-        listing.extend(list_current_external_subtitles(item.path, indexed, ownership_index, written_paths))
+        listing.extend(list_external_subtitles(
+            item.path, indexed, ownership_index, publication=True, written_paths=written_paths))
     audio_codes = {entry['code2'] for entry in get_audio_profile_languages(item.audio_language)}
     return compute_missing_subtitles(profile, get_profile_cutoff(profile_id), listing, item.failed_attempts,
                                      matches_audio=lambda language: language['language'] in audio_codes)

@@ -303,9 +303,20 @@ def add_sync_engine_outputs(dest_folder, subtitles, video_filename=None, video_p
                            for entry in media_files
                            if entry.is_file() and entry.name.lower().endswith(core.VIDEO_EXTENSIONS)}
 
+    with os.scandir(dest_folder) as entries:
+        names = []
+        vobsub_indexes = set()
+        for entry in entries:
+            names.append(entry.name)
+            if entry.name.lower().endswith('.idx') and entry.is_file(follow_symlinks=False):
+                vobsub_indexes.add(entry.name.lower())
+
     ownership = {}
-    for subtitle in os.listdir(dest_folder):
+    for subtitle in names:
         if not sync_engine_from_subtitle_name(subtitle):
+            continue
+        if core.is_vobsub_pair(subtitle, vobsub_indexes):
+            subtitles.pop(subtitle, None)
             continue
 
         subtitle_path = os.path.join(dest_folder, subtitle)

@@ -1711,16 +1711,26 @@ def test_source_provider_fallback_uses_current_cutoff(world, monkeypatch, isolat
     assert media.with_suffix(".hu.srt").is_file() == (edit == "cutoff-cleared")
 
 
-@pytest.mark.parametrize("location", ["media", "configured", "untagged", "sync"])
+@pytest.mark.parametrize("location", ["media", "configured", "untagged", "sync", "custom-hi", "custom-forced"])
 def test_source_provider_sees_cutoff_sidecar_before_index_refresh(world, monkeypatch, isolated_jobs, location):
     import json
 
     from app.config import settings
     from app.database import TableLanguagesProfiles, update_profile_id_list
+    from languages import get_languages
     from media_sources import repository, service
+    from media_sources.indexer import index_item
     from subtitles import download
 
-    profile = [{"id": 1, "language": "en", "forced": "False", "hi": "False"},
+    cutoff_language = "pb" if location.startswith("custom-") else "en"
+    if cutoff_language == "pb":
+        monkeypatch.setattr(get_languages, "languages_dict", [
+            *get_languages.languages_dict,
+            {"code2": "pb", "code3": "pob", "name": "Portuguese (Brazil)", "code3b": "pob"},
+            {"code2": "pt", "code3": "por", "name": "Portuguese", "code3b": "por"},
+        ])
+    profile = [{"id": 1, "language": cutoff_language, "forced": str(location == "custom-forced"),
+                "hi": str(location == "custom-hi")},
                {"id": 2, "language": "hu", "forced": "False", "hi": "False"}]
     world.db.execute(sa.update(TableLanguagesProfiles).values(items=json.dumps(profile), cutoff=1))
     update_profile_id_list.invalidate()
@@ -1731,7 +1741,8 @@ def test_source_provider_sees_cutoff_sidecar_before_index_refresh(world, monkeyp
     media = Path(context.path)
     folder = media.parent / "Subs" if location == "configured" else media.parent
     folder.mkdir(exist_ok=True)
-    suffix = {"untagged": ".srt", "sync": ".en.ffsubsync.srt"}.get(location, ".en.srt")
+    suffix = {"untagged": ".srt", "sync": ".en.ffsubsync.srt", "custom-hi": ".pt-BR.hi.srt",
+              "custom-forced": ".pt-BR.forced.srt"}.get(location, ".en.srt")
     name = media.with_suffix(suffix).name
     cutoff = folder / name
     content = CONTENT.replace(b"Downloaded", b"The children sat by the river while their mother read a story. "
@@ -1740,7 +1751,7 @@ def test_source_provider_sees_cutoff_sidecar_before_index_refresh(world, monkeyp
     def fetch(videos, languages, **kwargs):
         if {str(language) for language in languages} == {"hu"}:
             cutoff.write_bytes(content)
-            assert "en" in repository.get_item(context.item_id).missing_subtitles
+            assert cutoff_language in repository.get_item(context.item_id).missing_subtitles
             return {next(iter(videos)): [FakeSubtitle(Language("hun"))]}
         return {}
 
@@ -1752,6 +1763,49 @@ def test_source_provider_sees_cutoff_sidecar_before_index_refresh(world, monkeyp
     assert not (folder / media.with_suffix(".hu.srt").name).exists()
     assert world.db.execute(sa.select(repository.History)).all() == []
     assert not world.published
+    if cutoff_language == "pb":
+        (entry,) = index_item(context.item_id)
+        assert entry[:2] == [f"pb:{location.removeprefix('custom-')}", str(cutoff)]
+        assert repository.get_item(context.item_id).missing_subtitles == "[]"
+
+
+@pytest.mark.parametrize("indexed_before_fetch", [False, True])
+def test_source_provider_cutoff_excludes_vobsub_pairs(world, monkeypatch, isolated_jobs, indexed_before_fetch):
+    import json
+
+    from app.database import TableLanguagesProfiles, update_profile_id_list
+    from media_sources import repository, service
+    from media_sources.indexer import index_item
+    from subtitles import download
+
+    profile = [{"id": 1, "language": "en", "forced": "False", "hi": "False"},
+               {"id": 2, "language": "hu", "forced": "False", "hi": "False"}]
+    world.db.execute(sa.update(TableLanguagesProfiles).values(items=json.dumps(profile)))
+    update_profile_id_list.invalidate()
+    context = _movie(world)
+    media = Path(context.path)
+    sidecar = media.with_suffix(".en.sub" if indexed_before_fetch else ".en.ffsubsync.sub")
+    if indexed_before_fetch:
+        sidecar.write_bytes(CONTENT)
+        assert any(entry[1] == str(sidecar) for entry in index_item(context.item_id))
+
+    def fetch(videos, languages, **kwargs):
+        if {str(language) for language in languages} != {"hu"}:
+            return {}
+        world.db.execute(sa.update(TableLanguagesProfiles).values(cutoff=1))
+        update_profile_id_list.invalidate()
+        sidecar.write_bytes(b"bitmap data")
+        sidecar.with_suffix(".IDX").write_bytes(b"bitmap index")
+        return {next(iter(videos)): [FakeSubtitle(Language("hun"))]}
+
+    monkeypatch.setattr(download, "download_best_subtitles", fetch)
+    service.search_source_item(context.item_id, translation_gate=False)
+    assert isolated_jobs._run_job(isolated_jobs._reserve_next_job())
+
+    assert media.with_suffix(".hu.srt").read_bytes()
+    assert all(entry[1] != str(sidecar) for entry in index_item(context.item_id))
+    (result,) = world.db.execute(sa.select(repository.History)).all()
+    assert result.subtitles_path == str(media.with_suffix(".hu.srt"))
 
 
 @pytest.mark.parametrize("conflict", ["shared", "shared-modifier", "arrived-during-fetch"])
@@ -1787,6 +1841,27 @@ def test_source_provider_write_preserves_an_unavailable_destination(world, monke
         assert not destination.exists()
     else:
         assert b"Already present" in destination.read_bytes()
+    assert world.db.execute(sa.select(repository.History)).all() == []
+    assert not world.published
+
+
+def test_source_single_language_save_checks_custom_locale_ownership(world, monkeypatch, isolated_jobs):
+    from app.config import settings
+    from app.database import TableMovies
+    from media_sources import repository, service
+
+    monkeypatch.setattr(settings.general, "subfolder", "relative")
+    monkeypatch.setattr(settings.general, "subfolder_custom", "../Sidecars")
+    monkeypatch.setattr(settings.general, "single_language", True)
+    context = _movie(world, "Film.es-419.mkv")
+    dupe = video(world.tmp_path / "Arr" / "Film.mkv")
+    world.db.execute(sa.insert(TableMovies).values(path=str(dupe), title="Another film", tmdbId="7711"))
+    _download(monkeypatch)
+
+    service.search_source_item(context.item_id, translation_gate=False)
+    assert isolated_jobs._run_job(isolated_jobs._reserve_next_job())
+
+    assert not (world.tmp_path / "Sidecars" / "Film.es-419.srt").exists()
     assert world.db.execute(sa.select(repository.History)).all() == []
     assert not world.published
 
