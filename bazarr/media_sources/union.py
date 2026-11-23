@@ -26,6 +26,13 @@ def add_source_arguments(parser):
 class SourceKeyFilter:
     keys: tuple = ()
 
+    @classmethod
+    def from_values(cls, values):
+        return cls(tuple(_source_key(value) for value in values))
+
+    def includes(self, origin):
+        return not self.keys or any(kind == origin for kind, _ in self.keys)
+
     def arr(self, owner_column):
         return self._predicate('arr', owner_column)
 
@@ -46,7 +53,7 @@ def includes_sources(args, session, source_table, kind_condition):
         sa.select(sa.exists().select_from(source_table).where(kind_condition))))
 
 
-def union_page(session, arr, source, *, sort, start, length):
+def union_page(session, arr, source, *, sort, start, length, offset_unbounded=False):
     """Page both origins together, counting in SQL. The Arr projection defines the common column types.
 
     Each select must expose its own local ID and source owner as `id` and `_owner`. Missing columns on
@@ -74,6 +81,8 @@ def union_page(session, arr, source, *, sort, start, length):
         else_=sa.literal('arr:').concat(sa.cast(rows.c._owner, sa.Text)),
     )
     page = sa.select(rows, source_key.label('source_key')).order_by(*sort(rows.c))
+    if length > 0 or offset_unbounded:
+        page = page.offset(start)
     if length > 0:
-        page = page.offset(start).limit(length)
+        page = page.limit(length)
     return session.execute(page).all(), session.scalar(sa.select(sa.func.count()).select_from(rows))

@@ -61,6 +61,8 @@ def item_to_dict(item):
         'file_size': item.file_size, 'scene_name': item.scene_name,
         'subtitles': _listing(item.subtitles), 'missing_subtitles': _listing(item.missing_subtitles),
         'indexed_at': item.indexed_at.isoformat() if item.indexed_at else None,
+        **({'event_date': item.event_date, 'round': item.episode, 'part_number': item.part_number or None,
+            'part_name': item.part_name} if item.kind == 'sports_event' else {}),
     }
 
 

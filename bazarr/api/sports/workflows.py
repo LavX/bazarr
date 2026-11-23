@@ -5,6 +5,9 @@ from flask_restx import Namespace, Resource
 
 from app.database import database, TableHistorySports
 from app.process_session import PROCESS_SESSION
+from media_sources import sports_activity
+from media_sources.union import SourceKeyFilter
+from media_sources.wanted import queue_wanted_search
 from sportarr import history, workflows
 from sportarr.identity import resolve_event_in_session
 from sportarr.sync.leagues import require_sportarr
@@ -18,6 +21,10 @@ api_ns_sports_workflows = Namespace(
 
 
 _TRUTHY = {"true", "t", "yes", "y", "on", "1"}
+
+
+def _source_scope():
+    return SourceKeyFilter.from_values(request.args.getlist('source_key[]'))
 
 
 def _filters():
@@ -83,11 +90,9 @@ class SportsWanted(Resource):
     def get(self):
         try:
             filters = _filters()
-            return workflows.list_wanted(
-                database,
-                filters["arr_instance_id"],
-                filters["start"],
-                filters["length"],
+            return sports_activity.list_wanted(
+                database, request.args, _source_scope(), arr_instance_id=filters["arr_instance_id"],
+                start=filters["start"], length=filters["length"],
             ), 200
         except SportsNotFound as exc:
             return {'message': str(exc)}, 404
@@ -97,11 +102,18 @@ class SportsWanted(Resource):
     @authenticate
     def post(self):
         try:
-            owner = _owner(_body().get("arr_instance_id"))
+            body = _body()
+            owner = body.get("arr_instance_id")
+            scope = _source_scope()
+            if request.args.get('sources') == '1' and owner is None:
+                selected = {key for origin, key in scope.keys if origin == 'source' and key is not None}
+                source_ids = tuple(sorted(selected)) if scope.keys else None
+                return _queued(queue_wanted_search('sports_event', source_ids=source_ids))
+            owner = _owner(owner)
+            if scope.keys and ('arr', owner) not in scope.keys:
+                return _queued(None)
             require_sportarr(database, owner)
-            return _queued(
-                workflows.wanted_search_missing_subtitles_sports(arr_instance_id=owner)
-            )
+            return _queued(workflows.wanted_search_missing_subtitles_sports(arr_instance_id=owner))
         except SportsNotFound as exc:
             return {'message': str(exc)}, 404
         except ValueError as exc:
@@ -166,7 +178,7 @@ class SportsHistory(Resource):
     @authenticate
     def get(self):
         try:
-            return history.list_records(database, "history", **_filters()), 200
+            return sports_activity.list_activity(database, "history", request.args, _source_scope(), **_filters()), 200
         except SportsNotFound as exc:
             return {'message': str(exc)}, 404
         except ValueError as exc:
@@ -203,7 +215,7 @@ class SportsBlacklist(Resource):
     @authenticate
     def get(self):
         try:
-            return history.list_records(database, "blacklist", **_filters()), 200
+            return sports_activity.list_activity(database, "blacklist", request.args, _source_scope(), **_filters()), 200
         except SportsNotFound as exc:
             return {'message': str(exc)}, 404
         except ValueError as exc:
@@ -212,11 +224,14 @@ class SportsBlacklist(Resource):
     @authenticate
     def delete(self):
         try:
-            return {
-                "removed": history.clear_blacklist(
-                    database, _owner(request.args.get("arr_instance_id"))
-                )
-            }, 200
+            owner = request.args.get("arr_instance_id")
+            scope = _source_scope()
+            if request.args.get('sources') == '1' and owner is None:
+                removed = sports_activity.clear_blacklist(database, scope)
+            else:
+                owner = _owner(owner)
+                removed = history.clear_blacklist(database, owner) if not scope.keys or ('arr', owner) in scope.keys else 0
+            return {"removed": removed}, 200
         except SportsNotFound as exc:
             return {'message': str(exc)}, 404
         except ValueError as exc:
@@ -228,9 +243,14 @@ class SportsBlacklistEntry(Resource):
     @authenticate
     def delete(self, entry_id):
         try:
-            removed = history.remove_blacklist(
-                database, entry_id, _owner(request.args.get("arr_instance_id"))
-            )
+            if request.args.get('origin') == 'source':
+                if request.args.get('sources') != '1' or 'arr_instance_id' in request.args:
+                    raise ValueError('Source exclusion removal requires sources=1 and a source row.')
+                removed = sports_activity.remove_blacklist_entry(database, entry_id)
+            else:
+                removed = history.remove_blacklist(
+                    database, entry_id, _owner(request.args.get("arr_instance_id"))
+                )
             return (
                 ({"removed": True}, 200)
                 if removed

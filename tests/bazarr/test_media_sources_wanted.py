@@ -506,13 +506,16 @@ def test_audio_filter_can_list_a_language_only_present_in_a_folder(client, arr_l
     assert client.get(url + '?sources=1', headers=HEADERS).get_json() == [{'code2': 'fr', 'name': 'French'}]
 
 
-def test_sports_badge_excludes_library_rows_until_the_sports_wanted_list_supports_them(
+def test_sports_badge_counts_folder_rows_only_with_source_opt_in(
         client, arr_library, tmp_path):
     source, library, root = add_source(arr_library, tmp_path, content_kind='sports', profile_id=1)
     group = add_group(arr_library, source, library, kind='league', title='F1')
     add_item(arr_library, source, library, root / 'Race.mkv', kind='sports_event', group_id=group,
              missing_subtitles="['en']")
-    assert client.get('/api/badges?sources=1', headers=HEADERS).data == client.get('/api/badges', headers=HEADERS).data
+    legacy = client.get('/api/badges', headers=HEADERS).get_json()
+    combined = client.get('/api/badges?sources=1', headers=HEADERS).get_json()
+    assert legacy['sports'] == 1 and 'source_sports' not in legacy
+    assert combined['sports'] == 2 and combined['source_sports'] == 1
 
 
 def test_folder_only_badge_does_not_reuse_legacy_arr_count(client, arr_library, tmp_path):

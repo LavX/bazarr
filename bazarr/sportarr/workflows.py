@@ -101,7 +101,7 @@ def require_sports_enabled():
         raise ValueError("Sportarr is turned off. Turn on Use Sportarr in Settings first.")
 
 
-def _wanted_query(session, arr_instance_id=None, league_id=None):
+def wanted_query(session, arr_instance_id=None, league_id=None):
     """Compile owner/league rules once, then count and page event rows in SQL."""
     from sportarr.settings import get_sports_settings
 
@@ -149,18 +149,21 @@ def _wanted_query(session, arr_instance_id=None, league_id=None):
 
 
 def wanted_rows(session, arr_instance_id=None, league_id=None):
-    query = _wanted_query(session, arr_instance_id, league_id)
+    query = wanted_query(session, arr_instance_id, league_id)
     return [_serialize_event(row) for row in session.execute(query.order_by(TableSportsEvents.id))]
 
 
-def list_wanted(session, arr_instance_id=None, start=0, length=100):
+def list_wanted(session, arr_instance_id=None, start=0, length=100, *, owner_filter=None, query=None):
     limit = validate_page(start, length)
-    query = _wanted_query(session, arr_instance_id)
+    if query is None:
+        query = wanted_query(session, arr_instance_id)
+    if owner_filter is not None:
+        query = query.where(owner_filter)
     total = session.execute(select(func.count()).select_from(query.subquery())).scalar_one()
-    page = [_serialize_event(row) for row in session.execute(
-        query.order_by(TableSportsEvents.id).offset(start).limit(limit))]
     from subtitles.mismatch import flagged_media_ids
 
+    page = [_serialize_event(row) for row in session.execute(
+        query.order_by(TableSportsEvents.id).offset(start).limit(limit))]
     mismatched = flagged_media_ids(session, "sports", [row["id"] for row in page])
     for row in page:
         row["release_mismatch"] = row["id"] in mismatched
@@ -168,7 +171,7 @@ def list_wanted(session, arr_instance_id=None, start=0, length=100):
 
 
 def wanted_badge(session):
-    query = _wanted_query(session).with_only_columns(TableSportsEvents.missing_subtitles)
+    query = wanted_query(session).with_only_columns(TableSportsEvents.missing_subtitles)
     return sum(len(parse_stored_list(missing)) for missing in session.execute(query).scalars())
 
 
