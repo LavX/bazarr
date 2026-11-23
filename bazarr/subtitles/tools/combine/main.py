@@ -99,6 +99,11 @@ def try_combine_for_video(video_path, media_type, sonarr_series_id=None,
                 reason=f"missing source(s) for {langs}",
             )
 
+        inputs = (sources.primary, *sources.secondaries)
+        if source is not None and any(not sync_output_owner_is_unique(video_path, path, **owner_kwargs)
+                                      for path in inputs):
+            return CombineResult(status="skipped", reason="combined subtitle input has no unique regular-file owner")
+
         out_path = compose_combined_filename(
             video_path=video_path,
             primary=langs[0],
@@ -158,6 +163,8 @@ def try_combine_for_video(video_path, media_type, sonarr_series_id=None,
                         raise ValueError('The source item moved or was removed during composition')
                     if not sync_output_owner_is_unique(video_path, out_path, **owner_kwargs):
                         raise ValueError('The combined output lost its unique owner during composition')
+                    if any(not sync_output_owner_is_unique(video_path, path, **owner_kwargs) for path in inputs):
+                        raise ValueError('A combined subtitle input lost its unique owner during composition')
 
                 write_kwargs['before_publish'] = validate_source
 
@@ -166,7 +173,7 @@ def try_combine_for_video(video_path, media_type, sonarr_series_id=None,
                 published_versions = capture_subtitle_versions(video_path, (out_path,), cancel)
 
             with staged_subtitle_write(
-                    video_path, out_path, source_paths=(sources.primary, *sources.secondaries),
+                    video_path, out_path, source_paths=inputs,
                     on_publish=notify,
                     after_publish=after_publish, **owner_kwargs, **write_kwargs) as temporary:
                 check_cancelled(cancel)

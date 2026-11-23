@@ -501,7 +501,7 @@ def _search_languages(context, item, *, translation_gate, automatic=False):
         from .translation import queue_missing_translations
 
         try:
-            covered = queue_missing_translations(context, **({'hold_waiting': True} if automatic else {}))
+            covered = queue_missing_translations(context, **({'wanted': True} if automatic else {}))
         except Exception:
             logging.exception('BAZARR could not queue a translation for source item %s', context.item_id)
         else:

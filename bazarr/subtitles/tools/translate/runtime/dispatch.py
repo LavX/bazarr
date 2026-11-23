@@ -485,14 +485,14 @@ class Dispatcher:
         ``"cancelled"``, ``"failed"``, or the error class of the retry."""
         from app.jobs_queue import JobCancelled
         from subtitles.tools.subsync_engines import SubtitleDestinationChanged, SubtitleSourceChanged
+        from ..core.translator_utils import EmptySourceTranslation
 
         if isinstance(error, JobCancelled):
             jobs.cancel(state.job_id)
             self._finish_history(history, state, "cancelled")
             return "cancelled"
-        if getattr(error, "reason", None) == "empty_translation":
-            jobs.fail(state.job_id, "empty_translation", str(error))
-            self._finish_history(history, state, "failed", "empty_translation", str(error))
+        if isinstance(error, EmptySourceTranslation):
+            self._end_failed(jobs, history, state, AttemptFailure(error.reason, str(error)))
             return "failed"
         if isinstance(error, SubtitleDestinationChanged):
             jobs.fail(state.job_id, fail.DESTINATION_CHANGED, fail.MESSAGES[fail.DESTINATION_CHANGED])
@@ -539,12 +539,16 @@ class Dispatcher:
 
     # ------------------------------------------------------------------------------------------- legacy
     def _run_legacy(self, spec: JobSpec, legacy, instance) -> DispatchOutcome:
+        from ..core.translator_utils import EmptySourceTranslation
+
         if spec.legacy is None:
             raise AttemptFailure(fail.WORKER_UNAVAILABLE, "This caller cannot run an engine served by Bazarr+.")
         try:
             result = spec.legacy(legacy, instance)
         except LegacyDeclined as declined:
             raise EngineDeclined(declined.reason) from None
+        except EmptySourceTranslation as error:
+            raise AttemptFailure(error.reason, str(error)) from None
         if result.published is not None:
             return DispatchOutcome("published", published=result.published, partial_error=result.partial_error,
                                    plugin_id=legacy.plugin_id, engine_name=legacy.name)

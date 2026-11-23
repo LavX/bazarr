@@ -8,9 +8,10 @@ import os
 from sqlalchemy import select
 
 from app.config import settings
-from app.database import get_profiles_list
+from app.database import get_audio_profile_languages, get_profile_cutoff, get_profiles_list
+from subtitles.indexer.entries import entry_codec
 from subtitles.language_profiles import build_translate_from_map
-from subtitles.tools.subsync_engines import capture_subtitle_versions
+from subtitles.tools.subsync_engines import capture_subtitle_versions, sync_output_owner_is_unique
 from subtitles.wanted.utils import SOURCE_HISTORY_ACTIONS, source_history_for_wait, source_wait_elapsed
 
 from . import repository
@@ -76,15 +77,30 @@ def _target_code(to_lang, forced, hi):
     return f'{to_lang}:forced' if forced else f'{to_lang}:hi' if hi else to_lang
 
 
+def _current_missing(item, profile_id, profile):
+    # Profile saves queue an index refresh. While that work waits, evaluate the live
+    # policy against the indexed tracks instead of trusting its old missing list.
+    from .indexer import compute_missing_subtitles
+
+    ignored = {'pgs': settings.general.ignore_pgs_subs, 'vobsub': settings.general.ignore_vobsub_subs,
+               'ass': settings.general.ignore_ass_subs}
+    listing = [entry for entry in ast.literal_eval(item.subtitles or '[]') if
+               (os.path.isfile(entry[1]) if entry[1] else not ignored.get(entry_codec(entry)))]
+    audio_codes = {entry['code2'] for entry in get_audio_profile_languages(item.audio_language)}
+    return compute_missing_subtitles(profile, get_profile_cutoff(profile_id), listing, item.failed_attempts,
+                                     matches_audio=lambda language: language['language'] in audio_codes)
+
+
 def automatic_translation_is_current(source, subtitle_path, from_lang, to_lang, forced, hi):
     """Recheck the live profile, indexed inputs, wait and threshold at dispatch and publication."""
     item = _active_item(source)
     if item is None or not source.profile_id:
         return False
     target = _target_code(to_lang, forced, hi)
-    missing = ast.literal_eval(item.missing_subtitles or '[]')
-    rule = build_translate_from_map(get_profiles_list(profile_id=source.profile_id)).get(target)
-    return (target in missing and rule is not None and rule['from'] == from_lang
+    profile = get_profiles_list(profile_id=source.profile_id)
+    rule = build_translate_from_map(profile).get(target)
+    return (rule is not None and rule['from'] == from_lang
+            and target in _current_missing(item, source.profile_id, profile)
             and subtitle_path in _source_paths(item, from_lang) and _source_hold(source, subtitle_path) is None)
 
 
@@ -97,10 +113,10 @@ def _already_translated(source, target):
 
 
 def queue_missing_translations(source, *, downloaded_path=None, downloaded_language=None, score=None,
-                               hold_waiting=False):
+                               wanted=False):
     """Queue eligible source translations and return the target codes their jobs cover.
 
-    The source wanted caller can pass those codes over when forming its provider search. A just downloaded
+    Wanted uses the stored missing list and also holds targets waiting on a source file. A just downloaded
     subtitle is held for a positive wait. A later search with no download arguments measures the existing
     subtitle's age from source history, and falls back to the file's time for externally added subtitles.
     Once eligibility is checked, a target already present at the owned destination is covered as well.
@@ -109,7 +125,6 @@ def queue_missing_translations(source, *, downloaded_path=None, downloaded_langu
     from subtitles.tools.translate.core.translator_utils import translated_destination_path
     from subtitles.tools.translate.failure_record import translation_recently_failed
     from subtitles.tools.translate.main import translate_subtitles_file
-    from subtitles.tools.subsync_engines import sync_output_owner_is_unique
     from .indexer import SourcePublicationOwnerIndex
 
     source = live_source(source)
@@ -118,8 +133,13 @@ def queue_missing_translations(source, *, downloaded_path=None, downloaded_langu
     item = _active_item(source)
     if item is None or not translation_available().available:
         return set()
-    missing = set(ast.literal_eval(item.missing_subtitles or '[]'))
-    rules = build_translate_from_map(get_profiles_list(profile_id=source.profile_id))
+    profile = get_profiles_list(profile_id=source.profile_id)
+    rules = build_translate_from_map(profile)
+    if not rules:
+        return set()
+    missing = set(ast.literal_eval(item.missing_subtitles or '[]') if wanted
+                  else _current_missing(item, source.profile_id, profile))
+    owners = SourcePublicationOwnerIndex()
     covered = set()
     for target, rule in rules.items():
         from_lang = rule['from']
@@ -130,22 +150,22 @@ def queue_missing_translations(source, *, downloaded_path=None, downloaded_langu
         if _already_translated(source, target):
             covered.add(target)
             continue
+        candidates = _source_paths(item, from_lang)
         if downloaded_path is not None:
-            if from_lang != downloaded_language or downloaded_path not in _source_paths(item, from_lang):
+            if from_lang != downloaded_language:
                 continue
-            subtitle_path = downloaded_path
-        else:
-            subtitle_path = next(_source_paths(item, from_lang), None)
+            candidates = (candidate for candidate in candidates if candidate == downloaded_path)
+        subtitle_path = next((candidate for candidate in candidates if
+                              sync_output_owner_is_unique(source.path, candidate, ownership_index=owners)), None)
         if not subtitle_path or translation_recently_failed(
                 None, 'source', source.item_id, from_lang, to_lang, forced, hi, source_created_at=source.created_at):
             continue
         hold = _source_hold(source, subtitle_path, new_download=downloaded_path is not None, score=score)
         if hold is not None:
-            if hold_waiting and hold == 'wait':
+            if wanted and hold == 'wait':
                 covered.add(target)
             continue
         destination = translated_destination_path(source.path, to_lang, forced, hi)
-        owners = SourcePublicationOwnerIndex()
         if not sync_output_owner_is_unique(source.path, destination, ownership_index=owners):
             logging.debug('BAZARR source translation target ownership is ambiguous: %s', destination)
             continue
