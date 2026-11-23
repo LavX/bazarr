@@ -184,19 +184,49 @@ def _group_directory_vouches(group):
 
 
 class _ForeignGuard:
-    """Read each foreign library once, and verify its mount again before relying on that walk."""
+    """Keep the settings and filesystem evidence used to release another library's item."""
 
-    def __init__(self, session, cancel):
+    def __init__(self, session, cancel, destination):
         self.session = session
         self.cancel = cancel
+        self.destination = destination
+        self.settings_by_library = {}
         self.walks = {}
 
-    def _walk(self, holder):
+    def _read_settings(self, holder):
         library = repository.get_library(holder.library_id, self.session)
         source = repository.get_source(holder.source_id, self.session)
-        if library is None or source is None:
+        if (library is None or source is None or library.source_id != source.id
+                or library.content_kind != holder.content_kind or library.enabled != holder.library_enabled
+                or source.enabled != holder.source_enabled):
             return None
+        revision = None
+        if source.kind != 'folder':
+            from .kinds.media_server import server_row
+
+            try:
+                revision = server_row(source.media_server_instance_id, source.kind, self.session).revision
+            except MediaServerError:
+                return None
         roots = repository.get_roots(holder.library_id, self.session)
+        return _ScanSettings(source, library, roots, revision)
+
+    def snapshot(self, holder):
+        if holder.library_id not in self.settings_by_library:
+            self.settings_by_library[holder.library_id] = self._read_settings(holder)
+        return self.settings_by_library[holder.library_id]
+
+    def snapshots(self, holders):
+        snapshots = [self.settings_by_library.get(library_id) for library_id in {holder.library_id for holder in holders}]
+        if any(snapshot is None for snapshot in snapshots):
+            raise _ForeignClaimChanged
+        return snapshots
+
+    def _walk(self, holder):
+        settings = self.snapshot(holder)
+        if settings is None:
+            return None
+        source, library, roots = settings.source, settings.library, settings.roots
         before = _root_snapshot(roots)
         if before is None or any(root.last_dev != before[root.local_path].dev for root in roots):
             return None
@@ -204,12 +234,21 @@ class _ForeignGuard:
             kind = get_kind(source.kind) if source.kind == 'folder' else get_kind(source.kind, self.session)
         except UnknownSourceKind:
             return None
-        if kind.validate_library(source, library):
+        server = settings.revision is not None
+        options = {'roots': roots} if server else {}
+        if kind.validate_library(source, library, **options):
             return None
-        listing = kind.enumerate(source, library, self.cancel)
-        found_video = False
-        for _ in listing:
-            found_video = True
+        if server:
+            options['revision'] = settings.revision
+        listing = kind.enumerate(source, library, self.cancel, **options)
+        try:
+            found_video = False
+            for _ in listing:
+                found_video = True
+        except MediaServerError as error:
+            if error.code == 'configuration_changed':
+                return None
+            raise
         if (found_video and listing.complete and not listing.drifted and not listing.unstable
                 and _root_snapshot(roots) == before):
             return roots, before, listing.directory_states
@@ -243,10 +282,12 @@ class _ForeignGuard:
 
 
 @contextmanager
-def _admission_transaction(session, guard, outer_releases=None):
+def _admission_transaction(session, guard, outer_releases=None, *, holders=()):
     """Verify every release just before commit. Savepoints pass their releases to the outer transaction."""
     releases = []
     with source_transaction(session) as connection:
+        if outer_releases is None and holders:
+            _check_scan_settings(guard.destination, connection, lock=True, foreign=guard.snapshots(holders))
         yield connection, releases
         if outer_releases is None:
             for holder, found, alias in releases:
@@ -267,37 +308,64 @@ def _root_configuration(roots):
 
 
 @dataclass(frozen=True)
-class _ServerScan:
+class _ScanSettings:
     source: object
     library: object
     roots: list
-    revision: int
+    revision: int | None
 
-    def check(self, target, *, lock=False):
-        from .kinds.media_server import check_server_revision
+    def check(self, target):
+        _check_scan_settings(self, target)
 
+    def check_owners(self, current_source, current_library, target, *, primary):
         source, library = self.source, self.library
-        check_server_revision(source.media_server_instance_id, source.kind, self.revision, target, lock=lock)
-        current_source = repository.get_source(source.id, target, lock_config=lock)
-        current_library = repository.get_library(library.id, target, for_update=lock)
         if (current_source is None or current_source.created_at != source.created_at
                 or current_library is None or current_library.created_at != library.created_at):
+            if not primary:
+                raise _ForeignClaimChanged
             raise _ServerScanChanged('unavailable', 'The media source or library was removed during the scan.')
-        if not current_source.enabled or not current_library.enabled:
+        if primary and (not current_source.enabled or not current_library.enabled):
             raise _ServerScanChanged('disabled', 'The media source or library was disabled during the scan.')
-        if ((current_source.kind, current_source.media_server_instance_id)
-                != (source.kind, source.media_server_instance_id)
+        if ((current_source.kind, current_source.media_server_instance_id, current_source.enabled)
+                != (source.kind, source.media_server_instance_id, source.enabled)
                 or (current_library.source_id, current_library.locator, current_library.content_kind)
                 != (library.source_id, library.locator, library.content_kind)
+                or current_library.enabled != library.enabled
                 or current_library.updated_at != library.updated_at
                 or _root_configuration(repository.get_roots(library.id, target)) != _root_configuration(self.roots)):
+            if not primary:
+                raise _ForeignClaimChanged
             raise MediaServerError('configuration_changed')
 
     @contextmanager
-    def write(self, session):
+    def write(self, session, *, foreign=()):
         with source_transaction(session) as connection:
-            self.check(connection, lock=True)
+            _check_scan_settings(self, connection, lock=True, foreign=foreign)
             yield connection
+
+
+def _check_scan_settings(destination, target, *, lock=False, foreign=()):
+    from .kinds.media_server import check_server_revision
+
+    settings = (destination, *foreign)
+    # Match the parent-to-child order of settings edits and deletes, independent of the direction of transfer.
+    # Root edits take their library row first. Take all settings locks before touching groups or items.
+    for snapshot in sorted((item for item in settings if item.revision is not None),
+                           key=lambda item: item.source.media_server_instance_id):
+        try:
+            check_server_revision(snapshot.source.media_server_instance_id, snapshot.source.kind, snapshot.revision,
+                                  target, lock=lock, require_enabled=snapshot is destination)
+        except MediaServerError:
+            if snapshot is not destination:
+                raise _ForeignClaimChanged from None
+            raise
+    sources = {key: repository.get_source(key, target, lock_config=lock)
+               for key in sorted({snapshot.source.id for snapshot in settings})}
+    libraries = {key: repository.get_library(key, target, for_update=lock)
+                 for key in sorted({snapshot.library.id for snapshot in settings})}
+    for snapshot in settings:
+        snapshot.check_owners(sources[snapshot.source.id], libraries[snapshot.library.id], target,
+                              primary=snapshot is destination and destination.revision is not None)
 
 
 def _scan_library(source, library, cancel, session, shadow_context) -> LibraryScan:
@@ -318,7 +386,7 @@ def _scan_library(source, library, cancel, session, shadow_context) -> LibrarySc
             repository.record_library_scan(library.id, result.status, result.message, session,
                                            created_at=library.created_at)
             return result
-        scan = _ServerScan(source, library, roots, saved.revision)
+        scan = _ScanSettings(source, library, roots, saved.revision)
     try:
         return _scan_library_snapshot(source, library, roots, scan, result, cancel, session, shadow_context)
     except _ServerScanChanged as error:
@@ -406,12 +474,15 @@ def _scan_library_snapshot(source, library, roots, scan, result, cancel, session
         result.skipped += len(too_long)
 
     complete = listing.complete
-    foreign_guard = _ForeignGuard(session, cancel)
+    foreign_guard = _ForeignGuard(session, cancel, scan or _ScanSettings(source, library, roots, None))
     matching = identity.match_library(
         discovered, rows, ignore_dev=ignore_dev, library_content_kind=library.content_kind,
         foreign_lookup=lambda inodes, paths: repository.foreign_candidates(inodes, paths, library.id, session),
         foreign_vouched=lambda holder, found: complete and not listing.drifted and foreign_guard.vouches(holder, found),
-        by_server_id=server)
+        by_server_id=server, partial_server=server and (not complete or listing.drifted))
+    for holder, _, alias in matching.handovers:
+        if alias:
+            foreign_guard.snapshot(holder)
 
     # A remounted root has to vouch for what this library knows: a file it holds by identity, or, for a library
     # that holds only folders, a folder that is the one recorded.
@@ -467,17 +538,17 @@ def _scan_library_snapshot(source, library, roots, scan, result, cancel, session
     result.deferred = decisions.deferred
     write_args = (library, decisions, plan, group_identities, group_for_dir, result, cancel)
     write = scan.write if server else source_transaction
+    foreign = [holder for holder, _, handover in decisions.repathed if handover]
+    foreign.extend(decisions.foreign_to_close.values())
     if server:
         try:
-            with write(session) as connection:
+            with write(session, foreign=foreign_guard.snapshots(foreign)) as connection:
                 if _root_snapshot(roots) != root_snapshot:
                     raise _ServerScanChanged('root_missing', 'A folder changed before the scan could write.')
                 if library.content_kind == 'series' or decisions.foreign_to_close:
                     # The transaction holds item locks through all phases. Preserve show-before-episode
                     # ordering even for unchanged episodes and foreign owners.
                     shows = set(groups) if library.content_kind == 'series' else set()
-                    foreign = [holder for holder, _, handover in decisions.repathed if handover]
-                    foreign.extend(decisions.foreign_to_close.values())
                     shows.update(holder.group_id for holder in foreign if holder.kind == 'episode')
                     for batch in _chunks(sorted(shows - {None})):
                         repository.lock_show_groups(connection, batch)
@@ -501,7 +572,7 @@ def _scan_library_snapshot(source, library, roots, scan, result, cancel, session
         # These incoming files release rows whose groups give up their keys. A rejected write must also
         # roll back the group keys, so these scans keep the key changes and item writes together.
         try:
-            with _admission_transaction(session, decisions.foreign_guard) as (connection, releases):
+            with _admission_transaction(session, decisions.foreign_guard, holders=foreign) as (connection, releases):
                 inserted = _write_library(*write_args, connection, releases)
         except (_GroupedAdmissionRefused, _ForeignClaimChanged):
             result = LibraryScan(library.id)
@@ -685,6 +756,8 @@ def _decide(matching, groups, plan, group_for_dir, grouped, follows_directories,
     # identity and releases its path only as part of the competing move.
     blocked = (set() if complete and not server else
                {row.path for row in matching.displaced if row.path not in decisions.server_displaced})
+    blocked.update(row.path for row in matching.deferred_replacements)
+    decisions.deferred += len(matching.deferred_replacements)
 
     def trusted(found):
         return not (decisions.conservative and found.group_key not in group_for_dir)
@@ -937,7 +1010,9 @@ def _write_repathed(library, decisions, group_for_dir, grouped, result, session,
                 repository.update_item(row.id, connection, owner_library_id=row.library_id, path=f'pending:{row.id}')
     for batch in _chunks(prepared):
         try:
-            with _admission_transaction(session, decisions.foreign_guard, outer_releases) as (connection, releases):
+            holders = tuple(row for row, _, handover, *_ in batch if handover)
+            with _admission_transaction(session, decisions.foreign_guard, outer_releases, holders=holders) as (
+                    connection, releases):
                 moved = [(entry, _write_final_path(library, entry, grouped, decisions, connection, releases))
                          for entry in batch]
         except (IntegrityError, _ForeignClaimChanged):
@@ -945,7 +1020,8 @@ def _write_repathed(library, decisions, group_for_dir, grouped, result, session,
             # on the next scan. A handover keeps the old owner and path until it succeeds.
             for entry in batch:
                 try:
-                    with _admission_transaction(session, decisions.foreign_guard, outer_releases) as (
+                    holders = (entry[0],) if entry[2] else ()
+                    with _admission_transaction(session, decisions.foreign_guard, outer_releases, holders=holders) as (
                             connection, releases):
                         deleted = _write_final_path(library, entry, grouped, decisions, connection, releases)
                 except (IntegrityError, _ForeignClaimChanged) as error:
@@ -1082,7 +1158,8 @@ def _write_path_only(library, decisions, group_for_dir, result, session, cancel,
         if holder is None:
             continue
         try:
-            with _admission_transaction(session, decisions.foreign_guard, outer_releases) as (connection, releases):
+            with _admission_transaction(session, decisions.foreign_guard, outer_releases, holders=(holder,)) as (
+                    connection, releases):
                 updated = update(connection, row, found, identified)
                 deleted = _close_foreign(holder, found, connection, releases) if updated else 0
         except _ForeignClaimChanged:
@@ -1141,7 +1218,10 @@ def _insert_batch(batch, library, item_kind, group_for_dir, result, session, ins
             item_id = save()
         return item_id, deleted + _close_foreign(holder, found, connection, releases)
     try:
-        with _admission_transaction(session, decisions.foreign_guard, outer_releases) as (connection, releases):
+        holders = tuple(decisions.foreign_to_close[found.path] for found, _, _ in parses
+                        if found.path in decisions.foreign_to_close)
+        with _admission_transaction(session, decisions.foreign_guard, outer_releases, holders=holders) as (
+                connection, releases):
             written = [insert(connection, releases, found, group_id, identified)
                        for found, group_id, identified in parses]
     except (IntegrityError, DataError, OperationalError, _ForeignClaimChanged) as error:
@@ -1149,8 +1229,9 @@ def _insert_batch(batch, library, item_kind, group_for_dir, result, session, ins
             raise
         for found, group_id, identified in parses:
             try:
-                with _admission_transaction(session, decisions.foreign_guard, outer_releases) as (
-                        connection, releases):
+                holder = decisions.foreign_to_close.get(found.path)
+                with _admission_transaction(session, decisions.foreign_guard, outer_releases,
+                                            holders=(holder,) if holder is not None else ()) as (connection, releases):
                     item_id, deleted = insert(connection, releases, found, group_id, identified)
                 result.item_ids.append(item_id)
                 inserted.append((item_id, found))

@@ -450,6 +450,95 @@ def test_confirmed_displacement_preserves_both_server_identities(saved):
     assert repository.get_item(restored.id, saved.db).title == 'Keep this identity'
 
 
+@pytest.mark.parametrize('replace_file', [False, True])
+def test_partial_scan_preserves_the_identity_at_a_reused_path(saved, monkeypatch, replace_file):
+    from media_servers import item_pages
+    from media_sources import repository
+
+    source = _register(saved, library=_library(saved))
+    lib = source['libraries'][0]['id']
+    movie = video(saved.root / 'Film.2000.mkv')
+    remote = f'/remote/Movie/{movie.name}'
+    saved.rows[('movies', 'Movie')] = [_item(10, remote)]
+    _scan(saved, source['id'], lib)
+    before = _indexed(saved, lib)['10']
+    repository.update_item(before.id, saved.db, identity_source='user', title='Keep this identity', server_missing=1)
+    if replace_file:
+        video(saved.root / 'Replacement.mkv', size=2222).replace(movie)
+    monkeypatch.setattr(item_pages, 'PAGE_SIZE', 1)
+    saved.pages[('movies', 'Movie', 0)] = _body([_item(20, remote)], 2)
+    saved.fail_at = ('movies', 'Movie', 1)
+
+    assert _scan(saved, source['id'], lib)[0]['last_scan_status'] == 'partial'
+    rows = _indexed(saved, lib)
+    assert set(rows) == {'10'}
+    assert (rows['10'].id, rows['10'].path, rows['10'].server_missing) == (before.id, str(movie), 1)
+    assert repository.get_item(before.id, saved.db).title == 'Keep this identity'
+
+    saved.pages.clear()
+    saved.fail_at = None
+    saved.rows[('movies', 'Movie')] = [_item(20, remote)]
+    assert _scan(saved, source['id'], lib)[0]['last_scan_status'] == 'ok'
+    assert _indexed(saved, lib)['20'].id == before.id
+
+
+@pytest.mark.parametrize('edit', [None, 'roots', 'connection'])
+def test_handover_rechecks_previous_library_settings(saved, tmp_path, monkeypatch, edit):
+    from app.database import TableMediaServerInstances
+    from media_sources import repository, scanner
+
+    prior = _register(saved, library=_library(saved))
+    prior_id, prior_lib, prior_connection = prior['id'], prior['libraries'][0]['id'], saved.instance
+    saved.instance = str(uuid4())
+    saved.db.execute(sa.insert(TableMediaServerInstances).values(
+        id=saved.instance, kind=saved.kind, name='Other server', enabled=1, url='http://server.invalid',
+        verify_ssl=1, revision=1))
+    saved.folders.append({'ItemId': 'other-movies', 'Name': 'Other films', 'CollectionType': 'movies',
+                          'Locations': ['/remote/Movie']})
+    destination = _register(saved, library=_library(saved, 'other-movies', local_path=saved.other))
+    destination_id, destination_lib = destination['id'], destination['libraries'][0]['id']
+    movie = video(saved.root / 'Film.2000.mkv')
+    witness = video(saved.root / 'Witness.2001.mkv')
+    remote = f'/remote/Movie/{movie.name}'
+    witness_item = _item(11, f'/remote/Movie/{witness.name}')
+    saved.rows[('movies', 'Movie')] = [_item(10, remote), witness_item]
+    _scan(saved, prior_id, prior_lib)
+    before = _indexed(saved, prior_lib)['10']
+    movie.rename(saved.other / movie.name)
+    saved.rows[('movies', 'Movie')] = [witness_item]
+    saved.rows[('other-movies', 'Movie')] = [_item(20, remote)]
+
+    decide = scanner._decide
+
+    def edit_previous_owner(*args, **kwargs):
+        decisions = decide(*args, **kwargs)
+        assert [(row.id, handover) for row, _, handover in decisions.repathed] == [(before.id, True)]
+        if edit is None:
+            return decisions
+        if edit == 'roots':
+            new_root = tmp_path / 'new-root'
+            new_root.mkdir()
+            response = saved.client.patch(f'{SOURCES}/{prior_id}/libraries/{prior_lib}', headers=HEADERS, json={
+                'roots': [{'server_path': '/remote/Movie', 'local_path': str(new_root)}], 'confirmed_removed': 1,
+            })
+        else:
+            response = saved.client.patch(f'/api/system/media-server-instances/{prior_connection}', headers=HEADERS,
+                                          json={'api_key': 'fixture-replacement'})
+        assert response.status_code == 200, response.json
+        return decisions
+
+    monkeypatch.setattr(scanner, '_decide', edit_previous_owner)
+    outcome = _scan(saved, destination_id, destination_lib)[0]
+    after = repository.get_item(before.id, saved.db)
+    if edit is None:
+        assert outcome['last_scan_status'] == 'ok'
+        assert (after.library_id, after.external_id, after.path) == (destination_lib, '20', str(saved.other / movie.name))
+    else:
+        assert outcome['last_scan_status'] == 'partial'
+        assert (after.library_id, after.external_id, after.path) == (prior_lib, '10', str(movie))
+        assert not _indexed(saved, destination_lib)
+
+
 def test_each_library_maps_its_own_roots_and_server_ids(saved, tmp_path):
     source = _register(saved)
     special = tmp_path / 'special'
@@ -547,8 +636,11 @@ def test_id_lookup_batches_stop_on_first_error_and_keep_previous_flags(saved, mo
         '0': (0, 0), '1': (2, 0), '2': (2, 0), '3': (0, 0)}
 
 
-def test_enabled_folder_holder_wins_when_server_lists_a_hardlink(saved):
+def test_enabled_folder_holder_wins_when_server_lists_a_hardlink(saved, monkeypatch):
     from os import link
+
+    from media_servers import item_pages
+    from media_sources import repository
 
     source_id, library_id, root = add_source(saved.db, saved.root.parent, name='Folders', folder='Folder')
     old_path = video(root / 'Old.mkv')
@@ -561,8 +653,22 @@ def test_enabled_folder_holder_wins_when_server_lists_a_hardlink(saved):
     saved.rows[('movies', 'Movie')] = [_item('20', '/remote/Movie/Linked.mkv')]
     result = _scan(saved, source['id'], lib)[0]
     assert 'already supplied by Folders' in result['last_scan_message'] and not _indexed(saved, lib)
-    from media_sources import repository
     assert repository.get_item(holder, saved.db).path == str(old_path)
+
+    response = saved.client.patch(f'{SOURCES}/{source_id}/libraries/{library_id}', headers=HEADERS,
+                                  json={'enabled': False})
+    assert response.status_code == 200, response.json
+    monkeypatch.setattr(item_pages, 'PAGE_SIZE', 1)
+    saved.pages[('movies', 'Movie', 0)] = _body(saved.rows[('movies', 'Movie')], 2)
+    saved.fail_at = ('movies', 'Movie', 1)
+    result = _scan(saved, source['id'], lib)[0]
+    assert result['last_scan_status'] == 'partial' and not _indexed(saved, lib)
+    assert repository.get_item(holder, saved.db).library_id == library_id
+
+    saved.pages.clear()
+    saved.fail_at = None
+    assert _scan(saved, source['id'], lib)[0]['last_scan_status'] == 'ok'
+    assert _indexed(saved, lib)['20'].id == holder
 
 
 def test_server_roots_choose_the_longest_segment_prefix_and_refuse_ties(tmp_path):

@@ -60,6 +60,8 @@ def _page(ids, total):
 
 
 def test_page_boundary_uses_raw_offsets_and_requested_parent(client):
+    from jellyfin.client import JellyfinClient
+
     browser, fetch, _ = client
     fetch.side_effect = [_page(range(500), 501), _page([500], 501)]
     result = browser.get_item_pages('library-a', ('Movie',))
@@ -68,6 +70,8 @@ def test_page_boundary_uses_raw_offsets_and_requested_parent(client):
     query = [call.args[1] for call in fetch.call_args_list]
     assert [call.args[0] for call in fetch.call_args_list] == ['http://server.invalid/Items'] * 2
     assert [row['StartIndex'] for row in query] == [0, 500]
+    fields = 'Path,ProviderIds' if isinstance(browser, JellyfinClient) else 'Path,ProviderIds,PremiereDate'
+    assert [row['Fields'] for row in query] == [fields, fields]
     assert all(row['Limit'] == 500 and row['Recursive'] == 'true' and row['ParentId'] == 'library-a'
                and row['IncludeItemTypes'] == 'Movie' and row['SortBy'] == 'SortName' for row in query)
 
