@@ -2,6 +2,7 @@ import {
   ASS_EVENT_COLUMNS,
   type AssEventMetadata,
   assTextToDisplay,
+  parseAssTimestamp,
   SSA_EVENT_COLUMNS,
 } from "@/pages/SubtitleEditor/parsers/ass";
 import type { ParseResult } from "@/pages/SubtitleEditor/types";
@@ -15,7 +16,9 @@ Title: Untitled
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
 Style: Default,Arial,20,&H00FFFFFF,&H000000FF,&H00000000,&H00000000,0,0,0,0,100,100,0,0,1,2,2,2,10,10,10,1`;
 
-function formatAssTimestamp(ms: number): string {
+function formatAssTimestamp(ms: number, raw?: string): string {
+  if (raw !== undefined && parseAssTimestamp(raw) === ms) return raw;
+
   const clamped = Math.max(0, ms);
   const totalSeconds = Math.floor(clamped / 1000);
   const hours = Math.floor(totalSeconds / 3600);
@@ -34,41 +37,6 @@ function formatAssTimestamp(ms: number): string {
   );
 }
 
-/**
- * Patch an existing Dialogue line with updated timing and/or text.
- * Preserves all other fields (Layer, Style, Name, Margins, Effect).
- */
-function patchDialogueLine(
-  rawLine: string,
-  startMs: number,
-  endMs: number,
-  text: string,
-): string | null {
-  // The ordinary parser already selected this row, so only match its prefix.
-  const prefix = rawLine.match(/^Dialogue:[ \t]*/)?.[0];
-  if (!prefix) return null;
-
-  // Split into 10 fields (last field = Text, can contain commas)
-  const parts: string[] = [];
-  let remaining = rawLine.slice(prefix.length);
-  for (let i = 0; i < 9; i++) {
-    const commaIdx = remaining.indexOf(",");
-    if (commaIdx === -1) break;
-    parts.push(remaining.slice(0, commaIdx));
-    remaining = remaining.slice(commaIdx + 1);
-  }
-  parts.push(remaining); // Text field (10th)
-
-  if (parts.length < 10) return null;
-
-  // Update Start (index 1), End (index 2), Text (index 9)
-  parts[1] = formatAssTimestamp(startMs);
-  parts[2] = formatAssTimestamp(endMs);
-  parts[9] = text.replace(/\n/g, "\\N");
-
-  return prefix + parts.join(",");
-}
-
 export const assSerializer: SubtitleSerializer = {
   serialize(result: ParseResult): string {
     const { metadata, cues } = result;
@@ -83,37 +51,24 @@ export const assSerializer: SubtitleSerializer = {
     const marker = marked ? "Marked=0" : "0";
     const dialogueLines = cues.map((cue, index) => {
       const event = fields[index];
-      if (event) {
-        const raw = event.text;
-        const edited = cue.text !== assTextToDisplay(raw);
-        const values = [
-          event.marked ?? event.layer ?? marker,
-          formatAssTimestamp(cue.startMs),
-          formatAssTimestamp(cue.endMs),
-          event.style ?? "Default",
-          event.name ?? "",
-          event.marginl ?? "0",
-          event.marginr ?? "0",
-          event.marginv ?? "0",
-          event.effect ?? "",
-          edited ? cue.text.replace(/\n/g, "\\N") : raw,
-        ];
-        return `Dialogue: ${values.join(",")}`;
-      }
-      if (cue.rawText) {
-        const patched = patchDialogueLine(
-          cue.rawText,
-          cue.startMs,
-          cue.endMs,
-          cue.text,
-        );
-        if (patched !== null) return patched;
-      }
-      // Use the edited cue when no canonical raw row is available.
-      const start = formatAssTimestamp(cue.startMs);
-      const end = formatAssTimestamp(cue.endMs);
-      const text = cue.text.replace(/\n/g, "\\N");
-      return `Dialogue: ${marker},${start},${end},Default,,0,0,0,,${text}`;
+      const raw = event?.text;
+      const text =
+        raw !== undefined && cue.text === assTextToDisplay(raw)
+          ? raw
+          : cue.text.replace(/\n/g, "\\N");
+      const values = [
+        event?.marked ?? event?.layer ?? marker,
+        formatAssTimestamp(cue.startMs, event?.start),
+        formatAssTimestamp(cue.endMs, event?.end),
+        event?.style ?? "Default",
+        event?.name ?? "",
+        event?.marginl ?? "0",
+        event?.marginr ?? "0",
+        event?.marginv ?? "0",
+        event?.effect ?? "",
+        text,
+      ];
+      return `Dialogue: ${values.join(",")}`;
     });
 
     return (

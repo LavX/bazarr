@@ -2,7 +2,7 @@ import type { Cue, ParseResult } from "@/pages/SubtitleEditor/types";
 import type { SubtitleParser } from "./index";
 import { cueId } from "./uuid";
 
-function parseTimestamp(raw: string): number | null {
+export function parseAssTimestamp(raw: string): number | null {
   // H:MM:SS.cc (centiseconds)
   const match = raw.trim().match(/^(\d+):(\d+):(\d+)\.(\d+)$/);
   if (!match) return null;
@@ -44,12 +44,9 @@ export const SSA_EVENT_COLUMNS = [
   "Marked",
   ...ASS_EVENT_COLUMNS.slice(1),
 ] as const;
-const normalizedSsaColumns = SSA_EVENT_COLUMNS.map((column) =>
-  column.toLowerCase(),
-);
 
 export interface AssEventMetadata {
-  assFields: Record<string, string>;
+  assFields: Partial<Record<string, string>> & { text: string };
 }
 
 function formatColumns(value: string) {
@@ -197,7 +194,7 @@ export const assParser: SubtitleParser = {
       for (let i = 0; i < maxSplits; i++) {
         const commaIdx = remaining.indexOf(",");
         if (commaIdx === -1) break;
-        parts.push(remaining.slice(0, commaIdx).trim());
+        parts.push(remaining.slice(0, commaIdx));
         remaining = remaining.slice(commaIdx + 1);
       }
       parts.push(remaining); // The rest is the Text column (or last column)
@@ -207,8 +204,8 @@ export const assParser: SubtitleParser = {
       }
 
       const rawCueText =
-        textColIdx >= 0 && textColIdx < parts.length
-          ? parts[textColIdx]
+        textColIdx >= 0 && textColIdx < parts.length - 1
+          ? parts[textColIdx].trim()
           : parts[parts.length - 1];
       const startStr =
         startColIdx >= 0 && startColIdx < parts.length
@@ -217,33 +214,28 @@ export const assParser: SubtitleParser = {
       const endStr =
         endColIdx >= 0 && endColIdx < parts.length ? parts[endColIdx] : "";
 
-      const startMs = parseTimestamp(startStr);
-      const endMs = parseTimestamp(endStr);
+      const startMs = parseAssTimestamp(startStr);
+      const endMs = parseAssTimestamp(endStr);
       if (strict && (startMs === null || endMs === null)) {
         throw new Error("Invalid ASS cue timing");
       }
-      // The serializer writes canonical SSA fields after a checked reload. Keep
-      // them on a normal reopen so a second save keeps the Marked declaration.
-      const keepMarkedFields =
-        isSSA &&
-        parts.length === normalizedSsaColumns.length &&
-        columns.length === normalizedSsaColumns.length &&
-        normalizedSsaColumns.every(
-          (column, index) => column === columns[index],
-        );
       cues.push({
         id: cueId(),
         startMs: startMs ?? 0,
         endMs: endMs ?? 0,
         text: assTextToDisplay(rawCueText),
         rawText: line,
-        ...((strict || keepMarkedFields) && {
-          formatMetadata: {
-            assFields: Object.fromEntries(
-              columns.map((column, index) => [column, parts[index]]),
+        formatMetadata: {
+          assFields: {
+            // Fixed fields end before the unsplit remainder of a lenient row.
+            ...Object.fromEntries(
+              columns
+                .slice(0, parts.length - 1)
+                .map((column, index) => [column, parts[index]]),
             ),
-          } satisfies AssEventMetadata,
-        }),
+            text: rawCueText,
+          },
+        } satisfies AssEventMetadata,
       });
     }
 
