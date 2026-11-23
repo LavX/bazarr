@@ -482,6 +482,90 @@ def test_partial_scan_preserves_the_identity_at_a_reused_path(saved, monkeypatch
     assert _indexed(saved, lib)['20'].id == before.id
 
 
+@pytest.mark.parametrize('original_first', [False, True], ids=['replacement-first', 'original-first'])
+def test_conflicting_server_paths_stay_out_of_search_until_confirmed(saved, monkeypatch, original_first):
+    from media_servers import item_pages
+    from media_sources import repository, service
+    from subtitles import download
+
+    source = _register(saved, library=_library(saved))
+    source_id, lib = source['id'], source['libraries'][0]['id']
+    movie = video(saved.root / 'Film.2000.mkv')
+    control = video(saved.root / 'Control.2001.mkv')
+    remote = f'/remote/Movie/{movie.name}'
+    original = _item(10, remote)
+    replacement = _item(20, remote)
+    other = _item(30, f'/remote/Movie/{control.name}')
+    listing = ('movies', 'Movie')
+    saved.rows[listing] = [original, other]
+    assert _scan(saved, source_id, lib)[0]['last_scan_status'] == 'ok'
+    before = _indexed(saved, lib)
+    original_id, control_id = before['10'].id, before['30'].id
+    repository.update_item(original_id, saved.db, identity_source='user', title='Keep this identity')
+    last_seen = repository.get_item(original_id, saved.db).last_seen_at
+    history_id = repository.insert_history(saved.db, item_id=original_id, source_id=source_id,
+                                           item_kind='movie', action=1, description='fixture download')
+
+    generate = Mock(side_effect=lambda *args, **kwargs: iter(()))
+    monkeypatch.setattr(download, 'generate_subtitles', generate)
+    monkeypatch.setattr(service, 'get_providers', lambda: ['fake'])
+
+    def search(item_id):
+        response = saved.client.post(f'/api/sources/items/{item_id}/search', headers=HEADERS)
+        assert response.status_code == 202, response.json
+        job = saved.jobs._reserve_next_job()
+        assert job.job_id == response.json['job_id']
+        assert saved.jobs._run_job(job)
+        assert job.status == 'completed', job.error
+
+    search(original_id)
+    assert [call.args[0] for call in generate.call_args_list] == [str(movie)]
+    generate.reset_mock()
+
+    original_file = saved.root / 'Original.mkv'
+    movie.rename(original_file)
+    video(movie, size=2222)
+    competing = [original, replacement] if original_first else [replacement, original]
+    saved.rows[listing] = [*competing, other]
+    assert _scan(saved, source_id, lib)[0]['last_scan_status'] == 'partial'
+    search(original_id)
+    search(control_id)
+    assert [call.args[0] for call in generate.call_args_list] == [str(control)]
+    rows = _indexed(saved, lib)
+    assert set(rows) == {'10', '30'}
+    assert (rows['10'].id, rows['10'].path, rows['10'].server_missing) == (original_id, str(movie), 1)
+    assert rows['10'].file_size == before['10'].file_size
+    item = repository.get_item(original_id, saved.db)
+    assert (item.title, item.last_seen_at) == ('Keep this identity', last_seen)
+    history = saved.db.execute(sa.select(repository.History).where(repository.History.c.id == history_id)).one()
+    assert history.item_id == original_id
+
+    monkeypatch.setattr(item_pages, 'PAGE_SIZE', 2)
+    saved.pages[(*listing, 0)] = _body([original, other], 3)
+    saved.fail_at = (*listing, 2)
+    assert _scan(saved, source_id, lib)[0]['last_scan_status'] == 'partial'
+    search(original_id)
+    assert [call.args[0] for call in generate.call_args_list] == [str(control)]
+
+    saved.pages.clear()
+    saved.fail_at = None
+    saved.rows[listing] = [other]
+    saved.lookup_results['10'] = True
+    for _ in range(2):
+        assert _scan(saved, source_id, lib)[0]['last_scan_status'] == 'ok'
+    assert saved.lookups == [['10']]
+    search(original_id)
+    assert [call.args[0] for call in generate.call_args_list] == [str(control)]
+
+    original_file.replace(movie)
+    saved.rows[listing] = [original, other]
+    assert _scan(saved, source_id, lib)[0]['last_scan_status'] == 'ok'
+    restored = _indexed(saved, lib)['10']
+    assert (restored.id, restored.path, restored.server_missing) == (original_id, str(movie), 0)
+    search(original_id)
+    assert [call.args[0] for call in generate.call_args_list] == [str(control), str(movie)]
+
+
 @pytest.mark.parametrize('edit', [None, 'roots', 'connection'])
 def test_handover_rechecks_previous_library_settings(saved, tmp_path, monkeypatch, edit):
     from app.database import TableMediaServerInstances

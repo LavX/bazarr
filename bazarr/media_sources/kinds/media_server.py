@@ -242,8 +242,7 @@ class MediaServerKind:
             self.series.update({f'server:{item}': _hints(row) for item, row in series.items.items()
                                 if row.get('Type', 'Series') == 'Series'})
         result.seen_external_ids.update(media.items)
-        seen_paths = set()
-        seen_files = set()
+        mapped = {}
         for row in media.items.values():
             if cancel is not None:
                 cancel()
@@ -252,11 +251,22 @@ class MediaServerKind:
             except MediaServerError:
                 result.unmapped += 1
                 continue
-            if path in seen_paths:
-                result.drifted = True
-                continue
             if not is_storable(path) or not is_video_file(path) or path.lower().endswith('.strm'):
                 result.unavailable += 1
+                continue
+            if path in mapped:
+                result.ambiguous_paths.add(path)
+            else:
+                mapped[path] = (root, row)
+        if result.ambiguous_paths:
+            result.drifted = True
+            result.problems.append('Multiple media server items listed the same local path.')
+
+        seen_files = set()
+        for path, (root, row) in mapped.items():
+            if cancel is not None:
+                cancel()
+            if path in result.ambiguous_paths:
                 continue
             stat = identity.stat_file(path) if os.path.isfile(path) else None
             if stat is None:
@@ -275,7 +285,6 @@ class MediaServerKind:
                 if group_key is None:
                     result.ungrouped += 1
                     continue
-            seen_paths.add(path)
             seen_files.add((stat.dev, stat.ino))
             yield DiscoveredFile(path, stat.size, stat.mtime_ns, stat.dev, stat.ino, group_key, _hints(row))
 

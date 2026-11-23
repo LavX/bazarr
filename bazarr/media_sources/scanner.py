@@ -34,6 +34,9 @@ MAX_PATH_BYTES = 2600
 # A scan that started this long ago and never finished is taken for a crashed one, not a running one.
 STALE_SCAN_HOURS = 6
 INVALIDATED_FILE_INDEX = UNKNOWN_STREAM_COLUMNS | dict(subtitles=None, missing_subtitles=None, indexed_at=None)
+# A negative missing_scans holds a path conflict until a complete scan matches the file.
+# The number of subsequent misses is the distance below this value.
+_SERVER_PATH_CONFLICT = -1
 
 
 @dataclass
@@ -474,12 +477,20 @@ def _scan_library_snapshot(source, library, roots, scan, result, cancel, session
         result.skipped += len(too_long)
 
     complete = listing.complete
+    partial_server = server and (not complete or listing.drifted)
+    if partial_server:
+        held = [row for row in rows if row.path in listing.ambiguous_paths or row.missing_scans < 0]
+        if held:
+            held_paths = {row.path for row in held}
+            held_ids = {row.external_id for row in held}
+            discovered = [found for found in discovered
+                          if found.path not in held_paths and found.hints.external_id not in held_ids]
     foreign_guard = _ForeignGuard(session, cancel, scan or _ScanSettings(source, library, roots, None))
     matching = identity.match_library(
         discovered, rows, ignore_dev=ignore_dev, library_content_kind=library.content_kind,
         foreign_lookup=lambda inodes, paths: repository.foreign_candidates(inodes, paths, library.id, session),
         foreign_vouched=lambda holder, found: complete and not listing.drifted and foreign_guard.vouches(holder, found),
-        by_server_id=server, partial_server=server and (not complete or listing.drifted))
+        by_server_id=server, partial_server=partial_server)
     for holder, _, alias in matching.handovers:
         if alias:
             foreign_guard.snapshot(holder)
@@ -620,7 +631,8 @@ def _write_library(library, decisions, plan, group_identities, group_for_dir, re
             group_rules.apply_plan(plan, connection, update_group, group_identities)
 
     grouped = library.content_kind != 'movie'
-    group_for_dir.update(_create_groups(library, decisions, group_for_dir, session))
+    created = _create_groups(library, decisions, group_for_dir, session)
+    group_for_dir.update(created)
     if cancel is not None:
         cancel()
 
@@ -639,6 +651,11 @@ def _write_library(library, decisions, plan, group_identities, group_for_dir, re
     _write_path_only(library, decisions, group_for_dir, result, session, cancel, outer_releases)
     inserted = _insert_new(library, decisions, group_for_dir, result, session, cancel, outer_releases)
 
+    if created and outer_releases is None:
+        # A refused handover can leave its newly created destination group empty.
+        handover_groups = {created[found.group_key] for _, found, handover in decisions.repathed
+                           if handover and found.group_key in created}
+        repository.delete_empty_groups(handover_groups, session, owner_library_id=library.id)
     if plan is not None:
         repository.delete_empty_groups(plan.gone, session, owner_library_id=library.id)
     return inserted
@@ -1357,24 +1374,34 @@ def _server_presence(source, kind, rows, listing, result, cancel, revision):
             continue
         if cancel is not None:
             cancel()
+        if row.path in listing.ambiguous_paths:
+            changes[row.id] = dict(missing_scans=_SERVER_PATH_CONFLICT, server_missing=1)
+            continue
+        conflicted = row.missing_scans < 0
+        if conflicted and (not listing.complete or listing.drifted):
+            continue
         if row.external_id in listing.seen_external_ids:
-            changes[row.id] = dict(last_seen_at=datetime.now(), missing_scans=0, server_missing=0)
+            if not conflicted:
+                changes[row.id] = dict(last_seen_at=datetime.now(), missing_scans=0, server_missing=0)
         elif listing.complete and os.path.isabs(row.path) and os.path.isfile(row.path):
-            count = min(row.missing_scans + 1, 2_147_483_647)
-            changes[row.id] = dict(missing_scans=count)
+            previous = _SERVER_PATH_CONFLICT - row.missing_scans if conflicted else row.missing_scans
+            count = min(previous + 1, 2_147_483_647)
+            changes[row.id] = dict(missing_scans=_SERVER_PATH_CONFLICT - count if conflicted else count)
             if count >= 2:
-                pending[row.external_id].append(row.id)
+                pending[row.external_id].append((row.id, conflicted))
     if pending:
         try:
             for asked, found in kind.lookup_item_ids(source, _chunks(sorted(pending), LOOKUP_SIZE), cancel,
                                                      revision=revision):
                 for external_id in asked:
-                    ids = pending[external_id]
-                    if external_id not in found:
-                        confirmed_missing.update(ids)
-                    values = (dict(missing_scans=0, server_missing=0) if external_id in found else dict(server_missing=1))
-                    for item_id in ids:
-                        changes[item_id].update(values)
+                    for item_id, conflicted in pending[external_id]:
+                        if external_id not in found:
+                            confirmed_missing.add(item_id)
+                            changes[item_id]['server_missing'] = 1
+                        elif conflicted:
+                            changes[item_id]['missing_scans'] = _SERVER_PATH_CONFLICT
+                        else:
+                            changes[item_id].update(missing_scans=0, server_missing=0)
         except MediaServerError as error:
             if error.code == 'configuration_changed':
                 raise

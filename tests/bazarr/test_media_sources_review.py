@@ -302,6 +302,48 @@ def test_a_rejected_handover_keeps_the_holder_and_the_displaced_destination_row(
     assert movies.items()[str(destination)].id == destination_row.id
 
 
+@pytest.mark.parametrize("edit", [None, "roots"])
+def test_a_refused_handover_leaves_no_new_empty_group(lib, tmp_path, monkeypatch, edit):
+    from media_sources import repository, scanner
+
+    other = Lib(lib.session, tmp_path, name="Other", folder="Other")
+    (incoming,) = other.show("Incoming", count=1)
+    other.show("Witness", count=1)
+    other.scan()
+    before = other.items()[str(incoming)]
+    old_groups = {path: row.id for path, row in other.groups().items()}
+    destination = lib.root / "Incoming" / incoming.name
+    shutil.move(str(incoming.parent), str(destination.parent))
+    replacement = tmp_path / "New root"
+    replacement.mkdir()
+    decide = scanner._decide
+
+    def edit_previous_owner(*args, **kwargs):
+        decisions = decide(*args, **kwargs)
+        assert [(row.id, handover) for row, _, handover in decisions.repathed] == [(before.id, True)]
+        assert not decisions.required_paths
+        if edit == "roots":
+            repository.replace_roots(other.library_id, [(None, str(replacement))], lib.session)
+        return decisions
+
+    monkeypatch.setattr(scanner, "_decide", edit_previous_owner)
+
+    result = lib.scan()
+
+    after = repository.get_item(before.id, lib.session)
+    if edit is None:
+        assert (result.deleted, result.handed_over, result.deferred) == (0, 1, 0)
+        assert (after.library_id, after.path) == (lib.library_id, str(destination))
+        assert set(lib.groups()) == {str(destination.parent)}
+        assert lib.group("Incoming").id == after.group_id
+    else:
+        assert (result.deleted, result.handed_over, result.deferred) == (0, 0, 1)
+        assert (after.library_id, after.path, after.group_id) == (other.library_id, str(incoming), before.group_id)
+        assert {path: row.id for path, row in other.groups().items()} == old_groups
+        assert not lib.items()
+        assert not lib.groups()
+
+
 def test_a_rejected_series_handover_keeps_the_displaced_groups_key(lib, tmp_path, monkeypatch):
     from media_sources import repository
 

@@ -73,6 +73,8 @@ class Listing:
     ungrouped: int = 0
     drifted: bool = False
     seen_external_ids: set = field(default_factory=set)
+    #: Local paths claimed by more than one external item in a server listing.
+    ambiguous_paths: set = field(default_factory=set)
     unmapped: int = 0
     unavailable: int = 0
 
