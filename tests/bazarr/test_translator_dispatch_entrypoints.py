@@ -763,6 +763,7 @@ def test_a_paused_editor_retry_cannot_activate_a_newer_hold(env, monkeypatch, ed
 
 @pytest.mark.parametrize("attachment", [
     "own", "competing", "due-retry", "late-original", "late-immediate", "removed", "live-owner",
+    "inline-parent", "live-owner-retries",
 ])
 def test_native_dispatch_preserves_its_claim_when_attachment_arrives_late(
         env, media, monkeypatch, editor_runtime_queue, attachment):
@@ -794,7 +795,20 @@ def test_native_dispatch_preserves_its_claim_when_attachment_arrives_late(
         assert jobs.await_retry(old_id, "rate_limited", "later", retry_at=datetime.now() - timedelta(seconds=1))
 
     first = _request(main, video_path=str(media.video), source_srt_file=str(media.source))
-    if attachment in ("removed", "live-owner"):
+    if attachment == "inline-parent":
+        from subtitles.tools.translate import batch
+
+        args, kwargs = attachments[-1]
+        attach(*args, **kwargs)
+        assert queue.remove_job_from_pending_queue(first)
+        monkeypatch.setattr(batch, "process_movie_translation", lambda job_id: _request(
+            main, video_path=str(media.video), source_srt_file=str(media.source), job_id=job_id))
+        parent = queue.feed_jobs_pending_queue("Translate movies", batch.__name__, "process_movie_translation")
+        job = queue._reserve_next_job()
+        assert job.job_id == parent and queue._run_job(job)
+        assert not media.dest.exists() and env.last_job().queue_job_id == first
+        return
+    if attachment in ("removed", "live-owner", "live-owner-retries"):
         args, kwargs = attachments[-1]
         if attachment == "removed":
             attach(*args, **kwargs)
@@ -808,6 +822,25 @@ def test_native_dispatch_preserves_its_claim_when_attachment_arrives_late(
             assert live.job_id == first and live.status == "pending"
         job = queue._reserve_next_job()
         assert job.job_id == second != first and env.last_job().queue_job_id == first
+        if attachment == "live-owner-retries":
+            status = JobsQueuePort.status
+
+            def fail_owner(*_args, **_kwargs):
+                raise RuntimeError("the live owner failed")
+
+            def status_then_finish_owner(port, queue_id):
+                result = status(port, queue_id)
+                if queue_id == first and result == "pending":
+                    assert not queue._run_job(live)
+                return result
+
+            monkeypatch.setattr(Dispatcher, "_run_plugin", fail_owner)
+            monkeypatch.setattr(JobsQueuePort, "status", status_then_finish_owner)
+            assert queue._run_job(job)
+            row = env.last_job()
+            assert live.status == "failed" and (row.state, row.queue_job_id) == ("awaiting_retry", None)
+            assert not media.dest.exists()
+            return
         assert queue._run_job(job)
         if attachment == "live-owner":
             assert not media.dest.exists() and env.last_job().queue_job_id == first
