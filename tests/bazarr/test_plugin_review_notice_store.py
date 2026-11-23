@@ -54,9 +54,11 @@ class _Kind:
         self.reclaimed.append(plugin_id)
 
 
-def _removal(service, kind, plugin_id, keep, **row):
-    service._record_kept_data(plugin_id, {"provider_id": plugin_id, "kind": "translator", "source_id": "official",
-                                           **row}, kind, keep)
+def _removal(service, kind_hooks, plugin_id, keep, **row):
+    from provider_hub.state import mutate_state
+
+    installation = {"provider_id": plugin_id, "kind": "translator", "source_id": "official", **row}
+    mutate_state(lambda state: service._record_kept_data(state, plugin_id, installation, kind_hooks, keep))
 
 
 def _stage_row(plugin_id, **row):
@@ -67,25 +69,43 @@ def _stage_row(plugin_id, **row):
                      **row}}))
 
 
-def test_kept_data_goes_back_only_to_the_same_plugin_from_the_same_source_and_kind(hub_store, hub_engine, monkeypatch):
-    from provider_hub import service
+@pytest.mark.parametrize("plugin_kind", ["subtitle_provider", "translator", "service"])
+def test_kept_data_goes_back_only_to_the_same_plugin_from_the_same_source_and_kind(
+        hub_store, hub_engine, monkeypatch, tmp_path, plugin_kind):
+    from provider_hub import datadir, service
     from provider_hub.state import load_state
 
     kind = _Kind()
+    kind.keeps_data = plugin_kind != "service"
     monkeypatch.setattr(service, "get_kind", lambda name: kind)
-    _removal(service, kind, "engine", True)
-    assert load_state()["kept_data"]["engine"] == {"source_id": "official", "origin": None, "kind": "translator", "config": None}
+    monkeypatch.setattr(service, "provider_hub_dir", lambda: tmp_path)
+    manifest = {"schema_version": 2, "permissions": ["data_dir"]}
+    retained = datadir.plugin_root(tmp_path, "engine") / "kept"
+    marker = retained / "saved.txt"
 
-    assert service.claim_kept_data("engine", "official", "translator") is True
+    def keep():
+        _removal(service, kind, "engine", True, kind=plugin_kind, manifest=manifest)
+        retained.mkdir(parents=True, exist_ok=True)
+        marker.write_text("saved state")
+
+    keep()
+    assert load_state()["kept_data"]["engine"] == {
+        "source_id": "official", "origin": None, "kind": plugin_kind, "config": None,
+    }
+
+    assert service.claim_kept_data("engine", "official", plugin_kind) is True
     # Handed over: nothing discarded, the owner stays on record until a removal rewrites it.
     assert kind.discarded == [] and kind.reclaimed == ["engine"]
     assert load_state()["kept_data"]["engine"]["source_id"] == "official"
+    assert marker.read_text() == "saved state"
 
     # Another source, an upload over a catalog install, and another kind each start clean.
-    for source, kind_name in (("community", "translator"), (None, "translator"), ("official", "service")):
-        _removal(service, kind, "engine", True)
+    other_kind = "translator" if plugin_kind == "service" else "service"
+    for source, kind_name in (("community", plugin_kind), (None, plugin_kind), ("official", other_kind)):
+        keep()
         assert service.claim_kept_data("engine", source, kind_name) is False, (source, kind_name)
         assert "engine" not in load_state()["kept_data"], (source, kind_name)
+        assert not retained.exists()
     assert kind.discarded == ["engine"] * 3
 
 
@@ -134,8 +154,8 @@ def test_a_removal_that_deletes_the_data_forgets_what_was_kept_and_a_kind_with_n
     assert "engine" not in load_state()["kept_data"]
 
     kind.keeps_data = False
-    _removal(service, kind, "provider", True)
-    assert "provider" not in load_state()["kept_data"]
+    _removal(service, kind, "service", True, kind="service")
+    assert "service" not in load_state()["kept_data"]
     # Nothing was kept for it, so a first install has nothing to discard either.
-    assert service.claim_kept_data("provider", "official", "subtitle_provider") is False
+    assert service.claim_kept_data("service", "official", "service") is False
     assert kind.discarded == []

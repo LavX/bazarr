@@ -729,7 +729,7 @@ def test_ordinary_settings_and_backup_management_stay_open(monkeypatch, settings
 
 
 @pytest.mark.parametrize('auth_type', ['form', 'basic'])
-def test_startup_auto_install_and_boot_activation_run_ungated(monkeypatch, auth_type):
+def test_startup_auto_install_and_boot_activation_run_ungated(monkeypatch, auth_type, tmp_path):
     """The boot paths do real work, with no request and no user anywhere.
 
     A service-layer gate would break these on every boot; the tests exercise
@@ -744,10 +744,11 @@ def test_startup_auto_install_and_boot_activation_run_ungated(monkeypatch, auth_
     from flask import has_request_context
     from provider_hub import service
     from provider_hub.kinds import subtitle_provider as provider_kind
+    from provider_hub.state import load_state, mutate_state
 
+    monkeypatch.setenv('BAZARR_PROVIDER_HUB_STATE', str(tmp_path / 'provider_hub' / 'state.json'))
     monkeypatch.delenv('BAZARR_DISABLE_PROVIDER_AUTOINSTALL', raising=False)
     monkeypatch.setitem(settings.general, 'provider_hub_auto_install', True)
-    monkeypatch.setattr(service, 'load_state', lambda: {'installations': {}})
     monkeypatch.setattr(provider_kind, 'bazarr_enabled_providers', lambda: ['stubbed-provider'])
     monkeypatch.setattr(service, 'refresh_catalog', lambda **kwargs: None)
     monkeypatch.setattr(service, '_latest_official_catalog_manifest',
@@ -763,26 +764,22 @@ def test_startup_auto_install_and_boot_activation_run_ungated(monkeypatch, auth_
     # The activation half runs the same way: a pending removal is applied and
     # the record of the job it opens is written with no request context either.
     activated_with_request = []
-    import contextlib
+    original_record_job = service.record_job
 
-    @contextlib.contextmanager
     def record_job(*args, **kwargs):
         activated_with_request.append(has_request_context())
-        yield types.SimpleNamespace(update=lambda **kwargs: None, data={})
+        return original_record_job(*args, **kwargs)
+
     monkeypatch.setattr(service, 'record_job', record_job)
-    state = {'installations': {'gone': {'pending_restart': True, 'state': 'removed',
-                                        'name': 'Gone'}}}
-    monkeypatch.setattr(service, 'load_state', lambda: state)
-    persisted = []
-    monkeypatch.setattr(service, 'mutate_state',
-                        lambda mutator: persisted.append(
-                            mutator({'installations': {}})))
+    mutate_state(lambda state: state['installations'].update(
+        gone={'pending_restart': True, 'state': 'removed', 'name': 'Gone'}))
 
     assert service.activate_staged_installations() == []
     assert activated_with_request == [False]
-    # The removal was applied to the state and persisted, not skipped.
+    state = load_state()
     assert 'gone' not in state['installations']
-    assert len(persisted) == 1
+    job, = state['jobs']
+    assert (job['action'], job['target_id'], job['state']) == ('uninstall', 'gone', 'completed')
 
 
 @pytest.mark.parametrize('auth_type', ['form', 'basic'])
