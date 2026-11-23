@@ -351,7 +351,7 @@ def manual_upload_subtitle(path, language, forced, hi, media_type, subtitle, fil
                                               if source_version is not None else None)
 
         if source is not None:
-            _finish_source_upload(source, subtitle_path, uploaded_language, uploaded_language_code2, forced, hi,
+            _finish_source_upload(source, subtitle_path, uploaded_language, language_code, forced, hi,
                                   source_publication, uploaded_entry)
             return '', 204
 

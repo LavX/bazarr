@@ -280,7 +280,10 @@ export function useSourceFilter(
   }, [arrConfigured, removed, selected, sources]);
 
   return {
-    includeSources: true,
+    includeSources:
+      sources.length > 0 ||
+      retained?.retained === true ||
+      selected?.startsWith("source:") === true,
     showBadge: labels.size > 1,
     labels,
     sourceKeys,

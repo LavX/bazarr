@@ -131,6 +131,26 @@ def test_a_scan_is_queued_as_a_job_and_the_items_are_listed(api):
     assert second["path"] == str(api.movies / "The.Matrix.1999.1080p.BluRay.x264-GRP.mkv")
 
 
+def test_public_subtitle_entries_keep_codec_and_hide_internal_versions(api):
+    from media_sources import repository, scanner
+
+    created = _create(api).json
+    recording = video(api.movies / "Film.2001.mkv")
+    scanner.run_scan(created["id"])
+    (movie,) = api.client.get(ITEMS, headers=HEADERS).json["data"]
+    original = [
+        ["en", str(recording.with_suffix(".en.srt")), 57, "subrip"],
+        ["hu:forced", str(recording.with_suffix(".srt")), 72, (10, 11, 72, 12, 13)],
+        ["fr", None, None, "ass", "French dialogue"],
+    ]
+    repository.update_item(movie["id"], api.db, subtitles=repr(original))
+    expected = [original[0], original[1][:3], original[2]]
+    (listed,) = api.client.get(ITEMS, headers=HEADERS).json["data"]
+    detail = api.client.get(f"{ITEMS}/{movie['id']}", headers=HEADERS)
+    assert detail.status_code == 200
+    assert listed["subtitles"] == detail.json["subtitles"] == expected
+
+
 def test_the_item_list_pages_and_filters(api):
     from media_sources import scanner
 

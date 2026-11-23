@@ -415,6 +415,40 @@ def test_exclude_while_manual_provider_download_is_in_flight(
         assert [event.operation for event in writes] == ['download']
 
 
+@pytest.mark.parametrize('variant', ['hi', 'forced'])
+def test_source_upload_preserves_postprocessing_audio_and_one_language_variant(
+        client, arr_library, writes, isolated_jobs, tmp_path, monkeypatch, variant):
+    from app.config import settings
+    from media_sources import repository
+    from subtitles import post_processing, upload
+
+    source = _item(arr_library, tmp_path, 'movie')
+    repository.update_item(source.item_id, arr_library, audio_language="['English']")
+    monkeypatch.setattr(settings.general, 'use_postprocessing', True)
+    monkeypatch.setattr(settings.general, 'postprocessing_cmd',
+                        'fixture-command {{episode_language}} {{episode_language_code2}}'
+                        ' {{episode_language_code3}} {{subtitles_language_code2}}')
+    commands = Mock()
+    monkeypatch.setattr(post_processing, '_postprocessing_locked', commands)
+
+    response = client.post(f'/api/sources/items/{source.item_id}/subtitles', headers=HEADERS, data={
+        'file': (BytesIO(pipeline.CONTENT), 'fixture.srt'), 'language': 'en',
+        'hi': str(variant == 'hi'), 'forced': str(variant == 'forced'),
+    })
+    assert response.status_code == 202
+    job = isolated_jobs._reserve_next_job()
+    assert job.job_id == response.json['job_id']
+    assert isolated_jobs._run_job(job), job.error
+
+    language = f'en:{variant}'
+    commands.assert_called_once_with(['fixture-command', 'English', 'en', 'eng', language], source.path)
+    (row,) = arr_library.execute(sa.select(repository.History)).all()
+    assert (row.action, row.language, row.item_id) == (4, language, source.item_id)
+    assert Path(row.subtitles_path).read_bytes() == pipeline.CONTENT
+    assert upload.sync_subtitles.call_args.kwargs['srt_lang'] == 'en'
+    assert [event.operation for event in writes] == ['upload']
+
+
 @pytest.mark.parametrize('custom_folder', [False, True], ids=['beside-video', 'shared-folder'])
 def test_episode_upload_and_plain_delete(client, arr_library, writes, isolated_jobs, tmp_path, monkeypatch, custom_folder):
     from app.config import settings

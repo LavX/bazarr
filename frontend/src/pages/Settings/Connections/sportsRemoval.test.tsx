@@ -59,6 +59,7 @@ it.each([
         HttpResponse.json({ general: { use_sportarr: false } }),
       ),
       http.get("/api/system/arr-instances", () => HttpResponse.json([])),
+      http.get("/api/system/jobs", () => HttpResponse.json({ data: [] })),
       http.get("/api/system/status", () => HttpResponse.json({ data: {} })),
       http.get("/api/system/media-server-instances", () =>
         HttpResponse.json({ data: [] }),
@@ -182,9 +183,21 @@ it.each([
       expect(screen.queryByRole("link", { name: "Archive final" })).toBeNull();
     });
     expect(reads).toBeGreaterThan(initialReads);
-    const retainedQueries = queryClient
-      .getQueryCache()
-      .findAll({ queryKey: [QueryKeys.Sports, route] });
+    const retainedQueries = queryClient.getQueryCache().findAll({
+      queryKey: [QueryKeys.Sports, route],
+      predicate: ({ queryKey }) => {
+        const scope = queryKey[2];
+        return (
+          typeof scope === "object" &&
+          scope !== null &&
+          "includeSources" in scope &&
+          scope.includeSources === true
+        );
+      },
+    });
+    expect(retainedQueries.length).toBeGreaterThan(0);
+    const nativeKey = [QueryKeys.Sports, route, { includeSources: false }];
+    queryClient.setQueryData(nativeKey, { data: [], total: 0 });
     await act(() => router.navigate("/settings/connections#folders"));
     await user.click(
       await screen.findByRole("button", {
@@ -204,6 +217,7 @@ it.each([
     expect(retainedQueries.every((query) => query.state.isInvalidated)).toBe(
       true,
     );
+    expect(queryClient.getQueryState(nativeKey)?.isInvalidated).toBe(false);
     await act(() => router.navigate("/activity"));
     if (route !== "wanted") {
       expect(await screen.findByText("Archive final")).toBeVisible();

@@ -18,6 +18,7 @@ import Table from "./table";
 const BlacklistMoviesView: FunctionComponent = () => {
   const filter = useSourceFilter("movie", "radarr", {
     includeDisabledSources: true,
+    includeRetainedSources: true,
   });
   const { selected, includeSources, labels, onChange } = filter;
   const sourceOptions = useSourceOptions("movie", includeSources);
