@@ -1780,6 +1780,83 @@ def test_stage_install_does_not_copy_when_the_install_budget_expires_while_settl
     assert list(active.parent.iterdir()) == [active]
 
 
+def test_connection_probe_waits_for_active_data_and_reopens_dispatch(hub, monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Event
+    from types import SimpleNamespace
+
+    from plugin_platform_helpers import provider_manifest_v2
+    from provider_hub import datadir, service
+    from provider_hub.kinds.subtitle_provider import SUBTITLE_PROVIDER_KIND
+    from provider_hub.state import load_state, provider_hub_dir
+    from provider_hub.worker import ProviderWorkerClient
+
+    plugin_id = "examplehub"
+    active = datadir.release_path(provider_hub_dir(), plugin_id, "a" * 32)
+    active.mkdir(parents=True)
+    settings = active / "settings"
+    settings.write_text("writing")
+    _seed(examplehub=_row(plugin_id, active="1.0.0", active_data_key=active.name,
+                          manifest=provider_manifest_v2(permissions=["data_dir"])))
+    monkeypatch.setattr(service, "verify_bundle_tree", lambda *_: None)
+    monkeypatch.setattr(datadir, "QUIESCE_TIMEOUT", 0.5)
+
+    attempted, dispatched = Event(), Event()
+    live = ProviderWorkerClient([], provider_id=plugin_id, env={"BAZARR_PLUGIN_DATA_DIR": str(active)})
+    monkeypatch.setattr(live, "_request", lambda *_: dispatched.set())
+
+    def call_worker():
+        attempted.set()
+        live.request("health", {})
+
+    can_settle = False
+
+    def settle(checked_id, timeout):
+        assert checked_id == plugin_id
+        assert 0 < timeout <= 0.5
+        if can_settle:
+            settings.write_text("settled")
+        return can_settle
+
+    copy_folder = datadir.copy_folder
+
+    def copy(source, target):
+        assert source == active
+        executor.submit(call_worker)
+        assert attempted.wait(2)
+        assert not dispatched.wait(0.05)
+        return copy_folder(source, target)
+
+    probed = []
+
+    class ProbeClient(ProviderWorkerClient):
+        def _request(self, op, *_):
+            assert op == "health"
+            probed.append(Path(self.env["BAZARR_PLUGIN_DATA_DIR"]))
+            assert dispatched.wait(2)
+            copied_settings = probed[-1] / "settings"
+            assert copied_settings.read_text() == "settled"
+            copied_settings.write_text("probe write")
+            return SimpleNamespace(payload={"initialized": True})
+
+    monkeypatch.setattr(SUBTITLE_PROVIDER_KIND, "settle_data", settle)
+    monkeypatch.setattr(datadir, "copy_folder", copy)
+    monkeypatch.setattr(service, "ProviderWorkerClient", ProbeClient)
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        failed = service.test_provider_connection(plugin_id)
+        assert not failed["ok"] and "busy" in failed["message"]
+        assert not attempted.is_set() and not probed
+        assert not load_state()["installations"][plugin_id].get("needs_repair")
+        assert list(active.parent.iterdir()) == [active]
+
+        can_settle = True
+        assert service.test_provider_connection(plugin_id)["ok"]
+
+    assert len(probed) == 1 and not probed[0].exists()
+    assert settings.read_text() == "settled"
+
+
 def test_staging_uses_private_data_and_switch_refreshes_work_done_since_staging(data_release, service_kind, monkeypatch):
     from provider_hub import datadir, secret_paths
     from provider_hub.state import load_state, provider_hub_dir

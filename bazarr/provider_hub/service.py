@@ -5550,15 +5550,36 @@ def _probe_release_data(plugin_id: str, row, *, staged: bool = False):
     if not datadir.declared(manifest):
         yield None
         return
-    root = provider_hub_dir()
-    key = row.get("staged_data_key" if staged else "active_data_key")
-    source = (datadir.release_path(root, plugin_id, key) if key
-              else datadir.legacy_path(root, plugin_id, manifest))
-    parent = datadir.plugin_root(root, plugin_id)
-    parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    with tempfile.TemporaryDirectory(prefix=".probe-", dir=parent) as temporary:
-        target = Path(temporary) / "data"
-        datadir.copy_folder(source, target)
+    slot = "staged" if staged else "active"
+    with contextlib.ExitStack() as files:
+        with datadir.release_lock:
+            current = (load_state().get("installations") or {}).get(plugin_id)
+            if (not isinstance(current, dict) or current.get("state") == "removed"
+                    or any(current.get(f"{slot}_{field}") != row.get(f"{slot}_{field}")
+                           for field in ("version", "path", "data_key"))):
+                raise datadir.DataFolderError("The plugin release changed. Try the check again.")
+            try:
+                root = provider_hub_dir()
+                key = current.get(f"{slot}_data_key")
+                source = (datadir.release_path(root, plugin_id, key) if key
+                          else datadir.legacy_path(root, plugin_id, manifest))
+                parent = datadir.plugin_root(root, plugin_id)
+                parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+                temporary = files.enter_context(tempfile.TemporaryDirectory(prefix=".probe-", dir=parent))
+                target = Path(temporary) / "data"
+                # Older slots can share the same legacy folder.
+                active_source = source is not None and (not staged or source == _active_data_path(plugin_id, current))
+                idle = (datadir.quiesced(plugin_id, get_kind(kind_of(current)).settle_data, datadir.QUIESCE_TIMEOUT)
+                        if active_source else contextlib.nullcontext(True))
+                with idle as settled:
+                    if settled:
+                        datadir.copy_folder(source, target)
+            except (OSError, datadir.DataFolderError):
+                # A filesystem error can contain names from the plugin's private data.
+                raise datadir.DataFolderError("Could not copy the plugin data for the check.") from None
+            if not settled:
+                raise datadir.DataFolderError("The active plugin data is busy. Try the check again.")
+        # The probe uses its own folder. Live dispatch can resume before it starts.
         yield target
 
 
