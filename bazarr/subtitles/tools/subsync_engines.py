@@ -421,11 +421,10 @@ class SyncOutputOwnerIndex:
         return tuple(rows)
 
     @staticmethod
-    def _map_registry_rows(registry_rows, *, mappings=None, destination=None):
+    def _mapped_registry_paths(registry_rows, mappings=None):
         from utilities.path_mappings import path_mappings
         from utilities.path_mappings import _apply_mapping, apply_sports_mapping, read_arr_mappings, read_sports_mappings
 
-        owners = {}
         sports_fallback = [list(pair) for pair in mappings[2]] if mappings is not None else None
         for media_type, rows in registry_rows:
             for row in rows:
@@ -443,14 +442,25 @@ class SyncOutputOwnerIndex:
                                                  reverse=False)
                 else:
                     mapped_path = path_mappings.path_replace_instance(row.path, row.arr_instance_id, media_type)
-                SyncOutputOwnerIndex._add_owner_claims(owners, mapped_path, destination)
+                yield mapped_path
+
+    @staticmethod
+    def _map_registry_rows(registry_rows, *, mappings=None, destination=None):
+        owners = {}
+        for path in SyncOutputOwnerIndex._mapped_registry_paths(registry_rows, mappings):
+            SyncOutputOwnerIndex._add_owner_claims(owners, path, destination)
         return owners
 
     @staticmethod
     def _add_owner_claims(owners, path, destination):
+        canonical = os.path.normcase(os.path.realpath(path))
+        for key in SyncOutputOwnerIndex._owner_claim_keys(path, canonical, destination):
+            owners.setdefault(key, set()).add(canonical)
+
+    @staticmethod
+    def _owner_claim_keys(path, canonical, destination):
         from utilities.helper import get_target_folder
 
-        canonical = os.path.normcase(os.path.realpath(path))
         # A symlink's own name and the canonical video can each claim its subtitles.
         for name in {os.path.abspath(path), canonical}:
             if destination is None:
@@ -462,8 +472,7 @@ class SyncOutputOwnerIndex:
                 folders = SyncOutputOwnerIndex._owner_folders(name, destination)
             stem = _normalized_media_stem(name)
             for folder in folders:
-                key = os.path.normcase(os.path.realpath(folder)), stem
-                owners.setdefault(key, set()).add(canonical)
+                yield os.path.normcase(os.path.realpath(folder)), stem
 
     @staticmethod
     def _owner_folders(path, destination):

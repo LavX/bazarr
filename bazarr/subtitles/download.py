@@ -436,7 +436,7 @@ def _write_source_download(video_path, destination, content, *, source, language
     from media_sources.translation import prepare_source_sidecars
     from media_sources.wanted import arr_claim_blocks_wanted
 
-    ownership_index = SourcePublicationOwnerIndex()
+    ownership_index = SourcePublicationOwnerIndex(check_aliases=upgrade is not None)
     old_path = upgrade.subtitles_path if upgrade is not None else None
     same_destination = old_path is not None and os.path.normcase(os.path.realpath(old_path)) == (
         os.path.normcase(os.path.realpath(destination)))
@@ -486,6 +486,8 @@ def _write_source_download(video_path, destination, content, *, source, language
                 output_paths = tuple(path for path, _ in outputs)
                 if not local_subtitle_ownership_is_current(video_path, (*paths, *output_paths), ownership_index):
                     raise SubtitleDestinationChanged('Subtitle ownership in the source directory changed during search')
+                if not ownership_index.registered_alias_ownership_is_current(video_path, (*paths, *output_paths)):
+                    raise SubtitleDestinationChanged('Registered subtitle ownership could not be verified before publication')
                 files.enter_context(subtitle_mutation(video_path, old_path, *output_paths, invalidate_outputs=False))
                 files.enter_context(_preserve_source_subtitle(old_path, upgrade.subtitle_version, retire=remove_previous))
                 for output, version in outputs:

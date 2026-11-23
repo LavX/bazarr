@@ -11,7 +11,8 @@ import os
 import sqlite3
 from contextlib import contextmanager
 from functools import partial
-from time import sleep
+from itertools import chain
+from time import monotonic, sleep
 
 import sqlalchemy as sa
 from babelfish.exceptions import LanguageError
@@ -109,10 +110,11 @@ class SourcePublicationOwnersChanged(SubtitleDestinationChanged):
 class SourcePublicationOwnerIndex(SourceOutputOwnerIndex):
     """Source writes in shared subtitle folders must account for all media stored there."""
 
-    def __init__(self):
+    def __init__(self, *, check_aliases=False):
         super().__init__()
         self._prepared_owners = None
         self._publication_settings = None
+        self._registered_aliases = {} if check_aliases else None
 
     @staticmethod
     def _settings_snapshot():
@@ -144,10 +146,69 @@ class SourcePublicationOwnerIndex(SourceOutputOwnerIndex):
         source_paths, registry_rows = self._registry_snapshot()
         self._prepared_owners = source_paths, registry_rows
         destination, mappings = self._publication_settings or self._settings_snapshot()
-        owners = self._map_source_owners(source_paths, destination)
-        for key, paths in self._map_registry_rows(registry_rows, mappings=mappings, destination=destination).items():
-            owners.setdefault(key, set()).update(paths)
+        owners = {}
+        for path in chain(source_paths, self._mapped_registry_paths(registry_rows, mappings)):
+            if self._registered_aliases is None:
+                self._add_owner_claims(owners, path, destination)
+                continue
+            canonical = self._registered_owner_path(path)
+            claims = set(self._owner_claim_keys(path, canonical, destination))
+            for key in claims:
+                owners.setdefault(key, set()).add(canonical)
+            # An ancestor can be a symlink too. Keep paths with parent traversal
+            # because it can mask that indirection in the resolved name.
+            absolute = os.path.normcase(os.path.abspath(path))
+            if canonical != absolute or '..' in os.path.normcase(path).split(os.sep):
+                self._registered_aliases[path] = canonical, claims
         return owners
+
+    @staticmethod
+    def _registered_owner_path(path):
+        allow_missing = getattr(os.path, 'ALLOW_MISSING', None)
+        if allow_missing is not None:
+            return os.path.normcase(os.path.realpath(path, strict=allow_missing))
+        try:
+            return os.path.normcase(os.path.realpath(path, strict=True))
+        except FileNotFoundError:
+            # On older runtimes a missing component ends strict resolution.
+            # Check the resulting path for errors a non-strict retry can hide.
+            resolved = os.path.realpath(path)
+            try:
+                os.stat(resolved)
+            except FileNotFoundError:
+                pass
+            return os.path.normcase(resolved)
+
+    def registered_alias_ownership_is_current(self, video_path, subtitle_paths):
+        """Recheck registered aliases from the prepared shared ownership map."""
+        if not self._registered_aliases:
+            return True
+        video = os.path.normcase(os.path.realpath(video_path))
+        destination = self._publication_settings[0]
+        candidates = set()
+        for path in subtitle_paths:
+            directory = os.path.normcase(os.path.realpath(os.path.dirname(path)))
+            candidates.update((directory, stem) for stem in self.conflicting_stems(video, path))
+        stems = {stem for _, stem in candidates}
+        # Leave an unusually slow shared alias set unverified instead of
+        # holding the registry writer locks through a long filesystem scan.
+        deadline = monotonic() + 0.25
+        try:
+            # Even an unrelated alias from another library can resolve to a
+            # conflicting stem. Ordinary registry paths were checked in prepare.
+            for alias, (previous, previous_claims) in self._registered_aliases.items():
+                if monotonic() >= deadline:
+                    return False
+                current = self._registered_owner_path(alias)
+                before = candidates & previous_claims
+                if not before and stems.isdisjoint((_normalized_media_stem(alias), _normalized_media_stem(current))):
+                    continue
+                after = candidates.intersection(self._owner_claim_keys(alias, current, destination))
+                if before != after or (after and current != previous):
+                    return False
+        except (OSError, ValueError):
+            return False
+        return monotonic() < deadline
 
     def folder_is_shared(self, directory):
         # A relative custom path can also resolve into another video's directory.
@@ -173,6 +234,8 @@ class SourcePublicationOwnerIndex(SourceOutputOwnerIndex):
             self._loaded = False
             self._owners = {}
             self._prepared_owners = None
+            if self._registered_aliases is not None:
+                self._registered_aliases.clear()
             with self._settings_guard():
                 self._publication_settings = self._settings_snapshot()
             prepared = prepare() if prepare is not None else None

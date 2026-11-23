@@ -474,18 +474,29 @@ def test_source_upgrade_leaves_another_videos_generated_name_alone(world, monkey
 
 @pytest.mark.parametrize('change', [
     'destination owner', 'previous owner', 'generated owner', 'symlink retarget', 'unrelated video',
+    'registered destination alias', 'registered previous alias', 'registered generated alias',
+    'registered unrelated alias', 'registered directory alias', 'registered alias loop',
     'previous edit', 'generated edit',
 ])
-def test_source_upgrade_checks_local_ownership_and_versions_at_publication(world, monkeypatch, change):
+def test_source_upgrade_rechecks_ownership_and_versions_at_publication(world, monkeypatch, change):
+    from app.config import settings
+    from app.database import TableArrInstances, TableMovies
     from media_sources import indexer
     from subtitles import upgrade
     from subtitles.tools.subsync_engines import engine_output_path
 
     context = pipeline._movie(world)
     media = Path(context.path)
-    folder = pipeline._custom_folder(world, monkeypatch, world.tmp_path)
+    directory_alias = change == 'registered directory alias'
+    if directory_alias:
+        folder = media.parent / '../subtitles'
+        folder.mkdir()
+        monkeypatch.setattr(settings.general, 'subfolder', 'relative')
+        monkeypatch.setattr(settings.general, 'subfolder_custom', '../subtitles')
+    else:
+        folder = pipeline._custom_folder(world, monkeypatch, world.tmp_path)
     destination = folder / media.with_suffix('.en.srt').name
-    same_name = change != 'previous owner'
+    same_name = change not in ('previous owner', 'registered previous alias')
     original = destination if same_name else folder / media.with_suffix('.en.hi.srt').name
     generated = engine_output_path(original, 'ffsubsync')
     original.write_bytes(b'Old subtitle')
@@ -502,6 +513,34 @@ def test_source_upgrade_checks_local_ownership_and_versions_at_publication(world
         unrelated = video(world.tmp_path / 'Other' / 'Unrelated.mkv')
         competing = video(unrelated.with_name(destination.with_suffix('.mkv').name))
         alias.symlink_to(unrelated)
+    elif change.startswith('registered '):
+        unrelated = video(world.tmp_path / 'Arr' / 'Unrelated.mkv')
+        if directory_alias:
+            filename = destination.with_suffix('.mkv').name
+            # Both directories lead to the same canonical video. Retargeting
+            # changes the alias name's claim in the relative subtitle folder.
+            previous = world.tmp_path / 'Separate' / 'Movies'
+            previous.mkdir(parents=True)
+            competing = unrelated.parent
+            for directory in (previous, competing):
+                (directory / filename).symlink_to(unrelated)
+            alias = previous.with_name('Alias')
+            alias.symlink_to(previous, target_is_directory=True)
+            mapped_folder = alias
+        else:
+            alias = unrelated.with_name('Alias.mkv')
+            claim = {'registered destination alias': destination, 'registered previous alias': original,
+                     'registered generated alias': generated, 'registered unrelated alias': Path('Another.srt')}
+            competing = (alias.name if change == 'registered alias loop'
+                         else video(unrelated.with_name(claim[change].with_suffix('.mkv').name)))
+            alias.symlink_to(unrelated.name)
+            mapped_folder = alias.parent
+            filename = alias.name
+        world.db.execute(sa.insert(TableArrInstances).values(
+            id=42, kind='radarr', name='Cinema', stable_key='cinema', port=9800, enabled=1,
+            path_mappings=json.dumps([['/movies', str(mapped_folder)]])))
+        world.db.execute(sa.insert(TableMovies).values(
+            id=73, arr_instance_id=42, radarrId=9000, title='Other', path=f'/movies/{filename}', tmdbId='73'))
 
     publish = indexer.source_item_publication
     reached = []
@@ -516,9 +555,9 @@ def test_source_upgrade_checks_local_ownership_and_versions_at_publication(world
                 video(media.with_name(original.with_suffix('.mkv').name))
             elif change == 'generated owner':
                 video(media.with_name(generated.with_suffix('.mkv').name))
-            elif change == 'symlink retarget':
+            elif change == 'symlink retarget' or change.startswith('registered '):
                 alias.unlink()
-                alias.symlink_to(competing)
+                alias.symlink_to(competing, target_is_directory=directory_alias)
             elif change == 'unrelated video':
                 video(media.with_name('Unrelated.mkv'))
             elif change == 'previous edit':
@@ -531,7 +570,7 @@ def test_source_upgrade_checks_local_ownership_and_versions_at_publication(world
     upgrade.upgrade_source_subtitles(job_id=10)
 
     assert reached == [context.item_id]
-    if change == 'unrelated video':
+    if change in ('unrelated video', 'registered unrelated alias'):
         assert record_rows(world.db) == [(first, 1, None), (first + 1, 3, first)]
         assert destination.read_bytes() == pipeline.CONTENT
         assert not generated.exists()
