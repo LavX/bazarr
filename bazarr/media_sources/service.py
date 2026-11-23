@@ -4,7 +4,6 @@
 A search runs through the shared pipeline with the item's ``SourceItemContext``. Its history is written here,
 by the caller that did the work, never inside ``process_subtitle``.
 """
-import ast
 import logging
 import os
 import threading
@@ -402,16 +401,6 @@ def queue_search(item_id):
         raise
 
 
-def _missing_languages(item):
-    languages = []
-    for language in ast.literal_eval(item.missing_subtitles or '[]'):
-        if language is not None:
-            hi_ = "True" if language.endswith(':hi') else "False"
-            forced_ = "True" if language.endswith(':forced') else "False"
-            languages.append((language.split(":")[0], hi_, forced_))
-    return languages
-
-
 def _language_code(language, hi, forced):
     return language + (':hi' if hi == 'True' else ':forced' if forced == 'True' else '')
 
@@ -478,10 +467,14 @@ def _search_source_item(item_id, job_id, translation_gate, expected_source):
                 or refreshed.path != context.path or item.path != context.path):
             raise JobFailed('The source file moved while the search was starting. Try again.', reason='conflict')
         context = refreshed
-    languages = _search_languages(context, item, translation_gate=translation_gate)
+    from .translation import missing_language_candidates
+
+    candidates = missing_language_candidates(context)
+    languages = _search_languages(context, candidates, translation_gate=translation_gate)
     jobs_queue.update_job_progress(job_id=job_id, progress_max=len(languages), progress_message=context.title)
     if not languages:
-        jobs_queue.update_job_progress(job_id=job_id, progress_value='max', progress_message='Nothing to search')
+        jobs_queue.update_job_progress(job_id=job_id, progress_value='max',
+                                       progress_message='Subtitles found or queued' if candidates else 'Nothing is missing')
         return None
     if not get_providers():
         logging.info("BAZARR All providers are throttled")
@@ -495,8 +488,7 @@ def _search_source_item(item_id, job_id, translation_gate, expected_source):
     return None
 
 
-def _search_languages(context, item, *, translation_gate, automatic=False):
-    languages = _missing_languages(item)
+def _search_languages(context, languages, *, translation_gate, automatic=False):
     if translation_gate and languages:
         from .translation import queue_missing_translations
 
@@ -512,6 +504,7 @@ def _search_languages(context, item, *, translation_gate, automatic=False):
 def search_wanted_item(item_id, created_at, job_id):
     """Search only stored missing languages, after rechecking eligibility and the current Arr path."""
     from .shadows import path_stage_shadow
+    from .translation import stored_missing_language_candidates
     from .wanted import notify_wanted_changes, wanted_items
     from .db import handle
     from subtitles.adaptive_searching import is_search_active, updateFailedAttempts
@@ -535,8 +528,9 @@ def search_wanted_item(item_id, created_at, job_id):
     if not context.same_item(item) or context.path != item.path or not context.profile_id:
         return
 
+    candidates = stored_missing_language_candidates(item)
     languages = [
-        entry for entry in _search_languages(context, item, translation_gate=True, automatic=True)
+        entry for entry in _search_languages(context, candidates, translation_gate=True, automatic=True)
         if is_search_active(_language_code(*entry), item.failed_attempts or '[]')
     ]
     if not languages or not get_providers():
@@ -546,7 +540,7 @@ def search_wanted_item(item_id, created_at, job_id):
     current = session.execute(wanted_items(*items.c, profile_id=context.profile_id).where(*same_row)).first()
     if current is None or current.path != context.path or current.library_id != context.library_id:
         return
-    languages = [entry for entry in languages if entry in _missing_languages(current)]
+    languages = [entry for entry in languages if entry in stored_missing_language_candidates(current)]
     if not languages:
         return
     with source_search_probes(item_id):
@@ -557,7 +551,7 @@ def search_wanted_item(item_id, created_at, job_id):
             current = repository.get_item(item_id, connection, for_update=True)
             if current is None or not context.same_item(current) or current.path != context.path:
                 return
-            failed &= {_language_code(*entry) for entry in _missing_languages(current)}
+            failed &= {_language_code(*entry) for entry in stored_missing_language_candidates(current)}
             if failed:
                 attempts = current.failed_attempts or '[]'
                 for language in sorted(failed):

@@ -195,11 +195,13 @@ def test_a_failed_probe_is_retried_once_per_search_even_with_download_reindexing
 
 def test_a_search_with_nothing_missing_or_no_profile_does_not_ask_a_provider(world, monkeypatch):
     from media_sources import repository, service
+    from media_sources.indexer import index_item
 
     context = _movie(world)
     asked = _download(monkeypatch)
     monkeypatch.setattr(service.jobs_queue, "update_job_progress", lambda **kwargs: None)
-    repository.update_item(context.item_id, world.db, missing_subtitles="[]")
+    Path(context.path).with_suffix(".en.srt").write_bytes(CONTENT)
+    index_item(context.item_id)
     service.search_source_item(context.item_id, job_id=3)
     other = _movie(world, "Other.2002.mkv")
     world.db.execute(sa.update(repository.Libraries).values(profile_id=None))
@@ -544,16 +546,20 @@ def test_a_source_search_never_reports_or_clears_a_release_type_mismatch(world, 
     clear.assert_not_called()
 
 
-def test_check_if_still_required_reads_the_items_missing_languages(world, monkeypatch):
+def test_check_if_still_required_rechecks_the_items_indexed_subtitles(world, monkeypatch):
     from media_sources import repository
+    from media_sources.indexer import index_item
 
     context = _movie(world)
     asked = _download(monkeypatch)
-    repository.update_item(context.item_id, world.db, missing_subtitles="[]")
-    # The language the caller asks for was satisfied meanwhile, so the provider is not asked.
+    existing = Path(context.path).with_suffix(".en.srt")
+    existing.write_bytes(CONTENT)
+    index_item(context.item_id)
+    repository.update_item(context.item_id, world.db, missing_subtitles="['en']")
     assert _generate(context, check_if_still_required=True) == []
     assert "video" not in asked
-    repository.update_item(context.item_id, world.db, missing_subtitles="['en']")
+    existing.unlink()
+    repository.update_item(context.item_id, world.db, missing_subtitles="[]")
     assert len(_generate(context, check_if_still_required=True)) == 1
 
 
@@ -1649,3 +1655,157 @@ def test_runtime_lingarr_empty_source_translation_is_terminal(world, monkeypatch
     finally:
         clear_failed_translations()
         env.close()
+
+
+@pytest.mark.parametrize("edit", ["cutoff-set", "cutoff-cleared", "cutoff-during-fetch"])
+def test_source_provider_fallback_uses_current_cutoff(world, monkeypatch, isolated_jobs, edit):
+    import json
+
+    from app.database import TableLanguagesProfiles, update_profile_id_list
+    from media_sources import repository, service
+    from media_sources.indexer import index_item
+    from subtitles import download
+
+    profile = [{"id": 1, "language": "en", "forced": "False", "hi": "False"},
+               {"id": 2, "language": "hu", "forced": "False", "hi": "False"}]
+
+    def set_cutoff(cutoff):
+        world.db.execute(sa.update(TableLanguagesProfiles).values(items=json.dumps(profile), cutoff=cutoff))
+        update_profile_id_list.invalidate()
+
+    set_cutoff(1 if edit == "cutoff-cleared" else None)
+    context = _movie(world)
+    media = Path(context.path)
+    media.with_suffix(".en.srt").write_bytes(CONTENT)
+    index_item(context.item_id)
+    assert repository.get_item(context.item_id).missing_subtitles == ("[]" if edit == "cutoff-cleared" else "['hu']")
+
+    if edit == "cutoff-cleared":
+        set_cutoff(None)
+    elif edit == "cutoff-set":
+        set_cutoff(1)
+
+    def fetch(videos, languages, **kwargs):
+        assert {str(language) for language in languages} == {"hu"}
+        if edit == "cutoff-during-fetch":
+            set_cutoff(1)
+        return {next(iter(videos)): [FakeSubtitle(Language("hun"))]}
+
+    attempted = Mock(side_effect=fetch)
+    monkeypatch.setattr(download, "download_best_subtitles", attempted)
+    service.search_source_item(context.item_id, translation_gate=False)
+    assert isolated_jobs._run_job(isolated_jobs._reserve_next_job())
+
+    assert attempted.call_count == (0 if edit == "cutoff-set" else 1)
+    assert media.with_suffix(".hu.srt").is_file() == (edit == "cutoff-cleared")
+
+
+@pytest.mark.parametrize("conflict", ["shared", "arrived-during-fetch"])
+def test_source_provider_write_preserves_an_unavailable_destination(world, monkeypatch, isolated_jobs, conflict):
+    from app.config import settings
+    from app.database import TableMovies
+    from media_sources import repository, service
+    from subtitles import download
+
+    monkeypatch.setattr(settings.general, "subfolder", "relative")
+    monkeypatch.setattr(settings.general, "subfolder_custom", "../Sidecars")
+    context = _movie(world)
+    media = Path(context.path)
+    destination = world.tmp_path / "Sidecars" / media.with_suffix(".en.srt").name
+    if conflict == "shared":
+        other = video(world.tmp_path / "Arr" / media.name)
+        world.db.execute(sa.insert(TableMovies).values(path=str(other), title="Another film", tmdbId="7711"))
+
+    def fetch(videos, **kwargs):
+        if conflict == "arrived-during-fetch":
+            destination.parent.mkdir(exist_ok=True)
+            destination.write_bytes(CONTENT.replace(b"Downloaded", b"Already present"))
+        return {next(iter(videos)): [FakeSubtitle(Language("eng"))]}
+
+    monkeypatch.setattr(download, "download_best_subtitles", fetch)
+    service.search_source_item(context.item_id, translation_gate=False)
+    assert isolated_jobs._run_job(isolated_jobs._reserve_next_job())
+
+    if conflict == "shared":
+        assert not destination.exists()
+    else:
+        assert b"Already present" in destination.read_bytes()
+    assert world.db.execute(sa.select(repository.History)).all() == []
+    assert not world.published
+
+
+@pytest.mark.parametrize("file_mode", ["link", "stream"])
+def test_source_combine_requires_ordinary_inputs(world, monkeypatch, file_mode):
+    import os
+    import stat
+    from subtitles.tools.combine import main as combine
+
+    context = _movie(world)
+    media = Path(context.path)
+    primary = media.with_suffix(".en.srt")
+    primary.write_bytes(CONTENT)
+    media.with_suffix(".hu.srt").write_bytes(CONTENT)
+    real_lstat = os.lstat
+
+    def reported_file_type(path, *args, **kwargs):
+        if os.fsdecode(path) == str(primary):
+            mode = stat.S_IFLNK if file_mode == "link" else stat.S_IFIFO
+            return SimpleNamespace(st_mode=mode)
+        return real_lstat(path, *args, **kwargs)
+
+    with monkeypatch.context() as reported:
+        reported.setattr(os, "lstat", reported_file_type)
+        result = combine.try_combine_for_video(context.path, "movie", languages=["en", "hu"], format="srt",
+                                               source=context)
+    assert result.status == "skipped" and "input" in result.reason
+    assert not media.with_suffix(".en.combined-hu.srt").exists()
+
+
+def test_source_combine_rechecks_input_ownership_at_publication(world, monkeypatch):
+    from app.config import settings
+    from app.database import TableMovies
+    from subtitles.tools.combine import main as combine
+
+    monkeypatch.setattr(settings.general, "subfolder", "relative")
+    monkeypatch.setattr(settings.general, "subfolder_custom", "..")
+    context = _movie(world)
+    media = Path(context.path)
+    media.with_suffix(".en.srt").write_bytes(CONTENT)
+    (world.tmp_path / media.with_suffix(".hu.srt").name).write_bytes(CONTENT)
+    compose = combine.compose
+
+    def compose_then_add_owner(**kwargs):
+        result = compose(**kwargs)
+        arr = video(media.parent / "Arr" / media.name)
+        world.db.execute(sa.insert(TableMovies).values(path=str(arr), title="Arr copy", tmdbId="9876"))
+        return result
+
+    monkeypatch.setattr(combine, "compose", compose_then_add_owner)
+    result = combine.try_combine_for_video(context.path, "movie", languages=["en", "hu"], format="srt",
+                                           source=context)
+    assert result.status == "failed" and "input" in result.error
+    assert not (world.tmp_path / media.with_suffix(".en.combined-hu.srt").name).exists()
+
+
+def test_source_provider_guard_preserves_the_selected_subtitle_format(world, monkeypatch, isolated_jobs):
+    import pysubs2
+    from app.database import TableLanguagesProfiles, update_profile_id_list
+    from media_sources import repository, service
+
+    world.db.execute(sa.update(TableLanguagesProfiles).values(originalFormat=1))
+    update_profile_id_list.invalidate()
+    context = _movie(world)
+    media = Path(context.path)
+    subtitle = FakeSubtitle()
+    subtitle.format = "ass"
+    subtitle.use_original_format = True
+    subtitle.content = pysubs2.SSAFile.from_string(CONTENT.decode()).to_string("ass").encode()
+    _download(monkeypatch, subtitle)
+    service.search_source_item(context.item_id, translation_gate=False)
+    assert isolated_jobs._run_job(isolated_jobs._reserve_next_job())
+
+    destination = media.with_suffix(".en.ass")
+    assert "[Script Info]" in destination.read_text()
+    assert not media.with_suffix(".en.srt").exists()
+    (result,) = world.db.execute(sa.select(repository.History)).all()
+    assert result.subtitles_path == str(destination)

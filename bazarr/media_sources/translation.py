@@ -91,6 +91,27 @@ def _current_missing(item, profile_id, profile):
                                      matches_audio=lambda language: language['language'] in audio_codes)
 
 
+def _language_candidates(codes):
+    return [(code.split(':', 1)[0], str(code.endswith(':hi')), str(code.endswith(':forced')))
+            for code in codes if code is not None]
+
+
+def stored_missing_language_candidates(item):
+    return _language_candidates(ast.literal_eval(item.missing_subtitles or '[]'))
+
+
+def missing_language_candidates(source):
+    """Read the live source policy and return the shared provider-search language tuples."""
+    current = live_source(source)
+    if current is None or current.profile_id is None:
+        return []
+    item = repository.get_item(current.item_id)
+    if item is None or not current.same_item(item):
+        return []
+    profile = get_profiles_list(profile_id=current.profile_id)
+    return _language_candidates(_current_missing(item, current.profile_id, profile))
+
+
 def automatic_translation_is_current(source, subtitle_path, from_lang, to_lang, forced, hi):
     """Recheck the live profile, indexed inputs, wait and threshold at dispatch and publication."""
     item = _active_item(source)

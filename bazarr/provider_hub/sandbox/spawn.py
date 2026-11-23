@@ -366,7 +366,7 @@ def provider_profile_gaps(
 def provider_profile_limitations(abi: int) -> list[str]:
     """What the provider profile leaves open on every kernel with Landlock ``abi``."""
     notes = [
-        "the metadata filter (seccomp) is not applied to provider plugins, so a plugin can change the "
+        "the metadata filter (seccomp) is not applied to ordinary provider workers, so a plugin can change the "
         "mode, owner, times or extended attributes of any file the Bazarr+ user owns, media included, "
         "and can lock every provider out by changing the mode of a folder they run from",
         "the file-size and process-count limits are not applied",
@@ -377,7 +377,12 @@ def provider_profile_limitations(abi: int) -> list[str]:
             if abi >= 4
             else "network connections are not restricted"
         ),
-        "only media inside the root folders of Sonarr, Radarr and Sportarr is readable to a plugin",
+        "ordinary workers can read media inside the root folders of Sonarr, Radarr and Sportarr",
+        (
+            "standalone media reads require the enabled provider sandbox, verified Landlock ABI 3 or later, "
+            "metadata filtering and capability dropping. The file must have one link and configured libraries "
+            "must be separate from system and application runtime locations"
+        ),
     ]
     if abi < 9:
         notes.append("connections to pathname UNIX sockets (a Docker socket, a user session bus) are not restricted")

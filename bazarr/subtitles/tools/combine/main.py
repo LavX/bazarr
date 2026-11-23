@@ -5,7 +5,9 @@ import os
 import re
 import stat
 from dataclasses import dataclass
-from subtitles.tools.subsync_engines import staged_subtitle_write, subtitle_mutation, sync_output_owner_is_unique
+from subtitles.tools.subsync_engines import (capture_subtitle_versions, read_regular_subtitle,
+                                             regular_subtitle_version, staged_subtitle_write,
+                                             subtitle_mutation, sync_output_owner_is_unique)
 from app.jobs_queue import JobCancelled
 from media_servers.events import publication_callback
 from sportarr.connection import check_cancelled
@@ -100,9 +102,12 @@ def try_combine_for_video(video_path, media_type, sonarr_series_id=None,
             )
 
         inputs = (sources.primary, *sources.secondaries)
-        if source is not None and any(not sync_output_owner_is_unique(video_path, path, **owner_kwargs)
-                                      for path in inputs):
-            return CombineResult(status="skipped", reason="combined subtitle input has no unique regular-file owner")
+        input_versions = {}
+        if source is not None:
+            input_versions = {path: regular_subtitle_version(path) for path in inputs}
+            if any(version is None or not sync_output_owner_is_unique(video_path, path, **owner_kwargs)
+                   for path, version in input_versions.items()):
+                return CombineResult(status="skipped", reason="combined subtitle input has no unique regular-file owner")
 
         out_path = compose_combined_filename(
             video_path=video_path,
@@ -130,12 +135,12 @@ def try_combine_for_video(video_path, media_type, sonarr_series_id=None,
             if out_dir:
                 os.makedirs(out_dir, exist_ok=True)
             write_kwargs = {}
+            read_kwargs = {}
             notify = publication_callback(media_type, video_path, 'combine', arr_instance_id,
                                           **({'source': source} if source is not None else {}))
             published_versions = ()
             if sports_operation is not None:
                 from sportarr.profile_hooks import finalize
-                from subtitles.tools.subsync_engines import capture_subtitle_versions
                 sports_operation = sports_operation.bind(
                     (sources.primary, *sources.secondaries), out_path, cancel=cancel,
                     extra_destinations=tuple(os.path.splitext(out_path)[0] + ext
@@ -163,10 +168,13 @@ def try_combine_for_video(video_path, media_type, sonarr_series_id=None,
                         raise ValueError('The source item moved or was removed during composition')
                     if not sync_output_owner_is_unique(video_path, out_path, **owner_kwargs):
                         raise ValueError('The combined output lost its unique owner during composition')
-                    if any(not sync_output_owner_is_unique(video_path, path, **owner_kwargs) for path in inputs):
-                        raise ValueError('A combined subtitle input lost its unique owner during composition')
+                    for path, version in input_versions.items():
+                        if (regular_subtitle_version(path) != version
+                                or not sync_output_owner_is_unique(video_path, path, **owner_kwargs)):
+                            raise ValueError('A combined subtitle input changed or lost its unique owner')
 
                 write_kwargs['before_publish'] = validate_source
+                read_kwargs['read_bytes'] = lambda path: read_regular_subtitle(path, input_versions[path])
 
             def capture_published():
                 nonlocal published_versions
@@ -178,7 +186,7 @@ def try_combine_for_video(video_path, media_type, sonarr_series_id=None,
                     after_publish=after_publish, **owner_kwargs, **write_kwargs) as temporary:
                 check_cancelled(cancel)
                 content = compose(primary_path=sources.primary, secondary_paths=sources.secondaries,
-                                  format=rule["format"])
+                                  format=rule["format"], **read_kwargs)
                 check_cancelled(cancel)
                 with open(temporary, "wb") as fh:
                     fh.write(content)

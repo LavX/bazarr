@@ -437,6 +437,14 @@ class ProviderExcludedWhileQueuedError(ProviderExcludedError):
     provider excluded once it got there. Handled like any exclusion."""
 
 
+class ProviderItemExcludedError(ProviderExcludedError):
+    """A provider cannot serve this item, but remains usable for others."""
+
+    def __init__(self, provider, reason):
+        super().__init__(provider)
+        self.reason = reason
+
+
 class ProviderBusyError(Exception):
     """A request that could not get its turn on the provider's worker within
     its own timeout. Deliberately not a ProviderExcludedError: an excluded
@@ -1294,6 +1302,10 @@ class SZProviderPool(ProviderPool):
 
             return finish(out, "success" if out else "empty")
 
+        except ProviderItemExcludedError as error:
+            logger.info('Provider %r was excluded for this item: %s', provider, error.reason)
+            return finish([], "skipped", "provider_excluded")
+
         except ProviderExcludedError:
             # Refused by the worker once the request got its turn: the provider
             # went on backoff or was discarded while it waited. Nothing reached
@@ -1629,6 +1641,11 @@ class SZProviderPool(ProviderPool):
                         self.post_download_hook(subtitle)
 
                     break
+                except ProviderItemExcludedError as error:
+                    logger.info('Provider %r was excluded for this item: %s', subtitle.provider_name, error.reason)
+                    subtitle.skip_reason = 'provider_excluded'
+                    return False
+
                 except ProviderCallInterruptedError:
                     subtitle.skip_reason = 'provider_excluded'
                     return False
@@ -2546,7 +2563,8 @@ def save_subtitles(file_path, subtitles, single=False, directory=None, chmod=Non
     :type subtitles: list of :class:`~subliminal.subtitle.Subtitle`
     :param bool single: save a single subtitle, default is to save one subtitle per language.
     :param str directory: path to directory where to save the subtitles, default is next to the video.
-    :param write_subtitle: optional callback receiving each exact destination and encoded content
+    :param write_subtitle: optional callback receiving each exact destination and encoded content.
+        Returning False declines that file.
     :return: the saved subtitles
     :rtype: list of :class:`~subliminal.subtitle.Subtitle`
 
@@ -2596,6 +2614,7 @@ def save_subtitles(file_path, subtitles, single=False, directory=None, chmod=Non
 
         subtitle.storage_path = subtitle_path
 
+        written_path = None
         for format in formats:
             extension = SUBTITLE_FORMAT_EXTENSIONS.get(format, format)
             if extension != "srt":
@@ -2605,19 +2624,21 @@ def save_subtitles(file_path, subtitles, single=False, directory=None, chmod=Non
             content = subtitle.get_modified_content(format=format, debug=debug_mods)
             if content:
                 if write_subtitle is not None:
-                    write_subtitle(subtitle_path, content)
+                    # A writer can reject a destination after the provider has returned.
+                    if write_subtitle(subtitle_path, content) is False:
+                        continue
                 else:
                     if os.path.exists(subtitle_path):
                         os.remove(subtitle_path)
                     with open(subtitle_path, 'wb') as f:
                         f.write(content)
-                subtitle.storage_path = subtitle_path
+                written_path = subtitle.storage_path = subtitle_path
             else:
                 logger.error(u"Something went wrong when getting modified subtitle for %s", subtitle)
 
         # change chmod if requested
-        if chmod:
-            os.chmod(subtitle_path, chmod)
+        if chmod and written_path is not None:
+            os.chmod(written_path, chmod)
 
         saved_subtitles.append(subtitle)
 

@@ -55,13 +55,42 @@ def subtitle_write_lock(video_path, subtitle_directory):
         return lock
 
 
+def _subtitle_file_version(info):
+    return info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns
+
+
 def subtitle_source_version(path):
     """Identify the saved file a queued upload sync is allowed to replace."""
     try:
-        stat = os.stat(path)
+        return _subtitle_file_version(os.stat(path))
     except OSError:
         return None
-    return (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)
+
+
+def regular_subtitle_version(path):
+    """Identify the directory entry only when it is an ordinary file."""
+    try:
+        entry = os.lstat(path)
+    except OSError:
+        return None
+    return _subtitle_file_version(entry) if stat.S_ISREG(entry.st_mode) else None
+
+
+def read_regular_subtitle(path, expected_version):
+    """Read the same ordinary file the caller approved, without waiting on a stream."""
+    if expected_version is None or regular_subtitle_version(path) != expected_version:
+        raise SubtitleSourceChanged('The subtitle input is no longer an approved regular file')
+    flags = os.O_RDONLY | getattr(os, 'O_BINARY', 0) | getattr(os, 'O_NONBLOCK', 0) | getattr(os, 'O_NOFOLLOW', 0)
+    descriptor = os.open(path, flags)
+    try:
+        opened = os.fstat(descriptor)
+        if (not stat.S_ISREG(opened.st_mode) or _subtitle_file_version(opened) != expected_version
+                or regular_subtitle_version(path) != expected_version):
+            raise SubtitleSourceChanged('The subtitle input changed before it was opened')
+        with open(descriptor, 'rb', closefd=False) as handle:
+            return handle.read()
+    finally:
+        os.close(descriptor)
 
 
 class SubtitlePublication:
