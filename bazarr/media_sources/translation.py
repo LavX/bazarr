@@ -126,6 +126,13 @@ def automatic_translation_is_current(source, subtitle_path, from_lang, to_lang, 
     item = _active_item(source)
     if item is None or not source.profile_id:
         return False
+    if source.wanted_file_stamp is not None:
+        from .shadows import path_stage_shadow
+        from .wanted import notify_wanted_changes
+
+        if path_stage_shadow(source.item_id):
+            notify_wanted_changes(source.kind)
+            return False
     target = _target_code(to_lang, forced, hi)
     profile = get_profiles_list(profile_id=source.profile_id)
     rule = build_translate_from_map(profile).get(target)

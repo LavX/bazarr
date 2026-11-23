@@ -2,6 +2,7 @@
 # fmt: off
 
 import logging
+from dataclasses import replace
 import os
 from media_servers.events import observe_subtitle_change
 
@@ -380,6 +381,8 @@ def process_subtitle(subtitle, media_type, audio_language, path, max_score, is_u
             logging.info('BAZARR source item %s moved while its subtitles were being fetched; the file '
                          'was kept: %s', source.item_id, downloaded_path)
             return
+        if source.wanted_file_stamp is not None:
+            current_source = replace(current_source, wanted_file_stamp=source.wanted_file_stamp)
         series_id = None
         episode_id = None
         owner_instance_id = None

@@ -191,9 +191,9 @@ def test_wanted_refreshes_stale_shadows_and_retains_mount_shadows(client, arr_li
     arr_library.execute(sa.update(TableArrInstances).where(TableArrInstances.id == 2).values(
         path_mappings=json.dumps([['/earlier', str(root)], ['/incoming', str(root)]])))
     arr_library.execute(sa.update(TableArrInstances).where(TableArrInstances.id == 3).values(
-        path_mappings=json.dumps([['/sportarr/media', str(root)]])))
+        path_mappings=json.dumps([[r'D:\Races', str(root)]])))
     arr_library.execute(sa.update(TableSportsEvents).where(TableSportsEvents.id == 1).values(
-        path='/sportarr/media/cross-kind path.mkv'))
+        path='D:/Races/cross-kind path.mkv'))
     cases = {
         'bind': {'shadow_rung': 'inode', 'shadow_arr_row_id': 1, 'shadow_arr_path': '/arr/movies/Arr Movie.mkv'},
         'second': {'shadow_rung': 'attributes', 'shadow_arr_row_id': 2, 'shadow_arr_path': '/arr/movies/second.mkv'},
@@ -468,3 +468,58 @@ def test_sports_badge_excludes_library_rows_until_the_sports_wanted_list_support
     add_item(arr_library, source, library, root / 'Race.mkv', kind='sports_event', group_id=group,
              missing_subtitles="['en']")
     assert client.get('/api/badges?sources=1', headers=HEADERS).data == client.get('/api/badges', headers=HEADERS).data
+
+
+@pytest.mark.parametrize('change', ['translator unavailable', 'arr claimed'])
+def test_translation_after_a_wanted_download_keeps_its_publication_scope(world, isolated_jobs, monkeypatch, change):
+    from app.config import settings
+    from app.database import TableArrInstances, TableLanguagesProfiles, TableMovies, update_profile_id_list
+    from media_sources import repository, wanted
+    from subtitles.tools.translate import main
+
+    monkeypatch.setattr(wanted, 'jobs_queue', isolated_jobs)
+    monkeypatch.setattr(settings.translator, 'runtime_v2', False)
+    monkeypatch.setattr(settings.translator, 'translator_type', 'google_translate')
+    monkeypatch.setattr(settings.translator, 'min_source_wait_minutes', 0)
+    monkeypatch.setattr(settings.translator, 'min_source_score', 0)
+    profile = [
+        {'id': 1, 'language': 'en', 'forced': 'False', 'hi': 'False'},
+        {'id': 2, 'language': 'hu', 'forced': 'False', 'hi': 'False', 'translate_from': 'en'},
+    ]
+    world.db.execute(sa.update(TableLanguagesProfiles).values(items=json.dumps(profile)))
+    update_profile_id_list.invalidate()
+    context = pipeline._movie(world)
+    media = Path(context.path)
+    pipeline._download(monkeypatch)
+    engine = Mock(side_effect=AssertionError('the translator should not run'))
+    monkeypatch.setattr(main.TranslatorFactory, 'create_translator', engine)
+
+    wanted.wanted_search_missing_subtitles_sources(kind='movie')
+    assert isolated_jobs._run_job(isolated_jobs._reserve_next_job())
+    (translation,) = isolated_jobs.jobs_pending_queue
+    assert translation.func == 'translate_subtitles_file'
+    assert translation.kwargs['source'].wanted_file_stamp is not None
+
+    if change == 'arr claimed':
+        monkeypatch.setattr(settings.general, 'use_radarr', True)
+        world.db.execute(sa.insert(TableArrInstances).values(
+            id=42, kind='radarr', name='Cinema', stable_key='cinema', port=9800, enabled=1, path_mappings='[]'))
+        world.db.execute(sa.insert(TableMovies).values(
+            id=73, arr_instance_id=42, radarrId=9000, title='Film', path=context.path, tmdbId='73'))
+    else:
+        monkeypatch.setattr(main, 'translation_available', lambda: SimpleNamespace(available=False))
+    assert isolated_jobs._run_job(isolated_jobs._reserve_next_job())
+    engine.assert_not_called()
+    assert not media.with_suffix('.hu.srt').exists()
+    if change == 'arr claimed':
+        assert repository.get_item(context.item_id).arr_shadow == 1
+        assert not isolated_jobs.jobs_pending_queue
+    else:
+        (fallback,) = isolated_jobs.jobs_pending_queue
+        assert fallback.func == 'search_wanted_fallback'
+        assert fallback.kwargs['target_language'] == 'hu'
+        providers = Mock(side_effect=AssertionError('the replacement video should not be searched'))
+        monkeypatch.setattr('media_sources.service.get_providers', providers)
+        os.replace(video(media.with_suffix('.new'), size=3000), media)
+        assert isolated_jobs._run_job(isolated_jobs._reserve_next_job())
+        providers.assert_not_called()

@@ -561,7 +561,7 @@ def search_wanted_item(item_id, created_at, job_id, *, translation_gate=True, ex
     if not languages:
         return
     with source_search_probes(item_id):
-        downloaded = _download_source_subtitles(context, current, languages, job_id,
+        downloaded = _download_source_subtitles(wanted_source, current, languages, job_id,
                                                 translation_gate=translation_gate, wanted_stamp=stamp)
     failed = {_language_code(*entry) for entry in languages} - set(downloaded)
     if failed and local_content_stamp(context.path) == stamp:

@@ -507,8 +507,12 @@ class ArrOwners:
             table = TABLE_OF_KIND[instance.kind]
             model, file_id = self._columns(table)
             arr_paths = {mapped for candidate in candidates for mapped in mapper.candidate_paths(candidate)}
+            path_column = model.path
+            if mapper.sports:
+                path_column = sa.func.replace(path_column, '\\', '/')
+                arr_paths = {candidate.replace('\\', '/') for candidate in arr_paths}
             for row in session.execute(sa.select(model.id, model.path, model.file_size, file_id)
-                                       .where(model.arr_instance_id == instance.id, model.path.in_(arr_paths))
+                                       .where(model.arr_instance_id == instance.id, path_column.in_(arr_paths))
                                        .order_by(model.id)).all():
                 arr_row = self._arr_row(instance, table, row[0], row[1], row[2], row[3])
                 if arr_row is not None and arr_row.path in candidates:
@@ -567,8 +571,13 @@ def arr_claims_stored_path(path, target):
         claim = model.path == path
         if mapper.rules:
             mapped_path = _mapped_sports_sql_path if mapper.sports else _mapped_sql_path
-            candidates = [model.path == mapped_path(path, [rule], reverse=True) for rule in mapper.rules]
-            claim = sa.and_(sa.or_(claim, *candidates), mapped_path(model.path, mapper.rules) == path)
+            candidates = [mapped_path(path, [rule], reverse=True) for rule in mapper.rules]
+            if mapper.sports:
+                arr_path = sa.func.replace(model.path, '\\', '/')
+                alternatives = (arr_path == sa.func.replace(candidate, '\\', '/') for candidate in candidates)
+            else:
+                alternatives = (model.path == candidate for candidate in candidates)
+            claim = sa.and_(sa.or_(claim, *alternatives), mapped_path(model.path, mapper.rules) == path)
         clauses[model].append(sa.and_(model.arr_instance_id == instance.id, claim))
     return sa.or_(sa.false(), *(sa.select(model.id).where(sa.or_(*conditions)).correlate(path.table).exists()
                                 for model, conditions in clauses.items()))
