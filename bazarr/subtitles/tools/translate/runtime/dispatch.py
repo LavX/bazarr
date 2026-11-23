@@ -447,10 +447,9 @@ class Dispatcher:
                 state.ledger_id, **{key: value for key, value in spec.history_media.items() if value is not None},
                 source_language=spec.source_language, target_language=spec.target_language, plugin_id=plugin_id,
                 plugin_version=None if info is None else info.version, engine_instance_id=instance.id)
-            state.engine_started = True
             try:
                 if legacy is not None:
-                    output = self._run_legacy(spec, legacy, instance)
+                    output = self._run_legacy(spec, legacy, instance, state)
                 else:
                     output = self._run_plugin(spec, choice, info, state, jobs, history, ledger)
             except EngineDeclined as declined:
@@ -548,11 +547,12 @@ class Dispatcher:
         return now + timedelta(seconds=failure.retry_after or DEFAULT_RETRY_SECONDS)
 
     # ------------------------------------------------------------------------------------------- legacy
-    def _run_legacy(self, spec: JobSpec, legacy, instance) -> DispatchOutcome:
+    def _run_legacy(self, spec: JobSpec, legacy, instance, state: _Run) -> DispatchOutcome:
         from ..core.translator_utils import EmptySourceTranslation
 
         if spec.legacy is None:
             raise AttemptFailure(fail.WORKER_UNAVAILABLE, "This caller cannot run an engine served by Bazarr+.")
+        state.engine_started = True
         try:
             result = spec.legacy(legacy, instance)
         except LegacyDeclined as declined:
@@ -746,6 +746,7 @@ class Dispatcher:
                 except Exception:
                     logger.debug("A translation progress callback failed", exc_info=True)
 
+        state.engine_started = True
         try:
             handle = self.workers.submit(serving_id, request, secrets, context=context, on_progress=on_progress)
         except JobCancelled:
