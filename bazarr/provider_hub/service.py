@@ -6020,14 +6020,14 @@ def _finish_rollback_activation(state, provider_id: str, *, just_promoted=False)
     marker = row[_PENDING_ROLLBACK_HOOK]
     try:
         if marker.get("provider_settings_copy") is not None:
-            plan = release_settings.unseal(marker["provider_settings_copy"])
+            plan = release_settings.unseal(marker["provider_settings_copy"], field="provider_settings_copy")
             release_settings.restore_provider_section(provider_id, plan, row.get("config") or {}, row["manifest"],
                                                       just_promoted=just_promoted)
         if marker.get("settings_copy") is not None:
             from .kinds.translator import _store
             from subtitles.tools.translate.runtime.plugin_update import restore_release_settings
 
-            settings_copy = release_settings.unseal(marker["settings_copy"])
+            settings_copy = release_settings.unseal(marker["settings_copy"], field="settings_copy")
             restore_release_settings(_store(), provider_id, marker.get("previous_manifest"), row["manifest"],
                                      settings_copy["owners"], settings_copy["revisions"])
         attention = get_kind(kind_of(row)).on_activated(provider_id, marker.get("previous_manifest"), row["manifest"])

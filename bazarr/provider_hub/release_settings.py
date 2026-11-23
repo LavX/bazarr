@@ -3,10 +3,20 @@
 from __future__ import annotations
 
 import json
+from base64 import b64decode, urlsafe_b64encode
 from typing import Any
 
 RETAINED = "retained_release_settings"
 PENDING_HOOK = "pending_rollback_hook"
+_CONTENT = "content"
+_TRANSLATOR_COPY = "settings_copy"
+_PROVIDER_COPY = "provider_settings_copy"
+_PAYLOAD_FIELDS = {
+    _CONTENT: {"config_fields": list, "config": dict, "owners": dict},
+    _TRANSLATOR_COPY: {"owners": dict, "revisions": dict},
+    _PROVIDER_COPY: {"fields": list, "before": dict, "after": dict, "addresses": dict, "changed": dict,
+                     "secret_fields": list},
+}
 
 
 def provider_restore_pending(row: dict) -> bool:
@@ -70,19 +80,45 @@ def seal(payload: dict) -> str:
 
 
 def read(record: dict | None) -> dict:
-    return unseal(record["content"]) if record else {}
+    return unseal(record[_CONTENT], field=_CONTENT) if record else {}
 
 
-def unseal(content: str) -> dict:
-    from secret_store.crypto import decrypt_secret, is_encrypted
+def _valid_payload(data: dict, field: str) -> bool:
+    expected = _PAYLOAD_FIELDS[field]
+    if field == _CONTENT and "section" in data:
+        expected = {**expected, "section": dict}
+    if data.keys() != expected.keys() or any(not isinstance(data[key], kind) for key, kind in expected.items()):
+        return False
+    for key in ("config_fields", "fields", "secret_fields"):
+        if key in data and not all(isinstance(item, str) for item in data[key]):
+            return False
+    if field == _PROVIDER_COPY:
+        return all(isinstance(addresses, list) and all(isinstance(address, str) for address in addresses)
+                   for key in ("addresses", "changed") for addresses in data[key].values())
+    if field == _TRANSLATOR_COPY and any(type(revision) is not int for revision in data["revisions"].values()):
+        return False
+    return all(isinstance(owner, dict) and isinstance(owner.get("identity"), list)
+               and type(owner.get("revision")) is int and isinstance(owner.get("values"), dict)
+               for owner in data["owners"].values())
+
+
+def unseal(content: str, *, field: str) -> dict:
+    from secret_store.crypto import SECRET_MARKER_PREFIX, decrypt_secret, is_encrypted
 
     if not is_encrypted(content):
+        raise ValueError("The retained settings copy is invalid")
+    try:
+        encoded = content[len(SECRET_MARKER_PREFIX):].encode("ascii")
+        decoded = b64decode(encoded, altchars=b"-_", validate=True)
+    except ValueError:
+        raise ValueError("The retained settings copy is invalid") from None
+    if urlsafe_b64encode(decoded) != encoded:
         raise ValueError("The retained settings copy is invalid")
     try:
         result = json.loads(decrypt_secret(content))
     except (TypeError, ValueError):
         raise ValueError("The retained settings copy could not be read") from None
-    if not isinstance(result, dict):
+    if not isinstance(result, dict) or not _valid_payload(result, field):
         raise ValueError("The retained settings copy is invalid")
     return result
 
@@ -91,17 +127,15 @@ def is_sealed_state_field(path: tuple, value: str) -> bool:
     """Recognize authenticated settings storage without exempting diagnostic text from scrubbing."""
     if len(path) != 4 or path[0] != "installations" or not isinstance(path[1], str):
         return False
-    expected = {
-        (RETAINED, "content"): {"config_fields", "config", "owners"},
-        (PENDING_HOOK, "settings_copy"): {"owners", "revisions"},
-        (PENDING_HOOK, "provider_settings_copy"): {"fields", "before", "after", "addresses"},
-    }.get(path[2:])
-    if expected is None:
+    container, field = path[2:]
+    if (container, field) not in ((RETAINED, _CONTENT), (PENDING_HOOK, _TRANSLATOR_COPY),
+                                  (PENDING_HOOK, _PROVIDER_COPY)):
         return False
     try:
-        return expected <= unseal(value).keys()
+        unseal(value, field=field)
     except ValueError:
         return False
+    return True
 
 
 def restore_config(state: dict, plugin_id: str, row: dict, snapshot: dict) -> None:
