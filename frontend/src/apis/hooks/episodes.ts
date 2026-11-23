@@ -9,6 +9,7 @@ import { invalidateEpisodeHistory } from "@/apis/queries/episodeHistory";
 import { usePaginationQuery } from "@/apis/queries/hooks";
 import { episodesHistoryKey, QueryKeys } from "@/apis/queries/keys";
 import api from "@/apis/raw";
+import { useDeleteBlacklistMutation } from "./blacklistMutations";
 import { whenJobFinishes } from "./jobWatch";
 
 const cacheEpisodes = (client: QueryClient, episodes: Item.Episode[]) => {
@@ -124,18 +125,10 @@ export function useEpisodeAddBlacklist() {
 }
 
 export function useEpisodeDeleteBlacklist() {
-  const client = useQueryClient();
-  return useMutation({
-    mutationKey: [QueryKeys.Series, QueryKeys.Episodes, QueryKeys.Blacklist],
-
-    mutationFn: (removal: Blacklist.Removal) =>
-      api.episodes.deleteBlacklist(removal),
-
-    onSuccess: () =>
-      client.invalidateQueries({
-        queryKey: [QueryKeys.Series, QueryKeys.Episodes, QueryKeys.Blacklist],
-      }),
-  });
+  return useDeleteBlacklistMutation(
+    [QueryKeys.Series, QueryKeys.Episodes, QueryKeys.Blacklist],
+    (removal) => api.episodes.deleteBlacklist(removal),
+  );
 }
 
 export function useEpisodeHistoryPagination(includeEmbedded = false) {

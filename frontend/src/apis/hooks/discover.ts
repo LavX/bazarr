@@ -8,6 +8,7 @@ import type {
   DiscoverDownloadIdentity,
   DiscoverSelection,
   DiscoverSummary,
+  MetadataEpisode,
   MetadataSource,
   TrendingMediaType,
 } from "@/types/discover";
@@ -64,17 +65,32 @@ export const COPIES_QUERY_KEY = [QueryKeys.Discover, "copies"] as const;
 export function useDiscoverCopies(
   target: {
     mediaType: "movie" | "episode";
-    imdbId: string;
+    imdbId?: string;
+    tmdbId?: number;
     season?: number;
     episode?: number;
+    sourceEpisode?: Pick<
+      MetadataEpisode,
+      "season" | "episode" | "id" | "imdb_id" | "tvdb_id"
+    >;
   } | null,
 ) {
   const params = target
     ? {
         media_type: target.mediaType,
-        imdb_id: target.imdbId,
+        ...(target.imdbId ? { imdb_id: target.imdbId } : {}),
+        ...(target.tmdbId ? { tmdb_id: target.tmdbId } : {}),
         ...(target.mediaType === "episode"
           ? { season: target.season, episode: target.episode }
+          : {}),
+        ...(target.sourceEpisode
+          ? {
+              source_season: target.sourceEpisode.season,
+              source_episode: target.sourceEpisode.episode,
+              episode_tmdb_id: target.sourceEpisode.id,
+              episode_imdb_id: target.sourceEpisode.imdb_id ?? undefined,
+              episode_tvdb_id: target.sourceEpisode.tvdb_id ?? undefined,
+            }
           : {}),
       }
     : {};
@@ -84,6 +100,8 @@ export function useDiscoverCopies(
     enabled: target !== null,
     staleTime: 30_000,
     gcTime: 300_000,
+    // A different target must never offer the previous target's copies.
+    placeholderData: undefined,
     retry: false,
     networkMode: "always",
   });

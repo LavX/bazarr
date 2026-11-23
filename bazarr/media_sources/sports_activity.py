@@ -42,7 +42,8 @@ def _source_wanted(row):
     return postprocess_source({
         'id': row.id, 'source_id': row.source_id, 'source_item_id': row.id, 'source_group_id': row.group_id,
         'source_name': row.source_name, 'source_kind': row.source_kind, 'identity_state': row.identity_state,
-        'arr_instance_id': None, 'league_id': None, 'leagueTitle': row.league_title, 'title': row.title,
+        'arr_instance_id': None, 'league_id': None, 'sportarrLeagueId': None, 'sportarrEventId': None, 'file_id': None,
+        'leagueTitle': row.league_title, 'title': row.title,
         'season': row.season, 'episode': row.episode, 'eventDate': row.event_date, 'broadcastDate': None,
         'partNumber': row.part_number or None, 'partName': row.part_name,
         'path': row.path, 'mapped_path': row.path, 'hasFile': True, 'release_mismatch': False,
@@ -77,7 +78,8 @@ def list_wanted(session, args, scope, *, arr_instance_id, start, length):
         sort=lambda c: (sa.func.coalesce(c.league_title, ''), sa.func.coalesce(c.event_date, ''),
                         sa.func.coalesce(c.season, 0), sa.func.coalesce(c.episode, 0), c.part_number, c.origin, c.id))
     arr_ids, source_ids = _page_ids(page, 'arr'), _page_ids(page, 'source')
-    arr_rows = workflows.serialize_wanted_page(session, arr_query.where(events.id.in_(arr_ids))) if arr_ids else []
+    arr_rows = workflows.list_wanted(
+        session, length=-1, query=arr_query, owner_filter=events.id.in_(arr_ids))['data'] if arr_ids else []
     arr_data = {row['id']: dict(row, **dict.fromkeys(_METADATA)) for row in arr_rows}
 
     source_data = {}
@@ -162,15 +164,17 @@ def clear_blacklist(session, scope):
     source = repository.Blacklist
     removed = 0
     with source_transaction(session) as connection:
+        if scope.includes('source'):
+            removed = connection.execute(sa.delete(source).where(
+                source.c.item_kind == _KIND, scope.source(source.c.source_id),
+            )).rowcount
+        if not scope.keys and not removed:
+            raise ValueError('arr_instance_id is required and must be a positive integer')
         if settings.general.use_sportarr and scope.includes('arr'):
             enabled = sa.select(TableArrInstances.id).where(
                 TableArrInstances.kind == 'sportarr', TableArrInstances.enabled == 1)
             removed += connection.execute(sa.delete(TableBlacklistSports).where(
                 TableBlacklistSports.arr_instance_id.in_(enabled), scope.arr(TableBlacklistSports.arr_instance_id),
-            )).rowcount
-        if scope.includes('source'):
-            removed += connection.execute(sa.delete(source).where(
-                source.c.item_kind == _KIND, scope.source(source.c.source_id),
             )).rowcount
     event_stream(type='sports')
     return removed

@@ -166,6 +166,13 @@ class EpisodeApi extends BaseApi {
     return response.data;
   }
 
+  async blacklistSourceOptions(signal?: AbortSignal) {
+    const response = await this.get<{
+      source_filters?: Blacklist.SourceOption[];
+    }>("/blacklist", { sources: 1, length: 1 }, signal);
+    return response.source_filters ?? [];
+  }
+
   async addBlacklist(
     seriesid: number,
     episodeid: number,

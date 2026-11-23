@@ -15,7 +15,7 @@ from contextlib import contextmanager
 from subzero.language import Language
 from subliminal_patch.core import save_subtitles
 from subtitles.tools.subsync_engines import (SubtitleDestinationChanged, subtitle_write_locks,
-                                             regular_subtitle_version, subtitle_mutation,
+                                             regular_subtitle_version, subtitle_mutation, subtitle_source_version,
                                              sync_output_owner_is_unique, write_subtitle_file)
 from subliminal_patch.core_persistent import download_best_subtitles
 
@@ -32,12 +32,20 @@ from .utils import get_video, _get_lang_obj, _get_scores
 from .processing import process_subtitle
 
 
+class SourceMissingLanguagesUnavailable(OSError):
+    """The source publication cannot verify whether the target language is missing."""
+
+
 @update_pools
 def generate_subtitles(path, languages, audio_language, sceneName, title, media_type, profile_id,
                        forced_minimum_score=None, is_upgrade=False, check_if_still_required=False,
                        previous_subtitles_to_delete=None, job_id=None, fallback_allowed=False,
                        arr_instance_id=None, source=None, auto_translate=True, source_wanted_stamp=None):
     if not languages:
+        return None
+
+    video_version = subtitle_source_version(path) if source is not None else None
+    if source is not None and video_version is None:
         return None
 
     # A media source item is described by its context. Its publication type is what the media servers hear
@@ -206,7 +214,7 @@ def generate_subtitles(path, languages, audio_language, sceneName, title, media_
                                                      language=source_language, recheck_missing=check_if_still_required,
                                                      is_upgrade=is_upgrade, written_paths=written_paths,
                                                      on_publish=publish, wanted_stamp=source_wanted_stamp,
-                                                     wanted_profile=wanted_profile)
+                                                     wanted_profile=wanted_profile, video_version=video_version)
                                     if is_upgrade:
                                         from media_sources.indexer import SourcePublicationOwnerIndex
 
@@ -231,6 +239,10 @@ def generate_subtitles(path, languages, audio_language, sceneName, title, media_
                                                           previous_subtitles_to_delete)
                                 saved_subtitles = [saved for saved in saved_subtitles if saved.storage_path in written_paths]
 
+                        except SourceMissingLanguagesUnavailable:
+                            # The source job must fail rather than report a completed search
+                            # when its final missing-language check could not be performed.
+                            raise
                         except Exception as e:
                             logging.exception(
                                 f'BAZARR Error saving Subtitles file to disk for this file {path}: {repr(e)}')  # noqa: G004
@@ -346,7 +358,7 @@ def check_missing_languages_source(source, *, stored=False, external_subtitles=N
 
 
 def _write_source_download(video_path, destination, content, *, source, language, recheck_missing, is_upgrade,
-                           written_paths, on_publish, wanted_stamp=None, wanted_profile=None):
+                           written_paths, on_publish, wanted_stamp=None, wanted_profile=None, video_version=None):
     """Publish the actual provider-selected file only while its destination is still eligible."""
     from media_sources.indexer import SourcePublicationOwnerIndex
     from media_sources.translation import prepare_source_sidecars
@@ -359,15 +371,23 @@ def _write_source_download(video_path, destination, content, *, source, language
         if not sync_output_owner_is_unique(video_path, destination, ownership_index=ownership_index):
             raise SubtitleDestinationChanged('The source subtitle destination does not have one media owner')
         if wanted_stamp is None and recheck_missing:
-            return prepare_source_sidecars(source, ownership_index, written_paths)
+            try:
+                return prepare_source_sidecars(source, ownership_index, written_paths)
+            except OSError as error:
+                logging.warning('BAZARR could not verify missing languages for source item %s', source.item_id)
+                raise SourceMissingLanguagesUnavailable(
+                    'The source missing languages could not be verified. Try again when its subtitle files and '
+                    'folders can be read.') from error
         return None
 
     @contextmanager
     def publication():
-        with ownership_index.publication(source, prepare, destination=destination) as (
+        with ownership_index.publication(source, prepare, destination=destination, cleanup_outputs=True) as (
                 current, connection, external_subtitles):
             if current is None or current.path != video_path:
                 raise SubtitleDestinationChanged('The source item moved or was removed')
+            if video_version is not None and subtitle_source_version(video_path) != video_version:
+                raise SubtitleDestinationChanged('The media file changed while searching for subtitles')
             if os.path.lexists(destination) and (not is_upgrade or regular_subtitle_version(destination) is None):
                 raise SubtitleDestinationChanged('The source subtitle destination is already occupied')
             if wanted_stamp is not None:
@@ -380,7 +400,7 @@ def _write_source_download(video_path, destination, content, *, source, language
 
     try:
         write_subtitle_file(video_path, destination, content, written_paths=written_paths, on_publish=on_publish,
-                            publication_guard=publication, ownership_index=ownership_index)
+                            publication_guard=publication, invalidate_outputs=False)
     except SubtitleDestinationChanged as error:
         logging.info('BAZARR skipped saving a subtitle for source item %s: %s', source.item_id, error)
         return False

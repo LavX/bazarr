@@ -34,6 +34,9 @@ MAX_PATH_BYTES = 2600
 # A scan that started this long ago and never finished is taken for a crashed one, not a running one.
 STALE_SCAN_HOURS = 6
 INVALIDATED_FILE_INDEX = UNKNOWN_STREAM_COLUMNS | dict(subtitles=None, missing_subtitles=None, indexed_at=None)
+# A negative missing_scans holds a path conflict until a complete scan matches the file.
+# The number of subsequent misses is the distance below this value.
+_SERVER_PATH_CONFLICT = -1
 
 
 @dataclass
@@ -474,12 +477,20 @@ def _scan_library_snapshot(source, library, roots, scan, result, cancel, session
         result.skipped += len(too_long)
 
     complete = listing.complete
+    partial_server = server and (not complete or listing.drifted)
+    if partial_server:
+        held = [row for row in rows if row.path in listing.ambiguous_paths or row.missing_scans < 0]
+        if held:
+            held_paths = {row.path for row in held}
+            held_ids = {row.external_id for row in held}
+            discovered = [found for found in discovered
+                          if found.path not in held_paths and found.hints.external_id not in held_ids]
     foreign_guard = _ForeignGuard(session, cancel, scan or _ScanSettings(source, library, roots, None))
     matching = identity.match_library(
         discovered, rows, ignore_dev=ignore_dev, library_content_kind=library.content_kind,
         foreign_lookup=lambda inodes, paths: repository.foreign_candidates(inodes, paths, library.id, session),
         foreign_vouched=lambda holder, found: complete and not listing.drifted and foreign_guard.vouches(holder, found),
-        by_server_id=server, partial_server=server and (not complete or listing.drifted))
+        by_server_id=server, partial_server=partial_server)
     for holder, _, alias in matching.handovers:
         if alias:
             foreign_guard.snapshot(holder)
@@ -553,7 +564,7 @@ def _scan_library_snapshot(source, library, roots, scan, result, cancel, session
                     for batch in _chunks(sorted(shows - {None})):
                         repository.lock_show_groups(connection, batch)
                 with _admission_transaction(connection, decisions.foreign_guard) as (target, releases):
-                    inserted = _write_library(*write_args, target, releases)
+                    inserted, refused_groups = _write_library(*write_args, target, releases)
                 for root in roots:
                     if root.local_path not in changed_roots or complete:
                         repository.record_root_device(root.id, root_snapshot[root.local_path].dev, connection)
@@ -562,7 +573,8 @@ def _scan_library_snapshot(source, library, roots, scan, result, cancel, session
                     if item_id not in written:
                         repository.update_item(item_id, connection, owner_library_id=library.id, **change)
                 if complete and groups:
-                    repository.delete_empty_groups(groups.keys(), connection, owner_library_id=library.id)
+                    repository.delete_empty_groups(groups.keys() - refused_groups, connection,
+                                                   owner_library_id=library.id)
                 if _root_snapshot(roots) != root_snapshot:
                     raise _ServerScanChanged('root_missing', 'A folder changed before the scan could commit.')
         except (_GroupedAdmissionRefused, _ForeignClaimChanged):
@@ -573,12 +585,12 @@ def _scan_library_snapshot(source, library, roots, scan, result, cancel, session
         # roll back the group keys, so these scans keep the key changes and item writes together.
         try:
             with _admission_transaction(session, decisions.foreign_guard, holders=foreign) as (connection, releases):
-                inserted = _write_library(*write_args, connection, releases)
+                inserted, _ = _write_library(*write_args, connection, releases)
         except (_GroupedAdmissionRefused, _ForeignClaimChanged):
             result = LibraryScan(library.id)
             return refuse('partial', 'An incoming file could not be written. No item or group changes were saved.')
     else:
-        inserted = _write_library(*write_args, session)
+        inserted, _ = _write_library(*write_args, session)
 
     if plan is not None:
         for line in plan.log:
@@ -620,7 +632,8 @@ def _write_library(library, decisions, plan, group_identities, group_for_dir, re
             group_rules.apply_plan(plan, connection, update_group, group_identities)
 
     grouped = library.content_kind != 'movie'
-    group_for_dir.update(_create_groups(library, decisions, group_for_dir, session))
+    created = _create_groups(library, decisions, group_for_dir, session)
+    group_for_dir.update(created)
     if cancel is not None:
         cancel()
 
@@ -635,13 +648,17 @@ def _write_library(library, decisions, plan, group_identities, group_for_dir, re
             result.deleted += repository.delete_items(batch, connection, owner_library_id=library.id)
 
     _write_unchanged(library, decisions, group_for_dir, grouped, result, session, cancel)
-    _write_repathed(library, decisions, group_for_dir, grouped, result, session, cancel, outer_releases)
+    refused_groups = _write_repathed(library, decisions, group_for_dir, grouped, result, session, cancel,
+                                    outer_releases)
     _write_path_only(library, decisions, group_for_dir, result, session, cancel, outer_releases)
     inserted = _insert_new(library, decisions, group_for_dir, result, session, cancel, outer_releases)
 
+    # Wait until the other writes can use the group. Keep existing destinations available for the retry.
+    repository.delete_empty_groups(refused_groups.intersection(created.values()), session,
+                                   owner_library_id=library.id)
     if plan is not None:
         repository.delete_empty_groups(plan.gone, session, owner_library_id=library.id)
-    return inserted
+    return inserted, refused_groups
 
 
 def _summary(result, matching, listing):
@@ -994,6 +1011,7 @@ def _write_unchanged(library, decisions, group_for_dir, grouped, result, session
 
 def _write_repathed(library, decisions, group_for_dir, grouped, result, session, cancel, outer_releases):
     repathed = decisions.repathed
+    refused_groups = set()
     # Parsing and identifying are slow and hold nothing: they happen before the write lock is taken.
     prepared = []
     for row, found, handover in repathed:
@@ -1027,8 +1045,11 @@ def _write_repathed(library, decisions, group_for_dir, grouped, result, session,
                 except (IntegrityError, _ForeignClaimChanged) as error:
                     if entry[1].path in decisions.required_paths:
                         raise _GroupedAdmissionRefused from error
+                    _, found, handover, group_id, _ = entry
+                    if handover and group_id is not None:
+                        refused_groups.add(group_id)
                     logging.warning('BAZARR the source file could not be moved to its new path and waits for the '
-                                    'next scan: %s', entry[1].path)
+                                    'next scan: %s', found.path)
                     result.deferred += 1
                     continue
                 if deleted is not None:
@@ -1041,6 +1062,7 @@ def _write_repathed(library, decisions, group_for_dir, grouped, result, session,
                 _count_repathed(entry, result, deleted)
         if cancel is not None:
             cancel()
+    return refused_groups
 
 
 def _write_server_moves(library, moves, grouped, decisions, result, session):
@@ -1357,24 +1379,34 @@ def _server_presence(source, kind, rows, listing, result, cancel, revision):
             continue
         if cancel is not None:
             cancel()
+        if row.path in listing.ambiguous_paths:
+            changes[row.id] = dict(missing_scans=_SERVER_PATH_CONFLICT, server_missing=1)
+            continue
+        conflicted = row.missing_scans < 0
+        if conflicted and (not listing.complete or listing.drifted):
+            continue
         if row.external_id in listing.seen_external_ids:
-            changes[row.id] = dict(last_seen_at=datetime.now(), missing_scans=0, server_missing=0)
+            if not conflicted:
+                changes[row.id] = dict(last_seen_at=datetime.now(), missing_scans=0, server_missing=0)
         elif listing.complete and os.path.isabs(row.path) and os.path.isfile(row.path):
-            count = min(row.missing_scans + 1, 2_147_483_647)
-            changes[row.id] = dict(missing_scans=count)
+            previous = _SERVER_PATH_CONFLICT - row.missing_scans if conflicted else row.missing_scans
+            count = min(previous + 1, 2_147_483_647)
+            changes[row.id] = dict(missing_scans=_SERVER_PATH_CONFLICT - count if conflicted else count)
             if count >= 2:
-                pending[row.external_id].append(row.id)
+                pending[row.external_id].append((row.id, conflicted))
     if pending:
         try:
             for asked, found in kind.lookup_item_ids(source, _chunks(sorted(pending), LOOKUP_SIZE), cancel,
                                                      revision=revision):
                 for external_id in asked:
-                    ids = pending[external_id]
-                    if external_id not in found:
-                        confirmed_missing.update(ids)
-                    values = (dict(missing_scans=0, server_missing=0) if external_id in found else dict(server_missing=1))
-                    for item_id in ids:
-                        changes[item_id].update(values)
+                    for item_id, conflicted in pending[external_id]:
+                        if external_id not in found:
+                            confirmed_missing.add(item_id)
+                            changes[item_id]['server_missing'] = 1
+                        elif conflicted:
+                            changes[item_id]['missing_scans'] = _SERVER_PATH_CONFLICT
+                        else:
+                            changes[item_id].update(missing_scans=0, server_missing=0)
         except MediaServerError as error:
             if error.code == 'configuration_changed':
                 raise

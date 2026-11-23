@@ -46,18 +46,20 @@ def test_every_route_needs_the_api_key(api):
     assert api.client.post(ITEMS + "/1/search").status_code == 401
 
 
-def test_a_source_is_created_with_its_library_and_root(api):
+@pytest.mark.parametrize("content_kind", ["movie", "sports"])
+def test_a_source_is_created_with_its_library_and_root(api, content_kind):
     profile = add_profile(api.db, [("en", "False", "False")])
-    response = _create(api, library={"path": str(api.movies), "content_kind": "movie", "profile_id": profile},
+    response = _create(api, name=f"Local {content_kind}",
+                       library={"path": str(api.movies), "content_kind": content_kind, "profile_id": profile},
                        scan_frequency_hours=0)
 
     assert response.status_code == 201
     body = response.json
-    assert (body["kind"], body["name"], body["enabled"], body["scan_frequency_hours"]) == ("folder", "Local movies",
-                                                                                           True, 0)
+    assert (body["kind"], body["name"], body["enabled"], body["scan_frequency_hours"]) == (
+        "folder", f"Local {content_kind}", True, 0)
     (library,) = body["libraries"]
-    assert (library["content_kind"], library["locator"], library["profile_id"]) == ("movie", str(api.movies),
-                                                                                     profile)
+    assert (library["content_kind"], library["locator"], library["profile_id"]) == (
+        content_kind, str(api.movies), profile)
     assert [root["local_path"] for root in library["roots"]] == [str(api.movies)]
     assert library["roots"][0]["server_path"] is None
 
@@ -70,7 +72,6 @@ def test_a_source_is_created_with_its_library_and_root(api):
     ({"kind": "plex"}, "No media source kind"),
     ({"library": {"path": "relative", "content_kind": "movie"}}, "must be absolute"),
     ({"library": {"path": "/definitely/not/there", "content_kind": "movie"}}, "does not exist"),
-    ({"library": {"path": "{movies}", "content_kind": "music"}}, "content_kind must be one of"),
     ({"library": {"path": "{movies}", "content_kind": "music"}}, "content_kind must be one of"),
     ({"library": {"path": "{movies}", "content_kind": "movie", "profile_id": 99}}, "profile does not exist"),
     ({"scan_frequency_hours": -1}, "scan_frequency_hours"),
@@ -380,11 +381,12 @@ def test_a_source_is_listed_read_edited_and_removed(api):
 
 @pytest.mark.parametrize("content_kind,item_kind", [("movie", "movie"), ("series", "episode"),
                                                      ("sports", "sports_event")])
-def test_navigation_availability_keeps_browsing_and_searching_separate(api, content_kind, item_kind):
-    from app.config import get_settings
+def test_navigation_availability_keeps_browsing_and_searching_separate(api, monkeypatch, content_kind, item_kind):
+    from app.config import get_settings, settings
     from media_sources import repository
 
-    assert get_settings()["media_sources"]["visible"] is False
+    monkeypatch.delitem(settings.media_sources, "visible", raising=False)
+    assert "visible" not in get_settings()["media_sources"]
     hidden = {"browsable": False, "searchable": False, "retained": False}
 
     def availability():

@@ -59,6 +59,7 @@ describe.each(["movie", "series"] as const)("%s source exclusions", (kind) => {
     ...common,
     id: 81,
     origin: "source",
+    removal_key: "original-exclusion-key",
     source_key: "source:7",
     source_id: 7,
     source_item_id: 501,
@@ -78,11 +79,19 @@ describe.each(["movie", "series"] as const)("%s source exclusions", (kind) => {
     [titleKey]: "Recorded removed title",
     video_path: "/removed/recorded-video.mkv",
   };
+  const retained = {
+    ...source,
+    id: 83,
+    source_key: "source:8",
+    source_id: 8,
+    source_name: "Retained Folder",
+    [titleKey]: "Retained folder title",
+  };
 
-  function mockExclusions() {
+  function mockExclusions(conflict = false) {
     const gets = vi.fn();
     const deletes = vi.fn();
-    let rows = [arr, source, removed];
+    let rows = [arr, source, removed, retained];
     server.use(
       http.get("/api/system/settings", () =>
         HttpResponse.json({
@@ -112,6 +121,13 @@ describe.each(["movie", "series"] as const)("%s source exclusions", (kind) => {
               enabled: true,
               libraries: [{ content_kind: kind, enabled: true }],
             },
+            {
+              id: 8,
+              kind: "folder",
+              name: "Retained Folder",
+              enabled: true,
+              libraries: [],
+            },
           ],
         }),
       ),
@@ -120,13 +136,26 @@ describe.each(["movie", "series"] as const)("%s source exclusions", (kind) => {
         const keys = params.getAll("source_key[]");
         const sources = params.get("sources");
         gets({ sources, keys });
-        const data = rows.filter(
+        const filtered = rows.filter(
           (row) =>
             (sources === "1" || row.origin === "arr") &&
             (!keys.length || keys.includes(row.source_key)),
         );
+        const length = Number(params.get("length"));
+        const data = length > 0 ? filtered.slice(0, length) : filtered;
+        const sourceFilters = rows
+          .filter((row) => "source_name" in row)
+          .map((row) => ({
+            key: row.source_key,
+            name:
+              row.source_key === "source:removed"
+                ? "Removed sources"
+                : row.source_name,
+          }));
         return HttpResponse.json(
-          sources === "1" ? { data, total: data.length } : { data },
+          sources === "1"
+            ? { data, total: filtered.length, source_filters: sourceFilters }
+            : { data },
         );
       }),
       http.delete(`/api/${endpoint}/blacklist`, async ({ request }) => {
@@ -140,6 +169,22 @@ describe.each(["movie", "series"] as const)("%s source exclusions", (kind) => {
             ? rows.filter((row) => !keys.includes(row.source_key))
             : [];
         } else if (params.has("source_blacklist_id")) {
+          if (conflict) {
+            conflict = false;
+            rows = rows.map((row) =>
+              row === source
+                ? {
+                    ...row,
+                    [titleKey]: "Updated exclusion",
+                    removal_key: "updated-key",
+                  }
+                : row,
+            );
+            return HttpResponse.json(
+              { message: "The exclusion has changed." },
+              { status: 409 },
+            );
+          }
           rows = rows.filter(
             (row) =>
               row.origin !== "source" ||
@@ -248,6 +293,54 @@ describe.each(["movie", "series"] as const)("%s source exclusions", (kind) => {
     await waitFor(() => expect(remove).toBeDisabled());
   });
 
+  it.each([
+    ["source:removed", "Removed sources", "Recorded removed title"],
+    ["source:8", "Retained Folder", "Retained folder title"],
+  ])(
+    "selects retained exclusions for %s in the dropdown",
+    async (key, label, title) => {
+      const user = userEvent.setup();
+      const { gets, expectDelete } = mockExclusions();
+      customRender(<View />);
+      await screen.findByText(title);
+      const listbox = await openSelect(user, "All sources");
+      await user.click(
+        within(listbox).getByRole("option", { name: label, hidden: true }),
+      );
+      await waitFor(() =>
+        expect(gets).toHaveBeenCalledWith({ sources: "1", keys: [key] }),
+      );
+      expect(
+        new URLSearchParams(window.location.search).getAll("source"),
+      ).toEqual([key]);
+      await waitFor(() =>
+        expect(screen.queryByText("Arr title")).not.toBeInTheDocument(),
+      );
+      const retainedListbox = await openSelect(user, "All sources");
+      expect(
+        within(retainedListbox).getByRole("option", {
+          name:
+            key === "source:removed" ? "Retained Folder" : "Removed sources",
+          hidden: true,
+        }),
+      ).toBeInTheDocument();
+      await user.keyboard("{Escape}");
+      await user.click(screen.getByRole("button", { name: "Remove All" }));
+      await expectDelete({ all: "true", sources: "1", "source_key[]": key }, [
+        key,
+      ]);
+      expect(await screen.findByText(empty)).toBeInTheDocument();
+      const remainingListbox = await openSelect(user, "All sources");
+      expect(
+        within(remainingListbox).getByRole("option", {
+          name:
+            key === "source:removed" ? "Retained Folder" : "Removed sources",
+          hidden: true,
+        }),
+      ).toBeInTheDocument();
+    },
+  );
+
   it("removes all Arr and source exclusions without a source filter", async () => {
     const user = userEvent.setup();
     const { expectDelete } = mockExclusions();
@@ -256,6 +349,33 @@ describe.each(["movie", "series"] as const)("%s source exclusions", (kind) => {
     await user.click(screen.getByRole("button", { name: "Remove All" }));
     await expectDelete({ all: "true", sources: "1" });
     expect(await screen.findByText(empty)).toBeInTheDocument();
+  });
+
+  it("refreshes a stale exclusion and uses the new removal key", async () => {
+    const user = userEvent.setup();
+    const { expectDelete } = mockExclusions(true);
+    customRender(<View />);
+    const stale = await screen.findByRole("row", { name: /Folder title/ });
+    await user.click(
+      within(stale).getByRole("button", { name: "Remove from Excluded" }),
+    );
+    expect(await screen.findByText("Exclusion changed")).toBeInTheDocument();
+    const current = await screen.findByRole("row", {
+      name: /Updated exclusion/,
+    });
+    expect(screen.queryByText("Folder title")).not.toBeInTheDocument();
+    await user.click(
+      within(current).getByRole("button", { name: "Remove from Excluded" }),
+    );
+    await expectDelete({
+      sources: "1",
+      source_blacklist_id: "81",
+      source_blacklist_key: "updated-key",
+    });
+    await waitFor(() =>
+      expect(screen.queryByText("Updated exclusion")).not.toBeInTheDocument(),
+    );
+    expect(screen.getByText("Arr title")).toBeInTheDocument();
   });
 
   it("deletes by source blacklist id and preserves the Arr deletion form", async () => {
@@ -268,7 +388,11 @@ describe.each(["movie", "series"] as const)("%s source exclusions", (kind) => {
     await user.click(
       within(sourceRow).getByRole("button", { name: "Remove from Excluded" }),
     );
-    await expectDelete({ sources: "1", source_blacklist_id: "81" });
+    await expectDelete({
+      sources: "1",
+      source_blacklist_id: "81",
+      source_blacklist_key: "original-exclusion-key",
+    });
     await waitFor(() =>
       expect(screen.queryByText("Folder title")).not.toBeInTheDocument(),
     );

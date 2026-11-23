@@ -975,7 +975,7 @@ def test_sync_output_keeps_complete_actual_owner_stem(tmp_path, stem):
     ('\u00c9pisode', 'E\u0301PISODE', '\u00e9pisode.en'),
     ('E\u0301pisode', '\u00e9pisode', 'E\u0301PISODE.EN'),
 ])
-@pytest.mark.parametrize('sibling_kind', ['media', 'directory', 'non-media', 'absent'])
+@pytest.mark.parametrize('sibling_kind', ['media', 'directory', 'media-alias', 'directory-alias', 'non-media', 'absent'])
 def test_tagged_sync_output_defers_only_to_an_actual_media_owner(
         tmp_path, monkeypatch, video_stem, subtitle_stem, sibling_stem, sibling_kind):
     from subtitles.indexer.utils import add_sync_engine_outputs
@@ -992,6 +992,14 @@ def test_tagged_sync_output_defers_only_to_an_actual_media_owner(
         _write(sibling, 'video')
     elif sibling_kind == 'directory':
         sibling.mkdir()
+    elif sibling_kind.endswith('-alias'):
+        sibling = tmp_path / 'resolved' / sibling.name
+        sibling.parent.mkdir()
+        if sibling_kind == 'media-alias':
+            _write(sibling, 'video')
+        else:
+            sibling.mkdir()
+        (media_folder / 'Alias.mp4').symlink_to(sibling, target_is_directory=sibling_kind == 'directory-alias')
     elif sibling_kind == 'non-media':
         _write(media_folder / f'{sibling_stem}.txt', 'not a video')
     subtitle = f'{subtitle_stem}.en.ffsubsync.srt'
@@ -1016,7 +1024,7 @@ def test_tagged_sync_output_defers_only_to_an_actual_media_owner(
     monkeypatch.setattr(path_mappings, 'path_replace_instance', lambda path, *args: path)
     result = add_sync_engine_outputs(str(subtitle_folder), {}, video_path=str(video))
 
-    if sibling_kind == 'media':
+    if sibling_kind in ('media', 'media-alias'):
         assert result == {}
         assert add_sync_engine_outputs(str(subtitle_folder), {}, video_path=str(sibling)) == {subtitle: None}
     else:
@@ -1093,6 +1101,59 @@ def test_preview_owns_its_destination_while_a_library_source_still_proves_owners
         assert publication.destination_unchanged(engine_output_path(preview_source, 'ffsubsync'))
     finally:
         discard_preview_workspace(workspace)
+
+
+@pytest.mark.parametrize('folder_mode', ['current', 'relative', 'absolute'])
+def test_symlink_sidecars_use_the_logical_name_and_folder(tmp_path, monkeypatch, folder_mode):
+    from app.config import settings
+    from media_sources.indexer import SourceOutputOwnerIndex
+    from subtitles.tools.subsync_engines import sync_output_owner_is_unique
+
+    target = tmp_path / 'physical' / 'Target.mkv'
+    target.parent.mkdir()
+    _write(target, 'video')
+    logical = tmp_path / 'library' / 'Linked.mkv'
+    logical.parent.mkdir()
+    logical.symlink_to(target)
+    custom = tmp_path / 'subtitles' if folder_mode == 'absolute' else 'Subs'
+    monkeypatch.setattr(settings.general, 'subfolder', folder_mode)
+    monkeypatch.setattr(settings.general, 'subfolder_custom', str(custom))
+    directory = (logical.parent if folder_mode == 'current' else
+                 tmp_path / 'subtitles' if folder_mode == 'absolute' else logical.parent / 'Subs')
+    directory.mkdir(exist_ok=True)
+    index = SourceOutputOwnerIndex()
+    index._owners = index._map_source_owners([str(logical)])
+    index._loaded = True
+
+    assert sync_output_owner_is_unique(str(logical), str(directory / 'Linked.en.srt'), index)
+    assert {owner for owners in index._owners.values() for owner in owners} == {str(target)}
+    assert not sync_output_owner_is_unique(str(logical), str(directory / 'Target.en.srt'), index)
+    assert not sync_output_owner_is_unique(str(logical), str(target.parent / 'Linked.en.srt'), index)
+    target.unlink()
+    assert not sync_output_owner_is_unique(str(logical), str(directory / 'Linked.en.srt'), index)
+
+
+def test_symlink_sidecar_conflicts_use_logical_names_and_physical_owners(tmp_path, monkeypatch):
+    from app.config import settings
+    from media_sources.indexer import SourceOutputOwnerIndex
+    from subtitles.tools.subsync_engines import sync_output_owner_is_unique
+
+    target = tmp_path / 'physical' / 'Target.mkv'
+    other_target = tmp_path / 'physical' / 'Other.mkv'
+    target.parent.mkdir()
+    _write(target, 'video')
+    _write(other_target, 'other video')
+    logical = tmp_path / 'library' / 'Linked.mkv'
+    logical.parent.mkdir()
+    logical.symlink_to(target)
+    sibling = logical.with_suffix('.en.mkv')
+    sibling.symlink_to(other_target)
+    monkeypatch.setattr(settings.general, 'subfolder', 'current')
+    index = SourceOutputOwnerIndex()
+    index._owners = index._map_source_owners([str(logical), str(sibling)])
+    index._loaded = True
+
+    assert not sync_output_owner_is_unique(str(logical), str(logical.with_suffix('.en.srt')), index)
 
 
 def test_keep_all_job_name_does_not_claim_original_was_overwritten():
