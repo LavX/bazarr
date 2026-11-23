@@ -120,7 +120,7 @@ def configured_library_root_paths(target=None):
 
 
 def enabled_item_roots(item_id, source_id, library_id, path, target=None):
-    """Current local roots for a request whose item, path and owners still match."""
+    """Current local roots for an available item whose path and owners still match."""
     return _target(target).execute(
         sa.select(Roots.c.local_path)
         .select_from(Items.join(Libraries, sa.and_(Items.c.library_id == Libraries.c.id,
@@ -128,7 +128,7 @@ def enabled_item_roots(item_id, source_id, library_id, path, target=None):
                      .join(Sources, Libraries.c.source_id == Sources.c.id)
                      .join(Roots, Libraries.c.id == Roots.c.library_id))
         .where(Items.c.id == item_id, Items.c.source_id == source_id, Items.c.library_id == library_id,
-               Items.c.path == path, Libraries.c.enabled == 1, Sources.c.enabled == 1)
+               Items.c.path == path, Items.c.server_missing == 0, Libraries.c.enabled == 1, Sources.c.enabled == 1)
     ).scalars().all()
 
 

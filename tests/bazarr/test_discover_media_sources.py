@@ -155,9 +155,9 @@ def test_tmdb_movie_has_a_source_copy_through_details_offer_and_selection(
     assert conflict.json["reason"] == "copy_unavailable"
 
 
-@pytest.mark.parametrize("identity_matches", [True, False], ids=["unchanged", "mismatch"])
+@pytest.mark.parametrize("copy_state", ["unchanged", "mismatch", "server_missing"])
 def test_selected_source_copy_requires_matching_identity_at_worker_admission(
-    authenticated_client, source_db, providers, monkeypatch, tmp_path, identity_matches,
+    authenticated_client, source_db, providers, monkeypatch, tmp_path, copy_state,
 ):
     from pathlib import Path
     from types import SimpleNamespace
@@ -177,7 +177,7 @@ def test_selected_source_copy_requires_matching_identity_at_worker_admission(
     add_title(source_db, owner, db.TableSourceItems, kind="movie", title="Night Film", path=str(path), tmdb_id="42")
     source_db.commit()
 
-    if not identity_matches:
+    if copy_state == "mismatch":
         original_lstat = Path.lstat
         real_path = path.resolve()
 
@@ -190,6 +190,23 @@ def test_selected_source_copy_requires_matching_identity_at_worker_admission(
             return info
 
         monkeypatch.setattr(Path, "lstat", late_stat)
+
+    late_presence_checks = []
+    if copy_state == "server_missing":
+        import sqlalchemy as sa
+        from media_sources import repository
+
+        enabled_item_roots = repository.enabled_item_roots
+
+        def mark_missing_before_worker_read(item_id, *args, **kwargs):
+            # Search admission has finished; the worker must check presence again.
+            with source_db.get_bind().begin() as connection:
+                connection.execute(sa.update(db.TableSourceItems).where(
+                    db.TableSourceItems.id == item_id).values(server_missing=1))
+            late_presence_checks.append(item_id)
+            return enabled_item_roots(item_id, *args, **kwargs)
+
+        monkeypatch.setattr(repository, "enabled_item_roots", mark_missing_before_worker_read)
 
     source_grants = []
     worker = ProviderWorkerClient(command=[])
@@ -213,7 +230,7 @@ def test_selected_source_copy_requires_matching_identity_at_worker_admission(
     response = copies_fixtures.post(authenticated_client, {**target, "copy_id": copy["copy_id"], "language": "eng"})
     assert response.status_code == 200
     [outcome] = response.json["coverage"]["providers"]
-    if identity_matches:
+    if copy_state == "unchanged":
         assert outcome["status"] == "empty"
         [grant] = source_grants
         assert grant.path == path.resolve()
@@ -221,6 +238,8 @@ def test_selected_source_copy_requires_matching_identity_at_worker_admission(
     else:
         assert (outcome["status"], outcome["reason"]) == ("skipped", "provider_excluded")
         assert source_grants == []
+        if copy_state == "server_missing":
+            assert late_presence_checks
 
 
 def test_show_copy_uses_the_groups_identity_and_exact_episode(
@@ -702,8 +721,9 @@ def test_scanned_source_copies_download_the_chosen_result_and_never_substitute_a
     assert copies_fixtures.searched(providers) == [str(chosen_file), str(sibling_file)]
 
 
+@pytest.mark.parametrize('change', ['file_missing', 'server_missing'])
 def test_queued_search_rechecks_the_chosen_source_file_before_provider_admission(
-    authenticated_client, copy_database, providers, monkeypatch, tmp_path,
+    authenticated_client, copy_database, providers, monkeypatch, tmp_path, change,
 ):
     import app.jobs_queue as queue_module
     from app.database import TableSourceItems
@@ -727,7 +747,17 @@ def test_queued_search_rechecks_the_chosen_source_file_before_provider_admission
     queued = authenticated_client.post("/api/discover/search", headers=HEADERS,
                                        json={**target, "language": "eng", "copy_id": token})
     assert queued.status_code == 202
-    chosen.unlink()
+    if change == 'file_missing':
+        chosen.unlink()
+    else:
+        import sqlalchemy as sa
+
+        # Vendor presence can change while the same readable path remains on disk.
+        # Keep the copy revision unchanged so admission must check the live flag.
+        session.execute(sa.update(TableSourceItems).where(
+            TableSourceItems.path == str(chosen)).values(server_missing=1))
+        session.commit()
+        assert chosen.is_file()
     job = download_fixtures.run_queued_job(queued.json["job_id"])
     assert job["status"] == "failed"
     assert job["error"]["reason"] == "copy_unavailable"
