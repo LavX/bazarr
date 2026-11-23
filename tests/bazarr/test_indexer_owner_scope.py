@@ -23,7 +23,7 @@ import pytest
 
 from sqlalchemy import select, update
 
-from app.database import TableEpisodes, TableMovies, TableShows
+from app.database import TableEpisodes, TableMovies, TableShows, TableSportsEvents
 from test_sportarr_kind_migration import migration_engine  # noqa: F401
 
 
@@ -200,12 +200,13 @@ def test_full_scan_amortizes_sync_output_ownership(schema_session, monkeypatch, 
     full_scan = se.series_full_scan_subtitles if media_type == 'series' else mv.movies_full_scan_subtitles
     mapping_calls = []
     owner_queries = []
+    owner_tables = sorted(table.__tablename__ for table in (TableEpisodes, TableMovies, TableSportsEvents))
     execute = schema_session.execute
 
     def counted_execute(statement, *args, **kwargs):
         if getattr(statement, 'is_select', False):
             columns = list(statement.selected_columns)
-            if [column.name for column in columns] == ['path', 'arr_instance_id']:
+            if [column.name for column in columns] == ['path', 'arr_instance_id', 'path_mappings']:
                 owner_queries.append(columns[0].table.name)
         return execute(statement, *args, **kwargs)
 
@@ -268,7 +269,7 @@ def test_full_scan_amortizes_sync_output_ownership(schema_session, monkeypatch, 
     print(f'Ownership scan counts: {counts}')
     for row_id, subtitles in expected.items():
         assert ast.literal_eval(_subs(schema_session, table, row_id)) == subtitles
-    assert len(owner_queries) == 2, counts
+    assert sorted(owner_queries) == owner_tables, counts
     assert len(mapping_calls) <= 8 * library_size, counts
 
     # A new scan must see another media type claiming the same generated name.
@@ -289,7 +290,7 @@ def test_full_scan_amortizes_sync_output_ownership(schema_session, monkeypatch, 
     schema_session.commit()
     owner_queries.clear()
     full_scan(job_id=2, use_cache=False)
-    assert len(owner_queries) == 2, 'independent scans must rebuild their ownership snapshot'
+    assert sorted(owner_queries) == owner_tables, 'independent scans must rebuild their ownership snapshot'
     assert ast.literal_eval(_subs(schema_session, table, 1)) == []
     for row_id in range(2, library_size + 1):
         assert ast.literal_eval(_subs(schema_session, table, row_id)) == expected[row_id]

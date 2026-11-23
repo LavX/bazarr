@@ -6,6 +6,7 @@ from flask import request
 from flask_restx import Namespace, Resource, reqparse
 
 from media_sources import identify, overrides, repository, service
+from media_sources.history import source_subtitle_summary
 from media_sources.service import SourceError
 
 from ..queued_job import queued_job_response
@@ -49,6 +50,7 @@ class SourceItemsList(Resource):
     get_request_parser.add_argument('start', type=int, required=False, default=0, help='Paging start')
     get_request_parser.add_argument('length', type=int, required=False, default=25,
                                     help='Paging length, -1 for all')
+    get_request_parser.add_argument('scores', type=str, required=False, help='Include subtitle scores and upgradability')
 
     @authenticate
     @api_ns_sources_items.doc(parser=get_request_parser)
@@ -59,7 +61,9 @@ class SourceItemsList(Resource):
         length = args.get('length')
         rows = repository.list_items(limit=length if length is not None and length >= 0 else 1_000_000,
                                      offset=max(args.get('start') or 0, 0), **filters)
-        return {'data': [item_to_dict(row) for row in rows], 'total': repository.count_items(**filters)}
+        summary = source_subtitle_summary(rows) if args.get('scores') == '1' else {}
+        return {'data': [{**item_to_dict(row), **summary.get(row.id, {})} for row in rows],
+                'total': repository.count_items(**filters)}
 
 
 @api_ns_sources_items.route("sources/items/<int:item_id>")
@@ -71,7 +75,7 @@ class SourceItem(Resource):
         row = repository.get_item(item_id)
         if row is None:
             return {"error": "not_found"}, 404
-        return item_to_dict(row)
+        return {**item_to_dict(row), **source_subtitle_summary([row])[row.id]}
 
     @authenticate
     @api_ns_sources_items.response(400, 'Invalid identity correction')

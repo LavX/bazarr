@@ -462,7 +462,8 @@ def sync_subtitles(video_path,
             notify_publication = publication_callback(
                 'sports' if context is not None else source.publication_type if source is not None
                 else 'episode' if sonarr_episode_id is not None else 'movie',
-                video_path, publication_operation, arr_instance_id)
+                video_path, publication_operation, arr_instance_id,
+                **({'source': source} if source is not None else {}))
 
             def on_publish(path):
                 if context is not None:

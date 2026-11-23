@@ -15,10 +15,10 @@ const MetricsFilters: FunctionComponent<Props> = ({ value, onChange }) => {
   // history=true lists the providers that actually appear in download history,
   // which is the useful set to filter by. The throttle-state variant would
   // offer providers that have never delivered anything.
-  const { data: providers } = useSystemProviders(true);
+  const { data: providers } = useSystemProviders(true, true);
   const providerOptions = useSelectorOptions(providers ?? [], (v) => v.name);
 
-  const { data: languages } = useLanguages(true);
+  const { data: languages } = useLanguages(true, true);
   const languageOptions = useSelectorOptions(languages ?? [], (v) => v.name);
 
   return (

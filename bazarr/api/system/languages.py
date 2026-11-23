@@ -3,7 +3,7 @@
 from flask_restx import Resource, Namespace, reqparse
 from operator import itemgetter
 
-from app.database import (TableHistory, TableHistoryMovie, TableHistorySports, TableSettingsLanguages,
+from app.database import (TableHistory, TableHistoryMovie, TableHistorySports, TableSettingsLanguages, TableSourceHistory,
                           database, select)
 from languages.get_languages import alpha2_from_alpha3, language_from_alpha2, alpha3_from_alpha2
 
@@ -16,6 +16,7 @@ api_ns_system_languages = Namespace('System Languages', description='Get languag
 class Languages(Resource):
     get_request_parser = reqparse.RequestParser()
     get_request_parser.add_argument('history', type=str, required=False, help='Language name for history stats')
+    get_request_parser.add_argument('sources', type=str, help='Use 1 to include languages from source history.')
 
     @authenticate
     @api_ns_system_languages.doc(parser=get_request_parser)
@@ -43,6 +44,10 @@ class Languages(Resource):
                 select(TableHistorySports.language)
                 .where(TableHistorySports.language.is_not(None)))\
                 .all()
+            if args.get('sources') == '1':
+                languages += database.execute(
+                    select(TableSourceHistory.language)
+                    .where(TableSourceHistory.language.is_not(None)).distinct()).all()
             languages_list = [lang.language.split(':')[0] for lang in languages]
             languages_dicts = []
             for language in languages_list:
