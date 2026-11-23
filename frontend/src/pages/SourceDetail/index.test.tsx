@@ -189,6 +189,68 @@ it("groups source events by season and uses the source item action", async () =>
   );
 });
 
+it.each([
+  { clear: "Date", empty: false },
+  { clear: "Season", empty: false },
+  { clear: "Round", empty: false },
+  { clear: null, empty: false },
+  { clear: null, empty: true },
+])(
+  "preserves Sports identity fields with $clear cleared and empty=$empty",
+  async ({ clear, empty }) => {
+    const user = userEvent.setup();
+    const identify = vi.fn();
+    const event = {
+      ...movie,
+      id: 60,
+      kind: "sports_event",
+      title: "Identity race",
+      season: empty ? null : 2026,
+      episode: empty ? null : 2,
+      event_date: empty ? null : "2026-02-03",
+      part_name: "Qualifying",
+    };
+    server.use(
+      http.get("/api/sources/groups/7", () =>
+        HttpResponse.json({ ...movie, kind: "league", title: "Folder league" }),
+      ),
+      http.get("/api/sources/groups/7/items", () =>
+        HttpResponse.json({ data: [event], total: 1 }),
+      ),
+      http.get("/api/sources/items/60", () => HttpResponse.json(event)),
+      http.patch("/api/sources/items/60", async ({ request }) => {
+        identify(await request.json());
+        return HttpResponse.json(event);
+      }),
+    );
+    openPage("sports");
+    await user.click(await screen.findByRole("button", { name: event.title }));
+    const dialog = within(
+      await screen.findByRole("dialog", { name: event.title }),
+    );
+    await user.click(dialog.getByRole("button", { name: "Identity fix" }));
+    const correction = within(
+      await screen.findByRole("dialog", { name: "Identity fix" }),
+    );
+    if (clear) await user.clear(correction.getByLabelText(clear));
+    await user.click(correction.getByRole("button", { name: "Save" }));
+    await waitFor(() =>
+      expect(identify).toHaveBeenCalledWith({
+        title: event.title,
+        year: 2026,
+        part_name: "Qualifying",
+        ...(!empty
+          ? {
+              event_date: clear === "Date" ? null : event.event_date,
+              season: clear === "Season" ? null : event.season,
+              round: clear === "Round" ? null : event.episode,
+            }
+          : {}),
+      }),
+    );
+  },
+);
+
 it("keeps manual Sports tools available for an unprofiled, shadowed recording", async () => {
   const user = userEvent.setup();
   const event = {

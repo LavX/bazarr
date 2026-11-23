@@ -81,7 +81,8 @@ export async function invalidateSportsSource(
         typeof filters !== "object" ||
         filters === null ||
         !("includeSources" in filters) ||
-        filters.includeSources !== true
+        filters.includeSources !== true ||
+        ("owner" in filters && filters.owner !== undefined)
       )
         return false;
       const keys = "sourceKeys" in filters ? filters.sourceKeys : undefined;

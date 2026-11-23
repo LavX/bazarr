@@ -781,7 +781,16 @@ def test_scanned_events_reach_the_sports_threshold_and_publish_through_the_sourc
     monkeypatch.setattr(processing, 'call_external_webhook', Mock())
     monkeypatch.setattr(wanted, 'jobs_queue', isolated_jobs)
     monkeypatch.setattr(service, 'get_providers', lambda: ['fake'])
-    monkeypatch.setattr('app.event_handler.socketio.emit', Mock())
+    visible_history = []
+
+    def socket_event(event, payload):
+        if event == 'data' and payload['type'] == 'source-sports':
+            history = repository.History
+            rows = source_db.execute(sa.select(history.c.action).where(
+                history.c.item_kind == 'sports_event')).scalars().all()
+            visible_history.append((payload['payload'], rows))
+
+    monkeypatch.setattr('app.event_handler.socketio.emit', socket_event)
     monkeypatch.setattr('app.notifier.send_notifications_source', Mock())
 
     def unexpected(*args, **kwargs):
@@ -838,6 +847,7 @@ def test_scanned_events_reach_the_sports_threshold_and_publish_through_the_sourc
     assert not paths[3].with_suffix('.en.srt').exists()
     assert {(event.media_type, event.operation, event.arr_instance_id, event.source_item_id) for event in published} == {
         ('sports', 'download', None, items[str(path)].id) for path in (paths[0], paths[2])}
+    assert visible_history == [(source_id, [1]), (source_id, [1, 1])]
     rows = source_db.execute(sa.select(repository.History)).all()
     assert {(row.item_kind, row.action, row.video_path) for row in rows} == {
         ('sports_event', 1, str(path)) for path in (paths[0], paths[2])}
