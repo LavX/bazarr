@@ -1033,6 +1033,7 @@ jobs:
             tests/bazarr/test_media_sources_manual.py \
             tests/bazarr/test_media_sources_api.py \
             tests/bazarr/test_media_sources_no_change.py \
+            tests/bazarr/test_source_library_pages.py \
             tests/bazarr/test_postgres_driver_pin.py ; do
             echo "::group::$f"
             pytest "$f" -p no:cacheprovider -q

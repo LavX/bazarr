@@ -258,22 +258,40 @@ def update_library(source_id, library_id, payload, session=None):
     return describe_library(library_id, session)
 
 
-def update_group_profile(group_id, payload, session=None):
+def update_group_profile(group_id, payload, session=None, *, expected_kind=None):
     """Set or clear a source group's profile and refresh its items after the write."""
     if not isinstance(payload, dict) or payload.keys() != {'profile_id'}:
         raise SourceError('A group profile edit requires profile_id')
-    group = repository.get_group(group_id, session)
-    if group is None:
-        raise SourceError('No such group', 404, 'not_found')
-    profile_id = _profile_id(payload)
-    if profile_id != group.profile_id:
-        if not repository.update_group(group_id, session, profile_id=profile_id):
+    with source_transaction(session) as connection:
+        group = repository.get_group(group_id, connection, for_update=True)
+        if group is None or (expected_kind is not None and group.kind != expected_kind):
             raise SourceError('No such group', 404, 'not_found')
+        profile_id = _profile_id(payload)
+        changed = profile_id != group.profile_id
+        if changed:
+            repository.update_group(group_id, connection, profile_id=profile_id)
+            group = repository.get_group(group_id, connection)
+    if changed:
         queue_missing_subtitles_recalculation(source_scope={'group_id': group_id})
-        group = repository.get_group(group_id, session)
-    if group is None:
-        raise SourceError('No such group', 404, 'not_found')
     return group
+
+
+def update_item_profile(item_id, payload, session=None, *, expected_kind=None):
+    """Set or clear a source item's profile and refresh its stored missing subtitles."""
+    if not isinstance(payload, dict) or payload.keys() != {'profile_id'}:
+        raise SourceError('An item profile edit requires profile_id')
+    profile_id = _profile_id(payload)
+    with source_transaction(session) as connection:
+        item = repository.get_item(item_id, connection, for_update=True)
+        if item is None or (expected_kind is not None and item.kind != expected_kind):
+            raise SourceError('No such item', 404, 'not_found')
+        changed = profile_id != item.profile_id
+        if changed:
+            repository.update_item(item_id, connection, profile_id=profile_id)
+            item = repository.get_item(item_id, connection)
+    if changed:
+        queue_missing_subtitles_recalculation(source_scope={'item_id': item_id})
+    return item
 
 
 def delete_library(source_id, library_id, session=None):
@@ -402,6 +420,48 @@ def queue_search(item_id):
         raise
 
 
+def queue_group_search(group_id):
+    from .scanner import disabled_reason
+
+    group = repository.get_group(group_id)
+    if group is None or group.kind != 'show':
+        raise SourceError('No such show', 404, 'not_found')
+    reason = disabled_reason(group.source_id, group.library_id)
+    if reason:
+        raise SourceError(reason, 409, 'disabled')
+    return search_source_group(group_id, (group.source_id, group.library_id, group.created_at.isoformat()))
+
+
+def search_source_group(group_id, expected_group, job_id=None):
+    """Search eligible episodes of this show using the normal source Wanted search."""
+    if not job_id:
+        return jobs_queue.add_job_from_function('Search for Missing Show Subtitles', is_progress=True,
+                                                return_existing=True)
+    from .db import handle
+    from .wanted import wanted_items
+
+    group = repository.get_group(group_id)
+    if (group is None or group.kind != 'show'
+            or (group.source_id, group.library_id, group.created_at.isoformat()) != tuple(expected_group)):
+        raise JobFailed('The show has changed or no longer exists', reason='not_found')
+    items = repository.Items.c
+    eligible = wanted_items(items.id, items.created_at, items.title, kind='episode').where(
+        items.group_id == group_id, items.source_id == group.source_id, items.library_id == group.library_id,
+        repository.Groups.c.created_at == group.created_at)
+    session = handle()
+    last_id = 0
+    while page := session.execute(eligible.where(items.id > last_id).order_by(items.id).limit(500)).all():
+        last_id = page[-1].id
+        for item_id, created_at, title in page:
+            jobs_queue.raise_if_cancelled(job_id)
+            jobs_queue.update_job_progress(job_id=job_id, progress_message=title)
+            try:
+                search_wanted_item(item_id, created_at, job_id, group_id=group_id)
+            except JobFailed as error:
+                logging.info('BAZARR source episode %s could not be searched: %s', item_id, error)
+    jobs_queue.update_job_progress(job_id=job_id, progress_value='max', progress_message='Search completed')
+
+
 def _language_code(language, hi, forced):
     return language + (':hi' if hi == 'True' else ':forced' if forced == 'True' else '')
 
@@ -508,7 +568,7 @@ def search_wanted_fallback(source, target_language, job_id=None):
 
 
 def search_wanted_item(item_id, created_at, job_id, *, translation_gate=True, expected_source=None,
-                       target_language=None):
+                       target_language=None, group_id=None):
     """Search only stored missing languages, after rechecking eligibility and the current Arr path."""
     from .shadows import path_stage_shadow
     from .translation import stored_missing_language_candidates
@@ -518,6 +578,8 @@ def search_wanted_item(item_id, created_at, job_id, *, translation_gate=True, ex
 
     items = repository.Items
     same_row = (items.c.id == item_id, items.c.created_at == created_at)
+    if group_id is not None:
+        same_row += (items.c.group_id == group_id,)
     session = handle()
     item = session.execute(wanted_items(*items.c).where(*same_row)).first()
     if item is None:

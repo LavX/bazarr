@@ -241,24 +241,36 @@ def get_item_by_path(path, target=None):
     return _target(target).execute(sa.select(Items).where(Items.c.path == path)).first()
 
 
-def list_items(*, source_id=None, library_id=None, kind=None, limit=100, offset=0, target=None):
+def _group_item_scope(group_id):
+    return sa.and_(Items.c.group_id == group_id, sa.select(Groups.c.id).where(
+        Groups.c.id == group_id, Groups.c.source_id == Items.c.source_id,
+        Groups.c.library_id == Items.c.library_id,
+    ).exists())
+
+
+def list_items(*, source_id=None, library_id=None, group_id=None, kind=None, limit=100, offset=0, target=None):
     statement = sa.select(Items)
     if source_id is not None:
         statement = statement.where(Items.c.source_id == source_id)
     if library_id is not None:
         statement = statement.where(Items.c.library_id == library_id)
+    if group_id is not None:
+        statement = statement.where(_group_item_scope(group_id)).order_by(
+            sa.func.coalesce(Items.c.season, 0), sa.func.coalesce(Items.c.episode, 0), Items.c.part_number)
     if kind is not None:
         statement = statement.where(Items.c.kind == kind)
     statement = statement.order_by(Items.c.sort_title, Items.c.id).limit(limit).offset(offset)
     return _target(target).execute(statement).all()
 
 
-def count_items(*, source_id=None, library_id=None, kind=None, target=None):
+def count_items(*, source_id=None, library_id=None, group_id=None, kind=None, target=None):
     statement = sa.select(sa.func.count()).select_from(Items)
     if source_id is not None:
         statement = statement.where(Items.c.source_id == source_id)
     if library_id is not None:
         statement = statement.where(Items.c.library_id == library_id)
+    if group_id is not None:
+        statement = statement.where(_group_item_scope(group_id))
     if kind is not None:
         statement = statement.where(Items.c.kind == kind)
     return _target(target).execute(statement).scalar_one()
