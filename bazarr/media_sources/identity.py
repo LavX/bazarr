@@ -9,13 +9,17 @@ import errno
 import os
 from collections import defaultdict, namedtuple
 from dataclasses import dataclass, field
+from functools import cache
+from itertools import chain
 
 import sqlalchemy as sa
+from utilities.path_case import windows_path_case_mapping, windows_path_casefold
 
 FileStat = namedtuple('FileStat', 'dev ino size mtime_ns')
 
 # The rungs of "same file", in the order they are tried. They are also what a shadow records.
 RUNG_PATH, RUNG_INODE, RUNG_ATTRIBUTES = 'path', 'inode', 'attributes'
+_LOCAL_WINDOWS_PATHS = os.name == 'nt'
 
 
 def unsigned(value):
@@ -51,6 +55,20 @@ def path_is_gone(path):
     except ValueError:
         return False
     return False
+
+
+def displaced_item_path(item_id, path):
+    """Release a claimed path while keeping the missing item's last mapped path for display."""
+    return f'displaced:{item_id}:{path}'
+
+
+def last_mapped_path(path):
+    prefix, _, marker = path.partition(':')
+    if prefix == 'displaced':
+        _, _, original = marker.partition(':')
+        if os.path.isabs(original):
+            return original
+    return path
 
 
 def path_can_release(path, found):
@@ -137,6 +155,8 @@ class Matching:
     held_elsewhere: list = field(default_factory=list)
     #: ``(row, found)``: the content at the row's path changed.
     path_only: list = field(default_factory=list)
+    #: Rows whose saved server identity a partial listing cannot replace.
+    deferred_replacements: list = field(default_factory=list)
     new: list = field(default_factory=list)
     #: Rows matched in neither pass.
     unmatched: list = field(default_factory=list)
@@ -159,7 +179,7 @@ def _holds_live(row_path, found):
 
 
 def match_library(found_files, rows, *, ignore_dev, foreign_lookup, library_content_kind,
-                  foreign_vouched=lambda holder, found: True):
+                  foreign_vouched=lambda holder, found: True, by_server_id=False, partial_server=False):
     """Match a library's discovered files to its stored rows, over the whole library and before any write.
 
     ``ignore_dev(found)`` says whether a file's root changed device since the last scan. ``foreign_lookup(inodes,
@@ -178,14 +198,40 @@ def match_library(found_files, rows, *, ignore_dev, foreign_lookup, library_cont
     claimed = {}  # path -> the row (or holder) id that claimed it
     matched_rows = set()
 
+    def claim(row, found, matches):
+        if (partial_server and row.external_id and found.hints and found.hints.external_id
+                and row.external_id != found.hints.external_id):
+            # Reserve both the incoming path and the saved row for a complete listing.
+            result.deferred_replacements.append(row)
+        else:
+            matches.append((row, found))
+        claimed[found.path] = row.id
+        matched_rows.add(row.id)
+
+    if by_server_id:
+        by_id = {found.hints.external_id: found for found in found_files if found.hints and found.hints.external_id}
+        # Server IDs are scoped to this library. A duplicate stored ID cannot displace the file at home.
+        for row in sorted(rows, key=lambda row: (row.path != getattr(by_id.get(row.external_id), 'path', None),
+                                                 row.id)):
+            found = by_id.get(row.external_id)
+            if found is None or found.path in claimed:
+                continue
+            if row.path == found.path:
+                matches = result.unchanged if identity_holds(row, found, ignore_dev(found)) else result.path_only
+            elif os.path.isabs(row.path) and _holds_live(row.path, found):
+                matches = result.alias_unchanged
+            else:
+                matches = result.moved
+            claim(row, found, matches)
+
     # Pass 1, identity. A row that still holds the file at its own path comes first, so a file never goes to a
     # row elsewhere while its own row is right there.
     for row in rows:
+        if row.id in matched_rows:
+            continue
         found = by_path.get(row.path)
         if found is not None and found.path not in claimed and identity_holds(row, found, ignore_dev(found)):
-            claimed[found.path] = row.id
-            matched_rows.add(row.id)
-            result.unchanged.append((row, found))
+            claim(row, found, result.unchanged)
     for row in rows:
         if row.id in matched_rows:
             continue
@@ -194,13 +240,11 @@ def match_library(found_files, rows, *, ignore_dev, foreign_lookup, library_cont
         if not candidates:
             continue
         found = candidates[0]
-        claimed[found.path] = row.id
-        matched_rows.add(row.id)
         if _holds_live(row.path, found):
             # The row's own path still holds the file: this path is an alias of it, not a rename.
-            result.alias_unchanged.append((row, found))
+            claim(row, found, result.alias_unchanged)
         else:
-            result.moved.append((row, found))
+            claim(row, found, result.moved)
 
     # Identity against rows of other libraries, for the files no row of this library claimed.
     unclaimed = [found for found in found_files if found.path not in claimed]
@@ -228,10 +272,12 @@ def match_library(found_files, rows, *, ignore_dev, foreign_lookup, library_cont
                 claimed[found.path] = holder.id
                 if holder.library_enabled and holder.source_enabled:
                     result.supplied.append((found, holder))
-                elif same_kind:
-                    result.handovers.append((holder, found, True))
-                else:
+                elif not same_kind:
                     result.held_elsewhere.append((found, holder))
+                elif partial_server:
+                    result.deferred_foreign.append((found, holder))
+                else:
+                    result.handovers.append((holder, found, True))
             elif not foreign_vouched(holder, found):
                 claimed[found.path] = holder.id
                 result.deferred_foreign.append((found, holder))
@@ -249,9 +295,7 @@ def match_library(found_files, rows, *, ignore_dev, foreign_lookup, library_cont
             continue
         found = by_path.get(row.path)
         if found is not None and found.path not in claimed:
-            claimed[found.path] = row.id
-            matched_rows.add(row.id)
-            result.path_only.append((row, found))
+            claim(row, found, result.path_only)
 
     replacement_paths = {found.path for _, found in result.moved}
     replacement_paths.update(found.path for _, found, _ in result.handovers)
@@ -366,9 +410,20 @@ def master_toggles():
 class _Mapper:
     """An arr instance's path mapping, loaded once, so mapping a hundred thousand rows asks the database once."""
 
-    def __init__(self, forward, reverse):
+    def __init__(self, forward, rules=(), *, sports=False):
         self.forward = forward
-        self.reverse = reverse
+        self.rules = rules
+        self.sports = sports
+
+    def candidate_paths(self, path):
+        from utilities import path_mappings as module
+
+        if self.sports:
+            mapped = (module.apply_sports_mapping(path, [rule], reverse=True, ignore_case=_LOCAL_WINDOWS_PATHS)
+                      for rule in self.rules)
+        else:
+            mapped = (module._apply_mapping(path, [rule], reverse=True) for rule in self.rules)
+        return {path, *mapped}
 
 
 def _mapper_for(instance):
@@ -379,17 +434,15 @@ def _mapper_for(instance):
             mapping = module.read_sports_mappings(instance.path_mappings)
         except ValueError:
             return None
-        return _Mapper(lambda path: module.apply_sports_mapping(path, mapping),
-                       lambda path: module.apply_sports_mapping(path, mapping, reverse=True))
+        return _Mapper(lambda path: module.apply_sports_mapping(path, mapping), mapping, sports=True)
     media_type = 'movie' if instance.kind == 'radarr' else 'series'
     own = module._instance_path_mapping(instance.id, media_type)
     if own is not None:
-        return _Mapper(lambda path: module._apply_mapping(path, own, reverse=False),
-                       lambda path: module._apply_mapping(path, own, reverse=True))
+        return _Mapper(lambda path: module._apply_mapping(path, own, reverse=False), own)
     shared = module.path_mappings
     if media_type == 'movie':
-        return _Mapper(shared.path_replace_movie, shared.path_replace_reverse_movie)
-    return _Mapper(shared.path_replace, shared.path_replace_reverse)
+        return _Mapper(shared.path_replace_movie, shared.path_mapping_movies)
+    return _Mapper(shared.path_replace, shared.path_mapping_series)
 
 
 class ArrOwners:
@@ -405,9 +458,10 @@ class ArrOwners:
     def load(cls, target=None):
         from app.database import TableArrInstances, database
         toggles = master_toggles()
+        columns = (TableArrInstances.id, TableArrInstances.kind, TableArrInstances.name,
+                   TableArrInstances.path_mappings)
         rows = (database if target is None else target).execute(
-            sa.select(TableArrInstances).where(TableArrInstances.enabled == 1)
-            .execution_options(populate_existing=True)).scalars().all()
+            sa.select(*columns).where(TableArrInstances.enabled == 1)).all()
         return cls([row for row in rows if toggles.get(row.kind)], target)
 
     def counts(self, instance_id):
@@ -498,14 +552,187 @@ class ArrOwners:
                 continue
             table = TABLE_OF_KIND[instance.kind]
             model, file_id = self._columns(table)
-            arr_paths = {mapper.reverse(candidate) for candidate in candidates}
+            arr_paths = {mapped for candidate in candidates for mapped in mapper.candidate_paths(candidate)}
+            path_column = model.path
+            local_candidates = candidates
+            if mapper.sports:
+                codec = _windows_postgres_codec(session)
+                arr_paths = {_sports_path_key(candidate, codec) for candidate in arr_paths}
+                fold = _windows_sql_casefold(arr_paths, codec)
+                path_column = _sports_sql_path_key(path_column, fold)
+                if _LOCAL_WINDOWS_PATHS:
+                    local_candidates = {_sports_path_key(candidate) for candidate in candidates}
             for row in session.execute(sa.select(model.id, model.path, model.file_size, file_id)
-                                       .where(model.arr_instance_id == instance.id, model.path.in_(arr_paths))
+                                       .where(model.arr_instance_id == instance.id, path_column.in_(arr_paths))
                                        .order_by(model.id)).all():
                 arr_row = self._arr_row(instance, table, row[0], row[1], row[2], row[3])
-                if arr_row is not None and arr_row.path in candidates:
+                if arr_row is None:
+                    continue
+                local_path = _sports_path_key(arr_row.path) if mapper.sports and _LOCAL_WINDOWS_PATHS else arr_row.path
+                if local_path in local_candidates:
                     return arr_row, RUNG_PATH
         return None
+
+
+def _mapped_sql_path(path, rules, *, reverse=False):
+    """Use the same first matching Arr mapping for exact stored-path checks."""
+    matches = []
+    for remote, local, *_unused in rules:
+        start, end = (local, remote) if reverse else (remote, local)
+        if not start or not end or start == end:
+            continue
+        mapped = sa.func.replace(path, start, end)
+        normalized = sa.case(
+            (sa.func.substr(mapped, 1, 1) == '/', sa.func.replace(mapped, '\\', '/')),
+            (sa.or_(sa.func.substr(mapped, 1, 2) == '\\\\', sa.func.substr(mapped, 2, 2) == ':\\'),
+             sa.func.replace(mapped, '/', '\\')),
+            else_=mapped,
+        )
+        matches.append((mapped != path, normalized))
+    return sa.case(*matches, else_=path) if matches else path
+
+
+def _sports_path_key(path, codec=None):
+    normalized = path.replace('\\', '/')
+    if not _LOCAL_WINDOWS_PATHS:
+        return normalized
+    folded = windows_path_casefold(normalized)
+    return _encodable_key(folded, codec) if codec else folded
+
+
+def _encodable_key(key, codec):
+    # A folded character can be absent from a legacy server encoding. A
+    # backslash escape is unambiguous because the path uses forward slashes here.
+    return key.encode(codec, 'backslashreplace').decode(codec)
+
+
+@cache
+def _postgres_windows_case_mapping(codec):
+    singles, expansions = defaultdict(list), []
+    for original, folded in windows_path_case_mapping().items():
+        original = chr(original)
+        if original != _encodable_key(original, codec):
+            continue
+        folded = _encodable_key(folded, codec)
+        if len(folded) == 1:
+            singles[folded].append(original)
+        else:
+            expansions.append((original, folded))
+    return singles, expansions
+
+
+def _windows_postgres_codec(session):
+    if not _LOCAL_WINDOWS_PATHS:
+        return None
+    bind = session if isinstance(session, sa.engine.Connection) else session.get_bind()
+    if bind.dialect.name != 'postgresql':
+        return None
+    from psycopg2.extensions import encodings
+
+    connection = session if isinstance(session, sa.engine.Connection) else session.connection()
+    encoding = connection.connection.driver_connection.get_parameter_status('server_encoding')
+    return encodings[encoding.replace('_', '')]
+
+
+def _windows_sql_casefold(keys=(), codec=None):
+    if not _LOCAL_WINDOWS_PATHS:
+        return None
+    if codec is None:
+        return sa.func.unicode_path_casefold
+
+    # PostgreSQL's lower() uses its database locale. Use the same case mapping
+    # as Python and SQLite. For membership against known folded keys, only
+    # characters that can produce text in those keys can affect the result.
+    symbols = set(chain.from_iterable(keys))
+    singles, expansions = _postgres_windows_case_mapping(codec)
+    rules = [(value, symbol) for symbol in sorted(symbols) for value in singles.get(symbol, ())]
+    args = tuple(sa.literal(''.join(values)) for values in zip(*rules))
+    relevant = [(before, after) for before, after in expansions
+                if symbols.issuperset(after) and any(after in key for key in keys)]
+    expansion_chars = sa.literal(''.join(before for before, _ in relevant))
+    expanded = [(sa.literal(before), sa.literal(after)) for before, after in relevant]
+
+    def casefold(path):
+        folded = sa.func.translate(path, *args) if args else path
+        folded = folded.collate('C')
+        if expanded:
+            # Most paths contain no character that needs a multi-character fold.
+            without_expansions = sa.func.translate(folded, expansion_chars, '')
+            replacement = folded
+            for before, after in expanded:
+                replacement = sa.func.replace(replacement, before, after)
+            folded = sa.case((without_expansions != folded, replacement), else_=folded)
+        return folded
+
+    return casefold
+
+
+def _sports_sql_path_key(path, fold):
+    normalized = sa.func.replace(path, '\\', '/')
+    return fold(normalized) if fold is not None else normalized
+
+
+def _mapped_sports_sql_path(path, rules):
+    normalized = sa.func.replace(path, '\\', '/')
+    matches = []
+    for remote, destination in sorted(rules, key=lambda pair: len(pair[0]), reverse=True):
+        prefix = remote.replace('\\', '/').rstrip('/')
+        suffix = sa.func.substr(normalized, len(prefix) + 1)
+        mapped = sa.literal(destination.rstrip('/\\')).concat(suffix)
+        windows_drive = destination[:1].isascii() and destination[:1].isalpha() and destination[1:3] == ':\\'
+        if destination.startswith('\\\\') or windows_drive:
+            mapped = sa.func.replace(mapped, '/', '\\')
+        matches.extend(((sa.func.rtrim(normalized, '/') == prefix, destination),
+                        (sa.func.substr(normalized, 1, len(prefix) + 1) == prefix + '/', mapped)))
+    return sa.case(*matches, else_=path) if matches else path
+
+
+def arr_claims_stored_path(path, target):
+    """Exclude direct claims from every enabled Arr kind in the mixed SQL results.
+
+    Files that need a stat retain the scanner's recorded shadow. For Sportarr,
+    compare against the mapped paths of the active owners in one SQL set.
+    """
+    clauses = defaultdict(list)
+    sports_paths = []
+    postgres_keys = set()
+    owners = ArrOwners.load(target)
+    codec = _windows_postgres_codec(target)
+    fold = None if codec else _windows_sql_casefold()
+    for instance in owners.instances.values():
+        mapper = owners.mapper(instance.id)
+        if mapper is None:
+            continue
+        model, _ = ArrOwners._columns(TABLE_OF_KIND[instance.kind])
+        if mapper.sports:
+            owned = (model.arr_instance_id == instance.id, model.path.is_not(None))
+            if codec:
+                paths = target.scalars(sa.select(model.path).where(*owned))
+                postgres_keys.update(_sports_path_key(mapper.forward(value), codec) for value in paths)
+            else:
+                mapped = _mapped_sports_sql_path(model.path, mapper.rules)
+                if fold is not None:
+                    mapped = _sports_sql_path_key(mapped, fold)
+                sports_paths.append(sa.select(mapped.label('path')).where(*owned))
+            continue
+        claim = model.path == path
+        if mapper.rules:
+            candidates = [_mapped_sql_path(path, [rule], reverse=True) for rule in mapper.rules]
+            alternatives = (model.path == candidate for candidate in candidates)
+            claim = sa.and_(sa.or_(claim, *alternatives), _mapped_sql_path(model.path, mapper.rules) == path)
+        clauses[model].append(sa.and_(model.arr_instance_id == instance.id, claim))
+    claims = [sa.select(model.id).where(sa.or_(*conditions)).correlate(path.table).exists()
+              for model, conditions in clauses.items()]
+    if sports_paths:
+        local = _sports_sql_path_key(path, fold) if fold is not None else path
+        claims.append(local.in_(sa.union_all(*sports_paths)))
+    if postgres_keys:
+        from sqlalchemy.dialects.postgresql import ARRAY
+
+        folded = _sports_sql_path_key(path, _windows_sql_casefold(postgres_keys, codec))
+        keys = sa.literal(list(postgres_keys), ARRAY(sa.Text))
+        claims.append(folded.in_(sa.select(sa.func.unnest(keys))))
+    return sa.or_(sa.false(), *claims)
 
 
 def revalidate_shadow(item, owners, queue_scan=None, fetched=None):

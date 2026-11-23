@@ -50,8 +50,13 @@ def _insert(target, table, values):
 
 # Sources, libraries and roots
 
-def get_source(source_id, target=None):
-    return _target(target).execute(sa.select(Sources).where(Sources.c.id == source_id)).first()
+def get_source(source_id, target=None, *, lock_key=False, lock_config=False):
+    statement = sa.select(Sources).where(Sources.c.id == source_id)
+    if lock_key:
+        statement = statement.with_for_update(read=True, key_share=True)
+    elif lock_config:
+        statement = statement.with_for_update(read=True)
+    return _target(target).execute(statement).first()
 
 
 def list_sources(target=None):
@@ -60,6 +65,11 @@ def list_sources(target=None):
 
 def has_sources(target=None):
     return Sources is not None and bool(_target(target).execute(sa.select(sa.exists().select_from(Sources))).scalar())
+
+
+def source_for_server(instance_id, target=None):
+    return _target(target).execute(sa.select(Sources.c.id).where(
+        Sources.c.media_server_instance_id == instance_id).limit(1)).scalar()
 
 
 def name_taken(name, target=None):
@@ -75,19 +85,23 @@ def create_source(*, kind, name, enabled=True, scan_frequency_hours=12, media_se
 
 
 def create_library(*, source_id, content_kind, locator, name=None, profile_id=None, enabled=True,
-                   local_roots=None, target=None):
+                   local_roots=None, server_roots=None, target=None):
     """Add a library and its roots. A folder library has exactly one, equal to its locator."""
     now = datetime.now()
     library_id = _insert(target, Libraries, dict(
         source_id=source_id, content_kind=content_kind, locator=locator, name=name, profile_id=profile_id,
         enabled=1 if enabled else 0, created_at=now, updated_at=now))
-    for local_path in local_roots or [locator]:
-        _insert(target, Roots, dict(library_id=library_id, local_path=local_path))
+    roots = server_roots if server_roots is not None else [(None, path) for path in (local_roots or [locator])]
+    for remote, local in roots:
+        _insert(target, Roots, dict(library_id=library_id, local_path=local, server_path=remote))
     return library_id
 
 
-def get_library(library_id, target=None):
-    return _target(target).execute(sa.select(Libraries).where(Libraries.c.id == library_id)).first()
+def get_library(library_id, target=None, *, for_update=False):
+    query = sa.select(Libraries).where(Libraries.c.id == library_id)
+    if for_update:
+        query = query.with_for_update(key_share=True)
+    return _target(target).execute(query).first()
 
 
 def list_libraries(source_id, target=None):
@@ -106,7 +120,7 @@ def configured_library_root_paths(target=None):
 
 
 def enabled_item_roots(item_id, source_id, library_id, path, target=None):
-    """Current local roots for a request whose item, path and owners still match."""
+    """Current local roots for an available item whose path and owners still match."""
     return _target(target).execute(
         sa.select(Roots.c.local_path)
         .select_from(Items.join(Libraries, sa.and_(Items.c.library_id == Libraries.c.id,
@@ -114,13 +128,16 @@ def enabled_item_roots(item_id, source_id, library_id, path, target=None):
                      .join(Sources, Libraries.c.source_id == Sources.c.id)
                      .join(Roots, Libraries.c.id == Roots.c.library_id))
         .where(Items.c.id == item_id, Items.c.source_id == source_id, Items.c.library_id == library_id,
-               Items.c.path == path, Libraries.c.enabled == 1, Sources.c.enabled == 1)
+               Items.c.path == path, Items.c.server_missing == 0, Libraries.c.enabled == 1, Sources.c.enabled == 1)
     ).scalars().all()
 
 
-def record_library_scan(library_id, status, message=None, target=None):
-    _target(target).execute(sa.update(Libraries).where(Libraries.c.id == library_id).values(
-        last_scan_status=status, last_scan_message=message, updated_at=datetime.now()))
+def record_library_scan(library_id, status, message=None, target=None, *, created_at=None):
+    query = sa.update(Libraries).where(Libraries.c.id == library_id)
+    if created_at is not None:
+        query = query.where(Libraries.c.created_at == created_at)
+    _target(target).execute(query.values(last_scan_status=status, last_scan_message=message,
+                                        updated_at=datetime.now()))
 
 
 def record_source_scan(source_id, *, started=None, finished=None, status=None, target=None):
@@ -158,6 +175,7 @@ def delete_library(library_id, target=None):
 def replace_roots(library_id, roots, target=None):
     """Replace a library's roots with ``[(server_path, local_path)]``. A root whose local path is kept keeps its
     recorded device."""
+    update_library(library_id, target)
     kept = {row.local_path: row.last_dev for row in get_roots(library_id, target)}
     _target(target).execute(sa.delete(Roots).where(Roots.c.library_id == library_id))
     for server_path, local_path in roots:
@@ -227,10 +245,10 @@ def create_group(*, source_id, library_id, kind, group_key, title, identity_sour
 
 # Items
 
-def get_item(item_id, target=None, *, for_update=False):
+def get_item(item_id, target=None, *, for_update=False, nowait=False):
     statement = sa.select(Items).where(Items.c.id == item_id)
     if for_update:
-        statement = statement.with_for_update()
+        statement = statement.with_for_update(nowait=nowait)
     return _target(target).execute(statement).first()
 
 
@@ -262,7 +280,8 @@ def count_items(*, source_id=None, library_id=None, kind=None, target=None):
 
 
 _MATCH_COLUMNS = ('id', 'path', 'kind', 'group_id', 'source_id', 'library_id', 'file_dev', 'file_ino', 'file_size',
-                  'file_mtime_ns', 'identity_source')
+                  'file_mtime_ns', 'identity_source', 'external_id', 'missing_scans', 'server_missing',
+                  'title', 'year', 'imdb_id', 'tmdb_id', 'tvdb_id', 'episode_title', 'season', 'episode', 'event_date')
 
 
 def library_items(library_id, target=None):
@@ -471,6 +490,12 @@ def blacklist_pairs(item_kind, target=None):
         sa.select(Blacklist.c.provider, Blacklist.c.subs_id).where(Blacklist.c.item_kind == item_kind)).all()]
 
 
+def is_release_blacklisted(release, target):
+    item_kind, provider, subs_id = release
+    return target.scalar(sa.select(sa.exists().where(
+        Blacklist.c.item_kind == item_kind, Blacklist.c.provider == provider, Blacklist.c.subs_id == subs_id)))
+
+
 def retained_activity_by_kind(target=None):
     """History and blacklist rows can outlive both the source and its library."""
     by_kind = {'movie': 'movie', 'series': 'episode', 'sports': 'sports_event'}
@@ -483,9 +508,10 @@ def retained_activity_by_kind(target=None):
 # Enabled flags, overlap and holders
 
 def item_state(item_id, target=None):
-    """The id, title, source name and the two enabled flags of an item's library and source, or None."""
+    """The availability and owner details of an item, or None."""
     row = _target(target).execute(
-        sa.select(Items.c.id, Items.c.title, Libraries.c.enabled.label('library_enabled'),
+        sa.select(Items.c.id, Items.c.title, Items.c.server_missing, Items.c.file_dev, Items.c.file_ino,
+                  Libraries.c.enabled.label('library_enabled'),
                   Sources.c.enabled.label('source_enabled'), Sources.c.name.label('source_name'))
         .select_from(Items.join(Libraries, Items.c.library_id == Libraries.c.id)
                      .join(Sources, Items.c.source_id == Sources.c.id))

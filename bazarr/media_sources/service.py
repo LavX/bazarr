@@ -4,10 +4,10 @@
 A search runs through the shared pipeline with the item's ``SourceItemContext``. Its history is written here,
 by the caller that did the work, never inside ``process_subtitle``.
 """
-import ast
 import logging
 import os
 import threading
+from dataclasses import replace
 
 from sqlalchemy.exc import IntegrityError
 
@@ -16,12 +16,12 @@ from app.get_providers import get_providers
 from app.jobs_queue import JobFailed, jobs_queue
 from subtitles.indexer.missing_refresh import queue_missing_subtitles_recalculation
 
-from . import identity, paths, repository
-from .analysis import index_matches_file, local_stat, source_search_probes
-from .context import SourceItemGone, resolve_item
+from . import paths, repository
+from .analysis import index_matches_file, local_content_stamp, local_stat, source_search_probes
+from .context import SourceItemGone, resolve_item, resolve_same_item
 from .db import source_transaction
 from .history import history_log_source
-from .indexer import index_item, index_saved_subtitle
+from .indexer import index_and_notify_item, index_item
 from .kinds import UnknownSourceKind, get_kind
 from .schedule import refresh_tasks
 
@@ -100,11 +100,142 @@ def _overlap_error(path, session):
                           f"sits inside another library's.", 409, 'overlap')
 
 
+def _server_connection(instance_id, kind=None, session=None):
+    from media_servers.http import MediaServerError
+
+    from .kinds.media_server import server_row
+
+    if not isinstance(instance_id, str) or not instance_id:
+        raise SourceError('A saved media server connection is required')
+    try:
+        return server_row(instance_id, kind, session)
+    except MediaServerError as error:
+        raise SourceError('No matching saved Jellyfin or Emby connection', 404, 'not_found') from error
+
+
+def server_libraries(instance_id, session=None):
+    return _read_server_libraries(_server_connection(instance_id, session=session), session)
+
+
+def _read_server_libraries(saved, session, *, for_write=False):
+    from media_servers.http import MediaServerError
+
+    from .kinds.media_server import library_choices
+
+    try:
+        return library_choices(saved, target=session)
+    except MediaServerError as error:
+        if for_write and saved.enabled and error.code == 'configuration_changed':
+            raise SourceError('The saved connection changed. Reload it and try again.', 409, 'connection_changed') from error
+        raise SourceError('Could not list libraries from the saved media server connection', 502,
+                          'server_unavailable') from error
+
+
+def _checked_server_roots(roots, content_kind, session, library_id=None):
+    from media_servers.paths import is_media_path, media_paths_equal
+
+    from .kinds.folder import is_storable
+
+    if not isinstance(roots, list) or not roots:
+        raise SourceError('Map at least one server root to a local folder')
+    result = []
+    for root in roots:
+        if (not isinstance(root, dict) or not is_media_path(root.get('server_path'))
+                or not is_storable(root['server_path'])):
+            raise SourceError('Each root needs an absolute server_path')
+        _only(root, ('local_path', 'server_path'), 'adding a server root')
+        remote = root['server_path']
+        check = paths.validate_path(root.get('local_path'), content_kind, target=session, exclude_library_id=library_id,
+                                    include_warnings=False)
+        if check.errors:
+            problem = check.errors[0]
+            raise SourceError(problem.message, 409 if problem.code == 'overlap' else 400, problem.code)
+        if not is_storable(check.path):
+            raise SourceError('The local path cannot be stored')
+        if any(media_paths_equal(previous, remote) or os.path.normcase(local) == os.path.normcase(check.path)
+               for previous, local in result):
+            raise SourceError('Server and local roots must each be unique')
+        result.append((remote, check.path))
+    return result
+
+
+def _server_library_fields(saved, library, session):
+    _only(library, ('server_library_id', 'content_kind', 'profile_id', 'roots'), 'adding a server library')
+    locator = library.get('server_library_id')
+    if not isinstance(locator, str) or not locator:
+        raise SourceError('server_library_id is required')
+    chosen = next((item for item in _read_server_libraries(saved, session, for_write=True) if item['id'] == locator), None)
+    if chosen is None:
+        raise SourceError('Library not found on the saved media server', 404, 'not_found')
+    content_kind = library.get('content_kind') or chosen['content_kind']
+    if content_kind not in repository.CONTENT_KINDS:
+        raise SourceError(f"content_kind must be one of {', '.join(repository.CONTENT_KINDS)}")
+    return dict(locator=locator, name=chosen['name'], content_kind=content_kind,
+                profile_id=_profile_id(library), roots=library.get('roots', chosen['roots']))
+
+
+def _insert_server_library(source_id, fields, connection):
+    roots = _checked_server_roots(fields['roots'], fields['content_kind'], connection)
+    return repository.create_library(source_id=source_id, locator=fields['locator'], name=fields['name'],
+                                     content_kind=fields['content_kind'], profile_id=fields['profile_id'],
+                                     server_roots=roots, target=connection)
+
+
+def _lock_saved_connection(saved, connection, *, require_enabled=True):
+    from media_servers.http import MediaServerError
+
+    from .kinds.media_server import check_server_revision
+
+    try:
+        check_server_revision(saved.id, saved.kind, saved.revision, connection, lock=True,
+                              require_enabled=require_enabled)
+    except MediaServerError as error:
+        raise SourceError('The saved connection changed. Reload it and try again.', 409, 'connection_changed') from error
+
+
+def _create_server_source(payload, kind, session):
+    from .kinds.folder import is_storable
+
+    saved = _server_connection(payload.get('media_server_instance_id'), kind, session)
+    instance_id = saved.id
+    name = payload.get('name', saved.name)
+    if not isinstance(name, str) or not name.strip() or '\x00' in name or not is_storable(name):
+        raise SourceError('A name is required')
+    name = name.strip()
+    enabled = _flag(payload.get('enabled', True))
+    frequency = _frequency(payload.get('scan_frequency_hours', 12))
+    library = payload.get('library')
+    if library is not None and not isinstance(library, dict):
+        raise SourceError('library must be an object')
+    fields = _server_library_fields(saved, library, session) if library is not None else None
+    try:
+        with _creation_lock, source_transaction(session) as connection:
+            _lock_saved_connection(saved, connection, require_enabled=fields is not None)
+            if repository.source_for_server(instance_id, connection):
+                raise SourceError('This connection already has a media source', 409, 'source_exists')
+            if repository.name_taken(name, connection):
+                raise SourceError('A media source with that name already exists', 409, 'name_taken')
+            source_id = repository.create_source(kind=kind, name=name, enabled=enabled,
+                                                 scan_frequency_hours=frequency,
+                                                 media_server_instance_id=instance_id, target=connection)
+            if fields is not None:
+                _insert_server_library(source_id, fields, connection)
+    except IntegrityError as error:
+        raise SourceError('The media source could not be created because its configuration changed',
+                          409, 'source_conflict') from error
+    refresh_tasks()
+    return source_id
+
+
 def create_source(payload, session=None):
     """Create a source and its first library in one transaction. Returns the new source id."""
-    _only(payload, ('name', 'kind', 'library', 'enabled', 'scan_frequency_hours'), 'creating a media source')
-    name = payload.get('name')
     kind_name = payload.get('kind') or 'folder'
+    fields = ('name', 'kind', 'library', 'enabled', 'scan_frequency_hours')
+    if kind_name in ('jellyfin', 'emby'):
+        _only(payload, (*fields, 'media_server_instance_id'), 'creating a media server source')
+        return _create_server_source(payload, kind_name, session)
+    _only(payload, fields, 'creating a media source')
+    name = payload.get('name')
     library = payload.get('library')
     if not isinstance(name, str) or not name.strip():
         raise SourceError('A name is required')
@@ -207,12 +338,24 @@ def delete_source(source_id, session=None):
 
 
 def add_library(source_id, payload, session=None):
-    """Add a folder library to a folder source."""
+    """Add one folder or server library to its source."""
     source = repository.get_source(source_id, session)
     if source is None:
         raise SourceError('No such media source', 404, 'not_found')
     if source.kind != 'folder':
-        raise SourceError('Libraries of a media server source come from the server', 400, 'not_folder')
+        saved = _server_connection(source.media_server_instance_id, source.kind, session)
+        fields = _server_library_fields(saved, payload, session)
+        try:
+            with _creation_lock, source_transaction(session) as connection:
+                _lock_saved_connection(saved, connection)
+                current = repository.get_source(source.id, connection, lock_config=True)
+                if (current is None or current.created_at != source.created_at or current.kind != saved.kind
+                        or current.media_server_instance_id != saved.id):
+                    raise SourceError('The media source changed. Reload it and try again.', 409, 'source_changed')
+                library_id = _insert_server_library(source_id, fields, connection)
+        except IntegrityError as error:
+            raise SourceError('That server library is already part of this source', 409, 'library_exists') from error
+        return describe_library(library_id, session)
     path, content_kind = _checked_folder(payload, source.kind)
     profile_id = _profile_id(payload)
     with _creation_lock:
@@ -236,6 +379,11 @@ def update_library(source_id, library_id, payload, session=None):
     if 'path' in payload or 'locator' in payload:
         raise SourceError("A folder library's path cannot be edited: remove the library and add a new one", 400,
                           'immutable')
+    if 'roots' in payload:
+        _only(payload, ('roots', 'confirmed_removed'), 'editing server roots')
+        deleted = change_library_roots(source_id, library_id, payload['roots'], session,
+                                       confirmed_removed=payload.get('confirmed_removed'))
+        return {**describe_library(library_id, session), 'removed_items': deleted}
     unknown = set(payload) - {'enabled', 'profile_id', 'name'}
     if unknown:
         raise SourceError(f"Cannot edit {', '.join(sorted(unknown))}")
@@ -286,59 +434,56 @@ def delete_library(source_id, library_id, session=None):
 
 
 def preview_root_edit(library_id, local_paths, session=None):
-    """The rows a root edit would delete: the ones whose path lies under none of ``local_paths`` and whose file is
-    still on disk (the files are there but no longer in the library). Rows whose path is gone are left alone: if
-    a mount moved and the user changed ``local_path`` to follow it, the next scan finds the files under the new
-    root and re-paths those rows with their overrides."""
-    roots = [repository.normalize_path(path) for path in local_paths]
-    out = []
-    for row in repository.library_items(library_id, session):
-        if any(row.path == root or row.path.startswith(root.rstrip(os.sep) + os.sep) for root in roots):
-            continue
-        if not identity.path_is_gone(row.path):
-            out.append(row.id)
-    return out
+    """Only existing files outside every retained local root are removed by a root edit."""
+    roots = [os.path.normcase(repository.normalize_path(path)) for path in local_paths]
+    return [row.id for row in repository.library_items(library_id, session)
+            if os.path.isabs(row.path)
+            and not any(repository._inside(os.path.normcase(row.path), root) for root in roots)
+            and os.path.isfile(row.path)]
 
 
-def change_library_roots(source_id, library_id, roots, session=None):
-    """Replace the roots of a media server library. ``roots`` is ``[{server_path, local_path}]``.
-
-    The test runs against the ``local_path`` values after the edit, so an edit that changes only ``server_path``
-    deletes nothing. The out-of-scope rows whose files still exist are deleted in the same transaction as the
-    edit, and a scan of the library is queued at once. Returns how many rows were deleted, for the dialog, which
-    says that history and blacklist rows are kept."""
-    library = repository.get_library(library_id, session)
+def _server_library_for_edit(source_id, library_id, session, *, for_update=False):
+    library = repository.get_library(library_id, session, for_update=for_update)
     source = repository.get_source(source_id, session)
     if library is None or source is None or library.source_id != source_id:
         raise SourceError('No such library', 404, 'not_found')
     if source.kind == 'folder':
         raise SourceError("A folder library's path cannot be edited: remove the library and add a new one", 400,
                           'immutable')
-    cleaned = []
-    for root in roots:
-        if not isinstance(root, dict) or not isinstance(root.get('local_path'), str) \
-                or not os.path.isabs(root['local_path']):
-            raise SourceError('Each root needs an absolute local_path')
-        local = repository.normalize_path(root['local_path'])
-        if not os.path.isdir(local) or not os.access(local, os.R_OK | os.X_OK):
-            raise SourceError(f'{local} is not a readable folder')
-        clash = repository.overlapping_root(local, session, exclude_library_id=library_id)
-        if clash is not None:
-            raise SourceError(f"{local} overlaps {clash[1]}, a library of the media source {clash[0]}", 409,
-                              'overlap')
-        cleaned.append((root.get('server_path'), local))
-    if not cleaned or len({local for _, local in cleaned}) != len(cleaned):
-        raise SourceError('A library needs at least one root, and no root twice')
-    doomed = preview_root_edit(library_id, [local for _, local in cleaned], session)
-    with source_transaction(session) as connection:
-        repository.replace_roots(library_id, cleaned, connection)
-        repository.delete_items(doomed, connection)
+    return library
+
+
+def preview_library_roots(source_id, library_id, roots, session=None):
+    library = _server_library_for_edit(source_id, library_id, session)
+    checked = _checked_server_roots(roots, library.content_kind, session, library_id)
+    return len(preview_root_edit(library_id, [local for _, local in checked], session))
+
+
+def change_library_roots(source_id, library_id, roots, session=None, *, confirmed_removed=None):
+    """Replace the mappings and remove only the existing files confirmed in the preview."""
+    from .scanner import library_lock
+
+    lock = library_lock(library_id)
+    if not lock.acquire(blocking=False):
+        raise SourceError('This library is scanning. Try again when its scan finishes.', 409, 'library_busy')
+    try:
+        with _creation_lock, source_transaction(session) as connection:
+            library = _server_library_for_edit(source_id, library_id, connection, for_update=True)
+            cleaned = _checked_server_roots(roots, library.content_kind, connection, library_id)
+            doomed = preview_root_edit(library_id, [local for _, local in cleaned], connection)
+            if (confirmed_removed is not None or doomed) and (
+                    type(confirmed_removed) is not int or confirmed_removed != len(doomed)):
+                raise SourceError(f'This change removes {len(doomed)} items. Preview the change and confirm that count.',
+                                  409, 'root_change_confirmation')
+            repository.replace_roots(library_id, cleaned, connection)
+            deleted = repository.delete_items(doomed, connection, owner_library_id=library_id)
+    finally:
+        lock.release()
     try:
         queue_scan(source_id, library_id)
     except SourceError as error:
-        # The edit is committed. A library that is disabled is scanned when it is enabled again.
         logging.info('BAZARR no scan was queued after the roots of library %s changed: %s', library_id, error)
-    return len(doomed)
+    return deleted
 
 
 def describe_source(source_id, session=None):
@@ -394,37 +539,57 @@ def queue_search(item_id):
     reason = item_disabled_reason(item_id)
     if reason:
         raise SourceError(reason, 409, 'disabled')
-    return search_source_item(item_id)
+    try:
+        return search_source_item(item_id)
+    except JobFailed as error:
+        if error.reason == 'not_found':
+            raise SourceError(str(error), 404, 'not_found') from error
+        if error.reason == 'incomplete_identity':
+            raise SourceError(str(error), 409, error.reason) from error
+        raise
 
 
-def _missing_languages(item):
-    languages = []
-    for language in ast.literal_eval(item.missing_subtitles or '[]'):
-        if language is not None:
-            hi_ = "True" if language.endswith(':hi') else "False"
-            forced_ = "True" if language.endswith(':forced') else "False"
-            languages.append((language.split(":")[0], hi_, forced_))
-    return languages
+def _language_code(language, hi, forced):
+    return language + (':hi' if hi == 'True' else ':forced' if forced == 'True' else '')
 
 
-def _label(item_id):
+def _require_sports_identity(item):
+    if item.kind == 'sports_event' and item.identity_state not in ('parsed', 'identified'):
+        raise JobFailed('Complete the sports event identity before automatic search, or use manual search.',
+                        reason='incomplete_identity')
+
+
+def _search_label(item_id):
     item = repository.get_item(item_id)
-    return item.title if item is not None else str(item_id)
+    if item is None:
+        raise JobFailed('The item no longer exists', reason='not_found')
+    _require_sports_identity(item)
+    return item.title
 
 
-def search_source_item(item_id, job_id=None):
+def search_source_item(item_id, job_id=None, *, translation_gate=True, expected_source=None):
     """Search the missing subtitles of one source item. Called without a job id it queues itself."""
     if not job_id:
-        return jobs_queue.add_job_from_function(f"Searching subtitles for {_label(item_id)}", is_progress=True)
+        if expected_source is None:
+            try:
+                expected_source = resolve_item(item_id)
+            except SourceItemGone as error:
+                raise JobFailed('The item no longer exists', reason='not_found') from error
+        return jobs_queue.add_job_from_function(f"Searching subtitles for {_search_label(item_id)}", is_progress=True)
     with source_search_probes(item_id):
-        return _search_source_item(item_id, job_id)
+        return _search_source_item(item_id, job_id, translation_gate=translation_gate, expected_source=expected_source)
 
 
-def _search_source_item(item_id, job_id):
-    try:
-        context = resolve_item(item_id)
-    except SourceItemGone as error:
-        raise JobFailed('The item no longer exists', reason='not_found') from error
+def _search_source_item(item_id, job_id, *, translation_gate, expected_source):
+    if expected_source is not None:
+        context = resolve_same_item(expected_source)
+        if context is None or context.item_id != item_id:
+            return None
+    else:
+        try:
+            context = resolve_item(item_id)
+        except SourceItemGone as error:
+            raise JobFailed('The item no longer exists', reason='not_found') from error
     reason = item_disabled_reason(item_id)
     if reason:
         # Disabled after the search was queued: nothing is searched, and nothing is an error.
@@ -435,8 +600,13 @@ def _search_source_item(item_id, job_id):
                                        progress_message='No language profile: nothing to search for')
         return None
     item = repository.get_item(item_id)
-    if item is None:
+    if item is None or not context.same_item(item):
         raise JobFailed('The item no longer exists', reason='not_found')
+    if item.server_missing:
+        jobs_queue.update_job_progress(job_id=job_id, progress_value='max',
+                                       progress_message='The item is missing from its media server library')
+        return None
+    _require_sports_identity(item)
     stat = local_stat(item.path)
     if stat is None:
         raise JobFailed(f"The file is missing: {item.path}", reason='missing_file')
@@ -445,50 +615,160 @@ def _search_source_item(item_id, job_id):
     if item.missing_subtitles is None or not index_matches_file(item, stat):
         # The scanner still owns admission and re-identification. Refresh the tracks
         # and wanted languages of the file at this path for the immediate search.
-        if index_item(item_id, keep_index_on_probe_failure=True) is None:
+        if index_item(item_id, keep_index_on_probe_failure=True, expected_path=context.path,
+                      expected_source=context) is None:
             raise JobFailed('The source subtitle index could not be refreshed. Try again.', reason='conflict')
         item = repository.get_item(item_id)
-        if item is None:
+        if item is None or not context.same_item(item):
             raise JobFailed('The item no longer exists', reason='not_found')
-        try:
-            refreshed = resolve_item(item_id)
-        except SourceItemGone as error:
-            raise JobFailed('The item no longer exists', reason='not_found') from error
-        if refreshed.path != context.path or item.path != context.path:
+        refreshed = resolve_same_item(context)
+        if refreshed is None or item.path != context.path:
             raise JobFailed('The source file moved while the search was starting. Try again.', reason='conflict')
         context = refreshed
-    languages = _missing_languages(item)
+        _require_sports_identity(item)
+    from .translation import missing_language_candidates
+
+    candidates = missing_language_candidates(context)
+    languages = _search_languages(context, candidates, translation_gate=translation_gate)
     jobs_queue.update_job_progress(job_id=job_id, progress_max=len(languages), progress_message=context.title)
     if not languages:
-        jobs_queue.update_job_progress(job_id=job_id, progress_value='max', progress_message='Nothing is missing')
+        jobs_queue.update_job_progress(job_id=job_id, progress_value='max',
+                                       progress_message='Subtitles found or queued' if candidates else 'Nothing is missing')
         return None
     if not get_providers():
         logging.info("BAZARR All providers are throttled")
         jobs_queue.update_job_progress(job_id=job_id, progress_value='max', progress_message='All providers throttled')
         return None
 
+    downloaded = _download_source_subtitles(context, item, languages, job_id, translation_gate=translation_gate)
+    jobs_queue.update_job_progress(
+        job_id=job_id, progress_value='max',
+        progress_message=f"{len(downloaded)} subtitle(s) downloaded" if downloaded else 'No subtitles found')
+    return None
+
+
+def _search_languages(context, languages, *, translation_gate, automatic=False):
+    if translation_gate and languages:
+        from .translation import queue_missing_translations
+
+        try:
+            covered = queue_missing_translations(context, **({'wanted': True} if automatic else {}))
+        except Exception:
+            logging.exception('BAZARR could not queue a translation for source item %s', context.item_id)
+        else:
+            languages = [entry for entry in languages if _language_code(*entry) not in covered]
+    return languages
+
+
+def search_wanted_fallback(source, target_language, job_id=None):
+    """Resume one rejected translation's target under the scheduled search rules."""
+    if not job_id:
+        return jobs_queue.add_job_from_function(f"Searching subtitles for {source.title}", is_progress=True,
+                                                return_existing=True)
+    return search_wanted_item(source.item_id, source.created_at, job_id, translation_gate=False,
+                              expected_source=source, target_language=target_language)
+
+
+def search_wanted_item(item_id, created_at, job_id, *, translation_gate=True, expected_source=None,
+                       target_language=None, expected_source_id=None):
+    """Search only stored missing languages, after rechecking eligibility and the current Arr path."""
+    from .shadows import path_stage_shadow
+    from .translation import stored_missing_language_candidates
+    from .wanted import arr_claim_blocks_wanted, notify_wanted_changes, wanted_items
+    from .db import handle
+    from subtitles.adaptive_searching import is_search_active, updateFailedAttempts
+
+    items = repository.Items
+    same_row = (items.c.id == item_id, items.c.created_at == created_at)
+    if expected_source_id is not None:
+        same_row += (items.c.source_id == expected_source_id,)
+    session = handle()
+    item = session.execute(wanted_items(*items.c).where(*same_row)).first()
+    if item is None:
+        return
+    stamp = local_content_stamp(item.path)
+    if stamp is None or (expected_source is not None and (
+            expected_source.item_id, expected_source.path, expected_source.source_id,
+            expected_source.library_id, expected_source.wanted_file_stamp
+    ) != (item_id, item.path, item.source_id, item.library_id, stamp)):
+        return
+    if path_stage_shadow(item_id):
+        notify_wanted_changes(item.kind)
+        return
+    try:
+        context = resolve_item(item_id)
+    except SourceItemGone:
+        return
+    if not context.same_item(item) or context.path != item.path or not context.profile_id:
+        return
+
+    candidates = stored_missing_language_candidates(item)
+    if target_language is not None:
+        candidates = [entry for entry in candidates if _language_code(*entry) == target_language]
+    wanted_source = replace(context, wanted_file_stamp=stamp)
+    languages = [
+        entry for entry in _search_languages(wanted_source, candidates, translation_gate=translation_gate, automatic=True)
+        if is_search_active(_language_code(*entry), item.failed_attempts or '[]')
+    ]
+    if not languages or not get_providers():
+        return
+
+    # Settings, indexing and scanning can change eligibility while the translation gate runs.
+    current = session.execute(wanted_items(*items.c, profile_id=context.profile_id).where(*same_row)).first()
+    if current is None or current.path != context.path or current.library_id != context.library_id:
+        return
+    languages = [entry for entry in languages if entry in stored_missing_language_candidates(current)]
+    if not languages:
+        return
+    with source_search_probes(item_id):
+        downloaded = _download_source_subtitles(wanted_source, current, languages, job_id,
+                                                translation_gate=translation_gate, wanted_stamp=stamp)
+    failed = {_language_code(*entry) for entry in languages} - set(downloaded)
+    if failed and local_content_stamp(context.path) == stamp and not arr_claim_blocks_wanted(wanted_source):
+        with source_transaction() as connection:
+            current = repository.get_item(item_id, connection, for_update=True)
+            if (current is None or not context.same_item(current) or current.path != context.path
+                    or current.arr_shadow or current.server_missing or not current.monitored):
+                return
+            failed &= {_language_code(*entry) for entry in stored_missing_language_candidates(current)}
+            if failed:
+                attempts = current.failed_attempts or '[]'
+                for language in sorted(failed):
+                    attempts = updateFailedAttempts(language, attempts)
+                repository.set_failed_attempts(item_id, attempts, connection)
+
+
+def _download_source_subtitles(context, item, languages, job_id, *, translation_gate=True, wanted_stamp=None):
     audio_languages = get_audio_profile_languages(item.audio_language)
     audio_language = audio_languages[0]['name'] if audio_languages else 'None'
     # For an episode the title the providers get is the show's.
     title = context.group_title if context.kind == 'episode' and context.group_title else context.title
 
     from subtitles.download import generate_subtitles
-    downloaded = 0
+    from app.notifier import send_notifications_source
+
+    downloaded = []
     try:
         for result in generate_subtitles(context.path, languages, audio_language, str(context.scene_name), title,
                                          context.media_type, context.profile_id, check_if_still_required=True,
-                                         job_id=job_id, source=context):
+                                         job_id=job_id, source=context,
+                                         **({'source_wanted_stamp': wanted_stamp} if wanted_stamp is not None else {}),
+                                         **({} if translation_gate else {'auto_translate': False})):
             if not result:
+                continue
+            with source_transaction() as connection:
+                history_log_source(1, context, result, target=connection)
+            downloaded.append(result.language_code)
+            current = resolve_same_item(context)
+            if current is None:
                 continue
             if getattr(result, 'source_indexed', False) is not True:
                 # Retry an incomplete listing, including results from outside shared processing.
-                index_saved_subtitle(item_id, expected_path=context.path)
-            with source_transaction() as connection:
-                history_log_source(1, context, result, target=connection)
-            downloaded += 1
+                index_and_notify_item(current)
+            try:
+                send_notifications_source(current, result.message)
+            except Exception:
+                logging.exception('BAZARR could not send a notification for source item %s', context.item_id)
     except OSError as error:
         raise JobFailed(f'Unable to save the subtitles file: {error}', reason='save_failed') from error
-    jobs_queue.update_job_progress(
-        job_id=job_id, progress_value='max',
-        progress_message=f"{downloaded} subtitle(s) downloaded" if downloaded else 'No subtitles found')
-    return None
+    return downloaded

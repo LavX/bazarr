@@ -72,8 +72,8 @@ class FolderKind:
         if real == config or real.startswith(config + os.sep) or config.startswith(real.rstrip(os.sep) + os.sep):
             problems.append(Problem('config_directory', "The folder cannot contain or sit inside Bazarr+'s own "
                                                         "configuration folder."))
-        if library.content_kind not in ('movie', 'series'):
-            problems.append(Problem('content_kind', 'Only movie and series libraries can be scanned so far.'))
+        if library.content_kind not in ('movie', 'series', 'sports'):
+            problems.append(Problem('content_kind', 'Only movie, series and sports libraries can be scanned.'))
         return problems
 
     def enumerate(self, source, library, cancel: Optional[Callable[[], None]] = None):

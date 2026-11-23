@@ -755,7 +755,8 @@ jobs:
             tests/bazarr/test_subtitle_delete_ownership.py \
             tests/bazarr/test_upgrade_embedded_source.py \
             tests/bazarr/test_embedded_history_retraction.py \
-            tests/bazarr/test_sports_library_lookup_pg.py ; do
+            tests/bazarr/test_sports_library_lookup_pg.py \
+            tests/bazarr/test_media_sources_pipeline.py ; do
             echo "::group::$f"
             pytest "$f" -p no:cacheprovider -q
             echo "::endgroup::"
@@ -1028,9 +1029,14 @@ jobs:
             tests/bazarr/test_episode_subtitle_job_completion.py \
             tests/bazarr/test_parser_owner_threading.py \
             tests/bazarr/test_media_sources_schema.py \
-            tests/bazarr/test_media_sources_pipeline.py \
             tests/bazarr/test_media_sources_analysis.py \
+            tests/bazarr/test_media_sources_wanted.py \
+            tests/bazarr/test_media_sources_manual.py \
+            tests/bazarr/test_media_sources_sports.py \
             tests/bazarr/test_media_sources_api.py \
+            tests/bazarr/test_media_server_item_pages.py \
+            tests/bazarr/test_media_server_sources.py \
+            tests/bazarr/test_media_source_search_eligibility.py \
             tests/bazarr/test_media_sources_no_change.py \
             tests/bazarr/test_postgres_driver_pin.py ; do
             echo "::group::$f"

@@ -56,6 +56,13 @@ class TestFakeClientMatchesContract:
         fake = FakeJellyfinClient()
         fake.get_items({})
 
+    def test_item_collection_and_exact_lookup(self):
+        fake = FakeJellyfinClient()
+        fake.items = [make_movie(), make_episode()]
+        pages = fake.get_item_pages('library-id', ('Movie',))
+        assert pages.complete and list(pages.items) == ['movie-1']
+        assert fake.lookup_item_ids(['ep-1', 'missing']) == {'ep-1'}
+
     def test_empty_episodes(self):
         fake = FakeJellyfinClient()
         fake.get_episodes("s1", 1)
