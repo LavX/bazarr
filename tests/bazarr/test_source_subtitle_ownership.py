@@ -289,6 +289,62 @@ def test_running_source_sync_rechecks_a_native_owner_before_publication(toolbox,
     assert not toolbox.world.published
 
 
+@pytest.mark.parametrize(('kind', 'global_mapping'), [
+    pytest.param('sonarr', False, id='sonarr'),
+    pytest.param('radarr', False, id='radarr'),
+    pytest.param('radarr', True, id='radarr-global'),
+])
+def test_running_source_sync_rechecks_an_exact_mapped_arr_claim_with_stale_size(toolbox, monkeypatch, kind,
+                                                                               global_mapping):
+    import json
+    import os
+    import sqlalchemy as sa
+    from app.config import settings
+    from app.database import TableArrInstances, TableEpisodes, TableMovies
+    from media_sources import repository
+    from subtitles.tools import subsyncer
+    from utilities.path_mappings import path_mappings
+
+    library = toolbox.world.root.name
+    context = tools.pipeline._movie(toolbox.world, name=f'Shows/{library}/Match.mkv')
+    path, reference = tools._sidecars(toolbox, context)
+    remote_root = toolbox.world.root.with_name('arr-media')
+    remote_path = remote_root / 'Shows' / library / 'Match.mkv'
+    rules = [[f'{os.sep}arr-media', f'{os.sep}{library}']]
+    if kind == 'sonarr':
+        model, mapping_key = TableEpisodes, 'series'
+        row = dict(sonarrEpisodeId=71, episode_file_id=71, season=1, episode=1)
+    else:
+        model, mapping_key = TableMovies, 'movies'
+        row = dict(radarrId=71, movie_file_id=71, tmdbId='71')
+    instance_mapping = json.dumps({mapping_key: rules})
+    if global_mapping:
+        monkeypatch.setattr(path_mappings, f'path_mapping_{mapping_key}', rules)
+        instance_mapping = None
+    monkeypatch.setattr(settings.general, f'use_{kind}', True)
+    toolbox.db.execute(sa.insert(TableArrInstances).values(
+        id=71, kind=kind, name=kind, stable_key=f'native-{kind}', port=7171, enabled=1, is_default=0,
+        path_mappings=instance_mapping))
+    aligned = []
+
+    def align(self, engine, output_path, video_path, no_fix_framerate):
+        aligned.append(video_path)
+        toolbox.db.execute(sa.insert(model).values(
+            id=71, arr_instance_id=71, path=str(remote_path), title='Match', file_size=5, **row))
+        assert repository.get_item(context.item_id).arr_shadow == 0
+        output_path.write_text(tools.SYNCED)
+        return {'offset_seconds': 0.25}
+
+    monkeypatch.setattr(subsyncer.SubSyncer, '_run_external_engine', align)
+    tools._run(toolbox, tools._request(toolbox, context, path, 'sync', reference=str(reference),
+                                     output_mode='overwrite', enabled_engines='alass'))
+
+    assert aligned == [context.path]
+    assert path.read_text() == reference.read_text() == tools.SRT
+    assert not toolbox.db.execute(sa.select(repository.History)).all()
+    assert not toolbox.world.published
+
+
 def test_captured_source_editor_write_rechecks_a_native_owner(toolbox, monkeypatch):
     from media_sources.subtitle_tools import SourceSubtitleTool, indexed_sidecar, tool_item
     from subtitles.tools.subsync_engines import SubtitleSourceChanged
@@ -303,6 +359,74 @@ def test_captured_source_editor_write_rechecks_a_native_owner(toolbox, monkeypat
         captured.write(tools.SRT.replace('Original', 'Edited').encode(), 'edit')
     assert path.read_text() == tools.SRT
     assert not toolbox.world.published
+
+
+@pytest.mark.parametrize('claim_at', ['before-request', 'before-publication', 'shadowed'])
+def test_source_delete_rechecks_native_ownership_before_unlink(toolbox, monkeypatch, claim_at):
+    from contextlib import contextmanager
+    import sqlalchemy as sa
+    from media_sources import indexer, repository
+
+    context = tools.pipeline._sports(toolbox.world)
+    path, _ = tools._sidecars(toolbox, context)
+    if claim_at == 'before-publication':
+        publication = indexer.source_item_publication
+
+        @contextmanager
+        def claim_before_publication(*args, **kwargs):
+            _sportarr_claim(toolbox, context, monkeypatch)
+            assert repository.get_item(context.item_id).arr_shadow == 0
+            with publication(*args, **kwargs) as current:
+                yield current
+
+        monkeypatch.setattr(indexer, 'source_item_publication', claim_before_publication)
+    else:
+        _sportarr_claim(toolbox, context, monkeypatch)
+        if claim_at == 'shadowed':
+            repository.update_item(context.item_id, toolbox.db, arr_shadow=1)
+        else:
+            assert repository.get_item(context.item_id).arr_shadow == 0
+
+    refused = toolbox.client.delete(f'/api/sources/items/{context.item_id}/subtitles',
+                                    headers=tools.HEADERS, json={'language': 'en', 'subtitles_path': str(path)})
+
+    assert refused.status_code == 409
+    assert 'Arr owner' in refused.json['message']
+    assert path.read_text() == tools.SRT
+    assert not toolbox.db.execute(sa.select(repository.History)).all()
+    assert not toolbox.db.execute(sa.select(repository.Blacklist)).all()
+    assert not toolbox.world.published
+
+
+def test_source_delete_pins_native_ownership_on_postgresql(toolbox, monkeypatch):
+    import sqlalchemy as sa
+    from subtitles.tools import delete
+
+    engine = toolbox.db.get_bind()
+    if engine.dialect.name != 'postgresql':
+        pytest.skip('PostgreSQL registry lock; SQLite serializes source write transactions')
+    context = tools.pipeline._sports(toolbox.world)
+    path, _ = tools._sidecars(toolbox, context)
+    _sportarr_claim(toolbox, context, monkeypatch, enabled=False)
+    remove = delete.os.remove
+    unlinked = []
+
+    def try_claim_before_unlink(subtitle_path):
+        with pytest.raises(sa.exc.OperationalError) as blocked:
+            with engine.connect().execution_options(isolation_level='READ COMMITTED') as native, native.begin():
+                native.exec_driver_sql("SET LOCAL lock_timeout = '100ms'")
+                native.exec_driver_sql('UPDATE arr_instances SET enabled = 1 WHERE id = 71')
+        assert getattr(blocked.value.orig, 'pgcode', None) == '55P03'
+        unlinked.append(subtitle_path)
+        remove(subtitle_path)
+
+    monkeypatch.setattr(delete.os, 'remove', try_claim_before_unlink)
+    removed = toolbox.client.delete(f'/api/sources/items/{context.item_id}/subtitles',
+                                    headers=tools.HEADERS, json={'language': 'en', 'subtitles_path': str(path)})
+    assert removed.status_code == 204
+    assert unlinked == [str(path)]
+    assert not path.exists()
+    assert [event.operation for event in toolbox.world.published] == ['delete']
 
 
 def test_shadowed_recording_keeps_manual_search_and_upload_available(toolbox, monkeypatch):

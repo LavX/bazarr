@@ -280,6 +280,75 @@ def test_source_combine_route_preserves_output_when_a_selected_input_is_replaced
     assert not toolbox.world.published
 
 
+def _assigned_combine_profile(toolbox):
+    from app.database import TableLanguagesProfiles, update_profile_id_list
+
+    items = [{'id': number, 'language': code, 'forced': 'False', 'hi': 'False',
+              'audio_exclude': 'False', 'audio_only_include': 'False'}
+             for number, code in enumerate(('en', 'de'), start=1)]
+    toolbox.db.execute(sa.update(TableLanguagesProfiles)
+                       .where(TableLanguagesProfiles.profileId == toolbox.world.profile)
+                       .values(items=json.dumps(items),
+                               combine=json.dumps({'languages': ['en', 'de'], 'format': 'srt'})))
+    update_profile_id_list.invalidate()
+
+
+def test_source_combine_route_builds_from_assigned_profile_with_empty_body(toolbox):
+    _assigned_combine_profile(toolbox)
+    context = pipeline._movie(toolbox.world)
+    _sidecars(toolbox, context)
+
+    response = toolbox.client.post(f'/api/sources/items/{context.item_id}/subtitles/combine', headers=HEADERS)
+
+    assert response.status_code == 200 and response.json['status'] == 'built', response.json
+    assert Path(response.json['path']) == Path(context.path).with_suffix('.en.combined-de.srt')
+    assert 'Original cue' in Path(response.json['path']).read_text()
+
+
+@pytest.mark.parametrize('owner', ['radarr', 'sportarr'])
+@pytest.mark.parametrize('selection', ['assigned-profile', 'explicit'])
+def test_source_combine_route_preserves_outputs_when_native_owner_claims_during_composition(
+        toolbox, monkeypatch, owner, selection):
+    from app.config import settings
+    from media_sources import repository
+    from subtitles.tools.combine import main as combine
+    from subtitles.tools.subsync_engines import engine_output_path
+
+    monkeypatch.setattr(settings.general, f'use_{owner}', True)
+    _assigned_combine_profile(toolbox)
+    context = pipeline._movie(toolbox.world)
+    source, reference = _sidecars(toolbox, context)
+    output = Path(context.path).with_suffix('.en.combined-de.srt')
+    alternate = output.with_suffix('.ass')
+    generated = engine_output_path(output, 'ffsubsync')
+    for path in (output, alternate, generated):
+        path.write_text('Existing output')
+    original = combine.compose
+    composed = []
+
+    def compose_then_claim(**options):
+        result = original(**options)
+        toolbox.db.execute(pipeline._legacy_owner_insert(toolbox.world, owner, context.path))
+        assert not repository.get_item(context.item_id).arr_shadow
+        composed.append(result)
+        return result
+
+    monkeypatch.setattr(combine, 'compose', compose_then_claim)
+    options = {}
+    if selection == 'explicit':
+        options['json'] = {'languages': ['en', 'de'], 'format': 'srt', 'inputs': [
+            {'path': str(source), 'language': 'en'}, {'path': str(reference), 'language': 'de'}]}
+    response = toolbox.client.post(f'/api/sources/items/{context.item_id}/subtitles/combine',
+                                   headers=HEADERS, **options)
+
+    assert len(composed) == 1
+    assert response.status_code == 500, response.json
+    assert response.json['status'] == 'failed' and 'Arr owner' in response.json['error']
+    assert all(path.read_text() == 'Existing output' for path in (output, alternate, generated))
+    assert source.read_text() == reference.read_text() == SRT
+    assert not toolbox.world.published
+
+
 @pytest.mark.parametrize('quoted', [True, False])
 def test_source_editor_saves_with_compressed_get_etag(toolbox, quoted):
     app = toolbox.client.application

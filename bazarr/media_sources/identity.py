@@ -11,6 +11,7 @@ from collections import defaultdict, namedtuple
 from dataclasses import dataclass, field
 from functools import cache
 from itertools import chain
+from string import ascii_letters
 
 import sqlalchemy as sa
 from utilities.path_case import windows_path_case_mapping, windows_path_casefold
@@ -375,16 +376,6 @@ class _Mapper:
         self.rules = rules
         self.sports = sports
 
-    def candidate_paths(self, path):
-        from utilities import path_mappings as module
-
-        if self.sports:
-            mapped = (module.apply_sports_mapping(path, [rule], reverse=True, ignore_case=_LOCAL_WINDOWS_PATHS)
-                      for rule in self.rules)
-        else:
-            mapped = (module._apply_mapping(path, [rule], reverse=True) for rule in self.rules)
-        return {path, *mapped}
-
 
 def _mapper_for(instance):
     """The mapper of an instance, or None when its stored mapping cannot be read."""
@@ -396,7 +387,7 @@ def _mapper_for(instance):
             return None
         return _Mapper(lambda path: module.apply_sports_mapping(path, mapping), mapping, sports=True)
     media_type = 'movie' if instance.kind == 'radarr' else 'series'
-    own = module._instance_path_mapping(instance.id, media_type)
+    own = module.read_arr_mappings(instance.path_mappings, media_type)
     if own is not None:
         return _Mapper(lambda path: module._apply_mapping(path, own, reverse=False), own)
     shared = module.path_mappings
@@ -498,9 +489,10 @@ class ArrOwners:
         return found
 
     def path_stage(self, path):
-        """The path stage alone, for one file, with no stat: one indexed lookup per owner on the item's path and
-        real path, mapped back to each arr's own side. Used right before an automatic search."""
+        """Find an exact Arr claim for a file or its real path without consulting the stored size."""
         from app.database import database
+        from utilities.path_mappings import apply_sports_mapping
+
         session = database if self.target is None else self.target
         try:
             candidates = {path, os.path.realpath(path)}
@@ -512,16 +504,22 @@ class ArrOwners:
                 continue
             table = TABLE_OF_KIND[instance.kind]
             model, file_id = self._columns(table)
-            arr_paths = {mapped for candidate in candidates for mapped in mapper.candidate_paths(candidate)}
+            arr_paths = candidates
             path_column = model.path
             local_candidates = candidates
             if mapper.sports:
+                mapped = {apply_sports_mapping(candidate, [rule], reverse=True, ignore_case=_LOCAL_WINDOWS_PATHS)
+                          for candidate in candidates for rule in mapper.rules}
                 codec = _windows_postgres_codec(session)
-                arr_paths = {_sports_path_key(candidate, codec) for candidate in arr_paths}
+                arr_paths = {_sports_path_key(candidate, codec) for candidate in candidates | mapped}
                 fold = _windows_sql_casefold(arr_paths, codec)
                 path_column = _sports_sql_path_key(path_column, fold)
                 if _LOCAL_WINDOWS_PATHS:
                     local_candidates = {_sports_path_key(candidate) for candidate in candidates}
+            elif mapper.rules:
+                # A local directory name may also occur in the original suffix. Compare the forward mapping
+                # of the Arr path because reversing the legacy replace-all mapping loses that distinction.
+                path_column = _mapped_sql_path(path_column, mapper.rules)
             for row in session.execute(sa.select(model.id, model.path, model.file_size, file_id)
                                        .where(model.arr_instance_id == instance.id, path_column.in_(arr_paths))
                                        .order_by(model.id)).all():
@@ -565,14 +563,19 @@ class ArrOwners:
 def _mapped_sql_path(path, rules, *, reverse=False):
     """Use the same first matching Arr mapping for exact stored-path checks."""
     matches = []
-    for remote, local, *_unused in rules:
+    for rule in rules:
+        if len(rule) < 2 or '' in rule:
+            continue
+        remote, local = rule[:2]
         start, end = (local, remote) if reverse else (remote, local)
         if not start or not end or start == end:
             continue
         mapped = sa.func.replace(path, start, end)
+        first = sa.func.substr(mapped, 1, 1)
+        windows_drive = sa.and_(first.in_(tuple(ascii_letters)), sa.func.substr(mapped, 2, 2) == ':\\')
         normalized = sa.case(
-            (sa.func.substr(mapped, 1, 1) == '/', sa.func.replace(mapped, '\\', '/')),
-            (sa.or_(sa.func.substr(mapped, 1, 2) == '\\\\', sa.func.substr(mapped, 2, 2) == ':\\'),
+            (first == '/', sa.func.replace(mapped, '\\', '/')),
+            (sa.or_(sa.func.substr(mapped, 1, 2) == '\\\\', windows_drive),
              sa.func.replace(mapped, '/', '\\')),
             else_=mapped,
         )

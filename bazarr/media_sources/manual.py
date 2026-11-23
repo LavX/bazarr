@@ -98,7 +98,9 @@ def download_source_subtitle(source, provider, subtitle, hi, forced, original_fo
 
 
 @contextmanager
-def manual_source_publication(source, destination, ownership_index, *, release=None, cleanup_outputs=False):
+def manual_source_publication(source, destination, ownership_index, *, release=None, cleanup_outputs=False,
+                              reject_native_owner=False):
+    """Guard source writes, with native-owner rejection reserved for per-file deletion."""
     def prepare():
         video_directory = os.path.dirname(source.path)
         custom_directory = get_target_folder(source.path, create=False)
@@ -110,11 +112,17 @@ def manual_source_publication(source, destination, ownership_index, *, release=N
             raise SubtitleDestinationChanged('The subtitle destination does not have one media owner')
 
     with ownership_index.publication(source, prepare, destination=destination, release=release,
-                                     cleanup_outputs=cleanup_outputs) as (
+                                     cleanup_outputs=cleanup_outputs, native_owners=reject_native_owner) as (
             current, connection, _):
         state = repository.item_state(current.item_id, connection) if current is not None else None
         if state is None or state.server_missing:
             raise SubtitleDestinationChanged('The source item is no longer available')
+        if reject_native_owner:
+            from .subtitle_tools import _native_managed
+
+            item = repository.get_item(current.item_id, connection)
+            if item is None or _native_managed(current, item, connection):
+                raise SubtitleDestinationChanged('The source recording is now managed by an Arr owner')
         stamp = local_content_stamp(current.path)
         if stamp is None or any(recorded is not None and recorded != actual
                                 for recorded, actual in zip((state.file_dev, state.file_ino), stamp[:2])):

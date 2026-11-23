@@ -48,7 +48,9 @@ def try_combine_for_video(video_path, media_type, sonarr_series_id=None,
     try:
         owner_kwargs = {}
         if source is not None:
+            from media_sources import repository
             from media_sources.indexer import SourcePublicationOwnerIndex
+            from media_sources.subtitle_tools import _native_managed
             if sports_operation is not None or arr_instance_id is not None:
                 raise ValueError('A source composition requires source media metadata')
             video_version = subtitle_source_version(video_path)
@@ -188,11 +190,17 @@ def try_combine_for_video(video_path, media_type, sonarr_series_id=None,
                 @contextmanager
                 def publication():
                     with owners.publication(source, prepare, destination=out_path, cleanup_outputs=True,
-                                            native_owners=bool(selected)) as (current, connection, alternates):
+                                            native_owners=True) as (current, connection, alternates):
                         if current is None or current.path != video_path:
                             raise ValueError('The source item moved or was removed during composition')
                         if subtitle_source_version(video_path) != video_version:
                             raise ValueError('The source media file changed during composition')
+                        if not selected:
+                            item = repository.get_item(current.item_id, connection)
+                            if item is None or item.server_missing:
+                                raise ValueError('The source recording is no longer available')
+                            if _native_managed(current, item, connection):
+                                raise ValueError('The source recording is now managed by an Arr owner')
                         for tool in selected.values():
                             tool.check_current(current, connection)
                         if any(not sync_output_owner_is_unique(video_path, path, owners) for path in inputs):

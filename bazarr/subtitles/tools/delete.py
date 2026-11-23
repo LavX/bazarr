@@ -226,7 +226,8 @@ def _delete_source_subtitle(source, subtitle_path, language_code, language_name,
         require_indexed(item)
         try:
             release = (source.kind, *blacklist[1:]) if blacklist is not None else None
-            with manual_source_publication(source, subtitle_path, ownership_index, release=release) as (
+            with manual_source_publication(source, subtitle_path, ownership_index, release=release,
+                                           reject_native_owner=True) as (
                     current, connection):
                 require_indexed(repository.get_item(current.item_id, connection))
                 revalidate = None
