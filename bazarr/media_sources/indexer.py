@@ -179,7 +179,7 @@ class SourcePublicationOwnerIndex(SourceOutputOwnerIndex):
         return directory != media_directory
 
     @contextmanager
-    def publication(self, source, prepare=None, *, destination=None, cleanup_outputs=False):
+    def publication(self, source, prepare=None, *, destination=None, cleanup_outputs=False, cleanup_matches=None):
         """Keep slow ownership and subtitle discovery outside the writer transaction."""
         for _ in range(2):
             self._loaded = False
@@ -189,7 +189,9 @@ class SourcePublicationOwnerIndex(SourceOutputOwnerIndex):
                 self._publication_settings = self._settings_snapshot()
             prepared = prepare() if prepare is not None else None
             outputs = (plan_sync_output_cleanup(source.path, destination, self, include_combined=True)
-                       if cleanup_outputs else ())
+                       if cleanup_outputs or cleanup_matches is not None else ())
+            if cleanup_matches is not None:
+                outputs = tuple((path, version) for path, version in outputs if cleanup_matches(path, version=version))
             shared = self._needs_registry_guard(source, destination, self._publication_settings[0][1])
             if shared and self._prepared_owners is None:
                 raise SourcePublicationOwnersChanged('The shared subtitle owners could not be verified')

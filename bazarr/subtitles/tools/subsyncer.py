@@ -707,6 +707,14 @@ class SubSyncer:
                 publication = SubtitlePublication(video_path, srt_path, subtitle_source_version(srt_path),
                                                   **owner_index)
 
+        if path_publication_guard is not None:
+            def guarded_tool_destination(destination):
+                # The publication captured these versions before running the engine.
+                return path_publication_guard(
+                    destination, cleanup_matches=publication.destination_unchanged if cleanup_outputs else None)
+
+            source_guard['path_publication_guard'] = guarded_tool_destination
+
         def publish():
             if validate is not None and publication_guard is None and path_publication_guard is None:
                 validate()
@@ -724,7 +732,6 @@ class SubSyncer:
                 publication_lock=publication_lock,
                 on_publish=on_publish,
                 **({'publication_guard': publication_guard} if publication_guard is not None else {}),
-                **({'path_publication_guard': path_publication_guard} if path_publication_guard is not None else {}),
                 **source_guard,
                 after_publish=(lambda: quarantine_sync_outputs_after_mutation(video_path, srt_path))
                 if source is None and cleanup_outputs else None,

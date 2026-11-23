@@ -445,19 +445,27 @@ def test_a_generated_source_sync_output_can_be_promoted(toolbox, monkeypatch):
     assert rows == [(5, str(generated)), (5, str(path))]
 
 
-@pytest.mark.parametrize('completion', ['overwrite', 'cancelled', 'generated file changed'])
+@pytest.mark.parametrize('completion', ['overwrite', 'cancelled', 'generated file changed', 'generated edited during engine'])
 def test_source_sync_overwrite_retires_only_unchanged_generated_outputs(toolbox, monkeypatch, completion):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Event
+
     from media_sources import repository
     from subtitles.tools import subsyncer
 
     context = pipeline._movie(toolbox.world)
     path, _ = _sidecars(toolbox, context)
     generated = path.with_suffix('.alass.srt')
+    new_sibling = path.with_suffix('.ffsubsync.srt')
     replacement = SYNCED.replace('Original cue', 'Overwritten cue')
     edited = SYNCED.replace('Original cue', 'Edited generated cue')
     output = SYNCED
+    engine_started, resume_engine = Event(), Event()
 
     def align(self, engine, output_path, video_path, no_fix_framerate):
+        if completion == 'generated edited during engine' and output == replacement:
+            engine_started.set()
+            assert resume_engine.wait(5)
         output_path.write_text(output)
         return {'offset_seconds': 0.25}
 
@@ -474,19 +482,34 @@ def test_source_sync_overwrite_retires_only_unchanged_generated_outputs(toolbox,
     report = subsyncer.SubSyncer._report_progress
     at_publication = []
 
+    def edit_generated():
+        updated = generated.with_suffix('.incoming')
+        updated.write_text(edited)
+        updated.replace(generated)
+
     def change_before_publication(self, message, value, total):
         if message == 'Saving synchronized subtitle':
             at_publication.append(True)
             if completion == 'cancelled':
                 assert toolbox.jobs.cancel_running_job(job_id)
             elif completion == 'generated file changed':
-                updated = generated.with_suffix('.incoming')
-                updated.write_text(edited)
-                updated.replace(generated)
+                edit_generated()
         report(self, message, value, total)
 
     monkeypatch.setattr(subsyncer.SubSyncer, '_report_progress', change_before_publication)
-    assert toolbox.jobs._run_job(job) is (completion != 'cancelled')
+    if completion == 'generated edited during engine':
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            running = pool.submit(toolbox.jobs._run_job, job)
+            try:
+                assert engine_started.wait(5)
+                edit_generated()
+                new_sibling.write_text(edited)
+            finally:
+                resume_engine.set()
+            assert running.result(timeout=10)
+        assert new_sibling.read_text() == edited
+    else:
+        assert toolbox.jobs._run_job(job) is (completion != 'cancelled')
     assert at_publication == [True]
     rows = toolbox.db.execute(sa.select(repository.History.c.action, repository.History.c.subtitles_path)
                               .order_by(repository.History.c.id)).all()
@@ -499,7 +522,7 @@ def test_source_sync_overwrite_retires_only_unchanged_generated_outputs(toolbox,
     else:
         assert toolbox.jobs.get_job_status(job_id) == 'completed'
         assert path.read_text() == replacement and rows == [(5, str(generated)), (5, str(path))]
-        if completion == 'generated file changed':
+        if completion.startswith('generated'):
             assert generated.read_text() == edited
         else:
             assert not generated.exists()
