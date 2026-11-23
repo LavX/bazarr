@@ -127,8 +127,9 @@ def _source_library(table, kind, *columns):
 def source_items(kind, *columns):
     """Select live file rows of one kind, with source ownership in scope."""
     table = _source_model(kind)
+    # A retained server item can still name a path that belongs to a different file.
     return (_source_library(table, "movie" if kind == "movie" else "series", *columns)
-            .where(table.c.kind == kind, table.c.arr_shadow == 0))
+            .where(table.c.kind == kind, table.c.arr_shadow == 0, table.c.server_missing == 0))
 
 
 def source_titles(kind, *columns):

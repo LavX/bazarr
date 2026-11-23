@@ -17,7 +17,7 @@
 import { faCalendarAlt, faHardDrive } from "@fortawesome/free-solid-svg-icons";
 import { http, HttpResponse } from "msw";
 import { beforeEach, describe, expect, it } from "vitest";
-import ItemOverview from "@/pages/views/ItemOverview";
+import ItemOverview, { OverviewItem } from "@/pages/views/ItemOverview";
 import { customRender, screen, waitFor } from "@/tests";
 import server from "@/tests/mocks/node";
 
@@ -31,7 +31,7 @@ beforeEach(() => {
 // Shared fixture
 // ---------------------------------------------------------------------------
 
-function makeItem(overrides?: Partial<Item.Base>): Item.Base {
+function makeItem(overrides?: Partial<OverviewItem>): OverviewItem {
   return {
     title: "Test Movie Title",
     path: "/media/test.mkv",
@@ -109,6 +109,7 @@ describe("ItemOverview, audio language badges", () => {
       audio_language: [
         { code2: "en", name: "English" },
         { code2: "fr", name: "French" },
+        { code2: "zh", name: "Chinese Simplified" },
       ],
     });
 
@@ -118,6 +119,22 @@ describe("ItemOverview, audio language badges", () => {
       expect(screen.getByText("English")).toBeInTheDocument();
     });
     expect(screen.getByText("French")).toBeInTheDocument();
+    expect(screen.getByText("Chinese", { exact: true })).toBeInTheDocument();
+    expect(screen.getAllByLabelText("Audio Language")).toHaveLength(3);
+  });
+
+  it("labels null and empty audio names instead of rendering blank badges", () => {
+    const item = makeItem({
+      audio_language: [null, "", " ", { code2: "", name: "" }],
+    });
+
+    customRender(<ItemOverview item={item} />);
+
+    expect(
+      screen
+        .getAllByLabelText("Audio Language")
+        .map((badge) => badge.textContent),
+    ).toEqual(["Unknown", "Unknown", "Unknown", "Unknown"]);
   });
 });
 

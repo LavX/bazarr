@@ -4,6 +4,11 @@ import { useEffect } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { whenJobFinishes } from "@/apis/hooks/jobWatch";
 import { mediaServerLinksKey } from "@/apis/hooks/mediaServerLinks";
+import {
+  linkedServerRemovalScope,
+  refreshMediaSources,
+  serverSourceLibraryChoicesKey,
+} from "@/apis/hooks/mediaSources";
 import api from "@/apis/raw";
 import { inlineWhen } from "@/apis/raw/inlineWrites";
 import type {
@@ -12,6 +17,7 @@ import type {
   MediaServerKind,
   MediaServerUpdate,
 } from "@/apis/raw/mediaServers";
+import { isServerSourceKind } from "@/apis/raw/mediaSources";
 
 /**
  * The instance list for one kind. Exported because the Plex account flow writes
@@ -126,8 +132,14 @@ export function useDeleteMediaServerInstance(
 ) {
   const client = useQueryClient();
   return useMutation({
-    mutationFn: inlineWhen(inlineErrors, () => api.mediaServers.remove(id)),
-    onSuccess: async () => {
+    mutationFn: async () => {
+      const scope = isServerSourceKind(kind)
+        ? await linkedServerRemovalScope(client, id)
+        : undefined;
+      await inlineWhen(inlineErrors, () => api.mediaServers.remove(id))();
+      return scope;
+    },
+    onSuccess: async (scope) => {
       await client.cancelQueries({ queryKey: itemKey(kind, id) });
       client.removeQueries({ queryKey: itemKey(kind, id) });
       void client.invalidateQueries({
@@ -135,6 +147,13 @@ export function useDeleteMediaServerInstance(
       });
       // A removed destination is no longer one a Play on menu can offer.
       void client.invalidateQueries({ queryKey: mediaServerLinksKey });
+      if (isServerSourceKind(kind)) {
+        client.removeQueries({
+          queryKey: serverSourceLibraryChoicesKey(id),
+          exact: true,
+        });
+        await refreshMediaSources(client, scope);
+      }
     },
   });
 }

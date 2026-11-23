@@ -331,7 +331,7 @@ def test_the_scan_job_queues_itself_and_runs_the_scan(library, monkeypatch):
     video(root / "Film.2001.mkv")
     queued = []
     monkeypatch.setattr(scanner.jobs_queue, "add_job_from_function",
-                        lambda name, is_progress: queued.append(name) or 41)
+                        lambda name, is_progress, return_existing=False: queued.append(name) or 41)
     assert scanner.scan_media_source(source_id) == 41
     assert queued == ["Scanning media source Local"]
 
@@ -450,9 +450,10 @@ def test_the_folder_kind_refuses_paths_it_cannot_use(tmp_path):
     assert "config_directory" in problems(args.config_dir)
     assert "config_directory" in problems(os.path.dirname(args.config_dir))
     assert problems(str(tmp_path), "series") == set()
-    assert "content_kind" in problems(str(tmp_path), "sports")
+    assert problems(str(tmp_path), "sports") == set()
+    assert "content_kind" in problems(str(tmp_path), "music")
     with pytest.raises(UnknownSourceKind):
-        get_kind("jellyfin")
+        get_kind("plex")
 
 
 # A disabled source or library is not scanned

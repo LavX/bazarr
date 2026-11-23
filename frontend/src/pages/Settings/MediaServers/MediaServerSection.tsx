@@ -17,6 +17,7 @@ import type {
   MediaServerInstance,
   MediaServerKind,
 } from "@/apis/raw/mediaServers";
+import { isServerSourceKind } from "@/apis/raw/mediaSources";
 import { Check, Section } from "@/pages/Settings/components";
 import { useStagedValues } from "@/pages/Settings/utilities/FormValues";
 import { useSettingValue } from "@/pages/Settings/utilities/hooks";
@@ -40,6 +41,12 @@ function DeleteInstanceModal({
           Delete {instance.name}? Its connection settings and pending refreshes
           will be removed. This cannot be undone.
         </Text>
+        {isServerSourceKind(instance.kind) && (
+          <Text size="sm">
+            This also removes any linked library source and its indexed items.
+            Subtitle history, blacklist entries, and files on disk are kept.
+          </Text>
+        )}
         {remove.isError && (
           <Alert color="red">
             Could not delete this instance. Check that the Bazarr API is

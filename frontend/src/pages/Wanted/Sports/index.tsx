@@ -1,30 +1,32 @@
 /* eslint-disable camelcase */
 import { FunctionComponent, useCallback, useMemo, useState } from "react";
-import { Link, useSearchParams } from "react-router";
+import { Link } from "react-router";
 import { Anchor, Badge, Checkbox, Container, Group, Text } from "@mantine/core";
 import { useDebouncedValue } from "@mantine/hooks";
 import { faSearch } from "@fortawesome/free-solid-svg-icons";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import { ColumnDef } from "@tanstack/react-table";
 import { useArrInstanceLabels } from "@/apis/hooks/arrInstances";
-import { useAudioLanguages } from "@/apis/hooks/languages";
+import { useAudioLanguages, useLanguages } from "@/apis/hooks/languages";
 import {
+  sportsActivityLink,
+  sportsRowOwner,
   SportsWantedRow,
   useSportsAction,
+  useSportsActivityScope,
   useSportsAvailability,
+  useSportsSourceWanted,
   useSportsWantedPagination,
 } from "@/apis/hooks/sports";
 import { useBatchAction } from "@/apis/hooks/subtitles";
-import {
-  AudioList,
-  InstanceBadge,
-  ReleaseMismatchBadge,
-} from "@/components/bazarr";
+import { AudioList, ReleaseMismatchBadge } from "@/components/bazarr";
 import Language from "@/components/bazarr/Language";
+import SourceBadge from "@/components/bazarr/SourceBadge";
 import { WantedItem } from "@/components/forms/MassTranslateForm";
 import { SportsSearchModal } from "@/components/modals/SportsSearchModal";
 import { useModals } from "@/modules/modals";
-import FolderMediaNotice from "@/pages/views/FolderMediaNotice";
+import { SourceManualSearchModal } from "@/pages/SourceDetail/forms";
+import SourceFilter from "@/pages/views/SourceFilter";
 import WantedView from "@/pages/views/WantedView";
 import { BuildKey } from "@/utilities";
 import { buildSubtitleLanguageKey } from "@/utilities/subtitles";
@@ -50,6 +52,20 @@ const MissingLanguages: FunctionComponent<{ row: SportsWantedRow }> = ({
 }) => {
   const modals = useModals();
   const action = useSportsAction();
+  const manual = (item: Subtitle) => {
+    if (row.origin === "source") {
+      modals.openContextModal(SourceManualSearchModal, {
+        item: { id: row.id, path: row.path, scene_name: row.sceneName ?? null },
+      });
+    } else {
+      modals.openContextModal(SportsSearchModal, {
+        item: row,
+        language: item.code2,
+        hi: item.hi,
+        forced: item.forced,
+      });
+    }
+  };
   return (
     <Group gap="sm">
       {row.missing_subtitles.map((item, idx) => (
@@ -59,24 +75,21 @@ const MissingLanguages: FunctionComponent<{ row: SportsWantedRow }> = ({
           key={BuildKey(idx, item.code2)}
           style={{ cursor: "pointer" }}
           onClick={() =>
-            action.mutate({
-              path: `/events/${row.id}/automatic`,
-              owner: row.arr_instance_id,
-              // The full key, not the bare code. The automatic path matches
-              // this against the profile's missing list, which stores the
-              // variant ("hu:hi"), so a bare "hu" is refused as no eligible
-              // language and the click downloads nothing.
-              language: buildSubtitleLanguageKey(item),
-            })
+            row.origin === "source"
+              ? manual(item)
+              : action.mutate({
+                  path: `/events/${row.id}/automatic`,
+                  owner: row.arr_instance_id,
+                  // The full key, not the bare code. The automatic path matches
+                  // this against the profile's missing list, which stores the
+                  // variant ("hu:hi"), so a bare "hu" is refused as no eligible
+                  // language and the click downloads nothing.
+                  language: buildSubtitleLanguageKey(item),
+                })
           }
           onContextMenu={(event) => {
             event.preventDefault();
-            modals.openContextModal(SportsSearchModal, {
-              item: row,
-              language: item.code2,
-              hi: item.hi,
-              forced: item.forced,
-            });
+            manual(item);
           }}
         >
           <Language.Text value={item}></Language.Text>
@@ -87,11 +100,12 @@ const MissingLanguages: FunctionComponent<{ row: SportsWantedRow }> = ({
 };
 
 const WantedSportsView: FunctionComponent = () => {
-  const { activity, arrEnabled, isLoading } = useSportsAvailability();
-  const [params] = useSearchParams();
-  const owner = params.get("instance")
-    ? Number(params.get("instance"))
-    : undefined;
+  const { activity, arrEnabled, sourceActivity, sourceSearchable, isLoading } =
+    useSportsAvailability();
+  const scope = useSportsActivityScope();
+  const { owner, includeSources, sourceKeys, labels } = scope;
+  const sourceWanted = useSportsSourceWanted();
+  const sourceSelected = scope.selected?.startsWith("source:") === true;
 
   const [search, setSearch] = useState("");
   const [audioLanguages, setAudioLanguages] = useState<string[]>([]);
@@ -114,11 +128,25 @@ const WantedSportsView: FunctionComponent = () => {
   // the Audio column speak code2, so both directions are mapped through this
   // catalogue: names become the codes the rows carry, and the column turns
   // those back into readable names.
-  const { data: audioLangs = [] } = useAudioLanguages(arrEnabled);
+  const { data: audioLangs = [] } = useAudioLanguages(
+    arrEnabled || sourceSearchable,
+    sourceSearchable,
+  );
+  const { data: languages } = useLanguages(false, sourceSearchable);
   const langOptions = useMemo(
     () => audioLangs.map((l) => ({ value: l.code2, label: l.name })),
     [audioLangs],
   );
+  const missingLangOptions = useMemo(() => {
+    if (!sourceSearchable) return langOptions;
+    const options = new Map(
+      langOptions.map((option) => [option.value, option.label]),
+    );
+    for (const language of languages ?? []) {
+      if (language.enabled) options.set(language.code2, language.name);
+    }
+    return [...options].map(([value, label]) => ({ value, label }));
+  }, [languages, langOptions, sourceSearchable]);
   const nameToCode = useMemo(() => {
     const map = new Map<string, string>();
     for (const lang of audioLangs) map.set(lang.name, lang.code2);
@@ -131,7 +159,7 @@ const WantedSportsView: FunctionComponent = () => {
   }, [audioLangs]);
 
   const query = useSportsWantedPagination(
-    { owner },
+    { owner, includeSources, sourceKeys },
     hasActiveFilter,
     nameToCode,
   );
@@ -215,7 +243,10 @@ const WantedSportsView: FunctionComponent = () => {
             />
           );
         },
-        cell: ({ row: { index, getIsSelected, getToggleSelectedHandler } }) => {
+        cell: ({
+          row: { index, getIsSelected, getToggleSelectedHandler, getCanSelect },
+        }) => {
+          if (!getCanSelect()) return null;
           return (
             <Checkbox
               id={`table-cell-${index}`}
@@ -229,29 +260,37 @@ const WantedSportsView: FunctionComponent = () => {
       {
         header: "Name",
         accessorKey: "title",
-        cell: ({ row: { original } }) => (
-          <Group gap="xs" wrap="nowrap">
-            <Anchor
-              className={`table-primary ${tableStyles.episodeTitle}`}
-              component={Link}
-              to={`/sports/${original.league_id}?instance=${original.arr_instance_id}`}
-            >
-              {original.title}
-            </Anchor>
-            {original.release_mismatch ? <ReleaseMismatchBadge /> : null}
-          </Group>
-        ),
+        cell: ({ row: { original } }) => {
+          const link = sportsActivityLink(original);
+          return (
+            <Group gap="xs" wrap="nowrap">
+              {link ? (
+                <Anchor
+                  className={`table-primary ${tableStyles.episodeTitle}`}
+                  component={Link}
+                  to={link}
+                >
+                  {original.title}
+                </Anchor>
+              ) : (
+                <Text size="sm">{original.title}</Text>
+              )}
+              {original.release_mismatch ? <ReleaseMismatchBadge /> : null}
+            </Group>
+          );
+        },
       },
-      ...(multiInstance
+      ...(multiInstance || sourceActivity
         ? [
             {
               id: "instance",
-              header: "Instance",
+              header: sourceActivity ? "Source" : "Instance",
               cell: ({ row: { original } }) => (
-                <InstanceBadge
-                  instanceId={original.arr_instance_id}
-                  defaultId={instanceDefaultId}
-                  nameById={instanceNameById}
+                <SourceBadge
+                  row={sportsRowOwner(original)}
+                  labels={labels}
+                  defaultArr={instanceDefaultId}
+                  arrNames={instanceNameById}
                 />
               ),
             } as ColumnDef<SportsWantedRow>,
@@ -278,28 +317,51 @@ const WantedSportsView: FunctionComponent = () => {
         cell: ({ row: { original } }) => <MissingLanguages row={original} />,
       },
     ],
-    [multiInstance, instanceNameById, instanceDefaultId, codeToName],
+    [
+      multiInstance,
+      sourceActivity,
+      labels,
+      instanceNameById,
+      instanceDefaultId,
+      codeToName,
+    ],
   );
 
   const getWantedItem = useCallback(
-    (row: SportsWantedRow): WantedItem => ({
-      type: "sports",
-      sportsEventId: row.id,
-      arrInstanceId: row.arr_instance_id,
-      title: row.title,
-    }),
+    (row: SportsWantedRow): WantedItem | null =>
+      row.origin === "source"
+        ? null
+        : {
+            type: "sports",
+            sportsEventId: row.id,
+            arrInstanceId: row.arr_instance_id,
+            title: row.title,
+          },
     [],
   );
 
   const searchAll = useCallback(async () => {
     // One call per owner: the sports wanted job takes a single instance,
     // unlike the series and movies actions that sweep everything at once.
-    await Promise.all(
-      (owner ? [owner] : instanceIds).map((id) =>
-        run.mutateAsync({ path: "/wanted", owner: id }),
-      ),
-    );
-  }, [owner, instanceIds, run]);
+    const sources = (
+      sourceKeys.length ? sourceKeys : [...labels.keys()]
+    ).filter((key) => key.startsWith("source:") && key !== "source:removed");
+    const owners = sourceSelected ? [] : owner ? [owner] : instanceIds;
+    await Promise.all([
+      ...owners.map((id) => run.mutateAsync({ path: "/wanted", owner: id })),
+      ...(sources.length && owner === undefined
+        ? [sourceWanted.mutateAsync(sources)]
+        : []),
+    ]);
+  }, [
+    owner,
+    instanceIds,
+    run,
+    labels,
+    sourceSelected,
+    sourceKeys,
+    sourceWanted,
+  ]);
 
   const scanAll = useCallback(async () => {
     // Re-index from disk, which is what Scan All means on the other two pages.
@@ -315,8 +377,7 @@ const WantedSportsView: FunctionComponent = () => {
   }, [owner, instanceIds, batch]);
 
   if (isLoading) return null;
-  if (!arrEnabled && activity) return <FolderMediaNotice />;
-  if (!arrEnabled) {
+  if (!activity) {
     return (
       <Container px={0} fluid>
         <Text p="md">
@@ -342,10 +403,20 @@ const WantedSportsView: FunctionComponent = () => {
       missingLanguage={missingLanguage ?? undefined}
       onMissingLanguageChange={setMissingLanguage}
       langOptions={langOptions}
-      missingLangOptions={langOptions}
+      missingLangOptions={missingLangOptions}
       dataFilter={hasActiveFilter ? dataFilter : undefined}
       searchAll={searchAll}
       scanAll={scanAll}
+      arrActions={arrEnabled && !sourceSelected}
+      sourceFilter={
+        <SourceFilter
+          labels={labels}
+          value={scope.selected}
+          onChange={scope.onChange}
+          includeSources={sourceActivity}
+          showSingleSource={sourceActivity}
+        />
+      }
       getWantedItem={getWantedItem}
     />
   );

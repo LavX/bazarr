@@ -241,7 +241,12 @@ def delete_instance(session, instance_id):
         # The next startup would rebuild it from the signed-in account, so it is
         # removed by disconnecting from Plex rather than by a delete.
         return {'error_code': 'account_owned'}, 409
-    return _write(session, 'delete', instance_id)
+    result = _write(session, 'delete', instance_id)
+    if result[1] == 204:
+        from media_sources.schedule import refresh_tasks
+
+        refresh_tasks()
+    return result
 
 
 def probe_instance(session, instance_id, body, *, libraries=False):

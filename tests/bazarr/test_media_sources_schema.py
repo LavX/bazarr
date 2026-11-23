@@ -19,6 +19,7 @@ VERSIONS = Path(__file__).parents[2] / "migrations" / "versions"
 REVISION = "b4d1f7a39c25"
 PREVIOUS = "c3e8a1f5b972"
 POSTERS = "1f4c2a6b8d03"
+REMOVAL_KEYS = "2a7e4c8f109b"
 
 
 def _migration(revision=REVISION):
@@ -86,7 +87,8 @@ def test_the_revision_follows_the_previous_head_and_is_the_one_head():
     parent_of, heads = _heads()
     assert parent_of[REVISION] == (PREVIOUS,)
     assert parent_of[POSTERS] == (REVISION,)
-    assert heads == {POSTERS}, f"expected the media source poster revision to be the single head, found {sorted(heads)}"
+    assert parent_of[REMOVAL_KEYS] == (POSTERS,)
+    assert heads == {REMOVAL_KEYS}, f"expected the source blacklist revision to be the single head, found {sorted(heads)}"
     migration = _migration()
     assert (migration.revision, migration.down_revision) == (REVISION, PREVIOUS)
 
@@ -104,6 +106,7 @@ def test_the_migration_builds_what_the_models_build(backend, tmp_path):
         assert not set(SOURCE_TABLES) & set(sa.inspect(migrated_engine).get_table_names())
         _run(migrated_engine, _migration().upgrade)
         _run(migrated_engine, _migration(POSTERS).upgrade)
+        _run(migrated_engine, _migration(REMOVAL_KEYS).upgrade)
         built, migrated = _shape(model_engine), _shape(migrated_engine)
         for name in SOURCE_TABLES:
             for part in ("columns", "indexes", "foreign_keys", "checks", "primary"):
@@ -121,7 +124,9 @@ def test_the_migration_is_a_no_op_where_the_tables_exist_and_downgrades_cleanly(
         db.Base.metadata.create_all(engine)
         before = _shape(engine)
         _run(engine, _migration().upgrade)
+        _run(engine, _migration(REMOVAL_KEYS).upgrade)
         assert _shape(engine) == before
+        _run(engine, _migration(REMOVAL_KEYS).downgrade)
         _run(engine, _migration(POSTERS).downgrade)
         assert "poster" not in _shape(engine)["table_source_items"]["columns"]
         _run(engine, _migration().downgrade)
@@ -130,7 +135,44 @@ def test_the_migration_is_a_no_op_where_the_tables_exist_and_downgrades_cleanly(
         assert {"table_movies", "arr_instances", "media_server_instances"} <= set(sa.inspect(engine).get_table_names())
         _run(engine, _migration().upgrade)
         _run(engine, _migration(POSTERS).upgrade)
+        _run(engine, _migration(REMOVAL_KEYS).upgrade)
         assert _shape(engine) == before
+    finally:
+        cleanup()
+
+
+def test_blacklist_removal_keys_backfill_existing_rows_without_changing_snapshots(backend, tmp_path):
+    from app import database as db
+
+    engine, cleanup = make_engine(backend, tmp_path)
+    try:
+        _models_without_the_source_tables(db.Base.metadata, engine)
+        _run(engine, _migration().upgrade)
+        _run(engine, _migration(POSTERS).upgrade)
+        table = next(table for table in _migration()._tables() if table.name == 'table_source_blacklist')
+        with engine.connect() as connection:
+            for kind in ('movie', 'episode'):
+                connection.execute(sa.insert(table).values(item_kind=kind, provider='alpha', subs_id='same',
+                                                          item_title='Retained title', source_name='Removed source',
+                                                          timestamp=datetime(2026, 11, 23)))
+            before = connection.execute(sa.select(table).order_by(table.c.id)).mappings().all()
+        _run(engine, _migration(REMOVAL_KEYS).upgrade)
+        current = db.TableSourceBlacklist.__table__
+        with engine.connect() as connection:
+            rows = connection.execute(sa.select(current).order_by(current.c.id)).mappings().all()
+            keys = [row['removal_key'] for row in rows]
+            assert len(set(keys)) == 2 and all(len(key) == 32 for key in keys)
+            assert [{key: value for key, value in row.items() if key != 'removal_key'} for row in rows] == before
+        _run(engine, _migration(REMOVAL_KEYS).upgrade)
+        with engine.connect() as connection:
+            assert connection.execute(sa.select(current.c.removal_key).order_by(current.c.id)).scalars().all() == keys
+            new_id = connection.execute(sa.insert(current).values(item_kind='movie', provider='alpha', subs_id='same')) \
+                .inserted_primary_key[0]
+            assert connection.scalar(sa.select(current.c.removal_key).where(current.c.id == new_id)) not in keys
+            connection.execute(sa.delete(current).where(current.c.id == new_id))
+        _run(engine, _migration(REMOVAL_KEYS).downgrade)
+        with engine.connect() as connection:
+            assert connection.execute(sa.select(table).order_by(table.c.id)).mappings().all() == before
     finally:
         cleanup()
 
@@ -195,7 +237,7 @@ REQUIRED_COLUMNS = {
                              "source_name", "action", "description", "language", "provider", "ai_translated",
                              "score", "score_out_of", "subs_id", "subtitles_path", "timestamp", "video_path",
                              "matched", "not_matched", "upgradedFromId"},
-    "table_source_blacklist": {"id", "item_id", "source_id", "item_kind", "video_path", "item_title",
+    "table_source_blacklist": {"id", "removal_key", "item_id", "source_id", "item_kind", "video_path", "item_title",
                                "group_title", "source_name", "provider", "subs_id", "language", "timestamp"},
 }
 

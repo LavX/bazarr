@@ -173,6 +173,12 @@ class TranslationSummary:
         if not job:
             return {}
         kwargs = job.get("kwargs") or {}
+        source = kwargs.get("source")
+        if source is not None:
+            from media_sources.context import source_item_title
+
+            return {"media_type": "source", "media_id": source.item_id, "media_title": source_item_title(source),
+                    "source_language": kwargs.get("from_lang"), "target_language": kwargs.get("to_lang")}
         from subtitles.tools.translate.core.translator_utils import is_movie_media_type
 
         # Callers spell a movie "movie" or "movies"; the page is told "movie" either way.

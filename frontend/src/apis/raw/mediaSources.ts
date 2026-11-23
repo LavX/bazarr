@@ -1,11 +1,36 @@
+/* eslint-disable camelcase */
+
 import BaseApi from "./base";
 import client from "./client";
 
 export type SourceContentKind = "movie" | "series" | "sports";
 
+export interface ServerRootMapping {
+  server_path: string;
+  local_path: string;
+}
+
+export interface ServerLibraryChoice {
+  id: string;
+  name: string;
+  content_kind: SourceContentKind | null;
+  roots: (Omit<ServerRootMapping, "local_path"> & {
+    local_path: string | null;
+  })[];
+}
+
+export interface ServerLibraryDraft {
+  server_library_id: string;
+  content_kind: SourceContentKind;
+  profile_id: number | null;
+  roots: ServerRootMapping[];
+}
+
 export interface SourceLibrary {
   id: number;
   locator: string;
+  name?: string | null;
+  roots?: ServerRootMapping[];
   content_kind: SourceContentKind;
   profile_id: number | null;
   enabled: boolean;
@@ -15,16 +40,29 @@ export interface SourceLibrary {
 
 export interface MediaSource {
   id: number;
-  kind: "folder" | "jellyfin" | "emby";
+  kind: "folder" | ServerSourceKind;
+  media_server_instance_id?: string | null;
   name: string;
   enabled: boolean;
   scan_frequency_hours: number;
   libraries: SourceLibrary[];
 }
 
+export type ServerSourceKind = "jellyfin" | "emby";
+
+export function isServerSourceKind(kind: string): kind is ServerSourceKind {
+  return kind === "jellyfin" || kind === "emby";
+}
+
 export type SourceAvailability = Record<
   SourceContentKind,
-  { browsable: boolean; searchable: boolean; retained: boolean }
+  {
+    browsable: boolean;
+    searchable: boolean;
+    retained: boolean;
+    removed?: boolean;
+    retained_source_ids?: number[];
+  }
 >;
 
 interface MediaSourceList {
@@ -77,6 +115,71 @@ class MediaSourcesApi extends BaseApi {
     return this.postRaw<MediaSource>("", payload);
   }
 
+  serverLibraries(instanceId: string, signal?: AbortSignal) {
+    return this.get<{ data: ServerLibraryChoice[] }>(
+      "/server-libraries",
+      { media_server_instance_id: instanceId },
+      signal,
+    );
+  }
+
+  createServerSource(
+    kind: ServerSourceKind,
+    instanceId: string,
+    name: string,
+    library: ServerLibraryDraft,
+  ) {
+    return this.postRaw<MediaSource>("", {
+      kind,
+      media_server_instance_id: instanceId,
+      name,
+      library,
+    });
+  }
+
+  addServerLibrary(id: number, payload: ServerLibraryDraft) {
+    return this.postRaw<SourceLibrary>(`/${id}/libraries`, payload);
+  }
+
+  async validateServerRoots(
+    roots: ServerRootMapping[],
+    contentKind: SourceContentKind,
+    signal?: AbortSignal,
+  ) {
+    const { data } = await client.axios.post<Record<string, never>>(
+      `${this.prefix}/server-roots/validate`,
+      { roots, content_kind: contentKind },
+      { signal },
+    );
+    return data;
+  }
+
+  async previewServerRoots(
+    id: number,
+    libraryId: number,
+    roots: ServerRootMapping[],
+    signal?: AbortSignal,
+  ) {
+    const { data } = await client.axios.post<{ removed_items: number }>(
+      `${this.prefix}/${id}/libraries/${libraryId}/roots/preview`,
+      { roots },
+      { signal },
+    );
+    return data.removed_items;
+  }
+
+  updateServerRoots(
+    id: number,
+    libraryId: number,
+    roots: ServerRootMapping[],
+    confirmedRemoved: number,
+  ) {
+    return this.patchRaw<SourceLibrary & { job_id?: number | null }>(
+      `/${id}/libraries/${libraryId}`,
+      { roots, confirmed_removed: confirmedRemoved },
+    );
+  }
+
   update(id: number, payload: SourceSettings) {
     return this.patchRaw<MediaSource>(`/${id}`, payload);
   }
@@ -98,6 +201,13 @@ class MediaSourcesApi extends BaseApi {
 
   removeLibrary(id: number, libraryId: number) {
     return this.delete(`/${id}/libraries/${libraryId}`);
+  }
+
+  async scanLibrary(sourceId: number, libraryId: number) {
+    const { data } = await this.postRaw<{ job_id?: number | null }>(
+      `/${sourceId}/libraries/${libraryId}/scan`,
+    );
+    return data.job_id ?? null;
   }
 
   async scan(id: number) {

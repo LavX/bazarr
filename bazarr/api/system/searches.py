@@ -2,12 +2,14 @@
 
 from itertools import zip_longest
 
+import sqlalchemy as sa
 from flask_restx import Resource, Namespace, reqparse
 from unidecode import unidecode
 
 from app.config import base_url, settings
 from app.database import (TableArrInstances, TableShows, TableMovies, TableSportsLeagues,
                           database, select)
+from media_sources import repository
 
 from ..utils import authenticate, image_proxy_path_with_instance
 
@@ -32,10 +34,30 @@ def _poster_url(media, path, arr_instance_id):
     return f"{base_url}/images/{media}{path}"
 
 
+def _source_search_results(query):
+    groups, items = repository.Groups.c, repository.Items.c
+    routes = {'show': 'series', 'movie': 'movies', 'league': 'sports'}
+    media = sa.union_all(
+        select(groups.id, groups.title, groups.year, groups.poster, groups.kind).where(
+            groups.kind.in_(('show', 'league'))),
+        select(items.id, items.title, items.year, items.poster, items.kind).where(items.kind == 'movie'),
+    ).subquery()
+    rows = database.execute(select(media).order_by(media.c.title, media.c.kind, media.c.id))
+    return [
+        {
+            'id': row.id, 'title': row.title, 'year': row.year, 'poster': row.poster,
+            'origin': 'source', 'source_kind': row.kind,
+            'detail_url': f"/{routes[row.kind]}/source/{row.id}",
+        }
+        for row in rows if query in unidecode(row.title).lower()
+    ]
+
+
 @api_ns_system_searches.route('system/searches')
 class Searches(Resource):
     get_request_parser = reqparse.RequestParser()
     get_request_parser.add_argument('query', type=str, required=True, help='Series or movie name to search for')
+    get_request_parser.add_argument('sources', location='args', help='Set to 1 to include media sources')
 
     @authenticate
     @api_ns_system_searches.doc(parser=get_request_parser)
@@ -125,6 +147,9 @@ class Searches(Resource):
                     result['poster'] = _poster_url('movies', x.poster, x.arr_instance_id)
 
                 results.append(result)
+
+        if query and args.get('sources') == '1':
+            results.extend(_source_search_results(query))
 
         # sort results by how closely they match the query
         results = sorted(results, key=lambda x: _hamming_distance(query, x['title']))

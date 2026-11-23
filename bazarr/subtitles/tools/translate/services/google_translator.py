@@ -9,7 +9,7 @@ from media_servers.events import publication_callback
 from retry.api import retry
 from app.config import settings  # noqa: F401
 from ..core.translator_utils import (add_translator_info, create_process_result,
-                                     translation_write_kwargs)
+                                     record_source_translation, require_source_translation, translation_write_kwargs)
 from sonarr.history import history_log
 from radarr.history import history_log_movie
 from deep_translator import GoogleTranslator
@@ -29,7 +29,7 @@ class GoogleTranslatorService:
     def __init__(self, source_srt_file, dest_srt_file, lang_obj, to_lang, from_lang, media_type,
                  video_path, orig_to_lang, forced, hi, sonarr_series_id, sonarr_episode_id,
                  radarr_id, arr_instance_id=None, sports_operation=None, cancel=None,
-                 expected_destination_versions=()):
+                 expected_destination_versions=(), source=None, source_video_version=None):
         self.source_srt_file = source_srt_file
         self.dest_srt_file = dest_srt_file
         self.lang_obj = lang_obj
@@ -47,6 +47,8 @@ class GoogleTranslatorService:
         # unique together with it, so every media lookup below carries it.
         self.arr_instance_id = arr_instance_id
         self.sports_operation = sports_operation
+        self.source = source
+        self.source_video_version = source_video_version
         self.cancel = cancel
         # The destination's versions as the queueing sighting found them; an
         # empty tuple means this translation was not queued by an auto path and
@@ -64,10 +66,11 @@ class GoogleTranslatorService:
         try:
             with staged_subtitle_write(self.video_path, self.dest_srt_file,
                                        on_publish=publication_callback(self.media_type, self.video_path,
-                                                                       'translate', self.arr_instance_id),
+                                                                       'translate', self.arr_instance_id,
+                                                                       **({'source': self.source} if self.source else {})),
                                        source_paths=(self.source_srt_file,),
                                        before_publish=lambda: jobs_queue.update_job_progress(job_id=job_id),
-                                       allow_empty=not bool(self.sports_operation),
+                                       allow_empty=self.sports_operation is None and self.source is None,
                                        **translation_write_kwargs(self, job_id)) as temporary:
                 subs = pysubs2.load(self.source_srt_file, encoding='utf-8')
                 if not self.sports_operation:
@@ -80,6 +83,7 @@ class GoogleTranslatorService:
 
                 translated_lines = []
                 completed = set()
+                original_lines = lines_list.copy()
                 logger.debug(f'starting translation for {self.source_srt_file}')  # noqa: G004
 
                 def translate_line(line_id, subtitle_line):
@@ -137,6 +141,7 @@ class GoogleTranslatorService:
                                                                         f'malformed subtitles for {self.source_srt_file}')
                         raise
 
+                require_source_translation(self.source, original_lines, (line.plaintext for line in subs))
                 try:
                     subs.save(temporary)
                     add_translator_info(temporary, f"# Subtitles translated with Google Translate # ")  # noqa: F541
@@ -150,9 +155,10 @@ class GoogleTranslatorService:
             message = f"{language_from_alpha2(self.from_lang)} subtitles translated to {language_from_alpha3(self.to_lang)}."
             result = create_process_result(message, self.video_path, self.orig_to_lang, self.forced, self.hi, self.dest_srt_file, self.media_type,
                                            **({"sports_context": self.sports_operation.context}
-                                              if self.sports_operation else {}))
+                                              if self.sports_operation else {}),
+                                           **({"source": self.source} if self.source else {}))
 
-            if finish_translation(self, result):
+            if record_source_translation(self.source, result) or finish_translation(self, result):
                 return self.dest_srt_file
             if self.media_type == 'episode':
                 history_log(action=6, sonarr_series_id=self.sonarr_series_id, sonarr_episode_id=self.sonarr_episode_id, result=result,

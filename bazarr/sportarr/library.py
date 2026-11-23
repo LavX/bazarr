@@ -13,7 +13,7 @@ from sportarr.errors import SportsNotFound
 from subtitles.score_override import add_sports_score_overrides
 
 
-def _query():
+def leagues_query():
     counts = select(
         TableSportsEvents.league_id,
         TableSportsEvents.arr_instance_id,
@@ -55,12 +55,14 @@ def _serialize(row):
                      'missingLanguageCount': missing_count or 0}
 
 
-def list_leagues(session, arr_instance_id=None, start=0, length=100):
+def list_leagues(session, arr_instance_id=None, start=0, length=100, *, row_filter=None):
     limit = validate_page(start, length)
-    query = _query()
+    query = leagues_query()
     if arr_instance_id is not None:
         require_sportarr(session, arr_instance_id)
         query = query.where(TableSportsLeagues.arr_instance_id == arr_instance_id)
+    if row_filter is not None:
+        query = query.where(row_filter)
     total = session.execute(select(func.count()).select_from(query.subquery())).scalar_one()
     rows = session.execute(query.order_by(TableSportsLeagues.sortTitle, TableSportsLeagues.id)
                            .offset(start).limit(limit)).all()
@@ -70,7 +72,7 @@ def list_leagues(session, arr_instance_id=None, start=0, length=100):
 
 
 def get_league(session, league_id, arr_instance_id=None):
-    query = _query().where(TableSportsLeagues.id == league_id)
+    query = leagues_query().where(TableSportsLeagues.id == league_id)
     if arr_instance_id is not None:
         require_sportarr(session, arr_instance_id)
         query = query.where(TableSportsLeagues.arr_instance_id == arr_instance_id)

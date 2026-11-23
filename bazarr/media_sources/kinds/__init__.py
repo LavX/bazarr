@@ -2,7 +2,7 @@
 """What a source kind supplies to the shared scanner.
 
 A kind says what is in a library and whether that answer is complete. Everything after enumeration, the
-upsert, gone detection, the root guard, indexing and search, is shared. Today there is one kind, ``folder``.
+upsert, gone detection, the root guard, indexing and search, is shared.
 """
 from dataclasses import dataclass, field
 from typing import Callable, Iterator, Optional, Protocol
@@ -71,6 +71,12 @@ class Listing:
     skipped_names: int = 0
     #: Files directly in the root of a series or sports library: they belong to no show or league.
     ungrouped: int = 0
+    drifted: bool = False
+    seen_external_ids: set = field(default_factory=set)
+    #: Local paths claimed by more than one external item in a server listing.
+    ambiguous_paths: set = field(default_factory=set)
+    unmapped: int = 0
+    unavailable: int = 0
 
     def __iter__(self):
         return iter(self.files)
@@ -91,8 +97,14 @@ class SourceKind(Protocol):
     def series_identity(self, source, group_key) -> Optional[IdentityHints]: ...
 
 
-def get_kind(name) -> SourceKind:
+def get_kind(name, target=None) -> SourceKind:
     if name == 'folder':
         from .folder import FolderKind
         return FolderKind()
+    if name == 'jellyfin':
+        from .jellyfin import JellyfinKind
+        return JellyfinKind(target)
+    if name == 'emby':
+        from .emby import EmbyKind
+        return EmbyKind(target)
     raise UnknownSourceKind(f"No media source kind named {name!r} is available")

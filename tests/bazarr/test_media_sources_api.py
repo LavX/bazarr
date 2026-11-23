@@ -21,7 +21,7 @@ def api(source_db, monkeypatch, tmp_path, languages_loaded):
     queued = []
     for module in (scanner, service):
         monkeypatch.setattr(module.jobs_queue, "add_job_from_function",
-                            lambda name, is_progress, queued=queued: queued.append(name) or 33)
+                            lambda name, is_progress, return_existing=False, queued=queued: queued.append(name) or 33)
     # The scheduled tasks are rebuilt after every change that alters what is enabled; here that is only counted.
     refreshes = []
     monkeypatch.setattr(service, "refresh_tasks", lambda: refreshes.append(True))
@@ -46,18 +46,20 @@ def test_every_route_needs_the_api_key(api):
     assert api.client.post(ITEMS + "/1/search").status_code == 401
 
 
-def test_a_source_is_created_with_its_library_and_root(api):
+@pytest.mark.parametrize("content_kind", ["movie", "sports"])
+def test_a_source_is_created_with_its_library_and_root(api, content_kind):
     profile = add_profile(api.db, [("en", "False", "False")])
-    response = _create(api, library={"path": str(api.movies), "content_kind": "movie", "profile_id": profile},
+    response = _create(api, name=f"Local {content_kind}",
+                       library={"path": str(api.movies), "content_kind": content_kind, "profile_id": profile},
                        scan_frequency_hours=0)
 
     assert response.status_code == 201
     body = response.json
-    assert (body["kind"], body["name"], body["enabled"], body["scan_frequency_hours"]) == ("folder", "Local movies",
-                                                                                           True, 0)
+    assert (body["kind"], body["name"], body["enabled"], body["scan_frequency_hours"]) == (
+        "folder", f"Local {content_kind}", True, 0)
     (library,) = body["libraries"]
-    assert (library["content_kind"], library["locator"], library["profile_id"]) == ("movie", str(api.movies),
-                                                                                     profile)
+    assert (library["content_kind"], library["locator"], library["profile_id"]) == (
+        content_kind, str(api.movies), profile)
     assert [root["local_path"] for root in library["roots"]] == [str(api.movies)]
     assert library["roots"][0]["server_path"] is None
 
@@ -66,12 +68,11 @@ def test_a_source_is_created_with_its_library_and_root(api):
     ({"name": " "}, "A name is required"),
     ({"name": None}, "A name is required"),
     ({"library": None}, "A library is required"),
-    ({"kind": "jellyfin"}, "No media source kind"),
+    ({"kind": "jellyfin"}, "A saved media server connection is required"),
     ({"kind": "plex"}, "No media source kind"),
     ({"library": {"path": "relative", "content_kind": "movie"}}, "must be absolute"),
     ({"library": {"path": "/definitely/not/there", "content_kind": "movie"}}, "does not exist"),
     ({"library": {"path": "{movies}", "content_kind": "music"}}, "content_kind must be one of"),
-    ({"library": {"path": "{movies}", "content_kind": "sports"}}, "Only movie and series libraries"),
     ({"library": {"path": "{movies}", "content_kind": "movie", "profile_id": 99}}, "profile does not exist"),
     ({"scan_frequency_hours": -1}, "scan_frequency_hours"),
     ({"scan_frequency_hours": "6"}, "scan_frequency_hours"),
@@ -128,6 +129,26 @@ def test_a_scan_is_queued_as_a_job_and_the_items_are_listed(api):
     assert (second["year"], second["identity_state"], second["kind"], second["subtitles"],
             second["missing_subtitles"]) == ("1999", "parsed", "movie", [], [])
     assert second["path"] == str(api.movies / "The.Matrix.1999.1080p.BluRay.x264-GRP.mkv")
+
+
+def test_public_subtitle_entries_keep_codec_and_hide_internal_versions(api):
+    from media_sources import repository, scanner
+
+    created = _create(api).json
+    recording = video(api.movies / "Film.2001.mkv")
+    scanner.run_scan(created["id"])
+    (movie,) = api.client.get(ITEMS, headers=HEADERS).json["data"]
+    original = [
+        ["en", str(recording.with_suffix(".en.srt")), 57, "subrip"],
+        ["hu:forced", str(recording.with_suffix(".srt")), 72, (10, 11, 72, 12, 13)],
+        ["fr", None, None, "ass", "French dialogue"],
+    ]
+    repository.update_item(movie["id"], api.db, subtitles=repr(original))
+    expected = [original[0], original[1][:3], original[2]]
+    (listed,) = api.client.get(ITEMS, headers=HEADERS).json["data"]
+    detail = api.client.get(f"{ITEMS}/{movie['id']}", headers=HEADERS)
+    assert detail.status_code == 200
+    assert listed["subtitles"] == detail.json["subtitles"] == expected
 
 
 def test_the_item_list_pages_and_filters(api):
@@ -384,8 +405,11 @@ def test_navigation_availability_keeps_browsing_and_searching_separate(api, cont
     from app.config import get_settings
     from media_sources import repository
 
-    assert get_settings()["media_sources"]["visible"] is False
+    assert "visible" not in get_settings()["media_sources"]
     hidden = {"browsable": False, "searchable": False, "retained": False}
+    retired = {**hidden, "retained": True}
+    if content_kind == "sports":
+        retired["removed"] = True
 
     def availability():
         response = api.client.get(SOURCES + "?availability=1", headers=HEADERS)
@@ -415,10 +439,10 @@ def test_navigation_availability_keeps_browsing_and_searching_separate(api, cont
         source_id=source_id, item_kind=item_kind, action=1, description="Downloaded"))
     api.db.execute(sa.insert(repository.Blacklist).values(source_id=source_id, item_kind=item_kind))
     assert api.client.delete(source_url, headers=HEADERS).status_code == 204
-    assert availability() == {**hidden, "retained": True}
+    assert availability() == retired
 
     api.db.execute(sa.delete(repository.History))
-    assert availability() == {**hidden, "retained": True}
+    assert availability() == retired
     api.db.execute(sa.delete(repository.Blacklist))
     assert availability() == hidden
 
@@ -576,7 +600,7 @@ def test_editing_the_roots_of_a_server_library_deletes_only_what_is_out_of_scope
     narrow = api.movies / "Only"
     narrow.mkdir()
     deleted = service.change_library_roots(created["id"], library_id, [
-        {"server_path": "/server/only", "local_path": str(narrow)}])
+        {"server_path": "/server/only", "local_path": str(narrow)}], confirmed_removed=2)
 
     # Both files that are still on disk are out of scope and deleted; the one whose path is gone is left alone,
     # so that a mount that moved can have its rows re-pathed by the next scan.

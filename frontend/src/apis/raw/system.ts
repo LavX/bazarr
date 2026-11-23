@@ -1,6 +1,12 @@
 import BaseApi from "./base";
 import client from "./client";
 
+export const sourceSearchRoute = {
+  show: "series",
+  movie: "movies",
+  league: "sports",
+} as const;
+
 /**
  * Whether a 2xx body is the settings object at all.
  *
@@ -101,9 +107,11 @@ class SystemApi extends BaseApi {
     return response;
   }
 
-  async audioLanguages() {
-    const response =
-      await this.get<{ code2: string; name: string }[]>("/languages/audio");
+  async audioLanguages(includeSources = false) {
+    const response = await this.get<{ code2: string; name: string }[]>(
+      "/languages/audio",
+      { sources: includeSources ? 1 : undefined },
+    );
     return response;
   }
 
@@ -246,8 +254,11 @@ class SystemApi extends BaseApi {
     return response.data;
   }
 
-  async search(query: string) {
-    const response = await this.get<ItemSearchResult[]>("/searches", { query });
+  async search(query: string, includeSources = false) {
+    const response = await this.get<ItemSearchResult[]>("/searches", {
+      query,
+      sources: includeSources ? 1 : undefined,
+    });
     return response;
   }
 }

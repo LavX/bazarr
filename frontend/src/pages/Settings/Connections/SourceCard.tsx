@@ -41,7 +41,7 @@ export default function SourceCard({
     source.enabled && source.libraries.some((library) => library.enabled);
   const hours = source.scan_frequency_hours;
   const runScan = () => {
-    scan.mutate(source.id, {
+    scan.mutate(source, {
       onSuccess: (jobId) =>
         showNotification({
           color: jobId === null ? "yellow" : "green",

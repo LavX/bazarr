@@ -9,6 +9,7 @@ import { refreshWhenJobFinishes } from "@/apis/hooks/jobWatch";
 import { usePaginationQuery } from "@/apis/queries/hooks";
 import { QueryKeys } from "@/apis/queries/keys";
 import api from "@/apis/raw";
+import { useDeleteBlacklistMutation } from "./blacklistMutations";
 
 const cacheMovies = (client: QueryClient, movies: Item.Movie[]) => {
   movies.forEach((item) => {
@@ -95,20 +96,34 @@ export function useMovieAction() {
   });
 }
 
-export function useMovieWantedPagination(fetchAll = false) {
+export function useMovieWantedPagination(
+  fetchAll = false,
+  sourceKeys: MediaSourceKey[] = [],
+  includeSources = false,
+) {
   return usePaginationQuery(
-    [QueryKeys.Movies, QueryKeys.Wanted],
-    (param) => api.movies.wanted(param),
-    true,
+    [QueryKeys.Movies, QueryKeys.Wanted, { sourceKeys, includeSources }],
+    (param) =>
+      api.movies.wanted(
+        {
+          ...param,
+          sourceKeys: sourceKeys.length ? sourceKeys : undefined,
+        },
+        includeSources,
+      ),
+    false,
     fetchAll,
+    true,
+    false,
+    true,
   );
 }
 
-export function useMovieBlacklist() {
+export function useMovieBlacklist(scope: Blacklist.Scope = {}) {
   return useQuery({
-    queryKey: [QueryKeys.Movies, QueryKeys.Blacklist],
-
-    queryFn: () => api.movies.blacklist(),
+    queryKey: [QueryKeys.Movies, QueryKeys.Blacklist, scope],
+    queryFn: ({ signal }) => api.movies.blacklist(scope, signal),
+    placeholderData: undefined,
   });
 }
 
@@ -139,19 +154,10 @@ export function useMovieAddBlacklist() {
 }
 
 export function useMovieDeleteBlacklist() {
-  const client = useQueryClient();
-  return useMutation({
-    mutationKey: [QueryKeys.Movies, QueryKeys.Blacklist],
-
-    mutationFn: (param: { all?: boolean; form?: FormType.DeleteBlacklist }) =>
-      api.movies.deleteBlacklist(param.all, param.form),
-
-    onSuccess: () => {
-      void client.invalidateQueries({
-        queryKey: [QueryKeys.Movies, QueryKeys.Blacklist],
-      });
-    },
-  });
+  return useDeleteBlacklistMutation(
+    [QueryKeys.Movies, QueryKeys.Blacklist],
+    (removal) => api.movies.deleteBlacklist(removal),
+  );
 }
 
 export function useMovieHistoryPagination(includeEmbedded = false) {

@@ -211,6 +211,7 @@ class Job:
         self.func = func
         self.args = args
         self.kwargs = kwargs
+        self.exclude_from_deduplication = False
         self.status = 'pending'
         self.last_run_time = datetime.now(timezone.utc)
         self.is_progress = is_progress
@@ -1347,6 +1348,8 @@ class JobsQueue:
             queues_to_check = list(self.jobs_pending_queue) + list(self.jobs_running_queue)
 
             for job in queues_to_check:
+                if job.exclude_from_deduplication:
+                    continue
                 cleaned_job_kwargs = job.kwargs.copy()
                 cleaned_job_kwargs.pop('job_id', None)
                 if (job.module == module and
@@ -1355,6 +1358,13 @@ class JobsQueue:
                         cleaned_job_kwargs == cleaned_kwargs):
                     return job
             return None
+
+    def invalidate_running_job_matches(self, module, func, matches):
+        """Keep running jobs visible, but stop treating work using outdated settings as a duplicate."""
+        with self._queue_lock:
+            for job in self.jobs_running_queue:
+                if job.module == module and job.func == func and matches(job.kwargs):
+                    job.exclude_from_deduplication = True
 
     def claim_inline_job(self, module, func, args=None, kwargs=None, job_id=None):
         """Claim an inline run of work the queue would refuse to duplicate.

@@ -32,9 +32,11 @@ import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import { ColumnDef } from "@tanstack/react-table";
 import { useArrInstanceLabels } from "@/apis/hooks/arrInstances";
 import { useAudioLanguages } from "@/apis/hooks/languages";
+import { useSourceFilter } from "@/apis/hooks/mediaSources";
 import { useInstanceName } from "@/apis/hooks/site";
 import {
   SportsLeagueRow,
+  sportsRowOwner,
   useSportsAvailability,
   useSportsLeaguesPagination,
   useSportsProfile,
@@ -45,8 +47,9 @@ import { useUpgradableItems } from "@/apis/hooks/subtitles";
 import type { ArrInstance } from "@/apis/raw/arrInstances";
 import { BatchAction, BatchItem } from "@/apis/raw/subtitles";
 import { Toolbox } from "@/components";
-import { AudioList, InstanceBadge } from "@/components/bazarr";
+import { AudioList } from "@/components/bazarr";
 import LanguageProfileName from "@/components/bazarr/LanguageProfile";
+import SourceBadge from "@/components/bazarr/SourceBadge";
 import { BatchModConfirmModal } from "@/components/forms/BatchModConfirmForm";
 import { ChangeProfileModal } from "@/components/forms/ChangeProfileForm";
 import { MassCombineModal } from "@/components/forms/MassCombineForm";
@@ -57,7 +60,6 @@ import {
 } from "@/components/forms/MassTranslateForm";
 import { SUBTITLE_TOOL_ACTIONS } from "@/constants/batch";
 import { useModals } from "@/modules/modals";
-import FolderMediaNotice from "@/pages/views/FolderMediaNotice";
 import ItemView from "@/pages/views/ItemView";
 import { LIBRARY_ROUTES } from "@/Router/mediaRoutes";
 
@@ -188,12 +190,21 @@ const LeagueRowActions: FunctionComponent<{ league: SportsLeagueRow }> = ({
 const SportarrLeagues: FunctionComponent<{ instances: ArrInstance[] }> = ({
   instances,
 }) => {
-  const { data: audioCatalogue } = useAudioLanguages();
+  const { sourceBrowsable } = useSportsAvailability();
+  const { data: audioCatalogue } = useAudioLanguages(true, sourceBrowsable);
   const nameToCode = useMemo(
     () => new Map(audioCatalogue?.map(({ name, code2 }) => [name, code2])),
     [audioCatalogue],
   );
   const modals = useModals();
+  const ownerFilter = useSourceFilter("sports", "sportarr");
+  const getInstanceValue = useCallback(
+    (item: SportsLeagueRow) =>
+      sourceBrowsable
+        ? (item.source_key ?? `arr:${item.arr_instance_id}`)
+        : String(item.arr_instance_id),
+    [sourceBrowsable],
+  );
 
   const [search, setSearch] = useState("");
   const [audioLanguages, setAudioLanguages] = useState<string[]>([]);
@@ -218,7 +229,17 @@ const SportarrLeagues: FunctionComponent<{ instances: ArrInstance[] }> = ({
     excludeLanguages.length > 0 ||
     instanceFilter.length > 0 ||
     tagFilter.length > 0;
-  const query = useSportsLeaguesPagination(hasActiveFilter, nameToCode);
+  const sourceKeys = instanceFilter.length
+    ? instanceFilter.map<MediaSourceKey>((value) =>
+        value.includes(":")
+          ? (value as MediaSourceKey)
+          : `arr:${Number(value)}`,
+      )
+    : ownerFilter.sourceKeys;
+  const query = useSportsLeaguesPagination(hasActiveFilter, nameToCode, {
+    includeSources: ownerFilter.includeSources,
+    sourceKeys,
+  });
   // The same low-score marker Series and Movies show. Sports had no way to
   // consume /api/subtitles/upgradable because the endpoint sent no sports key,
   // so a league whose subtitles would benefit from an upgrade looked identical
@@ -429,34 +450,30 @@ const SportarrLeagues: FunctionComponent<{ instances: ArrInstance[] }> = ({
     () => [
       {
         id: "selection",
-        header: ({ table }) => (
-          <Checkbox
-            aria-label="Select all"
-            id="sports-select-all"
-            indeterminate={table.getIsSomeRowsSelected()}
-            checked={table.getIsAllRowsSelected()}
-            onChange={table.getToggleAllRowsSelectedHandler()}
-          />
-        ),
-        cell: ({ row }) => (
-          <Checkbox
-            aria-label={`Select ${row.original.title}`}
-            id={`sports-select-${row.index}`}
-            checked={row.getIsSelected()}
-            onChange={row.getToggleSelectedHandler()}
-          />
-        ),
+        header: ({ table }) =>
+          instances.length > 0 && (
+            <Checkbox
+              aria-label="Select all"
+              id="sports-select-all"
+              indeterminate={table.getIsSomeRowsSelected()}
+              checked={table.getIsAllRowsSelected()}
+              onChange={table.getToggleAllRowsSelectedHandler()}
+            />
+          ),
+        cell: ({ row }) =>
+          row.getCanSelect() && (
+            <Checkbox
+              aria-label={`Select ${row.original.title}`}
+              id={`sports-select-${row.index}`}
+              checked={row.getIsSelected()}
+              onChange={row.getToggleSelectedHandler()}
+            />
+          ),
       },
       {
         id: "status",
         cell: ({ row: { original } }) => (
-          <Tooltip
-            label={
-              original.monitored
-                ? "Monitored in Sportarr"
-                : "Unmonitored in Sportarr"
-            }
-          >
+          <Tooltip label={original.monitored ? "Monitored" : "Unmonitored"}>
             <FontAwesomeIcon
               icon={original.monitored ? faBookmark : farBookmark}
             />
@@ -466,6 +483,7 @@ const SportarrLeagues: FunctionComponent<{ instances: ArrInstance[] }> = ({
       {
         id: "upgradable",
         cell: ({ row: { original } }) =>
+          original.origin !== "source" &&
           upgradableLeagueKeys.has(
             `${original.id}:${original.arr_instance_id ?? ""}`,
           ) ? (
@@ -485,7 +503,11 @@ const SportarrLeagues: FunctionComponent<{ instances: ArrInstance[] }> = ({
           <Anchor
             className="table-primary"
             component={Link}
-            to={`${LIBRARY_ROUTES.sportarr}/${original.id}?instance=${original.arr_instance_id}`}
+            to={
+              original.origin === "source"
+                ? `/sports/source/${original.id}`
+                : `${LIBRARY_ROUTES.sportarr}/${original.id}?instance=${original.arr_instance_id}`
+            }
           >
             {original.title}
           </Anchor>
@@ -501,16 +523,17 @@ const SportarrLeagues: FunctionComponent<{ instances: ArrInstance[] }> = ({
       },
       // Owning Sportarr instance, shown only when more than one is configured,
       // matching how Series and Movies label their rows.
-      ...(multiInstance
+      ...(multiInstance || sourceBrowsable
         ? [
             {
               id: "instance",
-              header: "Instance",
+              header: sourceBrowsable ? "Source" : "Instance",
               cell: ({ row: { original } }) => (
-                <InstanceBadge
-                  instanceId={original.arr_instance_id}
-                  defaultId={instanceDefaultId}
-                  nameById={instanceNameById}
+                <SourceBadge
+                  row={sportsRowOwner(original)}
+                  labels={ownerFilter.labels}
+                  defaultArr={instanceDefaultId}
+                  arrNames={instanceNameById}
                 />
               ),
             } as ColumnDef<SportsLeagueRow>,
@@ -588,21 +611,34 @@ const SportarrLeagues: FunctionComponent<{ instances: ArrInstance[] }> = ({
       },
       {
         id: "actions",
-        cell: ({ row: { original } }) => <LeagueRowActions league={original} />,
+        cell: ({ row: { original } }) =>
+          original.origin === "source" ? null : (
+            <LeagueRowActions league={original} />
+          ),
       },
     ],
     // upgradableLeagueKeys is a memoised Set, so it is stable between
     // fetches and does not rebuild the columns on every render.
-    [multiInstance, instanceDefaultId, instanceNameById, upgradableLeagueKeys],
+    [
+      instances.length,
+      multiInstance,
+      sourceBrowsable,
+      ownerFilter.labels,
+      instanceDefaultId,
+      instanceNameById,
+      upgradableLeagueKeys,
+    ],
   );
 
   return (
     <Container px={0} fluid>
-      <Toolbox>
-        <Toolbox.MutateButton icon={faSync} promise={syncLeagues}>
-          Sync Leagues
-        </Toolbox.MutateButton>
-      </Toolbox>
+      {instances.length > 0 && (
+        <Toolbox>
+          <Toolbox.MutateButton icon={faSync} promise={syncLeagues}>
+            Sync Leagues
+          </Toolbox.MutateButton>
+        </Toolbox>
+      )}
       <ItemView
         query={query}
         columns={columns}
@@ -612,12 +648,26 @@ const SportarrLeagues: FunctionComponent<{ instances: ArrInstance[] }> = ({
         onAudioLanguagesChange={setAudioLanguages}
         excludeLanguages={excludeLanguages}
         onExcludeLanguagesChange={setExcludeLanguages}
-        instanceOptions={multiInstance ? instanceOptions : undefined}
+        includeSourceAudio={sourceBrowsable}
+        instanceOptions={
+          sourceBrowsable
+            ? [...ownerFilter.labels].map(([value, label]) => ({
+                value,
+                label,
+              }))
+            : multiInstance
+              ? instanceOptions
+              : undefined
+        }
+        instanceLabel={sourceBrowsable ? "Source" : "Instance"}
+        showSingleInstance={sourceBrowsable}
+        getInstanceValue={getInstanceValue}
         instanceValues={instanceFilter}
         onInstanceValuesChange={setInstanceFilter}
         tagValues={tagFilter}
         onTagValuesChange={setTagFilter}
-        enableRowSelection
+        getRowId={(item) => `${item.origin ?? "arr"}:${item.id}`}
+        enableRowSelection={(row) => row.original.origin !== "source"}
         onSelectionChanged={setSelections}
         selectionToolbar={selectionToolbar}
         profileToolbar={profileToolbar}
@@ -628,12 +678,11 @@ const SportarrLeagues: FunctionComponent<{ instances: ArrInstance[] }> = ({
 };
 
 const Sports: FunctionComponent = () => {
-  const { instances, enabled, arrEnabled, isLoading } = useSportsAvailability();
+  const { instances, enabled, isLoading } = useSportsAvailability();
   useDocumentTitle(`Sports - ${useInstanceName()}`);
 
   if (isLoading) return null;
-  if (arrEnabled) return <SportarrLeagues instances={instances} />;
-  if (enabled) return <FolderMediaNotice />;
+  if (enabled) return <SportarrLeagues instances={instances} />;
   return (
     <Container px={0} fluid>
       <Text p="md">
