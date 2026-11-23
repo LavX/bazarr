@@ -1119,20 +1119,38 @@ describe("parseReplacementSubtitle", () => {
     },
   );
 
-  it("preserves a spaces-only WebVTT payload line", () => {
-    const content = vtt + "\n \nLeft --> right";
+  it("preserves WebVTT payload whitespace and escapes through serialization", () => {
+    const text = "Valid cue\n \n00:02.000 --&gt; bad &amp; left \t\n \t";
+    const content = vtt.replace("Valid cue", text) + "\n";
+    const parsed = parseReplacementSubtitle("vtt", content);
+    const serialized = getSerializer("vtt").serialize(parsed);
+    const expected = [{ startMs: 0, endMs: 1000, text }];
 
-    expect(parseReplacementSubtitle("vtt", content).cues).toMatchObject([
-      { text: "Valid cue\n \nLeft --> right" },
-    ]);
+    expect(parsed.cues).toMatchObject(expected);
+    expect(parseReplacementSubtitle("vtt", serialized).cues).toMatchObject(
+      expected,
+    );
   });
 
-  it("rejects a second WebVTT timing line without a cue separator", () => {
-    const secondCue = "00:02.000 --> 00:03.000\nSecond cue";
-    const content = vtt + "\n" + secondCue;
+  it.each([
+    "\n00:02.000 --> 00:03.000\nSecond cue",
+    "\n \n00:02.000 --> bad\nSecond cue",
+    "\nbad --> 00:03.000\nSecond cue",
+    "\nLeft --> right",
+  ])("rejects a literal arrow in WebVTT payload %j", (suffix) => {
+    const content = vtt + suffix;
 
     expect(getParser("vtt").parse(content).cues).toMatchObject([
-      { text: `Valid cue\n${secondCue}` },
+      { text: `Valid cue${suffix}` },
+    ]);
+    expect(() => parseReplacementSubtitle("vtt", content)).toThrow();
+  });
+
+  it("rejects a second arrow on a WebVTT timing line", () => {
+    const content = vtt.replace("00:01.000", "00:01.000 --> bad");
+
+    expect(getParser("vtt").parse(content).cues).toMatchObject([
+      { startMs: 0, endMs: 1000, text: "Valid cue" },
     ]);
     expect(() => parseReplacementSubtitle("vtt", content)).toThrow();
   });
@@ -1155,26 +1173,81 @@ describe("parseReplacementSubtitle", () => {
     ]);
   });
 
-  it.each([
+  describe.each([
     ["ass", "V4+ Styles", "Layer", "0"],
     ["ssa", "V4 Styles", "Marked", "Marked=0"],
   ] as const)(
-    "requires the declared text field for %s replacement cues",
+    "%s replacement cues",
     (format, styles, firstField, firstValue) => {
-      const header = `[${styles}]\n[Events]\nFormat: ${firstField}, Start, End, Text`;
-      const valid = `${header}\nDialogue: ${firstValue},0:00:00.00,0:00:01.00,Hello, world`;
-      const secondRow = `\nDialogue: ${firstValue},0:00:02.00,0:00:03.00`;
+      const header = `[${styles}]\n[Events]`;
 
-      expect(getParser(format).parse(valid + secondRow).cues).toHaveLength(2);
-      expect(() =>
-        parseReplacementSubtitle(format, valid + secondRow),
-      ).toThrow();
-      expect(
-        parseReplacementSubtitle(format, valid + secondRow + ",").cues,
-      ).toMatchObject([
-        { text: "Hello, world" },
-        { startMs: 2000, endMs: 3000, text: "" },
-      ]);
+      it("requires the declared text field but accepts an empty field", () => {
+        const valid = `${header}\nFormat: End, ${firstField}, sTaRt, tExT\nDialogue: 0:00:01.00,${firstValue},0:00:00.00,Hello, world`;
+        const secondRow = `\nDialogue: 0:00:03.00,${firstValue},0:00:02.00`;
+
+        expect(getParser(format).parse(valid + secondRow).cues).toHaveLength(2);
+        expect(() =>
+          parseReplacementSubtitle(format, valid + secondRow),
+        ).toThrow();
+        expect(
+          parseReplacementSubtitle(format, valid + secondRow + ",").cues,
+        ).toMatchObject([
+          { startMs: 0, endMs: 1000, text: "Hello, world" },
+          { startMs: 2000, endMs: 3000, text: "" },
+        ]);
+      });
+
+      it.each([
+        ["Start, End", "0:00:00.00,0:00:01.00", "0:00:01.00"],
+        ["Start, Stop, Text", "0:00:00.00,0:00:01.00,Hello", "Hello"],
+        [
+          "Start, End, START, Text",
+          "0:00:00.00,0:00:01.00,0:00:00.50,Hello",
+          "Hello",
+        ],
+        [
+          "Start, End, end, Text",
+          "0:00:00.00,0:00:01.00,0:00:01.50,Hello",
+          "Hello",
+        ],
+        [
+          "Start, End, Text, text",
+          "0:00:00.00,0:00:01.00,Hello,world",
+          "Hello",
+        ],
+        [
+          "Start, End, Text, Style",
+          "0:00:00.00,0:00:01.00,Hello, world,Default",
+          "Hello",
+        ],
+      ])(
+        "rejects the unsupported Format declaration %s",
+        (columns, fields, text) => {
+          const content = `${header}\nFormat: ${firstField}, ${columns}\nDialogue: ${firstValue},${fields}`;
+
+          expect(getParser(format).parse(content).cues).toMatchObject([
+            { text },
+          ]);
+          expect(() => parseReplacementSubtitle(format, content)).toThrow();
+        },
+      );
+
+      it("reloads comma-bearing and empty cues from the serializer", () => {
+        const cues = [
+          { id: "first", startMs: 0, endMs: 1000, text: "Hello, world\nAgain" },
+          { id: "empty", startMs: 2000, endMs: 3000, text: "" },
+        ];
+        const content = getSerializer(format).serialize({
+          metadata: { format, rawHeader: `[${styles}]` },
+          cues,
+        });
+        const parsed = parseReplacementSubtitle(format, content);
+
+        expect(parsed.metadata.format).toBe(format);
+        expect(parsed.cues).toMatchObject(
+          cues.map(({ startMs, endMs, text }) => ({ startMs, endMs, text })),
+        );
+      });
     },
   );
 

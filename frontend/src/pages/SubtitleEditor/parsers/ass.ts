@@ -82,21 +82,28 @@ export const assParser: SubtitleParser = {
       formatColumns = formatLine
         .replace(/^Format:\s*/, "")
         .split(",")
-        .map((c) => c.trim());
+        .map((c) => c.trim().toLowerCase());
     }
 
-    const textColIdx = formatColumns.findIndex(
-      (c) => c.toLowerCase() === "text",
-    );
-    const startColIdx = formatColumns.findIndex(
-      (c) => c.toLowerCase() === "start",
-    );
-    const endColIdx = formatColumns.findIndex((c) => c.toLowerCase() === "end");
+    const textColIdx = formatColumns.indexOf("text");
+    const startColIdx = formatColumns.indexOf("start");
+    const endColIdx = formatColumns.indexOf("end");
+    // Only the final field can contain commas.
+    const hasSupportedFormat =
+      startColIdx >= 0 &&
+      endColIdx >= 0 &&
+      textColIdx === formatColumns.length - 1 &&
+      startColIdx === formatColumns.lastIndexOf("start") &&
+      endColIdx === formatColumns.lastIndexOf("end");
 
     const cues: Cue[] = [];
 
     for (const line of eventsLines) {
       if (!line.trim().startsWith("Dialogue:")) continue;
+
+      if (strict && !hasSupportedFormat) {
+        throw new Error("Invalid ASS event format");
+      }
 
       const afterPrefix = line.replace(/^Dialogue:\s*/, "");
       // Split only up to (columns - 1) commas, because the Text field can contain commas
@@ -111,7 +118,7 @@ export const assParser: SubtitleParser = {
       }
       parts.push(remaining); // The rest is the Text column (or last column)
 
-      if (strict && textColIdx >= parts.length) {
+      if (strict && parts.length !== formatColumns.length) {
         throw new Error("Invalid ASS cue fields");
       }
 
