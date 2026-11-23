@@ -2602,8 +2602,9 @@ def test_automatic_source_translation_checks_queued_video_version(world, monkeyp
 
 @pytest.mark.parametrize(
     "old_state", ["queued", "legacy-unsigned", "legacy-pinned", "legacy-current", "awaiting-retry", "legacy-recovered",
-                  "retry-during-replacement", "legacy-removed", "planning-retry", "wanted-planning-retry",
-                  "wanted-awaiting-retry", "wanted-legacy-stale-retry"])
+                  "retry-during-replacement", "legacy-removed", "planning-retry", "engine-failure-hold",
+                  "wanted-planning-retry", "wanted-engine-failure-hold", "wanted-awaiting-retry",
+                  "wanted-legacy-stale-retry"])
 def test_runtime_queues_a_new_source_translation_for_a_replacement_recording(
         world, monkeypatch, isolated_jobs, old_state):
     from dataclasses import replace
@@ -2663,6 +2664,21 @@ def test_runtime_queues_a_new_source_translation_for_a_replacement_recording(
         if old_state in ("legacy-pinned", "legacy-current"):
             assert queue_missing_translations(source, wanted=scheduled) == {"hu"}
             assert world.db.execute(sa.select(TableTranslatorJob.id)).scalars().all() == [older_id]
+        if old_state == "engine-failure-hold":
+            from requests import HTTPError
+            from subtitles.tools.translate.runtime.dispatch import Dispatcher
+
+            def fail_engine(*args, **kwargs):
+                raise HTTPError("401 Unauthorized")
+
+            monkeypatch.setattr(Dispatcher, "_run_plugin", fail_engine)
+            assert isolated_jobs._reserve_next_job() is older and not isolated_jobs._run_job(older)
+            assert older.retryable is not True
+            assert TranslationJobs(world.db).get(older_id).state == "awaiting_retry"
+            assert queue_missing_translations(source, wanted=scheduled) == set()
+            assert not isolated_jobs.jobs_pending_queue
+            assert not result.exists()
+            return
         if old_state in ("legacy-current", "planning-retry"):
             if old_state == "planning-retry":
                 from subtitles.tools.translate.runtime.dispatch import Dispatcher
