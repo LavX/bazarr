@@ -1361,6 +1361,20 @@ describe("parseReplacementSubtitle", () => {
     },
   );
 
+  it("serializes the edited cue when an ordinary ASS raw row is compact", () => {
+    const opened = getParser("ass").parse(
+      "[V4+ Styles]\n[Events]\nFormat: Start, End, Text\n" +
+        "Dialogue: 0:00:01.00,0:00:02.00,Original",
+    );
+    opened.cues[0].startMs = 1500;
+    opened.cues[0].text = "Edited";
+
+    const saved = getSerializer("ass").serialize(opened);
+    expect(parseReplacementSubtitle("ass", saved).cues).toMatchObject([
+      { startMs: 1500, endMs: 2000, text: "Edited" },
+    ]);
+  });
+
   it("keeps SSA Marked through a normal reopen and a second save", () => {
     const content =
       "[V4 Styles]\n[Events]\nFormat: Marked, Start, End, Style, Text\n" +

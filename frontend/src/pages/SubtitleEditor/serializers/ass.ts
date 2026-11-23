@@ -43,15 +43,14 @@ function patchDialogueLine(
   startMs: number,
   endMs: number,
   text: string,
-): string {
-  // Dialogue: Layer,Start,End,Style,Name,MarginL,MarginR,MarginV,Effect,Text
-  const match = rawLine.match(/^(Dialogue:[ \t]*)([^\r\n]*)$/);
-  if (!match) return rawLine;
+): string | null {
+  // The ordinary parser already selected this row, so only match its prefix.
+  const prefix = rawLine.match(/^Dialogue:[ \t]*/)?.[0];
+  if (!prefix) return null;
 
-  const afterPrefix = match[2];
   // Split into 10 fields (last field = Text, can contain commas)
   const parts: string[] = [];
-  let remaining = afterPrefix;
+  let remaining = rawLine.slice(prefix.length);
   for (let i = 0; i < 9; i++) {
     const commaIdx = remaining.indexOf(",");
     if (commaIdx === -1) break;
@@ -60,14 +59,14 @@ function patchDialogueLine(
   }
   parts.push(remaining); // Text field (10th)
 
-  if (parts.length < 10) return rawLine; // Malformed, return as-is
+  if (parts.length < 10) return null;
 
   // Update Start (index 1), End (index 2), Text (index 9)
   parts[1] = formatAssTimestamp(startMs);
   parts[2] = formatAssTimestamp(endMs);
   parts[9] = text.replace(/\n/g, "\\N");
 
-  return match[1] + parts.join(",");
+  return prefix + parts.join(",");
 }
 
 export const assSerializer: SubtitleSerializer = {
@@ -102,10 +101,15 @@ export const assSerializer: SubtitleSerializer = {
         return `Dialogue: ${values.join(",")}`;
       }
       if (cue.rawText) {
-        // Patch the raw line with any user edits to timing/text
-        return patchDialogueLine(cue.rawText, cue.startMs, cue.endMs, cue.text);
+        const patched = patchDialogueLine(
+          cue.rawText,
+          cue.startMs,
+          cue.endMs,
+          cue.text,
+        );
+        if (patched !== null) return patched;
       }
-      // New cue: build from scratch
+      // Use the edited cue when no canonical raw row is available.
       const start = formatAssTimestamp(cue.startMs);
       const end = formatAssTimestamp(cue.endMs);
       const text = cue.text.replace(/\n/g, "\\N");
