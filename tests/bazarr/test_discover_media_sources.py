@@ -65,6 +65,38 @@ def catalog_details(monkeypatch):
     monkeypatch.setattr(metadata, "show_details", show_details)
 
 
+@pytest.fixture(scope="module")
+def source_language_modules():
+    """Import cached database references before function-scoped databases replace them."""
+    from languages import custom_lang, get_languages
+
+    return custom_lang, get_languages
+
+
+@pytest.fixture
+def source_languages(source_language_modules, source_db):
+    """Run language startup against this source database and own its lookup cache."""
+    custom_lang, get_languages = source_language_modules
+    missing = object()
+    previous = getattr(get_languages, "languages_dict", missing)
+    initialized = missing
+    try:
+        # Both modules cache the database imported before source_db replaces it.
+        # Restore those references before the test can import another consumer.
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr(get_languages, "database", source_db)
+            patch.setattr(custom_lang, "database", source_db)
+            get_languages.load_language_in_db()
+            initialized = get_languages.languages_dict
+        yield
+    finally:
+        if initialized is not missing and getattr(get_languages, "languages_dict", missing) is initialized:
+            if previous is missing:
+                del get_languages.languages_dict
+            else:
+                get_languages.languages_dict = previous
+
+
 def test_tmdb_movie_has_a_source_copy_through_details_offer_and_selection(
     authenticated_client, copy_database, catalog_details, providers, monkeypatch, tmp_path,
 ):
@@ -353,7 +385,7 @@ def test_remapped_episode_uses_only_the_selected_source_archive_member(
 
 @pytest.mark.parametrize("mode", ["pin", "defer", "sibling", "corrected", "show_only"])
 def test_scanned_episode_archive_uses_manual_numbers_and_respects_an_identity_correction(
-    authenticated_client, source_db, providers, monkeypatch, tmp_path, mode,
+    authenticated_client, source_db, providers, monkeypatch, tmp_path, mode, source_languages,
 ):
     from app import database
     from discover import metadata
@@ -596,7 +628,7 @@ def test_a_distinct_source_copy_and_arr_copy_can_share_a_row_id(
 
 
 def test_scanned_source_copies_download_the_chosen_result_and_never_substitute_a_sibling(
-    authenticated_client, source_db, catalog_provider, providers, monkeypatch, tmp_path,
+    authenticated_client, source_db, catalog_provider, providers, monkeypatch, tmp_path, source_languages,
 ):
     from app import database
     from discover import metadata
