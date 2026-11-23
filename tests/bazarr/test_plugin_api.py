@@ -1792,6 +1792,36 @@ def test_provider_rollback_restores_its_settings_section_after_credential_check(
     assert not config.settings[plugin_id].get("api_key")
 
 
+def test_legacy_provider_rollback_checks_renamed_destination_fields(client, rollback_store, monkeypatch):
+    from app import config
+    from provider_hub import service, state
+    from provider_hub.kinds.subtitle_provider import SUBTITLE_PROVIDER_KIND
+
+    plugin_id = "providerhub"
+    monkeypatch.setattr(SUBTITLE_PROVIDER_KIND, "smoke_test", lambda *args, **kwargs: None)
+    monkeypatch.setattr(config, "write_config", lambda: True)
+    monkeypatch.setitem(config.settings, plugin_id, {"endpoint": "https://original.example.test",
+                                                    "base_url": "https://current.example.test",
+                                                    "api_key": "fixture value"})
+    versions = [provider_manifest_v1(plugin_id, version, config_schema={"type": "object", "properties": {
+        "api_key": {"type": "string"}, address: {"type": "string", "format": "uri"}}})
+        for version, address in (("1.0.0", "endpoint"), ("2.0.0", "base_url"))]
+    rollback_store(plugin_id, previous=versions[0], current=versions[1])
+    before = state.load_state()
+    assert _rollback(client, plugin_id).status_code == 400
+    assert state.load_state() == before
+    config.save_settings([("settings-providerhub-api_key", "")])
+    preview = _get(client, f"/api/plugins/installations/{plugin_id}/rollback").json
+    assert preview["restores_settings"] is False and preview["blocked_reason"] is None
+    assert preview["consent"]["added"]["destinations"] == ["https://original.example.test"]
+    assert _rollback(client, plugin_id).status_code == 400
+    assert _rollback(client, plugin_id, consent=preview["consent"]["digest"]).json == {
+        "status": "waiting", "version": "1.0.0"}
+    assert service.activate_staged_installations() == [plugin_id]
+    assert config.settings[plugin_id].get("endpoint") == "https://original.example.test"
+    assert config.settings[plugin_id].get("base_url") == "https://current.example.test"
+
+
 @pytest.mark.parametrize("edit_while_queued", [False, True])
 def test_provider_rollback_rechecks_the_effective_address_before_or_after_activation(
         client, rollback_store, monkeypatch, edit_while_queued):

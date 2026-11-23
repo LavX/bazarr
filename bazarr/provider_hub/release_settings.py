@@ -125,9 +125,12 @@ def _provider_destinations(manifest, section, hub, fields) -> dict:
     from app.config import _plugin_destination_fields, _plugin_destination_reach
 
     _, _, defaults = _plugin_destination_fields(manifest)
+    declared = _declared(manifest)
     try:
+        # Only a field declared by this release contributes to its effective settings section.
         return {key: sorted(str(value) for value in _plugin_destination_reach(
-            section.get(key), key in hub, hub.get(key), defaults.get(key, ()))) for key in fields}
+            section.get(key), key in hub, hub.get(key), defaults.get(key, ()))) if key in declared else []
+                for key in fields}
     except TypeError:
         raise ValueError("The previous provider address could not be verified") from None
 
