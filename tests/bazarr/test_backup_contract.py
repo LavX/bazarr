@@ -1798,9 +1798,14 @@ def _ready_folder_restore(backup_env):
     backup._write_plugin_restore_phase(backup_env.restore_dir / backup._PLUGIN_RESTORE_PHASE, backup._DATA_READY)
 
 
+@pytest.fixture
+def no_previous_workers(monkeypatch):
+    monkeypatch.setattr("provider_hub.sandbox.sweep.previous_workers_stopped", lambda config: True)
+
+
 @pytest.mark.parametrize("unrecognized", [True, False])
 def test_a_failed_plugin_restore_keeps_the_pending_input_and_all_original_folders(
-        backup_env, monkeypatch, tmp_path, unrecognized):
+        backup_env, monkeypatch, tmp_path, unrecognized, no_previous_workers):
     import json
 
     from plugin_platform_helpers import service_manifest
@@ -1825,14 +1830,18 @@ def test_a_failed_plugin_restore_keeps_the_pending_input_and_all_original_folder
     monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(state_path))
     _ready_folder_restore(backup_env)
 
+    failures = []
+
     def rename(path, target):
         if path.name == "new" and target.name == "b" * 32:
+            failures.append(True)
             raise OSError("simulated folder replacement failure")
         return original_rename(path, target)
 
     if not unrecognized:
         monkeypatch.setattr(Path, "rename", rename)
     backup_env.module.apply_pending_plugin_restore()
+    assert failures == ([] if unrecognized else [True])
     assert backup_env.stops == [backup_env.module.EXIT_RESTORE_ERROR]
     assert pending.is_dir()
     assert (datadir.release_path(root, "alpha", "a" * 32) / "sample").read_text() == "alpha original"
@@ -1986,7 +1995,8 @@ def test_failed_manifest_history_import_keeps_the_completed_database_checkpoint(
     assert not history.exists()
 
 
-def test_a_failed_rollback_rename_leaves_the_original_for_the_next_start(backup_env, monkeypatch, tmp_path):
+def test_a_failed_rollback_rename_leaves_the_original_for_the_next_start(
+        backup_env, monkeypatch, tmp_path, no_previous_workers):
     import gc
     import json
 
@@ -2010,14 +2020,17 @@ def test_a_failed_rollback_rename_leaves_the_original_for_the_next_start(backup_
     _ready_folder_restore(backup_env)
 
     path_rename = Path.rename
+    failures = []
     with monkeypatch.context() as failure:
         def fail_replacements(path, destination):
             if destination == target and path.name in {"new", "old"}:
+                failures.append(path.name)
                 raise OSError("simulated disk failure")
             return path_rename(path, destination)
 
         failure.setattr(Path, "rename", fail_replacements)
         backup_env.module.apply_pending_plugin_restore()
+    assert failures == ["new", "old"]
     assert backup_env.stops == [backup_env.module.EXIT_RESTORE_ERROR]
     gc.collect()
     journal = target.parent / f".restore-data-{target.name}"
@@ -2031,7 +2044,7 @@ def test_a_failed_rollback_rename_leaves_the_original_for_the_next_start(backup_
 
 @pytest.mark.parametrize('after_pending_rename', [False, True])
 def test_interrupting_plugin_restore_after_commit_keeps_the_new_folder(
-        backup_env, monkeypatch, tmp_path, after_pending_rename):
+        backup_env, monkeypatch, tmp_path, after_pending_rename, no_previous_workers):
     import json
     from plugin_platform_helpers import service_manifest
     from provider_hub import datadir
@@ -2071,7 +2084,7 @@ def test_interrupting_plugin_restore_after_commit_keeps_the_new_folder(
             interruption.setattr(Path, "rename", exit_after_pending_rename)
         else:
             interruption.setattr(Path, "touch", interrupt_after_touch)
-        with pytest.raises(SystemExit):
+        with pytest.raises(SystemExit, match="41"):
             backup_env.module.apply_pending_plugin_restore()
     assert (target / "sample").read_text() == "restored"
 
