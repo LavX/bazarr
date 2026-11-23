@@ -913,25 +913,25 @@ def _start_plain(command: list, **kwargs: Any) -> "WorkerProcess":
     anchor = _start_anchor()
     try:
         if anchor is not None and activity.registry_enabled():
-            process = _start_registered_group(command, anchor.pid, **kwargs)
-        elif anchor is not None:
+            return _start_registered_group(command, anchor, **kwargs)
+        if anchor is not None:
             process = activity.start_worker(
                 lambda argv: WorkerProcess(argv, process_group=anchor.pid, **kwargs), command, group=anchor.pid)
+            process._anchor = anchor
+            process._anchor_mark = _start_mark(anchor.pid)
         else:
             process = activity.start_worker(lambda argv: WorkerProcess(argv, start_new_session=True, **kwargs), command)
+        return process
     except BaseException:
         if anchor is not None:
             # Let the anchor end the group before collecting it. An error
             # can land after the worker received its launch acknowledgement.
             _finish_anchor(anchor, lifeline_only=True)
         raise
-    process._anchor = anchor
-    if anchor is not None:
-        process._anchor_mark = _start_mark(anchor.pid)
-    return process
 
 
-def _start_registered_group(command, group, **kwargs):
+def _start_registered_group(command, anchor, **kwargs):
+    group = anchor.pid
     read_fd, write_fd = os.pipe()
     try:
         launcher = [sys.executable, "-I", "-S", "-B", "-c", _ANCHORED_WORKER_SCRIPT,
@@ -939,6 +939,8 @@ def _start_registered_group(command, group, **kwargs):
         pass_fds = (*kwargs.pop("pass_fds", ()), read_fd)
         process = activity.start_worker(
             lambda argv: WorkerProcess(argv, process_group=group, pass_fds=pass_fds, **kwargs), launcher, group=group)
+        process._anchor = anchor
+        process._anchor_mark = _start_mark(group)
         os.write(write_fd, b"1")
         return process
     finally:

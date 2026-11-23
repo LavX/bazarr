@@ -612,7 +612,20 @@ def test_posix_interruption_after_the_child_starts_never_reaches_plugin_code(mon
     monkeypatch.setattr(activity, "_owner", "second-run")
     assert activity.previous_workers_stopped(tmp_path)
 
-    monkeypatch.setattr(spawn, "WorkerProcess", original_worker)
+    class RecordingWorker(original_worker):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            processes.append(self)
+
+    real_write = os.write
+
+    def acknowledge(fd, data):
+        if data == b"1":
+            assert processes[-1]._anchor.pid == processes[-1].activity_group
+        return real_write(fd, data)
+
+    monkeypatch.setattr(spawn, "WorkerProcess", RecordingWorker)
+    monkeypatch.setattr(os, "write", acknowledge)
     process = spawn._start_plain(command, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     try:
         assert process.wait(timeout=5) == 0
