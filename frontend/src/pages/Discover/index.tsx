@@ -34,8 +34,7 @@ import { useAppTitle, useEnabledStatus } from "@/apis/hooks/site";
 import { useDiscover } from "@/contexts/Discover";
 import {
   discoverPageKey,
-  recentEpisodeMismatch,
-  searchSelection,
+  discoverSearchEligibility,
 } from "@/contexts/discoverState";
 import DigitalReleases from "./DigitalReleases";
 import DiscoverSelect from "./DiscoverSelect";
@@ -498,8 +497,8 @@ export default function Discover() {
   ]);
   const searching = state.status === "searching";
   const searched = snapshot !== null || state.status === "failed";
-  const recentMismatch = recentEpisodeMismatch(state);
-  const canSearch = searchSelection(draft) !== null && !recentMismatch;
+  const { recentMismatch, selection } = discoverSearchEligibility(state);
+  const canSearch = selection !== null;
   const submit = (event: FormEvent) => {
     event.preventDefault();
     if (!searching && canSearch) void findSubtitles(searched);

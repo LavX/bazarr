@@ -6,6 +6,7 @@ import { beforeEach, expect, it, vi } from "vitest";
 import { METADATA_QUERY_KEY } from "@/apis/hooks/discover";
 import queryClient from "@/apis/queries";
 import { DiscoverSetupReturn } from "@/contexts/Discover";
+import * as searchJob from "@/contexts/searchJob";
 import { AllProviders } from "@/providers";
 import { act, rawRender, screen, waitFor } from "@/tests";
 import { discoverSearchJob } from "@/tests/discoverSearchJob";
@@ -884,6 +885,7 @@ it.each([
     localStorage.setItem("bazarr.discover.subtitle-language", "eng");
     const detailsPending = Promise.withResolvers<void>();
     const searchPending = Promise.withResolvers<void>();
+    const following = vi.spyOn(searchJob, "followSearch");
     server.use(
       http.get(
         "/api/discover/metadata/shows/100/seasons/2/episodes/1",
@@ -950,7 +952,11 @@ it.each([
         const find = screen.getByRole("button", { name: "Find subtitles" });
         if (blocksSearch) expect(find).toBeDisabled();
         else expect(find).toBeEnabled();
-        await act(async () => searchPending.resolve());
+        searchPending.resolve();
+        await waitFor(() => expect(following).toHaveBeenCalledTimes(1));
+        await act(async () => {
+          await Promise.allSettled([following.mock.results[0].value]);
+        });
         expect(
           screen.queryByRole("heading", { name: "accepted episode subtitle" }),
         ).not.toBeInTheDocument();
@@ -958,6 +964,7 @@ it.each([
     } finally {
       detailsPending.resolve();
       searchPending.resolve();
+      following.mockRestore();
     }
   },
 );

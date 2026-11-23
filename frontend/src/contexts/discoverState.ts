@@ -354,21 +354,30 @@ export function copyTargetKey(draft: DiscoverDraft): string {
   ]);
 }
 
-export function discoverContextKey(draft: DiscoverDraft): string {
+type DiscoverSearchInput = Pick<DiscoverState, "browsing" | "draft">;
+
+export function discoverSearchEligibility(state: DiscoverSearchInput) {
+  const recentMismatch = recentEpisodeMismatch(state);
+  return {
+    recentMismatch,
+    selection: recentMismatch ? null : searchSelection(state.draft),
+  };
+}
+
+export function discoverContextKey(state: DiscoverSearchInput): string {
+  const { draft } = state;
   if (draft.mode === "release")
     return JSON.stringify([
       "release",
       (draft.query ?? "").trim(),
       draft.language,
     ]);
-  if (draft.mediaType === "episode" && draft.manualConfirmed) {
-    const selection = searchSelection(draft);
-    if (selection) {
-      // A late episode response changes the revision only if it changes the
-      // request or makes the selection invalid.
-      const { episode_identity: identity, ...request } = selection;
-      return JSON.stringify([request, episodeIdentityKey(identity)]);
-    }
+  const { recentMismatch, selection } = discoverSearchEligibility(state);
+  if (draft.mediaType === "episode" && draft.manualConfirmed && selection) {
+    // A late episode response can invalidate the search even when it would
+    // leave the request body unchanged, if the feed now needs reconciliation.
+    const { episode_identity: identity, ...request } = selection;
+    return JSON.stringify([request, episodeIdentityKey(identity)]);
   }
   return JSON.stringify([
     draft.mediaType,
@@ -390,12 +399,32 @@ export function discoverContextKey(draft: DiscoverDraft): string {
     // feedback and pending responses all belong to the copy that was chosen.
     draft.copyId ?? null,
     draft.copyId ? (draft.copyTmdbId ?? null) : null,
+    recentMismatch,
   ]);
+}
+
+export function mergeDiscoverBrowsing(
+  browsing: DiscoverBrowsing,
+  changes: Partial<DiscoverBrowsing>,
+): DiscoverBrowsing {
+  return {
+    ...browsing,
+    ...(changes.selectedId != null
+      ? { releaseContext: null, recentContext: null, manualSearch: false }
+      : {}),
+    ...((changes.selectedSeason !== undefined &&
+      changes.selectedSeason !== browsing.selectedSeason) ||
+    (changes.selectedEpisode !== undefined &&
+      changes.selectedEpisode !== browsing.selectedEpisode)
+      ? { recentContext: null }
+      : {}),
+    ...changes,
+  };
 }
 
 type DiscoverAction =
   | { type: "restore"; state: DiscoverState; generation: number }
-  | { type: "browsing"; changes: Partial<DiscoverBrowsing> }
+  | { type: "browsing"; browsing: DiscoverBrowsing; generation: number }
   | {
       type: "draft";
       draft: DiscoverDraft;
@@ -491,23 +520,6 @@ export function discoverReducer(
       preview: saved.preview?.status === "pending" ? null : saved.preview,
     };
   }
-  if (action.type === "browsing")
-    return {
-      ...state,
-      browsing: {
-        ...state.browsing,
-        ...(action.changes.selectedId != null
-          ? { releaseContext: null, recentContext: null, manualSearch: false }
-          : {}),
-        ...((action.changes.selectedSeason !== undefined &&
-          action.changes.selectedSeason !== state.browsing.selectedSeason) ||
-        (action.changes.selectedEpisode !== undefined &&
-          action.changes.selectedEpisode !== state.browsing.selectedEpisode)
-          ? { recentContext: null }
-          : {}),
-        ...action.changes,
-      },
-    };
   if (action.type === "clear") {
     return {
       ...initialDiscoverState(),
@@ -515,15 +527,24 @@ export function discoverReducer(
       generation: action.generation,
     };
   }
-  if (action.type === "draft") {
+  if (action.type === "draft" || action.type === "browsing") {
+    const draft = action.type === "draft" ? action.draft : state.draft;
+    const browsing =
+      action.type === "browsing" ? action.browsing : state.browsing;
     const changed =
-      discoverContextKey(state.draft) !== discoverContextKey(action.draft);
+      (draft !== state.draft ||
+        browsing.recentContext !== state.browsing.recentContext) &&
+      discoverContextKey(state) !== discoverContextKey({ draft, browsing });
+    const cached = action.type === "draft" ? action.cached : undefined;
     return {
       ...state,
-      draft: action.draft,
+      draft,
+      browsing,
       generation: action.generation,
-      storageAvailable: action.storageAvailable,
-      languageSeeded: action.languageSeeded ?? state.languageSeeded,
+      ...(action.type === "draft" && {
+        storageAvailable: action.storageAvailable,
+        languageSeeded: action.languageSeeded ?? state.languageSeeded,
+      }),
       ...(changed
         ? ({
             snapshot: null,
@@ -533,19 +554,19 @@ export function discoverReducer(
             download: null,
             preview: null,
             retiredResultIds: [],
-            ...(action.cached
+            ...(cached
               ? {
-                  snapshot: action.cached.snapshot,
-                  status: action.cached.snapshot?.status ?? "unsearched",
+                  snapshot: cached.snapshot,
+                  status: cached.snapshot?.status ?? "unsearched",
                   download:
-                    action.cached.download?.status === "pending"
+                    cached.download?.status === "pending"
                       ? null
-                      : action.cached.download,
+                      : cached.download,
                   preview:
-                    action.cached.preview?.status === "pending"
+                    cached.preview?.status === "pending"
                       ? null
-                      : action.cached.preview,
-                  retiredResultIds: action.cached.retiredResultIds,
+                      : cached.preview,
+                  retiredResultIds: cached.retiredResultIds,
                 }
               : {}),
           } as const)
@@ -597,7 +618,7 @@ export function discoverReducer(
   if (action.type === "preview") {
     const { feedback } = action;
     if (
-      action.key !== discoverContextKey(state.draft) ||
+      action.key !== discoverContextKey(state) ||
       (feedback.status !== "pending" &&
         state.preview?.requestId !== feedback.requestId) ||
       !offeredResults(state).some(
@@ -625,7 +646,7 @@ export function discoverReducer(
     };
   }
   if (action.type === "download") {
-    if (action.key !== discoverContextKey(state.draft)) return state;
+    if (action.key !== discoverContextKey(state)) return state;
     const { feedback } = action;
     if (
       feedback.status !== "pending" &&
@@ -656,7 +677,7 @@ export function discoverReducer(
   }
   if (
     action.generation !== state.generation ||
-    action.key !== discoverContextKey(state.draft)
+    action.key !== discoverContextKey(state)
   )
     return state;
   if (action.type === "failure") {
@@ -716,9 +737,7 @@ export function discoverReducer(
   };
 }
 
-export function recentEpisodeMismatch(
-  state: Pick<DiscoverState, "browsing" | "draft">,
-): boolean {
+function recentEpisodeMismatch(state: DiscoverSearchInput): boolean {
   const item = state.browsing.recentContext?.item;
   if (!item || state.draft.mode === "release") return false;
   const episode = state.draft.episodeIdentity;

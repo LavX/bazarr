@@ -41,11 +41,11 @@ import {
   discoverContextKey,
   DiscoverDraft,
   discoverReducer,
+  discoverSearchEligibility,
   DiscoverState,
   initialDiscoverState,
+  mergeDiscoverBrowsing,
   offeredResults,
-  recentEpisodeMismatch,
-  searchSelection,
 } from "./discoverState";
 import { followSearch, SearchJobFailed, stopSearchJob } from "./searchJob";
 
@@ -121,7 +121,8 @@ export function DiscoverProvider({ children }: PropsWithChildren) {
   const searchJobs = useRef(
     new Map<number, { jobId: number; session?: string }>(),
   );
-  const draft = useRef(state.draft);
+  // Search admission uses both inputs, including updates in the same batch.
+  const searchInput = useRef({ draft: state.draft, browsing: state.browsing });
   const currentState = useRef(state);
   currentState.current = state;
   const downloadSequence = useRef(0);
@@ -159,7 +160,8 @@ export function DiscoverProvider({ children }: PropsWithChildren) {
         generation.current += 1;
         downloadSequence.current += 1;
         previewSequence.current += 1;
-        draft.current = initialDiscoverState().draft;
+        const { draft, browsing } = initialDiscoverState();
+        searchInput.current = { draft, browsing };
         dispatch({ type: "clear", generation: generation.current });
         reset();
         resetDownload();
@@ -205,13 +207,14 @@ export function DiscoverProvider({ children }: PropsWithChildren) {
     if (
       entry.state.snapshot === null &&
       (live.snapshot !== null || live.status === "searching") &&
-      discoverContextKey(live.draft) === discoverContextKey(entry.state.draft)
+      discoverContextKey(live) === discoverContextKey(entry.state)
     )
       return true;
     generation.current += 1;
     downloadSequence.current += 1;
     previewSequence.current += 1;
-    draft.current = entry.state.draft;
+    const { draft, browsing } = entry.state;
+    searchInput.current = { draft, browsing };
     dispatch({
       type: "restore",
       state: entry.state,
@@ -222,31 +225,32 @@ export function DiscoverProvider({ children }: PropsWithChildren) {
 
   const updateDraft = useCallback(
     (update: DraftUpdate) => {
-      const changes =
-        typeof update === "function" ? update(draft.current) : update;
+      const currentInput = searchInput.current;
+      const { draft } = currentInput;
+      const changes = typeof update === "function" ? update(draft) : update;
       if (!changes) return;
-      const merged = { ...draft.current, ...changes };
+      const merged = { ...draft, ...changes };
       // A copy belongs to one exact target. Retiring it here, rather than in
       // every caller, is what keeps a stale choice from surviving a change of
       // film or episode. The comparison is unconditional: a caller that
       // changes the target and supplies a copy in the same update is supplying
       // a copy for a target that no longer exists, so the copy loses.
       const next =
-        copyTargetKey(merged) === copyTargetKey(draft.current)
+        copyTargetKey(merged) === copyTargetKey(draft)
           ? merged
           : { ...merged, copyId: undefined };
-      const nextKey = discoverContextKey(next);
-      const changed = nextKey !== discoverContextKey(draft.current);
+      const nextInput = { ...currentInput, draft: next };
+      const oldKey = discoverContextKey(currentInput);
+      const nextKey = discoverContextKey(nextInput);
+      const changed = nextKey !== oldKey;
       if (changed) {
         const current = currentState.current;
         if (
           authenticated.current &&
           current.sessionId === state.sessionId &&
           current.snapshot &&
-          discoverContextKey(current.draft) ===
-            discoverContextKey(draft.current)
+          discoverContextKey(current) === oldKey
         ) {
-          const oldKey = discoverContextKey(current.draft);
           searches.current.delete(oldKey);
           searches.current.set(oldKey, { savedAt: Date.now(), state: current });
           while (searches.current.size > 20)
@@ -256,7 +260,7 @@ export function DiscoverProvider({ children }: PropsWithChildren) {
         downloadSequence.current += 1;
         previewSequence.current += 1;
       }
-      draft.current = next;
+      searchInput.current = nextInput;
       let storageAvailable = state.storageAvailable;
       if (changes.language !== undefined) {
         // Whether the write landed is what decides the session-only notice
@@ -288,11 +292,12 @@ export function DiscoverProvider({ children }: PropsWithChildren) {
   );
 
   const seedLanguage = useCallback((language: string) => {
-    if (!language || draft.current.language) return;
-    draft.current = { ...draft.current, language };
+    if (!language || searchInput.current.draft.language) return;
+    const draft = { ...searchInput.current.draft, language };
+    searchInput.current = { ...searchInput.current, draft };
     dispatch({
       type: "draft",
-      draft: draft.current,
+      draft,
       generation: generation.current,
       storageAvailable: currentState.current.storageAvailable,
       languageSeeded: true,
@@ -304,15 +309,14 @@ export function DiscoverProvider({ children }: PropsWithChildren) {
       refresh = false,
       captured?: { context: SearchContext; key: string },
     ) => {
-      if (!captured && recentEpisodeMismatch(currentState.current)) return;
-      // A recovery search reuses the context it captured, so the key it files
-      // results under travels with that context instead of being recomputed
-      // from the draft. If the two have drifted apart the results would belong
-      // to a context the reader has already left, so nothing is filed at all.
-      const key = captured?.key ?? discoverContextKey(draft.current);
-      if (key !== discoverContextKey(draft.current)) return;
-      const context = captured?.context ?? searchSelection(draft.current);
-      if (!context) return;
+      const input = searchInput.current;
+      const { selection: eligibleSelection } = discoverSearchEligibility(input);
+      if (!eligibleSelection) return;
+      // A recovery search can reuse its captured context while the current
+      // selection is still eligible and has the same key.
+      const key = discoverContextKey(input);
+      if (captured && captured.key !== key) return;
+      const context = captured?.context ?? eligibleSelection;
       const attempt = ++generation.current;
       // A seeded language becomes the remembered one the first time it is
       // actually used for a search; a chosen language was written when chosen.
@@ -432,7 +436,7 @@ export function DiscoverProvider({ children }: PropsWithChildren) {
         owner.download?.status === "pending"
       )
         return;
-      const key = discoverContextKey(draft.current);
+      const key = discoverContextKey(searchInput.current);
       const requestId = ++downloadSequence.current;
       const feedback: DiscoverDownloadFeedback = {
         requestId,
@@ -444,7 +448,7 @@ export function DiscoverProvider({ children }: PropsWithChildren) {
       dispatch({ type: "download", key, feedback });
       const stillCurrent = () =>
         requestId === downloadSequence.current &&
-        key === discoverContextKey(draft.current) &&
+        key === discoverContextKey(searchInput.current) &&
         offeredResults(currentState.current).some(
           (candidate) =>
             candidate.id === row.id && candidate.search_id === row.search_id,
@@ -890,7 +894,7 @@ export function DiscoverProvider({ children }: PropsWithChildren) {
         owner.retiredResultIds.includes(row.id)
       )
         return;
-      const key = discoverContextKey(draft.current);
+      const key = discoverContextKey(searchInput.current);
       const requestId = ++previewSequence.current;
       const feedback: DiscoverPreviewFeedback = {
         requestId,
@@ -902,7 +906,7 @@ export function DiscoverProvider({ children }: PropsWithChildren) {
       dispatch({ type: "preview", key, feedback });
       const stillCurrent = () =>
         requestId === previewSequence.current &&
-        key === discoverContextKey(draft.current) &&
+        key === discoverContextKey(searchInput.current) &&
         offeredResults(currentState.current).some(
           (candidate) =>
             candidate.id === row.id && candidate.search_id === row.search_id,
@@ -964,11 +968,21 @@ export function DiscoverProvider({ children }: PropsWithChildren) {
     [fetchPreview],
   );
 
-  const updateBrowsing = useCallback(
-    (changes: Partial<DiscoverBrowsing>) =>
-      dispatch({ type: "browsing", changes }),
-    [],
-  );
+  const updateBrowsing = useCallback((changes: Partial<DiscoverBrowsing>) => {
+    const currentInput = searchInput.current;
+    const browsing = mergeDiscoverBrowsing(currentInput.browsing, changes);
+    const nextInput = { ...currentInput, browsing };
+    if (
+      browsing.recentContext !== currentInput.browsing.recentContext &&
+      discoverContextKey(nextInput) !== discoverContextKey(currentInput)
+    ) {
+      generation.current += 1;
+      downloadSequence.current += 1;
+      previewSequence.current += 1;
+    }
+    searchInput.current = nextInput;
+    dispatch({ type: "browsing", browsing, generation: generation.current });
+  }, []);
 
   const value = useMemo(
     () => ({
