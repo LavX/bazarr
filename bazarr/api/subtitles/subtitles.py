@@ -6,6 +6,7 @@ from contextlib import nullcontext
 import sys
 
 from flask_restx import Resource, Namespace, reqparse, fields, marshal
+from sqlalchemy.exc import OperationalError
 
 from app.database import (TableArrInstances, TableShows, TableEpisodes, TableMovies, TableSportsEvents,
                           database, select)
@@ -887,6 +888,8 @@ def _embedded_ocr_action(args, language, hi, forced, media_type, media_id, arr_i
 
 
 def _score_override_integer(value):
+    if type(value) is float and value.is_integer():
+        return int(value)
     if type(value) not in (int, str):
         raise ValueError("A whole number is required")
     return int(value)
@@ -927,6 +930,7 @@ class SubtitleScoreOverride(Resource):
                                     "subtitlesPath, and a score from 0 to 100")
     @api_ns_subtitles.response(401, "Not Authenticated")
     @api_ns_subtitles.response(404, "Media not found, or the path is not listed for it")
+    @api_ns_subtitles.response(409, "The sports event changed. Please retry.")
     def post(self):
         """Pin a manual score on one listed external subtitle"""
         args = self.post_request_parser.parse_args()
@@ -945,6 +949,7 @@ class SubtitleScoreOverride(Resource):
         if score is None or not 0 <= score <= 100:
             return "The score must be a percentage from 0 to 100.", 400
         if sports_event_id is not None:
+            from sportarr.db import error_sqlstate
             from sportarr.errors import SportsNotFound
             from sportarr.workflows import require_sports_enabled
 
@@ -956,6 +961,10 @@ class SubtitleScoreOverride(Resource):
                 return str(exc), 404
             except ValueError as exc:
                 return str(exc), 400
+            except OperationalError as exc:
+                if error_sqlstate(exc) not in ('40001', '40P01'):
+                    raise
+                return "The sports event changed. Please retry.", 409
             return '', 204
 
         media, item_id = ("movie", movie_id) if movie_id is not None else ("episode", episode_id)

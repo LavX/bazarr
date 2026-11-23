@@ -30,6 +30,10 @@ from subliminal_patch.score import MAX_SCORES
 MANUAL_SCORE_ACTION = 9
 
 
+def manual_score_percent(score, score_out_of):
+    return round(score * 100 / score_out_of)
+
+
 def newer_sports_file_history(actions):
     """A newer history row for the same sports subtitle file."""
     history = TableHistorySports
@@ -67,8 +71,8 @@ def add_sports_score_overrides(session, events):
             (subtitle[0], subtitle[1]) == (row.language, row.subtitles_path)
             for subtitle in event['subtitles'] if subtitle and len(subtitle) >= 2 and subtitle[1]
         ):
-            event.setdefault('manual_subtitle_scores', {})[row.subtitles_path] = round(
-                row.score * 100 / row.score_out_of)
+            event.setdefault('manual_subtitle_scores', {})[row.subtitles_path] = manual_score_percent(
+                row.score, row.score_out_of)
 
 
 def _listed_language(listing, subtitles_path):
@@ -88,10 +92,13 @@ def _set_sports_score_override(database, event_id, subtitles_path, score_percent
     from sportarr.db import sports_transaction
     from sportarr.errors import SportsNotFound
     from sportarr.identity import resolve_event_in_session
-    from sportarr.subtitles import reverse_path
+    from sportarr.sync.leagues import require_sportarr
+    from utilities.path_mappings import apply_sports_mapping, read_sports_mappings
 
     with sports_transaction(database) as session:
         context = resolve_event_in_session(session, event_id, arr_instance_id)
+        # Event sync and publication both lock the owner before the event.
+        instance = require_sportarr(session, context.arr_instance_id)
         row = session.execute(
             select(TableSportsEvents.subtitles)
             .where(TableSportsEvents.id == context.event_id,
@@ -107,7 +114,8 @@ def _set_sports_score_override(database, event_id, subtitles_path, score_percent
         try:
             language = _listed_language(row.subtitles, subtitles_path)
         except ValueError:
-            subtitles_path = reverse_path(context, subtitles_path, session)
+            subtitles_path = apply_sports_mapping(
+                subtitles_path, read_sports_mappings(instance.path_mappings), reverse=True)
             try:
                 language = _listed_language(row.subtitles, subtitles_path)
             except ValueError as exc:

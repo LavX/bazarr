@@ -35,6 +35,8 @@ from sportarr.output import (
     validate_output_path,
 )
 from sportarr.sync.leagues import require_sportarr
+from subtitles.score_override import MANUAL_SCORE_ACTION, newer_sports_file_history
+from subtitles.wanted.utils import FILE_REPLACING_ACTIONS
 from utilities.path_mappings import apply_sports_mapping, read_sports_mappings
 
 # Bounded: the owner tables are busy for as long as one arr write takes, not
@@ -358,7 +360,7 @@ def sports_history(
     return row
 
 
-def _remove_superseded_sports_subtitle(path, previous_artifact, written_paths, is_upgrade,
+def _remove_superseded_sports_subtitle(path, previous_artifact, written_paths,
                                       on_publish=None):
     """Delete the subtitle an upgrade replaced, when it lands under a new name.
 
@@ -375,7 +377,7 @@ def _remove_superseded_sports_subtitle(path, previous_artifact, written_paths, i
     A removed file is handed to ``on_publish``; the caller decides when the
     media servers hear about it.
     """
-    if not (is_upgrade and previous_artifact and written_paths):
+    if not (previous_artifact and written_paths):
         return
     previous_path = previous_artifact[0]
     if not previous_path:
@@ -396,6 +398,29 @@ def _remove_superseded_sports_subtitle(path, previous_artifact, written_paths, i
         return
     if on_publish is not None:
         on_publish(previous_path)
+
+
+def _validate_upgrade_score_pins(session, context, mappings, *paths):
+    from sportarr.artifacts import ReplacementDestinationChanged
+
+    targets = {os.path.normcase(os.path.realpath(path)) for path in paths if path}
+    history = TableHistorySports
+    pins = session.execute(
+        select(history.subtitles_path).where(
+            history.event_id == context.event_id,
+            history.arr_instance_id == context.arr_instance_id,
+            history.video_path == context.original_path,
+            history.action == MANUAL_SCORE_ACTION,
+            history.subtitles_path.is_not(None),
+            ~newer_sports_file_history(FILE_REPLACING_ACTIONS + (MANUAL_SCORE_ACTION,)),
+        )
+    ).scalars()
+    for pin in pins:
+        pinned_path = apply_sports_mapping(pin, mappings)
+        if os.path.normcase(os.path.realpath(pinned_path)) in targets:
+            raise ReplacementDestinationChanged(
+                "Upgrade skipped because the subtitle has a manual score"
+            )
 
 
 @contextmanager
@@ -466,6 +491,7 @@ def save_sports_subtitle(
     )
 
     pending_replacement = replacement_state is not None
+    pending_upgrade = is_upgrade
     publication_destination = None
 
     def validate(destination=None):
@@ -477,20 +503,33 @@ def save_sports_subtitle(
 
     @contextmanager
     def publication_guard():
-        nonlocal pending_replacement
-        with sports_publication(candidate, cancel) as publication:
+        nonlocal pending_replacement, pending_upgrade
+        with sports_publication(candidate, cancel) as (session, check):
+            if pending_upgrade:
+                # Format and language tags can change the path selected by the saver.
+                _validate_upgrade_score_pins(
+                    session, context, read_sports_mappings(instance.path_mappings),
+                    publication_destination, previous_artifact[0] if previous_artifact else None,
+                )
             if pending_replacement:
                 from sportarr.artifacts import validate_replacement_state
 
                 validate_replacement_state(replacement_state, publication_destination)
-            yield publication
+            yield session, check
+            if pending_upgrade:
+                # Keep the owner and event locked over both the write and the old-file removal.
+                _remove_superseded_sports_subtitle(
+                    path, previous_artifact, written_paths,
+                    on_publish=lambda removed: changes.append(("delete", removed)),
+                )
+        pending_upgrade = False
         pending_replacement = False
 
     with (
         _publish_after_release(path, context.arr_instance_id) as changes,
         subtitle_write_locks(path, destination, cancel=cancel),
     ):
-        validate()
+        instance = validate()
         if pending_replacement:
             from sportarr.artifacts import validate_replacement_state
 
@@ -540,10 +579,6 @@ def save_sports_subtitle(
             except Exception:
                 logging.exception(
                     "BAZARR could not clear the sports release-type mismatch after a save")
-            _remove_superseded_sports_subtitle(
-                path, previous_artifact, written_paths, is_upgrade,
-                on_publish=lambda removed: changes.append(("delete", removed)),
-            )
             state["published"] = True
             phase = "processing"
             state[phase] = "running"

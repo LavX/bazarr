@@ -27,7 +27,7 @@ from sportarr.subtitles import (
     sports_history,
 )
 from subtitles.language_profiles import profile_item_language_code
-from subtitles.score_override import MANUAL_SCORE_ACTION
+from subtitles.score_override import MANUAL_SCORE_ACTION, manual_score_percent
 from subtitles.wanted.utils import FILE_REPLACING_ACTIONS
 from utilities.path_mappings import apply_sports_mapping, read_sports_mappings
 from subtitles.tools.subsync_engines import (
@@ -514,17 +514,20 @@ def _source_score_below_threshold(context, source_lang, source_path=None):
     preserves the upload exemption for the same file.
 
     ``source_path`` is the file the translation will read. The records that
-    count are the ones stored for that file, matched through the instance's path
-    mapping: a language prefix alone also takes in the records of a ``hu:forced``
-    or ``hu:hi`` file, and an upload of one of those says nothing about a plain
-    ``hu`` download. Without a path every record of the language counts.
+    count belong to the event's current video and are stored for that file,
+    matched through the instance's path mapping. A language prefix also takes
+    in the records of a ``hu:forced`` or ``hu:hi`` file. An upload of either
+    says nothing about a plain ``hu`` download. Without a subtitle path every
+    record of the language for the current video counts.
     """
     from app.database import TableHistorySports
 
     rows = database.execute(
-        select(TableHistorySports.score, TableHistorySports.action, TableHistorySports.subtitles_path)
+        select(TableHistorySports.score, TableHistorySports.score_out_of,
+               TableHistorySports.action, TableHistorySports.subtitles_path)
         .where(TableHistorySports.event_id == context.event_id)
         .where(TableHistorySports.arr_instance_id == context.arr_instance_id)
+        .where(TableHistorySports.video_path == context.original_path)
         .where(TableHistorySports.language.like(f"{source_lang}%"))
         .where(
             TableHistorySports.score.is_not(None)
@@ -551,7 +554,9 @@ def _source_score_below_threshold(context, source_lang, source_path=None):
                     if origin.action == 4 or origin_index < index:
                         return False
                     break
-        pct = round((record.score / MAX_SCORES["movie"]) * 100, 1)
+            pct = manual_score_percent(record.score, record.score_out_of or MAX_SCORES["movie"])
+        else:
+            pct = round((record.score / MAX_SCORES["movie"]) * 100, 1)
         return pct < settings.translator.min_source_score
     return False
 

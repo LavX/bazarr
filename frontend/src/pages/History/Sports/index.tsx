@@ -197,12 +197,22 @@ const SportsHistoryView: FunctionComponent = () => {
       {
         header: "Info",
         accessorKey: "description",
-        cell: ({ row: { original } }) =>
-          original.description ? (
-            <TextPopover text={original.description}>
+        cell: ({ row: { original } }) => {
+          const {
+            action,
+            description,
+            subtitles_path: subtitlesPath,
+          } = original;
+          const text =
+            action === 9 && subtitlesPath
+              ? [description, subtitlesPath].filter(Boolean).join(" ")
+              : description;
+          return text ? (
+            <TextPopover text={text}>
               <FontAwesomeIcon size="sm" icon={faInfoCircle} />
             </TextPopover>
-          ) : null,
+          ) : null;
+        },
       },
       {
         header: "Upgradable",

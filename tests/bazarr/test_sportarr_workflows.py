@@ -2119,6 +2119,63 @@ def test_sports_score_pin_blocks_only_its_file_until_a_newer_provider_download(
         assert list_events(session, 51, 1)["data"][0].get("manual_subtitle_scores", {}) == {}
 
 
+@pytest.mark.parametrize('pin', ['destination', 'candidate-during-search', 'other-file'])
+def test_sports_upgrade_protects_pins_at_the_actual_publication_path(workflow_library, monkeypatch, pin):
+    from datetime import datetime, timedelta
+
+    from app.config import settings
+    from app.database import TableHistorySports, TableSportsEvents
+    from sportarr.artifacts import capture_artifact
+    from sportarr.identity import resolve_event_in_session
+    from sportarr.subtitles import candidate_signature
+    from subtitles import score_override
+
+    automatic, _, workflows, _, session, folder = workflow_library
+    monkeypatch.setattr(score_override, 'event_stream', lambda **kwargs: None)
+    monkeypatch.setattr(settings.general, 'upgrade_subs', True)
+    monkeypatch.setattr(settings.general, 'days_to_upgrade_subs', 30)
+    assert automatic.search_event(61, 1)['downloads'] == 1
+    candidate = session.execute(sa.select(TableHistorySports)).scalar_one()
+    destination = folder / '1/event.en.srt'
+    previous = destination.with_suffix('.ass')
+    destination.rename(previous)
+    previous_bytes = previous.read_bytes()
+    pinned = folder / '1/event.alt.en.srt' if pin == 'other-file' else destination
+    pinned.write_text('1\n00:00:00,000 --> 00:00:01,000\nOriginal sidecar\n')
+    original = pinned.read_bytes()
+    context = resolve_event_in_session(session, 61, 1)
+    candidate.subtitles_path = '/sports/event.en.ass'
+    candidate.artifact = capture_artifact(context, str(previous), candidate_signature(context, session))
+    candidate.score = 1
+    candidate.timestamp = datetime.now() - timedelta(hours=1)
+    listing = str([['en', f'/sports/{item.name}', 100] for item in (previous, pinned)])
+    session.get(TableSportsEvents, 61).subtitles = listing
+    session.commit()
+
+    def pin_file(subtitles_path):
+        score_override.set_score_override(session, 'sports', 61, subtitles_path, 0)
+
+    if pin == 'candidate-during-search':
+        provider_result = automatic._provider_result
+
+        def pin_during_search(*args, **kwargs):
+            session.get(TableSportsEvents, 61).subtitles = listing
+            pin_file(candidate.subtitles_path)
+            return provider_result(*args, **kwargs)
+
+        monkeypatch.setattr(automatic, '_provider_result', pin_during_search)
+    else:
+        pin_file(f'/sports/{pinned.name}')
+
+    result = workflows.upgrade_sports_subtitles(job_id='score-pin-publication', arr_instance_id=1)
+    assert pinned.read_bytes() == original
+    assert [item['downloads'] for item in result['data']] == [int(pin == 'other-file')]
+    if pin == 'other-file':
+        assert not previous.exists()
+    else:
+        assert previous.read_bytes() == previous_bytes
+
+
 def test_an_older_history_row_is_not_flagged_upgradable(workflow_library, monkeypatch):
     """The flag has to agree with the run, or it promises an upgrade forever.
 

@@ -4,7 +4,7 @@ the one the lookup reads, and an empty subtitles path is refused."""
 
 import pytest
 from flask import Flask
-from sqlalchemy import select
+from sqlalchemy import event, select
 
 from app.database import (
     TableEpisodes,
@@ -42,7 +42,8 @@ def _manual_rows(session):
     ).all()
 
 
-def test_score_override_reads_the_item_of_the_instance_named(score_api):
+@pytest.mark.parametrize('owner,score', [(2, 40), (2.0, 40.0)])
+def test_score_override_reads_the_item_of_the_instance_named(score_api, owner, score):
     """Two instances each hold a movie with radarr id 7. The request names
     instance 2, so the row must be the one of instance 2 and not the first
     match on the upstream id."""
@@ -75,9 +76,9 @@ def test_score_override_reads_the_item_of_the_instance_named(score_api):
         ROOT,
         json={
             "radarrMovieId": 7,
-            "arr_instance_id": 2,
+            "arr_instance_id": owner,
             "subtitlesPath": "/movies/b.en.srt",
-            "score": 40,
+            "score": score,
         },
         headers=HEADERS,
     )
@@ -612,6 +613,54 @@ def test_sports_score_override_stores_the_owned_mapped_file_on_the_movie_scale(
     assert list_events(session, 52, 2)["data"][0]["manual_subtitle_scores"] == expected
     assert get_event(session, 61, 1).get("manual_subtitle_scores", {}) == {}
     assert list_events(session, 51, 1)["data"][0].get("manual_subtitle_scores", {}) == {}
+
+
+def test_mapped_sports_score_locks_owner_before_event(sports_score_api):
+    from app.database import TableArrInstances, TableSportsEvents
+
+    client, session = sports_score_api
+    locked = []
+
+    def capture_lock(state):
+        statement = state.statement
+        if state.is_select and statement._for_update_arg is not None:
+            locked.append(statement.column_descriptions[0]['entity'])
+
+    event.listen(session, 'do_orm_execute', capture_lock)
+    try:
+        response = client.post(ROOT, json={
+            'sportsEventId': 62, 'subtitlesPath': '/mapped/sports/2/event.en.srt', 'score': 40,
+        }, headers=HEADERS)
+    finally:
+        event.remove(session, 'do_orm_execute', capture_lock)
+
+    assert response.status_code == 204
+    assert locked == [TableArrInstances, TableSportsEvents]
+
+
+def test_a_concurrent_sports_event_change_returns_a_conflict(sports_score_api):
+    from app.database import TableHistorySports
+    from sqlalchemy.exc import OperationalError
+
+    client, session = sports_score_api
+
+    class ConcurrentUpdate(Exception):
+        pgcode = '40001'
+
+    def reject_history_insert(state):
+        if state.is_insert:
+            raise OperationalError(None, None, ConcurrentUpdate())
+
+    event.listen(session, 'do_orm_execute', reject_history_insert)
+    try:
+        response = client.post(ROOT, json={
+            'sportsEventId': 62, 'subtitlesPath': '/mapped/sports/2/event.en.srt', 'score': 40,
+        }, headers=HEADERS)
+    finally:
+        event.remove(session, 'do_orm_execute', reject_history_insert)
+
+    assert response.status_code == 409
+    assert session.execute(select(TableHistorySports)).all() == []
 
 
 @pytest.mark.parametrize("changes,status", [
