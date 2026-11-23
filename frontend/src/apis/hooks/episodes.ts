@@ -133,12 +133,30 @@ export function useEpisodeDeleteBlacklist() {
   });
 }
 
-export function useEpisodeHistoryPagination(includeEmbedded = false) {
+export function useEpisodeHistoryPagination(
+  includeEmbedded = false,
+  options: History.PageOptions = {},
+  enabled = true,
+) {
   return usePaginationQuery(
-    [QueryKeys.Series, QueryKeys.Episodes, QueryKeys.History, includeEmbedded],
+    [
+      QueryKeys.Series,
+      QueryKeys.Episodes,
+      QueryKeys.History,
+      includeEmbedded,
+      options,
+    ],
     (param) =>
-      api.episodes.history({ ...param, include_embedded: includeEmbedded }),
+      api.episodes.history({
+        ...param,
+        includeEmbedded,
+        ...options,
+      }),
     false,
+    false,
+    enabled,
+    false,
+    true,
   );
 }
 

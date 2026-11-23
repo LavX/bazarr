@@ -80,7 +80,7 @@ export function mediaSourceErrorMessage(error: unknown, fallback: string) {
   return fallback;
 }
 
-function isSourceKey(value: string | null): value is MediaSourceKey {
+export function isSourceKey(value: string | null): value is MediaSourceKey {
   return (
     value === "source:removed" ||
     (value !== null &&

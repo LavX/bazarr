@@ -65,9 +65,13 @@ export function usePaginationQuery<
   const urlPage =
     Number.isFinite(rawPage) && rawPage >= 1 ? Math.floor(rawPage) - 1 : 0;
   const [page, setIndex] = useState(urlPage);
-  useEffect(() => {
+  const [lastUrlPage, setLastUrlPage] = useState(urlPage);
+  if (lastUrlPage !== urlPage) {
+    // A filter can change its scope and clear the URL page in one navigation.
+    // Apply that page before committing a request for the new scope.
+    setLastUrlPage(urlPage);
     setIndex(urlPage);
-  }, [urlPage]);
+  }
 
   // The global setting is the default; a per-table selection (null = unset)
   // overrides it so the same size drives the fetch, page count and clamp.

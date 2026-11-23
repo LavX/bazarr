@@ -68,12 +68,18 @@ class MovieApi extends BaseApi {
     return response;
   }
 
-  async history(params: Parameter.Range & { include_embedded?: boolean }) {
-    const response = await this.get<DataWrapperWithTotal<History.Movie>>(
-      "/history",
-      params,
-    );
-    return response;
+  async history({
+    includeEmbedded,
+    includeSources,
+    sourceKeys,
+    ...params
+  }: History.Range) {
+    return this.get<History.Page<History.MovieRow>>("/history", {
+      ...params,
+      include_embedded: includeEmbedded,
+      sources: includeSources ? 1 : undefined,
+      source_key: sourceKeys,
+    });
   }
 
   async historyBy(id: number) {

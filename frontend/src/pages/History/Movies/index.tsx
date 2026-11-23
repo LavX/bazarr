@@ -2,48 +2,65 @@
 import { FunctionComponent, useMemo, useState } from "react";
 import { Link } from "react-router";
 import { Anchor, Badge, Group, Switch, Text } from "@mantine/core";
-import {
-  faFileExcel,
-  faInfoCircle,
-  faRecycle,
-} from "@fortawesome/free-solid-svg-icons";
-import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
+import { faFileExcel } from "@fortawesome/free-solid-svg-icons";
 import { CellContext, ColumnDef } from "@tanstack/react-table";
 import { useMovieAddBlacklist, useMovieHistoryPagination } from "@/apis/hooks";
 import { MutateAction } from "@/components/async";
-import { HistoryIcon } from "@/components/bazarr";
 import HistoryProvider from "@/components/bazarr/HistoryProvider";
 import Language from "@/components/bazarr/Language";
+import SourceBadge from "@/components/bazarr/SourceBadge";
 import PlayOnMenu from "@/components/PlayOnMenu";
 import StateIcon from "@/components/StateIcon";
 import TextPopover from "@/components/TextPopover";
+import {
+  HistoryAction,
+  historyAnchors,
+  HistoryInfo,
+  HistoryUpgrade,
+} from "@/pages/History/HistoryCells";
+import { useHistorySources } from "@/pages/History/sourceHistory";
 import HistoryView from "@/pages/views/HistoryView";
+import SourceFilter from "@/pages/views/SourceFilter";
 
 // Defined once, so the columns being rebuilt never remount an open menu.
-const MoviePlayCell = ({ row }: CellContext<History.Movie, unknown>) => (
-  <PlayOnMenu
-    mediaType="movie"
-    id={row.original.id}
-    itemLabel={row.original.title}
-    variant="action"
-  />
-);
+const MoviePlayCell = ({ row }: CellContext<History.MovieRow, unknown>) =>
+  row.original.origin === "source" ? null : (
+    <PlayOnMenu
+      mediaType="movie"
+      id={row.original.id}
+      itemLabel={row.original.title}
+      variant="action"
+    />
+  );
 
 const MoviesHistoryView: FunctionComponent = () => {
   const addToBlacklist = useMovieAddBlacklist();
+  const [includeEmbedded, setIncludeEmbedded] = useState(false);
+  const sources = useHistorySources("movie", "radarr");
+  const query = useMovieHistoryPagination(
+    includeEmbedded,
+    sources.options,
+    sources.enabled,
+  );
+  const labels = sources.getLabels(query.data);
+  const { names: arrNames, defaultId: defaultArr } = sources.arrOwners;
+  const showBadge = sources.showBadge || labels.size > 0;
+  const rows = query.data?.data;
+  const anchors = useMemo(() => historyAnchors(rows ?? []), [rows]);
 
-  const columns = useMemo<ColumnDef<History.Movie>[]>(
+  const columns = useMemo<ColumnDef<History.MovieRow>[]>(
     () => [
       {
         id: "action",
-        cell: ({ row }) => (
-          <HistoryIcon action={row.original.action}></HistoryIcon>
-        ),
+        cell: ({ row: { original } }) => <HistoryAction row={original} />,
       },
       {
         header: "Name",
         accessorKey: "title",
         cell: ({ row }) => {
+          if (row.original.origin === "source") {
+            return row.original.item_title || row.original.video_path;
+          }
           const target = `/movies/${row.original.id}`;
           return (
             <Anchor className="table-primary" component={Link} to={target}>
@@ -53,6 +70,22 @@ const MoviesHistoryView: FunctionComponent = () => {
         },
       },
       { id: "play", cell: MoviePlayCell },
+      ...(showBadge
+        ? [
+            {
+              header: "Source",
+              id: "source",
+              cell: ({ row: { original } }) => (
+                <SourceBadge
+                  row={original}
+                  labels={labels}
+                  arrNames={arrNames}
+                  defaultArr={defaultArr}
+                />
+              ),
+            } satisfies ColumnDef<History.MovieRow>,
+          ]
+        : []),
       {
         header: "Language",
         accessorKey: "language",
@@ -127,41 +160,24 @@ const MoviesHistoryView: FunctionComponent = () => {
       {
         header: "Info",
         accessorKey: "description",
-        cell: ({
-          row: {
-            original: { description },
-          },
-        }) => {
-          return (
-            <TextPopover text={description}>
-              <FontAwesomeIcon size="sm" icon={faInfoCircle}></FontAwesomeIcon>
-            </TextPopover>
-          );
-        },
+        cell: ({ row: { original } }) => <HistoryInfo row={original} />,
       },
       {
         header: "Upgradable",
         accessorKey: "upgradable",
-        cell: ({
-          row: {
-            original: { upgradable },
-          },
-        }) => {
-          if (upgradable) {
-            return (
-              <TextPopover text="This Subtitle File Is Eligible For An Upgrade.">
-                <FontAwesomeIcon size="sm" icon={faRecycle}></FontAwesomeIcon>
-              </TextPopover>
-            );
-          } else {
-            return null;
-          }
-        },
+        cell: ({ row: { original } }) => (
+          <HistoryUpgrade row={original} anchors={anchors} />
+        ),
       },
       {
         header: "Excluded",
         accessorKey: "blacklisted",
         cell: ({ row }) => {
+          if (row.original.origin === "source") {
+            return row.original.blacklisted ? (
+              <Text size="sm">Excluded</Text>
+            ) : null;
+          }
           const {
             blacklisted,
             radarrId,
@@ -197,14 +213,8 @@ const MoviesHistoryView: FunctionComponent = () => {
         },
       },
     ],
-    [addToBlacklist],
+    [addToBlacklist, anchors, arrNames, defaultArr, labels, showBadge],
   );
-
-  // Embedded Source rows (media state, not events) are hidden by default;
-  // the switch asks the API to include them.
-  const [includeEmbedded, setIncludeEmbedded] = useState(false);
-
-  const query = useMovieHistoryPagination(includeEmbedded);
 
   return (
     <HistoryView
@@ -213,6 +223,12 @@ const MoviesHistoryView: FunctionComponent = () => {
       columns={columns}
       toolbar={
         <Group justify="flex-end" mb="xs">
+          <SourceFilter
+            labels={labels}
+            value={sources.selected}
+            onChange={sources.onChange}
+            showSingle={!sources.sourceOnly}
+          />
           <Switch
             label="Show Embedded Source records"
             checked={includeEmbedded}

@@ -6,14 +6,14 @@ import { useAppTitle } from "@/apis/hooks/site";
 import { UsePaginationQueryResult } from "@/apis/queries/hooks";
 import { QueryPageTable } from "@/components";
 
-interface Props<T extends History.Base> {
+interface Props<T extends object> {
   name: string;
   query: UsePaginationQueryResult<T>;
   columns: ColumnDef<T>[];
   toolbar?: ReactNode;
 }
 
-function HistoryView<T extends History.Base = History.Base>({
+function HistoryView<T extends object>({
   columns,
   name,
   query,

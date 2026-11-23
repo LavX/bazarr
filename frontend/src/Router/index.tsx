@@ -184,7 +184,7 @@ export function useRoutes(): CustomRouteObject[] {
             icon: faClock,
             name: "History",
             path: "history",
-            hidden: !sonarr && !radarr && !sportsActivity,
+            hidden: !seriesActivity && !movieActivity && !sportsActivity,
             children: [
               {
                 path: "sports",
@@ -195,22 +195,28 @@ export function useRoutes(): CustomRouteObject[] {
               {
                 path: "series",
                 name: "Episodes",
-                hidden: !sonarr,
-                element: (
-                  <ArrMediaRoute kind="sonarr">
+                hidden: !seriesActivity,
+                element:
+                  !sonarr && seriesActivity ? (
                     <SeriesHistoryView />
-                  </ArrMediaRoute>
-                ),
+                  ) : (
+                    <ArrMediaRoute kind="sonarr">
+                      <SeriesHistoryView />
+                    </ArrMediaRoute>
+                  ),
               },
               {
                 path: "movies",
                 name: "Movies",
-                hidden: !radarr,
-                element: (
-                  <ArrMediaRoute kind="radarr">
+                hidden: !movieActivity,
+                element:
+                  !radarr && movieActivity ? (
                     <MoviesHistoryView />
-                  </ArrMediaRoute>
-                ),
+                  ) : (
+                    <ArrMediaRoute kind="radarr">
+                      <MoviesHistoryView />
+                    </ArrMediaRoute>
+                  ),
               },
               {
                 // Statistics lived here through 2.6, so old bookmarks point at it.

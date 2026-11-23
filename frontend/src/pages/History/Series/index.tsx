@@ -2,58 +2,70 @@
 import { FunctionComponent, useMemo, useState } from "react";
 import { Link } from "react-router";
 import { Anchor, Badge, Group, Switch, Text } from "@mantine/core";
-import {
-  faFileExcel,
-  faInfoCircle,
-  faRecycle,
-} from "@fortawesome/free-solid-svg-icons";
-import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
+import { faFileExcel } from "@fortawesome/free-solid-svg-icons";
 import { CellContext, ColumnDef } from "@tanstack/react-table";
 import {
   useEpisodeAddBlacklist,
   useEpisodeHistoryPagination,
 } from "@/apis/hooks";
 import { MutateAction } from "@/components/async";
-import { HistoryIcon } from "@/components/bazarr";
 import HistoryProvider from "@/components/bazarr/HistoryProvider";
 import Language from "@/components/bazarr/Language";
+import SourceBadge from "@/components/bazarr/SourceBadge";
 import PlayOnMenu from "@/components/PlayOnMenu";
 import StateIcon from "@/components/StateIcon";
 import TextPopover from "@/components/TextPopover";
+import {
+  HistoryAction,
+  historyAnchors,
+  HistoryInfo,
+  HistoryUpgrade,
+} from "@/pages/History/HistoryCells";
+import { useHistorySources } from "@/pages/History/sourceHistory";
 import HistoryView from "@/pages/views/HistoryView";
+import SourceFilter from "@/pages/views/SourceFilter";
 import { episodeCodeOf } from "@/utilities/episodes";
 
 // Defined once, so the columns being rebuilt never remount an open menu.
 const EpisodePlayCell = ({
   row: { original },
-}: CellContext<History.Episode, unknown>) => (
-  <PlayOnMenu
-    mediaType="episode"
-    id={original.id}
-    itemLabel={`${original.seriesTitle} ${episodeCodeOf(original.episode_number)}`}
-    variant="action"
-  />
-);
+}: CellContext<History.EpisodeRow, unknown>) =>
+  original.origin === "source" ? null : (
+    <PlayOnMenu
+      mediaType="episode"
+      id={original.id}
+      itemLabel={`${original.seriesTitle} ${episodeCodeOf(original.episode_number)}`}
+      variant="action"
+    />
+  );
 
 const SeriesHistoryView: FunctionComponent = () => {
   const addToBlacklist = useEpisodeAddBlacklist();
+  const [includeEmbedded, setIncludeEmbedded] = useState(false);
+  const sources = useHistorySources("series", "sonarr");
+  const query = useEpisodeHistoryPagination(
+    includeEmbedded,
+    sources.options,
+    sources.enabled,
+  );
+  const labels = sources.getLabels(query.data);
+  const { names: arrNames, defaultId: defaultArr } = sources.arrOwners;
+  const showBadge = sources.showBadge || labels.size > 0;
+  const rows = query.data?.data;
+  const anchors = useMemo(() => historyAnchors(rows ?? []), [rows]);
 
-  const columns = useMemo<ColumnDef<History.Episode>[]>(
+  const columns = useMemo<ColumnDef<History.EpisodeRow>[]>(
     () => [
       {
         id: "action",
-        cell: ({ row: { original } }) => (
-          <HistoryIcon action={original.action}></HistoryIcon>
-        ),
+        cell: ({ row: { original } }) => <HistoryAction row={original} />,
       },
       {
         header: "Series",
         accessorKey: "seriesTitle",
-        cell: ({
-          row: {
-            original: { seriesTitle, series_id: seriesId },
-          },
-        }) => {
+        cell: ({ row: { original } }) => {
+          if (original.origin === "source") return original.group_title;
+          const { seriesTitle, series_id: seriesId } = original;
           const target = `/series/${seriesId}`;
 
           return (
@@ -71,14 +83,30 @@ const SeriesHistoryView: FunctionComponent = () => {
       {
         header: "Title",
         accessorKey: "episodeTitle",
-        cell: ({
-          row: {
-            original: { episodeTitle },
-          },
-        }) => {
-          return <Text className="table-no-wrap">{episodeTitle}</Text>;
-        },
+        cell: ({ row: { original } }) => (
+          <Text className="table-no-wrap">
+            {original.origin === "source"
+              ? original.item_title || original.video_path
+              : original.episodeTitle}
+          </Text>
+        ),
       },
+      ...(showBadge
+        ? [
+            {
+              header: "Source",
+              id: "source",
+              cell: ({ row: { original } }) => (
+                <SourceBadge
+                  row={original}
+                  labels={labels}
+                  arrNames={arrNames}
+                  defaultArr={defaultArr}
+                />
+              ),
+            } satisfies ColumnDef<History.EpisodeRow>,
+          ]
+        : []),
       {
         header: "Language",
         accessorKey: "language",
@@ -153,41 +181,24 @@ const SeriesHistoryView: FunctionComponent = () => {
       {
         header: "Info",
         accessorKey: "description",
-        cell: ({
-          row: {
-            original: { description },
-          },
-        }) => {
-          return (
-            <TextPopover text={description}>
-              <FontAwesomeIcon size="sm" icon={faInfoCircle}></FontAwesomeIcon>
-            </TextPopover>
-          );
-        },
+        cell: ({ row: { original } }) => <HistoryInfo row={original} />,
       },
       {
         header: "Upgradable",
         accessorKey: "upgradable",
-        cell: ({
-          row: {
-            original: { upgradable },
-          },
-        }) => {
-          if (upgradable) {
-            return (
-              <TextPopover text="This Subtitle File Is Eligible For An Upgrade.">
-                <FontAwesomeIcon size="sm" icon={faRecycle}></FontAwesomeIcon>
-              </TextPopover>
-            );
-          } else {
-            return null;
-          }
-        },
+        cell: ({ row: { original } }) => (
+          <HistoryUpgrade row={original} anchors={anchors} />
+        ),
       },
       {
         header: "Excluded",
         accessorKey: "blacklisted",
         cell: ({ row }) => {
+          if (row.original.origin === "source") {
+            return row.original.blacklisted ? (
+              <Text size="sm">Excluded</Text>
+            ) : null;
+          }
           const {
             sonarrEpisodeId,
             sonarrSeriesId,
@@ -224,14 +235,8 @@ const SeriesHistoryView: FunctionComponent = () => {
         },
       },
     ],
-    [addToBlacklist],
+    [addToBlacklist, anchors, arrNames, defaultArr, labels, showBadge],
   );
-
-  // Embedded Source rows (media state, not events) are hidden by default;
-  // the switch asks the API to include them.
-  const [includeEmbedded, setIncludeEmbedded] = useState(false);
-
-  const query = useEpisodeHistoryPagination(includeEmbedded);
 
   return (
     <HistoryView
@@ -240,6 +245,12 @@ const SeriesHistoryView: FunctionComponent = () => {
       columns={columns}
       toolbar={
         <Group justify="flex-end" mb="xs">
+          <SourceFilter
+            labels={labels}
+            value={sources.selected}
+            onChange={sources.onChange}
+            showSingle={!sources.sourceOnly}
+          />
           <Switch
             label="Show Embedded Source records"
             checked={includeEmbedded}

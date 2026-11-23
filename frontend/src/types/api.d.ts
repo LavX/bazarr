@@ -331,6 +331,45 @@ declare namespace History {
       episode_number: string;
     };
 
+  type SourceOwner = {
+    origin: "source";
+    source_key: MediaSourceKey;
+    source_id: number | null;
+    source_name: string | null;
+    source_kind: Wanted.SourceRow["source_kind"] | null;
+  };
+
+  type UpgradeLink = {
+    upgradedFromId?: number | null;
+    original_id?: number | null;
+  };
+
+  type SourceRow = Omit<Base, "monitored" | "description" | "subtitles_path"> &
+    SourceOwner &
+    UpgradeLink & {
+      id: number | null;
+      item_id: number | null;
+      item_title: string | null;
+      group_title: string | null;
+      video_path: string | null;
+      description: string | null;
+      subtitles_path: string | null;
+      history_id: number;
+    };
+
+  type MovieRow = (Movie & Wanted.ArrRow & UpgradeLink) | SourceRow;
+  type EpisodeRow =
+    | (Episode & Wanted.ArrRow & UpgradeLink)
+    | (SourceRow & { episode_number: string | null });
+
+  type PageOptions = {
+    includeSources?: boolean;
+    sourceKeys?: MediaSourceKey[];
+  };
+
+  type Range = Parameter.Range & { includeEmbedded?: boolean } & PageOptions;
+  type Page<T> = DataWrapperWithTotal<T> & { source_keys?: MediaSourceKey[] };
+
   type StatItem = {
     count: number;
     date: string;

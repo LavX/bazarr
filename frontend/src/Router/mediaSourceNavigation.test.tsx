@@ -454,14 +454,9 @@ it.each([
       expect(
         await screen.findByText("Sports browsable, searchable"),
       ).toBeInTheDocument();
-      expect(screen.getByText(`History / ${activity}`)).toBeInTheDocument();
-    } else {
-      await waitFor(() =>
-        expect(
-          screen.queryByText(`History / ${activity}`),
-        ).not.toBeInTheDocument(),
-      );
     }
+    expect(screen.getByText("History", { exact: true })).toBeInTheDocument();
+    expect(screen.getByText(`History / ${activity}`)).toBeInTheDocument();
     expect(await screen.findByText(title, { exact: true })).toBeInTheDocument();
     expect(screen.getByText(`Missing / ${activity}`)).toBeInTheDocument();
     expect(screen.getByText(`Excluded / ${activity}`)).toBeInTheDocument();
@@ -469,6 +464,7 @@ it.each([
     await refresh(DISABLED);
     expect(screen.getByText(title, { exact: true })).toBeInTheDocument();
     expect(screen.getByText(`Missing / ${activity}`)).toBeInTheDocument();
+    expect(screen.getByText(`History / ${activity}`)).toBeInTheDocument();
     if (kind === "sports")
       expect(
         await screen.findByText("Sports browsable, search disabled"),
@@ -482,8 +478,8 @@ it.each([
     );
     expect(screen.getByText(`Missing / ${activity}`)).toBeInTheDocument();
     expect(screen.getByText(`Excluded / ${activity}`)).toBeInTheDocument();
-    if (kind === "sports")
-      expect(screen.getByText(`History / ${activity}`)).toBeInTheDocument();
+    expect(screen.getByText("History", { exact: true })).toBeInTheDocument();
+    expect(screen.getByText(`History / ${activity}`)).toBeInTheDocument();
 
     await refresh(ENABLED, false, false);
     await waitFor(() =>
@@ -516,6 +512,158 @@ function MediaPage({ group, path }: { group: string; path?: string }) {
   );
   return page?.element;
 }
+
+describe.each([
+  ["series", "sonarr", "/api/episodes/history", "Series", "Episodes"],
+  ["movies", "radarr", "/api/movies/history", "Movies", "Movies"],
+] as const)(
+  "%s History navigation",
+  (path, kind, endpoint, title, activity) => {
+    it.each([
+      ["live", ENABLED],
+      ["retained", RETAINED],
+    ] as const)(
+      "opens %s source activity without an Arr connection",
+      async (_mode, state) => {
+        server.use(
+          http.get("/api/system/settings", () =>
+            HttpResponse.json({
+              general: { [`use_${kind}`]: false },
+              media_sources: { visible: true },
+            }),
+          ),
+          http.get("/api/system/arr-instances", () => HttpResponse.json([])),
+          http.get("/api/system/status", () => HttpResponse.json({ data: {} })),
+          http.get("/api/system/media-sources", () =>
+            HttpResponse.json({
+              data: [],
+              availability: {
+                series: kind === "sonarr" ? state : ABSENT,
+                movie: kind === "radarr" ? state : ABSENT,
+                sports: ABSENT,
+              },
+            }),
+          ),
+          http.get("/api/badges", () => HttpResponse.json({})),
+          http.get(endpoint, () => HttpResponse.json({ data: [], total: 0 })),
+        );
+        customRender(
+          <>
+            <Navigation />
+            <MediaPage group="history" path={path} />
+          </>,
+        );
+
+        expect(
+          await screen.findByText(`Nothing Found in ${title} History`),
+        ).toBeInTheDocument();
+        expect(
+          screen.getByText("History", { exact: true }),
+        ).toBeInTheDocument();
+        expect(screen.getByText(`History / ${activity}`)).toBeInTheDocument();
+        expect(
+          screen.queryByRole("link", { name: "Connections" }),
+        ).not.toBeInTheDocument();
+      },
+    );
+
+    it.each([
+      {
+        mode: "an active native instance",
+        record: true,
+        legacy: false,
+        visible: true,
+        accessible: true,
+      },
+      {
+        mode: "a pre-instance legacy connection",
+        record: null,
+        legacy: true,
+        visible: true,
+        accessible: true,
+      },
+      {
+        mode: "the hidden source feature",
+        record: false,
+        legacy: false,
+        visible: false,
+        accessible: true,
+      },
+      {
+        mode: "a disabled native instance and an old scalar",
+        record: false,
+        legacy: true,
+        visible: true,
+        accessible: false,
+      },
+      {
+        mode: "no native or source activity",
+        record: null,
+        legacy: false,
+        visible: true,
+        accessible: false,
+      },
+    ])(
+      "preserves native gating with $mode",
+      async ({ record, legacy, visible, accessible }) => {
+        const history = vi.fn();
+        const sources = vi.fn();
+        server.use(
+          http.get("/api/system/settings", () =>
+            HttpResponse.json({
+              general: { [`use_${kind}`]: true },
+              media_sources: { visible },
+              [kind]: {
+                ip: "127.0.0.1",
+                apikey: legacy ? "synthetic-configured" : "",
+              },
+            }),
+          ),
+          http.get("/api/system/arr-instances", () =>
+            HttpResponse.json(
+              record === null ? [] : [makeInstance({ kind, enabled: record })],
+            ),
+          ),
+          http.get("/api/system/status", () => HttpResponse.json({ data: {} })),
+          http.get("/api/system/media-sources", () => {
+            sources();
+            return HttpResponse.json({
+              data: [],
+              availability: { series: ABSENT, movie: ABSENT, sports: ABSENT },
+            });
+          }),
+          http.get("/api/badges", () => HttpResponse.json({})),
+          http.get(endpoint, () => {
+            history();
+            return HttpResponse.json({ data: [], total: 0 });
+          }),
+        );
+        customRender(
+          <>
+            <Navigation />
+            <MediaPage group="history" path={path} />
+          </>,
+        );
+
+        if (accessible) {
+          expect(
+            await screen.findByText(`Nothing Found in ${title} History`),
+          ).toBeInTheDocument();
+          expect(screen.getByText(`History / ${activity}`)).toBeInTheDocument();
+        } else {
+          expect(
+            await screen.findByRole("link", { name: "Connections" }),
+          ).toBeInTheDocument();
+          expect(
+            screen.queryByText("History", { exact: true }),
+          ).not.toBeInTheDocument();
+          expect(history).not.toHaveBeenCalled();
+        }
+        if (!visible) expect(sources).not.toHaveBeenCalled();
+      },
+    );
+  },
+);
 
 function ConnectionsToExcluded() {
   const { data: instances } = useArrInstances();

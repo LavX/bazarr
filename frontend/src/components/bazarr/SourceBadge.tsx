@@ -4,7 +4,7 @@ import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import InstanceBadge from "./InstanceBadge";
 
 interface Props {
-  row: Wanted.RowOwner;
+  row: Wanted.RowOwner | History.SourceOwner;
   labels: Map<MediaSourceKey, string>;
   arrNames: Map<number, string>;
   defaultArr: number | null;
@@ -27,7 +27,10 @@ export default function SourceBadge({
   }
 
   const removed = row.source_key === "source:removed";
-  const name = labels.get(row.source_key) ?? row.source_name ?? "Media source";
+  const name =
+    (removed
+      ? row.source_name
+      : (labels.get(row.source_key) ?? row.source_name)) ?? "Media source";
   return (
     <Badge
       size="sm"
