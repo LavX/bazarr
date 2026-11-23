@@ -134,6 +134,49 @@ def attach_for(queue_job_id, source_key: str, to_lang: str, forced: bool = False
 
 
 
+def attached_queue_job(source_key, to_lang, forced, hi):
+    """Return the job attached under an older source reservation key, if it is still active."""
+    from app.database import database
+
+    row = TranslationJobs(database).active_for(source_key, target_key(to_lang, forced, hi))
+    return row.queue_job_id if row is not None and row.state in (QUEUED, RUNNING) else None
+
+
+_RECORDING_CHANGED_BEFORE_RETRY = "The source media file changed before the translation could retry"
+
+
+def retire_source_retries(source_key, scope, to_lang, forced, hi):
+    """Record terminal outcomes for older recordings that have no queue dispatch left to end them."""
+    from app.database import database
+
+    message = _RECORDING_CHANGED_BEFORE_RETRY
+    jobs = TranslationJobs(database)
+    for job_id in jobs.retire_source_retries(source_key, scope, target_key(to_lang, forced, hi), message):
+        _finish_source_change(database, job_id, message)
+
+
+def retire_source_retry(source_key, to_lang, forced, hi):
+    """End a detached retry created by a translation that was already running during replacement."""
+    from app.database import database
+
+    try:
+        message = _RECORDING_CHANGED_BEFORE_RETRY
+        target = target_key(to_lang, forced, hi)
+        jobs = TranslationJobs(database)
+        row = jobs.active_for(source_key, target)
+        if row is not None and jobs.cancel_source_retry(row.id, source_key, target, message):
+            _finish_source_change(database, row.id, message)
+    except Exception:
+        logger.exception("Could not retire a source translation retry for the replaced recording")
+
+
+def _finish_source_change(session, job_id, reason):
+    history = HistoryStore(session)
+    ledger_id = str(job_id)
+    if history.get_by_job(ledger_id) is not None:
+        history.finish_job(ledger_id, "cancelled", error_class="source_changed", error_detail=reason)
+
+
 def cancel_waiting_for(queue_job_id, source_key, to_lang, forced, hi, reason):
     """Retire a refused source request without ending a replacement queue job."""
     from app.database import database
@@ -143,9 +186,6 @@ def cancel_waiting_for(queue_job_id, source_key, to_lang, forced, hi, reason):
         row = jobs.active_for(source_key, target_key(to_lang, forced, hi))
         if row is None or not jobs.cancel_waiting(row.id, queue_job_id, reason):
             return
-        history = HistoryStore(database)
-        ledger_id = str(row.id)
-        if history.get_by_job(ledger_id) is not None:
-            history.finish_job(ledger_id, "cancelled", error_class="source_changed", error_detail=reason)
+        _finish_source_change(database, row.id, reason)
     except Exception:
         logger.exception("Could not retire a source translation that was no longer current")
