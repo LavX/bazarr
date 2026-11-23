@@ -339,35 +339,35 @@ def test_post_save_indexing_leaves_a_moved_items_new_path_untouched(world, monke
     assert (row.item_id, row.video_path, row.subtitles_path) == (context.item_id, context.path, str(saved))
 
 
-def test_post_save_indexing_recovers_the_global_session_after_a_disconnect(world, monkeypatch):
-    from media_sources import indexer, repository, service
+def test_shared_folder_owner_disconnect_preserves_the_saved_subtitle_and_history(world, monkeypatch):
+    from app.database import update_profile_id_list
+    from media_sources import repository, service
 
     engine = world.db.get_bind()
     if engine.dialect.name != "sqlite":
         pytest.skip("This regression injects a SQLite driver disconnect")
+    subtitles = _custom_folder(world, monkeypatch, world.tmp_path)
     context = _movie(world)
-    saved = Path(context.path).with_suffix(".en.srt")
-    list_sidecars = indexer.list_external_subtitles
+    saved = subtitles / Path(context.path).with_suffix(".en.srt").name
+    generated = saved.with_suffix(".ffsubsync.srt")
+    generated.write_bytes(CONTENT)
     failure = sqlite3.OperationalError("simulated transient disconnect")
     failure.sqlite_errorcode = sqlite3.SQLITE_IOERR
-    disconnected = []
+    owner_reads = []
+    jobs = []
 
     def fail_owner_read(cursor, statement, parameters, execution_context):
-        if saved.is_file() and not disconnected and statement.startswith("SELECT table_source_items.path"):
-            disconnected.append(statement)
-            raise failure
+        if saved.is_file() and statement.startswith("SELECT table_source_items.path"):
+            owner_reads.append(statement)
+            if len(owner_reads) == 1:
+                update_profile_id_list.invalidate()
+                raise failure
 
     def mark_disconnect(exception_context):
         if exception_context.original_exception is failure:
             exception_context.is_disconnect = True
 
-    def list_after_owner_read(*args, **kwargs):
-        if saved.is_file():
-            indexer.SourceOutputOwnerIndex._load_owners()
-        return list_sidecars(*args, **kwargs)
-
-    monkeypatch.setattr(indexer, "list_external_subtitles", list_after_owner_read)
-    monkeypatch.setattr(service.jobs_queue, "update_job_progress", lambda **_: None)
+    monkeypatch.setattr(service.jobs_queue, "update_job_progress", lambda **kwargs: jobs.append(kwargs))
     _download(monkeypatch)
     event.listen(engine, "do_execute", fail_owner_read)
     event.listen(engine, "handle_error", mark_disconnect)
@@ -377,13 +377,93 @@ def test_post_save_indexing_recovers_the_global_session_after_a_disconnect(world
         event.remove(engine, "do_execute", fail_owner_read)
         event.remove(engine, "handle_error", mark_disconnect)
 
-    assert len(disconnected) == 1
+    assert len(owner_reads) == 2
     assert saved.read_bytes() == CONTENT
+    assert generated.read_bytes() == CONTENT
     item = repository.get_item(context.item_id)
-    assert str(saved) in item.subtitles and item.missing_subtitles == "[]"
+    assert str(saved) in item.subtitles and str(generated) in item.subtitles
+    assert item.missing_subtitles == "[]"
+    assert jobs[-1]["progress_message"] == "1 subtitle(s) downloaded"
     (row,) = world.db.execute(sa.select(repository.History)).all()
     assert (row.item_id, row.video_path, row.subtitles_path) == (context.item_id, context.path, str(saved))
     assert world.db.execute(sa.select(sa.literal(1))).scalar_one() == 1
+
+
+@pytest.mark.parametrize("stored", ["[", "[None]", "[['en', ['invalid-path'], 1]]"],
+                         ids=["invalid-literal", "invalid-row", "invalid-path"])
+def test_indexing_leaves_a_malformed_stored_listing_incomplete(world, stored):
+    from media_sources import indexer, repository
+
+    context = _movie(world)
+    repository.update_item(context.item_id, world.db, subtitles=stored)
+    initial = repository.get_item(context.item_id)
+
+    assert indexer.index_item(context.item_id) is None
+
+    item = repository.get_item(context.item_id)
+    assert (item.subtitles, item.missing_subtitles, item.indexed_at) == (
+        initial.subtitles, initial.missing_subtitles, initial.indexed_at)
+
+
+@pytest.mark.parametrize("after_save", [False, True], ids=["ordinary-index", "post-save-index"])
+def test_a_malformed_sidecar_keeps_the_index_incomplete_and_preserves_a_saved_result(
+        world, monkeypatch, after_save):
+    from media_sources import indexer, repository, service
+    from subtitles.indexer import utils
+
+    context = _movie(world)
+    initial = repository.get_item(context.item_id)
+    bad = Path(context.path).with_suffix(".hu.srt")
+    bad.write_bytes(CONTENT + b"\xff")
+    # Exercise the real read and decode when an encoding detector guesses incorrectly.
+    monkeypatch.setattr(utils, "detect", lambda text: {"encoding": "utf-8"})
+    jobs = []
+    monkeypatch.setattr(service.jobs_queue, "update_job_progress", lambda **kwargs: jobs.append(kwargs))
+    saved = Path(context.path).with_suffix(".en.srt")
+
+    if after_save:
+        _download(monkeypatch)
+        service.search_source_item(context.item_id, job_id=3)
+        assert saved.read_bytes() == CONTENT
+        (row,) = world.db.execute(sa.select(repository.History)).all()
+        assert (row.item_id, row.subtitles_path) == (context.item_id, str(saved))
+        assert jobs[-1]["progress_message"] == "1 subtitle(s) downloaded"
+    else:
+        assert indexer.index_item(context.item_id) is None
+
+    assert bad.read_bytes() == CONTENT + b"\xff"
+    item = repository.get_item(context.item_id)
+    assert (item.subtitles, item.missing_subtitles, item.indexed_at) == (
+        initial.subtitles, initial.missing_subtitles, initial.indexed_at)
+
+
+@pytest.mark.parametrize("failure", ["programming-error", "query-cancelled", "job-cancelled", "runtime-error"])
+def test_post_save_indexing_propagates_errors_from_the_real_owner_helper(world, monkeypatch, failure):
+    from app.jobs_queue import JobCancelled
+    from media_sources import indexer
+
+    class QueryCancelled(Exception):
+        pgcode = "57014"
+
+    errors = {
+        "programming-error": sa.exc.ProgrammingError("invalid SQL", {}, sqlite3.ProgrammingError("invalid SQL")),
+        "query-cancelled": sa.exc.OperationalError("SELECT table_source_items.path", {}, QueryCancelled()),
+        "job-cancelled": JobCancelled(),
+        "runtime-error": RuntimeError("ownership query bug"),
+    }
+    error = errors[failure]
+    subtitles = _custom_folder(world, monkeypatch, world.tmp_path)
+    context = _movie(world)
+    generated = subtitles / Path(context.path).with_suffix(".en.ffsubsync.srt").name
+    generated.write_bytes(CONTENT)
+    owner_query = Mock(side_effect=error)
+    monkeypatch.setattr(indexer.SourceOutputOwnerIndex, "_load_owners", owner_query)
+
+    with pytest.raises(type(error)) as raised:
+        indexer.index_saved_subtitle(context.item_id, expected_path=context.path)
+
+    assert raised.value is error
+    owner_query.assert_called_once()
 
 
 @pytest.mark.parametrize("failure", ["programming-error", "missing-table", "invalidated-programming-error",
@@ -1123,7 +1203,7 @@ def test_the_source_ownership_index_only_claims_items_of_the_source_tables(world
     from media_sources.indexer import SourceOutputOwnerIndex
 
     first, second = _movie(world), _movie(world, "Other.2002.mkv")
-    owners = SourceOutputOwnerIndex._load_owners()
+    owners = SourceOutputOwnerIndex()._load_owners()
     claimed = {path for paths in owners.values() for path in paths}
     assert claimed == {first.path, second.path}
 

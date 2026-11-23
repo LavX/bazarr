@@ -42,13 +42,18 @@ class SourceOutputOwnerIndex(SyncOutputOwnerIndex):
     items, each claiming its own folder and, with a custom subtitle folder, that folder too.
     """
 
-    @staticmethod
-    def _load_owners():
+    def __init__(self, target=None):
+        super().__init__()
+        self._target = target
+        # Post-save indexing needs the original failure to discard an incomplete listing.
+        self.propagate_errors = target is not None
+
+    def _load_owners(self):
         custom_folder = get_subtitle_destination_folder()
         subfolder = settings.general.subfolder
         absolute_folder = os.path.normcase(os.path.realpath(custom_folder)) if subfolder == 'absolute' else None
         owners = {}
-        for row in handle().execute(sa.select(repository.Items.c.path)).all():
+        for row in handle(self._target).execute(sa.select(repository.Items.c.path)).all():
             mapped = os.path.normcase(os.path.realpath(row.path))
             folders = {os.path.dirname(mapped)}
             if absolute_folder:
@@ -270,12 +275,22 @@ def index_item(item_id, target=None, ownership_index=None, *, keep_index_on_prob
             return None
         try:
             previous = ast.literal_eval(latest.subtitles) if latest.subtitles else []
-            if (keep_index_on_probe_failure and blob is None
-                    and latest.subtitles is not None and latest.missing_subtitles is not None
-                    and index_matches_file(latest, stat, allow_external_only=True)):
-                return previous
+        except (SyntaxError, ValueError):
+            logging.exception('BAZARR invalid stored subtitle listing for this file %s', item.path)
+            return None
+        if not isinstance(previous, (list, tuple)) or any(
+                not isinstance(entry, (list, tuple))
+                or (len(entry) == 3 and entry[1] is not None and not isinstance(entry[1], str))
+                for entry in previous):
+            logging.warning('BAZARR invalid stored subtitle listing for this file %s', item.path)
+            return None
+        if (keep_index_on_probe_failure and blob is None
+                and latest.subtitles is not None and latest.missing_subtitles is not None
+                and index_matches_file(latest, stat, allow_external_only=True)):
+            return previous
+        try:
             external = list_external_subtitles(item.path, previous, ownership_index)
-        except OSError:
+        except (OSError, UnicodeDecodeError):
             logging.exception('BAZARR unable to index external subtitles for this file %s', item.path)
             return None
         if _file_signature(local_stat(item.path)) != _file_signature(stat):
@@ -337,11 +352,11 @@ def _recoverable_index_database_error(error):
 def index_saved_subtitle(item_id, *, expected_path):
     """Index after a save without letting recoverable failures discard the saved result or its history."""
     try:
-        # Isolate index_item's repository reads. Shared metadata and ownership helpers can still use the
-        # application session; the caller writes history in its own transaction. The indexer's write
-        # transaction also owns a connection and rolls back before a failure reaches this boundary.
+        # Keep repository and ownership reads in the same isolated session. The index write has
+        # its own transaction, which rolls back before a failure reaches this boundary.
         with Session(bind=handle().get_bind()) as session:
-            listing = index_item(item_id, target=session, expected_path=expected_path)
+            listing = index_item(item_id, target=session, ownership_index=SourceOutputOwnerIndex(session),
+                                 expected_path=expected_path)
     except (sa.exc.DBAPIError, OSError) as error:
         if isinstance(error, sa.exc.DBAPIError):
             if not _recoverable_index_database_error(error):
