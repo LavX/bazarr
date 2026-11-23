@@ -260,6 +260,7 @@ const SeriesHistoryView: FunctionComponent = () => {
             labels={labels}
             value={selected}
             onChange={sources.onChange}
+            includeSources={!nativeFallback}
             showSingle={!sources.sourceOnly}
           />
           <Switch

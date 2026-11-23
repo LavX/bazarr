@@ -28,7 +28,6 @@ export function useHistorySources(arrKind: "sonarr" | "radarr") {
     [includeSources, params],
   );
   const arrKeys = savedKeys.filter((key) => key.startsWith("arr:"));
-  const selected = savedKeys.length === 1 ? savedKeys[0] : null;
   const sourceNames = useMemo(() => {
     const names = new Map<MediaSourceKey, string>();
     for (const source of sources.data?.data ?? []) {
@@ -98,34 +97,43 @@ export function useHistorySources(arrKind: "sonarr" | "radarr") {
       !settings.isLoading &&
       !instances.isLoading &&
       (!sourceOnly || !sources.isLoading),
-    selected,
     sourceOnly,
     arrOwners,
     getPresentation(
       data: History.Page<History.SourceRow | Wanted.ArrRow> | undefined,
     ) {
       const labels = new Map<MediaSourceKey, string>();
-      const nativeFallback = !includeSources || data?.source_keys === undefined;
-      if (nativeFallback) return { labels, nativeFallback, selected: null };
-      for (const key of data?.source_keys ?? []) {
-        if (key === removedKey) {
-          labels.set(key, "Removed sources");
-        } else {
-          labels.set(key, sourceNames.get(key) ?? "Media source");
+      const native = !includeSources || data?.source_keys === undefined;
+      const selected = [
+        ...new Set(native || nativeFallback ? arrKeys : savedKeys),
+      ];
+      if (!native) {
+        for (const key of data?.source_keys ?? []) {
+          labels.set(
+            key,
+            key === removedKey
+              ? "Removed sources"
+              : (sourceNames.get(key) ?? "Media source"),
+          );
         }
       }
-      if (!sourceOnly && labels.size) {
+      if (
+        (native && selected.length) ||
+        (!native && !sourceOnly && labels.size)
+      ) {
         for (const [id, name] of arrOwners.names) labels.set(`arr:${id}`, name);
       }
-      if (selected && !labels.has(selected)) {
-        const label = selected.startsWith("arr:")
-          ? (arrOwners.names.get(Number(selected.slice(4))) ?? "Arr instance")
-          : selected === removedKey
+      for (const key of selected) {
+        if (labels.has(key)) continue;
+        const id = Number(key.split(":")[1]);
+        const label = key.startsWith("arr:")
+          ? (arrOwners.names.get(id) ?? `Arr instance ${id}`)
+          : key === removedKey
             ? "Removed sources"
-            : (sourceNames.get(selected) ?? "Media source");
-        labels.set(selected, label);
+            : (sourceNames.get(key) ?? `Media source ${id}`);
+        labels.set(key, label);
       }
-      return { labels, nativeFallback, selected };
+      return { labels, nativeFallback: native, selected };
     },
     onChange(value: string | null) {
       const next = new URLSearchParams(params);

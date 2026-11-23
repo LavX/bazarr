@@ -93,6 +93,26 @@ describe.each(cases)(
       title: "Second native title",
       history_id: 14,
     };
+    const nativeRows = [native, secondOwner].map((row) => ({
+      ...historyRow,
+      id: row.id,
+      history_id: row.history_id,
+      arr_instance_id: row.arr_instance_id,
+      ...(kind === "series"
+        ? {
+            series_id: row.series_id,
+            seriesTitle: row.seriesTitle,
+            episodeTitle: row.episodeTitle,
+            episode_number: row.episode_number,
+            sonarrSeriesId: row.sonarrSeriesId,
+            sonarrEpisodeId: row.sonarrEpisodeId,
+          }
+        : { title: row.title, radarrId: row.radarrId }),
+    }));
+    const scopedNativeRows = (keys: string[]) =>
+      nativeRows.filter(
+        (row) => !keys.length || keys.includes(`arr:${row.arr_instance_id}`),
+      );
     const removed = {
       ...live,
       source_key: "source:removed",
@@ -825,6 +845,7 @@ describe.each(cases)(
     ])(
       "retains native owner scope and page for $saved",
       async ({ saved, retained }) => {
+        const user = userEvent.setup();
         const requests = vi.fn();
         configure({ emptyFolder: true });
         const params = new URLSearchParams({ page: "2" });
@@ -841,9 +862,7 @@ describe.each(cases)(
               params.get("length"),
             );
             return HttpResponse.json({
-              data: [native, secondOwner].filter(
-                (row) => !keys.length || keys.includes(row.source_key),
-              ),
+              data: scopedNativeRows(keys),
               total: 75,
             });
           }),
@@ -864,68 +883,137 @@ describe.each(cases)(
         expect(new URLSearchParams(window.location.search).get("page")).toBe(
           "2",
         );
+        expect(screen.getByRole("combobox", { name: "Instance" })).toHaveValue(
+          retained.length === 1
+            ? `${arr} secondary`
+            : `${arr}, ${arr} secondary`,
+        );
+        const primary = screen.queryByRole("link", { name: "Native title" });
+        if (retained.length === 1) expect(primary).not.toBeInTheDocument();
+        else expect(primary).toBeVisible();
+        expect(
+          screen.queryByRole("columnheader", { name: "Source" }),
+        ).not.toBeInTheDocument();
+
+        await user.click(
+          screen.getByRole("button", { name: "Clear instance filter" }),
+        );
+        await waitFor(() =>
+          expect(requests).toHaveBeenLastCalledWith("1", [], "0", "25"),
+        );
+        expect(
+          await screen.findByRole("link", { name: "Native title" }),
+        ).toBeVisible();
+        const cleared = new URLSearchParams(window.location.search);
+        expect(cleared.has("source")).toBe(false);
+        expect(cleared.has("page")).toBe(false);
+        expect(
+          screen.queryByRole("combobox", { name: "Instance" }),
+        ).not.toBeInTheDocument();
         expect(
           screen.queryByRole("columnheader", { name: "Source" }),
         ).not.toBeInTheDocument();
       },
     );
 
-    it("keeps saved Arr scope when source-only history recovers", async () => {
-      const requests = vi.fn();
-      let sourceHistoryRestored = false;
-      configure({ nativeEnabled: false, emptyFolder: true });
-      window.history.replaceState(null, "", "/?source=arr%3A6&page=2");
-      server.use(
-        http.get(`/api/${api}/history`, ({ request }) => {
-          const params = new URL(request.url).searchParams;
-          const keys = params.getAll("source_key[]");
-          requests(params.get("sources"), keys, params.get("start"));
-          return HttpResponse.json({
-            data: keys.includes("arr:6") ? [secondOwner] : [native, live],
-            total: 75,
-            ...(sourceHistoryRestored ? { source_keys: ["source:8"] } : {}),
-          });
-        }),
-      );
-      customRender(<View />);
-      expect(
-        await screen.findByRole("link", { name: "Second native title" }),
-      ).toBeVisible();
-      await waitFor(() => expect(queryClient.isFetching()).toBe(0));
-      sourceHistoryRestored = true;
-      await act(async () => {
-        const reducer = createDefaultReducer().find(
-          ({ key }) => key === "source-item",
+    it.each([
+      { keys: ["arr:6"], label: "Arr instance 6" },
+      { keys: ["arr:5", "arr:6"], label: "Arr instance 5, Arr instance 6" },
+    ])(
+      "keeps the displayed $keys scope when source-only history recovers",
+      async ({ keys: saved, label }) => {
+        const user = userEvent.setup();
+        const requests = vi.fn();
+        let sourceHistoryRestored = false;
+        configure({ nativeEnabled: false, emptyFolder: true });
+        const params = new URLSearchParams({ page: "2" });
+        saved.forEach((key) => params.append("source", key));
+        window.history.replaceState(null, "", `/?${params}`);
+        server.use(
+          http.get(`/api/${api}/history`, ({ request }) => {
+            const params = new URL(request.url).searchParams;
+            const keys = params.getAll("source_key[]");
+            requests(params.get("sources"), keys, params.get("start"));
+            if (!sourceHistoryRestored) {
+              return HttpResponse.json({
+                data: scopedNativeRows(keys),
+                total: 75,
+              });
+            }
+            const rows = keys.includes("source:8")
+              ? [live]
+              : [native, secondOwner].filter((row) =>
+                  keys.includes(row.source_key),
+                );
+            return HttpResponse.json({
+              data: rows,
+              total: 75,
+              source_keys: ["source:8"],
+            });
+          }),
         );
-        if (reducer?.key !== "source-item")
-          throw new Error("source-item reducer is missing");
-        reducer.any?.();
-      });
-      await waitFor(() =>
+        customRender(<View />);
         expect(
-          screen.getByRole("columnheader", { name: "Source" }),
-        ).toBeVisible(),
-      );
-      await waitFor(() => expect(queryClient.isFetching()).toBe(0));
-      expect(
-        requests.mock.calls.every(
-          ([sources, keys, start]) =>
-            sources === "1" &&
-            keys.length === 1 &&
-            keys[0] === "arr:6" &&
-            start === "25",
-        ),
-      ).toBe(true);
-      expect(
-        screen.getByRole("link", { name: "Second native title" }),
-      ).toBeVisible();
-      expect(screen.queryByText("Archive item")).not.toBeInTheDocument();
-      expect(screen.queryByText("Native title")).not.toBeInTheDocument();
-      expect(new URLSearchParams(window.location.search).get("source")).toBe(
-        "arr:6",
-      );
-      expect(new URLSearchParams(window.location.search).get("page")).toBe("2");
-    });
+          await screen.findByRole("link", { name: "Second native title" }),
+        ).toBeVisible();
+        expect(screen.getByRole("combobox", { name: "Instance" })).toHaveValue(
+          label,
+        );
+        await waitFor(() => expect(queryClient.isFetching()).toBe(0));
+        sourceHistoryRestored = true;
+        await act(async () => {
+          const reducer = createDefaultReducer().find(
+            ({ key }) => key === "source-item",
+          );
+          if (reducer?.key !== "source-item")
+            throw new Error("source-item reducer is missing");
+          reducer.any?.();
+        });
+        await waitFor(() =>
+          expect(
+            screen.getByRole("columnheader", { name: "Source" }),
+          ).toBeVisible(),
+        );
+        await waitFor(() => expect(queryClient.isFetching()).toBe(0));
+        expect(
+          requests.mock.calls.every(
+            ([sources, keys, start]) =>
+              sources === "1" &&
+              keys.join(",") === saved.join(",") &&
+              start === "25",
+          ),
+        ).toBe(true);
+        expect(screen.getByRole("combobox", { name: "Source" })).toHaveValue(
+          label,
+        );
+        expect(
+          screen.getByRole("link", { name: "Second native title" }),
+        ).toBeVisible();
+        expect(screen.queryByText("Archive item")).not.toBeInTheDocument();
+        expect(
+          new URLSearchParams(window.location.search).getAll("source"),
+        ).toEqual(saved);
+        expect(new URLSearchParams(window.location.search).get("page")).toBe(
+          "2",
+        );
+
+        await user.click(
+          screen.getByRole("button", { name: "Clear source filter" }),
+        );
+        expect(await screen.findByText("Archive item")).toBeVisible();
+        expect(requests).toHaveBeenLastCalledWith(
+          "1",
+          ["source:removed", "source:8"],
+          "0",
+        );
+        expect(new URLSearchParams(window.location.search).has("source")).toBe(
+          false,
+        );
+        expect(
+          screen.queryByRole("link", { name: "Second native title" }),
+        ).not.toBeInTheDocument();
+      },
+    );
 
     it("clears the mounted selection after the final source event disappears", async () => {
       const user = userEvent.setup();
@@ -1271,9 +1359,7 @@ describe.each(cases)(
           http.get(`/api/${api}/history`, ({ request }) => {
             expect(new URL(request.url).searchParams.get("sources")).toBe("1");
             return HttpResponse.json({
-              data: [
-                { ...native, origin: undefined, upgradedFromId: undefined },
-              ],
+              data: [nativeRows[0]],
               total: 1,
             });
           }),
@@ -1287,7 +1373,7 @@ describe.each(cases)(
           screen.queryByRole("columnheader", { name: "Source" }),
         ).not.toBeInTheDocument();
         expect(
-          screen.queryByRole("combobox", { name: "Source" }),
+          screen.queryByRole("combobox", { name: /^(Source|Instance)$/ }),
         ).not.toBeInTheDocument();
       },
     );
