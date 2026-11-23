@@ -1,6 +1,7 @@
 """A source item through the shared subtitle pipeline: the seam, the pool, the blacklist, sync and history."""
 import logging
 import re
+import sqlite3
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -250,6 +251,197 @@ def test_search_reindexes_a_saved_subtitle_from_a_custom_result(world, monkeypat
     assert str(saved) in item.subtitles and item.missing_subtitles == "[]"
     (row,) = world.db.execute(sa.select(repository.History)).all()
     assert row.subtitles_path == str(saved)
+
+
+@pytest.mark.parametrize("custom_result", [False, True], ids=["shared-processing", "custom-result"])
+def test_search_keeps_the_saved_file_and_history_when_post_save_index_transactions_fail(
+        world, monkeypatch, custom_result):
+    from media_sources import repository, service
+    from subtitles import download
+
+    context = _movie(world)
+    initial = repository.get_item(context.item_id)
+    saved = Path(context.path).with_suffix(".en.srt")
+    write_index = repository.write_item_index
+    failed_writes = []
+    jobs = []
+
+    def fail_after_index_write(*args, **kwargs):
+        written = write_index(*args, **kwargs)
+        if saved.is_file():
+            assert written
+            assert saved.read_bytes() == CONTENT
+            failed_writes.append(args[0])
+            raise sa.exc.OperationalError("UPDATE table_source_items", {},
+                                          sqlite3.OperationalError("database is locked"))
+        return written
+
+    monkeypatch.setattr(repository, "write_item_index", fail_after_index_write)
+    monkeypatch.setattr(service.jobs_queue, "update_job_progress", lambda **kwargs: jobs.append(kwargs))
+    if custom_result:
+        def custom_download(*args, **kwargs):
+            saved.write_bytes(CONTENT)
+            yield SimpleNamespace(path=context.path, subs_path=str(saved), language_code="en", score=100,
+                                  provider="fake", subs_id="sub-1", message="Downloaded", matched=None, not_matched=None)
+
+        monkeypatch.setattr(download, "generate_subtitles", custom_download)
+    else:
+        _download(monkeypatch)
+
+    service.search_source_item(context.item_id, job_id=3)
+
+    assert failed_writes == [context.item_id] * (1 if custom_result else 2)
+    assert saved.read_bytes() == CONTENT
+    item = repository.get_item(context.item_id)
+    assert (item.subtitles, item.missing_subtitles, item.indexed_at) == (
+        initial.subtitles, initial.missing_subtitles, initial.indexed_at)
+    (row,) = world.db.execute(sa.select(repository.History)).all()
+    assert (row.item_id, row.source_id, row.action, row.video_path, row.subtitles_path) == (
+        context.item_id, world.source_id, 1, context.path, str(saved))
+    assert (row.language, row.provider, row.subs_id) == ("en", "fake", "sub-1")
+    assert jobs[-1]["progress_message"] == "1 subtitle(s) downloaded"
+
+
+def test_post_save_indexing_leaves_a_moved_items_new_path_untouched(world, monkeypatch):
+    from media_sources import indexer, repository, service
+
+    context = _movie(world)
+    initial = repository.get_item(context.item_id)
+    saved = Path(context.path).with_suffix(".en.srt")
+    replacement = video(world.root / "Replacement.2002.mkv")
+    replacement_subtitle = replacement.with_suffix(".en.srt")
+    replacement_subtitle.write_bytes(b"Replacement subtitle\n")
+    index_item = indexer.index_item
+    attempted_paths = []
+
+    def move_before_index(item_id, *args, expected_path=None, **kwargs):
+        if expected_path is not None:
+            assert saved.read_bytes() == CONTENT
+            attempted_paths.append(expected_path)
+            if len(attempted_paths) == 1:
+                repository.update_item(item_id, world.db, path=str(replacement))
+        return index_item(item_id, *args, expected_path=expected_path, **kwargs)
+
+    monkeypatch.setattr(indexer, "index_item", move_before_index)
+    monkeypatch.setattr(service.jobs_queue, "update_job_progress", lambda **_: None)
+    _download(monkeypatch)
+
+    service.search_source_item(context.item_id, job_id=3)
+
+    assert attempted_paths == [context.path, context.path]
+    assert saved.read_bytes() == CONTENT
+    assert replacement_subtitle.read_bytes() == b"Replacement subtitle\n"
+    item = repository.get_item(context.item_id)
+    assert item.path == str(replacement)
+    assert (item.subtitles, item.missing_subtitles, item.indexed_at, item.ffprobe_cache) == (
+        initial.subtitles, initial.missing_subtitles, initial.indexed_at, initial.ffprobe_cache)
+    (row,) = world.db.execute(sa.select(repository.History)).all()
+    assert (row.item_id, row.video_path, row.subtitles_path) == (context.item_id, context.path, str(saved))
+
+
+def test_post_save_indexing_recovers_the_global_session_after_a_disconnect(world, monkeypatch):
+    from media_sources import indexer, repository, service
+
+    engine = world.db.get_bind()
+    if engine.dialect.name != "sqlite":
+        pytest.skip("This regression injects a SQLite driver disconnect")
+    context = _movie(world)
+    saved = Path(context.path).with_suffix(".en.srt")
+    list_sidecars = indexer.list_external_subtitles
+    failure = sqlite3.OperationalError("simulated transient disconnect")
+    failure.sqlite_errorcode = sqlite3.SQLITE_IOERR
+    disconnected = []
+
+    def fail_owner_read(cursor, statement, parameters, execution_context):
+        if saved.is_file() and not disconnected and statement.startswith("SELECT table_source_items.path"):
+            disconnected.append(statement)
+            raise failure
+
+    def mark_disconnect(exception_context):
+        if exception_context.original_exception is failure:
+            exception_context.is_disconnect = True
+
+    def list_after_owner_read(*args, **kwargs):
+        if saved.is_file():
+            indexer.SourceOutputOwnerIndex._load_owners()
+        return list_sidecars(*args, **kwargs)
+
+    monkeypatch.setattr(indexer, "list_external_subtitles", list_after_owner_read)
+    monkeypatch.setattr(service.jobs_queue, "update_job_progress", lambda **_: None)
+    _download(monkeypatch)
+    event.listen(engine, "do_execute", fail_owner_read)
+    event.listen(engine, "handle_error", mark_disconnect)
+    try:
+        service.search_source_item(context.item_id, job_id=3)
+    finally:
+        event.remove(engine, "do_execute", fail_owner_read)
+        event.remove(engine, "handle_error", mark_disconnect)
+
+    assert len(disconnected) == 1
+    assert saved.read_bytes() == CONTENT
+    item = repository.get_item(context.item_id)
+    assert str(saved) in item.subtitles and item.missing_subtitles == "[]"
+    (row,) = world.db.execute(sa.select(repository.History)).all()
+    assert (row.item_id, row.video_path, row.subtitles_path) == (context.item_id, context.path, str(saved))
+    assert world.db.execute(sa.select(sa.literal(1))).scalar_one() == 1
+
+
+@pytest.mark.parametrize("failure", ["programming-error", "missing-table", "invalidated-programming-error",
+                                    "invalidated-missing-table", "invalid-data", "invalidated-invalid-data",
+                                    "runtime-error", "cancelled", "interrupt"])
+def test_post_save_indexing_propagates_programming_and_control_errors(source_db, monkeypatch, failure):
+    from app.jobs_queue import JobCancelled
+    from media_sources import indexer
+
+    errors = {
+        "programming-error": sa.exc.ProgrammingError("invalid SQL", {}, sqlite3.ProgrammingError("invalid SQL")),
+        "missing-table": sa.exc.OperationalError("SELECT * FROM absent", {},
+                                                sqlite3.OperationalError("no such table: absent")),
+        "invalidated-programming-error": sa.exc.ProgrammingError(
+            "invalid SQL", {}, sqlite3.ProgrammingError("invalid SQL"), connection_invalidated=True),
+        "invalidated-missing-table": sa.exc.OperationalError(
+            "SELECT * FROM absent", {}, sqlite3.OperationalError("no such table: absent"),
+            connection_invalidated=True),
+        "invalid-data": sa.exc.IntegrityError("UPDATE table_source_items", {},
+                                            sqlite3.IntegrityError("constraint failed")),
+        "invalidated-invalid-data": sa.exc.IntegrityError(
+            "UPDATE table_source_items", {}, sqlite3.IntegrityError("constraint failed"),
+            connection_invalidated=True),
+        "runtime-error": RuntimeError("indexing bug"),
+        "cancelled": JobCancelled(),
+        "interrupt": KeyboardInterrupt(),
+    }
+    error = errors[failure]
+    monkeypatch.setattr(indexer, "index_item", Mock(side_effect=error))
+
+    with pytest.raises(type(error)) as raised:
+        indexer.index_saved_subtitle(1, expected_path="/fixture/Film.mkv")
+
+    assert raised.value is error
+
+
+@pytest.mark.parametrize(("sqlstate", "invalidated", "recoverable"), [
+    ("08006", False, True), ("40001", False, True), ("53100", False, True), ("55P03", False, True),
+    ("57P01", False, True), ("25P02", False, True), ("42P01", False, False), ("42501", False, False),
+    ("23505", False, False), ("57014", False, False), ("57014", True, False), ("42P01", True, False),
+])
+def test_post_save_indexing_classifies_postgres_database_failures(
+        source_db, monkeypatch, sqlstate, invalidated, recoverable):
+    from media_sources import indexer
+
+    class PostgresFailure(Exception):
+        pgcode = sqlstate
+
+    error = sa.exc.OperationalError("UPDATE table_source_items", {}, PostgresFailure("database failure"),
+                                    connection_invalidated=invalidated)
+    monkeypatch.setattr(indexer, "index_item", Mock(side_effect=error))
+
+    if recoverable:
+        assert indexer.index_saved_subtitle(1, expected_path="/fixture/Film.mkv") is False
+    else:
+        with pytest.raises(sa.exc.OperationalError) as raised:
+            indexer.index_saved_subtitle(1, expected_path="/fixture/Film.mkv")
+        assert raised.value is error
 
 
 def test_search_retries_the_active_parser_when_previous_parser_metadata_remains(world, monkeypatch):

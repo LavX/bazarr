@@ -8,8 +8,10 @@ supplies embedded tracks and audio languages for the profile rules.
 import ast
 import logging
 import os
+import sqlite3
 
 import sqlalchemy as sa
+from sqlalchemy.orm import Session
 
 from subliminal_patch import core, search_external_subtitles
 
@@ -273,7 +275,7 @@ def index_item(item_id, target=None, ownership_index=None, *, keep_index_on_prob
                     and index_matches_file(latest, stat, allow_external_only=True)):
                 return previous
             external = list_external_subtitles(item.path, previous, ownership_index)
-        except Exception:
+        except OSError:
             logging.exception('BAZARR unable to index external subtitles for this file %s', item.path)
             return None
         if _file_signature(local_stat(item.path)) != _file_signature(stat):
@@ -304,6 +306,56 @@ def index_item(item_id, target=None, ownership_index=None, *, keep_index_on_prob
             if repository.write_item_index(item_id, str(listing), str(missing), connection, **values):
                 return listing
     return None
+
+
+def _recoverable_index_database_error(error):
+    """Recognize operational failures without hiding SQL defects reported as OperationalError by SQLite."""
+    if isinstance(error, (sa.exc.ProgrammingError, sa.exc.IntegrityError)):
+        return False
+    original = error.orig
+    sqlite_code = getattr(original, 'sqlite_errorcode', None)
+    if sqlite_code is not None:
+        return sqlite_code & 0xff in {
+            sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED, sqlite3.SQLITE_IOERR,
+            sqlite3.SQLITE_FULL, sqlite3.SQLITE_CANTOPEN, sqlite3.SQLITE_PROTOCOL,
+        }
+    sqlstate = getattr(original, 'sqlstate', None) or getattr(original, 'pgcode', None)
+    if sqlstate is not None:
+        if sqlstate == '57014':
+            return False  # Query cancellation must propagate, even when its connection was invalidated.
+        return sqlstate[:2] in {'08', '40', '53'} or sqlstate in {
+            '25P02', '55P03', '57P01', '57P02', '57P03',
+        }
+    # Without a driver code, recognize only SQLite's exact lock messages.
+    if isinstance(original, sqlite3.Error):
+        return isinstance(original, sqlite3.OperationalError) and str(original) in {
+            'database is locked', 'database table is locked', 'database schema is locked',
+        }
+    return error.connection_invalidated
+
+
+def index_saved_subtitle(item_id, *, expected_path):
+    """Index after a save without letting recoverable failures discard the saved result or its history."""
+    try:
+        # Isolate index_item's repository reads. Shared metadata and ownership helpers can still use the
+        # application session; the caller writes history in its own transaction. The indexer's write
+        # transaction also owns a connection and rolls back before a failure reaches this boundary.
+        with Session(bind=handle().get_bind()) as session:
+            listing = index_item(item_id, target=session, expected_path=expected_path)
+    except (sa.exc.DBAPIError, OSError) as error:
+        if isinstance(error, sa.exc.DBAPIError):
+            if not _recoverable_index_database_error(error):
+                raise
+            # Shared helpers may have invalidated the application's scoped session. Roll back this thread's
+            # logical transaction as well, so a retry can acquire a new connection in AUTOCOMMIT mode.
+            handle().rollback()
+        logging.exception('BAZARR source item %s subtitle index failed after saving; the subtitle was retained',
+                          item_id)
+        return False
+    if listing is None:
+        logging.warning('BAZARR source item %s subtitle index is incomplete after saving; the subtitle was retained',
+                        item_id)
+    return listing is not None
 
 
 def recalculate_missing_subtitles(*, library_id=None, group_id=None, cancel=None):

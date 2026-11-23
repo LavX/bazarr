@@ -485,10 +485,10 @@ def process_subtitle(subtitle, media_type, audio_language, path, max_score, is_u
     if source is not None:
         # The stored path is already the Bazarr-visible one: nothing is mapped, in either direction, and no arr
         # is told to rescan.
-        from media_sources.indexer import index_item
+        from media_sources.indexer import index_saved_subtitle
         reversed_path = path
         reversed_subtitles_path = downloaded_path
-        source_indexed = index_item(source.item_id, expected_path=path) is not None
+        source_indexed = index_saved_subtitle(source.item_id, expected_path=path)
     elif media_type == 'sports':
         from utilities.path_mappings import apply_sports_mapping, read_sports_mappings
         if validate is not None:

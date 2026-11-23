@@ -21,7 +21,7 @@ from .analysis import index_matches_file, local_stat, source_search_probes
 from .context import SourceItemGone, resolve_item
 from .db import source_transaction
 from .history import history_log_source
-from .indexer import index_item
+from .indexer import index_item, index_saved_subtitle
 from .kinds import UnknownSourceKind, get_kind
 from .schedule import refresh_tasks
 
@@ -468,8 +468,9 @@ def _search_source_item(item_id, job_id):
                 continue
             if getattr(result, 'source_indexed', False) is not True:
                 # Retry an incomplete listing, including results from outside shared processing.
-                index_item(item_id, expected_path=context.path)
-            history_log_source(1, context, result)
+                index_saved_subtitle(item_id, expected_path=context.path)
+            with source_transaction() as connection:
+                history_log_source(1, context, result, target=connection)
             downloaded += 1
     except OSError as error:
         raise JobFailed(f'Unable to save the subtitles file: {error}', reason='save_failed') from error
