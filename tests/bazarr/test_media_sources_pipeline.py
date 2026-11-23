@@ -494,6 +494,31 @@ def test_a_cached_custom_language_keeps_its_variant_across_index_passes(
     guess.assert_not_called()
 
 
+@pytest.mark.parametrize(("locale", "suffix", "variant"), [
+    ("en", "", ""),
+    ("en", ".forced", ":forced"),
+    ("en", ".hi", ":hi"),
+    ("pt", "", ""),
+    ("pt", ".forced", ":forced"),
+    ("pt", ".hi", ":hi"),
+    ("pt", ".forced.hi", ":forced"),
+], ids=["en-normal", "en-forced", "en-hi", "pt-normal", "pt-forced", "pt-hi", "pt-both"])
+def test_sync_sidecar_variants_keep_movie_indexer_precedence_across_passes(world, monkeypatch, locale, suffix, variant):
+    from languages import get_languages
+    from media_sources import indexer, repository
+
+    monkeypatch.setattr(get_languages, "languages_dict", get_languages.languages_dict + [
+        {"code2": "pt", "code3": "por", "name": "Portuguese", "code3b": "por"}])
+    context = _movie(world)
+    sidecar = Path(context.path).with_suffix(f".{locale}{suffix}.ffsubsync.srt")
+    sidecar.write_bytes(CONTENT)
+    expected = [[f"{locale}{variant}:sync-ffsubsync", str(sidecar), len(CONTENT)]]
+
+    for _ in range(2):
+        assert indexer.index_item(context.item_id) == expected
+        assert ast.literal_eval(repository.get_item(context.item_id).subtitles) == expected
+
+
 @pytest.mark.parametrize("after_save", [False, True], ids=["ordinary-index", "post-save-index"])
 def test_a_malformed_sidecar_keeps_the_index_incomplete_and_preserves_a_saved_result(
         world, monkeypatch, after_save):

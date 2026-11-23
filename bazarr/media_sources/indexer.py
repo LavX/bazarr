@@ -127,8 +127,9 @@ def list_external_subtitles(path, previous=None, ownership_index=None):
         if custom is not None:
             actual.append([custom, subtitle_path, subtitle_size])
         elif str(language.basename) != 'und':
+            # Match the movie indexer's forced-first classification for sidecars.
             language_str = normalize_subtitle_language_variant(language.basename, forced=language.forced,
-                                                               hi=language.hi)
+                                                               hi=language.hi and not language.forced)
             language_str = subtitle_language_with_sync_modifier(language_str, subtitle)
             language_str = subtitle_language_with_combined_modifier(language_str, subtitle)
             actual.append([language_str, subtitle_path, subtitle_size])
