@@ -666,6 +666,28 @@ async function waitForBatchChildren(client: QueryClient, batchJobId: number) {
   }
 }
 
+function subtitleContentQueryKey(
+  mediaType: string | undefined,
+  mediaId: number | undefined,
+  language: string | undefined,
+  arrInstanceId?: number,
+  source?: SubtitleSource,
+  codec?: string,
+) {
+  // The source and the row's codec go last, so invalidating the key without
+  // them still reaches both the file and every embedded track of a language.
+  return [
+    QueryKeys.Subtitles,
+    "content",
+    mediaType,
+    mediaId,
+    language,
+    arrInstanceId,
+    source ?? null,
+    codec ?? null,
+  ] as const;
+}
+
 export function useSubtitleContent(
   mediaType: string | undefined,
   mediaId: number | undefined,
@@ -676,18 +698,14 @@ export function useSubtitleContent(
   validateSource?: () => Promise<void>,
 ) {
   return useQuery({
-    // The source and the row's codec go last, so invalidating the key without
-    // them still reaches both the file and every embedded track of a language.
-    queryKey: [
-      QueryKeys.Subtitles,
-      "content",
+    queryKey: subtitleContentQueryKey(
       mediaType,
       mediaId,
       language,
       arrInstanceId,
-      source ?? null,
-      codec ?? null,
-    ],
+      source,
+      codec,
+    ),
     queryFn: async () => {
       if (!mediaType || mediaId === undefined || !language) {
         throw new Error("Missing parameters");
@@ -727,6 +745,7 @@ export function useSubtitleContent(
 }
 
 export function useSubtitleSave() {
+  const client = useQueryClient();
   return useMutation({
     mutationKey: [QueryKeys.Subtitles, "save"],
     mutationFn: (params: {
@@ -747,11 +766,52 @@ export function useSubtitleSave() {
         params.etag,
         params.arrInstanceId,
       ),
-    onSuccess: () => {
-      // Do NOT invalidate the content query here. The editor already has
-      // the content (it just saved it) and the PUT response provides the
-      // new ETag. Invalidating would trigger a refetch that races with
-      // the ETag update and causes 412 on the next save.
+    onSuccess: async (result, params) => {
+      if (params.mediaType !== "source") return;
+      const queryKey = subtitleContentQueryKey(
+        params.mediaType,
+        params.mediaId,
+        params.language,
+        params.arrInstanceId,
+      );
+      const wasFetching =
+        client.getQueryState(queryKey)?.fetchStatus === "fetching";
+      const originalEtag = params.etag?.replace(/^"|"$/g, "");
+      const savedEtag = result.etag?.replace(/^"|"$/g, "");
+      // A background read may still contain the version before this save.
+      // Cancel it before pairing the saved text with its new version, and
+      // finish before the editor clears dirty and checks the cached version.
+      await client.cancelQueries({ queryKey, exact: true });
+      client.setQueryData<Awaited<ReturnType<typeof api.subtitles.getContent>>>(
+        queryKey,
+        (previous) => {
+          if (!previous) return undefined;
+          const cachedEtag = previous.etag?.replace(/^"|"$/g, "");
+          // A different revision was read after the PUT wrote its file but
+          // before its response arrived. Keep that external replacement.
+          if (
+            cachedEtag &&
+            cachedEtag !== originalEtag &&
+            cachedEtag !== savedEtag
+          ) {
+            return previous;
+          }
+          return {
+            ...previous,
+            data: {
+              ...previous.data,
+              content: params.content,
+              encoding: params.encoding,
+            },
+            etag: result.etag,
+          };
+        },
+      );
+      // The canceled read may have followed an external change. Recheck only
+      // in that case, after publishing the saved text and version together.
+      if (wasFetching) {
+        void client.invalidateQueries({ queryKey, exact: true });
+      }
     },
   });
 }

@@ -11,6 +11,7 @@ import { ColumnDef } from "@tanstack/react-table";
 import queryClient from "@/apis/queries";
 import {
   expireSourceSubtitleDocument,
+  invalidateSourceSubtitleDocuments,
   sourceSubtitleVariant,
 } from "@/apis/queries/sourceSubtitleDocument";
 import BaseApi from "@/apis/raw/base";
@@ -262,6 +263,17 @@ export function useSourceUpgrade(item: SourceItem, disabled = false) {
       } finally {
         await refresh();
       }
+    },
+    onSuccess: (upgraded, row) => {
+      if (upgraded === 0) return;
+      const language = row?.language;
+      void invalidateSourceSubtitleDocuments(
+        client,
+        [item.id],
+        language
+          ? sourceSubtitleVariant(language.code2, language.hi, language.forced)
+          : undefined,
+      );
     },
   });
   return { ...mutation, queued, allowed, canUpgrade };

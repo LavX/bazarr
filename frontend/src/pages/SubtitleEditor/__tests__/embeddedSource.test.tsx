@@ -15,13 +15,14 @@ import { createMemoryRouter, RouterProvider } from "react-router";
 import userEvent from "@testing-library/user-event";
 import { http, HttpResponse } from "msw";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { useSubtitleContent, useSubtitleSave } from "@/apis/hooks/subtitles";
 import queryClient from "@/apis/queries";
 import { expireSourceSubtitleDocument } from "@/apis/queries/sourceSubtitleDocument";
 import SubtitleViewer from "@/pages/SubtitleEditor";
 import EditorPage from "@/pages/SubtitleEditor/EditorPage";
 import { buildEditorAutosaveKey } from "@/pages/SubtitleEditor/editorScope";
 import { AllProviders } from "@/providers";
-import { act, rawRender, screen, waitFor } from "@/tests";
+import { act, rawRender, renderHook, screen, waitFor } from "@/tests";
 import server from "@/tests/mocks/node";
 
 vi.mock("@/pages/SubtitleEditor/VideoPreview", () => ({ default: () => null }));
@@ -37,6 +38,7 @@ const pageHandlers = [
   http.get("/api/editor/subtitles", () => HttpResponse.json({ subtitles: [] })),
   http.get("/api/system/languages", () => HttpResponse.json([])),
   http.get("/api/system/jobs", () => HttpResponse.json({ data: [] })),
+  http.get("/api/system/status", () => HttpResponse.json({ data: {} })),
 ];
 
 // The serializer ends the last cue without a trailing newline.
@@ -544,3 +546,322 @@ it("loads a replaced source document into the open editor and saves only with it
     expect.objectContaining({ content: SAVED }),
   );
 });
+
+it("keeps saved source cues and their ETag through two successful saves", async () => {
+  const user = userEvent.setup();
+  const puts: Put[] = [];
+  const staleRead = Promise.withResolvers<void>();
+  const staleResponse = Promise.withResolvers<void>();
+  let reads = 0;
+  let content = FILE;
+  let revision = "original";
+  server.use(
+    ...pageHandlers,
+    http.get("/api/sources/items/30/subtitles/:language/content", async () => {
+      reads += 1;
+      const response = HttpResponse.json(
+        {
+          content,
+          encoding: "utf-8",
+          format: "srt",
+          language: "en:hi",
+          size: content.length,
+          lastModified: 1,
+          mediaId: 30,
+        },
+        { headers: { ETag: `"${revision}"` } },
+      );
+      if (reads === 2) {
+        await staleRead.promise;
+        staleResponse.resolve();
+      }
+      return response;
+    }),
+    http.put(
+      "/api/sources/items/30/subtitles/:language/content",
+      async ({ request }) => {
+        const body = (await request.json()) as { content: string };
+        const ifMatch = request.headers.get("If-Match");
+        if (ifMatch !== revision) {
+          return new HttpResponse(null, { status: 412 });
+        }
+        puts.push({ content: body.content, ifMatch });
+        content = body.content;
+        revision = `saved-${puts.length}`;
+        return new HttpResponse(null, {
+          status: 204,
+          headers: { ETag: `"${revision}"` },
+        });
+      },
+    ),
+  );
+  openAt("/subtitles/edit/source/30/en%3Ahi");
+  const textarea = await screen.findByDisplayValue("From the file on disk");
+  await user.clear(textarea);
+  await user.type(textarea, "First source edit");
+  const refetch = queryClient.invalidateQueries({
+    queryKey: ["subtitles", "content", "source", 30, "en:hi"],
+  });
+  await waitFor(() => expect(reads).toBe(2));
+  await user.click(screen.getByRole("button", { name: "Save" }));
+
+  await waitFor(() => {
+    expect(puts).toHaveLength(1);
+    expect(screen.queryByText("Unsaved")).not.toBeInTheDocument();
+    expect(screen.getByDisplayValue("First source edit")).toBeVisible();
+    expect(
+      queryClient.getQueryData([
+        "subtitles",
+        "content",
+        "source",
+        30,
+        "en:hi",
+        undefined,
+        null,
+        null,
+      ]),
+    ).toMatchObject({
+      data: { content: "1\n00:00:01,000 --> 00:00:02,000\nFirst source edit" },
+      etag: '"saved-1"',
+    });
+    expect(
+      queryClient.getQueryState([
+        "subtitles",
+        "content",
+        "source",
+        30,
+        "en:hi",
+        undefined,
+        null,
+        null,
+      ])?.fetchStatus,
+    ).toBe("idle");
+  });
+
+  await act(async () => {
+    staleRead.resolve();
+    await Promise.all([staleResponse.promise, refetch]);
+  });
+
+  await user.clear(screen.getByDisplayValue("First source edit"));
+  await user.type(textarea, "Second source edit");
+  await user.click(screen.getByRole("button", { name: "Save" }));
+
+  await waitFor(() => {
+    expect(puts).toEqual([
+      {
+        content: "1\n00:00:01,000 --> 00:00:02,000\nFirst source edit",
+        ifMatch: "original",
+      },
+      {
+        content: "1\n00:00:01,000 --> 00:00:02,000\nSecond source edit",
+        ifMatch: "saved-1",
+      },
+    ]);
+    expect(screen.queryByText("Unsaved")).not.toBeInTheDocument();
+    expect(screen.getByDisplayValue("Second source edit")).toBeVisible();
+    expect(
+      queryClient.getQueryData([
+        "subtitles",
+        "content",
+        "source",
+        30,
+        "en:hi",
+        undefined,
+        null,
+        null,
+      ]),
+    ).toMatchObject({
+      data: { content: "1\n00:00:01,000 --> 00:00:02,000\nSecond source edit" },
+      etag: '"saved-2"',
+    });
+  });
+});
+
+it("retains a dirty source draft when a background read or save fails", async () => {
+  const user = userEvent.setup();
+  const puts: Put[] = [];
+  let reads = 0;
+  server.use(
+    ...pageHandlers,
+    http.get("/api/sources/items/30/subtitles/:language/content", () => {
+      reads += 1;
+      if (reads > 1) {
+        return HttpResponse.json("Source temporarily unavailable", {
+          status: 404,
+        });
+      }
+      return HttpResponse.json(
+        {
+          content: FILE,
+          encoding: "utf-8",
+          format: "srt",
+          language: "en:hi",
+          size: FILE.length,
+          lastModified: 1,
+          mediaId: 30,
+        },
+        { headers: { ETag: '"original"' } },
+      );
+    }),
+    http.put(
+      "/api/sources/items/30/subtitles/:language/content",
+      async ({ request }) => {
+        const body = (await request.json()) as { content: string };
+        puts.push({
+          content: body.content,
+          ifMatch: request.headers.get("If-Match"),
+        });
+        return new HttpResponse(null, { status: 412 });
+      },
+    ),
+  );
+  openAt("/subtitles/edit/source/30/en%3Ahi");
+  const textarea = await screen.findByDisplayValue("From the file on disk");
+  await user.clear(textarea);
+  await user.type(textarea, "Keep my unsaved draft");
+
+  await act(() =>
+    queryClient.invalidateQueries({
+      queryKey: ["subtitles", "content", "source", 30, "en:hi"],
+    }),
+  );
+
+  expect(reads).toBe(2);
+  expect(screen.getByDisplayValue("Keep my unsaved draft")).toBeVisible();
+  expect(screen.getByText("Unsaved")).toBeVisible();
+  await user.click(screen.getByRole("button", { name: "Save" }));
+  expect(
+    await screen.findByText("The source file changed while you were editing."),
+  ).toBeVisible();
+  expect(screen.getByDisplayValue("Keep my unsaved draft")).toBeVisible();
+  expect(screen.getByText("Unsaved")).toBeVisible();
+  expect(puts).toEqual([
+    {
+      content: "1\n00:00:01,000 --> 00:00:02,000\nKeep my unsaved draft",
+      ifMatch: "original",
+    },
+  ]);
+  expect(
+    queryClient.getQueryData([
+      "subtitles",
+      "content",
+      "source",
+      30,
+      "en:hi",
+      undefined,
+      null,
+      null,
+    ]),
+  ).toMatchObject({ data: { content: FILE }, etag: '"original"' });
+});
+
+it.each(["completed", "pending"] as const)(
+  "preserves an external revision read after PUT writes but before its response (%s GET)",
+  async (readState) => {
+    const putStarted = Promise.withResolvers<void>();
+    const releasePut = Promise.withResolvers<void>();
+    const releaseRead = Promise.withResolvers<void>();
+    let reads = 0;
+    let content = FILE;
+    let revision = "original";
+    server.use(
+      ...pageHandlers,
+      http.get(
+        "/api/sources/items/30/subtitles/:language/content",
+        async () => {
+          reads += 1;
+          const response = HttpResponse.json(
+            {
+              content,
+              encoding: "utf-8",
+              format: "srt",
+              language: "en:hi",
+              size: content.length,
+              lastModified: 1,
+              mediaId: 30,
+            },
+            { headers: { ETag: `"${revision}"` } },
+          );
+          if (readState === "pending" && reads === 2) await releaseRead.promise;
+          return response;
+        },
+      ),
+      http.put(
+        "/api/sources/items/30/subtitles/:language/content",
+        async ({ request }) => {
+          const body = (await request.json()) as { content: string };
+          content = body.content;
+          revision = "saved";
+          putStarted.resolve();
+          await releasePut.promise;
+          return new HttpResponse(null, {
+            status: 204,
+            headers: { ETag: '"saved"' },
+          });
+        },
+      ),
+    );
+    const { result } = renderHook(
+      () => ({
+        document: useSubtitleContent("source", 30, "en:hi"),
+        save: useSubtitleSave(),
+      }),
+      { wrapper: AllProviders },
+    );
+    await waitFor(() =>
+      expect(result.current.document.data?.etag).toBe('"original"'),
+    );
+    const saving = result.current.save.mutateAsync({
+      mediaType: "source",
+      mediaId: 30,
+      language: "en:hi",
+      content: "1\n00:00:01,000 --> 00:00:02,000\nMy saved edit",
+      encoding: "utf-8",
+      etag: "original",
+    });
+    await putStarted.promise;
+    content = TRACK;
+    revision = "external";
+    const read = result.current.document.refetch();
+    if (readState === "pending") {
+      await waitFor(() => expect(reads).toBe(2));
+    } else {
+      await act(() => read);
+      await waitFor(() =>
+        expect(result.current.document.data).toMatchObject({
+          data: { content: TRACK },
+          etag: '"external"',
+        }),
+      );
+    }
+
+    await act(async () => {
+      releasePut.resolve();
+      await saving;
+    });
+    await waitFor(() =>
+      expect(result.current.document.data).toMatchObject({
+        data: { content: TRACK },
+        etag: '"external"',
+      }),
+    );
+    await act(async () => {
+      releaseRead.resolve();
+      await read;
+    });
+
+    expect(
+      queryClient.getQueryData([
+        "subtitles",
+        "content",
+        "source",
+        30,
+        "en:hi",
+        undefined,
+        null,
+        null,
+      ]),
+    ).toMatchObject({ data: { content: TRACK }, etag: '"external"' });
+  },
+);

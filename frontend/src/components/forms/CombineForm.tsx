@@ -18,6 +18,7 @@ interface Props {
   scope: CombineScope;
   availableLanguages: string[];
   sourceInputs?: NonNullable<Api.CombineRequest["inputs"]>;
+  initialRequest?: Api.CombineRequest;
   onSubmit?: () => void;
 }
 
@@ -25,10 +26,32 @@ const CombineForm: FunctionComponent<Props> = ({
   scope,
   availableLanguages,
   sourceInputs,
+  initialRequest,
   onSubmit,
 }) => {
-  const [selected, setSelected] = useState<string[]>([]);
-  const [format, setFormat] = useState<"srt" | "ass">("srt");
+  const [selected, setSelected] = useState<
+    { code: string; value: string | null }[]
+  >(() =>
+    (initialRequest?.languages ?? []).map((code) => {
+      const input = initialRequest?.inputs?.find(
+        (row) => row.language.split(":")[0] === code,
+      );
+      const index = sourceInputs?.findIndex(
+        (row) => row.path === input?.path && row.language === input.language,
+      );
+      return {
+        code,
+        value: sourceInputs
+          ? index !== undefined && index >= 0
+            ? String(index)
+            : null
+          : code,
+      };
+    }),
+  );
+  const [format, setFormat] = useState<"srt" | "ass">(
+    initialRequest?.format ?? "srt",
+  );
   const { mutateAsync, isPending } = useCombineSubtitles();
   const modals = useModals();
 
@@ -53,7 +76,7 @@ const CombineForm: FunctionComponent<Props> = ({
       }));
   const languageFor = (value: string) =>
     sourceInputs ? sourceInputs[Number(value)].language.split(":")[0] : value;
-  const languages = selected.map(languageFor);
+  const languages = selected.map((selection) => selection.code);
   const choicesFor = (index?: number) =>
     options.filter(
       (option) =>
@@ -66,7 +89,7 @@ const CombineForm: FunctionComponent<Props> = ({
       selected.length < 3 &&
       !languages.includes(languageFor(value))
     ) {
-      setSelected([...selected, value]);
+      setSelected([...selected, { code: languageFor(value), value }]);
     }
   };
 
@@ -76,7 +99,9 @@ const CombineForm: FunctionComponent<Props> = ({
     setSelected(next);
   };
 
-  const canSubmit = selected.length >= 2;
+  const canSubmit =
+    selected.length >= 2 &&
+    selected.every((selection) => selection.value !== null);
 
   const submit = async () => {
     try {
@@ -86,7 +111,9 @@ const CombineForm: FunctionComponent<Props> = ({
           languages,
           format,
           ...(sourceInputs && {
-            inputs: selected.map((value) => sourceInputs[Number(value)]),
+            inputs: selected.map(
+              (selection) => sourceInputs[Number(selection.value)],
+            ),
           }),
         },
       });
@@ -131,15 +158,17 @@ const CombineForm: FunctionComponent<Props> = ({
         Order is the display order; first language is primary.
       </Alert>
       <Stack gap="xs">
-        {selected.map((code, idx) => (
-          <Group key={`${code}-${idx}`}>
+        {selected.map((selection, idx) => (
+          <Group key={idx}>
             <Select
+              aria-label={`Input ${idx + 1}`}
+              placeholder={`Choose ${selection.code.toUpperCase()} input`}
               data={choicesFor(idx)}
-              value={code}
+              value={selection.value}
               onChange={(next) => {
                 if (next) {
                   const updated = [...selected];
-                  updated[idx] = next;
+                  updated[idx] = { code: languageFor(next), value: next };
                   setSelected(updated);
                 }
               }}

@@ -1963,7 +1963,11 @@ export default function EditorPage() {
   }
 
   // Real error (not "create new" mode)
-  if (error && !isNewSubtitle) {
+  if (
+    error &&
+    !isNewSubtitle &&
+    !(mediaType === "source" && loaded && docState.dirty && data)
+  ) {
     return (
       <Alert color="red" title="Error" m="md">
         {error.message || "Failed to load subtitle content"}

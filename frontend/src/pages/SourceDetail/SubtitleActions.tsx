@@ -118,21 +118,24 @@ function combineScope(item: SourceItem, output?: Subtitle) {
   };
 }
 
-function rebuildInputs(item: SourceItem, languages: string[]) {
-  const rank = (language: string) => {
-    const fields = language.split(":");
-    if (fields.includes("forced")) return 2;
-    return fields.includes("hi") ? 1 : 0;
-  };
-  const candidates = combineInputs(item).sort(
-    (a, b) =>
-      rank(a.language) - rank(b.language) || a.path.localeCompare(b.path),
-  );
-  return languages.flatMap((language) => {
-    const candidate = candidates.find(
-      (row) => row.language.split(":")[0] === language,
+function rebuildInputs(
+  item: SourceItem,
+  subtitle: Subtitle,
+  languages: string[],
+) {
+  const modifiers = buildSubtitleLanguageKey(subtitle).split(":").slice(1);
+  const primaryVariants = [
+    ...(subtitle.hi || modifiers.includes("hi") ? ["hi"] : []),
+    ...(subtitle.forced || modifiers.includes("forced") ? ["forced"] : []),
+  ];
+  return languages.flatMap((language, index) => {
+    const exactLanguage = [language, ...primaryVariants].join(":");
+    const candidates = combineInputs(item).filter((row) =>
+      index === 0 && primaryVariants.length > 0
+        ? row.language === exactLanguage
+        : row.language.split(":")[0] === language,
     );
-    return candidate ? [candidate] : [];
+    return candidates.length === 1 ? candidates : [];
   });
 }
 
@@ -187,6 +190,7 @@ export function SourceSubtitleMenu({
   const { canCombine, openCombine } = useSourceCombineAction(item);
   const [opened, setOpened] = useState(false);
   const [fileError, setFileError] = useState<string>();
+  const [checkingRebuild, setCheckingRebuild] = useState(false);
   const history = useSourceHistory(item, opened);
   const release = sourceReleaseForSubtitle(
     history.data?.data ?? [],
@@ -225,6 +229,65 @@ export function SourceSubtitleMenu({
       setFileError(sourceError(error));
     }
   };
+  const rebuildFile = async () => {
+    const body = combineRequestForSubtitle(subtitle);
+    if (!body) return;
+    setFileError(undefined);
+    setCheckingRebuild(true);
+    try {
+      const current = await sourceDetailApi.requireCurrentItem(item, subtitle);
+      const previousInputs = rebuildInputs(item, subtitle, body.languages);
+      const inputs = rebuildInputs(current, subtitle, body.languages).filter(
+        (input) => {
+          const previous = previousInputs.find(
+            (row) =>
+              row.language.split(":")[0] === input.language.split(":")[0],
+          );
+          return (
+            previous?.path === input.path &&
+            previous.language === input.language
+          );
+        },
+      );
+      if (inputs.length !== body.languages.length) {
+        const sourceInputs = combineInputs(current);
+        modals.openContextModal(CombineModal, {
+          scope: combineScope(current, subtitle),
+          availableLanguages: [
+            ...new Set(
+              sourceInputs.map((input) => input.language.split(":")[0]),
+            ),
+          ],
+          sourceInputs,
+          initialRequest: { ...body, inputs },
+        });
+        return;
+      }
+      const result = await rebuild.mutateAsync({
+        scope: combineScope(current, subtitle),
+        body: { ...body, inputs },
+      });
+      if (result.status === "built" && !result.error) {
+        showNotification(
+          notification.info(
+            "Combined subtitle generated",
+            `Saved to ${result.path}`,
+          ),
+        );
+      } else if (result.status !== "queued") {
+        showNotification(
+          notification.warn(
+            "Combine did not complete",
+            result.error ?? result.reason ?? "",
+          ),
+        );
+      }
+    } catch (error) {
+      setFileError(sourceError(error));
+    } finally {
+      setCheckingRebuild(false);
+    }
+  };
 
   return (
     <Stack gap="xs">
@@ -242,33 +305,7 @@ export function SourceSubtitleMenu({
               return sourceDetailApi.removeSubtitle(item.id, subtitle);
             });
           } else if (action === "rebuild") {
-            const body = combineRequestForSubtitle(subtitle);
-            if (!body) return;
-            rebuild.mutate(
-              {
-                scope: combineScope(item, subtitle),
-                body: { ...body, inputs: rebuildInputs(item, body.languages) },
-              },
-              {
-                onSuccess: (result) => {
-                  if (result.status === "built" && !result.error) {
-                    showNotification(
-                      notification.info(
-                        "Combined subtitle generated",
-                        `Saved to ${result.path}`,
-                      ),
-                    );
-                  } else if (result.status !== "queued") {
-                    showNotification(
-                      notification.warn(
-                        "Combine did not complete",
-                        result.error ?? result.reason ?? "",
-                      ),
-                    );
-                  }
-                },
-              },
-            );
+            void rebuildFile();
           }
         }}
         extraActions={
@@ -335,13 +372,10 @@ export function SourceSubtitleMenu({
         <Action
           label="Actions"
           icon={faEllipsis}
-          disabled={write.isPending || rebuild.isPending}
+          disabled={write.isPending || rebuild.isPending || checkingRebuild}
         />
       </SubtitleToolsMenu>
       {fileError && <Alert color="red">{fileError}</Alert>}
-      {rebuild.isError && (
-        <Alert color="red">{sourceError(rebuild.error)}</Alert>
-      )}
     </Stack>
   );
 }

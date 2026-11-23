@@ -1,10 +1,15 @@
 /* eslint-disable camelcase */
+import { createMemoryRouter, RouterProvider } from "react-router";
 import userEvent from "@testing-library/user-event";
 import { http, HttpResponse } from "msw";
 import { vi } from "vitest";
+import { useSubtitleContent } from "@/apis/hooks/subtitles";
 import queryClient from "@/apis/queries";
 import { QueryKeys } from "@/apis/queries/keys";
-import { customRender, screen, waitFor, within } from "@/tests";
+import { createDefaultReducer } from "@/modules/socketio/reducer";
+import SubtitleViewer from "@/pages/SubtitleEditor";
+import { AllProviders } from "@/providers";
+import { act, customRender, rawRender, screen, waitFor, within } from "@/tests";
 import server from "@/tests/mocks/node";
 import { SourceItem } from "./api";
 import {
@@ -89,6 +94,93 @@ beforeEach(() => {
   );
 });
 
+function OpenDocument({
+  mediaType = "source",
+  id = item.id,
+}: {
+  mediaType?: "source" | "movie";
+  id?: number;
+}) {
+  const { data } = useSubtitleContent(mediaType, id, "en:hi");
+  return <output>{data?.data.content}</output>;
+}
+
+it("refreshes an open source viewer for its own item event only", async () => {
+  const reads = vi.fn();
+  let content: string | null = "1\n00:00:01,000 --> 00:00:02,000\nOriginal\n";
+  server.use(
+    http.get(
+      "/api/sources/items/:id/subtitles/:language/content",
+      ({ params }) => {
+        reads("source", params.id);
+        if (params.id === "7" && content === null) {
+          return HttpResponse.json(
+            { message: "Subtitle file no longer exists" },
+            { status: 404 },
+          );
+        }
+        return HttpResponse.json({
+          content: params.id === "7" ? content : "other source cues",
+          format: "srt",
+          encoding: "utf-8",
+          size: content?.length ?? 0,
+          mediaId: Number(params.id),
+        });
+      },
+    ),
+    http.get("/api/movies/7/subtitles/:language/content", () => {
+      reads("movie", "7");
+      return HttpResponse.json({ content: "native movie cues" });
+    }),
+  );
+  const router = createMemoryRouter(
+    [
+      {
+        path: "/subtitles/preview/:mediaType/:mediaId/:language",
+        element: (
+          <>
+            <SubtitleViewer />
+            <OpenDocument id={8} />
+            <OpenDocument mediaType="movie" />
+          </>
+        ),
+      },
+    ],
+    { initialEntries: ["/subtitles/preview/source/7/en%3Ahi"] },
+  );
+  rawRender(
+    <AllProviders>
+      <RouterProvider router={router} />
+    </AllProviders>,
+  );
+  expect(await screen.findByText("1 cues")).toBeVisible();
+  expect(await screen.findByText("other source cues")).toBeVisible();
+  expect(await screen.findByText("native movie cues")).toBeVisible();
+  reads.mockClear();
+  content += "\n2\n00:00:03,000 --> 00:00:04,000\nUpdated\n";
+  const reducer = createDefaultReducer().find(
+    (entry) => entry.key === "source-item",
+  );
+  act(() => {
+    reducer?.any?.();
+    reducer?.update?.([]);
+  });
+  expect(reads).not.toHaveBeenCalled();
+  act(() => reducer?.update?.([7, 7]));
+  expect(await screen.findByText("2 cues")).toBeVisible();
+  expect(reads.mock.calls).toEqual([["source", "7"]]);
+  content = null;
+  act(() => reducer?.delete?.([7]));
+  expect(await screen.findByRole("alert", { name: "Error" })).toHaveTextContent(
+    "Subtitle file no longer exists",
+  );
+  expect(screen.queryByText("2 cues")).not.toBeInTheDocument();
+  expect(reads.mock.calls).toEqual([
+    ["source", "7"],
+    ["source", "7"],
+  ]);
+});
+
 it("opens the source history and preserves nullable references without reading Arr history", async () => {
   const user = userEvent.setup();
   queryClient.setQueryData(
@@ -139,7 +231,13 @@ it.each([0, 1])(
     const writes: FormData[] = [];
     const historyRead = vi.fn();
     const resultRead = vi.fn();
+    const contentRead = vi.fn();
+    let content = "original source cues";
     server.use(
+      http.get("/api/sources/items/7/subtitles/:language/content", () => {
+        contentRead();
+        return HttpResponse.json({ content });
+      }),
       http.get("/api/sources/items/7/history", () => {
         historyRead();
         return HttpResponse.json({ data: [row], total: 1 });
@@ -164,7 +262,13 @@ it.each([0, 1])(
       [QueryKeys.System, QueryKeys.Jobs],
       [{ job_id: 31, status: "running", session: "run-a" }],
     );
-    customRender(<SourceHistoryView item={item} />);
+    customRender(
+      <>
+        <SourceHistoryView item={item} />
+        <OpenDocument />
+      </>,
+    );
+    expect(await screen.findByText("original source cues")).toBeVisible();
     await waitFor(() =>
       expect(screen.getByRole("button", { name: "Upgrade" })).toBeEnabled(),
     );
@@ -183,6 +287,8 @@ it.each([0, 1])(
       [{ job_id: 31, status: "completed", session: "other-run" }],
     );
     expect(resultRead).not.toHaveBeenCalled();
+    expect(contentRead).toHaveBeenCalledTimes(1);
+    if (upgraded) content = "upgraded source cues";
     queryClient.setQueryData(
       [QueryKeys.System, QueryKeys.Jobs],
       [{ job_id: 31, status: "completed", session: "run-a" }],
@@ -194,6 +300,10 @@ it.each([0, 1])(
     ).toBeVisible();
     expect(resultRead).toHaveBeenCalledTimes(1);
     expect(historyRead).toHaveBeenCalledTimes(3);
+    if (upgraded) {
+      expect(await screen.findByText("upgraded source cues")).toBeVisible();
+    }
+    expect(contentRead).toHaveBeenCalledTimes(upgraded ? 2 : 1);
   },
 );
 

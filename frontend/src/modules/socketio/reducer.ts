@@ -2,6 +2,7 @@ import { isArray, isEmpty, isNumber } from "lodash";
 import queryClient from "@/apis/queries";
 import { scheduleEpisodesHistoryRefresh } from "@/apis/queries/episodeHistory";
 import { QueryKeys } from "@/apis/queries/keys";
+import { invalidateSourceSubtitleDocuments } from "@/apis/queries/sourceSubtitleDocument";
 import {
   scheduleSubtitleScoresRefresh,
   skipScoredRangeQueries,
@@ -379,6 +380,12 @@ export function createDefaultReducer(): SocketIO.Reducer[] {
     },
     {
       key: "source-item",
+      update: (itemIds) => {
+        void invalidateSourceSubtitleDocuments(queryClient, itemIds);
+      },
+      delete: (itemIds) => {
+        void invalidateSourceSubtitleDocuments(queryClient, itemIds);
+      },
       any: () => {
         invalidateSourceWanted();
         invalidateSourceLibrary();
