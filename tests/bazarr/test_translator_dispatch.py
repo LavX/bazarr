@@ -286,7 +286,7 @@ def test_a_terminal_decline_history_fault_leaves_the_job_awaiting_retry(env, mon
     history = env.history(job)
     assert history["status"] == "awaiting_retry" and history["declined_reason"] is None
 
-    env.scripts[SECOND_PLUGIN] = {}
+    env.ai_engine()
     output = env.dispatcher().run(make_spec())
     output.complete()
     assert (env.last_job().id, env.last_job().state) == (job.id, "completed")
