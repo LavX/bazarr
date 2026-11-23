@@ -424,9 +424,9 @@ backup.restart_bazarr = lambda: os._exit(41)
 backup.stop_bazarr = lambda code: os._exit(code & 255)
 backup.event_stream = lambda **fields: None
 backup.jobs_queue.update_job_name = lambda **fields: True
-# These children never launch a plugin worker. Process ownership has separate
-# coverage and must not make the database integration depend on /proc access.
-sweep.previous_workers_stopped = lambda config: True
+# These children never launch plugin workers. Let the real worker check see
+# a complete, empty process list so it cannot inspect or signal host workers.
+sweep._list_pids = lambda: ([], False)
 root = Path(backup.args.config_dir)
 run_tool = backup._run_postgres_tool
 def count(tool, *args, **kwargs):
@@ -447,6 +447,8 @@ if action == 'seed':
     }
     state.save_state(document)
 elif action == 'backup':
+    # The running application does this in init before it can take backups.
+    sweep.configure_owner(root)
     assert backup.backup_to_zip(job_id=1)
 elif action == 'prepare':
     assert backup.prepare_restore(argument)
@@ -491,8 +493,11 @@ def postgres_restore_instance(tmp_path):
     import uuid
     from pathlib import Path
     from types import SimpleNamespace
+    from zipfile import ZipFile
 
     import yaml
+
+    from provider_hub.datadir import ARCHIVE_DIR, OMISSIONS_ARCHIVE
 
     test_url = os.getenv("BAZARR_PG_TEST_URL")
     if not test_url or not all(shutil.which(program) for program in ("pg_dump", "pg_restore")):
@@ -584,6 +589,10 @@ def postgres_restore_instance(tmp_path):
             child("seed", "archived row")
             child("backup")
             [result] = (root / "backup").glob("*.zip")
+            with ZipFile(result) as backup:
+                assert OMISSIONS_ARCHIVE not in backup.namelist()
+                entry = f"{ARCHIVE_DIR}/{sample.relative_to(root / 'provider_hub' / 'data').as_posix()}"
+                assert backup.read(entry) == b"archived plugin files"
             return result
 
         configure("direct")
