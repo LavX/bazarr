@@ -311,13 +311,12 @@ class Dispatcher:
         _maintain_when_due(self.session, self.clock, self.monotonic, self.limits)
         state = _Run(row.id, str(row.id), DeadlineWatch(clock=self.monotonic, **self.deadlines))
         try:
-            chain, state.notices = self._plan(spec)
-        except GateClosed as closed:
-            self._end_gate_closed(jobs, history, spec, state, closed)
-            raise
-        digest = line_digest(spec.lines)
-        try:
-            return self._run_chain(spec, chain, state, jobs, history, ledger, digest)
+            try:
+                chain, state.notices = self._plan(spec)
+            except GateClosed as closed:
+                self._end_gate_closed(jobs, history, spec, state, closed)
+                raise
+            return self._run_chain(spec, chain, state, jobs, history, ledger, line_digest(spec.lines))
         except JobCancelled:
             jobs.cancel(state.job_id)
             self._finish_history(history, state, "cancelled")
@@ -327,7 +326,8 @@ class Dispatcher:
         except Exception as error:
             # A bug or a database fault: the job must not stay "running" for a worker that is no longer on it.
             logger.exception("A translation job failed unexpectedly")
-            self._await_retry(jobs, history, state, fail.INTERNAL, type(error).__name__)
+            if self._await_retry(jobs, history, state, fail.INTERNAL, type(error).__name__):
+                raise DispatchFailed(fail.INTERNAL, "The translation failed unexpectedly.", retry_later=True) from error
             raise
         finally:
             if state.budget_reserved:
@@ -504,13 +504,14 @@ class Dispatcher:
                           retry_at=self.clock() + timedelta(seconds=DEFAULT_RETRY_SECONDS), detail=type(error).__name__)
         return error_class
 
-    def _await_retry(self, jobs, history, state, error_class, message, *, retry_at=None, detail=None):
+    def _await_retry(self, jobs, history, state, error_class, message, *, retry_at=None, detail=None) -> bool:
         # A replacement can cancel the retry as soon as the job state is visible.
         with ledger_transaction(self.session):
-            if (jobs.await_retry(state.job_id, error_class, message, retry_at=retry_at)
-                    and history.get_by_job(state.ledger_id) is not None):
+            recorded = jobs.await_retry(state.job_id, error_class, message, retry_at=retry_at)
+            if recorded and history.get_by_job(state.ledger_id) is not None:
                 history.finish_job(state.ledger_id, "awaiting_retry", error_class=error_class,
                                    error_detail=detail or message)
+        return recorded
 
     def _finish_history(self, history, state, status, error_class=None, detail=None):
         try:
