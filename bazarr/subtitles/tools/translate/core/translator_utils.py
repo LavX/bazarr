@@ -128,6 +128,10 @@ class SourceTranslationChanged(JobCancelled):
     """The source item or its translation request ceased to be current."""
 
 
+class SourceTranslationInputAmbiguous(SourceTranslationChanged):
+    """The subtitle input is shared, so an automatic job can search providers instead."""
+
+
 def validate_source_translation(source, video_path, subtitle_path, destination, from_lang, to_lang, forced, hi,
                                 captured=(), owners=None):
     """Validate the queued source item, profile and write destination."""
@@ -148,17 +152,32 @@ def validate_source_translation(source, video_path, subtitle_path, destination, 
     if not sync_output_owner_is_unique(video_path, destination, ownership_index=owners):
         raise SourceTranslationChanged('The translated subtitle destination does not have one media owner')
     if not sync_output_owner_is_unique(video_path, subtitle_path, ownership_index=owners):
-        raise SourceTranslationChanged('The translation input does not have one media owner')
+        raise SourceTranslationInputAmbiguous('The translation input does not have one media owner')
     return current
+
+
+class EmptySourceTranslation(JobFailed):
+    """The engine returned no usable change to a source subtitle's dialogue."""
+
+    def __init__(self):
+        super().__init__('The translator returned no translated cues', reason='empty_translation', retryable=False)
+
+
+# Bidi_Control characters from Unicode. Joiners used to shape words are meaningful and stay.
+_BIDI_CONTROLS = str.maketrans('', '', '\u061c\u200e\u200f\u202a\u202b\u202c\u202d\u202e\u2066\u2067\u2068\u2069')
 
 
 def require_source_translation(source, original, translated):
     """Stop before publication if none of the subtitle cues was translated."""
-    if source is not None and not any(
-        isinstance(new, str) and old.strip() and new.strip() and new.strip() != old.strip()
-        for old, new in zip(original, translated)
-    ):
-        raise JobFailed('The translator returned no translated cues', reason='empty_translation', retryable=False)
+    if source is None:
+        return
+    for old, new in zip(original, translated):
+        if isinstance(new, str):
+            before = old.translate(_BIDI_CONTROLS).strip()
+            after = new.translate(_BIDI_CONTROLS).strip()
+            if before and after and before != after:
+                return
+    raise EmptySourceTranslation()
 
 
 def record_source_translation(source, result):

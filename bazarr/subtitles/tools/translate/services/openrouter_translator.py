@@ -20,7 +20,7 @@ from radarr.history import history_log_movie
 from sonarr.history import history_log
 from app.jobs_queue import jobs_queue, JobCancelled, JobFailed
 
-from ..core.translator_utils import (add_translator_info, create_process_result, get_title,
+from ..core.translator_utils import (EmptySourceTranslation, add_translator_info, create_process_result, get_title,
                                      record_source_translation, require_source_translation, translation_write_kwargs)
 from .auth import get_translator_auth_headers
 from .sidecar_errors import describe_sidecar_refusal, redact_service_text, MAX_REFUSAL_LENGTH
@@ -393,7 +393,7 @@ class OpenRouterTranslatorService:
 
             return self.dest_srt_file
 
-        except (JobCancelled, SubtitleDestinationChanged, JobFailed):
+        except (JobCancelled, SubtitleDestinationChanged, TranslationServiceError, EmptySourceTranslation):
             raise
         except Exception as e:
             if self.sports_operation:

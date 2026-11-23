@@ -2,11 +2,13 @@
 
 import logging
 from contextlib import nullcontext
+from os.path import normpath
 from threading import RLock
 
 
 from .core.translator_utils import (validate_translation_params, convert_language_codes, get_title,
-                                    SourceTranslationChanged, translated_destination_path, validate_source_translation)
+                                    SourceTranslationChanged, SourceTranslationInputAmbiguous,
+                                    translated_destination_path, validate_source_translation)
 from . import pick as _pick
 from .availability import runtime_active as _runtime_active, translation_available
 from .failure_record import clear_failed_translation, record_failed_translation
@@ -95,7 +97,9 @@ def _job_source_key(video_path, source_srt_file, embedded_source, source=None):
     """What the runtime keys a translation job by as its source: the file, or the embedded track it is read from."""
     if source is not None:
         stamp = source.created_at.isoformat() if source.created_at is not None else ''
-        return f"source:{source.item_id}:{stamp}:{source_srt_file}"
+        # Normalize the filesystem component before namespacing it. The queue, ledger and dispatcher
+        # must look up the same composite key even when its custom subtitle folder contains "..".
+        return f"source:{source.item_id}:{stamp}:{normpath(str(source_srt_file))}"
     if embedded_source:
         return (f"{video_path}#embedded:{embedded_source.get('language') or ''}:"
                 f"{'hi' if embedded_source.get('hi') else ''}:{'forced' if embedded_source.get('forced') else ''}")
@@ -474,6 +478,8 @@ def translate_subtitles_file(video_path, source_srt_file, from_lang, to_lang, fo
 
             enqueue.cancel_waiting_for(job_id, source_key, to_lang, forced, hi, str(error))
         _report_runtime_skip(job_id, from_lang, to_lang, str(error))
+        if expected_destination_versions and isinstance(error, SourceTranslationInputAmbiguous):
+            _search_providers_instead(media_type, None, None, None, source=source)
         return None
     except JobCancelled:
         raise
