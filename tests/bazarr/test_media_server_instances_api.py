@@ -82,38 +82,111 @@ def _isolated_server(monkeypatch, listener, calls):
     return server
 
 
-def test_listener_loop_leaves_process_exit_to_the_restart_that_closed_it(monkeypatch):
-    from concurrent.futures import ThreadPoolExecutor
-    from threading import Event
+def _exercise_listener_process_exit(scenario):
+    import ast
+    import logging
+    import os
+    from pathlib import Path
+    from threading import Event, Thread, current_thread
     from types import SimpleNamespace
 
     from media_servers import links
 
-    closed, finish_teardown = Event(), Event()
+    monkeypatch = pytest.MonkeyPatch()
+    lookup_started, listener_closing, entrypoint_returned = Event(), Event(), Event()
+    snapshot = SimpleNamespace(id='destination', revision=1, kind='jellyfin', enabled=True,
+                               configuration_error=None, sendable=True)
+    destination, lane = links._lane(snapshot)
+    native = SimpleNamespace(read=lambda _id, guard: (snapshot.revision, snapshot, False))
+    worker = None
     calls = []
 
+    def lookup(*_args):
+        nonlocal worker
+        worker = current_thread()
+        lookup_started.set()
+        Event().wait()  # Only process exit can end this lookup.
+
+    monkeypatch.setattr(links, '_lookup', lookup)
+    monkeypatch.setitem(links.BUDGETS, snapshot.kind, 1)
+    assert links._answer(links.Target(snapshot, 'Destination', None), 'movie', None,
+                         native, destination, lane)['state'] == 'unreachable'
+    assert lookup_started.is_set() and worker.is_alive()
+
+    def run():
+        if scenario == 'restart':
+            Thread(target=server.webserver.restart).start()
+            assert listener_closing.wait(3)
+
     def close():
-        closed.set()
-        assert finish_teardown.wait(3)
+        print('listener close')
+        if scenario == 'restart':
+            listener_closing.set()
+            assert entrypoint_returned.wait(3)
+        if scenario == 'listener':
+            raise RuntimeError('listener teardown failed')
 
-    listener = SimpleNamespace(close=close, print_listen=lambda _message: None)
+    def close_database():
+        assert calls == ['streams']
+        print('database cleanup')
+        if scenario == 'database':
+            raise RuntimeError('database teardown failed')
+
+    listener = SimpleNamespace(run=run, close=close, print_listen=lambda _message: None)
     server = _isolated_server(monkeypatch, listener, calls)
-    monkeypatch.setattr(links, 'shutdown', lambda: None)
-    monkeypatch.setattr(server, 'restart_bazarr', lambda: calls.append('restart'))
-    with ThreadPoolExecutor(max_workers=1) as restart_thread:
-        def run():
-            nonlocal restart
-            restart = restart_thread.submit(server.webserver.restart)
-            assert closed.wait(3)
+    monkeypatch.setattr(server, 'close_database', close_database)
+    shutdown = links.shutdown
 
-        restart = None
-        listener.run = run
-        try:
-            assert server.webserver.start() is False
-        finally:
-            finish_teardown.set()
-        restart.result(3)
-    assert calls == ['streams', 'database', 'restart']
+    def observe_shutdown():
+        shutdown()
+        assert destination.closed.is_set() and worker.is_alive()
+        print('lookup admission closed with worker still running')
+
+    monkeypatch.setattr(links, 'shutdown', observe_shutdown)
+    logging.basicConfig(level=logging.ERROR, force=True)
+
+    # Run the production entry point with its real process exit, skipping boot.
+    main = Path(server.__file__).parents[1] / 'main.py'
+    entrypoint = ast.Module(body=ast.parse(main.read_text(encoding='utf-8')).body[-1:], type_ignores=[])
+    exec(compile(entrypoint, str(main), 'exec'), {'__name__': '__main__', 'os': os, 'webserver': server.webserver})
+    print('listener entry point returned')
+    entrypoint_returned.set()
+
+
+@pytest.mark.parametrize('scenario, status', [('clean', 0), ('listener', 1), ('database', 1), ('restart', 0)])
+def test_listener_process_exits_without_joining_running_lookup(tmp_path, scenario, status):
+    import os
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[2]
+    restart_file, stop_file = tmp_path / 'restart', tmp_path / 'stop'
+    script = '''
+import runpy
+import sys
+runpy.run_path('tests/conftest.py')
+sys.path.insert(0, 'tests/bazarr')
+runpy.run_path('tests/bazarr/conftest.py')
+from test_media_server_instances_api import _exercise_listener_process_exit
+_exercise_listener_process_exit(sys.argv[1])
+'''
+    env = dict(os.environ, BAZARR_CONFIG_DIR=str(tmp_path), POSTGRES_ENABLED='false',
+               RESTARTFILE=str(restart_file), STOPFILE=str(stop_file))
+    try:
+        result = subprocess.run([sys.executable, '-u', '-c', script, scenario], cwd=root, env=env,
+                                capture_output=True, text=True, timeout=20)
+    except subprocess.TimeoutExpired as error:
+        pytest.fail(f'Listener process did not exit within {error.timeout}s.\n{error.stdout!r}\n{error.stderr!r}')
+    assert result.returncode == status, result.stdout + result.stderr
+    assert result.stdout.count('listener close') == 1
+    assert 'lookup admission closed with worker still running' in result.stdout
+    assert ('database cleanup' in result.stdout) is (scenario != 'listener')
+    assert ('listener entry point returned' in result.stdout) is (scenario == 'restart')
+    if status:
+        assert f'RuntimeError: {scenario} teardown failed' in result.stderr
+    assert restart_file.exists() is (scenario == 'restart')
+    assert not stop_file.exists()
 
 
 @pytest.mark.parametrize('lifecycle', [
@@ -259,7 +332,7 @@ def test_play_on_workers_follow_destination_lifecycle(instance_api, monkeypatch,
                 elif not deleting:
                     stopped = ['stop'] if lifecycle in ('loop-interrupt', 'loop-system-exit') else []
                     assert calls == ['run', 'close', 'streams', 'database', *stopped]
-                    assert result is (not stopped)
+                    assert result == (None if stopped else 0)
                 else:
                     assert result == 204
                     assert resolve(removed, 5) == 'not_found'

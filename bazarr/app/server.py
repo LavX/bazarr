@@ -119,8 +119,8 @@ class Server:
             status = EXIT_INTERRUPT if signum == signal.SIGINT else EXIT_NORMAL
             self.shutdown(status)
 
-    def start(self):
-        """Run the listener and report whether its loop performed teardown."""
+    def start(self) -> int | None:
+        """Run the listener and return its exit status, or None if another caller owns exit."""
         self.server.print_listen("BAZARR is started and waiting for requests on: http://{}:{}")
         signal.signal(signal.SIGINT, self.interrupt_handler)
         signal.signal(signal.SIGTERM, self.interrupt_handler)
@@ -131,8 +131,15 @@ class Server:
         except Exception:
             pass
         finally:
-            closed_here = self.close_all()
-        return closed_here
+            try:
+                closed_here = self.close_all()
+            except Exception:
+                logging.exception("BAZARR listener teardown failed")
+                # Preserve Python's exit status for the previously uncaught exception.
+                exit_status = 1
+            else:
+                exit_status = EXIT_NORMAL if closed_here else None
+        return exit_status
 
     def close_all(self):
         # An explicit shutdown can close the listener while start() is
