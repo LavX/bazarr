@@ -201,7 +201,7 @@ def _runtime_attach(queue_job_id, video_path, source_srt_file, to_lang, forced, 
     from .runtime import enqueue
     try:
         key = _job_source_key(video_path, source_srt_file, embedded_source, source, source_video_version)
-        enqueue.attach_for(queue_job_id, key, to_lang, forced, hi)
+        enqueue.attach_for(queue_job_id, key, to_lang, forced, hi, worker_waits_for_attachment=source is not None)
     except Exception:
         logging.exception('BAZARR could not attach a queued translation to its job in the translation runtime')
 
