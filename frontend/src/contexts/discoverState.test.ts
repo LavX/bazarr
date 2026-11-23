@@ -186,7 +186,7 @@ describe("searchSelection", () => {
       const selection = searchSelection(
         draftWith({
           episodeIdentity: wire(e),
-          manualEntry: true,
+          manualEntry: "catalog",
           manualConfirmed: true,
           ...draft,
         }),
@@ -212,7 +212,7 @@ describe("searchSelection", () => {
       searchSelection(
         draftWith({
           episodeIdentity: wire({ identity_status: "conflict" }),
-          manualEntry: true,
+          manualEntry: "catalog",
           manualConfirmed: true,
         }),
       ),

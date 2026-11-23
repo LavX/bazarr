@@ -194,7 +194,7 @@ export default function Discover() {
               showId: undefined,
               showTvdbId: undefined,
               episodeIdentity: undefined,
-              manualEntry: false,
+              manualEntry: undefined,
               manualConfirmed: false,
               season: "",
               episode: "",
@@ -255,7 +255,7 @@ export default function Discover() {
       showTvdbId: sameTitle ? state.draft.showTvdbId : undefined,
       episodeIdentity: undefined,
       manualConfirmed: false,
-      manualEntry: source !== "tmdb",
+      manualEntry: source === "tmdb" ? undefined : "numbers",
       season: "",
       episode: "",
     });
@@ -944,7 +944,7 @@ export default function Discover() {
                             showId: undefined,
                             episodeIdentity: undefined,
                             manualConfirmed: false,
-                            manualEntry: true,
+                            manualEntry: "numbers",
                             season: "",
                             episode: "",
                           });
@@ -993,7 +993,7 @@ export default function Discover() {
                           showId: undefined,
                           episodeIdentity: undefined,
                           manualConfirmed: false,
-                          manualEntry: true,
+                          manualEntry: "numbers",
                           season: "",
                           episode: "",
                         });

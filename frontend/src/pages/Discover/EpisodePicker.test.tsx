@@ -117,6 +117,9 @@ beforeEach(() => {
     http.get("/api/discover/metadata/shows/100/seasons/2/episodes/1", () =>
       HttpResponse.json({ data: { ...envelope, episode } }),
     ),
+    http.get("/api/discover/copies", () =>
+      HttpResponse.json({ items: [], truncated: false, owning_titles: 0 }),
+    ),
     discoverSearchJob(async ({ request }) => {
       requests.push(await request.json());
       return new HttpResponse(null, { status: 503 });
@@ -774,6 +777,119 @@ it("keeps a confirmed manual search possible while the guard is up", async () =>
   // The superseded identity describes the mapping the reader overrode, and the
   // server rejects a manual search that carries it.
   expect(requests[0]).not.toHaveProperty("episode_identity");
+});
+
+it("uses corrected catalog evidence for a manually numbered episode", async () => {
+  localStorage.setItem("bazarr.discover.subtitle-language", "eng");
+  const { user } = browse("/discover?show=100&season=2&episode=1");
+  await waitFor(() =>
+    expect(
+      screen.getByRole("button", { name: "Find subtitles" }),
+    ).toBeEnabled(),
+  );
+  await openSearchOptions(user);
+  await user.click(
+    screen.getByRole("button", { name: "Enter episode numbers manually" }),
+  );
+  const number = screen.getByRole("textbox", { name: "Episode" });
+  await user.clear(number);
+  await user.type(number, "5");
+  const confirmation = screen.getByRole("checkbox", {
+    name: /I confirm this series IMDb ID/,
+  });
+  await user.click(confirmation);
+
+  const corrected = {
+    ...episode,
+    title: "Corrected title",
+    air_date: "2026-09-02",
+  };
+  const conflict = {
+    ...corrected,
+    identity_status: "conflict",
+    target_episode: null,
+    target_season: null,
+    numbering: null,
+  };
+  let details: typeof corrected | typeof conflict = conflict;
+  server.use(
+    http.get("/api/discover/metadata/shows/100/seasons/2/episodes/1", () =>
+      HttpResponse.json({ data: { ...envelope, episode: details } }),
+    ),
+  );
+  await act(() =>
+    queryClient.invalidateQueries({ queryKey: METADATA_QUERY_KEY }),
+  );
+  const refresh = await screen.findByRole("button", {
+    name: "Refresh episode",
+  });
+  expect(screen.getByRole("button", { name: "Find subtitles" })).toBeDisabled();
+  expect(requests).toEqual([]);
+
+  details = corrected;
+  await user.click(refresh);
+  const find = screen.getByRole("button", { name: "Find subtitles" });
+  await waitFor(() => expect(find).toBeEnabled());
+  expect(number).toHaveValue("5");
+  expect(confirmation).toBeChecked();
+  await user.click(find);
+  await waitFor(() => expect(requests).toHaveLength(1));
+  expect(requests[0]).toMatchObject({
+    episode: 5,
+    manual_confirmed: true,
+    episode_identity: corrected,
+  });
+});
+
+it("blocks a delayed conflict for the episode confirmed by its link numbers", async () => {
+  localStorage.setItem("bazarr.discover.subtitle-language", "eng");
+  let finishDetails: () => void = () => undefined;
+  const pending = new Promise<void>((resolve) => {
+    finishDetails = resolve;
+  });
+  server.use(
+    http.get(
+      "/api/discover/metadata/shows/100/seasons/2/episodes/1",
+      async () => {
+        await pending;
+        return HttpResponse.json({
+          data: {
+            ...envelope,
+            episode: {
+              ...episode,
+              identity_status: "conflict",
+              target_season: null,
+              target_episode: null,
+              numbering: null,
+            },
+          },
+        });
+      },
+    ),
+  );
+  const { user } = browse("/discover?show=100&season=2&episode=1");
+  try {
+    await openSearchOptions(user);
+    await user.click(
+      await screen.findByRole("button", {
+        name: "Enter episode numbers manually",
+      }),
+    );
+    await user.click(
+      screen.getByRole("checkbox", { name: /I confirm this series IMDb ID/ }),
+    );
+    expect(
+      screen.getByRole("button", { name: "Find subtitles" }),
+    ).toBeEnabled();
+    finishDetails();
+    await screen.findByRole("button", { name: "Refresh episode" });
+    expect(
+      screen.getByRole("button", { name: "Find subtitles" }),
+    ).toBeDisabled();
+    expect(requests).toEqual([]);
+  } finally {
+    finishDetails();
+  }
 });
 
 it("explains numbering that cannot be verified instead of calling it stale", async () => {

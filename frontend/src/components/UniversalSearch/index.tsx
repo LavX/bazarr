@@ -320,7 +320,7 @@ export default function UniversalSearch() {
       showId: undefined,
       showTvdbId: undefined,
       episodeIdentity: undefined,
-      manualEntry: true,
+      manualEntry: "numbers",
       manualConfirmed: false,
       season: "",
       episode: "",
@@ -801,7 +801,8 @@ export default function UniversalSearch() {
                                 ? movie.id
                                 : undefined,
                             showTvdbId: undefined,
-                            manualEntry: movie.source !== "tmdb",
+                            manualEntry:
+                              movie.source === "tmdb" ? undefined : "numbers",
                             episodeIdentity: undefined,
                             manualConfirmed: false,
                             season: "",

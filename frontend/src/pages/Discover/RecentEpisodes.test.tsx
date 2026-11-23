@@ -164,6 +164,9 @@ beforeEach(() => {
     http.get("/api/discover/metadata/shows/100/seasons/2/episodes/1", () =>
       HttpResponse.json({ data: { ...envelope, episode: resolved() } }),
     ),
+    http.get("/api/discover/copies", () =>
+      HttpResponse.json({ items: [], truncated: false, owning_titles: 0 }),
+    ),
     discoverSearchJob(async ({ request }) => {
       searches.push(await request.json());
       return new HttpResponse(null, { status: 503 });
@@ -339,6 +342,73 @@ it.each(["unverified", "conflict"])(
         ),
       ).toBeInTheDocument();
       expect(searches).toEqual([]);
+    }
+  },
+);
+
+it.each([false, true])(
+  "reconciles a delayed feed episode during manual entry (corrected: %s)",
+  async (corrected) => {
+    let finishDetails: () => void = () => undefined;
+    const pending = new Promise<void>((resolve) => {
+      finishDetails = resolve;
+    });
+    const details = {
+      ...resolved(),
+      ...(corrected ? { title: "Corrected title" } : {}),
+    };
+    server.use(
+      http.get(
+        "/api/discover/metadata/shows/100/seasons/2/episodes/1",
+        async () => {
+          await pending;
+          return HttpResponse.json({ data: { ...envelope, episode: details } });
+        },
+      ),
+    );
+    const { user } = browse();
+    try {
+      await user.click(
+        await screen.findByRole("button", { name: /Northern Light.*Home/ }),
+      );
+      await user.click(
+        await screen.findByRole("button", { name: "Search options" }),
+      );
+      await user.click(
+        await screen.findByRole("button", {
+          name: "Enter episode numbers manually",
+        }),
+      );
+      const episode = screen.getByRole("textbox", { name: "Episode" });
+      await user.clear(episode);
+      await user.type(episode, "5");
+      const confirmation = screen.getByRole("checkbox", {
+        name: /I confirm this series IMDb ID/,
+      });
+      await user.click(confirmation);
+      const find = screen.getByRole("button", { name: "Find subtitles" });
+      expect(find).toBeDisabled();
+      finishDetails();
+      if (corrected) {
+        const accept = await screen.findByRole("button", {
+          name: "Use current episode details",
+        });
+        expect(find).toBeDisabled();
+        await user.click(accept);
+      }
+      await waitFor(() => expect(find).toBeEnabled());
+      expect(episode).toHaveValue("5");
+      expect(confirmation).toBeChecked();
+      await user.click(find);
+      await waitFor(() => expect(searches).toHaveLength(1));
+      expect(searches[0]).toMatchObject({
+        season: 2,
+        episode: 5,
+        manual_confirmed: true,
+        episode_identity: details,
+      });
+    } finally {
+      finishDetails();
     }
   },
 );

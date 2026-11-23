@@ -49,6 +49,10 @@ import {
 } from "./discoverState";
 import { followSearch, SearchJobFailed, stopSearchJob } from "./searchJob";
 
+type DraftUpdate =
+  | Partial<DiscoverDraft>
+  | ((draft: DiscoverDraft) => Partial<DiscoverDraft> | undefined);
+
 interface DiscoverContextValue {
   state: DiscoverState;
   rememberPage: (key: string, page: DiscoverState) => void;
@@ -59,7 +63,7 @@ interface DiscoverContextValue {
    */
   restorePage: (key: string) => boolean;
   updateBrowsing: (changes: Partial<DiscoverBrowsing>) => void;
-  updateDraft: (changes: Partial<DiscoverDraft>) => void;
+  updateDraft: (update: DraftUpdate) => void;
   /**
    * Preselect a subtitle language from the reader's language profile. Only an
    * empty language is ever seeded, nothing is written to browser storage, and
@@ -217,7 +221,10 @@ export function DiscoverProvider({ children }: PropsWithChildren) {
   }, []);
 
   const updateDraft = useCallback(
-    (changes: Partial<DiscoverDraft>) => {
+    (update: DraftUpdate) => {
+      const changes =
+        typeof update === "function" ? update(draft.current) : update;
+      if (!changes) return;
       const merged = { ...draft.current, ...changes };
       // A copy belongs to one exact target. Retiring it here, rather than in
       // every caller, is what keeps a stale choice from surviving a change of

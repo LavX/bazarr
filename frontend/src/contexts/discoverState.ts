@@ -29,9 +29,12 @@ export interface DiscoverDraft {
   year?: number;
   showId?: number;
   showTvdbId?: number | null;
+  // Latest accepted details for the catalog link.
   episodeIdentity?: MetadataEpisode;
   manualConfirmed?: boolean;
-  manualEntry?: boolean;
+  // A catalog selection keeps its source episode when the reader changes its
+  // numbering. A numbers-only selection starts without that association.
+  manualEntry?: "catalog" | "numbers";
   /**
    * The explicitly chosen library copy, or undefined for title-only matching.
    * Opaque: the server resolves it against the confirmed target every time.
@@ -178,6 +181,19 @@ export function initialDiscoverState(): DiscoverState {
   };
 }
 
+export function selectedEpisodeIdentity(draft: DiscoverDraft) {
+  const identity = draft.episodeIdentity;
+  if (
+    draft.manualEntry === "numbers" &&
+    identity &&
+    (!draft.season ||
+      Number(draft.season) !== identity.season ||
+      Number(draft.episode) !== identity.episode)
+  )
+    return undefined;
+  return identity;
+}
+
 export function searchSelection(
   draft: DiscoverDraft,
 ): DiscoverSelection | null {
@@ -212,7 +228,7 @@ export function searchSelection(
     selection.episode = Number(draft.episode);
     if (selection.episode < 1) return null;
     if (draft.manualEntry && !draft.manualConfirmed) return null;
-    const identity = draft.episodeIdentity;
+    const identity = selectedEpisodeIdentity(draft);
     if (identity?.identity_status === "conflict") return null;
     // An identity the show now contradicts cannot run a search on its own, but
     // it must not stand in the way of a confirmed manual one either: a reader
@@ -357,7 +373,7 @@ export function discoverContextKey(draft: DiscoverDraft): string {
     draft.mediaType === "episode" ? (draft.showId ?? null) : null,
     draft.mediaType === "episode" ? (draft.showTvdbId ?? null) : null,
     draft.mediaType === "episode"
-      ? episodeIdentityKey(draft.episodeIdentity)
+      ? episodeIdentityKey(selectedEpisodeIdentity(draft))
       : null,
     draft.mediaType === "episode" ? Boolean(draft.manualConfirmed) : null,
     draft.mediaType === "episode" ? Boolean(draft.manualEntry) : null,

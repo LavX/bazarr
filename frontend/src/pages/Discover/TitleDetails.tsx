@@ -158,14 +158,14 @@ export default function TitleDetails({
         title: movie.title,
         year: movie.year ?? undefined,
         ...(movie.source !== "tmdb"
-          ? { episodeIdentity: undefined, manualEntry: true }
+          ? { episodeIdentity: undefined, manualEntry: "numbers" }
           : {}),
         ...(parentChanged
           ? {
               season: "",
               episode: "",
               manualConfirmed: false,
-              manualEntry: false,
+              manualEntry: undefined,
             }
           : {}),
       });

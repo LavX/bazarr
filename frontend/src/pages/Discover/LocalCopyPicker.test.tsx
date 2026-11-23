@@ -645,16 +645,19 @@ it("lets a TMDB-only show on its catalog page search a manually confirmed source
   await user.click(screen.getByRole("button", { name: "Find subtitles" }));
   await waitFor(() => expect(searches).toHaveLength(1));
   expect(new URLSearchParams(copyRequests.at(-1)).get("episode")).toBe("5");
-  expect(searches[0]).toMatchObject({
+  expect(searches[0]).toEqual({
     media_type: "episode",
     tmdb_id: 100,
     show_id: 100,
     season: 2,
     episode: 5,
+    title: "Northern Light",
+    year: 2020,
+    language: "eng",
     manual_confirmed: true,
     copy_id: sourceCopy.copy_id,
+    refresh: false,
   });
-  expect(searches[0]).not.toHaveProperty("imdb_id");
   finishEpisode();
   await waitFor(() =>
     expect(
@@ -662,6 +665,11 @@ it("lets a TMDB-only show on its catalog page search a manually confirmed source
     ).not.toBeInTheDocument(),
   );
   expect(screen.getByRole("textbox", { name: "Episode" })).toHaveValue("5");
+  expect(
+    screen.getByRole("checkbox", {
+      name: "I confirm the manual season and episode numbers",
+    }),
+  ).toBeChecked();
   expect(
     screen.getByRole("button", { name: "Finding subtitles" }),
   ).toBeVisible();
