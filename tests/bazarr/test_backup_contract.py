@@ -15,6 +15,7 @@ import stat
 import sys
 import zipfile
 
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -98,6 +99,10 @@ def backup_env(monkeypatch, tmp_path):
     _write_marker_database(config_dir / 'db' / 'bazarr.db', 'live')
 
     monkeypatch.setattr('provider_hub.sandbox.sweep.previous_workers_stopped', lambda config: True)
+    monkeypatch.setattr(backup_module.restore_target, 'reserve',
+                        lambda configuration, directory, token: (
+                            backup_module.restore_target.sqlite_file(Path(directory) / 'db' / 'bazarr.db'), None)
+                        if not backup_module._postgres_enabled(configuration) else (None, None))
     monkeypatch.setattr(backup_module, 'args', SimpleNamespace(config_dir=str(config_dir)))
     monkeypatch.setattr(settings.backup, 'folder', str(config_dir / 'backup'))
     monkeypatch.setattr(backup_module, 'event_stream', lambda *a, **kw: None)
@@ -376,6 +381,54 @@ def test_sqlite_restore_replaces_config_and_database(backup_env, monkeypatch):
     assert _read_marker_database(backup_env.config_dir / 'db' / 'bazarr.db') == 'restored'
     backup_env.module.apply_pending_plugin_restore()
     assert os.listdir(backup_env.restore_dir) == []
+
+
+def test_sqlite_restore_rejects_a_replacement_file_before_startup_touches_it(backup_env, monkeypatch):
+    import subprocess
+
+    monkeypatch.setattr(backup_env.settings.postgresql, 'enabled', False)
+    archive = backup_env.backup_dir / 'bazarr_backup_vtest_2026.11.23_00.00.00.zip'
+    saved = backup_env.config_dir / 'saved.db'
+    _write_marker_database(saved, 'archived')
+    with zipfile.ZipFile(archive, 'w') as output:
+        output.write(saved, 'bazarr.db')
+        output.writestr('config.yaml', 'general:\n  port: 7000\n')
+    assert backup_env.module.prepare_restore(archive.name)
+    database = backup_env.config_dir / 'db' / 'bazarr.db'
+    replacement = database.with_name('replacement.db')
+    _write_marker_database(replacement, 'other database')
+    replacement.replace(database)
+    before = database.read_bytes()
+
+    repo = Path(__file__).resolve().parents[2]
+    environment = {**os.environ, 'BAZARR_CONFIG_DIR': str(backup_env.config_dir),
+                   'POSTGRES_ENABLED': 'false', 'PATH': backup_env.original_path,
+                   'PYTHONPATH': os.pathsep.join(str(repo / name) for name in ('bazarr', 'custom_libs'))}
+    boot = subprocess.run([sys.executable, '-c', 'import app.config'], env=environment,
+                          capture_output=True, text=True, timeout=30)
+    assert boot.returncode != 0
+    assert 'recorded SQLite database file could not be verified' in boot.stderr
+    assert database.read_bytes() == before
+    assert (backup_env.restore_dir / 'bazarr.db').is_file()
+
+
+def test_known_postgres_launch_failure_keeps_the_restore_staged(backup_env, monkeypatch, caplog):
+    import subprocess
+
+    _enable_postgresql(backup_env, monkeypatch)
+    backup = backup_env.module
+    _write_fake_tool(str(backup_env.tools_dir), 'pg_restore')
+    _stage_restore(backup_env, 'bazarr_postgres.dump')
+
+    def executable_missing(*args, **kwargs):
+        raise FileNotFoundError('fixture executable vanished')
+
+    monkeypatch.setattr(subprocess, 'run', executable_missing)
+    assert not backup.restore_from_backup()
+    assert not backup_env.stops
+    assert 'The restore did not start' in caplog.text
+    assert (backup_env.restore_dir / 'bazarr_postgres.dump').is_file()
+    assert not (backup_env.restore_dir / backup._RESTORE_HANDOFF).exists()
 
 
 def test_restore_advances_past_live_and_archived_generations_without_rotating_the_signing_key(
@@ -1582,7 +1635,8 @@ def _ready_folder_restore(backup_env):
     backup = backup_env.module
     backup._write_restore_journal(backup_env.restore_dir / backup._RESTORE_HANDOFF, {
         'phase': backup._DATA_READY, 'has_data': True,
-        'destination': backup._restore_destination(), 'server': None,
+        'destination': backup._restore_destination(),
+        'server': backup.restore_target.sqlite_file(backup_env.config_dir / 'db' / 'bazarr.db'),
     })
 
 
@@ -1670,9 +1724,9 @@ def test_plugin_restore_retries_the_handoff_without_restoring_sqlite_twice(
         restores = []
         restore_database = backup_env.module._restore_database
 
-        def restore_once(source, destination, before_restore):
+        def restore_once(source, destination, before_restore, record):
             restores.append(True)
-            return restore_database(source, destination, before_restore)
+            return restore_database(source, destination, before_restore, record)
 
         monkeypatch.setattr(backup_env.module, "_restore_database", restore_once)
         with monkeypatch.context() as interrupted:

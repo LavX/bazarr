@@ -418,7 +418,7 @@ def test_backup_resume_keeps_postgresql_and_plugin_files_bound_across_fresh_proc
     import yaml
 
     test_url = os.getenv("BAZARR_PG_TEST_URL")
-    if not test_url or not shutil.which("pg_dump") or not shutil.which("pg_restore"):
+    if not test_url or not all(shutil.which(program) for program in ("pg_dump", "pg_restore", "psql")):
         pytest.skip("requires the PostgreSQL test server and client tools")
     url = sa.make_url(test_url)
     admin = sa.create_engine(url, isolation_level="AUTOCOMMIT", hide_parameters=True)
@@ -460,6 +460,8 @@ elif action == 'backup':
 elif action == 'prepare':
     assert backup.prepare_restore(argument)
 elif action == 'check':
+    from app.config import open_database_for_restore
+    open_database_for_restore()
     with engine.connect() as connection:
         database = connection.execute(text('SELECT current_database()')).scalar_one()
     print(database + ':' + state.load_state_strict()['installations']['exampleservice']['name'])
@@ -514,20 +516,20 @@ else:
         sample.write_text("changed plugin files")
         child("prepare", archive.name)
 
-        child("interrupt", expected=42)
         journal = root / "restore" / ".restore-journal.json"
-        record = json.loads(journal.read_text())
-        assert record["phase"] == "database-started"
         from literals import EXIT_RESTORE_ERROR
 
-        child("boot", expected=EXIT_RESTORE_ERROR & 255)
+        assert json.loads(journal.read_text())["phase"] == "staged"
+        child("boot", target=None, expected=EXIT_RESTORE_ERROR & 255)
+        assert not (config.parent / "restore-runs").exists()
+        child("interrupt", expected=42)
+        record = json.loads(journal.read_text())
+        assert record["phase"] == "database-started"
+        child("boot", target=None, expected=EXIT_RESTORE_ERROR & 255)
         assert child("check") == f"{original}:archived row"
         assert sample.read_text() == "changed plugin files"
-        # Explicit recovery after verifying the original database contents.
-        record["phase"] = "database-complete"
-        journal.write_text(json.dumps(record))
-        child("boot", target=None, expected=EXIT_RESTORE_ERROR & 255)
-        assert sample.read_text() == "changed plugin files"
+        # A committed database receipt lets the original target continue
+        # without replaying either PostgreSQL client invocation.
         child("boot", expected=41)
         assert json.loads(journal.read_text())["phase"] == "data-ready"
         child("boot", target=None, expected=EXIT_RESTORE_ERROR & 255)
@@ -536,7 +538,7 @@ else:
         child("boot")
         assert sample.read_text() == "archived plugin files"
         assert not journal.exists()
-        assert (config.parent / "restore-runs").read_text().splitlines() == ["pg_restore"]
+        assert (config.parent / "restore-runs").read_text().splitlines() == ["pg_restore", "psql"]
         assert child("check") == f"{original}:archived row"
         assert child("check", target=other) == f"{other}:other row"
     finally:
