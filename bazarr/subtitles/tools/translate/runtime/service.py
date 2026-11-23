@@ -30,7 +30,8 @@ from subtitles.tools.subsync_engines import (SubtitleDestinationChanged, Subtitl
                                              capture_subtitle_versions, staged_subtitle_write,
                                              validate_subtitle_versions)
 
-from ..core.translator_utils import add_translator_info, create_process_result, get_title, translation_write_kwargs
+from ..core.translator_utils import (add_translator_info, create_process_result, get_title,
+                                     record_source_translation, require_source_translation, translation_write_kwargs)
 from .failure import MESSAGES
 from .dispatch import DispatchFailed, Dispatcher, JobSpec, LegacyDeclined, LegacyResult
 from .jobs import line_digest, target_key
@@ -57,8 +58,18 @@ def _unreachable(error: BaseException) -> bool:
     return isinstance(error, RequestError) and str(error).startswith(("Connection error", "Request timed out"))
 
 
-def _media_context(media_type, radarr_id, sonarr_series_id, sonarr_episode_id, arr_instance_id, sports_operation):
+def _media_context(media_type, radarr_id, sonarr_series_id, sonarr_episode_id, arr_instance_id, sports_operation,
+                   source=None):
     """The title, year, IMDB id and overview of what is being translated, for the engine's prompt."""
+    if source is not None:
+        from media_sources.context import source_item_title
+
+        context = {"type": source.publication_type, "title": source_item_title(source),
+                   "year": source.year, "imdb_id": source.imdb_id}
+        if source.kind == 'episode':
+            context.update(year=source.series_year or source.year, imdb_id=source.series_imdb_id or source.imdb_id)
+        return {key: value for key, value in context.items() if value is not None}
+
     from app.database import TableMovies, TableShows, database, select
 
     from ..core.translator_utils import _scope, is_movie_media_type
@@ -96,7 +107,7 @@ class RuntimeTranslatorService:
     def __init__(self, source_srt_file, dest_srt_file, lang_obj, to_lang, from_lang, media_type, video_path,
                  orig_to_lang, forced, hi, sonarr_series_id, sonarr_episode_id, radarr_id, arr_instance_id=None,
                  sports_operation=None, cancel=None, expected_destination_versions=(), source_key=None,
-                 dispatcher=None):
+                 dispatcher=None, source=None):
         self.source_srt_file = source_srt_file
         self.dest_srt_file = dest_srt_file
         self.lang_obj = lang_obj
@@ -112,6 +123,7 @@ class RuntimeTranslatorService:
         self.radarr_id = radarr_id
         self.arr_instance_id = arr_instance_id
         self.sports_operation = sports_operation
+        self.source = source
         self.cancel = cancel
         self.expected_destination_versions = tuple(expected_destination_versions or ())
         self.source_key = source_key or str(source_srt_file)
@@ -143,7 +155,8 @@ class RuntimeTranslatorService:
             sonarr_series_id=self.sonarr_series_id, sonarr_episode_id=self.sonarr_episode_id,
             radarr_id=self.radarr_id, arr_instance_id=self.arr_instance_id,
             expected_destination_versions=self.expected_destination_versions,
-            **({"sports_operation": self.sports_operation, "cancel": self.cancel} if self.sports_operation else {}))
+            **({"sports_operation": self.sports_operation, "cancel": self.cancel} if self.sports_operation else {}),
+            **({"source": self.source} if self.source is not None else {}))
         try:
             published = service.translate(job_id=self._job_id)
         except Exception as error:
@@ -173,18 +186,23 @@ class RuntimeTranslatorService:
             raise TranslationRuntimeError("The source subtitle has no lines to translate.", "empty_source")
         title = get_title(self.media_type, self.radarr_id, self.sonarr_series_id, self.sonarr_episode_id,
                           self.arr_instance_id,
-                          **({"sports_context": self.sports_operation.context} if self.sports_operation else {}))
+                          **({"sports_context": self.sports_operation.context} if self.sports_operation else {}),
+                          **({"source": self.source} if self.source is not None else {}))
         media_id = (self.sonarr_episode_id if self.media_type == "episode"
                     else (None if self.media_type == "sports" else self.radarr_id))
+        history_media = {"media_type": self.media_type, "media_id": media_id, "media_title": title or None,
+                         "arr_instance_id": self.arr_instance_id}
+        if self.source is not None:
+            history_media.update(media_type="source", media_id=self.source.item_id, arr_instance_id=None)
         spec = JobSpec(
             source_key=self.source_key, target_key=target_key(self.orig_to_lang, self.forced, self.hi), lines=lines,
             source_language=self.from_lang, target_language=self.orig_to_lang,
             source_name=language_from_alpha2(self.from_lang) or None,
             target_name=language_from_alpha2(self.orig_to_lang) or None,
             media=_media_context(self.media_type, self.radarr_id, self.sonarr_series_id, self.sonarr_episode_id,
-                                 self.arr_instance_id, self.sports_operation),
-            history_media={"media_type": self.media_type, "media_id": media_id, "media_title": title or None,
-                           "arr_instance_id": self.arr_instance_id},
+                                 self.arr_instance_id, self.sports_operation,
+                                 **({"source": self.source} if self.source is not None else {})),
+            history_media=history_media,
             pin_from_job=True, check_cancel=self._check, progress=self._progress, legacy=self._legacy)
         try:
             outcome = (self._dispatcher or Dispatcher()).run(spec)
@@ -220,11 +238,13 @@ class RuntimeTranslatorService:
         staged write, which checks them once more under its locks at the moment of publication.
         """
         self._check_inputs()
+        require_source_translation(self.source, source_lines, outcome.lines)
         write_kwargs = dict(translation_write_kwargs(self, job_id))
         write_kwargs["expected_versions"] = tuple(write_kwargs.get("expected_versions") or ()) + self._versions
         with staged_subtitle_write(self.video_path, self.dest_srt_file,
                                    on_publish=publication_callback(self.media_type, self.video_path, "translate",
-                                                                   self.arr_instance_id),
+                                                                   self.arr_instance_id,
+                                                                   **({"source": self.source} if self.source else {})),
                                    source_paths=(self.source_srt_file,),
                                    before_publish=lambda: jobs_queue.update_job_progress(job_id=job_id),
                                    allow_empty=not bool(self.sports_operation),
@@ -270,8 +290,9 @@ class RuntimeTranslatorService:
             message += f" Some lines may remain in the source language. {self.partial_error}"
         result = create_process_result(
             message, self.video_path, self.orig_to_lang, self.forced, self.hi, self.dest_srt_file, self.media_type,
-            **({"sports_context": self.sports_operation.context} if self.sports_operation else {}))
-        if finish_translation(self, result):
+            **({"sports_context": self.sports_operation.context} if self.sports_operation else {}),
+            **({"source": self.source} if self.source is not None else {}))
+        if record_source_translation(self.source, result) or finish_translation(self, result):
             return self.dest_srt_file
         if self.media_type == "episode":
             history_log(action=6, sonarr_series_id=self.sonarr_series_id, sonarr_episode_id=self.sonarr_episode_id,

@@ -107,7 +107,7 @@ def _year(value):
         return None
 
 
-def media_metadata(media_type, video_path, arr_instance_id):
+def media_metadata(media_type, video_path, arr_instance_id, *, source_item_id=None, source_created_at=None):
     """Read the identifiers Bazarr already stores for this published video.
 
     Resolved here rather than threaded through every publication callback:
@@ -120,6 +120,22 @@ def media_metadata(media_type, video_path, arr_instance_id):
     at all reading the database. The caller then climbs a lower rung.
     """
     try:
+        if source_item_id is not None:
+            from media_sources.context import resolve_item
+            from .paths import media_paths_equal
+
+            with _reader() as session:
+                source = resolve_item(source_item_id, session)
+            if (source_created_at is not None and source.created_at != source_created_at
+                    or source.publication_type != media_type or not media_paths_equal(source.path, video_path)):
+                return None
+            if media_type == 'episode':
+                return MediaMetadata(imdb_id=source.series_imdb_id, tvdb_id=source.series_tvdb_id,
+                                     title=source.group_title, year=source.series_year,
+                                     season=source.season, episode=source.episode)
+            return MediaMetadata(imdb_id=source.imdb_id, tmdb_id=source.tmdb_id, tvdb_id=source.tvdb_id,
+                                 title=source.title, year=source.year, season=source.season, episode=source.episode)
+
         from app.database import TableEpisodes, TableMovies, TableShows, select
         from arr_instances.resolution import scoped
         from utilities.path_mappings import path_mappings
