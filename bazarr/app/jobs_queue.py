@@ -303,7 +303,7 @@ class JobsQueue:
     def feed_jobs_pending_queue(self, job_name, module, func, args: list = None, kwargs: dict = None,
                                 is_progress=False, is_signalr=False, progress_max: int = 0,
                                 retryable: bool = False, retry_of: int = None, return_existing: bool = False,
-                                lane: str = None):
+                                lane: str = None, *, return_created: bool = False):
         """
         Adds a new job to the pending jobs queue with specified details and triggers an event
         to notify about the queue update. Each job is uniquely identified by a job ID,
@@ -338,9 +338,10 @@ class JobsQueue:
         :param lane: The lane a job a person starts is counted in, one of ``LANE_LIMITS``. Forcing the job to
             start at once is held to that lane's cap.
         :type lane: str
+        :param return_created: Also return whether this call created the queue job.
         :return: The unique job ID assigned to the newly queued job, or False when an identical job is already
-            pending or running.
-        :rtype: int | bool
+            pending or running. With ``return_created`` the result is a tuple of the ID and creation flag.
+        :rtype: int | bool | tuple[int | bool, bool]
         """
         if args is None:
             args = []
@@ -355,7 +356,8 @@ class JobsQueue:
                 existing = None
             if existing is not None:
                 logging.debug(f"Task {job_name} already exists in pending and running queue")  # noqa: G004
-                return existing.job_id if return_existing else False
+                job_id = existing.job_id if return_existing else False
+                return (job_id, False) if return_created else job_id
 
             claim = self._find_inline_claim(module, func, args, kwargs)
             if claim is not None:
@@ -363,7 +365,8 @@ class JobsQueue:
                 # request that would queue the same work follows that job
                 # instead of starting a second one.
                 logging.debug(f"Task {job_name} runs inline in job {claim['job_id']}")  # noqa: G004
-                return claim['job_id'] if return_existing else False
+                job_id = claim['job_id'] if return_existing else False
+                return (job_id, False) if return_created else job_id
 
             with self._job_id_lock:
                 new_job_id = self.current_job_id = self.current_job_id + 1
@@ -385,7 +388,7 @@ class JobsQueue:
 
         logging.debug(f"Task {job_name} ({new_job_id}) added to queue")  # noqa: G004
         _job_event('update', {"job_id": new_job_id, "progress_value": None, "status": "pending"})
-        return new_job_id
+        return (new_job_id, True) if return_created else new_job_id
 
     def list_jobs_from_queue(self, job_id: int = None, status: str = None):
         """
@@ -759,7 +762,8 @@ class JobsQueue:
         return False
 
     def add_job_from_function(self, job_name: str, is_progress: bool, progress_max: int = 0,
-                              wait_for_completion: bool = False, return_existing: bool = False) -> int | bool:
+                              wait_for_completion: bool = False, return_existing: bool = False, *,
+                              return_created: bool = False) -> int | bool | tuple[int | bool, bool]:
         """
         Adds a job to the pending queue using the details of the calling function. The job is then executed.
 
@@ -773,8 +777,9 @@ class JobsQueue:
         :type wait_for_completion: bool
         :param return_existing: Return the matching active job's id when this call is already queued.
         :type return_existing: bool
-        :return: ID of the added job.
-        :rtype: int | bool
+        :param return_created: Also return whether this call created the queue job.
+        :return: ID of the added job, or a tuple of the ID and creation flag when requested.
+        :rtype: int | bool | tuple[int | bool, bool]
         """
         # Get the current frame
         current_frame = inspect.currentframe()
@@ -805,19 +810,22 @@ class JobsQueue:
         del current_frame, caller_frame, caller_code, caller_signature, caller_locals, bound_arguments
 
         # Feed the job to the pending queue
-        job_id = self.feed_jobs_pending_queue(job_name=job_name, module=parent_function_path, func=parent_function_name,
-                                              kwargs=arguments, is_progress=is_progress, progress_max=progress_max,
-                                              return_existing=return_existing)
+        result = self.feed_jobs_pending_queue(job_name=job_name, module=parent_function_path,
+                                              func=parent_function_name, kwargs=arguments,
+                                              is_progress=is_progress, progress_max=progress_max,
+                                              return_existing=return_existing,
+                                              **({'return_created': True} if return_created else {}))
+        job_id = result[0] if return_created else result
 
         if not job_id:
-            return False
+            return result if return_created else False
 
         if wait_for_completion:
             time.sleep(1)
             while jobs_queue.get_job_status(job_id) in ['pending', 'running']:
                 time.sleep(1)
 
-        return job_id
+        return result
 
     def remove_job_from_pending_queue(self, job_id: int):
         """
