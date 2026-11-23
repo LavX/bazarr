@@ -152,8 +152,11 @@ class SourcePublicationOwnerIndex(SourceOutputOwnerIndex):
         return self._source_owner_paths(target), self._registry_rows(target)
 
     def _load_owners(self):
-        source_paths, registry_rows = self._registry_snapshot()
-        self._prepared_owners = source_paths, registry_rows
+        self._prepared_owners = self._registry_snapshot()
+        return self._map_owners(self._prepared_owners)
+
+    def _map_owners(self, snapshot):
+        source_paths, registry_rows = snapshot
         destination, mappings = self._publication_settings or self._settings_snapshot()
         return self._map_source_owners(chain(source_paths, self._mapped_registry_paths(registry_rows, mappings)),
                                        destination)
@@ -236,6 +239,11 @@ class SourcePublicationOwnerIndex(SourceOutputOwnerIndex):
         if not self.registered_ownership_is_current(proof):
             raise SourcePublicationOwnersChanged('Registered subtitle ownership changed before publication')
 
+    def refresh_mapped_owners(self):
+        """Resolve current filesystem claims from the rows pinned by publication."""
+        if self._prepared_owners is not None:
+            self._owners = self._map_owners(self._prepared_owners)
+
     def subtitle_destination(self):
         if self._publication_settings is not None:
             return self._publication_settings[0]
@@ -259,7 +267,7 @@ class SourcePublicationOwnerIndex(SourceOutputOwnerIndex):
 
     @contextmanager
     def publication(self, source, prepare=None, *, destination=None, cleanup_outputs=False,
-                    recheck_registered=False):
+                    recheck_registered=False, guard_registry=False):
         """Prepare subtitle changes before locking the registry for publication."""
         for _ in range(2):
             self._loaded = False
@@ -286,7 +294,8 @@ class SourcePublicationOwnerIndex(SourceOutputOwnerIndex):
                     sleep(delay)
                 publishing = False
                 try:
-                    with self._settings_guard(), source_item_publication(source, shared=shared) as (current, connection):
+                    with (self._settings_guard(),
+                          source_item_publication(source, shared=shared or guard_registry) as (current, connection)):
                         if self._publication_settings != self._settings_snapshot():
                             break
                         if shared and current is not None and self._prepared_owners != self._registry_snapshot(connection):
