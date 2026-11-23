@@ -536,15 +536,11 @@ def test_a_model_list_that_cannot_be_fetched_is_a_failed_test_that_names_the_add
 
 
 def test_saved_settings_that_no_longer_fit_the_plugin_are_a_failed_test_not_a_server_error(world, monkeypatch):
-    from subtitles.tools.translate.runtime.settings_service import InvalidValuesError
+    from subtitles.tools.translate.runtime import settings_service
 
-    world.hooks["options_source"] = lambda *args: {"items": []}
+    world.hooks["options_source"] = lambda *args: pytest.fail("Invalid saved settings reached the model source")
     connection_id = world.lan_connection()
-
-    def refuse(self, *args, **kwargs):
-        raise InvalidValuesError("The values are not valid.", field_errors={"base_url": "must be an address"})
-
-    monkeypatch.setattr(TranslatorSettingsService, "options", refuse)
+    monkeypatch.setattr(settings_service, "validate_draft", lambda *_: {"base_url": "must be an address"})
     response = world.call("post", f"connections/{connection_id}/test", {})
     assert response.status_code == 200 and response.json["ok"] is False
     assert "save it again" in response.json["message"]

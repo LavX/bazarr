@@ -132,11 +132,11 @@ def test_a_failed_test_reports_the_plugins_message_with_the_key_masked(app_servi
 
 
 def test_a_model_list_asks_the_worker_with_no_stored_secret(app_service):
-    port = FakePort([{"id": "qwen", "label": "Qwen"}])
+    port = FakePort([{"value": "qwen", "label": "Qwen"}])
     workers.bind(port)
     answer = app_service.service.options(app_service.instance.id, "openai_compatible", "model_list",
                                          {"base_url": ADDRESS})
-    assert answer["available"] is True and answer["items"] == [{"id": "qwen", "label": "Qwen"}]
+    assert answer["available"] is True and answer["items"] == [{"id": "qwen", "name": "Qwen"}]
     ((plugin_id, op, params, secrets, _timeout),) = port.calls
     assert (plugin_id, op, secrets) == (PLUGIN, "options", {})
     assert params["field"] == "model_list" and KEY not in str(params)
