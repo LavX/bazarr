@@ -1125,6 +1125,7 @@ class TableSourceItems(Base):
     imdb_id = mapped_column(Text)
     tmdb_id = mapped_column(Text)
     tvdb_id = mapped_column(Integer)
+    poster = mapped_column(Text)
     # The server item id (server kinds); NULL for folders.
     external_id = mapped_column(Text)
     identity_source = mapped_column(Text, nullable=False)

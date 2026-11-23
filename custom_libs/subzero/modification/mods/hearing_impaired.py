@@ -4,6 +4,7 @@ from __future__ import unicode_literals
 import re
 
 from subzero.language import Language
+from subzero.modification.markup import LINE_BREAK
 from subzero.modification.mods import SubtitleTextModification, empty_line_post_processors, TAG
 from subzero.modification.exc import EmptyEntryError
 from subzero.modification.processors.re_processor import NReProcessor
@@ -23,13 +24,71 @@ class FullBracketEntryProcessor(NReProcessor):
         return content
 
 
+class CapsCueProcessor(NReProcessor):
+    def process(self, content, debug=False, protect_caps_dialogue=False, **kwargs):
+        # When only alignment could be understood, keep ambiguous caps speech
+        # on the newly exposed first line. Standalone cues still use the HI rule.
+        if protect_caps_dialogue and len(content.split()) > 1:
+            return content
+        return super(CapsCueProcessor, self).process(content, debug=debug, **kwargs)
+
+
 # Any alphanumeric content (letters incl. non-Latin/CJK, or digits) marks a line
 # as real content rather than pure decoration.
 _HI_CONTENT_RE = re.compile(r'[^\W_]', re.UNICODE)
 _MUSIC_SYMBOL_RE = re.compile(r'[*#¶♫♪]')
+_LYRIC_NOTES = frozenset("¶♫♪")
+_LEGACY_LYRIC_MARKS = frozenset("*#")
+_LYRIC_START_RE = re.compile(r"^[-\s>~]*([¶♫♪]+|[*#](?=\s))")
+_LYRIC_END_RE = re.compile(r"([¶♫♪]+|(?<=\s)[*#])[)\]]?$")
+_BRACKET_SPAN = r"(?:-[ \t]*)?(?:\[[^\[\]]+\]|\([^()]+\))"
+_BRACKET_GAP = rf"(?:[ \t]|{re.escape(LINE_BREAK)})*"
+_BRACKETED_CUE_RE = re.compile(rf"{_BRACKET_GAP}{_BRACKET_SPAN}(?:{_BRACKET_GAP}{_BRACKET_SPAN})*{_BRACKET_GAP}")
 # SSA/ASS override tags ({\i1}, {\an8}, {\c&H..&}, ...) carry letters/digits that
 # must not be mistaken for lyric content when testing a line.
 _OVERRIDE_TAG_RE = re.compile(r'\{[^}]*\}')
+
+
+def is_bracketed_cue(entry):
+    return _BRACKETED_CUE_RE.fullmatch(entry) is not None
+
+
+def _lyric_boundaries(line):
+    line = line.strip()
+    # On a marker-only line there are no words to separate from the markers.
+    if line and not _MUSIC_SYMBOL_RE.sub("", line).strip():
+        return line[0], line[-1]
+    start = _LYRIC_START_RE.match(line)
+    end = _LYRIC_END_RE.search(line)
+    return (start.group(1)[-1] if start else None, end.group(1)[-1] if end else None)
+
+
+def _spanning_lyric_mark(lines):
+    if any(line is None for line in lines):
+        return None
+    opening, first_end = _lyric_boundaries(lines[0])
+    last_start, closing = _lyric_boundaries(lines[-1])
+    if (opening is not None and opening == closing
+            and first_end is None and last_start is None
+            and _HI_CONTENT_RE.search(lines[0]) is not None
+            and _HI_CONTENT_RE.search(lines[-1]) is not None
+            and not any(any(_lyric_boundaries(line)) for line in lines[1:-1])):
+        return opening
+    return None
+
+
+def spanning_lyric_entry(visible_lines, source_entry, alignment):
+    mark = _spanning_lyric_mark(visible_lines)
+    if mark in _LYRIC_NOTES:
+        return LINE_BREAK.join(visible_lines)
+    if mark in _LEGACY_LYRIC_MARKS:
+        # Verify the same delimiters in the source. Only visible text can
+        # establish that they surround words and no independent lyric lines.
+        source_lines = source_entry.removeprefix(alignment).split(LINE_BREAK)
+        if (_lyric_boundaries(source_lines[0]) == (mark, None)
+                and _lyric_boundaries(source_lines[-1]) == (None, mark)):
+            return source_entry
+    return None
 
 
 class MusicEntryProcessor(NReProcessor):
@@ -50,7 +109,7 @@ class MusicEntryProcessor(NReProcessor):
     subtitle convention and are removed earlier by HI_brackets.
     See https://github.com/LavX/bazarr/issues/225
     """
-    def process(self, content, debug=False, keep_lyrics=None, **kwargs):
+    def process(self, content, debug=False, keep_lyrics=None, line_scoped=False, entry=None, **kwargs):
         if keep_lyrics:
             text = content or ""
             # Only music-note lines are in this processor's scope; leave anything
@@ -64,7 +123,16 @@ class MusicEntryProcessor(NReProcessor):
             # letters/digits (e.g. {\i1}) are not counted as content.
             stripped = _OVERRIDE_TAG_RE.sub('', text)
             return content if _HI_CONTENT_RE.search(stripped) else ""
-        return super(MusicEntryProcessor, self).process(content, debug=debug, **kwargs)
+        if entry is None:
+            return content
+        if line_scoped:
+            opening, closing = _lyric_boundaries(entry)
+            marked = opening in _LYRIC_NOTES or closing in _LYRIC_NOTES
+            # Use visible text only to decide whether to remove the whole line.
+            if marked and self.pattern.fullmatch(entry):
+                return ""
+            return content
+        return super(MusicEntryProcessor, self).process(content, debug=debug, entry=entry, **kwargs)
 
 
 class HearingImpaired(SubtitleTextModification):
@@ -120,7 +188,7 @@ class HearingImpaired(SubtitleTextModification):
         #             name="HI_brackets_special"),
 
         # all caps line (at least 4 consecutive uppercase chars,only remove if line matches common HI cues, otherwise keep)
-        NReProcessor(
+        CapsCueProcessor(
             re.compile(r'(?u)(^(?=.*[A-ZÀ-Ž&+]{4,})[A-ZÀ-Ž-_\s&+]+$)'),
             lambda m: "" if any(
                 cue in m.group(1)
@@ -140,8 +208,8 @@ class HearingImpaired(SubtitleTextModification):
         # NReProcessor(re.compile(r'(?u)^\s*-\s*'), "", name="HI_starting_dash"),
 
         # all caps at start before new sentence
-        NReProcessor(re.compile(r'(?u)^(?=[A-ZÀ-Ž]{4,})[A-ZÀ-Ž-_\s]+\s([A-ZÀ-Ž][a-zà-ž].+)'), r"\1",
-                     name="HI_starting_upper_then_sentence", supported=lambda p: not p.mostly_uppercase),
+        CapsCueProcessor(re.compile(r'(?u)^(?=[A-ZÀ-Ž]{4,})[A-ZÀ-Ž-_\s]+\s([A-ZÀ-Ž][a-zà-ž].+)'), r"\1",
+                         name="HI_starting_upper_then_sentence", supported=lambda p: not p.mostly_uppercase),
 
         # remove normal and Japanese parentheses only for Japanese subtitles
         NReProcessor(re.compile(r'(?u)（.+）|\(.+\)'), "",

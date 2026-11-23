@@ -86,15 +86,18 @@ def _get_source_video(path, title, sceneName, providers, source):
     hints = {"title": title, "type": "episode" if is_episode else "movie"}
     try:
         logging.debug('BAZARR guessing video object for a source item using its path: %s', path)
+        fallback = dict(type=hints['type'], title=title or source.title)
+        if is_episode:
+            fallback.update(season=source.season, episode=source.episode)
         video = parse_video(path, hints=hints, skip_hashing=settings.general.skip_hashing, dry_run=False,
-                            providers=providers)
+                            providers=providers, fallback_guess=fallback)
         if sceneName != "None":
             scenename_video = _parse_scenename_video(sceneName, os.path.splitext(path)[1], hints)
             if scenename_video is not None:
                 refine_video_with_scenename(initial_video=video, scenename_video=scenename_video)
         video.source_context = source
         refine_from_source(path, video, source)
-        if is_episode:
+        if is_episode and video.episode is not None:
             for key in ("anidb", "anilist"):
                 registered_refiners[key](path, video)
         return video

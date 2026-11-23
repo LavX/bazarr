@@ -703,7 +703,7 @@ def test_a_scan_that_fails_releases_its_library_lock(movies, monkeypatch):
 def test_a_renamed_show_folder_gives_its_episodes_the_new_names_state(lib):
     stamped_video(lib.root / "2020" / "Show - S01E01.mkv")
     lib.scan()
-    assert lib.group("2020").identity_state == "unmatched"
+    assert (lib.group("2020").title, lib.group("2020").identity_state) == ("Show", "parsed")
     os.rename(lib.root / "2020", lib.root / "Real Show")
 
     lib.scan()

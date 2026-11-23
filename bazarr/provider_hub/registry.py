@@ -26,11 +26,16 @@ from .migration import (
     validation_built_in_provider_ids,
 )
 from .protocol import candidate_from_worker, language_to_payload, video_to_payload, worker_download_to_content
-from .state import active_installations, blocked_installations, provider_hub_dir
+from .state import (
+    OFFICIAL_CATALOG_REPO, OFFICIAL_CATALOG_SOURCE_ID, active_installations, blocked_installations, provider_hub_dir,
+)
 from . import leases, runtime_status
 from .env_registry import env_dir_of
 from .venv import hold_environment, validated_bundle_path, validated_interpreter
-from .worker import ProviderWorkerClient, release_when_gone, RequestNotAdmitted, WorkerBusy, WorkerError, worker_command
+from .worker import (
+    ProviderWorkerClient, RequestNotAdmitted, SourceMediaRefused, WorkerBusy, WorkerCancelled, WorkerError,
+    release_when_gone, worker_command,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -195,7 +200,7 @@ class HubProxyProvider(Provider):
         What it yields is the call's service leases: the request's configuration comes from ``call.config`` and the
         leases are given back when the call ends, whatever way it ends.
         """
-        from subliminal_patch.core import ProviderRetiredError
+        from subliminal_patch.core import ProviderCallInterruptedError, ProviderRetiredError
 
         with _PROXY_LOCK:
             if self._retired:
@@ -207,6 +212,8 @@ class HubProxyProvider(Provider):
         try:
             call = self._call_leases()
             yield call
+        except WorkerCancelled as error:
+            raise ProviderCallInterruptedError(self.provider_name) from error
         finally:
             if call is not None:
                 call.close()
@@ -258,13 +265,58 @@ class HubProxyProvider(Provider):
         if recorded is not None:
             recorded()
 
-    def _gated_request(self, op, request, timeout):
-        # The worker cannot raise what the pool catches, so its two refusals
+    def _source_media_permission(self):
+        """The manifest schema through which this release can request local media."""
+        manifest = getattr(self.__class__, "manifest", None)
+        if manifest is None:
+            return None
+        if (manifest.schema_version == 1 and self.provider_name == "embeddedsubtitles"
+                and manifest.source_repo.casefold() == OFFICIAL_CATALOG_REPO.casefold()):
+            return 1
+        if manifest.schema_version == 2 and "media_read" in (manifest.raw.get("permissions") or ()):
+            return 2
+        return None
+
+    def _source_media(self, context):
+        """Resolve the live installation's permission before looking up the source file."""
+        from .capabilities import live_row
+        from .provider_roots import source_media_file
+
+        permission = self._source_media_permission()
+        if permission is None:
+            return None
+        manifest = self.__class__.manifest
+        row = live_row(self.provider_name)
+        active_manifest = row.get("manifest") if row else None
+        if not isinstance(active_manifest, dict) or row.get("enabled") is False:
+            return None
+        if str(active_manifest.get("bundle_sha256", "")).lower() != manifest.bundle_sha256:
+            return None
+        if permission == 1 and (row.get("origin") != "catalog" or row.get("source_id") != OFFICIAL_CATALOG_SOURCE_ID
+                                or not can_shadow_built_in_provider(self.provider_name, row.get("trusted") is True)):
+            return None
+        if permission == 2:
+            permissions = active_manifest.get("permissions")
+            if not isinstance(permissions, list) or "media_read" not in permissions:
+                return None
+        return source_media_file(context)
+
+    def _gated_request(self, op, request, timeout, *, source_context=None, consume_source_reply=None):
+        # The worker cannot raise what the pool catches, so its refusals
         # are translated here. Imported late: some suites stub subliminal_patch.
-        if self.admit is None:
-            return self._worker().request(op, request, timeout=timeout)
+        # Source authorization is resolved after the request gets its turn.
+        options = {}
+        if source_context is not None and self._source_media_permission() is not None:
+            options["source_media"] = lambda: self._source_media(source_context)
+            if consume_source_reply is not None:
+                options["consume_source_reply"] = consume_source_reply
         try:
-            return self._worker().request(op, request, timeout=timeout, admit=self.admit)
+            if self.admit is not None:
+                options["admit"] = self.admit
+            return self._worker().request(op, request, timeout=timeout, **options)
+        except SourceMediaRefused as error:
+            from subliminal_patch.core import ProviderItemExcludedError
+            raise ProviderItemExcludedError(self.provider_name, str(error)) from error
         except RequestNotAdmitted as error:
             from subliminal_patch.core import ProviderExcludedWhileQueuedError
             raise ProviderExcludedWhileQueuedError(self.provider_name) from error
@@ -389,7 +441,7 @@ class HubProxyProvider(Provider):
         }
         with self._operation() as call:
             request["config"] = call.config(self.config)
-            result = self._gated_request("search", request, timeout)
+            result = self._gated_request("search", request, timeout, source_context=getattr(video, "source_context", None))
         _consume_runtime_events(
             self.provider_name,
             result,
@@ -399,6 +451,7 @@ class HubProxyProvider(Provider):
         subtitles = []
         for item in result.payload.get("candidates", []):
             subtitle = candidate_from_worker(self.provider_name, item)
+            subtitle.source_context = getattr(video, "source_context", None)
             # Request context belongs to this candidate, separate from provider
             # display metadata and opaque payloads used for scoring and download.
             subtitle._requested_archive_context = {
@@ -427,15 +480,8 @@ class HubProxyProvider(Provider):
             "language": language_to_payload(subtitle.language),
             "config": call.config(self.config) if call is not None else self.config,
         }
-        result = self._gated_request("download", request, timeout)
-        _consume_runtime_events(
-            self.provider_name,
-            result,
-            status_generation,
-            status_configuration_generation,
-        )
 
-        def _select_member_cb(members):
+        def build_selector_payload(members):
             context = getattr(subtitle, "_requested_archive_context", {})
             selector_payload = {
                 "provider": self.provider_name,
@@ -450,13 +496,26 @@ class HubProxyProvider(Provider):
                 selector_payload["absolute_episode"] = context["absolute_episode"]
             elif hasattr(subtitle, "absolute_episode"):
                 selector_payload["absolute_episode"] = subtitle.absolute_episode
-            response = self._worker().select_archive_member(
-                selector_payload,
-                timeout=timeout,
-            )
-            return response.payload
+            return selector_payload
 
-        worker_download_to_content(subtitle, result.payload, select_member_cb=_select_member_cb)
+        def consume(result, select_member):
+            _consume_runtime_events(
+                self.provider_name,
+                result,
+                status_generation,
+                status_configuration_generation,
+            )
+            worker_download_to_content(
+                subtitle, result.payload,
+                select_member_cb=lambda members: select_member(build_selector_payload(members), timeout=timeout).payload,
+            )
+
+        source_context = getattr(subtitle, "source_context", None)
+        if source_context is not None and self._source_media_permission() is not None:
+            self._gated_request("download", request, timeout, source_context=source_context, consume_source_reply=consume)
+        else:
+            result = self._gated_request("download", request, timeout)
+            consume(result, lambda payload, timeout: self._worker().select_archive_member(payload, timeout=timeout))
         return True
 
 
@@ -658,20 +717,19 @@ def unregister_provider_class(provider_id: str) -> Unregistered:
     left as it is. A search that already holds the class it looked up goes on with it: the pools drop their
     instances separately (``retire_provider_instances``).
     """
-    with _REGISTRY_GUARD:
+    with _REGISTRY_GUARD, provider_registry.lock:
         current = provider_registry[provider_id]
-        removed = current is not None and issubclass(current, HubProxyProvider) and provider_registry.unregister(
-            provider_id, expected=current) is not None
         built_in = _SHADOWED_BUILT_INS.pop(provider_id, None)
-        restored = False
-        if removed:
-            _REGISTERED_PROVIDER_HUB_IDS.discard(provider_id)
-            if built_in is not None and provider_registry[provider_id] is None:
-                provider_registry.register(provider_id, built_in)
-                restored = True
-            else:
-                _WITHDRAWN_PROVIDER_IDS.add(provider_id)
-        return Unregistered(removed=removed, restored_built_in=restored)
+        if current is None or not issubclass(current, HubProxyProvider):
+            return Unregistered()
+
+        _REGISTERED_PROVIDER_HUB_IDS.discard(provider_id)
+        if built_in is not None:
+            provider_registry.register(provider_id, built_in)
+        else:
+            provider_registry.unregister(provider_id, expected=current)
+            _WITHDRAWN_PROVIDER_IDS.add(provider_id)
+        return Unregistered(removed=True, restored_built_in=built_in is not None)
 
 
 def is_withdrawn(provider_id: str) -> bool:
@@ -731,13 +789,7 @@ def _retire_built_in_instances(provider_id: str, live_provider_pools) -> None:
     bump_provider_generation(provider_id)
     for pool in live_provider_pools():
         try:
-            stale = pool.detach_provider(provider_id, lambda cached: not isinstance(cached, HubProxyProvider))
-            if stale is not None:
-                try:
-                    stale.terminate()
-                except Exception:
-                    logger.exception("Provider Hub: could not end a built-in %s made before its pools were released",
-                                     provider_id)
+            pool.retire_built_in(provider_id)
         except Exception:
             logger.exception("Provider Hub: could not retire a built-in %s of a pool", provider_id)
 

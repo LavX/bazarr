@@ -17,8 +17,10 @@ import hashlib
 import logging
 import os
 import re
+import socket
 import subprocess
 import sys
+import tempfile
 from types import SimpleNamespace
 
 import pytest
@@ -115,28 +117,65 @@ def test_the_entrypoint_drops_privileges_by_number():
     succeeded would silently leave the process running as uid 1000 on a hardened
     host.
     """
-    assert 'gosu "$PUID:$PGID"' in _entrypoint(), (
-        'The entrypoint must hand gosu the numeric uid:gid, not a user name whose '
+    assert 'setpriv --reuid "$PUID" --regid "$PGID"' in _entrypoint(), (
+        'The entrypoint must use the numeric uid and gid, not a user name whose '
         'uid was only remapped if /etc was writable.')
 
 
-def test_the_entrypoint_has_a_non_root_branch_that_never_calls_gosu():
-    """A container started with ``user:`` cannot be handed to gosu.
+@pytest.mark.skipif(os.geteuid() != 0, reason='requires root to exercise the real privilege drop')
+@pytest.mark.parametrize('startup_gid,supplementary,allowed', [
+    (0, [0, 23456], True),
+    (0, [0], False),
+    (23457, [0, 23456, 23457], True),
+])
+def test_privilege_drop_preserves_only_supplied_nonroot_groups(startup_gid, supplementary, allowed):
+    """Exercise the real kernel credentials against a disposable local socket."""
+    with tempfile.TemporaryDirectory(prefix='bazarr-group-test-', dir='/tmp') as directory:
+        os.chmod(directory, 0o755)
+        path = os.path.join(directory, 'fixture.sock')
+        with socket.socket(socket.AF_UNIX) as listener:
+            listener.bind(path)
+            os.chown(path, 0, 23456)
+            os.chmod(path, 0o660)
+            listener.listen(1)
+            text = _entrypoint()
+            drop = text[text.index('startup_gid=$(id -g)'):]
+            drop = drop.replace('/usr/bin/tini -s -- env HOME=/config "$@"', '"$@"')
+            client = ('import os,socket,sys; '
+                      'print(os.getuid(), os.getgid(), os.getgroups(), flush=True); '
+                      's=socket.socket(socket.AF_UNIX); s.connect(sys.argv[1])')
 
-    gosu needs setgroups and setgid, which only root has, so it fails with
+            def set_groups():
+                os.setgroups(supplementary)
+                os.setgid(startup_gid)
+
+            result = subprocess.run(
+                ['bash', '-c', drop, 'drop-test', sys.executable, '-c', client, path],
+                env={**os.environ, 'PUID': '12345', 'PGID': '12346'},
+                preexec_fn=set_groups, text=True, capture_output=True, timeout=10)
+            assert result.stdout.splitlines()[-1] == f'12345 12346 {([23456] if allowed else [])}'
+            assert (result.returncode == 0) is allowed, result.stderr
+            if not allowed:
+                assert 'PermissionError' in result.stderr
+
+
+def test_the_entrypoint_has_a_non_root_branch_that_never_changes_identity():
+    """A container started with ``user:`` cannot change groups or identity.
+
+    The drop needs setgroups and setgid, which only root has, so it fails with
     "operation not permitted" even when the ids already match. The branch has to
-    sit before every root-only step and exec the app without gosu.
+    sit before every root-only step and exec the app directly.
     """
     text = _entrypoint()
     branch = re.search(r'^if \[ "\$\(id -u\)" != "0" \]; then\n(.*?)^fi$', text, re.S | re.M)
     assert branch, 'the entrypoint has no early branch for a non-root start'
 
     body = branch.group(1)
-    assert 'gosu' not in body, 'the non-root branch must not call gosu'
+    assert 'setpriv' not in body, 'the non-root branch must not change identity'
     assert 'exec /usr/bin/tini -s -- env HOME=/config "$@"' in body, (
-        'the non-root branch must exec the app the way the root path does, minus gosu')
+        'the non-root branch must exec the app without changing identity')
 
-    for step in ('usermod -o', 'groupmod -o', 'chown "$PUID:$PGID"', 'exec gosu'):
+    for step in ('usermod -o', 'groupmod -o', 'chown "$PUID:$PGID"', 'exec setpriv'):
         later = text.find(step, branch.end())
         assert later != -1, f'{step} should still run on the root path'
 
@@ -218,7 +257,7 @@ def test_the_entrypoint_makes_tini_pid_1_after_the_privilege_drop():
     assert _dockerfile_instruction('ENTRYPOINT') == ['/entrypoint.sh']
 
     last = _entrypoint().rstrip().splitlines()[-1]
-    assert last == 'exec gosu "$PUID:$PGID" /usr/bin/tini -s -- env HOME=/config "$@"', (
+    assert last == 'exec setpriv --reuid "$PUID" --regid "$PGID" "${group_option[@]}" /usr/bin/tini -s -- env HOME=/config "$@"', (
         f'the entrypoint no longer ends by exec-ing tini under the PUID:PGID drop: {last}')
 
 
@@ -265,7 +304,7 @@ def test_only_the_three_capabilities_the_startup_needs_are_added_back():
     """Nothing boots under a bare ``cap_drop: [ALL]``.
 
     The entrypoint starts as root: it needs CHOWN to hand /config to PUID:PGID
-    and SETUID/SETGID to become that user, and gosu fails outright without the
+    and SETUID/SETGID to become that user, and the privilege drop fails without the
     last two, which would leave the container dead rather than insecure. Every
     other default capability is gone, and the dropped-privilege process that
     runs Bazarr and the Provider Hub workers holds none at all.
@@ -717,7 +756,7 @@ def test_the_health_check_falls_back_to_6767_before_the_port_file_exists(where, 
 ])
 def test_a_port_file_that_is_not_a_port_number_fails_the_check_without_calling_curl(where, content, tmp_path):
     # The health check runs as root (the image has no USER; the entrypoint
-    # drops to PUID through gosu), while the port file sits in /tmp where the
+    # drops to PUID), while the port file sits in /tmp where the
     # app user, and so a provider plugin, can rewrite it.
     command = _healthchecks()[where]
 
