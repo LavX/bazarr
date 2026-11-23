@@ -464,6 +464,49 @@ def test_wanted_adjacent_subtitle_publication_blocks_arr_admission(world, monkey
     assert Path(item.path).with_suffix('.en.srt').read_bytes() == pipeline.CONTENT
 
 
+def test_registry_contention_does_not_age_a_wanted_provider_result(world, monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Event
+
+    from app.config import settings
+    from media_sources import repository, wanted
+    from media_sources.db import source_transaction
+
+    if world.db.get_bind().dialect.name != 'postgresql':
+        pytest.skip('Registry table lock contention is PostgreSQL-specific')
+    item = pipeline._movie(world)
+    target = Path(item.path).with_suffix('.en.srt')
+    pipeline._download(monkeypatch)
+    monkeypatch.setattr(settings.general, 'adaptive_searching_max_age', '4w')
+    now = datetime.now()
+    attempts = str([['en', (now - timedelta(days=29)).timestamp()],
+                    ['en', (now - timedelta(days=28)).timestamp()]])
+    repository.update_item(item.item_id, world.db, failed_attempts=attempts)
+    other = video(world.tmp_path / 'Unrelated.mkv')
+    insertion = pipeline._legacy_owner_insert(world, 'radarr', other)
+    entered, release = Event(), Event()
+
+    def update_registry():
+        with source_transaction() as connection:
+            connection.execute(insertion)
+            entered.set()
+            assert release.wait(12)
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        writer = pool.submit(update_registry)
+        try:
+            assert entered.wait(2)
+            wanted.wanted_search_missing_subtitles_sources(kind='movie', job_id=1)
+            assert not target.exists()
+            assert repository.get_item(item.item_id).failed_attempts == attempts
+        finally:
+            release.set()
+            writer.result(timeout=4)
+
+    wanted.wanted_search_missing_subtitles_sources(kind='movie', job_id=2)
+    assert target.read_bytes() == pipeline.CONTENT
+
+
 def test_search_all_queues_both_jobs_and_source_job_saves_through_shared_pipeline(
         client, arr_library, isolated_jobs, tmp_path, monkeypatch):
     from app.config import settings

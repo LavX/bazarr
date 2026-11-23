@@ -40,7 +40,8 @@ class SourceMissingLanguagesUnavailable(OSError):
 def generate_subtitles(path, languages, audio_language, sceneName, title, media_type, profile_id,
                        forced_minimum_score=None, is_upgrade=False, check_if_still_required=False,
                        previous_subtitles_to_delete=None, job_id=None, fallback_allowed=False,
-                       arr_instance_id=None, source=None, auto_translate=True, source_wanted_stamp=None):
+                       arr_instance_id=None, source=None, auto_translate=True, source_wanted_stamp=None,
+                       source_wanted_deferred=None):
     if not languages:
         return None
 
@@ -214,7 +215,8 @@ def generate_subtitles(path, languages, audio_language, sceneName, title, media_
                                                      language=source_language, recheck_missing=check_if_still_required,
                                                      is_upgrade=is_upgrade, written_paths=written_paths,
                                                      on_publish=publish, wanted_stamp=source_wanted_stamp,
-                                                     wanted_profile=wanted_profile, video_version=video_version)
+                                                     wanted_profile=wanted_profile, video_version=video_version,
+                                                     wanted_deferred=source_wanted_deferred)
                                     if is_upgrade:
                                         from media_sources.indexer import SourcePublicationOwnerIndex
 
@@ -359,9 +361,10 @@ def check_missing_languages_source(source, *, stored=False, external_subtitles=N
 
 
 def _write_source_download(video_path, destination, content, *, source, language, recheck_missing, is_upgrade,
-                           written_paths, on_publish, wanted_stamp=None, wanted_profile=None, video_version=None):
+                           written_paths, on_publish, wanted_stamp=None, wanted_profile=None, video_version=None,
+                           wanted_deferred=None):
     """Publish the actual provider-selected file only while its destination is still eligible."""
-    from media_sources.indexer import SourcePublicationOwnerIndex
+    from media_sources.indexer import SourcePublicationBusy, SourcePublicationOwnerIndex
     from media_sources.translation import prepare_source_sidecars
 
     ownership_index = SourcePublicationOwnerIndex()
@@ -404,6 +407,8 @@ def _write_source_download(video_path, destination, content, *, source, language
         write_subtitle_file(video_path, destination, content, written_paths=written_paths, on_publish=on_publish,
                             publication_guard=publication, invalidate_outputs=False)
     except SubtitleDestinationChanged as error:
+        if wanted_deferred is not None and isinstance(error, SourcePublicationBusy):
+            wanted_deferred.add(language)
         logging.info('BAZARR skipped saving a subtitle for source item %s: %s', source.item_id, error)
         return False
     return True
