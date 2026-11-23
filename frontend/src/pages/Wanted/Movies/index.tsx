@@ -11,14 +11,12 @@ import {
   useMovieSubtitleModification,
   useMovieWantedPagination,
 } from "@/apis/hooks";
-import { useArrInstanceLabels } from "@/apis/hooks/arrInstances";
-import {
-  AudioList,
-  InstanceBadge,
-  ReleaseMismatchBadge,
-} from "@/components/bazarr";
+import { useSourceFilter } from "@/apis/hooks/mediaSources";
+import { AudioList, ReleaseMismatchBadge } from "@/components/bazarr";
 import Language from "@/components/bazarr/Language";
+import SourceBadge from "@/components/bazarr/SourceBadge";
 import { WantedItem } from "@/components/forms/MassTranslateForm";
+import SourceFilter from "@/pages/views/SourceFilter";
 import WantedView from "@/pages/views/WantedView";
 import { BuildKey } from "@/utilities";
 import tableStyles from "@/components/tables/BaseTable.module.scss";
@@ -40,13 +38,23 @@ const WantedMoviesView: FunctionComponent = () => {
     tagFilter.length > 0 ||
     missingLanguage !== null;
 
-  const { data: audioLangs = [] } = useAudioLanguages();
   const {
-    multiInstance,
-    nameById: instanceNameById,
-    defaultId: instanceDefaultId,
-  } = useArrInstanceLabels("radarr");
-  const query = useMovieWantedPagination(hasActiveFilter);
+    includeSources,
+    showBadge,
+    labels,
+    sourceKeys,
+    arrActions,
+    arrNames,
+    defaultArr,
+    selected,
+    onChange,
+  } = useSourceFilter("movie", "radarr");
+  const { data: audioLangs = [] } = useAudioLanguages(true, includeSources);
+  const query = useMovieWantedPagination(
+    hasActiveFilter,
+    sourceKeys,
+    includeSources,
+  );
 
   const langOptions = useMemo(
     () => audioLangs.map((l) => ({ value: l.code2, label: l.name })),
@@ -55,7 +63,7 @@ const WantedMoviesView: FunctionComponent = () => {
 
   // Build client-side filter function
   const dataFilter = useCallback(
-    (item: Wanted.Movie) => {
+    (item: Wanted.MovieRow) => {
       if (debouncedSearch) {
         const lowerSearch = debouncedSearch.toLowerCase();
         if (!item.title.toLowerCase().includes(lowerSearch)) {
@@ -105,7 +113,7 @@ const WantedMoviesView: FunctionComponent = () => {
     ],
   );
 
-  const columns = useMemo<ColumnDef<Wanted.Movie>[]>(
+  const columns = useMemo<ColumnDef<Wanted.MovieRow>[]>(
     () => [
       {
         id: "selection",
@@ -113,13 +121,18 @@ const WantedMoviesView: FunctionComponent = () => {
           return (
             <Checkbox
               id="table-header-selection"
+              disabled={
+                !table.getRowModel().rows.some((row) => row.getCanSelect())
+              }
               indeterminate={table.getIsSomeRowsSelected()}
               checked={table.getIsAllRowsSelected()}
               onChange={table.getToggleAllRowsSelectedHandler()}
             />
           );
         },
-        cell: ({ row: { index, getIsSelected, getToggleSelectedHandler } }) => {
+        cell: ({ row }) => {
+          if (!row.getCanSelect()) return null;
+          const { index, getIsSelected, getToggleSelectedHandler } = row;
           return (
             <Checkbox
               id={`table-cell-${index}`}
@@ -133,11 +146,9 @@ const WantedMoviesView: FunctionComponent = () => {
       {
         header: "Name",
         accessorKey: "title",
-        cell: ({
-          row: {
-            original: { id, title, release_mismatch: releaseMismatch },
-          },
-        }) => {
+        cell: ({ row: { original: item } }) => {
+          const { id, title, release_mismatch: releaseMismatch } = item;
+          if (item.origin === "source") return title;
           const target = `/movies/${id}`;
           return (
             <Group gap="xs" wrap="nowrap">
@@ -153,21 +164,20 @@ const WantedMoviesView: FunctionComponent = () => {
           );
         },
       },
-      // Owning Radarr instance (#156), shown only with more than one Radarr.
-      // Default instance gets a muted grey badge, others an accent badge.
-      ...(multiInstance
+      ...(showBadge
         ? [
             {
-              id: "instance",
-              header: "Instance",
+              id: "source",
+              header: includeSources ? "Source" : "Instance",
               cell: ({ row: { original } }) => (
-                <InstanceBadge
-                  instanceId={original.arr_instance_id}
-                  defaultId={instanceDefaultId}
-                  nameById={instanceNameById}
+                <SourceBadge
+                  row={original}
+                  labels={labels}
+                  arrNames={arrNames}
+                  defaultArr={defaultArr}
                 />
               ),
-            } as ColumnDef<Wanted.Movie>,
+            } as ColumnDef<Wanted.MovieRow>,
           ]
         : []),
       {
@@ -184,15 +194,19 @@ const WantedMoviesView: FunctionComponent = () => {
       {
         header: "Missing",
         accessorKey: "missing_subtitles",
-        cell: ({
-          row: {
-            original: {
-              radarrId,
-              arr_instance_id: arrInstanceId,
-              missing_subtitles: missingSubtitles,
-            },
-          },
-        }) => {
+        cell: ({ row: { original } }) => {
+          const { missing_subtitles: missingSubtitles } = original;
+          if (original.origin === "source") {
+            return (
+              <Group gap="sm">
+                {missingSubtitles.map((item, idx) => (
+                  <Badge key={BuildKey(idx, item.code2)}>
+                    <Language.Text value={item} />
+                  </Badge>
+                ))}
+              </Group>
+            );
+          }
           return (
             <Group gap="sm">
               {missingSubtitles.map((item, idx) => (
@@ -203,8 +217,8 @@ const WantedMoviesView: FunctionComponent = () => {
                   style={{ cursor: "pointer" }}
                   onClick={async () => {
                     await download.mutateAsync({
-                      radarrId,
-                      arrInstanceId,
+                      radarrId: original.radarrId,
+                      arrInstanceId: original.arr_instance_id,
                       form: {
                         language: item.code2,
                         hi: item.hi,
@@ -221,17 +235,21 @@ const WantedMoviesView: FunctionComponent = () => {
         },
       },
     ],
-    [download, multiInstance, instanceNameById, instanceDefaultId],
+    [download, includeSources, showBadge, labels, arrNames, defaultArr],
   );
 
-  const getWantedItem = useCallback((row: Wanted.Movie): WantedItem => {
-    return {
-      type: "movie",
-      radarrId: row.radarrId,
-      arrInstanceId: row.arr_instance_id,
-      title: row.title,
-    };
-  }, []);
+  const getWantedItem = useCallback(
+    (row: Wanted.MovieRow): WantedItem | null => {
+      if (row.origin === "source") return null;
+      return {
+        type: "movie",
+        radarrId: row.radarrId,
+        arrInstanceId: row.arr_instance_id,
+        title: row.title,
+      };
+    },
+    [],
+  );
 
   const { mutateAsync } = useMovieAction();
 
@@ -240,6 +258,15 @@ const WantedMoviesView: FunctionComponent = () => {
       name="Movies"
       columns={columns}
       query={query}
+      arrActions={arrActions}
+      sourceFilter={
+        <SourceFilter
+          labels={labels}
+          value={selected}
+          onChange={onChange}
+          includeSources={includeSources}
+        />
+      }
       searchValue={search}
       onSearchChange={setSearch}
       audioLanguages={audioLanguages}
@@ -254,7 +281,10 @@ const WantedMoviesView: FunctionComponent = () => {
       missingLangOptions={langOptions}
       dataFilter={hasActiveFilter ? dataFilter : undefined}
       searchAll={async () => {
-        await mutateAsync({ action: "search-wanted" });
+        await mutateAsync({
+          action: "search-wanted",
+          sources: includeSources ? 1 : undefined,
+        });
       }}
       scanAll={async () => {
         await mutateAsync({ action: "scan-wanted" });

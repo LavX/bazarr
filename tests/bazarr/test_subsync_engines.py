@@ -975,7 +975,7 @@ def test_sync_output_keeps_complete_actual_owner_stem(tmp_path, stem):
     ('\u00c9pisode', 'E\u0301PISODE', '\u00e9pisode.en'),
     ('E\u0301pisode', '\u00e9pisode', 'E\u0301PISODE.EN'),
 ])
-@pytest.mark.parametrize('sibling_kind', ['media', 'directory', 'non-media', 'absent'])
+@pytest.mark.parametrize('sibling_kind', ['media', 'directory', 'media-alias', 'directory-alias', 'non-media', 'absent'])
 def test_tagged_sync_output_defers_only_to_an_actual_media_owner(
         tmp_path, monkeypatch, video_stem, subtitle_stem, sibling_stem, sibling_kind):
     from subtitles.indexer.utils import add_sync_engine_outputs
@@ -992,6 +992,14 @@ def test_tagged_sync_output_defers_only_to_an_actual_media_owner(
         _write(sibling, 'video')
     elif sibling_kind == 'directory':
         sibling.mkdir()
+    elif sibling_kind.endswith('-alias'):
+        sibling = tmp_path / 'resolved' / sibling.name
+        sibling.parent.mkdir()
+        if sibling_kind == 'media-alias':
+            _write(sibling, 'video')
+        else:
+            sibling.mkdir()
+        (media_folder / 'Alias.mp4').symlink_to(sibling, target_is_directory=sibling_kind == 'directory-alias')
     elif sibling_kind == 'non-media':
         _write(media_folder / f'{sibling_stem}.txt', 'not a video')
     subtitle = f'{subtitle_stem}.en.ffsubsync.srt'
@@ -1016,7 +1024,7 @@ def test_tagged_sync_output_defers_only_to_an_actual_media_owner(
     monkeypatch.setattr(path_mappings, 'path_replace_instance', lambda path, *args: path)
     result = add_sync_engine_outputs(str(subtitle_folder), {}, video_path=str(video))
 
-    if sibling_kind == 'media':
+    if sibling_kind in ('media', 'media-alias'):
         assert result == {}
         assert add_sync_engine_outputs(str(subtitle_folder), {}, video_path=str(sibling)) == {subtitle: None}
     else:

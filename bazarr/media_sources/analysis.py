@@ -48,6 +48,20 @@ def _content_stamp(stat):
     return file_content_stamp(FileStat(unsigned(stat.st_dev), unsigned(stat.st_ino), stat.st_size, stat.st_mtime_ns))
 
 
+def local_content_stamp(path):
+    """Identify the video by device, inode, size and modification time."""
+    stat = local_stat(path)
+    return None if stat is None else _content_stamp(stat)
+
+
+def indexed_local_content_stamp(item):
+    """Return the current file stamp only when the saved index describes it."""
+    stat = local_stat(item.path)
+    if stat is None or not index_matches_file(item, stat, allow_external_only=True):
+        return None
+    return _content_stamp(stat)
+
+
 def stamp_index(data, stamp):
     return pickle.dumps(data | {'source_file': stamp}, pickle.HIGHEST_PROTOCOL)
 
