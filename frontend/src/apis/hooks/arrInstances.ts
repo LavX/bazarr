@@ -55,6 +55,17 @@ export function useArrInstances(enabled = true) {
   });
 }
 
+// An absent list or kind leaves the connection's availability unknown.
+export function getArrInstanceAvailability(
+  kind: ArrKind,
+  instances: ArrInstance[] | undefined,
+) {
+  const records = instances?.filter((instance) => instance.kind === kind);
+  return records?.length
+    ? records.some((instance) => instance.enabled)
+    : undefined;
+}
+
 export function isArrMediaRouteEnabled(
   kind: ArrKind,
   settings: Settings | undefined,
@@ -64,8 +75,8 @@ export function isArrMediaRouteEnabled(
   if (!settings.media_sources?.visible) return true;
   if (!instances) return false;
 
-  const records = instances.filter((instance) => instance.kind === kind);
-  if (records.length > 0) return records.some((instance) => instance.enabled);
+  const available = getArrInstanceAvailability(kind, instances);
+  if (available !== undefined) return available;
   if (kind === "sportarr") return false;
 
   // A legacy Sonarr or Radarr connection can predate instance records.

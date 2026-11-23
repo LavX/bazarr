@@ -1,4 +1,9 @@
-import { isArrMediaRouteEnabled, useArrInstances } from "./arrInstances";
+import type { ArrKind } from "@/apis/raw/arrInstances";
+import {
+  getArrInstanceAvailability,
+  isArrMediaRouteEnabled,
+  useArrInstances,
+} from "./arrInstances";
 import { useSourceAvailability } from "./mediaSources";
 import { useSystemSettings, useSystemStatus } from "./system";
 
@@ -15,8 +20,9 @@ export function useEnabledStatus() {
 export function useMediaNavigation() {
   const { data: settings } = useSystemSettings();
   const general = settings?.general;
+  const visible = settings?.media_sources?.visible === true;
   const { data: instances } = useArrInstances(
-    settings?.media_sources?.visible === true &&
+    visible &&
       Boolean(
         general?.use_sonarr || general?.use_radarr || general?.use_sportarr,
       ),
@@ -28,6 +34,11 @@ export function useMediaNavigation() {
   const series = sonarr || availability?.series.browsable === true;
   const movies = radarr || availability?.movie.browsable === true;
   const sports = sportarr || availability?.sports.browsable === true;
+  // Hidden folders keep master-based navigation. The badge can still use
+  // cached instance records from Connections or an Arr page.
+  const showBadges = (kind: ArrKind, routeEnabled: boolean) =>
+    routeEnabled &&
+    (visible || getArrInstanceAvailability(kind, instances) !== false);
   return {
     series,
     movies,
@@ -37,7 +48,9 @@ export function useMediaNavigation() {
     sportsActivity: sports || availability?.sports.retained === true,
     sonarr,
     radarr,
-    sportarr,
+    sonarrBadges: showBadges("sonarr", sonarr),
+    radarrBadges: showBadges("radarr", radarr),
+    sportarrBadges: showBadges("sportarr", sportarr),
   };
 }
 
