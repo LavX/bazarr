@@ -617,8 +617,11 @@ def test_runtime_keeps_manual_and_wanted_translation_reservations_separate(world
                                                None, None, None, None, source=context)
         assert manual is not None and manual != automatic.job_id
         assert [job.job_id for job in isolated_jobs.jobs_pending_queue] == [automatic.job_id, manual]
-        key = main._job_source_key(context.path, subtitle, None, automatic.kwargs['source'])
-        manual_key = main._job_source_key(context.path, subtitle, None, context)
+        manual_job = isolated_jobs.jobs_pending_queue[-1]
+        key = main._job_source_key(context.path, subtitle, None, automatic.kwargs['source'],
+                                   automatic.kwargs['source_video_version'])
+        manual_key = main._job_source_key(context.path, subtitle, None, context,
+                                          manual_job.kwargs['source_video_version'])
         target = target_key('hu', False, False)
         ledger = TranslationJobs(world.db)
         assert ledger.active_for(key, target).queue_job_id == automatic.job_id
